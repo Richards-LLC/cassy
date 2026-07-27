@@ -854,96 +854,168 @@ case \"$branch\" in
 esac
 ";
 
-    /// Install the CAS worker pre-commit guard into `worktree_path`'s git hooks
-    /// directory. Uses `git rev-parse --git-path hooks` so it resolves correctly
-    /// for both main checkouts and linked worktrees (which share the common gitdir).
+    /// Resolve an absolute path from a `git -C <dir> rev-parse --git-path <arg>`
+    /// (or `--git-dir`) invocation. Relative results (as returned for plain,
+    /// non-worktree repos) are joined against `dir` so callers always get an
+    /// absolute path regardless of the process's own CWD.
+    fn run_git_path(dir: &std::path::Path, args: &[&str]) -> anyhow::Result<std::path::PathBuf> {
+        let dir_str = dir.to_string_lossy();
+        let mut full_args: Vec<&str> = vec!["-C", &dir_str];
+        full_args.extend_from_slice(args);
+        let output = std::process::Command::new("git").args(&full_args).output()?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "git {:?} failed in {:?}: {}",
+                args,
+                dir,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let p = std::path::Path::new(&raw);
+        Ok(if p.is_absolute() {
+            std::path::PathBuf::from(p)
+        } else {
+            dir.join(p)
+        })
+    }
+
+    /// Run a `git -C <dir> <args...>` command for side effects only (config
+    /// writes), bailing with stderr context on non-zero exit.
+    fn run_git_ok(dir: &std::path::Path, args: &[&str]) -> anyhow::Result<()> {
+        let dir_str = dir.to_string_lossy();
+        let mut full_args: Vec<&str> = vec!["-C", &dir_str];
+        full_args.extend_from_slice(args);
+        let output = std::process::Command::new("git").args(&full_args).output()?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "git {:?} failed in {:?}: {}",
+                args,
+                dir,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(())
+    }
+
+    /// Write the composed guard hook at `hook_path` (inside `hooks_dir`),
+    /// preserving `existing_content` (a pre-existing project pre-commit hook)
+    /// by appending a sourcing line that dot-sources a sibling
+    /// `pre-commit-cas-guard` file — mirrors the historical merge behavior so
+    /// project hooks (e.g. a committed `.githooks/pre-commit` lint gate)
+    /// still run.
+    fn write_guard_alongside(
+        hooks_dir: &std::path::Path,
+        hook_path: &std::path::Path,
+        existing_content: &str,
+    ) -> anyhow::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        const GUARD_MARKER: &str = "CAS factory worker guard";
+
+        let guard_path = hooks_dir.join("pre-commit-cas-guard");
+        std::fs::write(&guard_path, Self::WORKER_PRE_COMMIT_HOOK)?;
+        std::fs::set_permissions(&guard_path, std::fs::Permissions::from_mode(0o755))?;
+
+        let sourcing_line = format!(
+            "\n# {GUARD_MARKER} (sourced by cas factory — do not remove)\n\
+             _cas_guard=\"$(git rev-parse --git-path hooks 2>/dev/null)/pre-commit-cas-guard\"\n\
+             [ -f \"$_cas_guard\" ] && . \"$_cas_guard\"\n"
+        );
+        let mut updated = existing_content.to_string();
+        updated.push_str(&sourcing_line);
+        std::fs::write(hook_path, &updated)?;
+        std::fs::set_permissions(hook_path, std::fs::Permissions::from_mode(0o755))?;
+        Ok(())
+    }
+
+    /// Install the CAS worker pre-commit guard, scoped to `worktree_path` alone.
     ///
-    /// Idempotent: if the guard marker is already present in the existing hook,
-    /// no-ops. If another pre-commit exists, writes a separate `pre-commit-cas-guard`
-    /// file and appends a sourcing line to the existing hook so both fire.
+    /// # Why not just `git rev-parse --git-path hooks` (cas-2491)
     ///
-    /// Non-fatal failures are logged as warnings — LAYER 1 (PreToolUse) and
-    /// LAYER 3 (SessionStart) are the primary guards.
+    /// Git worktrees are linked checkouts that share a single COMMON git dir —
+    /// `git rev-parse --git-path hooks` resolves to that one shared hooks
+    /// directory for the main checkout *and* every linked worktree alike. The
+    /// original implementation installed straight into that shared path, so
+    /// the guard it wrote for an isolated worker's worktree was, in fact, the
+    /// *same file* backing `git commit` in the primary checkout. After the
+    /// factory exited (or crashed) the guard stayed behind and silently
+    /// blocked the repo owner's own commits on `main`/`master`.
+    ///
+    /// The fix scopes the guard using git's per-worktree config extension:
+    /// each worktree gets a private hooks directory under its own
+    /// (non-shared) git-dir — `$GIT_DIR/hooks-cas-guard`, where `$GIT_DIR` for
+    /// a linked worktree is `<repo>/.git/worktrees/<name>` — and
+    /// `core.hooksPath` is pointed at it via `git config --worktree`, which
+    /// requires `extensions.worktreeConfig = true` to store the override in a
+    /// worktree-private `config.worktree` file instead of the shared
+    /// `.git/config`. This is scoping, not teardown: it holds even if the
+    /// factory is killed with `SIGKILL` and shutdown never runs, and the
+    /// override disappears automatically when the worktree itself is removed
+    /// (`git worktree remove` deletes `$GIT_DIR/worktrees/<name>` outright).
+    ///
+    /// Idempotent: if the guard marker is already present in the private
+    /// hook, no-ops (aside from re-affirming the config, which is itself
+    /// idempotent). If a project-level pre-commit hook already existed at the
+    /// previously-effective (shared) location, its content is preserved via
+    /// [`Self::write_guard_alongside`].
+    ///
+    /// Non-fatal failures are logged as warnings by callers — LAYER 1
+    /// (PreToolUse) and LAYER 3 (SessionStart) are the primary guards.
     pub fn install_worker_pre_commit_hook(
         worktree_path: &std::path::Path,
     ) -> anyhow::Result<()> {
         use std::os::unix::fs::PermissionsExt;
 
-        let hooks_output = std::process::Command::new("git")
-            .args([
-                "-C",
-                &worktree_path.to_string_lossy(),
-                "rev-parse",
-                "--git-path",
-                "hooks",
-            ])
-            .output()?;
-        if !hooks_output.status.success() {
-            anyhow::bail!(
-                "git rev-parse --git-path hooks failed in {:?}: {}",
-                worktree_path,
-                String::from_utf8_lossy(&hooks_output.stderr)
-            );
-        }
-        // `git rev-parse --git-path hooks` returns an absolute path for linked
-        // worktrees but a relative path (`.git/hooks`) for plain repos. Resolve
-        // relative results against `worktree_path` so we always have an absolute
-        // path and don't accidentally write into the test process's CWD.
-        let hooks_raw = String::from_utf8_lossy(&hooks_output.stdout)
-            .trim()
-            .to_string();
-        let hooks_dir = {
-            let p = std::path::Path::new(&hooks_raw);
-            if p.is_absolute() {
-                std::path::PathBuf::from(p)
-            } else {
-                worktree_path.join(p)
-            }
-        };
-        std::fs::create_dir_all(&hooks_dir)?;
+        // Private git-dir for this worktree: `.git` for a plain checkout, or
+        // `.git/worktrees/<name>` for a linked worktree (never shared).
+        let git_dir = Self::run_git_path(worktree_path, &["rev-parse", "--git-dir"])?;
+
+        // Whatever hooks dir is *currently* effective (before we scope
+        // anything) — on first install this is the shared/common dir; on
+        // reinstall it's already our private dir from a prior call.
+        let effective_hooks_dir = Self::run_git_path(worktree_path, &["rev-parse", "--git-path", "hooks"])?;
+
+        let private_hooks_dir = git_dir.join("hooks-cas-guard");
+        std::fs::create_dir_all(&private_hooks_dir)?;
 
         const GUARD_MARKER: &str = "CAS factory worker guard";
-        let hook_path = hooks_dir.join("pre-commit");
+        let hook_path = private_hooks_dir.join("pre-commit");
 
-        if hook_path.exists() {
-            let existing = std::fs::read_to_string(&hook_path).unwrap_or_default();
-            if existing.contains(GUARD_MARKER) {
-                tracing::debug!(
-                    "CAS pre-commit guard already installed at {:?}",
-                    hook_path
-                );
-                return Ok(());
-            }
-            // Existing hook present — write guard as separate file, append sourcing line.
-            let guard_path = hooks_dir.join("pre-commit-cas-guard");
-            std::fs::write(&guard_path, Self::WORKER_PRE_COMMIT_HOOK)?;
-            std::fs::set_permissions(
-                &guard_path,
-                std::fs::Permissions::from_mode(0o755),
-            )?;
-            let sourcing_line = format!(
-                "\n# {GUARD_MARKER} (sourced by cas factory — do not remove)\n\
-                 _cas_guard=\"$(git rev-parse --git-path hooks 2>/dev/null)/pre-commit-cas-guard\"\n\
-                 [ -f \"$_cas_guard\" ] && . \"$_cas_guard\"\n"
-            );
-            let mut updated = existing;
-            updated.push_str(&sourcing_line);
-            std::fs::write(&hook_path, updated)?;
-            tracing::info!(
-                "Appended CAS guard sourcing line to existing pre-commit hook at {:?}",
-                hook_path
-            );
+        if hook_path.exists()
+            && std::fs::read_to_string(&hook_path)
+                .unwrap_or_default()
+                .contains(GUARD_MARKER)
+        {
+            tracing::debug!("CAS pre-commit guard already installed at {:?}", hook_path);
         } else {
-            std::fs::write(&hook_path, Self::WORKER_PRE_COMMIT_HOOK)?;
-            std::fs::set_permissions(
-                &hook_path,
-                std::fs::Permissions::from_mode(0o755),
-            )?;
-            tracing::info!(
-                "Installed CAS worker pre-commit guard at {:?}",
-                hook_path
-            );
+            let preexisting_project_hook = effective_hooks_dir.join("pre-commit");
+            if preexisting_project_hook != hook_path && preexisting_project_hook.exists() {
+                let existing = std::fs::read_to_string(&preexisting_project_hook)?;
+                Self::write_guard_alongside(&private_hooks_dir, &hook_path, &existing)?;
+                tracing::info!(
+                    "Installed CAS worker pre-commit guard at {:?} (chained to existing project hook {:?})",
+                    hook_path,
+                    preexisting_project_hook
+                );
+            } else {
+                std::fs::write(&hook_path, Self::WORKER_PRE_COMMIT_HOOK)?;
+                std::fs::set_permissions(&hook_path, std::fs::Permissions::from_mode(0o755))?;
+                tracing::info!("Installed CAS worker pre-commit guard at {:?}", hook_path);
+            }
         }
+
+        // Scope core.hooksPath to THIS worktree only, so the guard never
+        // leaks into the main checkout or sibling worktrees (cas-2491).
+        Self::run_git_ok(worktree_path, &["config", "extensions.worktreeConfig", "true"])?;
+        Self::run_git_ok(
+            worktree_path,
+            &[
+                "config",
+                "--worktree",
+                "core.hooksPath",
+                &private_hooks_dir.to_string_lossy(),
+            ],
+        )?;
 
         Ok(())
     }
@@ -1768,36 +1840,172 @@ mod tests {
 
     /// When an existing pre-commit hook is present, our guard must be appended
     /// without clobbering the original.
+    ///
+    /// Note (cas-2491): the guard now lives in a worktree-private hooks dir
+    /// scoped via `core.hooksPath`, not the original (pre-scoping) location —
+    /// so this test pre-creates the "project's" hook at the location that was
+    /// effective *before* install runs, then re-resolves `--git-path hooks`
+    /// *after* install to find where the merged hook actually landed. The
+    /// original file at its original path is left untouched (that's the
+    /// point — it's a separate project hook, not overwritten in place).
     #[test]
     fn install_worker_pre_commit_hook_appends_to_existing_hook() {
         let tmp = make_git_repo_for_hook_test();
         let p = tmp.path();
 
-        // Pre-install a custom hook
-        let output = std::process::Command::new("git")
+        // Pre-install a custom hook at the location that's effective before
+        // our install call scopes core.hooksPath elsewhere.
+        let pre_output = std::process::Command::new("git")
             .args(["-C", &p.to_string_lossy(), "rev-parse", "--git-path", "hooks"])
             .output()
             .unwrap();
-        let hooks_raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let hooks_dir = {
-            let rp = std::path::Path::new(&hooks_raw);
+        let pre_hooks_raw = String::from_utf8_lossy(&pre_output.stdout).trim().to_string();
+        let pre_hooks_dir = {
+            let rp = std::path::Path::new(&pre_hooks_raw);
             if rp.is_absolute() { rp.to_path_buf() } else { p.join(rp) }
         };
-        std::fs::create_dir_all(&hooks_dir).unwrap();
+        std::fs::create_dir_all(&pre_hooks_dir).unwrap();
         let existing_content = "#!/bin/sh\n# My existing hook\nexit 0\n";
-        let hook_path = hooks_dir.join("pre-commit");
-        std::fs::write(&hook_path, existing_content).unwrap();
+        let original_hook_path = pre_hooks_dir.join("pre-commit");
+        std::fs::write(&original_hook_path, existing_content).unwrap();
 
         TeamsManager::install_worker_pre_commit_hook(p).expect("install with existing hook");
 
-        let final_content = std::fs::read_to_string(&hook_path).unwrap();
+        // Re-resolve --git-path hooks now that core.hooksPath is scoped to
+        // our private dir; that's where the merged (original + guard) hook
+        // must have landed.
+        let post_output = std::process::Command::new("git")
+            .args(["-C", &p.to_string_lossy(), "rev-parse", "--git-path", "hooks"])
+            .output()
+            .unwrap();
+        let post_hooks_raw = String::from_utf8_lossy(&post_output.stdout).trim().to_string();
+        let post_hooks_dir = {
+            let rp = std::path::Path::new(&post_hooks_raw);
+            if rp.is_absolute() { rp.to_path_buf() } else { p.join(rp) }
+        };
+        let effective_hook_path = post_hooks_dir.join("pre-commit");
+        assert_ne!(
+            effective_hook_path, original_hook_path,
+            "the guard must scope to a NEW private hooks dir, not the original project one"
+        );
+
+        let final_content = std::fs::read_to_string(&effective_hook_path).unwrap();
         assert!(
             final_content.contains("My existing hook"),
-            "existing hook content must be preserved"
+            "existing hook content must be preserved in the merged hook"
         );
         assert!(
             final_content.contains("CAS factory worker guard"),
             "guard marker must be appended"
         );
+    }
+
+    /// Regression test for cas-2491: "Factory pre-commit guard is left
+    /// installed in the MAIN repo and blocks the owner's own commits".
+    ///
+    /// Before the fix, `install_worker_pre_commit_hook` wrote into whatever
+    /// `git rev-parse --git-path hooks` reported — which, for a *linked*
+    /// worktree, is the single hooks dir SHARED with the main checkout (and
+    /// every other worktree). Installing the guard for an isolated worker's
+    /// worktree therefore also installed it for `main`, and nothing ever
+    /// uninstalls it (there is no factory-shutdown teardown path for this
+    /// hook at all — confirmed by repo search), so it strands the owner's
+    /// repo the moment factory exits, cleanly or via `kill -9`.
+    ///
+    /// This test exercises a REAL linked worktree (not just a plain repo
+    /// standing in for one, as the other tests above do) to prove:
+    ///   AC1: installing the guard in the worker's worktree does not block a
+    ///        commit on `main` in the primary checkout — with no teardown
+    ///        call of any kind, simulating both a clean factory exit and an
+    ///        abrupt crash (both leave the guard installed; the fix means
+    ///        that no longer matters because it's scoped, not torn down).
+    ///   AC2: the guard still blocks a worker committing off its
+    ///        `factory/<name>` branch inside that same worker worktree.
+    #[test]
+    fn install_worker_pre_commit_hook_does_not_leak_into_main_checkout() {
+        let tmp = make_git_repo_for_hook_test();
+        let repo = tmp.path();
+
+        // Create a linked worktree on a factory branch, exactly as the
+        // daemon does for isolated workers (see app/mod.rs spawn_prep).
+        let wt_path = repo
+            .parent()
+            .unwrap()
+            .join(format!("{}-wt", repo.file_name().unwrap().to_string_lossy()));
+        let add_out = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "factory/test-worker",
+                &wt_path.to_string_lossy(),
+                "main",
+            ])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(
+            add_out.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&add_out.stderr)
+        );
+
+        TeamsManager::install_worker_pre_commit_hook(&wt_path)
+            .expect("install into worker worktree should succeed");
+
+        // AC1 — no teardown of any kind runs here (simulating both a clean
+        // exit that skips cleanup and an abrupt `kill -9`). The owner's
+        // commit on `main` in the PRIMARY checkout must still succeed.
+        std::fs::write(repo.join("owner-change.txt"), "owner commit").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        let main_commit = std::process::Command::new("git")
+            .args(["commit", "-m", "owner commit on main"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(
+            main_commit.status.success(),
+            "commit on main in the primary checkout must succeed after installing the worker \
+             guard in a linked worktree (no shutdown/uninstall ran); stderr: {}",
+            String::from_utf8_lossy(&main_commit.stderr)
+        );
+
+        // AC2 — the guard must still block a worker committing off its
+        // factory/<name> branch inside the worker worktree itself.
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "not-a-factory-branch"])
+            .current_dir(&wt_path)
+            .output()
+            .unwrap();
+        std::fs::write(wt_path.join("wip.txt"), "off-branch change").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&wt_path)
+            .output()
+            .unwrap();
+        let wt_commit = std::process::Command::new("git")
+            .args(["commit", "-m", "should be blocked off factory branch"])
+            .current_dir(&wt_path)
+            .output()
+            .unwrap();
+        assert!(
+            !wt_commit.status.success(),
+            "commit off factory/<name> inside the worker worktree must still be blocked"
+        );
+        let stderr = String::from_utf8_lossy(&wt_commit.stderr);
+        assert!(
+            stderr.contains("CAS COMMIT GUARD"),
+            "hook stderr should mention the guard: {stderr}"
+        );
+
+        // Best-effort cleanup so temp dirs don't linger as registered worktrees.
+        let _ = std::process::Command::new("git")
+            .args(["worktree", "remove", "--force", &wt_path.to_string_lossy()])
+            .current_dir(repo)
+            .output();
     }
 }

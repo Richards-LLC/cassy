@@ -152,3 +152,11 @@ Mitigation adopted session-side: all merges/deploys from detached `git worktree 
 | 6 | AskUserQuestion in factory | P3 | 1 wasted call; pause risk if uncaught | factory sessions |
 
 Happy to provide the full transcript (session `25fe20f1-a679-4da6-bf92-56df1fe02a25`, project `-home-pippenz-Petrastella-ozer`) or expanded log excerpts for any item.
+
+---
+
+## Resolution
+
+**Resolved 2026-07-27 — shipped in cas v2.29.0 (`origin/main`).** Task: (6 items, individually tracked)
+
+All six reported issues are marked SHIPPED inline: lifecycle echo (`dc3d6e4`), session log review (`ebbef98`), codemap freshness branch (`90e2f60`), overlap-gate handoff surfacing (`9848a07`), `.cas/` sentinel accumulation (`341bd3f`), and AskUserQuestion in factory mode (`d5a8975`). The last is independently corroborated: factory Claude sessions now launch with `--disallowedTools AskUserQuestion`.

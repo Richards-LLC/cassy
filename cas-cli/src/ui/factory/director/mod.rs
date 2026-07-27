@@ -20,9 +20,14 @@ pub(crate) mod tasks;
 pub use data::{AgentSummary, DirectorData, DirectorStores, TaskSummary};
 pub(crate) use events::pick_best_open_branch_epic;
 pub use events::{DirectorEvent, DirectorEventDetector};
+// cas-893c: shared idle-confidence gate, reused by the daemon's delivery-time
+// idle-nudge decision (queue_and_events.rs) so the "is this worker really
+// idle, not just between turns" heuristic has one definition.
+pub(crate) use events::{FRESH_HEARTBEAT_SECS, RECENT_ACTIVITY_SECS};
 pub use panel::PanelRegistry;
 pub use prompts::{
-    Prompt, compute_gated_task_ids, generate_prompt, revalidate_event_for_delivery_with_context,
+    MergeAlertFreshness, Prompt, check_merge_alert_freshness, compute_gated_task_ids,
+    generate_prompt, revalidate_event_for_delivery_with_context,
     revalidate_event_for_delivery_with_focus, with_response_instructions,
 };
 // PanelAreas, SidecarFocus, SidecarState, ViewMode, DiffLine, DiffLineType, render, render_with_state are already public in this module

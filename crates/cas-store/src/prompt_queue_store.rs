@@ -1267,10 +1267,15 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             let placeholders: Vec<&str> = std::iter::repeat_n("?", targets.len()).collect();
             let sql = format!(
                 "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session
-                 FROM prompt_queue
-                 WHERE processed_at IS NULL
-                   AND target IN ({})
-                 ORDER BY priority ASC, id ASC
+                 FROM (
+                     SELECT *, ROW_NUMBER() OVER (
+                         PARTITION BY target, priority ORDER BY id ASC
+                     ) AS cas_target_rn
+                     FROM prompt_queue
+                     WHERE processed_at IS NULL
+                       AND target IN ({})
+                 )
+                 ORDER BY priority ASC, cas_target_rn ASC, id ASC
                  LIMIT ?",
                 placeholders.join(", ")
             );
@@ -1285,11 +1290,41 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         // Live-session path: two indexable peeks + bounded two-lane merge
         // (cas-2bcb). Each lane is LIMIT-bounded so neither can permanently
         // occupy the caller's window.
+        //
+        // cas-7210: within each lane, also round-robin across targets
+        // instead of a flat `ORDER BY priority ASC, id ASC`. The window
+        // function ranks each row by its position within its OWN
+        // `(target, priority)` queue (`cas_target_rn`); ordering the final
+        // result by `(priority, cas_target_rn, id)` means every target's
+        // *oldest* row at a given priority is considered before any
+        // target's *second* row at that same priority — `priority` stays
+        // the dominant sort key, so the existing "never emit priority P+1
+        // while priority ≤P remains" contract is untouched, and for the
+        // common case of a single contending target this reduces to
+        // exactly the original `(priority, id)` FIFO order (rn increases
+        // monotonically with id when there's only one target, so it's a
+        // no-op reordering).
+        //
+        // Without this, a target with a persistent, never-resolving
+        // backlog (rows left `processed_at IS NULL` by
+        // `record_pending_reason` — AdapterRetryable / GatedNotReady /
+        // TargetUnavailable / AwaitingDelivery are all designed to keep
+        // retrying, not to resolve on their own) sorts first by id and can
+        // fill the ENTIRE `limit` window on every tick, forever. A fresh
+        // message to a completely different, actively-working target then
+        // never appears in the peeked batch at all — not retried, not
+        // logged as failing, simply invisible. Reproduced at
+        // `peek_for_targets_gives_active_target_a_slot_despite_another_targets_stuck_backlog`.
         let session_sql = "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session
-             FROM prompt_queue
-             WHERE processed_at IS NULL
-               AND factory_session = ?
-             ORDER BY priority ASC, id ASC
+             FROM (
+                 SELECT *, ROW_NUMBER() OVER (
+                     PARTITION BY target, priority ORDER BY id ASC
+                 ) AS cas_target_rn
+                 FROM prompt_queue
+                 WHERE processed_at IS NULL
+                   AND factory_session = ?
+             )
+             ORDER BY priority ASC, cas_target_rn ASC, id ASC
              LIMIT ?";
         let session_params: Vec<Box<dyn rusqlite::ToSql>> =
             vec![Box::new(session.to_string()), Box::new(limit as i64)];
@@ -1301,11 +1336,16 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             let placeholders: Vec<&str> = std::iter::repeat_n("?", targets.len()).collect();
             let legacy_sql = format!(
                 "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session
-                 FROM prompt_queue
-                 WHERE processed_at IS NULL
-                   AND factory_session IS NULL
-                   AND target IN ({})
-                 ORDER BY priority ASC, id ASC
+                 FROM (
+                     SELECT *, ROW_NUMBER() OVER (
+                         PARTITION BY target, priority ORDER BY id ASC
+                     ) AS cas_target_rn
+                     FROM prompt_queue
+                     WHERE processed_at IS NULL
+                       AND factory_session IS NULL
+                       AND target IN ({})
+                 )
+                 ORDER BY priority ASC, cas_target_rn ASC, id ASC
                  LIMIT ?",
                 placeholders.join(", ")
             );
@@ -2043,6 +2083,173 @@ mod tests {
         assert_eq!(prompts_b.len(), 1);
         assert_eq!(prompts_b[0].target, "worker-b1");
         assert_eq!(prompts_b[0].factory_session.as_deref(), Some("session-b"));
+    }
+
+    /// Regression test for cas-7210 ("active workers stop receiving ALL
+    /// messages mid-session; all_workers broadcast 0-for-4").
+    ///
+    /// BEFORE THE FIX, this exact test failed: `peek_for_targets`'s session
+    /// lane had NO per-target fairness — a single flat
+    /// `ORDER BY priority ASC, id ASC LIMIT ?` across the WHOLE session,
+    /// regardless of which target each row was for. Any row left with
+    /// `processed_at IS NULL` by `record_pending_reason` (AdapterRetryable /
+    /// GatedNotReady / TargetUnavailable / AwaitingDelivery are all designed
+    /// to keep retrying, not to resolve on their own) stayed in that pool
+    /// indefinitely. Once `limit` (10 in production —
+    /// queue_and_events.rs:308) such stuck rows accumulated for ANY
+    /// target(s), they occupied the ENTIRE window every tick (oldest id
+    /// always sorts first), and a genuinely fresh message for a completely
+    /// different, actively-working target never appeared in the peeked
+    /// batch at all: not delivered, not retried-and-eventually-seen, simply
+    /// absent. `process_prompt_queue` only sees what `peek_for_targets`
+    /// returns, so the message was never even attempted — matching the
+    /// reported signature of "reports success/registration while silently
+    /// doing nothing." Confirmed by running this exact test against the
+    /// pre-fix query: it failed with `fresh_id` absent from a 10-row result
+    /// entirely made of `stuck-target` rows.
+    ///
+    /// AFTER THE FIX, the session/legacy lane queries rank each row by its
+    /// position within its own `(target, priority)` queue
+    /// (`ROW_NUMBER() OVER (PARTITION BY target, priority ORDER BY id)`)
+    /// and order the final candidates by `(priority, rank, id)` instead of
+    /// flat `(priority, id)`. Priority remains the dominant sort key
+    /// (nothing about existing priority-ordering guarantees changes); within
+    /// one priority band, every target's *oldest* pending row is now
+    /// considered before any target's *second* row, so one target's
+    /// backlog — however large — can delay but never fully exclude another
+    /// target's traffic. For the ordinary single-target case this is a
+    /// no-op reordering (rank increases monotonically with id when only one
+    /// target is present), which is why the unrelated multi-row-per-target
+    /// tests elsewhere in this module are unaffected.
+    ///
+    /// This one mechanism explains both reported symptoms: an active worker
+    /// can stop receiving ALL new messages mid-session (its fresh direct
+    /// messages never surface past another target's stuck backlog), and an
+    /// `all_workers` broadcast can behave the same way (its row is itself
+    /// just one more entry competing for the same starved window).
+    #[test]
+    fn peek_for_targets_gives_active_target_a_slot_despite_another_targets_stuck_backlog() {
+        let (_temp, store) = create_test_store();
+        let limit = 10usize;
+
+        // Fill the session with `limit` rows for a target that will never
+        // resolve — exactly what a persistent structural delivery failure
+        // (not a one-off transient blip) leaves behind via
+        // `record_pending_reason`, which deliberately does not set
+        // `processed_at` so the row is retried.
+        for i in 0..limit {
+            let id = store
+                .enqueue_with_session(
+                    "supervisor",
+                    "stuck-target",
+                    &format!("stuck message {i}"),
+                    "session-a",
+                )
+                .unwrap();
+            store
+                .record_pending_reason(
+                    id,
+                    PendingReason::AdapterRetryable,
+                    Some("simulated persistent delivery failure"),
+                )
+                .unwrap();
+        }
+
+        // A brand-new message to a COMPLETELY DIFFERENT, actively-working
+        // target, enqueued after all the stuck rows.
+        let fresh_id = store
+            .enqueue_with_session(
+                "supervisor",
+                "active-worker",
+                "fresh message for the active worker",
+                "session-a",
+            )
+            .unwrap();
+
+        // This is exactly the call process_prompt_queue makes: all live
+        // targets for the session, limit=10 (queue_and_events.rs:308).
+        let targets = &["supervisor", "all_workers", "director", "active-worker", "stuck-target"];
+        let peeked = store
+            .peek_for_targets(targets, Some("session-a"), limit)
+            .unwrap();
+
+        assert!(
+            peeked.iter().any(|p| p.id == fresh_id),
+            "cas-7210 regression: a fresh message to an active, unrelated target \
+             must appear in the peeked batch even when another target has a large \
+             never-resolving backlog. Got {} rows, none matching fresh_id={fresh_id}: {peeked:?}",
+            peeked.len()
+        );
+
+        // A second fresh message to the same active target must also get
+        // through on the very next peek — the fix isn't a one-time fluke.
+        let second_fresh_id = store
+            .enqueue_with_session(
+                "supervisor",
+                "active-worker",
+                "second fresh message, must not be starved",
+                "session-a",
+            )
+            .unwrap();
+        let peeked_again = store
+            .peek_for_targets(targets, Some("session-a"), limit)
+            .unwrap();
+        assert!(
+            peeked_again.iter().any(|p| p.id == second_fresh_id),
+            "the fix must hold for every subsequent fresh message, not just the first"
+        );
+    }
+
+    /// AC3-focused variant of the cas-7210 regression above: the fresh
+    /// message that must not be starved is itself an `all_workers`
+    /// broadcast row, directly covering the reported "all_workers broadcast
+    /// 0-for-4" symptom (a broadcast row is, from `peek_for_targets`'
+    /// perspective, just one more row competing for the same window — the
+    /// starvation mechanism and fix are identical to a direct message).
+    #[test]
+    fn peek_for_targets_gives_all_workers_broadcast_a_slot_despite_stuck_backlog() {
+        let (_temp, store) = create_test_store();
+        let limit = 10usize;
+
+        for i in 0..limit {
+            let id = store
+                .enqueue_with_session(
+                    "supervisor",
+                    "stuck-target",
+                    &format!("stuck message {i}"),
+                    "session-a",
+                )
+                .unwrap();
+            store
+                .record_pending_reason(
+                    id,
+                    PendingReason::AdapterRetryable,
+                    Some("simulated persistent delivery failure"),
+                )
+                .unwrap();
+        }
+
+        let broadcast_id = store
+            .enqueue_with_session(
+                "supervisor",
+                "all_workers",
+                "checkpoint broadcast",
+                "session-a",
+            )
+            .unwrap();
+
+        let targets = &["supervisor", "all_workers", "director", "stuck-target"];
+        let peeked = store
+            .peek_for_targets(targets, Some("session-a"), limit)
+            .unwrap();
+
+        assert!(
+            peeked.iter().any(|p| p.id == broadcast_id),
+            "cas-7210 AC3 regression: an all_workers broadcast must appear in the \
+             peeked batch even when another target has a large never-resolving \
+             backlog. Got {} rows, none matching broadcast_id={broadcast_id}: {peeked:?}",
+            peeked.len()
+        );
     }
 
     #[test]

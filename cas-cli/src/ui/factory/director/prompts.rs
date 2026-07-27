@@ -4,8 +4,12 @@
 //! into the appropriate agent's terminal.
 
 use std::collections::HashSet;
+use std::path::Path;
 
 use crate::config::AutoPromptConfig;
+use crate::mcp::tools::core::task::lifecycle::close_ops::{
+    count_unmerged_factory_commits, resolve_branch_short_sha,
+};
 use crate::ui::factory::director::data::{ActiveLeaseSummary, DirectorData, TaskSummary};
 use crate::ui::factory::director::events::DirectorEvent;
 use cas_mux::SupervisorCli;
@@ -539,15 +543,102 @@ pub fn with_response_instructions(
 }
 
 /// True when a WorkerIdle active-task payload is the merge-gate park path
-/// (cas-c145): either the task is already `AwaitingMerge`, or the close
-/// rejection reason names MERGE REQUIRED. Other close rejections stay on the
-/// generic informational wording.
+/// (cas-c145): the task's CURRENT status is `AwaitingMerge`.
+///
+/// cas-6883: this used to also match when `close_rejected_reason` merely
+/// *named* MERGE REQUIRED, even if `task_status` had since moved off
+/// `AwaitingMerge`. Traced against `run_factory_branch_merge_gate` /
+/// `park_task_awaiting_merge` (close_ops.rs): a MERGE REQUIRED rejection
+/// ALWAYS parks the task to `AwaitingMerge` in the same call, so
+/// `task_status != AwaitingMerge` while `close_rejected_reason` still says
+/// MERGE REQUIRED can only mean the reason string is a stale echo of an
+/// older activity event (`close_rejections` in `director.rs` scans the last
+/// 50 activity rows and never expires an entry) — the task was reset or
+/// reopened since. Gating strictly on live `task_status` stops that stale
+/// echo from re-triggering the actionable merge-queue framing; the alert
+/// falls back to the honest, generic idle wording instead (which still
+/// surfaces `close_rejected_reason` for context — see
+/// `BUG-stale-merge-required-alerts-refire-after-merge.md`, AC1).
 fn is_merge_required_idle(task: &ActiveLeaseSummary) -> bool {
     task.task_status == TaskStatus::AwaitingMerge
-        || task
-            .close_rejected_reason
-            .as_deref()
-            .is_some_and(|reason| reason.to_ascii_uppercase().contains("MERGE REQUIRED"))
+}
+
+/// Live evidence backing a MERGE REQUIRED idle alert, computed at send time
+/// (cas-6883) so the alert is self-verifying instead of asserting stale
+/// state. `epic_sha` is the epic branch's tip at the moment the unmerged
+/// count was computed — if a supervisor's own `epic_status` shows a
+/// different SHA, the branch has moved and this alert may already be
+/// out of date again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeAlertEvidence {
+    pub task_id: String,
+    pub factory_branch: String,
+    pub unmerged_count: u32,
+    pub epic_sha: String,
+}
+
+/// Outcome of the cas-6883 send-time freshness re-check for a MERGE
+/// REQUIRED / AwaitingMerge idle alert.
+#[derive(Debug)]
+pub enum MergeAlertFreshness {
+    /// Not a merge-required idle signal (wrong event shape, task no longer
+    /// AwaitingMerge, or the epic branch can't be resolved from this
+    /// snapshot). Caller falls back to the pre-cas-6883 path unaffected.
+    NotApplicable,
+    /// Confirmed stale: the factory branch already carries zero unmerged
+    /// commits vs the epic branch. Drop the alert entirely (AC1).
+    Stale,
+    /// Confirmed live: evidence to embed in the alert text (AC2).
+    Fresh(MergeAlertEvidence),
+}
+
+/// Re-validate a MERGE REQUIRED / AwaitingMerge `WorkerIdle` signal against
+/// live git state immediately before it would be sent (cas-6883).
+///
+/// See `docs/requests/BUG-stale-merge-required-alerts-refire-after-merge.md`:
+/// the task-status snapshot backing this alert can be accurate (the task
+/// really is still `AwaitingMerge` in the DB) while stale in the sense that
+/// matters — the branch was already merged and nobody has re-closed the
+/// task yet. `count_unmerged_factory_commits` is the SAME helper the
+/// close-time merge gate and `epic_status` use, so this check can never
+/// disagree with what a supervisor sees by running `epic_status` by hand
+/// (the report's own observation: "the check the alert recommends is one
+/// the alert could have run itself").
+pub fn check_merge_alert_freshness(
+    event: &DirectorEvent,
+    data: &DirectorData,
+    repo_root: &Path,
+) -> MergeAlertFreshness {
+    let DirectorEvent::WorkerIdle {
+        worker,
+        active_task: Some(task),
+    } = event
+    else {
+        return MergeAlertFreshness::NotApplicable;
+    };
+    if task.task_status != TaskStatus::AwaitingMerge {
+        return MergeAlertFreshness::NotApplicable;
+    }
+    let factory_branch = format!("factory/{worker}");
+    let (_, epic_branch) = resolve_merge_target_for_task(data, &task.task_id);
+    let Some(epic_branch) = epic_branch else {
+        // No resolvable epic link in this snapshot — can't verify either
+        // way, so don't silently drop a possibly-valid alert over a
+        // data-linking gap unrelated to git state (pre-cas-6883 behavior).
+        return MergeAlertFreshness::NotApplicable;
+    };
+    let unmerged_count = count_unmerged_factory_commits(repo_root, &factory_branch, &epic_branch);
+    if unmerged_count == 0 {
+        return MergeAlertFreshness::Stale;
+    }
+    let epic_sha = resolve_branch_short_sha(repo_root, &epic_branch)
+        .unwrap_or_else(|| "unknown".to_string());
+    MergeAlertFreshness::Fresh(MergeAlertEvidence {
+        task_id: task.task_id.clone(),
+        factory_branch,
+        unmerged_count,
+        epic_sha,
+    })
 }
 
 /// Resolve the focused epic id + branch for a parked task from the current
@@ -586,12 +677,20 @@ fn resolve_merge_target_for_task(
 ///
 /// Wording constraint: must not contain "assign" — the AwaitingMerge idle
 /// path is not "idle needing work" (cas-09d0 / cas-728b).
+///
+/// `evidence` (cas-6883) is the live git evidence this alert was validated
+/// against (see `check_merge_alert_freshness`) — `None` only when the
+/// caller skipped that check (e.g. no resolvable epic branch, or a caller
+/// that intentionally doesn't run it, such as most tests). When present, it
+/// is embedded inline (AC2) so the alert is dismissible at a glance without
+/// a supervisor having to run `epic_status` themselves.
 fn merge_required_idle_prompt_text(
     worker: &str,
     task: &ActiveLeaseSummary,
     data: &DirectorData,
     supervisor_prefix: &str,
     worker_prefix: &str,
+    evidence: Option<&MergeAlertEvidence>,
 ) -> String {
     let factory_branch = format!("factory/{worker}");
     let (epic_id, epic_branch) = resolve_merge_target_for_task(data, &task.task_id);
@@ -614,10 +713,18 @@ fn merge_required_idle_prompt_text(
         .close_rejected_reason
         .as_deref()
         .unwrap_or("MERGE REQUIRED");
+    let evidence_line = match evidence {
+        Some(e) => format!(
+            "Live evidence: {} unmerged commit(s) on {} vs {} (checked against epic tip {}).\n",
+            e.unmerged_count, e.factory_branch, target, e.epic_sha
+        ),
+        None => String::new(),
+    };
 
     format!(
         "⚠️ MERGE REQUIRED — supervisor action needed (not a task completion).\n\
          Worker {worker} is idle while task {} ({}) is {} (close rejected: {rejection}).\n\
+         {evidence_line}\
          Source branch: {factory_branch}\n\
          Merge target: {target}\n\
          Next action — drain the merge queue before free-form user chat:\n\
@@ -645,6 +752,14 @@ fn merge_required_idle_prompt_text(
 /// closed" for a task that's merely out of the current epic's display scope.
 /// Callers with only one snapshot available (e.g. most tests) may pass the
 /// same value for both.
+///
+/// `merge_alert_evidence` (cas-6883) is the live git evidence a caller
+/// already computed via `check_merge_alert_freshness` for THIS event, or
+/// `None` when the caller skipped that check (most tests) or the event
+/// isn't a merge-required idle signal. This function never runs git itself
+/// (it stays a pure function over in-memory snapshots) — the freshness
+/// re-check, including the decision to drop a stale alert entirely, is the
+/// caller's responsibility (`revalidate_and_prompt_for_delivery`).
 pub fn generate_prompt(
     event: &DirectorEvent,
     data: &DirectorData,
@@ -654,6 +769,7 @@ pub fn generate_prompt(
     supervisor_cli: SupervisorCli,
     worker_cli: SupervisorCli,
     gated_task_ids: &HashSet<String>,
+    merge_alert_evidence: Option<&MergeAlertEvidence>,
 ) -> Option<Prompt> {
     // Check global enable flag first
     if !config.enabled {
@@ -875,6 +991,7 @@ pub fn generate_prompt(
                         data,
                         supervisor_prefix,
                         worker_prefix,
+                        merge_alert_evidence,
                     )
                 } else {
                     let rejection = task
@@ -1534,6 +1651,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         )
         .unwrap();
 
@@ -1569,6 +1687,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         )
         .unwrap();
 
@@ -1641,6 +1760,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         )
         .unwrap();
 
@@ -1702,6 +1822,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         );
         assert!(
             prompt.is_none(),
@@ -1728,6 +1849,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         )
         .unwrap();
 
@@ -1768,6 +1890,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         )
         .unwrap();
 
@@ -1782,6 +1905,18 @@ mod tests {
 
     #[test]
     fn test_worker_idle_with_close_rejected_task_is_not_completion_worded() {
+        // cas-6883: `task_status: InProgress` with a `close_rejected_reason`
+        // that still names MERGE REQUIRED is exactly the stale-echo shape
+        // from BUG-stale-merge-required-alerts-refire-after-merge.md — a
+        // fresh MERGE REQUIRED rejection ALWAYS parks the task to
+        // `AwaitingMerge` in the same call (see
+        // `run_factory_branch_merge_gate` / `park_task_awaiting_merge` in
+        // close_ops.rs), so `InProgress` here means the task was
+        // reset/reopened since and the reason string is a leftover echo
+        // from `director.rs`'s 50-event activity scan. Before cas-6883 this
+        // still got the actionable "factory/swift-fox … merge …" framing
+        // (asserted below to have been removed); it must now fall back to
+        // the generic, honest idle wording instead.
         let event = DirectorEvent::WorkerIdle {
             worker: "swift-fox".to_string(),
             active_task: Some(ActiveLeaseSummary {
@@ -1803,6 +1938,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         )
         .unwrap();
         let lower = prompt.text.to_lowercase();
@@ -1817,10 +1953,21 @@ mod tests {
             "idle close-rejection prompt must not use completion-flavored wording: {}",
             prompt.text
         );
-        // cas-c145: MERGE REQUIRED upgrades to an actionable merge-queue prompt.
+        // cas-6883: `task_status` is InProgress, not AwaitingMerge, so this
+        // must NOT get the actionable merge-queue framing (that would be
+        // exactly the stale "instructing a merge that already happened"
+        // bug this task fixes) — it stays on the generic informational
+        // wording, which doesn't name a factory source branch.
         assert!(
-            prompt.text.contains("factory/swift-fox"),
-            "merge-required idle must name the factory source branch: {}",
+            !prompt.text.contains("factory/swift-fox"),
+            "InProgress + stale MERGE REQUIRED echo must NOT get the actionable \
+             merge-queue framing (cas-6883): {}",
+            prompt.text
+        );
+        assert!(
+            !prompt.text.contains("MERGE REQUIRED — supervisor action needed"),
+            "InProgress + stale MERGE REQUIRED echo must not use the actionable \
+             alert header (cas-6883): {}",
             prompt.text
         );
     }
@@ -1882,6 +2029,7 @@ mod tests {
             SupervisorCli::Grok,
             SupervisorCli::Grok,
             &HashSet::new(),
+            None,
         )
         .expect("AwaitingMerge idle must produce a supervisor prompt");
 
@@ -2000,6 +2148,7 @@ mod tests {
             claude(),
             codex(),
             &HashSet::new(),
+            None,
         )
         .expect("mixed-harness AwaitingMerge must produce a supervisor prompt");
 
@@ -2076,6 +2225,7 @@ mod tests {
             claude(),
             SupervisorCli::Grok,
             &HashSet::new(),
+            None,
         )
         .expect("Claude+Grok AwaitingMerge must produce a prompt");
         let grok_body = grok_prompt
@@ -2156,6 +2306,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         )
         .unwrap();
 
@@ -2225,6 +2376,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         )
         .expect("close-rejected WorkerIdle must produce an operator notification");
 
@@ -2265,6 +2417,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         )
         .unwrap();
 
@@ -2296,6 +2449,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         );
 
         assert!(
@@ -2322,6 +2476,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         );
 
         assert!(
@@ -2348,6 +2503,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         )
         .unwrap();
         let lower = prompt.text.to_lowercase();
@@ -2378,6 +2534,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         )
         .unwrap();
 
@@ -2407,6 +2564,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         )
         .unwrap();
 
@@ -2438,6 +2596,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         );
         assert!(prompt.is_none());
     }
@@ -2461,6 +2620,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         );
         assert!(prompt.is_none());
     }
@@ -2487,6 +2647,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         );
         assert!(prompt.is_none());
     }
@@ -2513,6 +2674,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         );
         assert!(prompt.is_none());
     }
@@ -2549,6 +2711,7 @@ mod tests {
             claude(),
             claude(),
             &HashSet::new(),
+            None,
         )
         .unwrap();
         assert!(prompt.text.contains("mcp__cas__task action=start"));
@@ -2616,6 +2779,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         )
         .unwrap();
 
@@ -2656,6 +2820,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         );
 
         assert!(
@@ -2686,6 +2851,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         );
 
         assert!(
@@ -2717,6 +2883,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         )
         .unwrap();
 
@@ -2753,6 +2920,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         );
 
         assert!(
@@ -2810,6 +2978,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         );
         assert!(
             prompt.is_none(),
@@ -2832,6 +3001,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         );
         assert!(
             prompt2.is_none(),
@@ -2903,6 +3073,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         );
         assert!(
             prompt.is_some(),
@@ -2959,6 +3130,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         );
         assert!(
             prompt.is_none(),
@@ -3013,6 +3185,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         );
         assert!(
             prompt.is_none(),
@@ -3049,6 +3222,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         );
 
         assert!(
@@ -3081,6 +3255,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         );
 
         assert!(
@@ -3124,6 +3299,7 @@ mod tests {
             claude(),
             codex(),
             &HashSet::new(),
+            None,
         )
         .expect("TaskAssigned must produce a prompt");
 
@@ -3177,6 +3353,7 @@ mod tests {
             codex(),
             claude(),
             &HashSet::new(),
+            None,
         )
         .expect("TaskAssigned must produce a prompt");
 
@@ -3242,6 +3419,7 @@ mod tests {
             claude(),
             codex(),
             &HashSet::new(),
+            None,
         )
         .expect("TaskCompleted (closed path) must produce a prompt");
 
@@ -3311,6 +3489,7 @@ mod tests {
             claude(),
             codex(),
             &HashSet::new(),
+            None,
         )
         .expect("TaskCompleted (regressed) must produce a prompt");
 
@@ -3389,6 +3568,7 @@ mod tests {
             claude(),
             codex(),
             &HashSet::new(),
+            None,
         )
         .expect("WorkerIdle must produce a prompt");
 
@@ -3464,6 +3644,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         )
         .unwrap();
 
@@ -3497,6 +3678,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         )
         .unwrap();
 
@@ -3532,6 +3714,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         )
         .unwrap();
 
@@ -3582,6 +3765,7 @@ mod tests {
                     codex(),
                     codex(),
                     &HashSet::new(),
+                    None,
                 )
                 .is_none(),
                 "on_worker_stalled=false must suppress WorkerStalled (escalate={escalate})"
@@ -3613,6 +3797,7 @@ mod tests {
                 codex(),
                 codex(),
                 &HashSet::new(),
+                None,
             )
             .is_none(),
             "WorkerStalled must not fire for a worker absent from the live snapshot"
@@ -3691,6 +3876,7 @@ mod tests {
             codex(),
             codex(),
             &gated,
+            None,
         )
         .unwrap();
 
@@ -3722,6 +3908,7 @@ mod tests {
             codex(),
             codex(),
             &gated,
+            None,
         )
         .unwrap();
 
@@ -3763,6 +3950,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         )
         .unwrap();
 
@@ -3947,6 +4135,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         )
         .expect("owner should get a prompt");
         assert_eq!(owner_prompt.target, "owner-sup");
@@ -3968,6 +4157,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         );
         assert!(
             foreign_prompt.is_none(),
@@ -3993,6 +4183,7 @@ mod tests {
             codex(),
             codex(),
             &HashSet::new(),
+            None,
         )
         .unwrap();
         assert!(
@@ -4001,5 +4192,226 @@ mod tests {
             prompt.text
         );
         assert!(prompt.text.contains("task action=close id=epic-456"));
+    }
+
+    /// cas-6883: send-time freshness re-check for MERGE REQUIRED alerts.
+    /// Uses real git repos (same style as `close_ops.rs`'s
+    /// `run_factory_branch_merge_gate` tests) since
+    /// `check_merge_alert_freshness` shells out to the same
+    /// `count_unmerged_factory_commits` helper the close-time gate and
+    /// `epic_status` use.
+    mod merge_alert_freshness_tests {
+        use super::*;
+        use std::process::Command;
+        use tempfile::TempDir;
+
+        fn git(dir: &std::path::Path, args: &[&str]) {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@test")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@test")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .status()
+                .expect("git");
+            assert!(status.success(), "git {args:?} failed");
+        }
+
+        /// `epic/test-epic` seeded with one commit, `factory/<worker>`
+        /// branched off it. Caller adds worker commits and/or merges on
+        /// top; returns the tempdir positioned on `factory/<worker>`.
+        fn init_repo(worker: &str) -> TempDir {
+            let dir = tempfile::tempdir().unwrap();
+            let p = dir.path();
+            git(p, &["init", "-q", "-b", "epic/test-epic"]);
+            std::fs::write(p.join("seed.txt"), "seed\n").unwrap();
+            git(p, &["add", "seed.txt"]);
+            git(p, &["commit", "-q", "-m", "seed"]);
+            git(p, &["checkout", "-q", "-b", &format!("factory/{worker}")]);
+            dir
+        }
+
+        fn commit_file(dir: &std::path::Path, name: &str) {
+            std::fs::write(dir.join(name), "x\n").unwrap();
+            git(dir, &["add", name]);
+            git(dir, &["commit", "-q", "-m", &format!("feat: {name}")]);
+        }
+
+        /// Merge `factory/<worker>` into `epic/test-epic` (fast-forward),
+        /// leaving the repo checked out on the epic branch.
+        fn merge_worker_into_epic(dir: &std::path::Path, worker: &str) {
+            git(dir, &["checkout", "-q", "epic/test-epic"]);
+            git(dir, &["merge", "-q", "--ff-only", &format!("factory/{worker}")]);
+        }
+
+        fn awaiting_merge_data(worker: &str) -> DirectorData {
+            let mut data = make_data(0);
+            data.agents[0].name = worker.to_string();
+            data.in_progress_tasks = vec![TaskSummary {
+                id: "cas-6883t".to_string(),
+                title: "Freshness test task".to_string(),
+                status: TaskStatus::AwaitingMerge,
+                priority: Priority::MEDIUM,
+                assignee: Some(worker.to_string()),
+                task_type: TaskType::Task,
+                epic: Some("cas-epic-t".to_string()),
+                branch: None,
+                updated_at: None,
+                epic_verification_owner: None,
+            }];
+            data.epic_tasks = vec![TaskSummary {
+                id: "cas-epic-t".to_string(),
+                title: "Test epic".to_string(),
+                status: TaskStatus::InProgress,
+                priority: Priority::HIGH,
+                assignee: None,
+                task_type: TaskType::Epic,
+                epic: None,
+                branch: Some("epic/test-epic".to_string()),
+                updated_at: None,
+                epic_verification_owner: None,
+            }];
+            data
+        }
+
+        fn idle_event(worker: &str, task_status: TaskStatus) -> DirectorEvent {
+            DirectorEvent::WorkerIdle {
+                worker: worker.to_string(),
+                active_task: Some(ActiveLeaseSummary {
+                    task_id: "cas-6883t".to_string(),
+                    task_title: "Freshness test task".to_string(),
+                    task_status,
+                    close_rejected_reason: Some("MERGE REQUIRED".to_string()),
+                }),
+            }
+        }
+
+        #[test]
+        fn ac1_drops_when_branch_already_fully_merged() {
+            let repo = init_repo("recipe-be");
+            commit_file(repo.path(), "a.rs");
+            merge_worker_into_epic(repo.path(), "recipe-be");
+
+            let data = awaiting_merge_data("recipe-be");
+            let event = idle_event("recipe-be", TaskStatus::AwaitingMerge);
+
+            let outcome = check_merge_alert_freshness(&event, &data, repo.path());
+            assert!(
+                matches!(outcome, MergeAlertFreshness::Stale),
+                "already-merged branch must yield Stale (drop the alert): {outcome:?}"
+            );
+        }
+
+        #[test]
+        fn ac1_drops_when_task_no_longer_awaiting_merge() {
+            // Branch genuinely has unmerged commits, but the task's live
+            // status has already moved off AwaitingMerge — must not be
+            // treated as an actionable merge-required signal.
+            let repo = init_repo("recipe-be");
+            commit_file(repo.path(), "a.rs");
+
+            let data = awaiting_merge_data("recipe-be");
+            let event = idle_event("recipe-be", TaskStatus::InProgress);
+
+            let outcome = check_merge_alert_freshness(&event, &data, repo.path());
+            assert!(
+                matches!(outcome, MergeAlertFreshness::NotApplicable),
+                "task no longer AwaitingMerge must not produce a merge alert: {outcome:?}"
+            );
+        }
+
+        #[test]
+        fn ac2_fresh_evidence_carries_unmerged_count_and_epic_sha() {
+            let repo = init_repo("recipe-be");
+            commit_file(repo.path(), "a.rs");
+            commit_file(repo.path(), "b.rs");
+
+            let data = awaiting_merge_data("recipe-be");
+            let event = idle_event("recipe-be", TaskStatus::AwaitingMerge);
+
+            let outcome = check_merge_alert_freshness(&event, &data, repo.path());
+            let evidence = match outcome {
+                MergeAlertFreshness::Fresh(e) => e,
+                other => panic!("expected Fresh evidence for a genuinely unmerged branch: {other:?}"),
+            };
+            assert_eq!(evidence.task_id, "cas-6883t");
+            assert_eq!(evidence.factory_branch, "factory/recipe-be");
+            assert_eq!(evidence.unmerged_count, 2);
+            assert!(!evidence.epic_sha.is_empty(), "epic SHA must be captured");
+
+            // The alert text itself must embed the evidence inline (AC2).
+            let config = default_config();
+            let prompt = generate_prompt(
+                &event,
+                &data,
+                &data,
+                "supervisor",
+                &config,
+                SupervisorCli::Claude,
+                SupervisorCli::Claude,
+                &HashSet::new(),
+                Some(&evidence),
+            )
+            .expect("AwaitingMerge idle with fresh evidence must produce a prompt");
+            assert!(
+                prompt.text.contains("2 unmerged commit"),
+                "alert text must include the unmerged commit count: {}",
+                prompt.text
+            );
+            assert!(
+                prompt.text.contains(&evidence.epic_sha),
+                "alert text must include the epic SHA the check ran against: {}",
+                prompt.text
+            );
+        }
+
+        #[test]
+        fn not_applicable_when_epic_branch_unresolvable() {
+            let repo = init_repo("recipe-be");
+            commit_file(repo.path(), "a.rs");
+
+            let mut data = awaiting_merge_data("recipe-be");
+            data.epic_tasks.clear(); // epic link present on the task, but epic row missing
+            let event = idle_event("recipe-be", TaskStatus::AwaitingMerge);
+
+            let outcome = check_merge_alert_freshness(&event, &data, repo.path());
+            assert!(
+                matches!(outcome, MergeAlertFreshness::NotApplicable),
+                "unresolvable epic branch must not silently drop a possibly-valid alert: {outcome:?}"
+            );
+        }
+
+        #[test]
+        fn ac3_dedup_suppresses_identical_repeat_but_allows_changed_evidence() {
+            let mut detector =
+                crate::ui::factory::director::events::DirectorEventDetector::new(
+                    vec!["recipe-be".to_string()],
+                    "supervisor".to_string(),
+                );
+
+            assert!(
+                detector.merge_alert_should_emit("cas-6883t", "factory/recipe-be", 2, "abc1234"),
+                "first emission with this evidence must be allowed"
+            );
+            assert!(
+                !detector.merge_alert_should_emit("cas-6883t", "factory/recipe-be", 2, "abc1234"),
+                "identical repeat evidence must be suppressed (AC3)"
+            );
+            assert!(
+                detector.merge_alert_should_emit("cas-6883t", "factory/recipe-be", 3, "abc1234"),
+                "changed unmerged count is a real state change and must re-emit"
+            );
+            assert!(
+                detector.merge_alert_should_emit("cas-6883t", "factory/recipe-be", 3, "def5678"),
+                "changed epic SHA is a real state change and must re-emit"
+            );
+            assert!(
+                !detector.merge_alert_should_emit("cas-6883t", "factory/recipe-be", 3, "def5678"),
+                "repeat of the new evidence must again be suppressed"
+            );
+        }
     }
 }

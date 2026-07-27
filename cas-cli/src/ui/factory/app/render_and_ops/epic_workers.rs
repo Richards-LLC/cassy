@@ -833,6 +833,27 @@ impl FactoryApp {
                     tracing::warn!("Failed to flag dirty_on_shutdown for agent '{agent_id}': {e}");
                 }
             }
+            RemoveOutcome::ExternalSymlinksBlocked(warning) => {
+                // cas-df97: live external symlinks (e.g. dotfiles a
+                // stow/install step pointed at this worktree by mistake)
+                // resolve into it — removing the directory would leave
+                // every one dangling. Preserve the worktree and name every
+                // offending link so it's fixable without spelunking.
+                let links_desc = warning
+                    .links
+                    .iter()
+                    .map(|l| format!("{} -> {}", l.link.display(), l.target.display()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.set_error(format!(
+                    "Worker '{}' shut down but worktree at {} has {} live external symlink{} pointing into it — worktree preserved, NOT removed: {}",
+                    warning.worker_name,
+                    warning.path.display(),
+                    warning.links.len(),
+                    if warning.links.len() == 1 { "" } else { "s" },
+                    links_desc,
+                ));
+            }
         }
     }
 

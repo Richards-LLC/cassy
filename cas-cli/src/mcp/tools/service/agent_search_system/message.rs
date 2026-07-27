@@ -528,17 +528,35 @@ impl CasService {
             }
         }
 
-        // cas-6913: honest delivery-status line. Urgent takes priority in the
-        // wording since it describes the delivery MECHANISM (interrupt) —
-        // but an urgent message to an unregistered target still can't
-        // interrupt a turn that doesn't exist yet, so the registration
-        // caveat wins even for urgent sends.
+        // cas-6913 / cas-893c: honest delivery-status line. Urgent takes
+        // priority in the wording since it describes the delivery MECHANISM
+        // (interrupt) — but an urgent message to an unregistered target
+        // still can't interrupt a turn that doesn't exist yet, so the
+        // registration caveat wins even for urgent sends.
+        //
+        // cas-893c: the non-urgent line previously read "queued for next
+        // poll (target is registered)", which a sender reasonably read as
+        // "delivered". It is not: the daemon enqueues this row and will
+        // attempt a transport handoff (teams-inbox file write or PTY
+        // inject) on its next tick, but that handoff succeeding is not the
+        // same as the recipient actually reading it — a Claude teammate
+        // only polls its inbox at a turn boundary, which an idle worker
+        // parked awaiting input may not reach on its own for a long time.
+        // The daemon now also nudges an idle recipient directly over PTY
+        // (see queue_and_events.rs `worker_looks_idle`), but that nudge is
+        // best-effort, not guaranteed — so the response must not claim
+        // delivery either way. Use `message_status` to check the actual
+        // stage reached.
         let delivery_status = if !target_is_registered {
             "Delivery: queued — target not yet registered, will deliver on registration\n"
         } else if urgent {
             "Delivery: interrupt-and-redirect (breaks the target's in-flight turn, then injects)\n"
         } else {
-            "Delivery: queued for next poll (target is registered)\n"
+            "Delivery: enqueued (target is registered) — not yet confirmed delivered. The \
+             daemon will attempt transport handoff on its next tick and nudge the recipient if \
+             it looks idle, but neither guarantees the recipient has read it. Check \
+             `message_status` (id above) if you need to know whether this landed before \
+             escalating.\n"
         };
 
         let message_id_text = message_id.to_string();
@@ -631,7 +649,43 @@ impl CasService {
 
         match report {
             Some(r) => {
-                let json = serde_json::to_string_pretty(&r).unwrap_or_else(|_| {
+                // cas-893c AC2: `delivered_at` is only transport handoff (the
+                // teams-inbox write / PTY inject succeeding) — cas cannot
+                // observe whether the recipient's harness actually consumed
+                // it (see `ObservationStatus` / the `wake`/`reaction` fields
+                // below, which stay `Unobserved` because cas has no signal
+                // for that). `confirmed_at` is the only field that means
+                // "the recipient told us it got this" (an explicit
+                // `message_ack`), which most recipients never call. So the
+                // honest "how long has this been undelivered" clock runs
+                // from `enqueued_at` until `confirmed_at`, not until
+                // `delivered_at` — a message can sit "delivered" (transport
+                // succeeded) but functionally unread for a long time, which
+                // is exactly the failure mode this task exists to surface.
+                let now = chrono::Utc::now();
+                let undelivered_after_secs = if r.confirmed_at.is_none() {
+                    Some((now - r.enqueued_at).num_seconds().max(0))
+                } else {
+                    None
+                };
+
+                let mut json_value = serde_json::to_value(&r).unwrap_or_else(|_| {
+                    serde_json::json!({
+                        "id": r.id,
+                        "legacy_status": r.legacy_status,
+                        "stage": r.stage,
+                    })
+                });
+                if let Some(obj) = json_value.as_object_mut() {
+                    obj.insert(
+                        "undelivered_after_secs".to_string(),
+                        match undelivered_after_secs {
+                            Some(secs) => serde_json::Value::Number(secs.into()),
+                            None => serde_json::Value::Null,
+                        },
+                    );
+                }
+                let json = serde_json::to_string_pretty(&json_value).unwrap_or_else(|_| {
                     format!(
                         "{{\"id\":{},\"legacy_status\":\"{}\",\"stage\":\"{}\"}}",
                         r.id, r.legacy_status, r.stage
@@ -641,9 +695,19 @@ impl CasService {
                     .pending_reason
                     .map(|p| p.to_string())
                     .unwrap_or_else(|| "none".into());
+                let undelivered_line = match undelivered_after_secs {
+                    Some(secs) => format!(
+                        "undelivered_after: {secs}s (not yet confirmed received — \
+                         transport handoff succeeding is not the same as the recipient \
+                         reading it; escalate if this is climbing and the target is idle)\n"
+                    ),
+                    None => "undelivered_after: n/a (recipient confirmed via message_ack)\n"
+                        .to_string(),
+                };
                 Ok(Self::success(format!(
                     "Message {notification_id} status: {}\n\
                      stage: {}  pending_reason: {}  wake: {}  reaction: {}\n\
+                     {undelivered_line}\
                      {json}",
                     r.legacy_status, r.stage, reason, r.wake, r.reaction
                 )))

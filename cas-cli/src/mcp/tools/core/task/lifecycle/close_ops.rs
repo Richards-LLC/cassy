@@ -560,14 +560,43 @@ impl CasCore {
         // `epic_base_branch`, falling back to git's detected default
         // branch) instead of skipping the gate or guessing `"main"`.
         let close_project_root = self.cas_root.parent().unwrap_or(&self.cas_root);
-        if task.task_type != TaskType::Epic && task.assignee.is_some() {
-            let parent_branch = task_store
-                .get_parent_epic(&req.id)
+
+        // cas-7efe: single, authoritative parent-branch resolution for
+        // every close-time gate below (merge gate, commit-claim gate,
+        // additive-only gate, zero-commit gate, diff stat). Resolved once
+        // and reused — previously four of these five sites independently
+        // resolved via `task.worktree_id -> worktree_store.get(..).parent_branch`
+        // with a silent `.unwrap_or_else(|| "main".to_string())` fallback,
+        // which on an epic based on a non-`main` branch (e.g. `staging`)
+        // evaluated every downstream gate against the wrong branch — the
+        // root cause of the ZERO-COMMIT catch-22
+        // (BUG-zero-commit-close-gate-catch22.md) and the 110KB diff-stat
+        // overflow (BUG-task-close-returns-110kb-diffstat-overflowing-token-limit.md).
+        // See `resolve_close_parent_branch` for the resolution order; it
+        // never falls back to a bare `"main"` literal.
+        let worktree_store_parent_branch = task.worktree_id.as_deref().and_then(|wt_id| {
+            self.open_worktree_store()
                 .ok()
-                .flatten()
-                .and_then(|p| p.branch)
-                .unwrap_or_else(|| resolve_standalone_merge_target(close_project_root));
-            match run_factory_branch_merge_gate(&task, &req, &parent_branch, close_project_root) {
+                .and_then(|store| store.get(wt_id).ok())
+                .map(|wt| wt.parent_branch.clone())
+        });
+        let epic_parent_branch = task_store
+            .get_parent_epic(&req.id)
+            .ok()
+            .flatten()
+            .and_then(|p| p.branch);
+        let resolved_parent_branch = resolve_close_parent_branch(
+            worktree_store_parent_branch,
+            epic_parent_branch,
+            close_project_root,
+        );
+        if task.task_type != TaskType::Epic && task.assignee.is_some() {
+            match run_factory_branch_merge_gate(
+                &task,
+                &req,
+                &resolved_parent_branch,
+                close_project_root,
+            ) {
                 MergeStateGateOutcome::Proceed => {}
                 MergeStateGateOutcome::Reject(msg) => {
                     // cas-627f: a worker looping `close` before the
@@ -1406,19 +1435,12 @@ impl CasCore {
                     .map(|s| !s.trim().is_empty())
                     .unwrap_or(false);
                 if has_findings {
-                    let parent_branch = task
-                        .worktree_id
-                        .as_deref()
-                        .and_then(|wt_id| {
-                            self.open_worktree_store()
-                                .ok()
-                                .and_then(|store| store.get(wt_id).ok())
-                                .map(|wt| wt.parent_branch.clone())
-                        })
-                        .unwrap_or_else(|| "main".to_string());
+                    // cas-7efe: use the single close-time resolver instead
+                    // of an independent worktree-only lookup that fell
+                    // back to a bare "main".
                     match check_commit_claim_integrity(
                         worker_wt,
-                        &parent_branch,
+                        &resolved_parent_branch,
                         true,
                         task.deliverables.factory_branch_anchor.as_deref(),
                     ) {
@@ -1467,19 +1489,12 @@ impl CasCore {
         // the exact wrong-worktree-scope bug cas-bc1b was filed to fix.
         if task.execution_note.as_deref() == Some("additive-only") {
             if let Some(worker_wt) = worker_worktree_path.as_ref() {
-                let parent_branch = task
-                    .worktree_id
-                    .as_deref()
-                    .and_then(|wt_id| {
-                        self.open_worktree_store()
-                            .ok()
-                            .and_then(|store| store.get(wt_id).ok())
-                            .map(|wt| wt.parent_branch.clone())
-                    })
-                    .unwrap_or_else(|| "main".to_string());
+                // cas-7efe: use the single close-time resolver instead of
+                // an independent worktree-only lookup that fell back to a
+                // bare "main".
                 let violations = check_additive_only_branch_violations(
                     worker_wt,
-                    &parent_branch,
+                    &resolved_parent_branch,
                     task.deliverables.factory_branch_anchor.as_deref(),
                 );
                 if !violations.is_empty() {
@@ -1548,29 +1563,18 @@ impl CasCore {
         // non-isolated tasks, fall through to the existing main-repo check —
         // those workers share the main worktree so its state IS the task diff.
         //
-        // Also capture `worker_review_parent_branch` for lint / merge-reality /
-        // case-3 ambiguity (avoids a second parent lookup).
-        //
-        // cas-dc5d P1: System-B isolated workers (`spawn_workers isolate=true`)
-        // almost never set `task.worktree_id` (that's System A). The previous
-        // worktree_id → parent_branch lookup therefore fell through to a
-        // hard-coded `"main"`, so lightweight lint's merge-base..HEAD range
-        // was wrong whenever the real integration target was `epic/<slug>`.
-        // Reuse the same authoritative resolution as the merge-state gate:
-        // `get_parent_epic(...).branch`, else `resolve_standalone_merge_target`.
-        let (effective_has_reviewable, worker_review_parent_branch) =
-            if let Some(worker_wt) = worker_worktree_path.as_ref() {
-                let parent_branch = task_store
-                    .get_parent_epic(&req.id)
-                    .ok()
-                    .flatten()
-                    .and_then(|p| p.branch)
-                    .unwrap_or_else(|| resolve_standalone_merge_target(close_project_root));
-                let reviewable = has_worker_committed_reviewable_changes(worker_wt, &parent_branch);
-                (reviewable, Some(parent_branch))
-            } else {
-                (has_reviewable_changes(close_project_root), None)
-            };
+        // cas-7efe: reuse the single close-time resolved parent branch
+        // (computed once above) for lint / merge-reality / case-3
+        // ambiguity, instead of an independent lookup that fell through to
+        // a hard-coded `"main"` whenever `task.worktree_id` was unset — the
+        // common System-B factory-isolation case (`spawn_workers
+        // isolate=true` almost never sets `task.worktree_id`; see
+        // `resolve_close_parent_branch`).
+        let effective_has_reviewable = if let Some(worker_wt) = worker_worktree_path.as_ref() {
+            has_worker_committed_reviewable_changes(worker_wt, &resolved_parent_branch)
+        } else {
+            has_reviewable_changes(close_project_root)
+        };
 
         // cas-762e (B2): factory branch merge-reality gate.
         //
@@ -1598,9 +1602,10 @@ impl CasCore {
             && effective_has_reviewable
         {
             if let Some(assignee) = task.assignee.as_deref() {
-                let parent = worker_review_parent_branch.as_deref().unwrap_or("main");
+                // cas-7efe: single close-time resolver, not a bare "main".
                 let close_root = self.cas_root.parent().unwrap_or(&self.cas_root);
-                match check_factory_branch_merge_reality(close_root, assignee, parent) {
+                match check_factory_branch_merge_reality(close_root, assignee, &resolved_parent_branch)
+                {
                     MergeRealityOutcome::Proceed => {}
                     MergeRealityOutcome::Refuse(msg) => {
                         return Ok(Self::tool_error(msg));
@@ -1663,8 +1668,11 @@ impl CasCore {
             // (cas-ee2b / cas-bc1b) already use this authority; lint was
             // the remaining caller of bare `close_project_root`.
             let lint_outcome = if let Some(worker_wt) = worker_worktree_path.as_ref() {
-                let parent = worker_review_parent_branch.as_deref().unwrap_or("main");
-                run_lightweight_structural_lint_with_scope(worker_wt, Some(parent))
+                // cas-7efe: single close-time resolver, not a bare "main".
+                run_lightweight_structural_lint_with_scope(
+                    worker_wt,
+                    Some(resolved_parent_branch.as_str()),
+                )
             } else {
                 run_lightweight_structural_lint(close_project_root)
             };
@@ -1785,13 +1793,13 @@ impl CasCore {
             // Only run the case-3 gate for isolated-worker tasks that
             // are not supervisor-bypassed.
             if !bypass_close_gates {
-                if let (Some(worker_wt), Some(parent)) = (
-                    worker_worktree_path.as_ref(),
-                    worker_review_parent_branch.as_deref(),
-                ) {
+                if let Some(worker_wt) = worker_worktree_path.as_ref() {
+                    // cas-7efe: single close-time resolver, not the
+                    // independently-derived `worker_review_parent_branch`
+                    // that used to fall back to a bare "main".
                     match check_zero_commit_close(
                         worker_wt,
-                        parent,
+                        &resolved_parent_branch,
                         &req.id,
                         &task.task_type,
                         task.execution_note.as_deref(),
@@ -2225,37 +2233,32 @@ impl CasCore {
         // the stat is an objective record of what was committed, independent
         // of whatever the worker's close reason claims.
         let diff_stat_msg = if let Some(worker_wt) = worker_worktree_path.as_ref() {
-            let parent_branch = task
-                .worktree_id
-                .as_deref()
-                .and_then(|wt_id| {
-                    self.open_worktree_store()
-                        .ok()
-                        .and_then(|store| store.get(wt_id).ok())
-                        .map(|wt| wt.parent_branch.clone())
-                })
-                .unwrap_or_else(|| "main".to_string());
-            let stat = get_worker_diff_stat(worker_wt, &parent_branch);
+            // cas-7efe: single close-time resolver, not a bare "main" —
+            // this used to diff against the wrong branch (e.g. the entire
+            // staging/main divergence) whenever `task.worktree_id` was
+            // unset, producing the 110KB diff-stat overflow.
+            let stat = get_worker_diff_stat(worker_wt, &resolved_parent_branch);
             if stat.is_empty() {
                 String::new()
             } else {
-                format!("\n\n📊 Committed diff stat (vs {parent_branch}):\n{stat}")
+                format!(
+                    "\n\n📊 Committed diff stat (vs {resolved_parent_branch}):\n{stat}"
+                )
             }
         } else {
             String::new()
         };
 
-        Ok(Self::success(format!(
-            "Closed task: {} - {}{}{}{}{}{}{}{}",
-            req.id,
-            task.title,
-            verification_note,
+        Ok(Self::success(format_close_success_message(
+            &req.id,
+            &task.title,
+            &verification_note,
             lease_msg,
-            worktree_msg,
-            diff_stat_msg,
-            epic_close_msg,
+            &worktree_msg,
+            &diff_stat_msg,
+            &epic_close_msg,
             commit_nudge_msg,
-            auto_unblock_msg
+            &auto_unblock_msg,
         )))
     }
 
@@ -2433,25 +2436,39 @@ impl CasCore {
         VerificationSkipReason::AssigneeUnknown
     }
 
-    /// Reopen a closed task
+    /// Reopen a closed OR blocked task (cas-cd24: blocked support added).
     ///
     /// cas-3c23: reopening a Closed/merged task is a supervisor-only action.
     /// A factory worker told (by a stale director re-dispatch or coordination
     /// message) to work an already-Closed ticket must NOT be able to reopen
     /// it unilaterally — that's exactly the thrash loop cas-a7c8 diagnosed
     /// (reopen → re-verify already-shipped code → re-close, stomping main).
+    /// The same supervisor-only gate applies to unblocking (cas-cd24): a
+    /// blocked task is typically waiting on a supervisor decision (e.g. an
+    /// acceptance criterion the worker correctly flagged as wrong), so
+    /// lifting the block is kept a supervisor action too, for the same
+    /// "don't let a stale signal cause unilateral state thrash" reason.
+    ///
+    /// cas-cd24: `reopen` previously only accepted `Closed` tasks —
+    /// `Blocked` tasks had no documented path back to `Open` via this verb,
+    /// forcing `update status=open` as an undiscoverable workaround that
+    /// also silently dropped the `reason` (see
+    /// `BUG-blocked-tasks-cannot-be-reopened.md`). Closed→Open behavior
+    /// (status flip, `closed_at`/`factory_branch_anchor` reset) is
+    /// unchanged; Blocked→Open is new and does not touch those
+    /// closed-specific fields.
     pub async fn cas_task_reopen(
         &self,
-        Parameters(req): Parameters<IdRequest>,
+        Parameters(req): Parameters<TaskReopenRequest>,
     ) -> Result<CallToolResult, McpError> {
         if !is_supervisor_from_env() {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
                 format!(
-                    "task reopen rejected: only supervisors may reopen a closed task \
-                     (CAS_AGENT_ROLE=supervisor). Task {} stays Closed. Message your \
-                     supervisor if you believe this task needs rework — do not reopen \
-                     it yourself.",
+                    "task reopen rejected: only supervisors may reopen a closed or \
+                     blocked task (CAS_AGENT_ROLE=supervisor). Task {} stays as-is. \
+                     Message your supervisor if you believe this task needs rework \
+                     or its blocker should be lifted — do not reopen it yourself.",
                     req.id
                 ),
             ));
@@ -2465,29 +2482,58 @@ impl CasCore {
             data: None,
         })?;
 
-        if task.status != TaskStatus::Closed {
+        if task.status != TaskStatus::Closed && task.status != TaskStatus::Blocked {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
                 format!(
-                    "Task is already {} (only closed tasks can be reopened)",
-                    task.status
+                    "Task is already {} (only closed or blocked tasks can be \
+                     reopened). To change status directly, use: \
+                     `task action=update id={} status=open`.",
+                    task.status, req.id
                 ),
             ));
         }
 
         let old_status = task.status;
         task.status = TaskStatus::Open;
-        task.closed_at = None;
+        if old_status == TaskStatus::Closed {
+            // cas-cd24: closed-specific resets stay gated to the closed
+            // path so Closed→Open behavior is byte-for-byte unchanged
+            // (AC2) — a Blocked task was never closed, so `closed_at` is
+            // already `None` and clearing `factory_branch_anchor` here
+            // would be a no-op at best, dead code at worst.
+            task.closed_at = None;
+            // cas-cf64 (P2, anchor freshness — Scenario B): a stale
+            // `factory_branch_anchor` from a PRIOR close/park cycle must not
+            // survive a reopen. Without this, `run_factory_branch_merge_gate`
+            // would keep trusting the OLD anchor sha (already merged, from
+            // before the reopen) forever — `park_task_awaiting_merge`'s
+            // `is_none()` guard never overwrites an existing anchor, so any
+            // NEW commits made after rework would be invisible to the gate and
+            // the task would false-Proceed on reworked-but-unmerged code.
+            task.deliverables.factory_branch_anchor = None;
+        }
         task.updated_at = chrono::Utc::now();
-        // cas-cf64 (P2, anchor freshness — Scenario B): a stale
-        // `factory_branch_anchor` from a PRIOR close/park cycle must not
-        // survive a reopen. Without this, `run_factory_branch_merge_gate`
-        // would keep trusting the OLD anchor sha (already merged, from
-        // before the reopen) forever — `park_task_awaiting_merge`'s
-        // `is_none()` guard never overwrites an existing anchor, so any
-        // NEW commits made after rework would be invisible to the gate and
-        // the task would false-Proceed on reworked-but-unmerged code.
-        task.deliverables.factory_branch_anchor = None;
+
+        // cas-cd24: capture the reopen/unblock reason on the audit trail —
+        // previously silently dropped (the dispatcher discarded `reason`
+        // for this action entirely; see `TaskRequest` -> `IdRequest` in
+        // `service/core.rs` before this fix). Mirrors the close-path
+        // `close_reason`/note pattern above in `cas_task_close`.
+        if let Some(reason) = &req.reason {
+            let timestamp = task.updated_at.format("%Y-%m-%d %H:%M");
+            let verb = if old_status == TaskStatus::Blocked {
+                "Unblocked"
+            } else {
+                "Reopened"
+            };
+            let reopen_note = format!("[{timestamp}] {verb}: {reason}");
+            if task.notes.is_empty() {
+                task.notes = reopen_note;
+            } else {
+                task.notes = format!("{}\n\n{}", task.notes, reopen_note);
+            }
+        }
 
         task_store.update(&task).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
@@ -3643,6 +3689,187 @@ fn resolve_standalone_merge_target(repo_path: &std::path::Path) -> String {
     })
 }
 
+/// cas-7efe: the single, authoritative parent-branch resolution policy for
+/// every close-time gate in `cas_task_close` (merge gate, commit-claim
+/// gate, additive-only gate, zero-commit gate, diff stat).
+///
+/// Before this fix, four of the five gates resolved the parent branch via
+/// `task.worktree_id -> worktree_store.get(..).parent_branch`, falling back
+/// to a hardcoded `.unwrap_or_else(|| "main".to_string())` whenever
+/// `worktree_id` was unset (the common System-B factory-isolation case —
+/// see `resolve_worker_worktree_path`) or the worktree-store lookup failed.
+/// On an epic based on a non-`main` branch (e.g. `staging`), that silently
+/// evaluated every downstream gate against the wrong branch:
+///
+/// - `check_zero_commit_close`'s cas-127f merge-satisfied path calls
+///   `commit_is_merged_into_parent(anchor, "main")`. The anchor was merged
+///   into the epic, not `main` -> `false` -> an ambiguous ZERO-COMMIT
+///   rejection immediately after the supervisor did exactly what the prior
+///   MERGE REQUIRED rejection demanded (the catch-22 documented in
+///   BUG-zero-commit-close-gate-catch22.md).
+/// - `get_worker_diff_stat(wt, "main")` diffs across the *entire*
+///   staging/main divergence instead of the task's own contribution,
+///   producing a ~110KB result that overflows the MCP tool-result token
+///   limit (BUG-task-close-returns-110kb-diffstat-overflowing-token-limit.md).
+///
+/// Resolution order (first `Some` wins):
+///
+/// 1. `worktree_parent_branch` — the `WorktreeStore` row's recorded parent
+///    for `task.worktree_id` (System A). Most specific when present: it's
+///    the actual recorded parent of this task's own worktree.
+/// 2. `epic_branch` — `task_store.get_parent_epic(task_id).branch`. Covers
+///    System-B isolated workers (`spawn_workers isolate=true`), which are
+///    the day-to-day factory path and almost never set `worktree_id`.
+/// 3. [`resolve_standalone_merge_target`] — configured `epic_base_branch`,
+///    falling back to git's own detected default branch. Used only when
+///    neither tier above resolves (a standalone task with no parent epic).
+///
+/// Never a bare `"main"` literal: tier 3 is a real resolution (configured
+/// value or git-detected default), not a guess, so this function always
+/// returns a genuine answer rather than silently guessing.
+fn resolve_close_parent_branch(
+    worktree_parent_branch: Option<String>,
+    epic_branch: Option<String>,
+    repo_path: &std::path::Path,
+) -> String {
+    worktree_parent_branch
+        .or(epic_branch)
+        .unwrap_or_else(|| resolve_standalone_merge_target(repo_path))
+}
+
+/// cas-e093: build the `task.close` success message with the confirmation
+/// line always first (`"Closed task: <id> - <title>"`), so it survives
+/// truncation/spilling if the rest of the payload (e.g. a wide diff stat)
+/// turns out to be large. See BUG-task-close-returns-110kb-diffstat-
+/// overflowing-token-limit.md: a successful close whose confirmation is
+/// buried inside a spilled file presents as a failure to the caller.
+#[allow(clippy::too_many_arguments)]
+fn format_close_success_message(
+    task_id: &str,
+    task_title: &str,
+    verification_note: &str,
+    lease_msg: &str,
+    worktree_msg: &str,
+    diff_stat_msg: &str,
+    epic_close_msg: &str,
+    commit_nudge_msg: &str,
+    auto_unblock_msg: &str,
+) -> String {
+    format!(
+        "Closed task: {task_id} - {task_title}{verification_note}{lease_msg}{worktree_msg}\
+         {diff_stat_msg}{epic_close_msg}{commit_nudge_msg}{auto_unblock_msg}"
+    )
+}
+
+#[cfg(test)]
+mod parent_branch_resolver_tests {
+    //! cas-7efe: unit tests for the single close-time parent-branch
+    //! resolution policy, and cas-e093 tests for the success-message
+    //! ordering that makes the "Closed task" confirmation survive
+    //! truncation/spilling.
+    use super::*;
+
+    #[test]
+    fn worktree_store_parent_wins_over_epic_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolved = resolve_close_parent_branch(
+            Some("staging".to_string()),
+            Some("epic/other".to_string()),
+            dir.path(),
+        );
+        assert_eq!(
+            resolved, "staging",
+            "the most specific source (worktree store) must win"
+        );
+    }
+
+    #[test]
+    fn epic_branch_wins_over_standalone_fallback_when_worktree_unset() {
+        // Reproduces the ZERO-COMMIT catch-22 shape at the policy level:
+        // System-B factory workers never set `task.worktree_id`, so the
+        // worktree-store tier is always `None` for them. The resolver
+        // must still prefer the real epic branch over guessing "main".
+        let dir = tempfile::tempdir().unwrap();
+        let resolved = resolve_close_parent_branch(
+            None,
+            Some("epic/staging-thing".to_string()),
+            dir.path(),
+        );
+        assert_eq!(
+            resolved, "epic/staging-thing",
+            "must never fall through to a bare 'main' literal when the \
+             epic branch is known"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_standalone_merge_target_when_both_unset() {
+        // Neither the worktree store nor a parent epic resolved (a
+        // standalone task with no epic) — falls back to
+        // `resolve_standalone_merge_target`, which is a real git-detected
+        // answer, not a blind guess. A repo whose init branch is
+        // deliberately non-`main` proves this isn't hardcoded.
+        let dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q", "-b", "trunk"])
+            .current_dir(dir.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .expect("git init");
+        let resolved = resolve_close_parent_branch(None, None, dir.path());
+        assert_eq!(
+            resolved, "trunk",
+            "final tier must reflect the repo's real detected default, \
+             never a hardcoded 'main'"
+        );
+    }
+
+    // ── cas-e093: success message ordering ──────────────────────────────────
+
+    #[test]
+    fn success_message_puts_closed_task_line_first() {
+        // Even with every optional suffix populated (the worst case that
+        // used to spill ~110KB via the diff stat), the confirmation must
+        // be the literal first text of the result.
+        let msg = format_close_success_message(
+            "cas-e093",
+            "Bound the close-time diff stat",
+            " (verified)",
+            " (lease released)",
+            "\n🌳 Worktree merged (branch: factory/worker)",
+            "\n\n📊 Committed diff stat (vs epic/foo):\n a.txt | 1 +",
+            "\n\n🎉 All subtasks complete!",
+            "\n\n💡 Consider committing your changes.",
+            "\n\n🔓 Auto-unblocked task(s): cas-xyz",
+        );
+        assert!(
+            msg.starts_with("Closed task: cas-e093 - Bound the close-time diff stat"),
+            "success confirmation must be first, unconditionally; got: {msg}"
+        );
+        // Sanity: every suffix is still present, just not first.
+        for fragment in [
+            "(verified)",
+            "lease released",
+            "Worktree merged",
+            "Committed diff stat",
+            "subtasks complete",
+            "Consider committing",
+            "Auto-unblocked",
+        ] {
+            assert!(msg.contains(fragment), "must retain {fragment}: {msg}");
+        }
+    }
+
+    #[test]
+    fn success_message_with_all_suffixes_empty_is_just_the_confirmation() {
+        let msg = format_close_success_message(
+            "cas-1234", "Some task", "", "", "", "", "", "", "",
+        );
+        assert_eq!(msg, "Closed task: cas-1234 - Some task");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // cas-4b3f: System B (factory-isolation) worktree resolution
 // ---------------------------------------------------------------------------
@@ -3803,6 +4030,15 @@ pub(crate) fn count_worker_branch_commits(
     }
 }
 
+/// cas-e093: cap on the number of files listed in the close-time diff
+/// stat. Even a legitimately huge task must not overflow the MCP
+/// tool-result token limit — six closes in one session each spilled
+/// ~110KB (BUG-task-close-returns-110kb-diffstat-overflowing-token-limit.md),
+/// forcing an extra shell call every time just to confirm the close
+/// (whose success line was buried at the top of the spill file) actually
+/// landed.
+const DIFF_STAT_MAX_FILES: usize = 40;
+
 /// Return a `git diff --stat` summary for commits on `HEAD` beyond
 /// `parent_branch`, running inside `worker_worktree_path`.
 ///
@@ -3811,6 +4047,13 @@ pub(crate) fn count_worker_branch_commits(
 ///
 /// Returns an empty string on any git failure or when there are no commits
 /// beyond the parent (an empty stat is the correct representation there).
+///
+/// cas-e093: bounded to [`DIFF_STAT_MAX_FILES`] files via git's own
+/// `--stat-count`, so git does the truncation work rather than this
+/// function reading an unbounded stat into memory first. When the diff is
+/// wider than the cap, the truncated file list gets an explicit
+/// "… and M more files" line (derived from git's own trailing "N files
+/// changed" summary) in place of git's bare "..." marker.
 pub(crate) fn get_worker_diff_stat(
     worker_worktree_path: &std::path::Path,
     parent_branch: &str,
@@ -3830,13 +4073,56 @@ pub(crate) fn get_worker_diff_stat(
     }
 
     let stat_out = Command::new("git")
-        .args(["diff", "--stat", &format!("{merge_base}..HEAD")])
+        .args([
+            "diff",
+            "--stat",
+            &format!("--stat-count={DIFF_STAT_MAX_FILES}"),
+            &format!("{merge_base}..HEAD"),
+        ])
         .current_dir(worker_worktree_path)
         .output();
-    match stat_out {
+    let raw = match stat_out {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        _ => String::new(),
+        _ => return String::new(),
+    };
+    cap_diff_stat_output(&raw, DIFF_STAT_MAX_FILES)
+}
+
+/// Post-process a `git diff --stat --stat-count=<max_files>` result.
+///
+/// When the true file count (parsed from git's own trailing "N files
+/// changed" summary line) exceeds `max_files`, git has already truncated
+/// the file listing and left a bare "..." marker line — replace that with
+/// an explicit "… and M more files" count. Below the cap, or if the
+/// summary line can't be parsed (unexpected git output shape), returns
+/// `raw` unchanged.
+fn cap_diff_stat_output(raw: &str, max_files: usize) -> String {
+    let lines: Vec<&str> = raw.lines().collect();
+    let Some((summary_line, body_lines)) = lines.split_last() else {
+        return raw.to_string();
+    };
+    let Some(total_files) = parse_files_changed(summary_line) else {
+        return raw.to_string();
+    };
+    if total_files <= max_files {
+        return raw.to_string();
     }
+    let more = total_files - max_files;
+    let body: Vec<&str> = body_lines
+        .iter()
+        .copied()
+        .filter(|line| line.trim() != "...")
+        .collect();
+    format!(
+        "{}\n … and {more} more files\n{summary_line}",
+        body.join("\n")
+    )
+}
+
+/// Parse the leading file count from a `git diff --stat` summary line,
+/// e.g. " 1700 files changed, 42 insertions(+)" -> `Some(1700)`.
+fn parse_files_changed(summary_line: &str) -> Option<usize> {
+    summary_line.trim().split_whitespace().next()?.parse().ok()
 }
 
 /// Outcome of the cas-490f commit-claim integrity gate.
@@ -4251,6 +4537,32 @@ pub(crate) fn last_commit_unix(repo_path: &std::path::Path, branch: &str) -> Opt
         .trim()
         .parse::<i64>()
         .ok()
+}
+
+/// Short SHA of `branch`'s current tip, or `None` when the branch ref
+/// doesn't resolve or `git rev-parse` fails. Used by the director's
+/// send-time MERGE REQUIRED alert freshness check (cas-6883) to stamp an
+/// emitted alert with the epic commit its unmerged-count was computed
+/// against, so a supervisor can tell at a glance whether the alert is
+/// still current (does `epic_status`'s current SHA match?). Mirrors the
+/// shell-out style of `count_unmerged_factory_commits` / `last_commit_unix`.
+pub(crate) fn resolve_branch_short_sha(repo_path: &std::path::Path, branch: &str) -> Option<String> {
+    use std::process::Command;
+
+    if !is_safe_git_refname(branch) {
+        return None;
+    }
+
+    let out = Command::new("git")
+        .args(["rev-parse", "--short", branch])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if sha.is_empty() { None } else { Some(sha) }
 }
 
 /// Outcome of the cas-8f8f epic-close per-child merge-state gate.
@@ -7481,6 +7793,44 @@ mod merge_state_gate_tests {
         );
     }
 
+    // --- cas-6883: resolve_branch_short_sha ----------------------------------
+
+    #[test]
+    fn resolve_branch_short_sha_returns_current_tip() {
+        let dir = init_factory_repo("worker");
+        let expected = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "--short", "main"])
+                .current_dir(dir.path())
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+
+        assert_eq!(
+            resolve_branch_short_sha(dir.path(), "main"),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn resolve_branch_short_sha_none_for_unresolvable_or_unsafe_ref() {
+        let dir = init_factory_repo("worker");
+        assert_eq!(
+            resolve_branch_short_sha(dir.path(), "no-such-branch"),
+            None,
+            "unresolvable branch must return None, not a stale/default SHA"
+        );
+        assert_eq!(
+            resolve_branch_short_sha(dir.path(), "-oProxyCommand=evil"),
+            None,
+            "unsafe refname must fail closed to None, never reach the git shell-out"
+        );
+    }
+
     #[test]
     fn merge_gate_rejects_unsafe_assignee_or_parent_branch_with_clear_message() {
         let dir = init_factory_repo("worker");
@@ -9480,6 +9830,162 @@ mod commit_claim_integrity_tests {
         );
     }
 
+    // ── cas-e093: bounded diff stat ──────────────────────────────────────────
+
+    /// Pure-logic test for the truncation/annotation policy, independent of
+    /// git: below-cap input passes through unchanged.
+    #[test]
+    fn cap_diff_stat_output_below_cap_is_unchanged() {
+        let raw = " a.txt | 1 +\n 1 file changed, 1 insertion(+)";
+        assert_eq!(cap_diff_stat_output(raw, 40), raw);
+    }
+
+    /// Pure-logic test: above-cap input gets an explicit "… and M more
+    /// files" line derived from git's own trailing summary, and git's bare
+    /// "..." marker (if present) is dropped rather than left in.
+    #[test]
+    fn cap_diff_stat_output_truncates_and_annotates() {
+        let raw = " a.txt | 1 +\n b.txt | 1 +\n ...\n 3 files changed, 3 insertions(+)";
+        let capped = cap_diff_stat_output(raw, 2);
+        assert!(
+            capped.contains("and 1 more files"),
+            "must state exactly how many files were hidden; got: {capped}"
+        );
+        assert!(capped.contains("a.txt") && capped.contains("b.txt"));
+        assert!(
+            !capped.contains("..."),
+            "git's bare truncation marker must be replaced, not left in: {capped}"
+        );
+        assert!(
+            capped.ends_with("3 files changed, 3 insertions(+)"),
+            "summary line must be preserved verbatim: {capped}"
+        );
+    }
+
+    #[test]
+    fn parse_files_changed_handles_singular_and_plural_and_junk() {
+        assert_eq!(
+            parse_files_changed(" 1 file changed, 1 insertion(+)"),
+            Some(1)
+        );
+        assert_eq!(
+            parse_files_changed(" 50 files changed, 50 insertions(+)"),
+            Some(50)
+        );
+        assert_eq!(parse_files_changed("not a summary line"), None);
+    }
+
+    /// End-to-end (real git): a diff far wider than `DIFF_STAT_MAX_FILES`
+    /// must produce a small, bounded result with an explicit remainder
+    /// count — directly reproducing the bug doc's evidence shape (a
+    /// long-lived branch differing across ~1700 files used to spill
+    /// ~110KB and overflow the MCP tool-result token limit).
+    #[test]
+    fn get_diff_stat_synthetic_1700_file_diff_stays_small() {
+        let dir = init_worker_repo();
+        for i in 0..1700 {
+            std::fs::write(dir.path().join(format!("wide{i}.txt")), "x\n").unwrap();
+        }
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "wide diff"]);
+
+        let stat = get_worker_diff_stat(dir.path(), "main");
+        assert!(
+            stat.len() < 4096,
+            "a 1700-file diff must produce a small, bounded result \
+             (bug doc evidence: unbounded == ~110,000 bytes); got {} bytes",
+            stat.len()
+        );
+        assert!(
+            stat.contains("more files"),
+            "must indicate truncation for a diff this wide; got: {stat}"
+        );
+    }
+
+    /// Sanity: a diff below the cap must NOT be annotated as truncated —
+    /// the common small-task case is unaffected by the cas-e093 cap.
+    #[test]
+    fn get_diff_stat_below_cap_lists_every_file_untruncated() {
+        let dir = init_worker_repo();
+        for name in ["a.rs", "b.rs", "c.rs"] {
+            std::fs::write(dir.path().join(name), format!("// {name}\n")).unwrap();
+            git(dir.path(), &["add", name]);
+        }
+        git(dir.path(), &["commit", "-q", "-m", "add three files"]);
+
+        let stat = get_worker_diff_stat(dir.path(), "main");
+        assert!(
+            !stat.contains("more files"),
+            "small diff must not be flagged as truncated; got: {stat}"
+        );
+        for name in ["a.rs", "b.rs", "c.rs"] {
+            assert!(stat.contains(name), "must list {name}; got: {stat}");
+        }
+    }
+
+    /// cas-7efe (AC3): the close-time diff stat must be computed against
+    /// the task's real parent (the epic branch), not a divergent trunk —
+    /// otherwise it lists the trunk's entire unrelated history instead of
+    /// the task's own contribution
+    /// (BUG-task-close-returns-110kb-diffstat-overflowing-token-limit.md).
+    #[test]
+    fn get_diff_stat_against_epic_excludes_unrelated_trunk_divergence() {
+        // `get_worker_diff_stat` diffs `merge-base(HEAD, parent_branch)..HEAD`
+        // — so the bug only reproduces when the merge-base against the
+        // WRONG branch ("main") is genuinely older/different than the
+        // merge-base against the real parent (the epic). Mirror the bug
+        // doc's actual shape: `staging` (the real trunk) has drifted far
+        // from `main` with unrelated history, and the epic branches from
+        // staging's current tip — so diffing the worker branch against
+        // `main` walks all the way back through staging's entire
+        // unrelated drift.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "main"]);
+        std::fs::write(p.join("root.txt"), "root\n").unwrap();
+        git(p, &["add", "root.txt"]);
+        git(p, &["commit", "-q", "-m", "root"]);
+
+        // `staging` diverges from `main` with a lot of unrelated history —
+        // `main` itself never advances past `root`.
+        git(p, &["checkout", "-q", "-b", "staging"]);
+        for i in 0..30 {
+            std::fs::write(p.join(format!("unrelated{i}.txt")), "noise\n").unwrap();
+        }
+        git(p, &["add", "."]);
+        git(p, &["commit", "-q", "-m", "staging drift"]);
+
+        // The epic branches from staging's current (drifted) tip.
+        git(p, &["checkout", "-q", "-b", "epic/foo"]);
+
+        // Worker branches off the epic and touches exactly one file.
+        git(p, &["checkout", "-q", "-b", "factory/worker"]);
+        std::fs::write(p.join("task_file.rs"), "fn work() {}\n").unwrap();
+        git(p, &["add", "task_file.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: task work"]);
+
+        let stat_vs_epic = get_worker_diff_stat(p, "epic/foo");
+        assert!(
+            stat_vs_epic.contains("task_file.rs"),
+            "must list the task's own file; got: {stat_vs_epic}"
+        );
+        assert!(
+            !stat_vs_epic.contains("unrelated0.txt"),
+            "must NOT include trunk-only divergence when diffed against \
+             the real epic parent; got: {stat_vs_epic}"
+        );
+
+        // Sanity: proves what the bug looked like when the wrong base
+        // (main) was used instead of the epic branch — this pulls in
+        // staging's entire unrelated drift, exactly the 110KB overflow.
+        let stat_vs_main = get_worker_diff_stat(p, "main");
+        assert!(
+            stat_vs_main.contains("unrelated0.txt"),
+            "sanity: diffing vs the wrong base pulls in the unrelated \
+             trunk divergence — exactly the 110KB overflow bug; got: {stat_vs_main}"
+        );
+    }
+
     // ── check_commit_claim_integrity ─────────────────────────────────────────
 
     /// Reproduces the cas-ba91 incident: worker provides non-empty
@@ -10031,6 +10537,186 @@ mod zero_change_close_tests {
             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
             "main"
         ));
+    }
+
+    // ── cas-7efe: ZERO-COMMIT catch-22 on a non-`main`-based epic ──────────
+
+    /// Regression test for BUG-zero-commit-close-gate-catch22.md.
+    /// Reproduces the exact bug shape: an epic branched from a non-`main`
+    /// base (here `staging`; this repo has no `main` branch at all — the
+    /// old code's fallback would have nothing sane to land on), a
+    /// worker's factory branch merged into the epic, and the worker
+    /// branch subsequently synced to the epic tip (0 commits ahead — the
+    /// ambiguous shape).
+    ///
+    /// Before cas-7efe, 4 of the 5 close-time gates resolved the parent
+    /// branch via `task.worktree_id -> worktree_store.get(..).parent_branch`
+    /// with `.unwrap_or_else(|| "main".to_string())`. Since
+    /// `task.worktree_id` is unset for the common System-B factory path
+    /// (`spawn_workers isolate=true`), they always fell straight through
+    /// to that "main" literal, ignoring the real epic branch — so
+    /// `check_zero_commit_close`'s cas-127f merge-satisfied path called
+    /// `commit_is_merged_into_parent(anchor, "main")`, which is false
+    /// (the anchor was merged into `epic/foo`, not `main`), producing an
+    /// ambiguous ZERO-COMMIT rejection immediately after the supervisor
+    /// did exactly what the prior MERGE REQUIRED rejection demanded.
+    #[test]
+    fn cas7efe_catch22_resolves_epic_not_main_and_proceeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "staging"]);
+        std::fs::write(p.join("seed.txt"), "seed\n").unwrap();
+        git(p, &["add", "seed.txt"]);
+        git(p, &["commit", "-q", "-m", "seed"]);
+
+        // Epic branch, based on `staging` — never `main`.
+        git(p, &["checkout", "-q", "-b", "epic/foo"]);
+
+        // Worker branch off the epic.
+        git(p, &["checkout", "-q", "-b", "factory/worker"]);
+        std::fs::write(p.join("fix.rs"), "pub fn work() {}\n").unwrap();
+        git(p, &["add", "fix.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: task work"]);
+        let anchor = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(p)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+
+        // Supervisor merges the worker branch into the epic (what MERGE
+        // REQUIRED demanded), then the worker's factory branch is synced
+        // to the epic tip — the exact post-merge state that produced the
+        // catch-22 (0 commits ahead of parent).
+        git(p, &["checkout", "-q", "epic/foo"]);
+        git(
+            p,
+            &[
+                "merge",
+                "--no-ff",
+                "-m",
+                "merge factory/worker",
+                "factory/worker",
+            ],
+        );
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(p, &["reset", "--hard", "epic/foo"]);
+
+        assert_eq!(
+            count_worker_branch_commits(p, "epic/foo"),
+            0,
+            "sanity: post-merge, worker branch must show 0 commits ahead \
+             of the epic — the ambiguous shape"
+        );
+        assert!(
+            !commit_is_merged_into_parent(p, &anchor, "main"),
+            "sanity: this repo has no relevant 'main' branch — proves the \
+             old hardcoded fallback would misfire if it were still used"
+        );
+
+        // The fix: resolve_close_parent_branch must select the epic
+        // branch, never guess "main", when the worktree store has
+        // nothing recorded (the common System-B factory-isolation shape).
+        let resolved =
+            resolve_close_parent_branch(None, Some("epic/foo".to_string()), p);
+        assert_eq!(
+            resolved, "epic/foo",
+            "must resolve the real epic branch, never a bare 'main'"
+        );
+        assert!(
+            commit_is_merged_into_parent(p, &anchor, &resolved),
+            "parked anchor must be recognized as merged into the \
+             correctly-resolved epic branch"
+        );
+
+        // End to end: feeding the CORRECTLY resolved branch into the
+        // zero-commit gate must Proceed — no ZERO-COMMIT rejection after
+        // the supervisor did exactly what MERGE REQUIRED demanded. This
+        // is the assertion that fails before the cas-7efe fix (when
+        // exercised through the real close_ops.rs call sites, which used
+        // to feed a bare "main" here instead of `resolved`).
+        let outcome = check_zero_commit_close(
+            p,
+            &resolved,
+            "cas-7efe",
+            &TaskType::Bug,
+            None,
+            false,
+            Some(&anchor),
+        );
+        assert!(
+            matches!(outcome, ZeroCommitCloseOutcome::Proceed),
+            "post-merge close on a non-main-based epic must Proceed, not \
+             ZERO-COMMIT; got {outcome:?}"
+        );
+    }
+
+    /// Companion assertion: had the pre-fix code's "main" fallback still
+    /// been wired into `check_zero_commit_close` for this same fixture,
+    /// the close would have been wrongly rejected as ambiguous — pinning
+    /// down exactly what the fix prevents.
+    #[test]
+    fn cas7efe_old_main_fallback_would_have_falsely_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "staging"]);
+        std::fs::write(p.join("seed.txt"), "seed\n").unwrap();
+        git(p, &["add", "seed.txt"]);
+        git(p, &["commit", "-q", "-m", "seed"]);
+        git(p, &["checkout", "-q", "-b", "epic/foo"]);
+        git(p, &["checkout", "-q", "-b", "factory/worker"]);
+        std::fs::write(p.join("fix.rs"), "pub fn work() {}\n").unwrap();
+        git(p, &["add", "fix.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: task work"]);
+        let anchor = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(p)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        git(p, &["checkout", "-q", "epic/foo"]);
+        git(
+            p,
+            &[
+                "merge",
+                "--no-ff",
+                "-m",
+                "merge factory/worker",
+                "factory/worker",
+            ],
+        );
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(p, &["reset", "--hard", "epic/foo"]);
+
+        // Simulating the OLD (pre-cas-7efe) resolution: no worktree_id,
+        // so the old code's `.unwrap_or_else(|| "main".to_string())`
+        // fired directly — this is that literal value, fed to the same
+        // gate the real call site used.
+        let old_hardcoded_fallback = "main";
+        let outcome = check_zero_commit_close(
+            p,
+            old_hardcoded_fallback,
+            "cas-7efe",
+            &TaskType::Bug,
+            None,
+            false,
+            Some(&anchor),
+        );
+        assert!(
+            matches!(outcome, ZeroCommitCloseOutcome::AmbiguousCodeTask(_)),
+            "documents the bug: the old hardcoded 'main' fallback falsely \
+             rejects this exact post-merge state as ZERO-COMMIT; got {outcome:?}"
+        );
     }
 }
 

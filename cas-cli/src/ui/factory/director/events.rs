@@ -22,14 +22,14 @@ const IDLE_RATE_LIMIT: Duration = Duration::from_secs(300);
 /// considered "recently alive" for the purposes of the idle gate (cas-4038).
 /// CC agents heartbeat on every tool call, so a 60s window covers one full
 /// turn without generating a false-idle notification.
-const FRESH_HEARTBEAT_SECS: i64 = 60;
+pub(crate) const FRESH_HEARTBEAT_SECS: i64 = 60;
 
 /// A worker whose `latest_activity` timestamp is within this many seconds of
 /// `now_utc` is considered "recently active" (cas-4038). Combined with the
 /// fresh-heartbeat gate: BOTH must be true to suppress a WorkerIdle tick.
 /// 120s gives one comfortable "between tasks" turn window at the 2s refresh
 /// rate without masking a genuinely stalled worker.
-const RECENT_ACTIVITY_SECS: i64 = 120;
+pub(crate) const RECENT_ACTIVITY_SECS: i64 = 120;
 
 /// Scale the base stall threshold by a worker's configured reasoning effort
 /// (cas-09d0). A high/xhigh-effort worker's read-and-think phase routinely
@@ -543,6 +543,13 @@ pub struct DirectorEventDetector {
     /// When a worker is absent from this map under age override, defaults to
     /// `TRANSCRIPT_FRESH_WINDOW` (Claude/Grok 60s).
     transcript_window_override: Option<HashMap<String, Duration>>,
+    /// (cas-7e85) Test-only override for the "has an in-flight tool call"
+    /// signal, keyed by resolved worker name, used alongside
+    /// `transcript_age_override` so tests can exercise the suppression path
+    /// without a real transcript file. `None` per-worker (missing from the
+    /// map) means "no in-flight call" — production resolves this via
+    /// `wedged::transcript_has_in_flight_tool_call`.
+    transcript_in_flight_override: Option<HashMap<String, bool>>,
     /// (cas-09d0) Workers explicitly put on hold by the supervisor — a
     /// first-class primitive for "deliberately paused, not idle-needing-work"
     /// that doesn't require a task-status transition (unlike `AwaitingMerge`,
@@ -553,6 +560,16 @@ pub struct DirectorEventDetector {
     /// short-circuit below. Set/cleared via [`Self::mark_worker_hold`] /
     /// [`Self::clear_worker_hold`].
     held_workers: HashSet<String>,
+    /// (cas-6883) Evidence `(unmerged_count, epic_sha)` last actually sent
+    /// for a MERGE REQUIRED alert, keyed by `(task_id, factory_branch)`.
+    /// `IDLE_RATE_LIMIT` above only floors re-fire *frequency* (once per 5
+    /// minutes); this floors re-fire *content* — AC3 requires the alert not
+    /// re-emit for the same (task, branch) pair without an intervening
+    /// state change, not merely "not more than once every 5 minutes" (a
+    /// parked task can easily stay parked for 5+ minutes, and did in the
+    /// reported six-stale-alerts session). See
+    /// [`Self::merge_alert_should_emit`].
+    merge_alert_last_evidence: HashMap<(String, String), (u32, String)>,
 }
 
 impl DirectorEventDetector {
@@ -577,8 +594,33 @@ impl DirectorEventDetector {
             cas_root: None,
             transcript_age_override: None,
             transcript_window_override: None,
+            transcript_in_flight_override: None,
             held_workers: HashSet::new(),
+            merge_alert_last_evidence: HashMap::new(),
         }
+    }
+
+    /// (cas-6883) Whether a MERGE REQUIRED alert for `(task_id,
+    /// factory_branch)` carrying `(unmerged_count, epic_sha)` should
+    /// actually be sent — `false` when this exact evidence was the last
+    /// thing sent for this pair (AC3: no re-emit without an intervening
+    /// state change). Records the evidence as "last sent" as a side effect
+    /// whenever it returns `true`, so callers must only invoke this once
+    /// per candidate emission (not use it as a read-only peek).
+    pub(crate) fn merge_alert_should_emit(
+        &mut self,
+        task_id: &str,
+        factory_branch: &str,
+        unmerged_count: u32,
+        epic_sha: &str,
+    ) -> bool {
+        let key = (task_id.to_string(), factory_branch.to_string());
+        let evidence = (unmerged_count, epic_sha.to_string());
+        if self.merge_alert_last_evidence.get(&key) == Some(&evidence) {
+            return false;
+        }
+        self.merge_alert_last_evidence.insert(key, evidence);
+        true
     }
 
     /// (cas-09d0) Put a worker on hold: suppress `WorkerIdle` for them
@@ -617,6 +659,16 @@ impl DirectorEventDetector {
     #[cfg(test)]
     pub(crate) fn set_transcript_window_override(&mut self, windows: HashMap<String, Duration>) {
         self.transcript_window_override = Some(windows);
+    }
+
+    /// (cas-7e85) Test-only seam: inject a synthetic "in-flight tool call"
+    /// signal alongside `set_transcript_age_override`, so tests can prove
+    /// an outstanding call suppresses the stall alert regardless of how
+    /// stale the (overridden) transcript age is — without needing a real
+    /// JSONL fixture file.
+    #[cfg(test)]
+    pub(crate) fn set_transcript_in_flight_override(&mut self, in_flight: HashMap<String, bool>) {
+        self.transcript_in_flight_override = Some(in_flight);
     }
 
     /// Initialize with current state (call after first data load)
@@ -671,7 +723,14 @@ impl DirectorEventDetector {
                 .as_ref()
                 .and_then(|m| m.get(worker_name).copied())
                 .unwrap_or(crate::cli::factory::wedged::TRANSCRIPT_FRESH_WINDOW);
-            return transcript_confirms_stall_for_age(age, window);
+            // cas-7e85: missing from the override map means "no in-flight
+            // call", matching production's fail-safe default.
+            let in_flight = self
+                .transcript_in_flight_override
+                .as_ref()
+                .and_then(|m| m.get(worker_name).copied())
+                .unwrap_or(false);
+            return transcript_confirms_stall_for_age(age, window, in_flight);
         }
         let Some(cas_root) = &self.cas_root else {
             return true;
@@ -1468,6 +1527,12 @@ impl DirectorEventDetector {
 /// cas-ab80: freshness window is harness-specific via
 /// [`activity_fresh_window`](crate::cli::factory::wedged::activity_fresh_window),
 /// matching `is-wedged`.
+///
+/// cas-7e85: also consults
+/// [`transcript_has_in_flight_tool_call`](crate::cli::factory::wedged::transcript_has_in_flight_tool_call)
+/// — the SAME function `cas factory is-wedged` uses — so an outstanding
+/// tool call (e.g. a worker sleeping on a backgrounded `cargo test`) never
+/// confirms a stall here while is-wedged would call the worker Alive.
 fn transcript_confirms_stall_for_path(
     transcript_path: Option<&std::path::Path>,
     cli: cas_mux::SupervisorCli,
@@ -1476,14 +1541,20 @@ fn transcript_confirms_stall_for_path(
         return false;
     };
     let window = crate::cli::factory::wedged::activity_fresh_window(cli);
+    let in_flight = crate::cli::factory::wedged::transcript_has_in_flight_tool_call(path, cli);
     transcript_confirms_stall_for_age(
         crate::cli::factory::wedged::transcript_mtime_age(path),
         window,
+        in_flight,
     )
 }
 
-/// (cas-09d0 / cas-de95 / cas-ab80) Pure core of the confirmation decision.
+/// (cas-09d0 / cas-de95 / cas-ab80 / cas-7e85) Pure core of the confirmation
+/// decision.
 ///
+/// - `in_flight_tool_call == true` → **never** confirm (AC1: an outstanding
+///   call proves the worker is actively waiting on real work, regardless of
+///   transcript age — checked first, short-circuiting the age comparison).
 /// - `Some(age < fresh_window)` → not stalled (fresh transcript)
 /// - `Some(age ≥ fresh_window)` → confirm stall (cold transcript is positive evidence)
 /// - `None` → **do not confirm** (unresolved/missing telemetry is not starvation)
@@ -1491,7 +1562,14 @@ fn transcript_confirms_stall_for_path(
 /// `fresh_window` must come from
 /// [`activity_fresh_window`](crate::cli::factory::wedged::activity_fresh_window)
 /// (or the same constants) so director and is-wedged agree.
-fn transcript_confirms_stall_for_age(age: Option<Duration>, fresh_window: Duration) -> bool {
+fn transcript_confirms_stall_for_age(
+    age: Option<Duration>,
+    fresh_window: Duration,
+    in_flight_tool_call: bool,
+) -> bool {
+    if in_flight_tool_call {
+        return false;
+    }
     match age {
         Some(age) if age < fresh_window => false,
         Some(_) => true,

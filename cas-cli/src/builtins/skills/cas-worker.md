@@ -62,6 +62,7 @@ Your scope is locked at assignment. The supervisor will reject work that violate
 - **Non-goals are real.** Do not touch listed non-goal areas regardless of how easy the fix looks.
 - **Stay in your layer.** Only modify files/modules declared in your assignment. Crossing the boundary is automatic rejection.
 - **Match existing patterns.** Follow established conventions. Don't introduce new patterns without asking.
+- **Stow/install steps target the main checkout, never a worktree path.** Dotfile managers (`stow`, `chezmoi`, etc.) and install scripts create symlinks that outlive your worktree's lifetime. Point them at the real checkout — never `$REPO/.cas/worktrees/<you>/...` — or a later worktree cleanup silently orphans every symlink it created, with the breakage only surfacing much later (cas-df97).
 - **No config surprises.** Don't hardcode values that should be configurable. Don't add config that wasn't requested.
 - **Document important choices.** Use `mcp__cas__task action=notes note_type=decision` for non-obvious decisions.
 

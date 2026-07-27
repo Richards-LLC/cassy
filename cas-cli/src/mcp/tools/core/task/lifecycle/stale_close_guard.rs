@@ -282,7 +282,9 @@ pub fn is_merge_reclose_exempt_urgent(text: &str, target_awaiting_merge_task_ids
         .any(|id| text_mentions_task_id_bounded(text, id))
 }
 
-/// cas-60393 (G-M1/X-M1 deadlock): whether the `task close` halt-work gate
+/// cas-60393 (G-M1/X-M1 deadlock); widened by cas-3894 to `InProgress`.
+///
+/// Whether the `task close` / `verification action=add` halt-work gate
 /// should be **exempted** for this specific call.
 ///
 /// cas-126b already stops the merge-done *notification itself* from arming
@@ -292,25 +294,55 @@ pub fn is_merge_reclose_exempt_urgent(text: &str, target_awaiting_merge_task_ids
 /// because `halt_task_work` is still `1` from the older, unrelated event.
 /// There is no in-band recovery — starting the parked task is illegal (you
 /// cannot `start` an `AwaitingMerge` task), so only an operator can clear the
-/// halt out of band. That is the deadlock this predicate closes.
+/// halt out of band. cas-60393 closed that deadlock for `AwaitingMerge`.
 ///
-/// The exemption is narrow by construction:
-/// - It fires **only** when the task being closed is `AwaitingMerge` and its
-///   `assignee` is exactly the calling agent's own display name — someone
-///   else's parked task, or this same task in any other status, still halts.
+/// cas-3894: the same trap recurs one state earlier, for `InProgress`, and
+/// is worse there because it can be a genuine mutual deadlock rather than
+/// merely an unreachable escape. Two recorded incidents: a worker holding a
+/// finished, gate-green `InProgress` task was halted by an entirely
+/// unrelated, informational urgent message (a checkpoint nudge in one case,
+/// a task-assignment briefing in the other — neither was a redirect about
+/// the task being closed). The documented escape, "start a new task", was
+/// either (a) unreachable — no unstarted assignment existed — or (b) reachable
+/// but itself refused by the verification jail, because starting a *new* task
+/// requires the caller's current `InProgress` task to be verified/closed
+/// first — which is exactly the call halt was blocking. Two independent gates
+/// each demand the other complete first.
+///
+/// The exemption is narrow by construction, identical in shape to the
+/// `AwaitingMerge` case:
+/// - It fires **only** when the task being closed is `AwaitingMerge` OR
+///   `InProgress` and its `assignee` is exactly the calling agent's own
+///   display name — someone else's task, or this same task in any other
+///   status (`Open`, `Blocked`, `Closed`, `PendingSupervisorReview`), still
+///   halts.
 /// - It does **not** clear `halt_task_work` — every other close/verify call
-///   remains blocked until a real new `task start` clears the flag.
-/// - It does **not** touch the merge-integrity gate. Skipping the halt check
-///   only lets execution reach `run_factory_branch_merge_gate`; an
-///   `AwaitingMerge` task whose commit is not actually merged yet still
-///   bounces `MERGE REQUIRED` from that gate exactly as before, so this can
-///   never manufacture a false close success.
-pub fn halt_exempt_for_owned_awaiting_merge(
+///   remains blocked until a real new `task start` clears the flag. A worker
+///   cannot use this to bootstrap its way into unhalted work on anything
+///   other than the exact task it already owns.
+/// - It does **not** touch any other gate. Skipping the halt check only lets
+///   execution reach the merge-integrity / verification / code-review gates
+///   that already run after it — an `AwaitingMerge` task whose commit is not
+///   actually merged yet still bounces `MERGE REQUIRED`, and an `InProgress`
+///   task with no verification row still bounces `VERIFICATION REQUIRED`.
+///   This can never manufacture a false close success; it only removes the
+///   halt gate's veto over gates that are already sufficient on their own.
+/// - A genuine redirect ("stop, this approach is wrong") does not lose its
+///   force here: the redirect is about the *content* of the task, and the
+///   gates downstream of this check — verification, code review, the merge
+///   gate — are what enforce content correctness, not this flag. What this
+///   predicate removes is only the blanket "you may not close ANY task you
+///   own, even already-finished ones" side effect of a halt that was never
+///   about this task in the first place.
+pub fn halt_exempt_for_owned_task(
     task_status: TaskStatus,
     task_assignee: Option<&str>,
     caller_agent_name: Option<&str>,
 ) -> bool {
-    if task_status != TaskStatus::AwaitingMerge {
+    if !matches!(
+        task_status,
+        TaskStatus::AwaitingMerge | TaskStatus::InProgress
+    ) {
         return false;
     }
     match (task_assignee, caller_agent_name) {
@@ -643,7 +675,7 @@ mod tests {
     /// from an unrelated, pre-existing halt.
     #[test]
     fn test_60393_owned_awaiting_merge_is_halt_exempt() {
-        assert!(halt_exempt_for_owned_awaiting_merge(
+        assert!(halt_exempt_for_owned_task(
             TaskStatus::AwaitingMerge,
             Some("swift-fox-12"),
             Some("swift-fox-12"),
@@ -655,32 +687,29 @@ mod tests {
     /// caller.
     #[test]
     fn test_60393_other_workers_awaiting_merge_task_not_exempt() {
-        assert!(!halt_exempt_for_owned_awaiting_merge(
+        assert!(!halt_exempt_for_owned_task(
             TaskStatus::AwaitingMerge,
             Some("other-worker"),
             Some("swift-fox-12"),
         ));
     }
 
-    /// cas-60393: the same caller/task pairing is not exempt for any status
-    /// other than AwaitingMerge — e.g. re-close of a plain InProgress task
-    /// must still halt.
+    /// cas-3894: widened from the original cas-60393 assertion. `InProgress`
+    /// moved from the "must still halt" list to its own exempt test below —
+    /// this is the ticket's whole point, not a regression. What remains true,
+    /// and is the actual safety property (AC2): every status that is neither
+    /// the caller's own `AwaitingMerge` nor `InProgress` task still halts.
     #[test]
-    fn test_60393_non_awaiting_merge_status_not_exempt() {
+    fn test_3894_non_exempt_statuses_still_halt() {
         for status in [
             TaskStatus::Open,
-            TaskStatus::InProgress,
             TaskStatus::Blocked,
             TaskStatus::Closed,
             TaskStatus::PendingSupervisorReview,
         ] {
             assert!(
-                !halt_exempt_for_owned_awaiting_merge(
-                    status,
-                    Some("swift-fox-12"),
-                    Some("swift-fox-12"),
-                ),
-                "status {status:?} must not be halt-exempt"
+                !halt_exempt_for_owned_task(status, Some("swift-fox-12"), Some("swift-fox-12"),),
+                "status {status:?} must not be halt-exempt — only AwaitingMerge/InProgress are"
             );
         }
     }
@@ -689,18 +718,66 @@ mod tests {
     /// closed (never exempt) rather than assume ownership.
     #[test]
     fn test_60393_missing_identity_fails_closed_to_halt() {
-        assert!(!halt_exempt_for_owned_awaiting_merge(
+        assert!(!halt_exempt_for_owned_task(
             TaskStatus::AwaitingMerge,
             None,
             Some("swift-fox-12"),
         ));
-        assert!(!halt_exempt_for_owned_awaiting_merge(
+        assert!(!halt_exempt_for_owned_task(
             TaskStatus::AwaitingMerge,
             Some("swift-fox-12"),
             None,
         ));
-        assert!(!halt_exempt_for_owned_awaiting_merge(
+        assert!(!halt_exempt_for_owned_task(
             TaskStatus::AwaitingMerge,
+            Some(""),
+            Some(""),
+        ));
+    }
+
+    // --- cas-3894: InProgress carve-out --------------------------------
+
+    /// AC1: the recorded deadlock shape — a worker's own `InProgress` task,
+    /// halted by an unrelated urgent (checkpoint nudge / task briefing, not a
+    /// redirect about this task), must be closable without a new assignment.
+    #[test]
+    fn test_3894_owned_in_progress_is_halt_exempt() {
+        assert!(halt_exempt_for_owned_task(
+            TaskStatus::InProgress,
+            Some("patient-cobra-45"),
+            Some("patient-cobra-45"),
+        ));
+    }
+
+    /// AC2 (safety half 1): a different worker's InProgress task must not be
+    /// exempted for this caller — the exemption is ownership-bound, not
+    /// status-only. Halt still fires for anything the caller does not own.
+    #[test]
+    fn test_3894_other_workers_in_progress_task_not_exempt() {
+        assert!(!halt_exempt_for_owned_task(
+            TaskStatus::InProgress,
+            Some("other-worker"),
+            Some("patient-cobra-45"),
+        ));
+    }
+
+    /// AC2 (safety half 2): missing assignee/caller identity fails closed for
+    /// InProgress exactly as it already does for AwaitingMerge — an unknown
+    /// owner is never assumed to be "mine".
+    #[test]
+    fn test_3894_in_progress_missing_identity_fails_closed_to_halt() {
+        assert!(!halt_exempt_for_owned_task(
+            TaskStatus::InProgress,
+            None,
+            Some("patient-cobra-45"),
+        ));
+        assert!(!halt_exempt_for_owned_task(
+            TaskStatus::InProgress,
+            Some("patient-cobra-45"),
+            None,
+        ));
+        assert!(!halt_exempt_for_owned_task(
+            TaskStatus::InProgress,
             Some(""),
             Some(""),
         ));

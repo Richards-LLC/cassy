@@ -34,11 +34,27 @@ impl CasCore {
         }
 
         // cas-b269: urgent stop halt blocks verification MCP.
+        //
+        // cas-3894: same owned-task exemption as `task action=close`
+        // (`halt_exempt_for_owned_task`). Recorded incident: a worker's own
+        // InProgress task is halted by an unrelated informational urgent,
+        // and the documented escape (start a new task) is itself refused by
+        // the verification jail until THIS task is verified — spawning the
+        // task-verifier (which calls this endpoint) was as stuck as closing.
+        // The exemption only skips the halt flag; it does not fabricate a
+        // verification verdict.
         if let Ok(agent_id) = self.get_agent_id() {
             if let Ok(agent) = agent_store.get(&agent_id) {
+                let halt_exempt =
+                    crate::mcp::tools::core::task::lifecycle::stale_close_guard::halt_exempt_for_owned_task(
+                        task.status,
+                        task.assignee.as_deref(),
+                        Some(agent.name.as_str()),
+                    );
                 if crate::mcp::tools::core::task::lifecycle::stale_close_guard::agent_task_work_halted(
                     &agent.metadata,
-                ) {
+                ) && !halt_exempt
+                {
                     return Err(McpError {
                         code: ErrorCode::INVALID_PARAMS,
                         message: Cow::from(

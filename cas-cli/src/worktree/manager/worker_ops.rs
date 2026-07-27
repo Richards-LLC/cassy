@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::types::Worktree;
+use crate::worktree::external_symlinks::{scan_external_symlinks_into, ExternalSymlink};
 use crate::worktree::git::GitOperations;
 use crate::worktree::manager::{WorktreeError, WorktreeManager, WorktreeResult, symlink_project_config};
 
@@ -16,6 +17,19 @@ pub struct DirtyWorktreeWarning {
     pub file_count: usize,
 }
 
+/// Describes a worker worktree that was left on disk because live external
+/// symlinks resolve into it (cas-df97). Removing the worktree would leave
+/// every one of `links` dangling — real incident: a stow/install step run
+/// from inside a worktree repointed ~21 `$HOME` symlinks (`.gitconfig`,
+/// `.ssh/config`, `~/bin/*`, systemd user units, ...) into it, and a later
+/// routine cleanup silently orphaned all of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalSymlinkWarning {
+    pub worker_name: String,
+    pub path: PathBuf,
+    pub links: Vec<ExternalSymlink>,
+}
+
 /// Outcome of attempting a non-force shutdown of a single worker worktree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoveOutcome {
@@ -25,13 +39,18 @@ pub enum RemoveOutcome {
     Removed,
     /// Worktree had uncommitted work; left on disk for deferred salvage.
     DirtyDeferred(DirtyWorktreeWarning),
+    /// Live external symlinks resolve into the worktree; left on disk so
+    /// nothing goes dangling (cas-df97).
+    ExternalSymlinksBlocked(ExternalSymlinkWarning),
 }
 
-/// Result of `cleanup_workers` — both what was removed and what was deferred.
+/// Result of `cleanup_workers` — what was removed, what was deferred as
+/// dirty, and what was blocked by live external symlinks.
 #[derive(Debug, Clone, Default)]
 pub struct CleanupReport {
     pub cleaned: Vec<String>,
     pub dirty_deferred: Vec<DirtyWorktreeWarning>,
+    pub external_symlinks_blocked: Vec<ExternalSymlinkWarning>,
 }
 
 impl WorktreeManager {
@@ -223,6 +242,22 @@ impl WorktreeManager {
 
         for name in worker_names {
             if let Some(mut worktree) = self.workers.remove(&name) {
+                // cas-df97: live external symlinks block regardless of
+                // `force` — force means "bypass git dirty-tree protection",
+                // not "I'm aware this will orphan $HOME symlinks".
+                if worktree.path.exists() {
+                    let links = scan_external_symlinks_into(&worktree.path);
+                    if !links.is_empty() {
+                        report.external_symlinks_blocked.push(ExternalSymlinkWarning {
+                            worker_name: name.clone(),
+                            path: worktree.path.clone(),
+                            links,
+                        });
+                        self.workers.insert(name, worktree);
+                        continue;
+                    }
+                }
+
                 if !force && worktree.path.exists() {
                     let file_count = self
                         .git
@@ -258,10 +293,30 @@ impl WorktreeManager {
     /// Remove a single worker's worktree
     pub fn remove_worker(&mut self, worker_name: &str, force: bool) -> WorktreeResult<()> {
         if let Some(mut worktree) = self.workers.remove(worker_name) {
+            // cas-df97: live external symlinks block regardless of `force`
+            // — see the identical guard in cleanup_workers.
+            if worktree.path.exists() {
+                let links = scan_external_symlinks_into(&worktree.path);
+                if !links.is_empty() {
+                    let warning = ExternalSymlinkWarning {
+                        worker_name: worker_name.to_string(),
+                        path: worktree.path.clone(),
+                        links,
+                    };
+                    self.workers.insert(worker_name.to_string(), worktree);
+                    return Err(WorktreeError::ExternalSymlinksDetected(warning));
+                }
+            }
+
             // cas-006c: named-path classification, not a raw "any porcelain
             // output" check — see GitOperations::classify_dirty_status.
+            // will_remove=true always: remove_worker unconditionally deletes
+            // the worktree directory when it exists, so untracked files
+            // must block exactly like tracked ones (supervisor review
+            // finding cas-006c — untracked-only debris is destroyed, not
+            // preserved, by an actual removal).
             if !force && worktree.path.exists() {
-                if let Err(e) = self.reject_or_warn_on_dirty(&worktree.path) {
+                if let Err(e) = self.reject_or_warn_on_dirty(&worktree.path, true) {
                     self.workers.insert(worker_name.to_string(), worktree);
                     return Err(e);
                 }
@@ -269,10 +324,9 @@ impl WorktreeManager {
 
             // cas-006c: force=true unconditionally at the git layer — by
             // this point either the caller forced past our dirty-check gate
-            // above, or `reject_or_warn_on_dirty` already vetted the tree.
-            // `git worktree remove` without --force independently refuses on
-            // ANY untracked file, which would silently reinstate the
-            // false-positive this task fixes (e.g. a lone `.husky/_/`).
+            // above, or `reject_or_warn_on_dirty(path, true)` already vetted
+            // the tree as safe to remove (blocking on untracked too, not
+            // just tracked changes).
             if worktree.path.exists() {
                 self.git.remove_worktree(&worktree.path, true)?;
             }

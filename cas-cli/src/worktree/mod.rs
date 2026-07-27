@@ -27,14 +27,16 @@
 //! files are missing.
 
 pub mod discovery;
+pub mod external_symlinks;
 pub mod git;
 mod manager;
 pub mod salvage;
 pub mod sweep;
 
+pub use external_symlinks::{scan_external_symlinks_into, ExternalSymlink};
 pub use git::{GitError, GitOperations};
 pub use manager::{
-    CleanupReport, DirtyWorktreeWarning, RemoveOutcome, WorktreeConfig, WorktreeManager,
-    WorktreeResult, symlink_project_config,
+    CleanupReport, DirtyWorktreeWarning, ExternalSymlinkWarning, RemoveOutcome, WorktreeConfig,
+    WorktreeManager, WorktreeResult, symlink_project_config,
 };
 pub use salvage::{salvage, SalvageError, SalvageOutcome, SkipReason};

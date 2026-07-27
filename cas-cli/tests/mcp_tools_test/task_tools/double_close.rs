@@ -124,7 +124,7 @@ async fn test_close_on_already_closed_is_non_destructive() {
             reason: Some("First closer wins.".to_string()),
             bypass_code_review: None,
             code_review_findings: None,
-        }))
+            search_manifest: None,        }))
         .await
         .expect("first close should return a result"),
     );
@@ -153,7 +153,7 @@ async fn test_close_on_already_closed_is_non_destructive() {
             reason: Some("Second closer races.".to_string()),
             bypass_code_review: None,
             code_review_findings: None,
-        }))
+            search_manifest: None,        }))
         .await
         .expect("second close should return a result"),
     );
@@ -221,7 +221,7 @@ async fn test_close_on_already_closed_skips_code_review_gate() {
             reason: Some("Initial close.".to_string()),
             bypass_code_review: None,
             code_review_findings: None,
-        }))
+            search_manifest: None,        }))
         .await
         .expect("first close should return a result"),
     );

@@ -2977,6 +2977,7 @@ async fn test_062d_lifecycle_close_pushes_closed() {
             reason: Some("lifecycle close proof".to_string()),
             code_review_findings: None,
             bypass_code_review: Some(true),
+            search_manifest: None,
         }))
         .await
         .expect("close should succeed");

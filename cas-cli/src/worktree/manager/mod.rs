@@ -68,8 +68,10 @@ pub enum WorktreeError {
     #[error("Worktree not found: {0}")]
     NotFound(String),
 
-    #[error("Worktree has uncommitted changes")]
-    UncommittedChanges,
+    /// cas-006c: names the offending tracked paths (with status) rather
+    /// than forcing a manual `git status` to find out what's blocking.
+    #[error("Worktree has uncommitted changes: {0}")]
+    UncommittedChanges(String),
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
@@ -103,6 +105,27 @@ impl WorktreeManager {
         self.workers
             .get(worker_name)
             .ok_or_else(|| WorktreeError::NotFound(worker_name.to_string()))
+    }
+
+    /// Shared dirty-check gate for force-free merge/removal (cas-006c).
+    ///
+    /// Blocks on tracked modified/added/deleted paths, naming each with its
+    /// status. Untracked paths and CAS-generated artifacts (`.husky/_/`)
+    /// never block — untracked paths only get a `tracing::warn!` naming
+    /// them, since a merge or removal cannot lose data git never tracked.
+    fn reject_or_warn_on_dirty(&self, path: &Path) -> WorktreeResult<()> {
+        let dirty = self.git.classify_dirty_status(path)?;
+        if dirty.is_blocked() {
+            return Err(WorktreeError::UncommittedChanges(dirty.describe_blocking()));
+        }
+        if !dirty.warnings.is_empty() {
+            tracing::warn!(
+                "Worktree {} has untracked files (not blocking): {}",
+                path.display(),
+                dirty.describe_warnings()
+            );
+        }
+        Ok(())
     }
 
     /// Create a new WorktreeManager
@@ -265,9 +288,11 @@ impl WorktreeManager {
         force: bool,
         cleanup: bool,
     ) -> WorktreeResult<Option<String>> {
-        // Check for uncommitted changes
-        if !force && self.git.has_uncommitted_changes(&worktree.path)? {
-            return Err(WorktreeError::UncommittedChanges);
+        // Check for uncommitted changes (cas-006c: named-path classification,
+        // not a raw "any porcelain output" check — see
+        // GitOperations::classify_dirty_status).
+        if !force {
+            self.reject_or_warn_on_dirty(&worktree.path)?;
         }
 
         let merge_commit = if self.config.auto_merge {
@@ -293,8 +318,18 @@ impl WorktreeManager {
 
         // cas-369f: force ≠ cleanup. Only remove when the caller explicitly
         // requested cleanup (or System-A path that passed config-driven true).
+        //
+        // cas-006c: always pass force=true to the low-level git removal
+        // here. By this point either the caller explicitly forced past our
+        // dirty-check gate above, or (force=false) `reject_or_warn_on_dirty`
+        // already vetted the tree as safe (clean, or dirty only in
+        // untracked/CAS-artifact paths). `git worktree remove` without
+        // --force independently refuses on ANY untracked file though — the
+        // same over-broad check this task exists to fix — so re-running it
+        // here would silently reinstate the false-positive for a worktree
+        // whose only dirty entry is `.husky/_/` and cleanup=true.
         if cleanup {
-            self.git.remove_worktree(&worktree.path, force)?;
+            self.git.remove_worktree(&worktree.path, true)?;
 
             // Delete the branch
             let _ = self.git.delete_branch(&worktree.branch, true);
@@ -307,13 +342,18 @@ impl WorktreeManager {
 
     /// Abandon a worktree without merging
     pub fn abandon(&self, worktree: &mut Worktree, force: bool) -> WorktreeResult<()> {
-        // Check for uncommitted changes
-        if !force && self.git.has_uncommitted_changes(&worktree.path)? {
-            return Err(WorktreeError::UncommittedChanges);
+        // Check for uncommitted changes (cas-006c: same named-path
+        // classification as merge_and_cleanup).
+        if !force {
+            self.reject_or_warn_on_dirty(&worktree.path)?;
         }
 
-        // Remove the worktree
-        self.git.remove_worktree(&worktree.path, force)?;
+        // Remove the worktree. cas-006c: pass force=true unconditionally —
+        // by this point `reject_or_warn_on_dirty` already vetted the tree
+        // (or the caller explicitly forced past it), so the low-level
+        // `git worktree remove` must not independently re-block on
+        // untracked-only debris it has no way to classify.
+        self.git.remove_worktree(&worktree.path, true)?;
 
         // Delete the branch
         let _ = self.git.delete_branch(&worktree.branch, true);

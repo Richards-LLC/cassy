@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use thiserror::Error;
 
+use crate::hooks::handlers::session_hygiene::{PorcelainEntry, porcelain_status};
 use crate::types::GitContext;
 
 mod branch_ops;
@@ -97,6 +98,52 @@ impl WorktreeDirtyStatus {
             parts.join(", ")
         }
     }
+}
+
+/// Classification of a worktree's `git status --porcelain` entries for
+/// merge/removal dirty-check gating (cas-006c). See
+/// [`GitOperations::classify_dirty_status`] for the split rules.
+#[derive(Debug, Clone, Default)]
+pub struct DirtyClassification {
+    /// Tracked modified/added/deleted paths — block a force-free operation.
+    pub blocking: Vec<PorcelainEntry>,
+    /// Untracked paths — surfaced but never block.
+    pub warnings: Vec<PorcelainEntry>,
+}
+
+impl DirtyClassification {
+    /// True if any tracked change blocks a force-free merge/removal.
+    pub fn is_blocked(&self) -> bool {
+        !self.blocking.is_empty()
+    }
+
+    /// "label path" listing of blocking entries, for error messages that
+    /// must name the offending paths (cas-006c AC2).
+    pub fn describe_blocking(&self) -> String {
+        Self::describe(&self.blocking)
+    }
+
+    /// "label path" listing of warning-only (untracked) entries.
+    pub fn describe_warnings(&self) -> String {
+        Self::describe(&self.warnings)
+    }
+
+    fn describe(entries: &[PorcelainEntry]) -> String {
+        entries
+            .iter()
+            .map(|entry| format!("{} {}", entry.label(), entry.path))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// True for paths CAS itself generates inside every worktree that must
+/// never gate a dirty check — currently just the `.husky/_` git-hooks shim
+/// the worker startup hook creates (cas-006c). Matches the directory itself
+/// and anything nested under it, with or without a trailing slash.
+fn is_cas_generated_artifact(path: &str) -> bool {
+    let trimmed = path.trim_end_matches('/');
+    trimmed == ".husky/_" || trimmed.starts_with(".husky/_/")
 }
 
 /// Result of resolving a branch-creation base against its remote tip
@@ -669,6 +716,46 @@ impl GitOperations {
         }
 
         Ok(!output.stdout.is_empty())
+    }
+
+    /// Classify a worktree's dirty state for merge/removal gating (cas-006c).
+    ///
+    /// Splits `git status --porcelain` entries into two buckets:
+    ///
+    /// - `blocking`: tracked changes (modified/added/deleted) — a force-free
+    ///   merge or removal can genuinely lose this work, so callers must
+    ///   refuse.
+    /// - `warnings`: untracked paths. Nothing git tracks can be destroyed by
+    ///   a merge, and a stray untracked file is not lost work, so these are
+    ///   surfaced but must never block.
+    ///
+    /// CAS-generated artifacts (currently the `.husky/_` git-hooks shim the
+    /// worker startup hook creates in every worktree) are excluded from
+    /// *both* buckets — the tool that creates that artifact must not refuse
+    /// to merge or remove because of it.
+    ///
+    /// Reuses [`porcelain_status`] for parsing rather than a second
+    /// porcelain parser.
+    pub fn classify_dirty_status(&self, path: &Path) -> Result<DirtyClassification> {
+        let entries = porcelain_status(path).ok_or_else(|| {
+            GitError::CommandFailed(format!(
+                "git status --porcelain=v1 failed in {}",
+                path.display()
+            ))
+        })?;
+
+        let mut classification = DirtyClassification::default();
+        for entry in entries {
+            if is_cas_generated_artifact(&entry.path) {
+                continue;
+            }
+            if entry.is_untracked() {
+                classification.warnings.push(entry);
+            } else {
+                classification.blocking.push(entry);
+            }
+        }
+        Ok(classification)
     }
 
     /// Count uncommitted entries (modified, staged, and untracked) in the worktree.

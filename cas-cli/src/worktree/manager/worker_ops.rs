@@ -258,16 +258,23 @@ impl WorktreeManager {
     /// Remove a single worker's worktree
     pub fn remove_worker(&mut self, worker_name: &str, force: bool) -> WorktreeResult<()> {
         if let Some(mut worktree) = self.workers.remove(worker_name) {
-            if !force
-                && worktree.path.exists()
-                && self.git.has_uncommitted_changes(&worktree.path)?
-            {
-                self.workers.insert(worker_name.to_string(), worktree);
-                return Err(WorktreeError::UncommittedChanges);
+            // cas-006c: named-path classification, not a raw "any porcelain
+            // output" check — see GitOperations::classify_dirty_status.
+            if !force && worktree.path.exists() {
+                if let Err(e) = self.reject_or_warn_on_dirty(&worktree.path) {
+                    self.workers.insert(worker_name.to_string(), worktree);
+                    return Err(e);
+                }
             }
 
+            // cas-006c: force=true unconditionally at the git layer — by
+            // this point either the caller forced past our dirty-check gate
+            // above, or `reject_or_warn_on_dirty` already vetted the tree.
+            // `git worktree remove` without --force independently refuses on
+            // ANY untracked file, which would silently reinstate the
+            // false-positive this task fixes (e.g. a lone `.husky/_/`).
             if worktree.path.exists() {
-                self.git.remove_worktree(&worktree.path, force)?;
+                self.git.remove_worktree(&worktree.path, true)?;
             }
 
             let _ = self.git.delete_branch(&worktree.branch, true);

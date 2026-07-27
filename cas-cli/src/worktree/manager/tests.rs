@@ -498,8 +498,11 @@ fn merge_force_dirty_does_not_remove_when_cleanup_false() {
         .current_dir(&wt_path)
         .output()
         .unwrap();
-    // Dirty uncommitted change
-    std::fs::write(wt_path.join("dirty.txt"), "uncommitted").unwrap();
+    // Genuine uncommitted work: a tracked file modified after commit.
+    // cas-006c: untracked-only no longer blocks a force-free merge, so this
+    // must be a tracked modification to still exercise the force-required
+    // path this test is about.
+    std::fs::write(wt_path.join("committed.txt"), "modified after commit").unwrap();
 
     worktree.parent_branch = epic_branch;
     // Without force, dirty fails
@@ -936,6 +939,107 @@ fn test_create_epic_branch_honors_configured_epic_base_branch() {
         "epic branch must be cut from the configured epic_base_branch (staging), \
          not the repo-detected default branch ({detected_trunk})"
     );
+}
+
+// --- cas-006c: merge/removal dirty-check classification --------------------
+
+/// AC1: a worktree whose only dirty entry is the CAS-generated
+/// `.husky/_/` artifact merges WITHOUT force: true.
+#[test]
+fn merge_and_cleanup_husky_artifact_only_merges_without_force() {
+    let (_temp, repo_path) = create_test_repo();
+    let mut config = WorktreeConfig::default();
+    config.auto_merge = true;
+    let mut manager = WorktreeManager::new(&repo_path, config).unwrap();
+
+    let epic_branch = manager.create_epic_branch("Husky Noise").unwrap();
+    let mut worktree = manager.create_for_worker("husky-worker").unwrap();
+    let wt_path = worktree.path.clone();
+
+    // Exactly the false-positive from the bug report: an untracked
+    // `.husky/_/` directory the worker startup hook creates itself.
+    std::fs::create_dir_all(wt_path.join(".husky/_")).unwrap();
+    std::fs::write(wt_path.join(".husky/_/husky.sh"), "# shim").unwrap();
+
+    worktree.parent_branch = epic_branch;
+    let result = manager.merge_and_cleanup(&mut worktree, false, false);
+
+    assert!(
+        result.is_ok(),
+        "husky artifact alone must not require force: {result:?}"
+    );
+}
+
+/// AC2: a worktree with modified tracked files still blocks without force,
+/// and the error names the offending path with its status.
+#[test]
+fn merge_and_cleanup_modified_tracked_file_blocks_and_names_path() {
+    let (_temp, repo_path) = create_test_repo();
+    let mut config = WorktreeConfig::default();
+    config.auto_merge = true;
+    let mut manager = WorktreeManager::new(&repo_path, config).unwrap();
+
+    let epic_branch = manager.create_epic_branch("Real Wip").unwrap();
+    let mut worktree = manager.create_for_worker("wip-worker").unwrap();
+    let wt_path = worktree.path.clone();
+
+    // Real, uncommitted, tracked modification.
+    std::fs::write(wt_path.join("README.md"), "# real uncommitted work").unwrap();
+
+    worktree.parent_branch = epic_branch;
+    let err = manager
+        .merge_and_cleanup(&mut worktree, false, false)
+        .expect_err("modified tracked file must still block without force");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("README.md"),
+        "error must name the offending path: {message}"
+    );
+}
+
+/// AC1/AC2 via `remove_worker` (worker_ops.rs:263 — the other named call
+/// site in the bug report).
+#[test]
+fn remove_worker_husky_artifact_only_removes_without_force() {
+    let (_temp, repo_path) = create_test_repo();
+    let config = WorktreeConfig::default();
+    let mut manager = WorktreeManager::new(&repo_path, config).unwrap();
+
+    let worktree = manager.ensure_worker_worktree("husky-remove").unwrap();
+    let path = worktree.path.clone();
+
+    std::fs::create_dir_all(path.join(".husky/_")).unwrap();
+    std::fs::write(path.join(".husky/_/husky.sh"), "# shim").unwrap();
+
+    manager
+        .remove_worker("husky-remove", false)
+        .expect("husky artifact alone must not require force");
+
+    assert!(!path.exists());
+}
+
+#[test]
+fn remove_worker_modified_tracked_file_blocks_and_names_path() {
+    let (_temp, repo_path) = create_test_repo();
+    let config = WorktreeConfig::default();
+    let mut manager = WorktreeManager::new(&repo_path, config).unwrap();
+
+    let worktree = manager.ensure_worker_worktree("wip-remove").unwrap();
+    let path = worktree.path.clone();
+
+    std::fs::write(path.join("README.md"), "# real uncommitted work").unwrap();
+
+    let err = manager
+        .remove_worker("wip-remove", false)
+        .expect_err("modified tracked file must still block without force");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("README.md"),
+        "error must name the offending path: {message}"
+    );
+    assert!(path.exists(), "blocked removal must leave the worktree intact");
 }
 
 #[test]

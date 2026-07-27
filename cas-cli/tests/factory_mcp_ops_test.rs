@@ -3000,3 +3000,210 @@ async fn test_062d_lifecycle_close_pushes_closed() {
         "close must push task_closed. pending={pending:?}"
     );
 }
+
+// =============================================================================
+// cas-a844: awaiting_merge is a dead end when the merge cannot succeed
+// =============================================================================
+
+/// AC1: a worker CAN start an `awaiting_merge` task now — it transitions back
+/// to `in_progress` instead of being refused. This is the core fix: before,
+/// `task start` on an `awaiting_merge` task was unconditionally rejected with
+/// "the worker work is already complete", which was a dead end whenever the
+/// parked branch actually conflicted (supervisor can't merge, worker can't
+/// start — nothing transitions the task).
+#[tokio::test]
+async fn test_a844_worker_can_start_awaiting_merge_task() {
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_AGENT_ROLE", Some("worker")),
+        ("CAS_FACTORY_MODE", Some("1")),
+    ]);
+    let env = FactoryTestEnv::with_agent_id("swift-fox");
+    {
+        let store = env.agent_store();
+        let mut worker = Agent::new("swift-fox".to_string(), "swift-fox".to_string());
+        worker.role = AgentRole::Worker;
+        store.register(&worker).expect("register worker");
+    }
+    let task_id = env.create_awaiting_merge_task("parked work", "swift-fox");
+
+    let result = env
+        .service
+        .inner
+        .cas_task_start(Parameters(cas::mcp::tools::IdRequest {
+            id: task_id.clone(),
+        }))
+        .await;
+    assert!(
+        result.is_ok(),
+        "starting an awaiting_merge task must now succeed: {result:?}"
+    );
+
+    let after = env.task_store().get(&task_id).expect("task");
+    assert_eq!(
+        after.status,
+        TaskStatus::InProgress,
+        "awaiting_merge -> start must transition to in_progress, not stay parked"
+    );
+    assert!(
+        after.notes.to_lowercase().contains("awaiting_merge"),
+        "resume note should mention the prior awaiting_merge state: {}",
+        after.notes
+    );
+}
+
+/// AC1 (self-dispatch guard preserved): starting an `awaiting_merge` task must
+/// still be refused for a DIFFERENT worker than the recorded assignee — the
+/// fix permits the *assigned* worker to resume, not free-for-all self-dispatch.
+#[tokio::test]
+async fn test_a844_other_worker_still_refused_on_awaiting_merge() {
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_AGENT_ROLE", Some("worker")),
+        ("CAS_FACTORY_MODE", Some("1")),
+    ]);
+    let env = FactoryTestEnv::with_agent_id("brave-otter");
+    {
+        let store = env.agent_store();
+        let mut worker = Agent::new("brave-otter".to_string(), "brave-otter".to_string());
+        worker.role = AgentRole::Worker;
+        store.register(&worker).expect("register worker");
+    }
+    // Parked under a different assignee ("swift-fox").
+    let task_id = env.create_awaiting_merge_task("parked work", "swift-fox");
+
+    let result = env
+        .service
+        .inner
+        .cas_task_start(Parameters(cas::mcp::tools::IdRequest {
+            id: task_id.clone(),
+        }))
+        .await;
+    assert!(
+        result.is_err(),
+        "a worker other than the recorded assignee must still be refused: {result:?}"
+    );
+
+    let after = env.task_store().get(&task_id).expect("task");
+    assert_eq!(
+        after.status,
+        TaskStatus::AwaitingMerge,
+        "task must remain parked when the wrong worker attempts start"
+    );
+}
+
+/// AC3: the branch name is recorded on the task the first time it parks
+/// (`parked_branch`), independent of the commit-sha anchor, so recovery
+/// doesn't depend on a supervisor remembering which branch held the work
+/// after the original worker is lost (e.g. a fleet restart).
+#[tokio::test]
+async fn test_a844_park_records_branch_name_surviving_reassignment() {
+    let _guard = EnvGuard::set_optional(&[("CAS_AGENT_ROLE", Some("supervisor"))]);
+    let env = FactoryTestEnv::new();
+    let task_id = env.create_awaiting_merge_task("parked work", "lost-worker");
+
+    // Simulate what `park_task_awaiting_merge` does at close time.
+    {
+        let store = env.task_store();
+        let mut task = store.get(&task_id).expect("task");
+        task.deliverables.parked_branch = Some("factory/lost-worker".to_string());
+        store.update(&task).expect("update");
+    }
+
+    // The original worker is gone; supervisor reassigns to a fresh worker.
+    {
+        let store = env.task_store();
+        let mut task = store.get(&task_id).expect("task");
+        task.assignee = Some("fresh-worker".to_string());
+        store.update(&task).expect("reassign");
+    }
+
+    let after = env.task_store().get(&task_id).expect("task");
+    assert_eq!(
+        after.deliverables.parked_branch.as_deref(),
+        Some("factory/lost-worker"),
+        "parked_branch must survive reassignment — it's the only thing still \
+         pointing at the orphaned commits once the original assignee is gone"
+    );
+}
+
+/// AC2: a conflicted awaiting_merge must be visibly distinguishable from a
+/// clean one in task show/list output — not read identically as "done,
+/// pending a formality".
+#[tokio::test]
+async fn test_a844_show_and_list_distinguish_merge_conflict() {
+    let _guard = EnvGuard::set_optional(&[("CAS_AGENT_ROLE", Some("supervisor"))]);
+    let env = FactoryTestEnv::new();
+    let clean_id = env.create_awaiting_merge_task("clean parked work", "swift-fox");
+    let conflict_id = env.create_awaiting_merge_task("conflicted parked work", "brave-otter");
+    {
+        let store = env.task_store();
+        let mut task = store.get(&conflict_id).expect("task");
+        task.deliverables.merge_conflicted = true;
+        task.deliverables.parked_branch = Some("factory/brave-otter".to_string());
+        store.update(&task).expect("update");
+    }
+
+    let clean_show = env
+        .service
+        .inner
+        .cas_task_show(Parameters(cas::mcp::tools::TaskShowRequest {
+            id: clean_id.clone(),
+            with_deps: false,
+        }))
+        .await
+        .expect("show clean");
+    let clean_text = get_text(&clean_show);
+    assert!(
+        !clean_text.to_uppercase().contains("MERGE CONFLICT"),
+        "a clean awaiting_merge must not be flagged as conflicted: {clean_text}"
+    );
+
+    let conflict_show = env
+        .service
+        .inner
+        .cas_task_show(Parameters(cas::mcp::tools::TaskShowRequest {
+            id: conflict_id.clone(),
+            with_deps: false,
+        }))
+        .await
+        .expect("show conflict");
+    let conflict_text = get_text(&conflict_show);
+    assert!(
+        conflict_text.to_uppercase().contains("MERGE CONFLICT"),
+        "a conflicted awaiting_merge must be visibly flagged in show: {conflict_text}"
+    );
+    assert!(
+        conflict_text.contains("factory/brave-otter"),
+        "parked branch should be surfaced in show: {conflict_text}"
+    );
+
+    let list = env
+        .service
+        .inner
+        .cas_task_list(Parameters(cas::mcp::tools::TaskListRequest {
+            limit: None,
+            scope: "all".to_string(),
+            status: Some("awaiting_merge".to_string()),
+            task_type: None,
+            label: None,
+            assignee: None,
+            epic: None,
+            sort: None,
+            sort_order: None,
+        }))
+        .await
+        .expect("list");
+    let list_text = get_text(&list);
+    assert!(
+        list_text.contains(&format!("[{conflict_id}]")) && list_text.contains("MERGE CONFLICT"),
+        "conflicted task must show a MERGE CONFLICT marker in list: {list_text}"
+    );
+    // The clean one's line must not carry the marker.
+    let clean_line = list_text
+        .lines()
+        .find(|l| l.contains(&clean_id))
+        .unwrap_or("");
+    assert!(
+        !clean_line.contains("MERGE CONFLICT"),
+        "clean awaiting_merge line must not carry the conflict marker: {clean_line}"
+    );
+}

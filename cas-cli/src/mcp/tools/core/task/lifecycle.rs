@@ -401,13 +401,37 @@ impl CasCore {
             ));
         }
 
-        if task.status == TaskStatus::AwaitingMerge {
-            return Err(Self::error(
-                ErrorCode::INVALID_PARAMS,
-                "Cannot start a task that is awaiting merge. The worker work is \
-                already complete; wait for the supervisor to merge the factory \
-                branch, then retry task close.",
-            ));
+        // cas-a844: `awaiting_merge` used to be a dead end when the parked
+        // branch could not be merged (a real git conflict) — the supervisor
+        // couldn't merge it and the worker was refused `start` "because the
+        // work is already complete". If the merge genuinely can't happen,
+        // the work is NOT complete, and the assigned worker is the right
+        // party to resolve it. Allow starting from `AwaitingMerge`; it falls
+        // through to the ordinary start path below, which sets
+        // `TaskStatus::InProgress` unconditionally. The self-dispatch guard
+        // just below still applies, so a *different* worker cannot grab a
+        // task parked under someone else's name without an explicit
+        // supervisor reassignment first.
+        let resuming_awaiting_merge = task.status == TaskStatus::AwaitingMerge;
+        if resuming_awaiting_merge {
+            let now = chrono::Utc::now();
+            let timestamp = now.format("%Y-%m-%d %H:%M");
+            let conflict_note = if task.deliverables.merge_conflicted {
+                " (flagged as a merge conflict — the parked branch cannot be \
+                  fast-forwarded or auto-merged cleanly)"
+            } else {
+                ""
+            };
+            let audit = format!(
+                "[{timestamp}] Resumed from awaiting_merge{conflict_note}: the parked \
+                 merge cannot be completed as-is, so the task is back in_progress for \
+                 the worker to resolve directly."
+            );
+            task.notes = if task.notes.is_empty() {
+                audit
+            } else {
+                format!("{}\n\n{}", task.notes, audit)
+            };
         }
 
         // Auto-claim the task with a lease

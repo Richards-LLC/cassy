@@ -705,6 +705,96 @@ fn load_validated_focused_epic(
     })
 }
 
+// ============================================================================
+// cas-a844: awaiting_merge dead end — merge-conflict detection & recovery
+// ============================================================================
+
+/// True when `worktree_merge` failed because of a real git merge conflict
+/// (as opposed to any other worktree-manager error). Distinguishing this
+/// case is the whole point: a conflict is a dead end for the supervisor
+/// (retrying `worktree_merge` will never resolve it), whereas other errors
+/// might be transient or caller-fixable.
+fn is_worktree_merge_conflict(e: &crate::worktree::WorktreeError) -> bool {
+    matches!(
+        e,
+        crate::worktree::WorktreeError::Git(crate::worktree::GitError::MergeConflict)
+    )
+}
+
+/// Resolve which task to flag when a merge conflicts. Prefers the caller's
+/// explicit `task_id`; otherwise finds the `AwaitingMerge` task whose
+/// `parked_branch` matches the branch that failed to merge (cas-a844's
+/// `parked_branch` field exists specifically so this lookup doesn't depend
+/// on the caller remembering the task id).
+fn resolve_conflicted_task_id(
+    task_id: Option<&str>,
+    branch: &str,
+    task_store: &dyn cas_store::TaskStore,
+) -> Option<String> {
+    task_id.map(str::to_string).or_else(|| {
+        task_store.list(None).ok()?.into_iter().find_map(|t| {
+            (t.status == crate::types::TaskStatus::AwaitingMerge
+                && t.deliverables.parked_branch.as_deref() == Some(branch))
+            .then_some(t.id)
+        })
+    })
+}
+
+/// Flag `task_id`'s deliverables as a real merge conflict (not just "not
+/// merged yet") and append an audit note naming the alternative — the
+/// assigned worker can now `task start` an `AwaitingMerge` task (cas-a844)
+/// and resolve the conflict directly. Idempotent: does nothing if the task
+/// isn't (still) `AwaitingMerge`, or is already flagged, so a retried merge
+/// attempt against the same conflict doesn't append duplicate notes.
+/// Returns true if the task was flagged.
+fn flag_task_merge_conflict(
+    task_store: &dyn cas_store::TaskStore,
+    task_id: &str,
+    branch: &str,
+    parent_branch: &str,
+) -> bool {
+    let Ok(mut task) = task_store.get(task_id) else {
+        return false;
+    };
+    if task.status != crate::types::TaskStatus::AwaitingMerge || task.deliverables.merge_conflicted
+    {
+        return false;
+    }
+    task.deliverables.merge_conflicted = true;
+    if task.deliverables.parked_branch.is_none() {
+        task.deliverables.parked_branch = Some(branch.to_string());
+    }
+    let now = chrono::Utc::now();
+    let timestamp = now.format("%Y-%m-%d %H:%M");
+    let audit = format!(
+        "[{timestamp}] worktree_merge hit a real git conflict merging {branch} into \
+         {parent_branch} — this is NOT a clean awaiting_merge; the assigned worker \
+         should `task start {task_id}` to resolve it directly."
+    );
+    task.notes = if task.notes.is_empty() {
+        audit
+    } else {
+        format!("{}\n\n{}", task.notes, audit)
+    };
+    task.updated_at = now;
+    task_store.update(&task).is_ok()
+}
+
+/// Error text returned to the caller for a conflicted merge — names the
+/// alternative (worker `task start`) instead of leaving a bare git error for
+/// the caller to guess at, per cas-a844 AC4.
+fn worktree_merge_conflict_message(e: &crate::worktree::WorktreeError) -> String {
+    format!(
+        "Failed to merge worktree: {e}\n\n\
+         This is a real git merge conflict — retrying worktree_merge will not \
+         resolve it. The supervisor cannot fix this by merging; the assigned \
+         worker is the right party to resolve the conflict. Alternative: have \
+         the worker run `mcp__cas__task action=start id=<task_id>` (now \
+         permitted from `awaiting_merge`), resolve the conflict on their \
+         factory branch, and re-close."
+    )
+}
+
 impl CasCore {
     pub async fn worktree_create(&self, epic_id: &str) -> Result<CallToolResult, McpError> {
         use crate::config::Config;
@@ -1266,13 +1356,43 @@ impl CasCore {
             wt_config.cleanup_on_close,
         );
 
-        let merge_commit = manager
-            .merge_and_cleanup(&mut worktree, force, do_cleanup)
-            .map_err(|e| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!("Failed to merge worktree: {e}")),
-                data: None,
-            })?;
+        let merge_commit = match manager.merge_and_cleanup(&mut worktree, force, do_cleanup) {
+            Ok(commit) => commit,
+            Err(e) => {
+                // cas-a844: a real git merge conflict is a dead end for the
+                // supervisor — worktree_merge cannot resolve it by retrying,
+                // and the OLD `awaiting_merge` refusal meant the assigned
+                // worker couldn't pick it back up either. Flag the task (if
+                // resolvable) so its status output visibly distinguishes
+                // "conflicted, needs a worker" from a clean "queued for
+                // merge", and name the actual alternative in the error
+                // instead of leaving the caller to guess.
+                if is_worktree_merge_conflict(&e) {
+                    if let Ok(task_store) = self.open_task_store() {
+                        let flagged_task_id =
+                            resolve_conflicted_task_id(task_id, &worktree.branch, task_store.as_ref());
+                        if let Some(flagged_task_id) = flagged_task_id {
+                            flag_task_merge_conflict(
+                                task_store.as_ref(),
+                                &flagged_task_id,
+                                &worktree.branch,
+                                &worktree.parent_branch,
+                            );
+                        }
+                    }
+                    return Err(McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(worktree_merge_conflict_message(&e)),
+                        data: None,
+                    });
+                }
+                return Err(McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("Failed to merge worktree: {e}")),
+                    data: None,
+                });
+            }
+        };
 
         // Update store — System B worktrees were never registered there, so
         // there's no row to update (and nothing worth persisting: the
@@ -1575,5 +1695,165 @@ mod tests {
     fn resolve_merge_cleanup_system_a_uses_config() {
         assert!(resolve_worktree_merge_cleanup(None, false, true));
         assert!(!resolve_worktree_merge_cleanup(None, false, false));
+    }
+
+    // ========================================================================
+    // cas-a844: awaiting_merge is a dead end when the merge cannot succeed
+    // ========================================================================
+
+    mod merge_conflict {
+        use super::super::{
+            flag_task_merge_conflict, is_worktree_merge_conflict, resolve_conflicted_task_id,
+            worktree_merge_conflict_message,
+        };
+        use crate::store::TaskStore;
+        use crate::store::mock::MockTaskStore;
+        use crate::types::{Task, TaskStatus};
+        use crate::worktree::{GitError, WorktreeError};
+
+        fn awaiting_merge_task(id: &str, branch: Option<&str>) -> Task {
+            let mut task = Task::new(id.to_string(), format!("task {id}"));
+            task.status = TaskStatus::AwaitingMerge;
+            task.deliverables.parked_branch = branch.map(str::to_string);
+            task
+        }
+
+        #[test]
+        fn is_conflict_true_only_for_git_merge_conflict() {
+            assert!(is_worktree_merge_conflict(&WorktreeError::Git(
+                GitError::MergeConflict
+            )));
+            assert!(!is_worktree_merge_conflict(&WorktreeError::NotAGitRepo));
+            assert!(!is_worktree_merge_conflict(&WorktreeError::Git(
+                GitError::NotAGitRepo
+            )));
+        }
+
+        #[test]
+        fn error_message_names_the_alternative() {
+            let msg = worktree_merge_conflict_message(&WorktreeError::Git(
+                GitError::MergeConflict,
+            ));
+            assert!(
+                msg.contains("task action=start") || msg.contains("task=start")
+                    || msg.contains("action=start"),
+                "must name the worker `task start` alternative: {msg}"
+            );
+            assert!(
+                msg.to_lowercase().contains("conflict"),
+                "must say this is a conflict, not a generic failure: {msg}"
+            );
+        }
+
+        #[test]
+        fn resolve_task_id_prefers_explicit_over_branch_lookup() {
+            let store = MockTaskStore::with_tasks(vec![awaiting_merge_task(
+                "cas-x1",
+                Some("factory/someone-else"),
+            )]);
+            let resolved =
+                resolve_conflicted_task_id(Some("cas-explicit"), "factory/someone-else", &store);
+            assert_eq!(resolved.as_deref(), Some("cas-explicit"));
+        }
+
+        #[test]
+        fn resolve_task_id_falls_back_to_parked_branch_match() {
+            let store = MockTaskStore::with_tasks(vec![
+                awaiting_merge_task("cas-a", Some("factory/alice")),
+                awaiting_merge_task("cas-b", Some("factory/bob")),
+            ]);
+            let resolved = resolve_conflicted_task_id(None, "factory/bob", &store);
+            assert_eq!(
+                resolved.as_deref(),
+                Some("cas-b"),
+                "must find the AwaitingMerge task whose parked_branch matches, \
+                 without the caller needing to pass task_id (recovery after a \
+                 lost worker)"
+            );
+        }
+
+        #[test]
+        fn resolve_task_id_none_when_no_match() {
+            let store = MockTaskStore::with_tasks(vec![awaiting_merge_task(
+                "cas-a",
+                Some("factory/alice"),
+            )]);
+            assert!(resolve_conflicted_task_id(None, "factory/nobody", &store).is_none());
+        }
+
+        #[test]
+        fn flag_sets_conflicted_and_appends_note() {
+            let store = MockTaskStore::with_tasks(vec![awaiting_merge_task(
+                "cas-a",
+                Some("factory/alice"),
+            )]);
+            let flagged =
+                flag_task_merge_conflict(&store, "cas-a", "factory/alice", "epic/target");
+            assert!(flagged);
+
+            let task = store.get("cas-a").unwrap();
+            assert!(task.deliverables.merge_conflicted);
+            assert!(
+                task.notes.contains("task start cas-a"),
+                "note should point at the resolution path: {}",
+                task.notes
+            );
+        }
+
+        #[test]
+        fn flag_backfills_parked_branch_when_missing() {
+            // Older tasks parked before cas-a844 shipped never got
+            // `parked_branch` recorded — flagging should still backfill it
+            // rather than leave the task pointing nowhere.
+            let store = MockTaskStore::with_tasks(vec![awaiting_merge_task("cas-a", None)]);
+            flag_task_merge_conflict(&store, "cas-a", "factory/alice", "epic/target");
+
+            let task = store.get("cas-a").unwrap();
+            assert_eq!(
+                task.deliverables.parked_branch.as_deref(),
+                Some("factory/alice")
+            );
+        }
+
+        #[test]
+        fn flag_is_idempotent_no_duplicate_notes() {
+            let store = MockTaskStore::with_tasks(vec![awaiting_merge_task(
+                "cas-a",
+                Some("factory/alice"),
+            )]);
+            assert!(flag_task_merge_conflict(
+                &store,
+                "cas-a",
+                "factory/alice",
+                "epic/target"
+            ));
+            // A second merge attempt against the same still-conflicted task
+            // must not append a second audit note.
+            let flagged_again =
+                flag_task_merge_conflict(&store, "cas-a", "factory/alice", "epic/target");
+            assert!(
+                !flagged_again,
+                "already-flagged task must be a no-op on retry"
+            );
+
+            let task = store.get("cas-a").unwrap();
+            let occurrences = task.notes.matches("worktree_merge hit a real git conflict").count();
+            assert_eq!(occurrences, 1, "note must not duplicate on retry: {}", task.notes);
+        }
+
+        #[test]
+        fn flag_no_op_when_task_not_awaiting_merge() {
+            let mut task = awaiting_merge_task("cas-a", Some("factory/alice"));
+            task.status = TaskStatus::InProgress;
+            let store = MockTaskStore::with_tasks(vec![task]);
+
+            let flagged =
+                flag_task_merge_conflict(&store, "cas-a", "factory/alice", "epic/target");
+            assert!(
+                !flagged,
+                "must not flag a task that isn't (still) awaiting_merge — e.g. it \
+                 already got resumed by the worker via `task start`"
+            );
+        }
     }
 }

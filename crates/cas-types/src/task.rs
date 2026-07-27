@@ -239,6 +239,26 @@ pub struct TaskDeliverables {
     /// needed — serde `default` keeps old rows deserializing as `None`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub factory_branch_anchor: Option<String>,
+
+    /// cas-a844: the `factory/<assignee>` branch name recorded the first
+    /// time a close is rejected with MERGE REQUIRED (same call site as
+    /// `factory_branch_anchor`, but the branch NAME rather than a commit
+    /// sha). `factory_branch_anchor` is only useful if you already know
+    /// which branch to resolve it against; when the original assignee is
+    /// lost (fleet restart, reassignment), the branch name itself is the
+    /// only thing that still points at the orphaned commits. Never
+    /// overwritten once set — see `park_task_awaiting_merge`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parked_branch: Option<String>,
+
+    /// cas-a844: set when a supervisor `worktree_merge` attempt against this
+    /// task's parked branch fails with an actual git merge conflict (as
+    /// opposed to simply "not merged yet"). Distinguishes a clean
+    /// `awaiting_merge` (mergeable, just queued for the supervisor) from a
+    /// conflicted one (NOT complete, needs a worker to resolve it) — the two
+    /// used to be indistinguishable in task status output.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub merge_conflicted: bool,
 }
 
 impl TaskDeliverables {
@@ -248,6 +268,8 @@ impl TaskDeliverables {
             && self.merge_commit.is_none()
             && self.review_envelope.is_none()
             && self.factory_branch_anchor.is_none()
+            && self.parked_branch.is_none()
+            && !self.merge_conflicted
     }
 }
 

@@ -248,6 +248,16 @@ impl CasCore {
         if parked.deliverables.factory_branch_anchor.is_none() {
             parked.deliverables.factory_branch_anchor = factory_branch_anchor;
         }
+        // cas-a844: record the branch NAME (not just its tip sha) so a lost
+        // worker's commits stay linked to this task even after the assignee
+        // field is reassigned or cleared. Never overwrite an existing value —
+        // this only fires once per task, same as the anchor above.
+        if parked.deliverables.parked_branch.is_none() {
+            parked.deliverables.parked_branch = task
+                .assignee
+                .as_deref()
+                .map(|assignee| format!("factory/{assignee}"));
+        }
         // cas-627f: investigated as a possible verification-jail escape
         // (parking clears `pending_verification` before the verification
         // policy block ever runs) — REFUTED. `pending_verification` is only

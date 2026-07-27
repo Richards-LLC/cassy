@@ -192,6 +192,22 @@ pub struct TaskCloseRequest {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct TaskReopenRequest {
+    /// Task ID
+    #[schemars(description = "Task ID to reopen")]
+    pub id: String,
+
+    /// Reopen reason (cas-cd24)
+    #[schemars(
+        description = "Reason for reopening (e.g. why a blocker was withdrawn or a \
+                       closed task needs rework). Recorded on the task's audit \
+                       trail as a note."
+    )]
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct TaskUpdateRequest {
     /// Task ID to update
     #[schemars(description = "ID of the task to update")]

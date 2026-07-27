@@ -2436,25 +2436,39 @@ impl CasCore {
         VerificationSkipReason::AssigneeUnknown
     }
 
-    /// Reopen a closed task
+    /// Reopen a closed OR blocked task (cas-cd24: blocked support added).
     ///
     /// cas-3c23: reopening a Closed/merged task is a supervisor-only action.
     /// A factory worker told (by a stale director re-dispatch or coordination
     /// message) to work an already-Closed ticket must NOT be able to reopen
     /// it unilaterally — that's exactly the thrash loop cas-a7c8 diagnosed
     /// (reopen → re-verify already-shipped code → re-close, stomping main).
+    /// The same supervisor-only gate applies to unblocking (cas-cd24): a
+    /// blocked task is typically waiting on a supervisor decision (e.g. an
+    /// acceptance criterion the worker correctly flagged as wrong), so
+    /// lifting the block is kept a supervisor action too, for the same
+    /// "don't let a stale signal cause unilateral state thrash" reason.
+    ///
+    /// cas-cd24: `reopen` previously only accepted `Closed` tasks —
+    /// `Blocked` tasks had no documented path back to `Open` via this verb,
+    /// forcing `update status=open` as an undiscoverable workaround that
+    /// also silently dropped the `reason` (see
+    /// `BUG-blocked-tasks-cannot-be-reopened.md`). Closed→Open behavior
+    /// (status flip, `closed_at`/`factory_branch_anchor` reset) is
+    /// unchanged; Blocked→Open is new and does not touch those
+    /// closed-specific fields.
     pub async fn cas_task_reopen(
         &self,
-        Parameters(req): Parameters<IdRequest>,
+        Parameters(req): Parameters<TaskReopenRequest>,
     ) -> Result<CallToolResult, McpError> {
         if !is_supervisor_from_env() {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
                 format!(
-                    "task reopen rejected: only supervisors may reopen a closed task \
-                     (CAS_AGENT_ROLE=supervisor). Task {} stays Closed. Message your \
-                     supervisor if you believe this task needs rework — do not reopen \
-                     it yourself.",
+                    "task reopen rejected: only supervisors may reopen a closed or \
+                     blocked task (CAS_AGENT_ROLE=supervisor). Task {} stays as-is. \
+                     Message your supervisor if you believe this task needs rework \
+                     or its blocker should be lifted — do not reopen it yourself.",
                     req.id
                 ),
             ));
@@ -2468,29 +2482,58 @@ impl CasCore {
             data: None,
         })?;
 
-        if task.status != TaskStatus::Closed {
+        if task.status != TaskStatus::Closed && task.status != TaskStatus::Blocked {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
                 format!(
-                    "Task is already {} (only closed tasks can be reopened)",
-                    task.status
+                    "Task is already {} (only closed or blocked tasks can be \
+                     reopened). To change status directly, use: \
+                     `task action=update id={} status=open`.",
+                    task.status, req.id
                 ),
             ));
         }
 
         let old_status = task.status;
         task.status = TaskStatus::Open;
-        task.closed_at = None;
+        if old_status == TaskStatus::Closed {
+            // cas-cd24: closed-specific resets stay gated to the closed
+            // path so Closed→Open behavior is byte-for-byte unchanged
+            // (AC2) — a Blocked task was never closed, so `closed_at` is
+            // already `None` and clearing `factory_branch_anchor` here
+            // would be a no-op at best, dead code at worst.
+            task.closed_at = None;
+            // cas-cf64 (P2, anchor freshness — Scenario B): a stale
+            // `factory_branch_anchor` from a PRIOR close/park cycle must not
+            // survive a reopen. Without this, `run_factory_branch_merge_gate`
+            // would keep trusting the OLD anchor sha (already merged, from
+            // before the reopen) forever — `park_task_awaiting_merge`'s
+            // `is_none()` guard never overwrites an existing anchor, so any
+            // NEW commits made after rework would be invisible to the gate and
+            // the task would false-Proceed on reworked-but-unmerged code.
+            task.deliverables.factory_branch_anchor = None;
+        }
         task.updated_at = chrono::Utc::now();
-        // cas-cf64 (P2, anchor freshness — Scenario B): a stale
-        // `factory_branch_anchor` from a PRIOR close/park cycle must not
-        // survive a reopen. Without this, `run_factory_branch_merge_gate`
-        // would keep trusting the OLD anchor sha (already merged, from
-        // before the reopen) forever — `park_task_awaiting_merge`'s
-        // `is_none()` guard never overwrites an existing anchor, so any
-        // NEW commits made after rework would be invisible to the gate and
-        // the task would false-Proceed on reworked-but-unmerged code.
-        task.deliverables.factory_branch_anchor = None;
+
+        // cas-cd24: capture the reopen/unblock reason on the audit trail —
+        // previously silently dropped (the dispatcher discarded `reason`
+        // for this action entirely; see `TaskRequest` -> `IdRequest` in
+        // `service/core.rs` before this fix). Mirrors the close-path
+        // `close_reason`/note pattern above in `cas_task_close`.
+        if let Some(reason) = &req.reason {
+            let timestamp = task.updated_at.format("%Y-%m-%d %H:%M");
+            let verb = if old_status == TaskStatus::Blocked {
+                "Unblocked"
+            } else {
+                "Reopened"
+            };
+            let reopen_note = format!("[{timestamp}] {verb}: {reason}");
+            if task.notes.is_empty() {
+                task.notes = reopen_note;
+            } else {
+                task.notes = format!("{}\n\n{}", task.notes, reopen_note);
+            }
+        }
 
         task_store.update(&task).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,

@@ -2917,8 +2917,9 @@ async fn test_062d_lifecycle_reopen_pushes_ready() {
     let result = env
         .service
         .inner
-        .cas_task_reopen(Parameters(cas::mcp::tools::IdRequest {
+        .cas_task_reopen(Parameters(cas::mcp::tools::TaskReopenRequest {
             id: "cas-062d-reopen".to_string(),
+            reason: None,
         }))
         .await
         .expect("reopen should succeed");

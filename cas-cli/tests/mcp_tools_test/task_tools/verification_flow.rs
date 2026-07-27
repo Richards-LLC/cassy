@@ -1297,7 +1297,10 @@ async fn test_reopened_task_does_not_reuse_stale_anchor_cas_cf64() {
         let _sup = ScopedSupervisorEnv::new();
         extract_text(
             service
-                .cas_task_reopen(Parameters(IdRequest { id: id_a.clone() }))
+                .cas_task_reopen(Parameters(TaskReopenRequest {
+                    id: id_a.clone(),
+                    reason: None,
+                }))
                 .await
                 .expect("reopen returns"),
         )

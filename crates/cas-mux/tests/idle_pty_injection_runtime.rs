@@ -8,14 +8,13 @@
 //!   cargo test -p cas-mux --test idle_pty_injection_runtime -- --ignored --nocapture
 //!
 //! `codex` itself isn't installed in this sandbox, so this uses a real,
-//! plain interactive `sh` as a stand-in for a harness idling at its input
+//! plain interactive `bash` as a stand-in for a harness idling at its input
 //! prompt. That's a deliberate, honest scope: the thing actually under test
-//! is cas's OWN
-//! injection mechanism (`Pane::inject_prompt` — a raw PTY write of text,
-//! then a `\r` after a harness-scaled settle delay), which is harness-
-//! agnostic bytes-over-PTY. It validates, against a real OS-level PTY
-//! rather than a code-trace assumption, the two claims cas-893c's task
-//! description asked to verify before fixing anything:
+//! is cas's OWN injection mechanism (`Pane::inject_prompt` — a raw PTY
+//! write of text, then a `\r` after a harness-scaled settle delay), which
+//! is harness-agnostic bytes-over-PTY. It validates, against a real
+//! OS-level PTY rather than a code-trace assumption, the two claims
+//! cas-893c's task description asked to verify before fixing anything:
 //!
 //!   1. `Pane::ready_for_injection()` state for a genuinely idle pane.
 //!   2. Whether injected text auto-submits (the child receives a complete
@@ -57,15 +56,26 @@ fn idle_pane_injection_auto_submits_real_pty() {
     // property of the trivial stand-in, not of the readiness gate).
     let config = PtyConfig {
         command: "bash".to_string(),
-        args: vec!["--norc".to_string(), "--noprofile".to_string(), "-i".to_string()],
+        args: vec![
+            "--norc".to_string(),
+            "--noprofile".to_string(),
+            "-i".to_string(),
+        ],
         cwd: Some(std::env::temp_dir()),
         env: vec![("PS1".to_string(), "cas893c$ ".to_string())],
         rows: 24,
         cols: 80,
     };
     let pty = Pty::spawn("cas-893c-idle-test", config).expect("spawn real pty");
-    let mut pane = Pane::with_pty("cas-893c-idle-test", PaneKind::Shell, pty, 24, 80, SupervisorCli::Claude)
-        .expect("wrap pty in pane");
+    let mut pane = Pane::with_pty(
+        "cas-893c-idle-test",
+        PaneKind::Shell,
+        pty,
+        24,
+        80,
+        SupervisorCli::Claude,
+    )
+    .expect("wrap pty in pane");
 
     // Drain startup output so `total_bytes_received` advances the same way
     // the daemon's poll loop does — this is exactly what
@@ -96,7 +106,8 @@ fn idle_pane_injection_auto_submits_real_pty() {
     // check the idle `sh` actually executed it as a submitted line.
     let command = format!("echo hello-cas-893c-idle-nudge >> {}", tmp.display());
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    rt.block_on(pane.inject_prompt(&command)).expect("inject_prompt");
+    rt.block_on(pane.inject_prompt(&command))
+        .expect("inject_prompt");
 
     // inject_prompt sends the CR on a background task after a settle delay
     // (150ms for non-codex harnesses, 500ms for codex). Give it real time

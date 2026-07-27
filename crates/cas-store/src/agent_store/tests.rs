@@ -297,6 +297,150 @@ fn test_lease_renewal() {
     assert_eq!(after.renewal_count, 1);
 }
 
+/// cas-85d9: `heartbeat` must renew ALL of an agent's active task leases,
+/// not just worktree leases — this is the root-cause fix for "task leases
+/// are never renewed" (found while verifying cas-d165). Before this fix,
+/// `renew_lease` had zero production call sites for task leases at all.
+#[test]
+fn test_heartbeat_renews_task_lease_past_original_duration() {
+    let (_temp, store) = create_test_store();
+
+    let agent = Agent::new("agent-hb-renew".to_string(), "Heartbeat Renew Test".to_string());
+    store.register(&agent).unwrap();
+
+    // Claim with a very short duration — simulates a task claimed near (or
+    // past) the default ~30min window that's about to run out.
+    store
+        .try_claim("task-hb-renew", "agent-hb-renew", 1, None)
+        .unwrap();
+
+    let before = store.get_lease("task-hb-renew").unwrap().unwrap();
+
+    // Heartbeat renews the lease to `now + TASK_LEASE_HEARTBEAT_RENEWAL_SECS`
+    // (600s in production) — well past the original 1s claim duration.
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    store.heartbeat("agent-hb-renew").unwrap();
+
+    let after = store.get_lease("task-hb-renew").unwrap().unwrap();
+    assert!(
+        after.expires_at > before.expires_at,
+        "heartbeat must extend the lease's expires_at"
+    );
+    assert_eq!(
+        after.renewal_count, 1,
+        "heartbeat-driven renewal must be recorded the same way explicit renew_lease is"
+    );
+
+    // Wait past the ORIGINAL 1s claim duration — before cas-85d9, the
+    // lease would now be expired and `reclaim_expired_leases` would sweep
+    // it, even though the agent just heartbeated.
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    let reclaimed = store.reclaim_expired_leases().unwrap();
+    assert_eq!(
+        reclaimed, 0,
+        "a heartbeat-renewed lease must survive past its original claim duration"
+    );
+    assert!(
+        store.get_lease("task-hb-renew").unwrap().is_some(),
+        "task-hb-renew's lease must still be active after a heartbeat renewed it"
+    );
+}
+
+/// Safety property: renewal happens ONLY on heartbeat. An agent that never
+/// heartbeats after claiming (crashed immediately, or the lease predates
+/// its first heartbeat) must still let the lease expire normally — the
+/// dead-holder-recovery property the lease exists for is unaffected.
+#[test]
+fn test_lease_still_expires_without_heartbeat() {
+    let (_temp, store) = create_test_store();
+
+    let agent = Agent::new("agent-no-hb".to_string(), "No Heartbeat Test".to_string());
+    store.register(&agent).unwrap();
+
+    store
+        .try_claim("task-no-hb", "agent-no-hb", 1, None)
+        .unwrap();
+    // No heartbeat call.
+
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    let reclaimed = store.reclaim_expired_leases().unwrap();
+    assert_eq!(
+        reclaimed, 1,
+        "a lease with no heartbeat renewal must still expire normally"
+    );
+}
+
+/// cas-85d9: heartbeat must ALSO renew worktree leases at the store layer.
+/// Discovered while auditing task leases: worktree leases nominally had a
+/// renewal call site (`cas_agent_heartbeat`, the client-invoked MCP
+/// `heartbeat` action), but the actual high-frequency production heartbeat
+/// is the daemon's internal PID-liveness loop, which calls this `heartbeat`
+/// store method directly and never goes through that MCP handler — so
+/// worktree leases had the same latent gap as task leases in practice.
+#[test]
+fn test_heartbeat_renews_worktree_lease_past_original_duration() {
+    let (_temp, store) = create_test_store();
+
+    let agent = Agent::new(
+        "agent-hb-wt-renew".to_string(),
+        "Heartbeat Worktree Renew Test".to_string(),
+    );
+    store.register(&agent).unwrap();
+
+    store
+        .try_claim_worktree("wt-hb-renew", "agent-hb-wt-renew", 1)
+        .unwrap();
+
+    let before = store.get_worktree_lease("wt-hb-renew").unwrap().unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    store.heartbeat("agent-hb-wt-renew").unwrap();
+
+    let after = store.get_worktree_lease("wt-hb-renew").unwrap().unwrap();
+    assert!(
+        after.expires_at > before.expires_at,
+        "heartbeat must extend the worktree lease's expires_at"
+    );
+
+    // Wait past the ORIGINAL 1s claim duration and reclaim — the renewed
+    // lease must survive.
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let reclaimed = store.reclaim_expired_worktree_leases().unwrap();
+    assert_eq!(
+        reclaimed, 0,
+        "a heartbeat-renewed worktree lease must survive past its original claim duration"
+    );
+}
+
+/// Heartbeat renewal must be scoped to the heartbeating agent's OWN leases
+/// — must not accidentally touch or extend another agent's lease.
+#[test]
+fn test_heartbeat_renewal_does_not_affect_other_agents_leases() {
+    let (_temp, store) = create_test_store();
+
+    let agent_a = Agent::new("agent-hb-a".to_string(), "A".to_string());
+    let agent_b = Agent::new("agent-hb-b".to_string(), "B".to_string());
+    store.register(&agent_a).unwrap();
+    store.register(&agent_b).unwrap();
+
+    store.try_claim("task-a", "agent-hb-a", 1, None).unwrap();
+    store.try_claim("task-b", "agent-hb-b", 1, None).unwrap();
+
+    let b_before = store.get_lease("task-b").unwrap().unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    store.heartbeat("agent-hb-a").unwrap();
+
+    let b_after = store.get_lease("task-b").unwrap().unwrap();
+    assert_eq!(
+        b_after.expires_at, b_before.expires_at,
+        "agent-hb-a's heartbeat must not renew agent-hb-b's lease"
+    );
+    assert_eq!(b_after.renewal_count, 0);
+}
+
 #[test]
 fn test_expired_lease_reclaim() {
     let (_temp, store) = create_test_store();

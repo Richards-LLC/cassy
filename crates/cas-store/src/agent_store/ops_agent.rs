@@ -4,9 +4,20 @@ use crate::error::StoreError;
 use crate::event_store::record_event_with_conn;
 use crate::recording_store::capture_agent_event;
 use crate::shared_db::ImmediateTx;
-use cas_types::{Agent, AgentStatus, Event, EventEntityType, EventType, RecordingEventType};
+use cas_types::{
+    Agent, AgentStatus, DEFAULT_LEASE_DURATION_SECS, Event, EventEntityType, EventType,
+    RecordingEventType,
+};
 use chrono::Utc;
 use rusqlite::{OptionalExtension, params};
+
+/// cas-85d9: renewal window applied to a live agent's active task leases on
+/// every heartbeat (see the long comment in `agent_heartbeat` for why this
+/// doesn't weaken dead-holder recovery). Reuses `DEFAULT_LEASE_DURATION_SECS`
+/// (600s) — an agent heartbeating every 5-30s (observed daemon tick cadence)
+/// keeps its leases continuously fresh well inside this window, while a
+/// worker that stops heartbeating still lets the lease expire naturally.
+const TASK_LEASE_HEARTBEAT_RENEWAL_SECS: i64 = DEFAULT_LEASE_DURATION_SECS;
 
 impl SqliteAgentStore {
     pub(crate) fn agent_init(&self) -> Result<()> {
@@ -238,7 +249,8 @@ impl SqliteAgentStore {
     pub(crate) fn agent_heartbeat(&self, id: &str) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
             let conn = self.lock_conn()?;
-            let now = Utc::now().to_rfc3339();
+            let now_dt = Utc::now();
+            let now = now_dt.to_rfc3339();
 
             // Only heartbeat agents in live states (active/idle). Agents that have been
             // explicitly shut down or marked stale should not be revived by a heartbeat —
@@ -277,6 +289,82 @@ impl SqliteAgentStore {
                     }
                 }
             }
+
+            // cas-85d9: renew this agent's active task AND worktree leases
+            // in the SAME transaction as the heartbeat itself. Root-cause
+            // fix for the "leases are never renewed" gap (cas-d165
+            // finding).
+            //
+            // Task leases: nothing in production ever called `renew_lease`
+            // for them at all, so any task held past its ~30min claim
+            // duration lost its lease under a perfectly healthy,
+            // heartbeating worker.
+            //
+            // Worktree leases: DID have a renewal call site —
+            // `cas_agent_heartbeat` (the `mcp__cas__coordination
+            // action=heartbeat` MCP handler,
+            // agent_coordination/agent_management.rs) renews them via
+            // `renew_worktree_lease`. But that handler is a *client-invoked
+            // MCP tool call*; the actual high-frequency (~5-30s observed)
+            // production heartbeat is a separate, purely internal loop —
+            // the daemon's per-agent PID-liveness monitor
+            // (`cas-cli/src/mcp/daemon.rs`) — which calls this very
+            // `store.heartbeat()` method DIRECTLY and never goes anywhere
+            // near the MCP handler layer. So worktree leases had the exact
+            // same hole as task leases in practice: whether they ever got
+            // renewed depended on whether an agent happened to also call
+            // the `heartbeat` MCP action explicitly (uncertain/inconsistent
+            // in the field), not on the daemon keeping the process alive.
+            // Fixing renewal here, at the one method both paths actually
+            // call, closes the gap for both lease types uniformly instead
+            // of leaving worktree leases with a second, harder-to-notice
+            // instance of the same bug right next to the one just fixed.
+            //
+            // Why heartbeat-renewal does NOT weaken dead-holder recovery
+            // (the property the lease exists for): `agent_mark_stale`
+            // (ops_agent.rs, a few lines below) already revokes ALL of an
+            // agent's active task leases immediately and unconditionally
+            // the moment heartbeat staleness is detected (~30-75s via
+            // WORKER_STALE_SECS/WORKER_DEAD_SECS, well before this renewal
+            // window could matter) — dead-holder recovery has never
+            // actually depended on a lease's own `expires_at` timer
+            // reaching zero; it is driven entirely by heartbeat staleness.
+            // A worker whose process is truly dead stops heartbeating and
+            // therefore stops renewing within seconds, same as today.
+            //
+            // A worker whose PROCESS is alive but whose WORK LOOP is
+            // wedged (heartbeating, doing nothing) is a different failure
+            // mode the lease's `expires_at` timer was never actually
+            // catching either way — `mark_stale` only fires on heartbeat
+            // *staleness*, and a wedged-but-heartbeating worker's
+            // heartbeat stays fresh. That failure mode is the job of
+            // `WorkerStalled` / `cas factory is-wedged` (checkpoint-age +
+            // in-flight-tool-call evidence, cas-9829/cas-7e85/cas-d165),
+            // which does not consult lease state at all. Renewing the
+            // lease here does not make a wedged worker any harder to
+            // detect or recover than it already is/was.
+            //
+            // Renewal window: extends `expires_at` to `now +
+            // TASK_LEASE_HEARTBEAT_RENEWAL_SECS` on every heartbeat.
+            // Heartbeats observed every 5-30s in practice (daemon tick),
+            // so this keeps an actively-heartbeating worker's lease
+            // continuously fresh; a worker that stops heartbeating for
+            // longer than the window still lets the lease expire
+            // naturally (defense in depth alongside `mark_stale`).
+            let renewed_until =
+                (now_dt + chrono::Duration::seconds(TASK_LEASE_HEARTBEAT_RENEWAL_SECS))
+                    .to_rfc3339();
+            conn.execute(
+                "UPDATE task_leases SET expires_at = ?, renewed_at = ?, renewal_count = renewal_count + 1
+                 WHERE agent_id = ? AND status = 'active'",
+                params![renewed_until, now, id],
+            )?;
+            conn.execute(
+                "UPDATE worktree_leases SET expires_at = ?, renewed_at = ?, renewal_count = renewal_count + 1
+                 WHERE agent_id = ? AND status = 'active'",
+                params![renewed_until, now, id],
+            )?;
+
             Ok(())
         }) // with_write_retry
     }

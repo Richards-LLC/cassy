@@ -234,10 +234,17 @@ impl CasCore {
         reason: &str,
         message: &str,
         factory_branch_anchor: Option<String>,
+        merge_conflicted: bool,
     ) {
         let mut parked = task.clone();
         let now = chrono::Utc::now();
         parked.status = TaskStatus::AwaitingMerge;
+        // cas-a844: snapshot whether THIS park is a genuine git conflict
+        // (vs. simply "not merged yet") so status output can tell the two
+        // apart. This only fires once per task (same guard as the anchor
+        // below); a later preflight re-check on retry (see call site) can
+        // still flip it true if the situation changes after park.
+        parked.deliverables.merge_conflicted = merge_conflicted;
         // cas-4b3f: snapshot the factory branch's current tip onto the task
         // the FIRST time it parks (this fn's only call site already guards
         // on `task.status != AwaitingMerge`, so this only fires once per
@@ -352,6 +359,30 @@ impl CasCore {
         }
 
         self.record_close_rejection_activity(&task.id, reason, message);
+    }
+
+    /// cas-a844: refresh `merge_conflicted` on an already-parked task when a
+    /// retried close now shows a genuine conflict that wasn't flagged (or
+    /// didn't exist) at first park. Deliberately does NOT touch `notes` —
+    /// the audit note is written once, at park time; this only keeps the
+    /// status-output flag truthful on later retries. No-op if the task
+    /// isn't (or is no longer) `AwaitingMerge`, or is already flagged.
+    fn mark_awaiting_merge_conflicted(&self, task_store: &dyn cas_store::TaskStore, task_id: &str) {
+        let Ok(mut task) = task_store.get(task_id) else {
+            return;
+        };
+        if task.status != TaskStatus::AwaitingMerge || task.deliverables.merge_conflicted {
+            return;
+        }
+        task.deliverables.merge_conflicted = true;
+        task.updated_at = chrono::Utc::now();
+        if let Err(e) = task_store.update(&task) {
+            tracing::warn!(
+                task_id = %task_id,
+                error = %e,
+                "failed to refresh merge_conflicted flag on retried awaiting_merge close"
+            );
+        }
     }
 
     pub async fn cas_task_close(
@@ -609,6 +640,23 @@ impl CasCore {
             ) {
                 MergeStateGateOutcome::Proceed => {}
                 MergeStateGateOutcome::Reject(msg) => {
+                    // cas-a844: "MERGE REQUIRED" alone doesn't say whether the
+                    // supervisor's merge will actually succeed — it fires for
+                    // ANY stranded commits, whether or not they'd conflict.
+                    // Distinguish the two with a read-only preflight (bright-
+                    // gopher-20's cas-e18f `preflight_merge_conflicts`, which
+                    // uses `git merge-tree --write-tree` and touches neither
+                    // the working tree nor the index) so the parked state and
+                    // this refusal both name the real situation instead of
+                    // reading as "done, pending a formality" either way.
+                    let merge_conflicted = task.assignee.as_deref().is_some_and(|assignee| {
+                        factory_branch_merge_conflicted(
+                            close_project_root,
+                            &resolved_parent_branch,
+                            &format!("factory/{assignee}"),
+                        )
+                    });
+
                     // cas-627f: a worker looping `close` before the
                     // supervisor merges (the documented #1 worker failure
                     // mode) used to re-run `park_task_awaiting_merge` on
@@ -634,8 +682,35 @@ impl CasCore {
                             "MERGE REQUIRED",
                             &msg,
                             anchor,
+                            merge_conflicted,
                         );
+                    } else if merge_conflicted && !task.deliverables.merge_conflicted {
+                        // Already parked (a retry), but a fresh preflight now
+                        // shows a genuine conflict that wasn't detected (or
+                        // didn't exist) at first park — e.g. the epic branch
+                        // moved underneath it. Refresh the flag so status
+                        // output stays truthful without duplicating the park
+                        // audit note.
+                        self.mark_awaiting_merge_conflicted(task_store.as_ref(), &task.id);
                     }
+
+                    // cas-a844 AC4: name the alternative in the refusal
+                    // itself when the merge genuinely can't succeed — not
+                    // just in the parked task's notes.
+                    let msg = if merge_conflicted {
+                        format!(
+                            "{msg}\n\n\
+                             ⚠️ This branch has a genuine git merge conflict against \
+                             {resolved_parent_branch} (not just unmerged commits) — a \
+                             supervisor merge attempt may fail here. Alternative: the \
+                             assigned worker can `mcp__cas__task action=start id={}` \
+                             (now permitted from `awaiting_merge`) to resolve the \
+                             conflict directly and re-close.",
+                            task.id
+                        )
+                    } else {
+                        msg
+                    };
                     return Ok(Self::tool_error(msg));
                 }
             }
@@ -2963,6 +3038,30 @@ pub(crate) enum MergeStateGateOutcome {
 ///    is the task-specific proof for the rebased form A': it does **not**
 ///    require live HEAD to be zero-ahead, so serial B cannot mask or
 ///    satisfy task A. Unknown/failed cherry → not integrated (fail closed).
+/// cas-a844: does the worker's factory branch have a genuine git merge
+/// conflict against `parent_branch` — as opposed to simply carrying commits
+/// not yet merged? Delegates to `GitOperations::preflight_merge_conflicts`
+/// (bright-gopher-20's cas-e18f helper), which runs `git merge-tree
+/// --write-tree` — it computes the merge purely in-memory and never touches
+/// the working tree or index, so it's safe to call from this read-only
+/// close-time gate.
+///
+/// Returns `false` when the check itself can't be evaluated (branch
+/// missing, git failure unrelated to a content conflict, etc.) — an
+/// unknowable state must not be reported as a positive conflict finding,
+/// matching the fail-closed-on-claims-but-fail-open-on-uncertainty posture
+/// used throughout this gate.
+pub(crate) fn factory_branch_merge_conflicted(
+    repo_path: &std::path::Path,
+    parent_branch: &str,
+    factory_branch: &str,
+) -> bool {
+    crate::worktree::GitOperations::new(repo_path.to_path_buf())
+        .preflight_merge_conflicts(parent_branch, factory_branch)
+        .map(|conflicts| !conflicts.is_empty())
+        .unwrap_or(false)
+}
+
 pub(crate) fn run_factory_branch_merge_gate(
     task: &Task,
     _req: &TaskCloseRequest,
@@ -9082,6 +9181,105 @@ mod merge_state_gate_tests {
             matches!(out, MergeStateGateOutcome::Reject(_)),
             "origin KnownPositive must reject, got {out:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod merge_conflict_detection_tests {
+    //! cas-a844: `factory_branch_merge_conflicted` distinguishes a genuine
+    //! git merge conflict from simply "not merged yet" — the distinction
+    //! `awaiting_merge`'s status output and refusal message need so a
+    //! conflicted park never reads identically to a clean one. Uses the
+    //! same `git()` / `init_factory_repo` fixtures as
+    //! `merge_state_gate_tests` (pure-function coverage, same rationale:
+    //! no full `CasCore`/`cas_task_close` harness needed to prove the
+    //! detection logic itself).
+    use super::*;
+    use std::process::Command;
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn init_factory_repo(worker: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "main"]);
+        std::fs::write(p.join("seed.txt"), "seed\n").unwrap();
+        git(p, &["add", "seed.txt"]);
+        git(p, &["commit", "-q", "-m", "seed"]);
+        git(p, &["checkout", "-q", "-b", &format!("factory/{worker}")]);
+        dir
+    }
+
+    #[test]
+    fn clean_divergence_is_not_conflicted() {
+        // Worker adds a brand-new file — never merged into main yet, but
+        // trivially fast-forwardable/mergeable. This is the common,
+        // supervisor-actionable "MERGE REQUIRED" case: unmerged, not
+        // conflicted.
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        std::fs::write(p.join("worker.txt"), "worker change\n").unwrap();
+        git(p, &["add", "worker.txt"]);
+        git(p, &["commit", "-q", "-m", "worker change"]);
+
+        assert!(
+            !factory_branch_merge_conflicted(p, "main", "factory/worker"),
+            "a clean, non-overlapping divergence must not be reported as conflicted"
+        );
+    }
+
+    #[test]
+    fn overlapping_edits_to_same_file_is_conflicted() {
+        // Both branches edit seed.txt differently after the fork point —
+        // a real content conflict the supervisor's merge cannot resolve
+        // automatically.
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        std::fs::write(p.join("seed.txt"), "worker's edit\n").unwrap();
+        git(p, &["commit", "-aq", "-m", "worker edits seed"]);
+
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("seed.txt"), "main's conflicting edit\n").unwrap();
+        git(p, &["commit", "-aq", "-m", "main edits seed differently"]);
+
+        assert!(
+            factory_branch_merge_conflicted(p, "main", "factory/worker"),
+            "overlapping edits to the same file must be reported as a genuine conflict"
+        );
+    }
+
+    #[test]
+    fn missing_branch_is_not_conflicted() {
+        // Unknowable state (branch doesn't exist) must not be reported as
+        // a positive conflict finding — fail open on uncertainty, per the
+        // gate's existing posture elsewhere in this file.
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        assert!(!factory_branch_merge_conflicted(p, "main", "factory/nobody"));
+    }
+
+    #[test]
+    fn same_branch_against_itself_is_not_conflicted() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        assert!(!factory_branch_merge_conflicted(
+            p,
+            "factory/worker",
+            "factory/worker"
+        ));
     }
 }
 

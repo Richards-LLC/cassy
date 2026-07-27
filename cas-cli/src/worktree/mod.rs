@@ -37,6 +37,6 @@ pub use external_symlinks::{scan_external_symlinks_into, ExternalSymlink};
 pub use git::{GitError, GitOperations};
 pub use manager::{
     CleanupReport, DirtyWorktreeWarning, ExternalSymlinkWarning, RemoveOutcome, WorktreeConfig,
-    WorktreeError, WorktreeManager, WorktreeResult, symlink_project_config,
+    WorktreeManager, WorktreeResult, symlink_project_config,
 };
 pub use salvage::{salvage, SalvageError, SalvageOutcome, SkipReason};

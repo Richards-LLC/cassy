@@ -208,6 +208,14 @@ impl FactoryDaemon {
     /// ever reads it. `None` for every other prompt kind. Ignored entirely
     /// on the `Pty` channel (no queued row exists there to tag).
     ///
+    /// `retract_task` (cas-e48f): `Some(task_id)` when `text` is the
+    /// actionable MERGE REQUIRED / `AwaitingMerge` idle alert — tags the
+    /// queued row so a later sweep (`prune_stale_merge_alerts`) can retract
+    /// it if the merge lands (or the task leaves `AwaitingMerge`) before the
+    /// recipient ever reads it. Mutually exclusive with `retract_worker` in
+    /// practice (callers pass at most one `Some`); both `None` for every
+    /// other prompt kind. Ignored entirely on the `Pty` channel.
+    ///
     /// Returns `Ok(())` on a successful write to the chosen channel.
     pub(crate) async fn deliver_to_worker(
         &self,
@@ -217,6 +225,7 @@ impl FactoryDaemon {
         summary: Option<&str>,
         color: Option<&str>,
         retract_worker: Option<&str>,
+        retract_task: Option<&str>,
     ) -> anyhow::Result<()> {
         // Normalise the target into the two name forms the two channels expect:
         //   - `pane_target`  : the real pane id `Mux::inject` routes on
@@ -242,8 +251,8 @@ impl FactoryDaemon {
                     .teams
                     .as_ref()
                     .expect("TeamsInbox channel requires active teams");
-                match retract_worker {
-                    Some(worker) => teams.write_to_inbox_for_worker_idle(
+                match (retract_worker, retract_task) {
+                    (Some(worker), _) => teams.write_to_inbox_for_worker_idle(
                         inbox_target,
                         source,
                         text,
@@ -251,7 +260,17 @@ impl FactoryDaemon {
                         color,
                         worker,
                     ),
-                    None => teams.write_to_inbox(inbox_target, source, text, summary, color),
+                    (None, Some(task_id)) => teams.write_to_inbox_for_merge_alert(
+                        inbox_target,
+                        source,
+                        text,
+                        summary,
+                        color,
+                        task_id,
+                    ),
+                    (None, None) => {
+                        teams.write_to_inbox(inbox_target, source, text, summary, color)
+                    }
                 }
             }
             DeliveryChannel::Pty => {
@@ -309,7 +328,7 @@ impl FactoryDaemon {
         color: Option<&str>,
         worker_is_idle: bool,
     ) -> anyhow::Result<()> {
-        self.deliver_to_worker(target, source, text, summary, color, None)
+        self.deliver_to_worker(target, source, text, summary, color, None, None)
             .await?;
 
         if !worker_is_idle {

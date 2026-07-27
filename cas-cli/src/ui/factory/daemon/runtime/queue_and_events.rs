@@ -589,6 +589,7 @@ impl FactoryDaemon {
                             queued.summary.as_deref(),
                             None,
                             None,
+                            None,
                         )
                         .await
                     };

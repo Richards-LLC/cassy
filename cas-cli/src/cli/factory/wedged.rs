@@ -50,19 +50,42 @@ use crate::mcp::tools::service::factory_ops::{
     default_grok_sessions_dir, resolve_transcript, worker_cli_from_agent,
 };
 
-/// Window in which a transcript mtime counts as "recent" — used to distinguish
-/// a worker that is still writing tool results (alive or wedged) from one
-/// whose transcript has gone cold (starved or dead).
+/// Window in which a Claude transcript mtime counts as "recent" — used to
+/// distinguish a worker that is still writing tool results (alive or
+/// wedged) from one whose transcript has gone cold (starved or dead).
 ///
-/// 60 seconds chosen to comfortably cover:
-///   - the 30 s `WORKER_STALE_SECS` supervisor-heartbeat threshold
-///     (factory_ops.rs cas-8240), and
-///   - the ~45 s upper end of a single `cargo test` run on the saturated-host
-///     case documented in cas-0bf4.
+/// cas-7e85: widened from the original 60s to 3 minutes. The original
+/// 60s value (30s heartbeat threshold + ~45s upper end of a single `cargo
+/// test` run on a saturated host, cas-0bf4) undercounted this repo's real
+/// full-gate duration badly — `cargo test --workspace --no-fail-fast` here
+/// routinely runs multiple minutes, and workers correctly backgrounding it
+/// with a `sleep N; check` loop (the low-token pattern supervisors ask for)
+/// go quiet on the transcript for the whole wait. That produced four
+/// confirmed false WorkerStalled alerts in one session (BUG report
+/// 2026-07-27), each recommending `cas factory kill` against a live,
+/// correctly-behaving worker. `has_in_flight_tool_call` (below) is the
+/// primary fix for the long-single-call case (it works regardless of
+/// window size), but this widened value is a real, evidence-based
+/// complementary margin for the general "checkpoint cadence exceeds a
+/// tight window" case — not just a nicety. Still deliberately shorter than
+/// [`CODEX_TRANSCRIPT_FRESH_WINDOW`]; see
+/// `classify_codex_window_keeps_3min_transcript_fresh` for the pinned
+/// ordering.
 ///
-/// A transcript that hasn't been touched in a minute is almost certainly not
-/// actively executing; that's the signal the supervisor needs.
-pub(crate) const TRANSCRIPT_FRESH_WINDOW: Duration = Duration::from_secs(60);
+/// Grok is intentionally NOT touched by this widening — see
+/// [`GROK_TRANSCRIPT_FRESH_WINDOW`].
+pub(crate) const TRANSCRIPT_FRESH_WINDOW: Duration = Duration::from_secs(3 * 60);
+
+/// Grok's freshness window, held at the original 60s (cas-7e85: Grok is out
+/// of scope for this task — no repro evidence involved a Grok worker, and
+/// its `signals.json` corroborating signal (see [`grok_activity_age`]) is
+/// already a finer-grained, more-precise-than-mtime activity signal than
+/// what Claude/Codex have, so it doesn't share the same risk profile that
+/// motivated widening [`TRANSCRIPT_FRESH_WINDOW`]). Deliberately a
+/// SEPARATE constant from `TRANSCRIPT_FRESH_WINDOW` rather than a shared
+/// one, precisely so a future widening of Claude's window can't silently
+/// drag Grok's along with it again.
+pub(crate) const GROK_TRANSCRIPT_FRESH_WINDOW: Duration = Duration::from_secs(60);
 
 /// Codex workers routinely sit mid-inference for several minutes without a
 /// CAS tool call (and sometimes without a rollout append). A 60 s transcript
@@ -99,6 +122,11 @@ pub(crate) struct WorkerEvidence {
     /// supervisor can grep the projects tree manually if they distrust the
     /// resolution, per the cas-900b always-surface-session-id contract).
     pub session_id: String,
+    /// True when the transcript's trailing window has an outstanding tool
+    /// call (cas-7e85) — see [`has_in_flight_tool_call`]. Surfaced so a
+    /// supervisor reading `is-wedged` output can see WHY a stale-looking
+    /// transcript still classified Alive.
+    pub in_flight_tool_call: bool,
 }
 
 /// Liveness classification produced by [`classify_worker`]. The variants are
@@ -196,6 +224,16 @@ const CRASH_SIGNATURE_NEEDLES: &[&str] = &[
 /// progress signal (worktree / CPU) it classifies [`WorkerLivenessState::Unverified`]
 /// rather than Starved — so director/auto-nudge paths must not treat telemetry
 /// absence as starvation.
+///
+/// **cas-7e85:** `in_flight_tool_call` (from [`has_in_flight_tool_call`]) is
+/// OR'd into the freshness determination — an outstanding tool call proves
+/// the worker is actively waiting on real work regardless of how stale the
+/// transcript mtime looks, so it counts as "fresh" for every downstream
+/// branch (Alive/Wedged vs Starved/Dead). This is the single piece of
+/// evidence shared verbatim between `cas factory is-wedged` and the
+/// director's `WorkerStalled` gate (`events.rs::transcript_confirms_stall`)
+/// — by construction, the alert and its own recommended `is-wedged` triage
+/// command can no longer disagree about this specific signal.
 pub(crate) fn classify_from_evidence(
     pid_alive: bool,
     transcript_mtime_age: Option<Duration>,
@@ -203,12 +241,14 @@ pub(crate) fn classify_from_evidence(
     worktree_recent_edit_age: Option<Duration>,
     process_busy: bool,
     fresh_window: Duration,
+    in_flight_tool_call: bool,
 ) -> WorkerLivenessState {
     // Distinguish unresolved (None) from resolved-but-stale (Some(age ≥ window)).
     let transcript_resolved = transcript_mtime_age.is_some();
-    let fresh = transcript_mtime_age
-        .map(|age| age < fresh_window)
-        .unwrap_or(false);
+    let fresh = in_flight_tool_call
+        || transcript_mtime_age
+            .map(|age| age < fresh_window)
+            .unwrap_or(false);
     let worktree_recent = worktree_recent_edit_age
         .map(|age| age < fresh_window)
         .unwrap_or(false);
@@ -241,12 +281,15 @@ pub(crate) fn classify_from_evidence(
     }
 }
 
-/// Harness-specific transcript freshness window. Codex gets a longer
-/// grace period (cas-c655); Claude/Grok keep the original 60 s.
+/// Harness-specific transcript freshness window. Codex gets the longest
+/// grace period (cas-c655); Claude was widened to 3 minutes (cas-7e85);
+/// Grok stays at the original 60s (cas-7e85: deliberately out of scope,
+/// see [`GROK_TRANSCRIPT_FRESH_WINDOW`]).
 pub(crate) fn activity_fresh_window(cli: cas_mux::SupervisorCli) -> Duration {
     match cli {
         cas_mux::SupervisorCli::Codex => CODEX_TRANSCRIPT_FRESH_WINDOW,
-        cas_mux::SupervisorCli::Claude | cas_mux::SupervisorCli::Grok => TRANSCRIPT_FRESH_WINDOW,
+        cas_mux::SupervisorCli::Claude => TRANSCRIPT_FRESH_WINDOW,
+        cas_mux::SupervisorCli::Grok => GROK_TRANSCRIPT_FRESH_WINDOW,
     }
 }
 
@@ -370,6 +413,160 @@ pub(crate) fn transcript_has_crash_signature(path: &Path, tail_lines: usize) -> 
     }
 }
 
+/// Number of trailing JSONL lines inspected for an in-flight (unresolved)
+/// tool call (cas-7e85). Mirrors [`CRASH_SIGNATURE_TAIL_LINES`]'s reasoning:
+/// a single long assistant reply, or a burst of parallel tool calls, can
+/// push the still-open call out of a smaller window.
+pub(crate) const IN_FLIGHT_TAIL_LINES: usize = 200;
+
+/// True when the trailing window of `reader`'s JSONL transcript contains a
+/// tool/function call that has been requested but not yet completed — a
+/// `tool_use`/`function_call`-shaped entry with no matching
+/// `tool_result`/`function_call_output` later in the window.
+///
+/// cas-7e85: this is the decisive signal the WorkerStalled false positives
+/// (BUG report 2026-07-27, four confirmed specimens) were missing. A worker
+/// executing a long-running tool call — e.g. `Bash: sleep 280` while a
+/// backgrounded `cargo test --no-fail-fast` gate runs — produces NO
+/// transcript writes for the call's whole duration. Mtime-based freshness
+/// can never distinguish that from a genuinely wedged worker, no matter how
+/// the freshness window is tuned (widening the window only pushes the false
+/// positive further out, it never eliminates it — see the widened
+/// [`TRANSCRIPT_FRESH_WINDOW`] below, which is a complementary defense, not
+/// a substitute for this check). But the transcript already recorded the
+/// call's *start* before it went quiet; checking for that unresolved entry
+/// is a structural signal, not a timing one, so it works regardless of how
+/// long the call runs.
+///
+/// Deliberately broader than the ticket's literal "the LAST entry is an
+/// unmatched tool_use": this scans the whole tail window and tracks ALL
+/// pending call ids, not just whichever block happens to be the final JSON
+/// line. A turn can end with plain assistant text after issuing a tool
+/// call, or issue several parallel calls where only some have resolved —
+/// either way, "a call this worker is waiting on has not come back yet" is
+/// the property that actually matters, and the last-line-only reading would
+/// miss both cases.
+///
+/// Harness-aware — see the harness-specific parsers below for schema
+/// detail and confidence level:
+/// - **Claude**: real, well-understood schema (Anthropic Messages API
+///   shape); this is the harness all four reported false positives came
+///   from, so it's implemented with confidence.
+/// - **Codex**: best-effort. Inferred from the Responses-API-style
+///   `response_item`/`payload.type` shape already used elsewhere in this
+///   codebase for `session_meta` (`factory_ops.rs::resolve_codex_transcript`)
+///   — no local fixture exists for the tool-call entries specifically
+///   (grepped the repo for `function_call`/`local_shell_call`/`call_id`
+///   before writing this: zero hits). Fails safe: an unrecognized entry
+///   shape never reports "in flight" — it just falls through to the
+///   pre-existing mtime-based classification unchanged. Confirm against a
+///   real Codex rollout before trusting this path the way the Claude path
+///   is trusted.
+/// - **Grok**: out of scope for this pass (no repro evidence involved a
+///   Grok worker, and its directory-per-session + `signals.json` layout is
+///   the one wedged.rs's own comments actually flag as structurally
+///   different — see the module doc). Always returns `false`, deferring
+///   entirely to the existing `signals.json`/mtime-based freshness check.
+pub(crate) fn has_in_flight_tool_call<R: Read>(
+    reader: R,
+    cli: cas_mux::SupervisorCli,
+    tail_lines: usize,
+) -> bool {
+    let lines = collect_tail_lines(reader, tail_lines);
+    match cli {
+        cas_mux::SupervisorCli::Grok => false,
+        cas_mux::SupervisorCli::Claude => claude_has_pending_tool_call(&lines),
+        cas_mux::SupervisorCli::Codex => codex_has_pending_tool_call(&lines),
+    }
+}
+
+/// Claude Code transcript entries are `{"type":"assistant"|"user"|..,
+/// "message":{"role":..,"content":[...]}}`; tool blocks live inside
+/// `content` as `{"type":"tool_use","id":"toolu_..","..}` (assistant turn)
+/// and `{"type":"tool_result","tool_use_id":"toolu_..","..}` (the following
+/// user/tool turn). Track every `tool_use` id seen, drop it when its
+/// `tool_result` shows up; anything left pending after the whole window is
+/// an outstanding call. Malformed/non-JSON lines (partial writes, etc.) and
+/// lines with no `message.content` array are silently skipped — they carry
+/// no tool-call evidence either way.
+fn claude_has_pending_tool_call(lines: &[String]) -> bool {
+    let mut pending: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for line in lines {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(content) = value
+            .pointer("/message/content")
+            .and_then(|c| c.as_array())
+        else {
+            continue;
+        };
+        for block in content {
+            match block.get("type").and_then(|t| t.as_str()) {
+                Some("tool_use") => {
+                    if let Some(id) = block.get("id").and_then(|v| v.as_str()) {
+                        pending.insert(id.to_string());
+                    }
+                }
+                Some("tool_result") => {
+                    if let Some(id) = block.get("tool_use_id").and_then(|v| v.as_str()) {
+                        pending.remove(id);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    !pending.is_empty()
+}
+
+/// Codex rollout entries relevant here are `{"type":"response_item",
+/// "payload":{"type":"function_call"|"local_shell_call"|
+/// "function_call_output"|"local_shell_call_output","call_id":"..",..}}`.
+/// Same pending-id tracking as the Claude parser. See
+/// [`has_in_flight_tool_call`]'s doc for the confidence caveat on this
+/// schema — unrecognized shapes are silently skipped, never treated as
+/// evidence of an in-flight call.
+fn codex_has_pending_tool_call(lines: &[String]) -> bool {
+    let mut pending: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for line in lines {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if value.get("type").and_then(|t| t.as_str()) != Some("response_item") {
+            continue;
+        }
+        let Some(payload) = value.get("payload") else {
+            continue;
+        };
+        let payload_type = payload.get("type").and_then(|t| t.as_str());
+        let Some(call_id) = payload.get("call_id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        match payload_type {
+            Some("function_call" | "local_shell_call") => {
+                pending.insert(call_id.to_string());
+            }
+            Some("function_call_output" | "local_shell_call_output") => {
+                pending.remove(call_id);
+            }
+            _ => {}
+        }
+    }
+    !pending.is_empty()
+}
+
+/// Convenience wrapper that opens `path` and runs [`has_in_flight_tool_call`].
+/// Missing or unreadable files read as "no in-flight call" — fail safe,
+/// falling through to mtime-based classification instead of masking a
+/// genuine stall on a read error.
+pub(crate) fn transcript_has_in_flight_tool_call(path: &Path, cli: cas_mux::SupervisorCli) -> bool {
+    match std::fs::File::open(path) {
+        Ok(f) => has_in_flight_tool_call(f, cli, IN_FLIGHT_TAIL_LINES),
+        Err(_) => false,
+    }
+}
+
 /// Age of the freshest available Grok activity signal for a resolved
 /// transcript path (which points at `updates.jsonl`, the authoritative ACP
 /// log — see `factory_ops::resolve_grok_transcript`). Prefers the sibling
@@ -458,12 +655,13 @@ where
         .filter(|_| pid_alive)
         .map(process_busy_probe)
         .unwrap_or(false);
-    let (age_opt, sig) = match transcript_path {
+    let (age_opt, sig, in_flight) = match transcript_path {
         Some(p) => (
             effective_transcript_age(p, cli),
             effective_crash_signature(p, cli),
+            transcript_has_in_flight_tool_call(p, cli),
         ),
-        None => (None, false),
+        None => (None, false, false),
     };
     let worktree_age = clone_path.and_then(worktree_age_probe);
     let state = classify_from_evidence(
@@ -473,6 +671,7 @@ where
         worktree_age,
         process_busy,
         activity_fresh_window(cli),
+        in_flight,
     );
     let evidence = WorkerEvidence {
         pid,
@@ -482,6 +681,7 @@ where
         crash_signature_match: sig,
         worktree_edit_age_secs: worktree_age.map(|d| d.as_secs()),
         session_id: session_id.to_string(),
+        in_flight_tool_call: in_flight,
     };
     (state, evidence)
 }
@@ -1302,6 +1502,10 @@ fn format_state_human(state: &WorkerLivenessState, ev: &WorkerEvidence) -> Strin
         None => s.push_str("  worktree recent-edit age: <unknown>\n"),
     }
     s.push_str(&format!("  session: {}\n", ev.session_id));
+    s.push_str(&format!(
+        "  in-flight tool call: {}\n",
+        ev.in_flight_tool_call
+    ));
     s
 }
 
@@ -1325,6 +1529,7 @@ fn format_state_json(state: &WorkerLivenessState, ev: &WorkerEvidence) -> String
         "crash_signature_match": ev.crash_signature_match,
         "worktree_edit_age_secs": ev.worktree_edit_age_secs,
         "session_id": ev.session_id,
+        "in_flight_tool_call": ev.in_flight_tool_call,
     });
     body.to_string()
 }
@@ -1339,7 +1544,7 @@ mod tests {
         // cas-f781 AC c: Dead requires TWO independent signals to agree —
         // pid gone AND (transcript stale AND worktree not recently edited).
         for sig in [true, false] {
-            let got = classify_from_evidence(false, Some(Duration::from_secs(5 * 60)), sig, None, false, TRANSCRIPT_FRESH_WINDOW);
+            let got = classify_from_evidence(false, Some(Duration::from_secs(5 * 60)), sig, None, false, TRANSCRIPT_FRESH_WINDOW, false);
             assert_eq!(got, WorkerLivenessState::Dead, "sig={sig}");
         }
     }
@@ -1353,7 +1558,7 @@ mod tests {
         // Report Unverified so an operator investigates before a caller
         // (e.g. a supervisor auto-reset) treats it as ground truth.
         for sig in [true, false] {
-            let got = classify_from_evidence(false, Some(Duration::from_secs(5)), sig, None, false, TRANSCRIPT_FRESH_WINDOW);
+            let got = classify_from_evidence(false, Some(Duration::from_secs(5)), sig, None, false, TRANSCRIPT_FRESH_WINDOW, false);
             assert_eq!(got, WorkerLivenessState::Unverified, "sig={sig}");
         }
     }
@@ -1370,6 +1575,7 @@ mod tests {
             Some(Duration::from_secs(20)),
             false,
             TRANSCRIPT_FRESH_WINDOW,
+            false,
         );
         assert_eq!(got, WorkerLivenessState::Unverified);
     }
@@ -1379,19 +1585,19 @@ mod tests {
         // No transcript resolved, no worktree resolved, pid gone: nothing
         // contradicts "dead", so Dead still fires — matches the
         // no-pid-registered case (classify_worker_no_pid_short_circuits_to_dead).
-        let got = classify_from_evidence(false, None, true, None, false, TRANSCRIPT_FRESH_WINDOW);
+        let got = classify_from_evidence(false, None, true, None, false, TRANSCRIPT_FRESH_WINDOW, false);
         assert_eq!(got, WorkerLivenessState::Dead);
     }
 
     #[test]
     fn classify_wedged_when_alive_fresh_and_signature_matches() {
-        let got = classify_from_evidence(true, Some(Duration::from_secs(5)), true, None, false, TRANSCRIPT_FRESH_WINDOW);
+        let got = classify_from_evidence(true, Some(Duration::from_secs(5)), true, None, false, TRANSCRIPT_FRESH_WINDOW, false);
         assert_eq!(got, WorkerLivenessState::Wedged);
     }
 
     #[test]
     fn classify_alive_when_fresh_and_no_signature() {
-        let got = classify_from_evidence(true, Some(Duration::from_secs(5)), false, None, false, TRANSCRIPT_FRESH_WINDOW);
+        let got = classify_from_evidence(true, Some(Duration::from_secs(5)), false, None, false, TRANSCRIPT_FRESH_WINDOW, false);
         assert_eq!(got, WorkerLivenessState::Alive);
     }
 
@@ -1401,8 +1607,10 @@ mod tests {
         // worker is functionally hung, not wedged — the recovery playbook
         // is the same (SIGKILL + respawn) but the label matters for
         // operator triage.
+        // cas-7e85: TRANSCRIPT_FRESH_WINDOW widened 60s -> 3min, so the
+        // fixture moved from 120s to 200s to stay past the window.
         for sig in [true, false] {
-            let got = classify_from_evidence(true, Some(Duration::from_secs(120)), sig, None, false, TRANSCRIPT_FRESH_WINDOW);
+            let got = classify_from_evidence(true, Some(Duration::from_secs(200)), sig, None, false, TRANSCRIPT_FRESH_WINDOW, false);
             assert_eq!(got, WorkerLivenessState::Starved, "sig={sig}");
         }
     }
@@ -1411,10 +1619,10 @@ mod tests {
     fn classify_unverified_when_no_mtime_available() {
         // cas-de95: missing/unresolved transcript is missing evidence, not
         // Starved — even if a crash needle were claimed without a file.
-        let got = classify_from_evidence(true, None, true, None, false, TRANSCRIPT_FRESH_WINDOW);
+        let got = classify_from_evidence(true, None, true, None, false, TRANSCRIPT_FRESH_WINDOW, false);
         assert_eq!(got, WorkerLivenessState::Unverified);
         let got_clean =
-            classify_from_evidence(true, None, false, None, false, TRANSCRIPT_FRESH_WINDOW);
+            classify_from_evidence(true, None, false, None, false, TRANSCRIPT_FRESH_WINDOW, false);
         assert_eq!(got_clean, WorkerLivenessState::Unverified);
     }
 
@@ -1429,6 +1637,7 @@ mod tests {
                 Some(Duration::from_secs(10)),
                 false,
                 window,
+                false,
             );
             assert_eq!(
                 got,
@@ -1448,6 +1657,7 @@ mod tests {
             None,
             false,
             TRANSCRIPT_FRESH_WINDOW,
+            false,
         );
         assert_eq!(got, WorkerLivenessState::Starved);
     }
@@ -1463,6 +1673,7 @@ mod tests {
             None,
             true,
             CODEX_TRANSCRIPT_FRESH_WINDOW,
+            false,
         );
         assert_eq!(got, WorkerLivenessState::Alive);
     }
@@ -1478,6 +1689,7 @@ mod tests {
             Some(Duration::from_secs(15)),
             false,
             CODEX_TRANSCRIPT_FRESH_WINDOW,
+            false,
         );
         assert_eq!(got, WorkerLivenessState::Alive);
     }
@@ -1493,6 +1705,7 @@ mod tests {
             None,
             false,
             CODEX_TRANSCRIPT_FRESH_WINDOW,
+            false,
         );
         assert_eq!(got, WorkerLivenessState::Dead);
     }
@@ -1500,7 +1713,10 @@ mod tests {
     /// cas-c655: a stale-but-within-codex-window transcript is still Alive.
     #[test]
     fn classify_codex_window_keeps_3min_transcript_fresh() {
-        let age = Duration::from_secs(3 * 60);
+        // cas-7e85: TRANSCRIPT_FRESH_WINDOW widened from 60s to 3min, so the
+        // fixture moved to 4min to keep sitting strictly between the two
+        // windows (Claude's widened 3min and Codex's 5min).
+        let age = Duration::from_secs(4 * 60);
         assert!(
             age < CODEX_TRANSCRIPT_FRESH_WINDOW && age >= TRANSCRIPT_FRESH_WINDOW,
             "fixture must sit between the claude and codex windows"
@@ -1512,6 +1728,7 @@ mod tests {
             None,
             false,
             CODEX_TRANSCRIPT_FRESH_WINDOW,
+            false,
         );
         assert_eq!(got, WorkerLivenessState::Alive);
         let claude = classify_from_evidence(
@@ -1521,6 +1738,7 @@ mod tests {
             None,
             false,
             TRANSCRIPT_FRESH_WINDOW,
+            false,
         );
         assert_eq!(claude, WorkerLivenessState::Starved);
     }
@@ -1537,8 +1755,18 @@ mod tests {
         );
         assert_eq!(
             activity_fresh_window(cas_mux::SupervisorCli::Grok),
-            TRANSCRIPT_FRESH_WINDOW
+            GROK_TRANSCRIPT_FRESH_WINDOW
         );
+    }
+
+    /// cas-7e85: Grok's window must stay at the original 60s, independent
+    /// of any future widening of Claude's `TRANSCRIPT_FRESH_WINDOW` — the
+    /// two are deliberately separate constants specifically to prevent this
+    /// class of accidental coupling.
+    #[test]
+    fn grok_window_unaffected_by_claude_widening() {
+        assert_eq!(GROK_TRANSCRIPT_FRESH_WINDOW, Duration::from_secs(60));
+        assert_ne!(GROK_TRANSCRIPT_FRESH_WINDOW, TRANSCRIPT_FRESH_WINDOW);
     }
 
     #[test]
@@ -1905,6 +2133,7 @@ mod tests {
             crash_signature_match: true,
             worktree_edit_age_secs: Some(3),
             session_id: "ses-xyz".to_string(),
+        in_flight_tool_call: false,
         };
         let out = format_state_human(&WorkerLivenessState::Wedged, &ev);
         assert!(out.contains("state: wedged"));
@@ -1930,6 +2159,7 @@ mod tests {
             crash_signature_match: false,
             worktree_edit_age_secs: None,
             session_id: "ses-abc".to_string(),
+        in_flight_tool_call: false,
         };
         let out = format_state_human(&WorkerLivenessState::Dead, &ev);
         assert!(out.contains("pid: <none>"));
@@ -1949,6 +2179,7 @@ mod tests {
             crash_signature_match: false,
             worktree_edit_age_secs: None,
             session_id: "ses\"id".to_string(),
+            in_flight_tool_call: false,
         };
         let out = format_state_json(&WorkerLivenessState::Alive, &ev);
         // Should be parseable as JSON.
@@ -2006,6 +2237,187 @@ mod tests {
         let body: String = (0..50).map(|i| format!("line {i}\n")).collect();
         let got = collect_tail_lines(Cursor::new(body), 3);
         assert_eq!(got, vec!["line 47", "line 48", "line 49"]);
+    }
+
+    // --- cas-7e85: has_in_flight_tool_call -----------------------------------
+
+    /// Real Claude Code transcript shape: a `sleep 280` Bash call requested
+    /// (matches the actual `happy-sparrow-33`/`patient-cobra-45` repro
+    /// specimens) with no `tool_result` line following it yet.
+    #[test]
+    fn claude_in_flight_tool_call_detected_when_unresolved() {
+        let transcript = concat!(
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Running the gate in the background."},{"type":"tool_use","id":"toolu_01abc","name":"Bash","input":{"command":"sleep 280"}}]}}"#,
+            "\n",
+        );
+        assert!(has_in_flight_tool_call(
+            Cursor::new(transcript),
+            cas_mux::SupervisorCli::Claude,
+            IN_FLIGHT_TAIL_LINES,
+        ));
+    }
+
+    /// Same shape, but the `tool_result` has already come back — no call is
+    /// outstanding.
+    #[test]
+    fn claude_no_in_flight_call_when_tool_result_present() {
+        let transcript = concat!(
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01abc","name":"Bash","input":{"command":"sleep 280"}}]}}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01abc","content":"done"}]}}"#,
+            "\n",
+        );
+        assert!(!has_in_flight_tool_call(
+            Cursor::new(transcript),
+            cas_mux::SupervisorCli::Claude,
+            IN_FLIGHT_TAIL_LINES,
+        ));
+    }
+
+    /// A transcript with no tool calls at all (plain assistant text) must
+    /// not be misread as having an outstanding call.
+    #[test]
+    fn claude_no_in_flight_call_on_plain_text_transcript() {
+        let transcript = concat!(
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"All done."}]}}"#,
+            "\n",
+        );
+        assert!(!has_in_flight_tool_call(
+            Cursor::new(transcript),
+            cas_mux::SupervisorCli::Claude,
+            IN_FLIGHT_TAIL_LINES,
+        ));
+    }
+
+    /// Malformed / non-JSON lines (partial writes) must not crash the parser
+    /// or be misread as evidence either way.
+    #[test]
+    fn claude_malformed_lines_are_skipped_not_treated_as_in_flight() {
+        let transcript = "not json at all\n{\"partial\": tr\n";
+        assert!(!has_in_flight_tool_call(
+            Cursor::new(transcript),
+            cas_mux::SupervisorCli::Claude,
+            IN_FLIGHT_TAIL_LINES,
+        ));
+    }
+
+    /// Codex rollout shape (best-effort schema, see `has_in_flight_tool_call`
+    /// doc): a `function_call` with no matching `function_call_output`.
+    #[test]
+    fn codex_in_flight_tool_call_detected_when_unresolved() {
+        let transcript = concat!(
+            r#"{"type":"session_meta","payload":{"cwd":"/tmp"}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"function_call","call_id":"call_01","name":"shell","arguments":"{\"command\":\"sleep 280\"}"}}"#,
+            "\n",
+        );
+        assert!(has_in_flight_tool_call(
+            Cursor::new(transcript),
+            cas_mux::SupervisorCli::Codex,
+            IN_FLIGHT_TAIL_LINES,
+        ));
+    }
+
+    /// Codex: the matching `function_call_output` resolves the call.
+    #[test]
+    fn codex_no_in_flight_call_when_output_present() {
+        let transcript = concat!(
+            r#"{"type":"response_item","payload":{"type":"function_call","call_id":"call_01","name":"shell","arguments":"{}"}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"call_01","output":"ok"}}"#,
+            "\n",
+        );
+        assert!(!has_in_flight_tool_call(
+            Cursor::new(transcript),
+            cas_mux::SupervisorCli::Codex,
+            IN_FLIGHT_TAIL_LINES,
+        ));
+    }
+
+    /// Codex: the `local_shell_call` / `local_shell_call_output` variant
+    /// (sandboxed shell tool) resolves the same way.
+    #[test]
+    fn codex_local_shell_call_pairing_resolves() {
+        let transcript = concat!(
+            r#"{"type":"response_item","payload":{"type":"local_shell_call","call_id":"call_02"}}"#,
+            "\n",
+            r#"{"type":"response_item","payload":{"type":"local_shell_call_output","call_id":"call_02","output":"ok"}}"#,
+            "\n",
+        );
+        assert!(!has_in_flight_tool_call(
+            Cursor::new(transcript),
+            cas_mux::SupervisorCli::Codex,
+            IN_FLIGHT_TAIL_LINES,
+        ));
+    }
+
+    /// Grok is explicitly out of scope for cas-7e85 — always `false`,
+    /// regardless of transcript content (falls back to the existing
+    /// signals.json/mtime path).
+    #[test]
+    fn grok_in_flight_tool_call_always_false() {
+        let transcript = concat!(
+            r#"{"type":"response_item","payload":{"type":"function_call","call_id":"call_01"}}"#,
+            "\n",
+        );
+        assert!(!has_in_flight_tool_call(
+            Cursor::new(transcript),
+            cas_mux::SupervisorCli::Grok,
+            IN_FLIGHT_TAIL_LINES,
+        ));
+    }
+
+    /// Convenience wrapper: missing file fails safe to `false`.
+    #[test]
+    fn transcript_has_in_flight_tool_call_missing_file_is_false() {
+        let missing = Path::new("/tmp/does-not-exist-cas-7e85.jsonl");
+        assert!(!transcript_has_in_flight_tool_call(
+            missing,
+            cas_mux::SupervisorCli::Claude
+        ));
+    }
+
+    /// End-to-end through the file-reading wrapper, not just the `Read`
+    /// core — proves `transcript_has_in_flight_tool_call` actually opens
+    /// and parses the file it's given.
+    #[test]
+    fn transcript_has_in_flight_tool_call_reads_real_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("transcript.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_x","name":"Bash","input":{}}]}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        assert!(transcript_has_in_flight_tool_call(
+            &path,
+            cas_mux::SupervisorCli::Claude
+        ));
+    }
+
+    /// cas-7e85 AC4: this is the SAME signal `classify_from_evidence` (the
+    /// core of `cas factory is-wedged`) consults — a stale-by-mtime but
+    /// in-flight transcript must classify Alive, not Starved, matching the
+    /// director's suppression above one-for-one.
+    #[test]
+    fn classify_from_evidence_in_flight_call_overrides_stale_mtime() {
+        let got = classify_from_evidence(
+            true,
+            Some(Duration::from_secs(10 * 60)), // long past every window
+            false,
+            None,
+            false,
+            TRANSCRIPT_FRESH_WINDOW,
+            true, // in-flight tool call
+        );
+        assert_eq!(
+            got,
+            WorkerLivenessState::Alive,
+            "an in-flight tool call must classify Alive regardless of mtime age"
+        );
     }
 
     #[test]
@@ -2069,6 +2481,7 @@ mod tests {
             worktree_edit_age_secs: None,
             // Newline + backslash inside session_id — worst-case.
             session_id: "ses\nfoo\\bar".to_string(),
+        in_flight_tool_call: false,
         };
         let out = format_state_json(&WorkerLivenessState::Alive, &ev);
         // Parse round-trip. If escaping is wrong, this panics with a clear

@@ -1,7 +1,8 @@
 use crate::types::WorktreeStatus;
+use crate::worktree::git::GitError;
 use crate::worktree::manager::worker_ops::RemoveOutcome;
 use crate::worktree::manager::*;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 
@@ -1370,4 +1371,196 @@ fn test_create_epic_branch_without_config_still_defaults_to_detected_trunk() {
     let epic_sha = manager.git().ref_sha(&branch).unwrap();
 
     assert_eq!(epic_sha, trunk_sha);
+}
+
+// --- cas-e18f: conflicting worktree_merge must not leave the shared
+// checkout mid-merge -------------------------------------------------------
+
+fn commit_file(repo_or_worktree_path: &Path, name: &str, content: &str, message: &str) {
+    std::fs::write(repo_or_worktree_path.join(name), content).unwrap();
+    Command::new("git")
+        .args(["add", name])
+        .current_dir(repo_or_worktree_path)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", message])
+        .current_dir(repo_or_worktree_path)
+        .output()
+        .unwrap();
+}
+
+/// AC1 + AC3: a genuinely conflicting merge is refused with the conflicting
+/// path named, and leaves the shared checkout exactly as it was before the
+/// attempt — no `MERGE_HEAD`, no staged conflict markers.
+#[test]
+fn merge_and_cleanup_conflict_leaves_checkout_clean_and_names_path() {
+    let (_temp, repo_path) = create_test_repo();
+    let mut config = WorktreeConfig::default();
+    config.auto_merge = true;
+    let mut manager = WorktreeManager::new(&repo_path, config).unwrap();
+
+    commit_file(&repo_path, "shared.txt", "base\n", "add shared.txt");
+
+    let epic_branch = manager.create_epic_branch("Conflict Merge").unwrap();
+    manager.git().checkout(&epic_branch).unwrap();
+
+    let mut worktree = manager.create_for_worker("conflict-worker").unwrap();
+    let wt_path = worktree.path.clone();
+    commit_file(&wt_path, "shared.txt", "worker-version\n", "worker edit");
+
+    // Diverge the epic branch itself so the merge has real content to
+    // reconcile (both sides touched the same line).
+    commit_file(&repo_path, "shared.txt", "epic-version\n", "epic edit");
+
+    let pre_head = manager.git().ref_sha(&epic_branch).unwrap();
+
+    worktree.parent_branch = epic_branch.clone();
+    let err = manager
+        .merge_and_cleanup(&mut worktree, false, false)
+        .expect_err("conflicting content must fail the merge");
+
+    match &err {
+        WorktreeError::Git(GitError::MergeConflictPaths(paths)) => {
+            assert!(
+                paths.iter().any(|p| p == "shared.txt"),
+                "conflict error must name shared.txt, got {paths:?}"
+            );
+        }
+        other => panic!("expected MergeConflictPaths naming shared.txt, got {other:?}"),
+    }
+
+    // No trace of the failed merge: no MERGE_HEAD, no staged conflict, HEAD
+    // unchanged, working tree clean.
+    assert!(
+        !manager.git().merge_in_progress(),
+        "a failed merge must leave no MERGE_HEAD behind"
+    );
+    // Only tracked entries matter here — the worktree store/config under
+    // `.cas/` is untracked scaffolding the manager itself creates and is
+    // present regardless of merge outcome; the assertion is about the
+    // *merge* leaving no trace (no staged conflict, no modified tracked
+    // files), not about a pristine `git status` overall.
+    let status = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    let tracked_changes: Vec<String> = String::from_utf8_lossy(&status.stdout)
+        .lines()
+        .filter(|line| !line.starts_with("??"))
+        .map(|line| line.to_string())
+        .collect();
+    assert!(
+        tracked_changes.is_empty(),
+        "shared checkout must have no tracked/staged changes after a failed merge, got: {tracked_changes:?}"
+    );
+    assert_eq!(
+        manager.git().ref_sha(&epic_branch).unwrap(),
+        pre_head,
+        "HEAD of the target branch must be unchanged by a failed merge"
+    );
+}
+
+/// AC2: an unrelated, non-conflicting merge must succeed immediately after a
+/// conflicting one failed — the whole point of aborting on failure is that
+/// it doesn't cascade into blocking every other merge behind it.
+#[test]
+fn merge_and_cleanup_unrelated_merge_succeeds_after_prior_conflict() {
+    let (_temp, repo_path) = create_test_repo();
+    let mut config = WorktreeConfig::default();
+    config.auto_merge = true;
+    let mut manager = WorktreeManager::new(&repo_path, config).unwrap();
+
+    commit_file(&repo_path, "shared.txt", "base\n", "add shared.txt");
+
+    let epic_branch = manager.create_epic_branch("Cascade Merge").unwrap();
+    manager.git().checkout(&epic_branch).unwrap();
+
+    let mut conflicting = manager.create_for_worker("cascade-conflict-worker").unwrap();
+    let conflict_path = conflicting.path.clone();
+    commit_file(&conflict_path, "shared.txt", "worker-version\n", "worker edit");
+    commit_file(&repo_path, "shared.txt", "epic-version\n", "epic edit");
+
+    conflicting.parent_branch = epic_branch.clone();
+    manager
+        .merge_and_cleanup(&mut conflicting, false, false)
+        .expect_err("first merge must conflict");
+
+    // A second, unrelated worker touching a different file must merge
+    // cleanly right away — no residual MERGE_HEAD blocking it.
+    manager.git().checkout(&epic_branch).unwrap();
+    let mut unrelated = manager.create_for_worker("cascade-unrelated-worker").unwrap();
+    let unrelated_path = unrelated.path.clone();
+    commit_file(&unrelated_path, "unrelated.txt", "fine\n", "unrelated work");
+
+    unrelated.parent_branch = epic_branch.clone();
+    let commit = manager
+        .merge_and_cleanup(&mut unrelated, false, false)
+        .expect("unrelated merge must succeed immediately after the prior conflict");
+    assert!(commit.is_some());
+
+    manager.git().checkout(&epic_branch).unwrap();
+    assert!(repo_path.join("unrelated.txt").exists());
+}
+
+/// AC4: a `MERGE_HEAD` already present on entry (e.g. left by some other
+/// process, or a bug that predates this fix) must be reported as its own
+/// distinct error rather than surfacing as an opaque failure on whatever
+/// unrelated merge happens to run next.
+#[test]
+fn merge_and_cleanup_detects_pre_existing_merge_in_progress() {
+    let (_temp, repo_path) = create_test_repo();
+    let mut config = WorktreeConfig::default();
+    config.auto_merge = true;
+    let mut manager = WorktreeManager::new(&repo_path, config).unwrap();
+
+    commit_file(&repo_path, "shared.txt", "base\n", "add shared.txt");
+
+    let epic_branch = manager.create_epic_branch("Preexisting Merge").unwrap();
+    manager.git().checkout(&epic_branch).unwrap();
+
+    let mut worktree = manager.create_for_worker("preexisting-merge-worker").unwrap();
+    let wt_path = worktree.path.clone();
+    commit_file(&wt_path, "unrelated.txt", "fine\n", "unrelated work");
+    worktree.parent_branch = epic_branch.clone();
+
+    // Simulate a merge left mid-flight by something other than
+    // `merge_and_cleanup` itself: start a real conflicting merge directly
+    // and leave it unresolved (no --abort).
+    commit_file(&repo_path, "shared.txt", "epic-version\n", "epic edit");
+    let stray_branch = "stray-conflicting-branch";
+    Command::new("git")
+        .args(["checkout", "-b", stray_branch])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    commit_file(&repo_path, "shared.txt", "stray-version\n", "stray edit");
+    manager.git().checkout(&epic_branch).unwrap();
+    // Diverge epic_branch too, past the common ancestor with stray_branch,
+    // so the two sides actually conflict on the same line instead of one
+    // being a fast-forward-able descendant of the other.
+    commit_file(&repo_path, "shared.txt", "epic-version-2\n", "further epic edit");
+    let merge_output = Command::new("git")
+        .args(["merge", "--no-ff", stray_branch])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    assert!(!merge_output.status.success(), "setup merge must conflict");
+    assert!(
+        manager.git().merge_in_progress(),
+        "setup must leave MERGE_HEAD in place (no abort) to simulate the pre-existing state"
+    );
+
+    let err = manager
+        .merge_and_cleanup(&mut worktree, false, false)
+        .expect_err("entry must refuse when a merge is already in progress");
+
+    assert!(
+        matches!(err, WorktreeError::Git(GitError::MergeInProgress(_))),
+        "expected MergeInProgress, got {err:?}"
+    );
+    // The pre-existing merge state must be left exactly as found — this
+    // check does not itself abort or otherwise touch it.
+    assert!(manager.git().merge_in_progress());
 }

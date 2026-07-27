@@ -11,8 +11,9 @@ use chrono::{DateTime, Utc};
 use ratatui::layout::Rect;
 
 use super::director::{
-    DiffLine, DirectorData, DirectorEvent, DirectorEventDetector, DirectorStores, PanelAreas,
-    Prompt, SidecarFocus, ViewMode, generate_prompt, revalidate_event_for_delivery_with_context,
+    DiffLine, DirectorData, DirectorEvent, DirectorEventDetector, DirectorStores,
+    MergeAlertFreshness, PanelAreas, Prompt, SidecarFocus, ViewMode, check_merge_alert_freshness,
+    generate_prompt, revalidate_event_for_delivery_with_context,
     revalidate_event_for_delivery_with_focus,
 };
 use crate::store::open_prompt_queue_store;
@@ -693,7 +694,7 @@ impl FactoryApp {
     /// generation so the two steps can never observe two different
     /// snapshots.
     pub fn revalidate_and_prompt_for_delivery(
-        &self,
+        &mut self,
         events: &[DirectorEvent],
     ) -> (Vec<DirectorEvent>, Vec<Prompt>) {
         if events.is_empty() {
@@ -744,21 +745,59 @@ impl FactoryApp {
         let gated_task_ids =
             crate::ui::factory::director::compute_gated_task_ids(&non_closed_ids, &blocks_deps);
 
-        let prompts: Vec<Prompt> = delivery_events
-            .iter()
-            .filter_map(|event| {
-                generate_prompt(
-                    event,
-                    &self.director_data,
-                    &unfiltered_data,
-                    &self.supervisor_name,
-                    &self.auto_prompt,
-                    self.supervisor_cli,
-                    self.worker_cli,
-                    &gated_task_ids,
-                )
-            })
-            .collect();
+        // cas-6883: repo root for the send-time MERGE REQUIRED freshness
+        // check — same derivation as `close_project_root` in close_ops.rs /
+        // `repo_root` in `director.rs::load_all_git_changes` (`.cas`'s
+        // parent is the main checkout all `factory/*` and `epic/*` branches
+        // live in).
+        let repo_root = self.cas_dir.parent().unwrap_or(&self.cas_dir).to_path_buf();
+
+        let mut prompts: Vec<Prompt> = Vec::with_capacity(delivery_events.len());
+        for event in &delivery_events {
+            // cas-6883: re-validate a MERGE REQUIRED / AwaitingMerge idle
+            // signal against live git state, and against what was last
+            // actually sent, immediately before generating its prompt —
+            // as close to true send time as this tick-based pipeline gets.
+            // `NotApplicable` (wrong event shape, task no longer
+            // AwaitingMerge, or no resolvable epic branch) falls through to
+            // `generate_prompt` unaffected, exactly as before this fix.
+            let merge_alert_evidence =
+                match check_merge_alert_freshness(event, &unfiltered_data, &repo_root) {
+                    MergeAlertFreshness::NotApplicable => None,
+                    // AC1: branch already carries zero unmerged commits vs
+                    // the epic — drop the alert entirely rather than
+                    // instruct a merge that already happened.
+                    MergeAlertFreshness::Stale => continue,
+                    MergeAlertFreshness::Fresh(evidence) => {
+                        // AC3: same (task, branch) pair, same evidence as
+                        // last time — suppress the repeat.
+                        if self.event_detector.merge_alert_should_emit(
+                            &evidence.task_id,
+                            &evidence.factory_branch,
+                            evidence.unmerged_count,
+                            &evidence.epic_sha,
+                        ) {
+                            Some(evidence)
+                        } else {
+                            continue;
+                        }
+                    }
+                };
+
+            if let Some(prompt) = generate_prompt(
+                event,
+                &self.director_data,
+                &unfiltered_data,
+                &self.supervisor_name,
+                &self.auto_prompt,
+                self.supervisor_cli,
+                self.worker_cli,
+                &gated_task_ids,
+                merge_alert_evidence.as_ref(),
+            ) {
+                prompts.push(prompt);
+            }
+        }
 
         (delivery_events, prompts)
     }

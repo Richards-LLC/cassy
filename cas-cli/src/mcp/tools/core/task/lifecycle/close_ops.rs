@@ -4253,6 +4253,32 @@ pub(crate) fn last_commit_unix(repo_path: &std::path::Path, branch: &str) -> Opt
         .ok()
 }
 
+/// Short SHA of `branch`'s current tip, or `None` when the branch ref
+/// doesn't resolve or `git rev-parse` fails. Used by the director's
+/// send-time MERGE REQUIRED alert freshness check (cas-6883) to stamp an
+/// emitted alert with the epic commit its unmerged-count was computed
+/// against, so a supervisor can tell at a glance whether the alert is
+/// still current (does `epic_status`'s current SHA match?). Mirrors the
+/// shell-out style of `count_unmerged_factory_commits` / `last_commit_unix`.
+pub(crate) fn resolve_branch_short_sha(repo_path: &std::path::Path, branch: &str) -> Option<String> {
+    use std::process::Command;
+
+    if !is_safe_git_refname(branch) {
+        return None;
+    }
+
+    let out = Command::new("git")
+        .args(["rev-parse", "--short", branch])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if sha.is_empty() { None } else { Some(sha) }
+}
+
 /// Outcome of the cas-8f8f epic-close per-child merge-state gate.
 ///
 /// Symmetric to [`MergeStateGateOutcome`] but at the epic scope.
@@ -7478,6 +7504,44 @@ mod merge_state_gate_tests {
             count_unmerged_factory_commits(dir.path(), "factory/worker", "-oProxyCommand=evil"),
             u32::MAX,
             "unsafe parent_branch must fail closed, not silently degrade to 0"
+        );
+    }
+
+    // --- cas-6883: resolve_branch_short_sha ----------------------------------
+
+    #[test]
+    fn resolve_branch_short_sha_returns_current_tip() {
+        let dir = init_factory_repo("worker");
+        let expected = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "--short", "main"])
+                .current_dir(dir.path())
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+
+        assert_eq!(
+            resolve_branch_short_sha(dir.path(), "main"),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn resolve_branch_short_sha_none_for_unresolvable_or_unsafe_ref() {
+        let dir = init_factory_repo("worker");
+        assert_eq!(
+            resolve_branch_short_sha(dir.path(), "no-such-branch"),
+            None,
+            "unresolvable branch must return None, not a stale/default SHA"
+        );
+        assert_eq!(
+            resolve_branch_short_sha(dir.path(), "-oProxyCommand=evil"),
+            None,
+            "unsafe refname must fail closed to None, never reach the git shell-out"
         );
     }
 

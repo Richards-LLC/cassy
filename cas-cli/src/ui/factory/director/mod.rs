@@ -22,7 +22,8 @@ pub(crate) use events::pick_best_open_branch_epic;
 pub use events::{DirectorEvent, DirectorEventDetector};
 pub use panel::PanelRegistry;
 pub use prompts::{
-    Prompt, compute_gated_task_ids, generate_prompt, revalidate_event_for_delivery_with_context,
+    MergeAlertFreshness, Prompt, check_merge_alert_freshness, compute_gated_task_ids,
+    generate_prompt, revalidate_event_for_delivery_with_context,
     revalidate_event_for_delivery_with_focus, with_response_instructions,
 };
 // PanelAreas, SidecarFocus, SidecarState, ViewMode, DiffLine, DiffLineType, render, render_with_state are already public in this module

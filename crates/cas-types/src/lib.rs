@@ -46,6 +46,7 @@ mod prompt;
 mod recording;
 mod rule;
 mod scope;
+mod search_manifest;
 mod session;
 mod skill;
 mod sort;
@@ -79,6 +80,10 @@ pub use recording::{
 };
 pub use rule::{Rule, RuleCategory, RuleStatus};
 pub use scope::{Scope, ScopeFilter, ShareScope};
+pub use search_manifest::{
+    SearchManifest, SearchManifestEntry, parse_search_manifest, search_manifest_shape_hint,
+    zero_hit_entries,
+};
 pub use session::{Session, SessionOutcome};
 pub use skill::{Skill, SkillHookConfig, SkillHookEntry, SkillHooks, SkillStatus, SkillType};
 pub use sort::{

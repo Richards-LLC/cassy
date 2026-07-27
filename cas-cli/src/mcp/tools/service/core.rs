@@ -305,6 +305,7 @@ impl CasService {
             reason: req.reason,
             bypass_code_review: req.bypass_code_review,
             code_review_findings: req.code_review_findings,
+            search_manifest: req.search_manifest,
         };
         self.inner.cas_task_close(Parameters(inner_req)).await
     }

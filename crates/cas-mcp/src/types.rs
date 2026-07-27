@@ -221,6 +221,25 @@ pub struct TaskRequest {
     #[serde(default)]
     pub code_review_findings: Option<String>,
 
+    /// Search manifest for investigation-task (`Spike`) closes (cas-49f1).
+    ///
+    /// Optional JSON array of `{command, hits}` entries: every search
+    /// command the worker actually ran and the hit count each returned.
+    /// The close gate only consults this for `Spike`-type tasks; if any
+    /// entry reports `hits == 0`, a warning note is appended rather than
+    /// letting the close proceed silently. Ordinary code tasks and tasks
+    /// that omit this field are entirely unaffected.
+    #[schemars(
+        description = "Serialized JSON array of search steps run during an \
+                       investigation (Spike) task, e.g. \
+                       [{\"command\": \"grep -c foo file\", \"hits\": 3}]. \
+                       Optional; when present on a Spike-type close, any \
+                       entry with hits=0 is surfaced as a warning note \
+                       instead of a silent pass."
+    )]
+    #[serde(default)]
+    pub search_manifest: Option<String>,
+
     /// Include dependencies (for show)
     #[schemars(description = "Include dependency information")]
     #[serde(default, deserialize_with = "deser::option_bool")]

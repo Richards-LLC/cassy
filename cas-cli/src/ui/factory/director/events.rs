@@ -543,6 +543,13 @@ pub struct DirectorEventDetector {
     /// When a worker is absent from this map under age override, defaults to
     /// `TRANSCRIPT_FRESH_WINDOW` (Claude/Grok 60s).
     transcript_window_override: Option<HashMap<String, Duration>>,
+    /// (cas-7e85) Test-only override for the "has an in-flight tool call"
+    /// signal, keyed by resolved worker name, used alongside
+    /// `transcript_age_override` so tests can exercise the suppression path
+    /// without a real transcript file. `None` per-worker (missing from the
+    /// map) means "no in-flight call" — production resolves this via
+    /// `wedged::transcript_has_in_flight_tool_call`.
+    transcript_in_flight_override: Option<HashMap<String, bool>>,
     /// (cas-09d0) Workers explicitly put on hold by the supervisor — a
     /// first-class primitive for "deliberately paused, not idle-needing-work"
     /// that doesn't require a task-status transition (unlike `AwaitingMerge`,
@@ -587,6 +594,7 @@ impl DirectorEventDetector {
             cas_root: None,
             transcript_age_override: None,
             transcript_window_override: None,
+            transcript_in_flight_override: None,
             held_workers: HashSet::new(),
             merge_alert_last_evidence: HashMap::new(),
         }
@@ -653,6 +661,16 @@ impl DirectorEventDetector {
         self.transcript_window_override = Some(windows);
     }
 
+    /// (cas-7e85) Test-only seam: inject a synthetic "in-flight tool call"
+    /// signal alongside `set_transcript_age_override`, so tests can prove
+    /// an outstanding call suppresses the stall alert regardless of how
+    /// stale the (overridden) transcript age is — without needing a real
+    /// JSONL fixture file.
+    #[cfg(test)]
+    pub(crate) fn set_transcript_in_flight_override(&mut self, in_flight: HashMap<String, bool>) {
+        self.transcript_in_flight_override = Some(in_flight);
+    }
+
     /// Initialize with current state (call after first data load)
     pub fn initialize(&mut self, data: &DirectorData) {
         self.last_state = DirectorState::from_data(data);
@@ -705,7 +723,14 @@ impl DirectorEventDetector {
                 .as_ref()
                 .and_then(|m| m.get(worker_name).copied())
                 .unwrap_or(crate::cli::factory::wedged::TRANSCRIPT_FRESH_WINDOW);
-            return transcript_confirms_stall_for_age(age, window);
+            // cas-7e85: missing from the override map means "no in-flight
+            // call", matching production's fail-safe default.
+            let in_flight = self
+                .transcript_in_flight_override
+                .as_ref()
+                .and_then(|m| m.get(worker_name).copied())
+                .unwrap_or(false);
+            return transcript_confirms_stall_for_age(age, window, in_flight);
         }
         let Some(cas_root) = &self.cas_root else {
             return true;
@@ -1502,6 +1527,12 @@ impl DirectorEventDetector {
 /// cas-ab80: freshness window is harness-specific via
 /// [`activity_fresh_window`](crate::cli::factory::wedged::activity_fresh_window),
 /// matching `is-wedged`.
+///
+/// cas-7e85: also consults
+/// [`transcript_has_in_flight_tool_call`](crate::cli::factory::wedged::transcript_has_in_flight_tool_call)
+/// — the SAME function `cas factory is-wedged` uses — so an outstanding
+/// tool call (e.g. a worker sleeping on a backgrounded `cargo test`) never
+/// confirms a stall here while is-wedged would call the worker Alive.
 fn transcript_confirms_stall_for_path(
     transcript_path: Option<&std::path::Path>,
     cli: cas_mux::SupervisorCli,
@@ -1510,14 +1541,20 @@ fn transcript_confirms_stall_for_path(
         return false;
     };
     let window = crate::cli::factory::wedged::activity_fresh_window(cli);
+    let in_flight = crate::cli::factory::wedged::transcript_has_in_flight_tool_call(path, cli);
     transcript_confirms_stall_for_age(
         crate::cli::factory::wedged::transcript_mtime_age(path),
         window,
+        in_flight,
     )
 }
 
-/// (cas-09d0 / cas-de95 / cas-ab80) Pure core of the confirmation decision.
+/// (cas-09d0 / cas-de95 / cas-ab80 / cas-7e85) Pure core of the confirmation
+/// decision.
 ///
+/// - `in_flight_tool_call == true` → **never** confirm (AC1: an outstanding
+///   call proves the worker is actively waiting on real work, regardless of
+///   transcript age — checked first, short-circuiting the age comparison).
 /// - `Some(age < fresh_window)` → not stalled (fresh transcript)
 /// - `Some(age ≥ fresh_window)` → confirm stall (cold transcript is positive evidence)
 /// - `None` → **do not confirm** (unresolved/missing telemetry is not starvation)
@@ -1525,7 +1562,14 @@ fn transcript_confirms_stall_for_path(
 /// `fresh_window` must come from
 /// [`activity_fresh_window`](crate::cli::factory::wedged::activity_fresh_window)
 /// (or the same constants) so director and is-wedged agree.
-fn transcript_confirms_stall_for_age(age: Option<Duration>, fresh_window: Duration) -> bool {
+fn transcript_confirms_stall_for_age(
+    age: Option<Duration>,
+    fresh_window: Duration,
+    in_flight_tool_call: bool,
+) -> bool {
+    if in_flight_tool_call {
+        return false;
+    }
     match age {
         Some(age) if age < fresh_window => false,
         Some(_) => true,

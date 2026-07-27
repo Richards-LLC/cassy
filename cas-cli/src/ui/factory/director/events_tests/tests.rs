@@ -2181,12 +2181,13 @@ fn test_728b_transcript_confirms_stall_for_path_freshness_decision() {
     );
 
     // Resolved cold transcript — positive evidence of inactivity; confirm.
-    // 120s is past Claude's 60s window (and still within Codex's 5m — covered
-    // by the cas-ab80 harness-window tests below).
+    // cas-7e85: TRANSCRIPT_FRESH_WINDOW widened 60s -> 3min, so 200s (past
+    // the widened window, still within Codex's 5m — covered by the cas-ab80
+    // harness-window tests below) replaces the old 120s fixture.
     let stale = tmp.path().join("stale.jsonl");
     std::fs::write(&stale, b"{}").unwrap();
     let old_mtime = filetime::FileTime::from_system_time(
-        std::time::SystemTime::now() - std::time::Duration::from_secs(120),
+        std::time::SystemTime::now() - std::time::Duration::from_secs(200),
     );
     filetime::set_file_mtime(&stale, old_mtime).unwrap();
     assert!(
@@ -2343,6 +2344,99 @@ fn test_09d0_stale_transcript_does_not_suppress_stall_alert() {
     );
 }
 
+/// cas-7e85 AC1 end-to-end: an in-flight tool call suppresses the
+/// WorkerStalled alert even when BOTH the checkpoint-class activity AND the
+/// (overridden) transcript age are long past every threshold — this is the
+/// exact shape of all four reported false positives (a worker sleeping on a
+/// backgrounded `cargo test --no-fail-fast` gate, transcript cold for
+/// minutes because there is nothing to write while the shell blocks on
+/// `sleep`).
+#[test]
+fn test_7e85_in_flight_tool_call_suppresses_stall_alert() {
+    let base_utc = chrono::Utc::now();
+    let t0 = std::time::Instant::now();
+
+    let mut detector =
+        DirectorEventDetector::new(vec!["lively-crow".to_string()], "supervisor".to_string());
+    detector.set_stall_threshold_secs(300);
+    detector.set_transcript_age_override(HashMap::from([(
+        "lively-crow".to_string(),
+        Some(std::time::Duration::from_secs(280)), // cold the whole `sleep 280` duration
+    )]));
+    detector.set_transcript_in_flight_override(HashMap::from([(
+        "lively-crow".to_string(),
+        true,
+    )]));
+
+    let data = stalled_data_for(make_agent_working_stalled(
+        "agent-1",
+        "lively-crow",
+        "cas-0b7d",
+        5,         // fresh heartbeat
+        Some(400), // checkpoint-class activity long past the threshold too
+        base_utc,
+    ));
+    detector.initialize(&data);
+
+    let events = detector.detect_changes_at(&data, None, t0, base_utc);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, DirectorEvent::WorkerStalled { .. })),
+        "an in-flight tool call must suppress the stall alert regardless of \
+         cold transcript AND stale checkpoint activity: {events:?}"
+    );
+}
+
+/// cas-7e85 AC2 (safety property): the in-flight-tool-call check is an
+/// ADDITIONAL suppression path, not a replacement for the existing one — a
+/// worker with NO in-flight call and a genuinely cold transcript must still
+/// be flagged stalled. Same shape as
+/// `test_09d0_stale_transcript_does_not_suppress_stall_alert` but explicit
+/// about the in-flight override being `false`, so this test fails loudly if
+/// a future change makes "no override present" accidentally default to
+/// "suppress".
+#[test]
+fn test_7e85_no_in_flight_call_does_not_suppress_genuine_stall() {
+    let base_utc = chrono::Utc::now();
+    let t0 = std::time::Instant::now();
+
+    let mut detector =
+        DirectorEventDetector::new(vec!["lively-crow".to_string()], "supervisor".to_string());
+    detector.set_stall_threshold_secs(300);
+    detector.set_transcript_age_override(HashMap::from([(
+        "lively-crow".to_string(),
+        Some(std::time::Duration::from_secs(600)), // cold, no outstanding call
+    )]));
+    detector.set_transcript_in_flight_override(HashMap::from([(
+        "lively-crow".to_string(),
+        false,
+    )]));
+
+    let data = stalled_data_for(make_agent_working_stalled(
+        "agent-1",
+        "lively-crow",
+        "cas-0b7d",
+        5,
+        Some(610),
+        base_utc,
+    ));
+    detector.initialize(&data);
+
+    let events = detector.detect_changes_at(&data, None, t0, base_utc);
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            DirectorEvent::WorkerStalled {
+                escalate: false,
+                ..
+            }
+        )),
+        "a genuinely wedged worker (no in-flight call, cold transcript) must \
+         still be flagged — the safety property must survive cas-7e85: {events:?}"
+    );
+}
+
 /// Pure-function coverage for the transcript age → confirm decision,
 /// independent of the DirectorEventDetector plumbing above.
 #[test]
@@ -2351,21 +2445,35 @@ fn test_09d0_transcript_confirms_stall_for_age_pure_cases() {
     assert!(
         !transcript_confirms_stall_for_age(
             Some(std::time::Duration::from_secs(5)),
-            TRANSCRIPT_FRESH_WINDOW
+            TRANSCRIPT_FRESH_WINDOW,
+            false,
         ),
         "fresh age must NOT confirm the stall (i.e. suppress it)"
     );
+    // cas-7e85: TRANSCRIPT_FRESH_WINDOW widened 60s -> 3min, so the "stale"
+    // fixture moved from 120s to 200s to stay past the window.
     assert!(
         transcript_confirms_stall_for_age(
-            Some(std::time::Duration::from_secs(120)),
-            TRANSCRIPT_FRESH_WINDOW
+            Some(std::time::Duration::from_secs(200)),
+            TRANSCRIPT_FRESH_WINDOW,
+            false,
         ),
         "stale age must confirm (proceed with) the stall verdict"
     );
     // cas-de95: unknown age is missing evidence, not a stall confirmation.
     assert!(
-        !transcript_confirms_stall_for_age(None, TRANSCRIPT_FRESH_WINDOW),
+        !transcript_confirms_stall_for_age(None, TRANSCRIPT_FRESH_WINDOW, false),
         "unknown age (no telemetry) must NOT confirm stall — absence ≠ starvation"
+    );
+    // cas-7e85 AC1: an in-flight tool call suppresses unconditionally, even
+    // with an age that would otherwise confirm the stall.
+    assert!(
+        !transcript_confirms_stall_for_age(
+            Some(std::time::Duration::from_secs(10 * 60)),
+            TRANSCRIPT_FRESH_WINDOW,
+            true,
+        ),
+        "an in-flight tool call must suppress the stall verdict regardless of age"
     );
 }
 
@@ -2376,7 +2484,8 @@ fn test_09d0_transcript_confirms_stall_for_age_pure_cases() {
 #[test]
 fn test_ab80_harness_specific_transcript_window_matches_is_wedged() {
     use crate::cli::factory::wedged::{
-        CODEX_TRANSCRIPT_FRESH_WINDOW, TRANSCRIPT_FRESH_WINDOW, activity_fresh_window,
+        CODEX_TRANSCRIPT_FRESH_WINDOW, GROK_TRANSCRIPT_FRESH_WINDOW, TRANSCRIPT_FRESH_WINDOW,
+        activity_fresh_window,
     };
     use cas_mux::SupervisorCli;
 
@@ -2389,30 +2498,38 @@ fn test_ab80_harness_specific_transcript_window_matches_is_wedged() {
         activity_fresh_window(SupervisorCli::Claude),
         TRANSCRIPT_FRESH_WINDOW
     );
+    // cas-7e85: Grok kept at its own (unwidened) constant — deliberately NOT
+    // the same value as Claude's TRANSCRIPT_FRESH_WINDOW anymore.
     assert_eq!(
         activity_fresh_window(SupervisorCli::Grok),
-        TRANSCRIPT_FRESH_WINDOW
+        GROK_TRANSCRIPT_FRESH_WINDOW
     );
 
     let mid_codex_window = std::time::Duration::from_secs(120); // past 60s, under 5m
     assert!(
         !transcript_confirms_stall_for_age(
             Some(mid_codex_window),
-            activity_fresh_window(SupervisorCli::Codex)
+            activity_fresh_window(SupervisorCli::Codex),
+            false,
         ),
         "Codex transcript active within 5m window must NOT confirm stall"
     );
+    // cas-7e85: TRANSCRIPT_FRESH_WINDOW widened 60s -> 3min, so this
+    // sub-case needs an age past 3min (not 120s) to still confirm for Claude.
+    let past_claude_window = std::time::Duration::from_secs(200);
     assert!(
         transcript_confirms_stall_for_age(
-            Some(mid_codex_window),
-            activity_fresh_window(SupervisorCli::Claude)
+            Some(past_claude_window),
+            activity_fresh_window(SupervisorCli::Claude),
+            false,
         ),
-        "Claude transcript at 120s (past 60s) must confirm stall"
+        "Claude transcript at 200s (past the widened 3min window) must confirm stall"
     );
     assert!(
         transcript_confirms_stall_for_age(
             Some(std::time::Duration::from_secs(6 * 60)),
-            activity_fresh_window(SupervisorCli::Codex)
+            activity_fresh_window(SupervisorCli::Codex),
+            false,
         ),
         "Codex transcript past 5m window must confirm stall"
     );

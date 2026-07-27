@@ -375,23 +375,26 @@ impl CasCore {
 
         // cas-b269: urgent stop sets halt_task_work; block close until new start.
         //
-        // cas-60393: narrow exemption — a pre-existing halt armed by an
-        // EARLIER, unrelated urgent stop must not deadlock re-close of the
-        // caller's OWN already-parked `AwaitingMerge` task (there is no
-        // in-band way to `start` an `AwaitingMerge` task to clear the halt).
-        // The exemption only skips *this* check; the merge-integrity gate
-        // below remains authoritative, so an AwaitingMerge task whose branch
-        // is not actually merged yet still bounces MERGE REQUIRED. Halt
-        // continues to block close for every other task/status/assignee.
+        // cas-60393 (AwaitingMerge) + cas-3894 (widened to InProgress): a
+        // pre-existing halt armed by an EARLIER, unrelated urgent stop must
+        // not deadlock re-close of the caller's OWN task. AwaitingMerge has
+        // no in-band way to `start` and clear the halt; InProgress can hit an
+        // even worse *mutual* deadlock, because the documented escape
+        // ("start a new task") is itself refused by the verification jail
+        // until this very task is closed. The exemption only skips *this*
+        // check; the merge/verification/review gates below remain fully
+        // authoritative, so a task whose work is not actually done yet still
+        // bounces on those, exactly as before. Halt continues to block close
+        // for every task/status/assignee the caller does not own as
+        // AwaitingMerge or InProgress.
         if let Ok(agent_id) = self.get_agent_id() {
             if let Ok(agent_store) = self.open_agent_store() {
                 if let Ok(agent) = agent_store.get(&agent_id) {
-                    let halt_exempt =
-                        super::stale_close_guard::halt_exempt_for_owned_awaiting_merge(
-                            task.status,
-                            task.assignee.as_deref(),
-                            Some(agent.name.as_str()),
-                        );
+                    let halt_exempt = super::stale_close_guard::halt_exempt_for_owned_task(
+                        task.status,
+                        task.assignee.as_deref(),
+                        Some(agent.name.as_str()),
+                    );
                     if super::stale_close_guard::agent_task_work_halted(&agent.metadata)
                         && !halt_exempt
                     {

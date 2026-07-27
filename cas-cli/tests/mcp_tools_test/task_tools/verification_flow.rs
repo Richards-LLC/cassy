@@ -2570,6 +2570,171 @@ enabled = false
     );
 }
 
+/// cas-3894 AC1: the recorded deadlock, end to end through `cas_task_close`.
+/// A worker's own InProgress task is halted by an unrelated, informational
+/// urgent (a checkpoint nudge / task briefing — not a redirect about this
+/// task). Close must succeed without needing a new assignment: halt is
+/// exempt for the caller's own owned task, and every other gate (no git repo
+/// here, verification disabled) is already satisfied exactly as in
+/// `test_task_close_passes_without_worktree_and_clean_cwd` above.
+#[tokio::test]
+async fn test_3894_halted_worker_can_close_own_in_progress_task() {
+    let (temp, service) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        r#"[verification]
+enabled = false
+"#,
+    )
+    .expect("write config");
+
+    let create_req = TaskCreateRequest {
+        depth: None,
+        title: "Finished, gate-green work".to_string(),
+        description: None,
+        priority: 2,
+        task_type: "task".to_string(),
+        labels: None,
+        notes: None,
+        blocked_by: None,
+        design: None,
+        acceptance_criteria: None,
+        external_ref: None,
+        assignee: None,
+        demo_statement: None,
+        execution_note: None,
+        epic: None,
+    };
+    let id = extract_task_id(&extract_text(
+        service
+            .cas_task_create(Parameters(create_req))
+            .await
+            .expect("task_create"),
+    ))
+    .expect("task id")
+    .to_string();
+
+    let _ = service
+        .cas_task_start(Parameters(IdRequest { id: id.clone() }))
+        .await
+        .expect("start"); // sets task.assignee = "test-agent", status = InProgress
+
+    // Simulate the urgent-stop halt landing from an unrelated, informational
+    // message (checkpoint nudge / task briefing) — exactly like `message.rs`
+    // does via `apply_halt_metadata`, but driven directly here since this
+    // test is at the CasCore level, not the coordination MCP surface.
+    let agent_store = open_agent_store(&cas_dir).expect("open agent store");
+    {
+        let mut agent = agent_store
+            .list(None)
+            .expect("list agents")
+            .into_iter()
+            .find(|a| a.name == "test-agent")
+            .expect("test agent exists");
+        agent
+            .metadata
+            .insert("halt_task_work".to_string(), "1".to_string());
+        agent_store.update(&agent).expect("apply halt");
+    }
+    assert!(
+        agent_store
+            .list(None)
+            .unwrap()
+            .into_iter()
+            .find(|a| a.name == "test-agent")
+            .unwrap()
+            .metadata
+            .get("halt_task_work")
+            .is_some(),
+        "halt must be armed before the close attempt for this test to be meaningful"
+    );
+
+    let close_req = TaskCloseRequest {
+        id: id.clone(),
+        reason: Some("done, no files touched".to_string()),
+        bypass_code_review: None,
+        code_review_findings: None,
+    };
+    let resp = extract_text(
+        service
+            .cas_task_close(Parameters(close_req))
+            .await
+            .expect("close returns result"),
+    );
+    assert!(
+        !resp.contains("WORK HALTED"),
+        "a halted worker must be able to close its OWN InProgress task \
+         without needing a new assignment (cas-3894): {resp}"
+    );
+    assert!(
+        resp.contains("Closed task:"),
+        "close must actually succeed, not merely avoid the halt message: {resp}"
+    );
+}
+
+/// cas-3894 AC2 (safety property): the halt-exemption is ownership-bound.
+/// A halted worker must still be refused when attempting to close a task it
+/// does NOT own — the exemption never lets a halted worker act on anyone
+/// else's work, which is what would actually defeat a genuine redirect
+/// aimed at a different assignee.
+#[tokio::test]
+async fn test_3894_halted_worker_still_blocked_closing_unowned_task() {
+    let (temp, service) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        r#"[verification]
+enabled = false
+"#,
+    )
+    .expect("write config");
+
+    let task_store = open_task_store(&cas_dir).expect("open task store");
+    let id = task_store.generate_id().expect("generate_id");
+    let mut task = cas::types::Task::new(id.clone(), "Someone else's work".to_string());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("someone-else".to_string()); // NOT "test-agent"
+    task_store.add(&task).expect("add task owned by another agent");
+
+    let agent_store = open_agent_store(&cas_dir).expect("open agent store");
+    {
+        let mut agent = agent_store
+            .list(None)
+            .expect("list agents")
+            .into_iter()
+            .find(|a| a.name == "test-agent")
+            .expect("test agent exists");
+        agent
+            .metadata
+            .insert("halt_task_work".to_string(), "1".to_string());
+        agent_store.update(&agent).expect("apply halt");
+    }
+
+    let close_req = TaskCloseRequest {
+        id: id.clone(),
+        reason: Some("trying to close someone else's task".to_string()),
+        bypass_code_review: None,
+        code_review_findings: None,
+    };
+    // The halt gate rejects via `Err(McpError)`, not an `Ok` tool-error
+    // response — unlike the exempt path, which returns `Ok`. Accept either
+    // shape so this test asserts the message content regardless of which
+    // one the gate uses.
+    let resp = match service.cas_task_close(Parameters(close_req)).await {
+        Ok(result) => extract_text(result),
+        Err(e) => e.message.to_string(),
+    };
+    assert!(
+        resp.contains("WORK HALTED"),
+        "halt must still block close of a task the caller does not own: {resp}"
+    );
+}
+
 #[tokio::test]
 async fn test_epic_close_requires_epic_verification_type() {
     let (temp, service) = setup_cas();
@@ -6814,12 +6979,24 @@ async fn test_60393_unmerged_awaiting_merge_still_bounces_merge_required_under_h
     );
 }
 
-/// cas-60393: the exemption is scoped to the caller's OWN AwaitingMerge task.
-/// A halted worker attempting to close an unrelated, ordinary InProgress task
-/// must still be refused with `WORK HALTED` — halt continues to protect all
-/// other work.
+/// cas-60393 → superseded by cas-3894 for this exact scenario.
+///
+/// This test originally asserted that a halted worker closing its OWN,
+/// already-approved, InProgress task ("Task B", assignee = "test-agent",
+/// the caller) was still refused with `WORK HALTED`. That was cas-60393's
+/// deliberate scope boundary at the time: only `AwaitingMerge` was exempt.
+///
+/// cas-3894 supersedes that boundary: two recorded production deadlocks
+/// showed a worker holding finished, gate-green `InProgress` work halted by
+/// an entirely unrelated, informational urgent (a checkpoint nudge, a task
+/// briefing — neither was a redirect about this task), with no reachable
+/// escape. `halt_exempt_for_owned_task` now exempts the caller's own
+/// `InProgress` task exactly as it already did for `AwaitingMerge`, so this
+/// close must now SUCCEED. The true remaining safety boundary — a halted
+/// worker still cannot touch a task it does not own — is covered by
+/// `test_3894_halted_worker_still_blocked_closing_unowned_task` above.
 #[tokio::test]
-async fn test_60393_halt_still_blocks_close_of_unrelated_inprogress_task() {
+async fn test_3894_halt_no_longer_blocks_close_of_own_inprogress_task() {
     let (temp, service) = setup_cas();
     let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
@@ -6879,8 +7056,8 @@ async fn test_60393_halt_still_blocks_close_of_unrelated_inprogress_task() {
         agent_store.update(&agent).expect("arm halt");
     }
 
-    // The halt gate rejects with an `McpError` (not a success payload), so
-    // assert on the `Err` arm directly rather than unwrapping to success.
+    // cas-3894: the caller's own InProgress task is now halt-exempt, so this
+    // must succeed instead of erroring — the inverse of the old assertion.
     let close_result = service
         .cas_task_close(Parameters(TaskCloseRequest {
             id: id_b.clone(),
@@ -6888,18 +7065,16 @@ async fn test_60393_halt_still_blocks_close_of_unrelated_inprogress_task() {
             bypass_code_review: None,
             code_review_findings: None,
         }))
-        .await;
-    let err = close_result.expect_err(
-        "an ordinary InProgress task (not AwaitingMerge) must still be refused under halt",
-    );
+        .await
+        .expect("halted worker must be able to close its OWN InProgress task (cas-3894)");
+    let text = extract_text(close_result);
     assert!(
-        err.message.contains("WORK HALTED"),
-        "expected the halt-blocks-close message, got: {}",
-        err.message
+        text.contains("Closed task:"),
+        "expected a successful close, got: {text}"
     );
     assert_eq!(
         task_store.get(&id_b).expect("B exists").status,
-        TaskStatus::InProgress,
-        "halted close attempt must not change task status"
+        TaskStatus::Closed,
+        "the exempt close must actually close the task"
     );
 }

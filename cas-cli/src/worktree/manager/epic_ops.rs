@@ -83,14 +83,23 @@ impl WorktreeManager {
                     results.push((name.clone(), true, None));
                 }
                 Err(GitError::MergeConflict) => {
-                    let _ = std::process::Command::new("git")
-                        .args(["merge", "--abort"])
-                        .current_dir(&self.repo_root)
-                        .output();
+                    // cas-e18f: `merge_branch` now aborts-on-failure itself,
+                    // so the checkout is already clean here — no manual
+                    // `git merge --abort` needed.
                     results.push((
                         name.clone(),
                         false,
                         Some("Merge conflict - manual resolution required".to_string()),
+                    ));
+                }
+                Err(GitError::MergeConflictPaths(paths)) => {
+                    results.push((
+                        name.clone(),
+                        false,
+                        Some(format!(
+                            "Merge conflict in: {} - manual resolution required",
+                            paths.join(", ")
+                        )),
                     ));
                 }
                 Err(e) => {

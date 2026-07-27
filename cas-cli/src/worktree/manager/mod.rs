@@ -338,18 +338,49 @@ impl WorktreeManager {
         }
 
         let merge_commit = if self.config.auto_merge {
+            // cas-e18f (fix d): a prior conflicting merge that was never
+            // aborted leaves the shared checkout mid-merge. Detect that
+            // *before* touching anything, so it's reported as its own
+            // distinct failure rather than surfacing as an opaque error on
+            // this (unrelated) merge once we try to checkout/merge below.
+            if self.git.merge_in_progress() {
+                return Err(WorktreeError::Git(GitError::MergeInProgress(
+                    self.git.describe_merge_in_progress(),
+                )));
+            }
+
+            // cas-e18f (fix b+c): pre-flight with `git merge-tree
+            // --write-tree`, which computes the merge purely in-memory —
+            // it never touches the working tree or index. A conflicting
+            // merge is refused here, before `checkout`/`merge` run at all,
+            // so the failing case never puts the shared checkout in a
+            // mid-merge state in the first place.
+            let conflicts = self
+                .git
+                .preflight_merge_conflicts(&worktree.parent_branch, &worktree.branch)
+                .map_err(WorktreeError::Git)?;
+            if !conflicts.is_empty() {
+                worktree.mark_conflict();
+                return Err(WorktreeError::Git(GitError::MergeConflictPaths(conflicts)));
+            }
+
             // Switch to parent branch in main repo
             self.git.checkout(&worktree.parent_branch)?;
 
-            // Merge the worktree branch
+            // Merge the worktree branch. The pre-flight above should make
+            // this branch unreachable in the conflicting case, but
+            // `merge_branch` itself still aborts-on-failure (fix a) as a
+            // safety net — e.g. a conflict introduced by a concurrent
+            // change between pre-flight and this call, or anything
+            // merge-tree doesn't model identically to a real merge.
             match self.git.merge_branch(&worktree.branch, true) {
                 Ok(commit) => {
                     worktree.mark_merged(commit.clone());
                     commit
                 }
-                Err(GitError::MergeConflict) => {
+                Err(e @ (GitError::MergeConflict | GitError::MergeConflictPaths(_))) => {
                     worktree.mark_conflict();
-                    return Err(WorktreeError::Git(GitError::MergeConflict));
+                    return Err(WorktreeError::Git(e));
                 }
                 Err(e) => return Err(WorktreeError::Git(e)),
             }

@@ -39,6 +39,28 @@ pub enum GitError {
     #[error("Merge conflict detected")]
     MergeConflict,
 
+    /// cas-e18f: names the conflicting paths instead of a bare
+    /// "Failed to execute git command" — the underlying `git merge`
+    /// failure was previously mis-detected (see `merge_branch`: conflict
+    /// markers land on stdout, not stderr, so the old stderr-only check
+    /// never matched and fell through to `CommandFailed` with an empty
+    /// message). The working tree has already been restored via
+    /// `git merge --abort` by the time this is returned.
+    #[error("Merge conflict in: {}", .0.join(", "))]
+    MergeConflictPaths(Vec<String>),
+
+    /// cas-e18f: a `MERGE_HEAD` was already present on entry — a prior
+    /// conflicting merge was never aborted and left the shared checkout
+    /// mid-merge. Reported distinctly so this doesn't look like the
+    /// unrelated merge that happens to run next (the exact cascade this
+    /// task fixes).
+    #[error(
+        "A merge is already in progress in this repository (MERGE_HEAD present) — \
+         a previous merge did not complete cleanly. Run `git merge --abort` (or resolve \
+         and commit it) before retrying: {0}"
+    )]
+    MergeInProgress(String),
+
     #[error("Uncommitted changes in worktree")]
     UncommittedChanges,
 
@@ -660,8 +682,118 @@ impl GitOperations {
         Ok(())
     }
 
+    /// Check whether a merge is already in progress in the main checkout
+    /// (i.e. `MERGE_HEAD` exists). cas-e18f: a conflicting merge that
+    /// wasn't aborted leaves this set, and the *next* merge — for an
+    /// unrelated branch — fails with git's generic "you need to resolve
+    /// your current index first", which describes the symptom of the
+    /// previous failure rather than anything about the current one.
+    /// Callers should check this before attempting a merge and report it
+    /// distinctly rather than letting git's own error surface unexplained.
+    pub fn merge_in_progress(&self) -> bool {
+        Command::new("git")
+            .args(["rev-parse", "--verify", "-q", "MERGE_HEAD"])
+            .current_dir(&self.repo_root)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// Describe the in-progress merge for `MergeInProgress`'s error message
+    /// (best-effort; falls back to a generic note if git status can't be
+    /// read for any reason).
+    pub fn describe_merge_in_progress(&self) -> String {
+        Command::new("git")
+            .args(["status", "--porcelain=v1"])
+            .current_dir(&self.repo_root)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| {
+                let stdout = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if stdout.is_empty() {
+                    "no other changes reported".to_string()
+                } else {
+                    stdout
+                }
+            })
+            .unwrap_or_else(|| "unable to read repository status".to_string())
+    }
+
+    /// Best-effort `git merge --abort`. A failed/conflicting merge must
+    /// leave no trace in the shared checkout (cas-e18f) — this is called
+    /// unconditionally after any merge failure. The result is intentionally
+    /// discarded: if there was nothing to abort (e.g. the failure happened
+    /// before git entered a merge state), `--abort` itself fails harmlessly.
+    fn abort_merge_best_effort(&self) {
+        let _ = Command::new("git")
+            .args(["merge", "--abort"])
+            .current_dir(&self.repo_root)
+            .output();
+    }
+
+    /// Extract conflicting paths from combined merge output (stdout+stderr).
+    /// Matches the common `CONFLICT (<kind>): ... in <path>` shape git
+    /// prints for content/add-add conflicts, plus a fallback that keeps the
+    /// whole CONFLICT line when a path can't be isolated — some conflict
+    /// kinds (e.g. rename/delete) phrase the path differently and callers
+    /// still want *something* actionable rather than silence.
+    fn extract_conflict_paths(combined: &str) -> Vec<String> {
+        let mut paths = Vec::new();
+        for line in combined.lines() {
+            let line = line.trim();
+            if !line.starts_with("CONFLICT") {
+                continue;
+            }
+            if let Some(idx) = line.rfind(" in ") {
+                paths.push(line[idx + 4..].trim().to_string());
+            } else {
+                paths.push(line.to_string());
+            }
+        }
+        paths
+    }
+
+    /// Pre-flight a merge without touching the working tree or index
+    /// (cas-e18f, fix (b)+(c)). Uses `git merge-tree --write-tree` to
+    /// compute the merge result purely in-memory; returns the conflicting
+    /// paths (empty if the merge would succeed cleanly). Callers should
+    /// refuse to run the real merge when this returns any paths, so the
+    /// failing case never enters the working tree at all.
+    pub fn preflight_merge_conflicts(&self, target: &str, source: &str) -> Result<Vec<String>> {
+        let output = Command::new("git")
+            .args(["merge-tree", "--write-tree", target, source])
+            .current_dir(&self.repo_root)
+            .output()?;
+
+        if output.status.success() {
+            return Ok(Vec::new());
+        }
+
+        let combined = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let paths = Self::extract_conflict_paths(&combined);
+        if paths.is_empty() {
+            // merge-tree failed for a reason other than a content conflict
+            // (e.g. one of the refs doesn't exist) — surface it verbatim
+            // rather than claiming a conflict with no paths.
+            return Err(GitError::CommandFailed(combined.trim().to_string()));
+        }
+        Ok(paths)
+    }
+
     /// Merge a branch into the current branch
     pub fn merge_branch(&self, branch: &str, no_ff: bool) -> Result<Option<String>> {
+        // cas-e18f: a merge left over from a previous, un-aborted failure
+        // must be reported distinctly, not surfaced as an opaque failure of
+        // *this* (unrelated) merge attempt.
+        if self.merge_in_progress() {
+            return Err(GitError::MergeInProgress(self.describe_merge_in_progress()));
+        }
+
         // Fix symlinked submodules before merge to avoid:
         // "error: expected submodule path 'vendor/...' not to be a symbolic link"
         self.fix_symlinked_submodules(&self.repo_root)?;
@@ -678,11 +810,30 @@ impl GitOperations {
             .output()?;
 
         if !output.status.success() {
+            // cas-e18f: git prints "CONFLICT ..." / "Automatic merge
+            // failed" to STDOUT, not stderr — the previous stderr-only
+            // check never matched a real conflict, so it fell through to
+            // `CommandFailed` with an empty message (stderr is blank on a
+            // content conflict). Check both streams.
+            let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("CONFLICT") || stderr.contains("Automatic merge failed") {
+            let combined = format!("{stdout}\n{stderr}");
+            let is_conflict =
+                combined.contains("CONFLICT") || combined.contains("Automatic merge failed");
+
+            // cas-e18f fix (a): a failed merge must leave no trace. Abort
+            // unconditionally before returning — this is what removes the
+            // factory-wide cascade, regardless of which branch below fires.
+            self.abort_merge_best_effort();
+
+            if is_conflict {
+                let paths = Self::extract_conflict_paths(&combined);
+                if !paths.is_empty() {
+                    return Err(GitError::MergeConflictPaths(paths));
+                }
                 return Err(GitError::MergeConflict);
             }
-            return Err(GitError::CommandFailed(stderr.to_string()));
+            return Err(GitError::CommandFailed(combined.trim().to_string()));
         }
 
         // Get the merge commit hash

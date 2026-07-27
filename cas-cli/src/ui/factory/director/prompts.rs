@@ -80,6 +80,20 @@ fn task_assigned_to_worker(data: &DirectorData, task: &TaskSummary, worker: &str
             .any(|(id, name)| name == worker && task.assignee.as_deref() == Some(id.as_str()))
 }
 
+/// cas-ed6c: `pub(crate)` re-export of the same lease-independent
+/// assignment predicate the `WorkerIdle` delivery-time revalidation arm
+/// already uses (`revalidate_event_for_delivery_with_context`), so the
+/// inbox-retraction sweep (`TeamsManager::prune_stale_idle_alerts`, wired
+/// in `lifecycle.rs`) can never disagree with it about what "this worker
+/// is no longer idle" means. Checks the task store's InProgress +
+/// open-Ready assignee fields directly — independent of the lease table,
+/// which cas-d165 already established goes blind mid-task (leases expire
+/// ~30 min in; a worker can hold a genuine assignment with no active
+/// lease at all).
+pub fn worker_now_has_real_assignment(data: &DirectorData, worker: &str) -> bool {
+    worker_has_open_or_in_progress_assignment(data, worker)
+}
+
 fn worker_has_open_or_in_progress_assignment(data: &DirectorData, worker: &str) -> bool {
     data.in_progress_tasks
         .iter()
@@ -515,6 +529,13 @@ pub struct Prompt {
     pub target: String,
     /// Prompt text to inject
     pub text: String,
+    /// cas-ed6c: `Some(worker)` when this prompt is a `WorkerIdle`-class
+    /// alert about `worker` — threaded down to `deliver_to_worker` so the
+    /// queued inbox row can be tagged for later retraction
+    /// (`TeamsManager::prune_stale_idle_alerts`) if the worker gains a real
+    /// assignment before the recipient ever reads it. `None` for every
+    /// other prompt kind.
+    pub retract_worker: Option<String>,
 }
 
 /// Wrap a message with response instructions
@@ -802,6 +823,7 @@ pub fn generate_prompt(
             Some(Prompt {
                 target: worker.clone(),
                 text: with_response_instructions(&text, supervisor_name, worker_cli),
+                retract_worker: None,
             })
         }
 
@@ -873,6 +895,7 @@ pub fn generate_prompt(
             Some(Prompt {
                 target: supervisor_name.to_string(),
                 text: with_response_instructions(&text, worker, supervisor_cli),
+                retract_worker: None,
             })
         }
 
@@ -893,6 +916,7 @@ pub fn generate_prompt(
             Some(Prompt {
                 target: supervisor_name.to_string(),
                 text: with_response_instructions(&text, worker, supervisor_cli),
+                retract_worker: None,
             })
         }
 
@@ -1011,6 +1035,7 @@ pub fn generate_prompt(
                 return Some(Prompt {
                     target: supervisor_name.to_string(),
                     text: with_response_instructions(&text, worker, supervisor_cli),
+                    retract_worker: Some(worker.clone()),
                 });
             }
 
@@ -1052,6 +1077,7 @@ pub fn generate_prompt(
             Some(Prompt {
                 target: supervisor_name.to_string(),
                 text: with_response_instructions(&text, worker, supervisor_cli),
+                retract_worker: Some(worker.clone()),
             })
         }
 
@@ -1090,6 +1116,7 @@ pub fn generate_prompt(
                 Some(Prompt {
                     target: worker.clone(),
                     text: with_response_instructions(&text, supervisor_name, worker_cli),
+                    retract_worker: None,
                 })
             } else {
                 // Still stalled after the nudge — escalate to the supervisor.
@@ -1119,6 +1146,7 @@ pub fn generate_prompt(
                 Some(Prompt {
                     target: supervisor_name.to_string(),
                     text: with_response_instructions(&text, worker, supervisor_cli),
+                    retract_worker: None,
                 })
             }
         }
@@ -1177,6 +1205,7 @@ pub fn generate_prompt(
             Some(Prompt {
                 target: supervisor_name.to_string(),
                 text: with_response_instructions(&text, agent_name, supervisor_cli),
+                retract_worker: None,
             })
         }
 
@@ -1300,6 +1329,7 @@ pub fn generate_prompt(
             Some(Prompt {
                 target: supervisor_name.to_string(),
                 text,
+                retract_worker: None,
             })
         }
     }
@@ -1870,6 +1900,15 @@ mod tests {
             "Prompt must direct supervisor to live task action=ready (D-3): {}",
             prompt.text
         );
+        // cas-ed6c: every WorkerIdle prompt must tag its worker so a stale
+        // queued copy can be retracted later if the worker gets assigned
+        // real work before the supervisor ever reads this row.
+        assert_eq!(
+            prompt.retract_worker.as_deref(),
+            Some("swift-fox"),
+            "WorkerIdle prompt must carry retract_worker so prune_stale_idle_alerts \
+             can find and retract it later"
+        );
     }
 
     #[test]
@@ -2393,6 +2432,15 @@ mod tests {
             "notification must carry the close-rejected reason: {}",
             prompt.text
         );
+        // cas-ed6c: the active_task/MERGE-REQUIRED WorkerIdle branch must
+        // also tag retract_worker — this is the SAME live-incident shape
+        // (a queued alert about a specific worker) as the ready_count
+        // branch, and must be retractable the same way.
+        assert_eq!(
+            prompt.retract_worker.as_deref(),
+            Some("swift-fox"),
+            "MERGE-REQUIRED WorkerIdle prompt must also carry retract_worker"
+        );
     }
 
     /// Regression for cas-b67d D-3: the zero-ready-task nudge must NOT instruct
@@ -2858,6 +2906,94 @@ mod tests {
             prompt.is_none(),
             "cas-889d: WorkerIdle must be suppressed when worker has active task (name key), got: {:?}",
             prompt.map(|p| p.text)
+        );
+    }
+
+    // --- cas-ed6c: worker_now_has_real_assignment + retract_worker tagging --
+    //
+    // Direct pin of the AC#1 finding: `worker_now_has_real_assignment` is
+    // the SAME lease-independent predicate the WorkerIdle delivery-time
+    // revalidation arm already uses (`worker_has_open_or_in_progress_assignment`),
+    // so `prune_stale_idle_alerts` can never disagree with it. Also proves
+    // the falsifiable hypothesis in the ticket's original framing ("keys on
+    // lease presence") does NOT hold: a worker with a real InProgress
+    // assignment and NO active_lease at all still reads as assigned here.
+
+    /// The reclaimed-lease-but-still-InProgress-and-assigned shape from
+    /// AC#4/AC#2: `make_data_with_in_progress` builds a task InProgress with
+    /// an assignee, but attaches NO `active_lease` to any agent (there are
+    /// no agents in this snapshot at all) — proving the predicate reads the
+    /// task store directly and does not require a lease to recognize a real
+    /// assignment.
+    #[test]
+    fn worker_now_has_real_assignment_true_for_in_progress_task_with_no_lease() {
+        let data = make_data_with_in_progress("swift-fox");
+        assert!(
+            worker_now_has_real_assignment(&data, "swift-fox"),
+            "an InProgress task assigned to swift-fox must count as a real \
+             assignment even with zero lease data in this snapshot"
+        );
+    }
+
+    /// Negative control: a worker with no matching task anywhere in the
+    /// snapshot is not considered assigned.
+    #[test]
+    fn worker_now_has_real_assignment_false_for_unrelated_worker() {
+        let data = make_data_with_in_progress("swift-fox");
+        assert!(!worker_now_has_real_assignment(&data, "some-other-worker"));
+    }
+
+    /// An Open (not yet started) task assigned to a worker also counts —
+    /// mirrors the WorkerIdle guard's own "assigned-but-not-yet-started"
+    /// gap coverage (the window between `task update assignee=` and
+    /// `task start`).
+    #[test]
+    fn worker_now_has_real_assignment_true_for_open_assigned_task() {
+        let mut data = make_data_with_in_progress("someone-else");
+        data.in_progress_tasks.clear();
+        data.ready_tasks.push(TaskSummary {
+            id: "task-open".to_string(),
+            title: "Open Task".to_string(),
+            status: TaskStatus::Open,
+            priority: Priority::MEDIUM,
+            assignee: Some("swift-fox".to_string()),
+            task_type: TaskType::Task,
+            epic: None,
+            branch: None,
+            updated_at: None,
+            epic_verification_owner: None,
+        });
+        assert!(worker_now_has_real_assignment(&data, "swift-fox"));
+    }
+
+    /// A non-WorkerIdle prompt (e.g. `TaskAssigned`) must never carry
+    /// `retract_worker` — that tag is specific to WorkerIdle-class alerts,
+    /// and accidentally tagging other prompt kinds would let
+    /// `prune_stale_idle_alerts` retract the wrong thing.
+    #[test]
+    fn test_task_assigned_prompt_has_no_retract_worker() {
+        let event = DirectorEvent::TaskAssigned {
+            task_id: "cas-1234".to_string(),
+            task_title: "Some task".to_string(),
+            worker: "swift-fox".to_string(),
+        };
+        let config = default_config();
+        let data = make_data(0);
+        let prompt = generate_prompt(
+            &event,
+            &data,
+            &data,
+            "supervisor",
+            &config,
+            codex(),
+            codex(),
+            &HashSet::new(),
+            None,
+        )
+        .expect("TaskAssigned must produce a prompt");
+        assert_eq!(
+            prompt.retract_worker, None,
+            "only WorkerIdle-class prompts should carry retract_worker"
         );
     }
 

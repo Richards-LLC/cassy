@@ -29,6 +29,7 @@ pub use prompts::{
     MergeAlertFreshness, Prompt, check_merge_alert_freshness, compute_gated_task_ids,
     generate_prompt, revalidate_event_for_delivery_with_context,
     revalidate_event_for_delivery_with_focus, with_response_instructions,
+    worker_now_has_real_assignment,
 };
 // PanelAreas, SidecarFocus, SidecarState, ViewMode, DiffLine, DiffLineType, render, render_with_state are already public in this module
 

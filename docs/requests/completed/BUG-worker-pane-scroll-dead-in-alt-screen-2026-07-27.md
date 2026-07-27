@@ -1,8 +1,33 @@
+---
+filed: 2026-05-07
+refiled: 2026-07-27
+resolved: 2026-07-27
+priority: P2
+cas_task: cas-3f23
+status: DUPLICATE
+duplicate_of: docs/requests/completed/SHIPPED-worker-pane-mouse-wheel-alt-screen.md
+---
+
 # BUG: Worker pane mouse wheel / touch scroll does nothing while inner TUI is in alt-screen (Claude Code)
 
 **Filed:** 2026-05-07 (originally as Penguinz task cas-c08d, P1; moved to this inbox 2026-07-27 — CAS-tooling issue, wrong board)
 **Affected version:** `cas 2.13.0 (7450278 2026-05-06)`
-**Prior history:** reported before; prior fix attempt did not land the behavior.
+**Status:** RESOLVED — duplicate, see Resolution below.
+**Prior history:** the "prior fix attempt [that] did not land the behavior" referenced by the original 2026-05-07 report is `53a7bf4` (cas-d5fa) — it forwarded arrow-key bytes, which landed in Claude Code's prompt-input history instead of scrolling the transcript. It was superseded seven days later by `678f75b` (cas-f93a), which switched to PgUp/PgDn bytes and was empirically A/B confirmed by the user to work. This report was re-filed on 2026-07-27 reusing the original's stale `cas 2.13.0` text without checking whether f93a had already landed — see Resolution.
+
+## Resolution (2026-07-27, cas-3f23)
+
+**Duplicate of `docs/requests/completed/SHIPPED-worker-pane-mouse-wheel-alt-screen.md`.** This report was filed against a `cas 2.13.0` binary using `strings`-derived file:line notes; those notes are stale. On current `main` (v2.29.0, commit `8879819`), the exact behavior requested here is already implemented and covered by automated tests:
+
+- Alt-screen detection: `crates/cas-mux/src/pane/mod.rs` scans the raw PTY byte stream for DEC private-mode 1049/47/1047 (`update_alt_screen`, `is_in_alt_screen`); exposed fleet-wide via `Mux::focused_is_in_alt_screen()` (`crates/cas-mux/src/mux.rs:1168`).
+- Dispatch: `FactoryApp::handle_scroll_up`/`handle_scroll_down` (`cas-cli/src/ui/factory/app/sidecar_and_selection.rs:574`/`607`) return `ScrollAction::AltScreen` when the focused pane is in alt-screen and no dialog/help/Mission-Control overlay suppresses forwarding; otherwise they fall through to local `Pane::scroll` (host scrollback) — no regression for shell panes.
+- Forwarding: on `ScrollAction::AltScreen`, wheel and PgUp/PgDn both forward harness-aware bytes to the inner PTY via the existing `Mux::send_input` path (`cas-cli/src/ui/factory/daemon/runtime/client_input.rs:157-194` for wheel, `:722-753` for PgUp/PgDn) — PgUp/PgDn (`\x1b[5~`/`\x1b[6~`) for Claude/Codex, SGR wheel for Grok (`alt_screen_wheel_bytes`, `sidecar_and_selection.rs:60`).
+- F1 help text (`cas-cli/src/ui/factory/app/render_and_ops/rendering/dialogs.rs:1156`, "Scroll → Scroll focused pane") is accurate for current behavior.
+- `"Failed to scroll terminal: code …"` (`crates/ghostty_vt/src/lib.rs:39`) is a genuine `ghostty_vt` error variant, not the alt-screen no-op case — that case is now intercepted before reaching `Pane::scroll`.
+
+Verified locally: `cargo test -p cas --lib sidecar_and_selection` (25/25 pass, including `pgup_dispatch_fires_when_alt_screen_active`, `pgdn_dispatch_fires_when_alt_screen_active`, `wheel_scroll_no_regress_when_not_in_alt_screen`, `scroll_changes_dialog_blocks_alt_screen_forwarding_cas_72c3`) and `cargo test -p cas-mux --lib pane::` (35/35 pass, including the `update_alt_screen_*` DEC-sequence scanner suite). No code changes made — closing as duplicate/already-shipped.
+
+**Manual verification still required** (cannot be automated — see task cas-3f23 notes for the human test plan): confirm on a build ≥ commit `678f75b` at an actual Konsole terminal and over Termux/SSH that wheel-up/PgUp scroll a focused Claude Code worker pane's transcript, and that a plain shell pane still scrolls its own host-side scrollback.
 
 ## Summary
 

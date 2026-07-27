@@ -682,6 +682,10 @@ async fn test_a844_merge_conflict_flags_task_and_names_alternative() {
         close_text.contains("task action=start") || close_text.contains("action=start"),
         "refusal must name the worker task-start alternative: {close_text}"
     );
+    assert!(
+        close_text.contains("seed.txt"),
+        "refusal must name the actual conflicting file(s), not just say 'conflict': {close_text}"
+    );
 
     let parked = task_store.get(&id_a).expect("A exists");
     assert_eq!(parked.status, TaskStatus::AwaitingMerge);

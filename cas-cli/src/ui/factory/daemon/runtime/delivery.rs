@@ -151,6 +151,17 @@ pub(crate) fn pty_payload_needs_framing(harness: SupervisorCli) -> bool {
     matches!(harness, SupervisorCli::Codex)
 }
 
+/// Pure decision (cas-893c): given the recipient's *primary* delivery
+/// channel, should an idle nudge additionally run?
+///
+/// Only `TeamsInbox` qualifies — a `Pty`-delivered recipient (Codex, Grok, or
+/// a Claude recipient in a non-teams factory) already received the message
+/// over the one channel it can read; nudging again would type the same text
+/// a second time into its pane.
+pub(crate) fn idle_nudge_applies(channel: DeliveryChannel) -> bool {
+    channel == DeliveryChannel::TeamsInbox
+}
+
 /// Prefix PTY-delivered text with literal sender attribution.
 ///
 /// Emits exactly `Message from <sender>: <text>` — no summary interpolation before
@@ -239,6 +250,88 @@ impl FactoryDaemon {
                     .map_err(Into::into)
             }
         }
+    }
+
+    /// Like [`Self::deliver_to_worker`], but when the recipient's channel is
+    /// the Claude Agent-Teams inbox AND the caller has established the
+    /// recipient is genuinely idle, also PTY-nudge the same payload directly
+    /// into the pane (cas-893c).
+    ///
+    /// Root cause this addresses: `TeamsInbox` delivery is a plain file
+    /// write (`TeamsManager::write_to_inbox`). Claude Code polls its inbox at
+    /// turn boundaries; a worker parked idle awaiting input has no upcoming
+    /// turn boundary, so the write can sit unread indefinitely — the daemon
+    /// marks the queue row transport-delivered the moment the write
+    /// succeeds, but "transport delivered" is not "received" (cas can't
+    /// observe Claude Code's internal read-tracking; see the `read` field
+    /// comment on `InboxMessage`). Idle is the one moment a plain (non-
+    /// cancelling) PTY inject is safe: there is no in-flight turn to
+    /// disturb, so typing the message directly creates a genuine new turn
+    /// the same way a human pressing Enter would.
+    ///
+    /// No-op (beyond the primary delivery) when:
+    /// - `worker_is_idle` is false — normal inbox write only, matching prior
+    ///   behavior exactly.
+    /// - The chosen channel is already `Pty` (Codex, Grok, or a Claude
+    ///   recipient in a non-teams factory) — that recipient already got the
+    ///   message over the only channel it reads; nudging again would
+    ///   double-submit the same text.
+    ///
+    /// The nudge is best-effort: a failure is logged, not propagated,
+    /// because the primary inbox write already succeeded by the time this
+    /// runs — the message is not lost, only the idle fast-path failed and
+    /// the worker will still see it whenever it next reaches a turn
+    /// boundary on its own.
+    pub(crate) async fn deliver_to_worker_with_idle_nudge(
+        &self,
+        target: &str,
+        source: &str,
+        text: &str,
+        summary: Option<&str>,
+        color: Option<&str>,
+        worker_is_idle: bool,
+    ) -> anyhow::Result<()> {
+        self.deliver_to_worker(target, source, text, summary, color)
+            .await?;
+
+        if !worker_is_idle {
+            return Ok(());
+        }
+
+        let pane_target = if target == "supervisor" {
+            self.app.supervisor_name()
+        } else {
+            target
+        };
+        let teams_active = self.teams.is_some();
+        let harness = self.app.harness_for(pane_target);
+        if !idle_nudge_applies(choose_channel(harness, teams_active)) {
+            // Already PTY-delivered by the primary call above.
+            return Ok(());
+        }
+
+        let payload = frame_pty_payload(harness, source, text);
+        match self.app.mux.inject(pane_target, &payload).await {
+            Ok(()) => {
+                tracing::info!(
+                    target: "cas::coordination",
+                    stage = "idle_nudge",
+                    target_agent = %pane_target,
+                    "cas-893c: nudged idle worker via PTY in addition to teams-inbox write"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "cas::coordination",
+                    stage = "idle_nudge",
+                    target_agent = %pane_target,
+                    error = %e,
+                    "cas-893c: idle PTY nudge failed; inbox write already succeeded, worker will \
+                     still see the message at its next natural turn boundary"
+                );
+            }
+        }
+        Ok(())
     }
 }
 
@@ -381,6 +474,34 @@ mod tests {
             frame_pty_payload(SupervisorCli::Codex, "worker-2", "blocker: need merge"),
             "Message from worker-2: blocker: need merge"
         );
+    }
+
+    /// cas-893c: the idle-nudge fast path only applies to the TeamsInbox
+    /// channel — Pty-delivered recipients already got the message the one
+    /// way they can read it.
+    #[test]
+    fn idle_nudge_applies_only_to_teams_inbox_channel() {
+        assert!(idle_nudge_applies(DeliveryChannel::TeamsInbox));
+        assert!(!idle_nudge_applies(DeliveryChannel::Pty));
+    }
+
+    /// cas-893c: end-to-end sanity over the real `choose_channel` matrix —
+    /// the idle nudge should fire for exactly the shapes where the primary
+    /// channel is TeamsInbox (Claude recipient, teams active) and never for
+    /// any Pty-delivered shape (Codex/Grok always, or Claude without teams).
+    #[test]
+    fn idle_nudge_fires_only_for_claude_teams_recipients() {
+        for harness in [SupervisorCli::Claude, SupervisorCli::Codex, SupervisorCli::Grok] {
+            for teams_active in [true, false] {
+                let channel = choose_channel(harness, teams_active);
+                let expect_nudge = harness == SupervisorCli::Claude && teams_active;
+                assert_eq!(
+                    idle_nudge_applies(channel),
+                    expect_nudge,
+                    "harness={harness:?} teams_active={teams_active} channel={channel:?}"
+                );
+            }
+        }
     }
 
     /// cas-ab80: Claude and Grok stay bare under urgent and normal paths alike.

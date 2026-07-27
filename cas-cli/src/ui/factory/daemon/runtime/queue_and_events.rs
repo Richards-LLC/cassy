@@ -190,6 +190,56 @@ impl FactoryDaemon {
         IDLE_PREFIXES.iter().any(|prefix| lower.starts_with(prefix))
     }
 
+    /// cas-893c: whether `target` looks idle enough that a plain (non-
+    /// cancelling) PTY nudge is safe right now.
+    ///
+    /// Deliberately independent of the director's `consecutive_idle_ticks`
+    /// debounce (`director/events.rs`) — that machinery exists to avoid
+    /// flooding the *supervisor* with repeated `WorkerIdle` notifications,
+    /// and once a supervisor message lands during an idle streak it sets
+    /// `idle_handled_by_supervisor`, which permanently short-circuits that
+    /// debounce for the rest of the streak (see task notes on cas-893c).
+    /// This is a different question — "is it safe to type into this pane
+    /// right now" — answered fresh on every delivery attempt, using the same
+    /// fresh-heartbeat + recent-activity signals the director uses
+    /// (`FRESH_HEARTBEAT_SECS` / `RECENT_ACTIVITY_SECS`) so the two notions
+    /// of "idle" in this codebase stay consistent without sharing mutable
+    /// state.
+    ///
+    /// Conservative on missing data: an unknown agent (e.g. mid-spawn) is
+    /// treated as NOT idle so delivery falls back to the plain inbox write
+    /// rather than guessing.
+    fn worker_looks_idle(
+        data: &crate::ui::factory::director::DirectorData,
+        target: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> bool {
+        use crate::ui::factory::director::{FRESH_HEARTBEAT_SECS, RECENT_ACTIVITY_SECS};
+
+        let Some(agent) = data.agents.iter().find(|a| a.name == target) else {
+            return false;
+        };
+        if agent.current_task.is_some() {
+            return false;
+        }
+        let has_fresh_heartbeat = agent
+            .last_heartbeat
+            .map(|hb| {
+                let age_secs = (now - hb).num_seconds();
+                age_secs >= 0 && age_secs < FRESH_HEARTBEAT_SECS
+            })
+            .unwrap_or(false);
+        let has_recent_activity = agent
+            .latest_activity
+            .as_ref()
+            .map(|(_, ts)| {
+                let age_secs = (now - *ts).num_seconds();
+                age_secs >= 0 && age_secs < RECENT_ACTIVITY_SECS
+            })
+            .unwrap_or(false);
+        !(has_fresh_heartbeat && has_recent_activity)
+    }
+
     /// Bounded settle window between an urgent turn-break (Esc) and the
     /// follow-up inject (cas-c931).
     ///
@@ -619,12 +669,24 @@ impl FactoryDaemon {
                     // name normalisation handled inside the helper.
                     // color=None: peer/supervisor senders; team manager resolves
                     // configured color from the sender's team record.
-                    self.deliver_to_worker(
+                    //
+                    // cas-893c: when the target is a worker (not the
+                    // supervisor) and looks genuinely idle right now, also
+                    // PTY-nudge the teams-inbox write so it isn't left
+                    // sitting in a file nobody is polling.
+                    let worker_is_idle = target != "supervisor"
+                        && Self::worker_looks_idle(
+                            self.app.director_data(),
+                            target.as_str(),
+                            chrono::Utc::now(),
+                        );
+                    self.deliver_to_worker_with_idle_nudge(
                         target,
                         &inbox_source,
                         &prompt_with_instructions,
                         queued.summary.as_deref(),
                         None,
+                        worker_is_idle,
                     )
                     .await
                 };
@@ -1653,9 +1715,121 @@ mod tests {
         shutdown_targets, take_next_pending_spawn,
     };
     use crate::ui::factory::daemon::{FactoryDaemon, PendingSpawn};
-    use crate::ui::factory::director::{AgentSummary, DirectorEvent};
+    use crate::ui::factory::director::{AgentSummary, DirectorData, DirectorEvent};
     use cas_types::AgentStatus;
-    use std::collections::VecDeque;
+    use std::collections::{HashMap, VecDeque};
+
+    // -----------------------------------------------------------------------
+    // cas-893c: idle-nudge eligibility (`FactoryDaemon::worker_looks_idle`)
+    // -----------------------------------------------------------------------
+
+    fn agent_summary(
+        name: &str,
+        current_task: Option<&str>,
+        last_heartbeat: Option<chrono::DateTime<chrono::Utc>>,
+        latest_activity: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> AgentSummary {
+        AgentSummary {
+            id: format!("id-{name}"),
+            name: name.to_string(),
+            status: AgentStatus::Active,
+            registered_at: chrono::Utc::now(),
+            current_task: current_task.map(str::to_string),
+            latest_activity: latest_activity.map(|ts| ("checkpoint".to_string(), ts)),
+            last_heartbeat,
+            pending_messages: 0,
+            pending_supervisor_messages: 0,
+            latest_supervisor_message_at: None,
+            active_lease: None,
+            effort: None,
+        }
+    }
+
+    fn director_data_with(agents: Vec<AgentSummary>) -> DirectorData {
+        DirectorData {
+            ready_tasks: vec![],
+            in_progress_tasks: vec![],
+            epic_tasks: vec![],
+            agents,
+            activity: vec![],
+            agent_id_to_name: HashMap::new(),
+            changes: vec![],
+            git_loaded: true,
+            reminders: vec![],
+            epic_closed_counts: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn worker_looks_idle_true_for_taskless_worker_with_no_signals() {
+        let now = chrono::Utc::now();
+        let data = director_data_with(vec![agent_summary("swift-fox", None, None, None)]);
+        assert!(
+            FactoryDaemon::worker_looks_idle(&data, "swift-fox", now),
+            "no current task and no heartbeat/activity data at all must read as idle \
+             (an absent signal is inactive, not treated as busy — mirrors the \
+             director's WorkerIdle gate)"
+        );
+    }
+
+    #[test]
+    fn worker_looks_idle_false_when_current_task_set() {
+        let now = chrono::Utc::now();
+        let data = director_data_with(vec![agent_summary(
+            "swift-fox",
+            Some("cas-1234"),
+            None,
+            None,
+        )]);
+        assert!(
+            !FactoryDaemon::worker_looks_idle(&data, "swift-fox", now),
+            "a worker holding a current task must never be nudged"
+        );
+    }
+
+    #[test]
+    fn worker_looks_idle_false_when_heartbeat_and_activity_both_fresh() {
+        let now = chrono::Utc::now();
+        let data = director_data_with(vec![agent_summary(
+            "swift-fox",
+            None,
+            Some(now - chrono::Duration::seconds(5)),
+            Some(now - chrono::Duration::seconds(5)),
+        )]);
+        assert!(
+            !FactoryDaemon::worker_looks_idle(&data, "swift-fox", now),
+            "fresh heartbeat + fresh activity means between-turns, not idle — \
+             nudging here would type into a pane that's still mid-work"
+        );
+    }
+
+    #[test]
+    fn worker_looks_idle_true_when_heartbeat_or_activity_is_stale() {
+        let now = chrono::Utc::now();
+        // Heartbeat long past FRESH_HEARTBEAT_SECS (60s).
+        let data = director_data_with(vec![agent_summary(
+            "swift-fox",
+            None,
+            Some(now - chrono::Duration::seconds(300)),
+            Some(now - chrono::Duration::seconds(5)),
+        )]);
+        assert!(
+            FactoryDaemon::worker_looks_idle(&data, "swift-fox", now),
+            "a stale heartbeat alone is enough to fail the fresh+recent AND gate, \
+             so this must read as idle even with recent activity recorded"
+        );
+    }
+
+    #[test]
+    fn worker_looks_idle_false_for_unknown_agent() {
+        let now = chrono::Utc::now();
+        let data = director_data_with(vec![]);
+        assert!(
+            !FactoryDaemon::worker_looks_idle(&data, "ghost-worker", now),
+            "an agent absent from DirectorData (e.g. mid-spawn) must not be \
+             guessed idle — fall back to the plain inbox write"
+        );
+    }
 
     #[test]
     fn shutdown_bypasses_an_in_flight_spawn_without_reordering_other_actions() {

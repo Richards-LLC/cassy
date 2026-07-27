@@ -408,7 +408,20 @@ impl FactoryDaemon {
 
             // Skip PTY injection for native extension agents that use plain PTY mode —
             // they poll the queue and deliver messages via their own extension API.
+            //
+            // cas-7210 AC4: this used to be a bare `continue` — the row stayed
+            // `processed_at IS NULL` (correctly, since this daemon isn't the
+            // one delivering it) but left no forensic trail explaining why, so
+            // `message_status` on such a row looked identical to a message
+            // stuck for an unknown/unexplained reason. Record the (accurate,
+            // non-blocking) reason so the distinction is visible without
+            // changing the retry/ownership semantics at all.
             if target != "all_workers" && native_agents.contains(target.as_str()) {
+                let _ = queue.record_pending_reason(
+                    queued.id,
+                    cas_store::PendingReason::AwaitingDelivery,
+                    Some("native extension agent — delivered via its own polling API, not daemon PTY/inbox"),
+                );
                 continue;
             }
 

@@ -139,6 +139,32 @@ pub(super) fn execute_cleanup(args: &FactoryArgs) -> Result<()> {
 
     let report = manager.cleanup_workers(true)?;
 
+    // cas-df97: live external symlinks (e.g. a dotfile stow/install step
+    // mistakenly run inside a worktree) resolve into a worktree we would
+    // otherwise remove — surface it loudly instead of silently orphaning
+    // every one of those links. Independent of --force: force means
+    // "bypass git dirty-tree protection", not "destroy my $HOME symlinks".
+    if !report.external_symlinks_blocked.is_empty() {
+        fmt.newline()?;
+        StatusLine::warning(format!(
+            "{} worktree director{} preserved — live external symlinks point into them:",
+            report.external_symlinks_blocked.len(),
+            if report.external_symlinks_blocked.len() == 1 { "y" } else { "ies" },
+        ))
+        .render(&mut fmt)?;
+        for warning in &report.external_symlinks_blocked {
+            fmt.bullet(&format!("{} ({})", warning.worker_name, warning.path.display()))?;
+            for link in &warning.links {
+                fmt.bullet(&format!(
+                    "  {} -> {}",
+                    link.link.display(),
+                    link.target.display()
+                ))?;
+            }
+        }
+        fmt.newline()?;
+    }
+
     fmt.newline()?;
     fmt.info(&format!(
         "Removed {} worktree directories:",

@@ -636,3 +636,119 @@ fn test_fetch_branch_bounded_times_out_fast_on_hung_remote() {
         "fetch_branch must not block for git's full TCP connect/retry window; took {elapsed:?}"
     );
 }
+
+// --- cas-006c: classify_dirty_status (blocking vs warning vs CAS-excluded) --
+
+#[test]
+fn test_classify_dirty_status_clean_repo_is_empty() {
+    let (_temp, repo_path) = create_test_repo();
+    let git = GitOperations::new(repo_path.clone());
+
+    let status = git.classify_dirty_status(&repo_path).unwrap();
+
+    assert!(status.blocking.is_empty());
+    assert!(status.warnings.is_empty());
+    assert!(!status.is_blocked());
+}
+
+/// Commit a tracked `.husky/pre-commit` placeholder so `.husky/` itself is
+/// already known to git — matching real repos where husky's tracked hook
+/// scripts are committed. Only the `_` runner subdir is left untracked,
+/// which is why git reports it individually (`?? .husky/_/`) instead of
+/// collapsing the whole `.husky/` directory into one untracked entry.
+fn commit_tracked_husky_dir(repo_path: &Path) {
+    std::fs::create_dir_all(repo_path.join(".husky")).unwrap();
+    std::fs::write(repo_path.join(".husky/pre-commit"), "#!/bin/sh\n").unwrap();
+    Command::new("git")
+        .args(["add", ".husky/pre-commit"])
+        .current_dir(repo_path)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "add husky pre-commit hook"])
+        .current_dir(repo_path)
+        .output()
+        .unwrap();
+}
+
+#[test]
+fn test_classify_dirty_status_husky_underscore_artifact_is_excluded_entirely() {
+    let (_temp, repo_path) = create_test_repo();
+    let git = GitOperations::new(repo_path.clone());
+    commit_tracked_husky_dir(&repo_path);
+
+    // The exact false-positive from the bug report: an untracked `.husky/_/`
+    // directory the worker startup hook creates itself.
+    std::fs::create_dir_all(repo_path.join(".husky/_")).unwrap();
+    std::fs::write(repo_path.join(".husky/_/husky.sh"), "# shim").unwrap();
+
+    let status = git.classify_dirty_status(&repo_path).unwrap();
+
+    assert!(
+        status.blocking.is_empty(),
+        "husky artifact must never block: {:?}",
+        status.blocking
+    );
+    assert!(
+        status.warnings.is_empty(),
+        "husky artifact must not even warn — it's CAS's own droppings: {:?}",
+        status.warnings
+    );
+    assert!(!status.is_blocked());
+}
+
+#[test]
+fn test_classify_dirty_status_modified_tracked_file_blocks_and_is_named() {
+    let (_temp, repo_path) = create_test_repo();
+    let git = GitOperations::new(repo_path.clone());
+
+    std::fs::write(repo_path.join("README.md"), "# Modified").unwrap();
+
+    let status = git.classify_dirty_status(&repo_path).unwrap();
+
+    assert!(status.is_blocked());
+    assert_eq!(status.blocking.len(), 1);
+    assert_eq!(status.blocking[0].path, "README.md");
+    assert!(status.warnings.is_empty());
+    assert!(status.describe_blocking().contains("README.md"));
+}
+
+#[test]
+fn test_classify_dirty_status_untracked_non_cas_path_warns_not_blocks() {
+    let (_temp, repo_path) = create_test_repo();
+    let git = GitOperations::new(repo_path.clone());
+
+    std::fs::write(repo_path.join("scratch.txt"), "draft").unwrap();
+
+    let status = git.classify_dirty_status(&repo_path).unwrap();
+
+    assert!(
+        !status.is_blocked(),
+        "untracked non-CAS paths must not block a merge/removal"
+    );
+    assert_eq!(status.warnings.len(), 1);
+    assert_eq!(status.warnings[0].path, "scratch.txt");
+    assert!(status.describe_warnings().contains("scratch.txt"));
+}
+
+#[test]
+fn test_classify_dirty_status_mixed_only_tracked_change_blocks() {
+    let (_temp, repo_path) = create_test_repo();
+    let git = GitOperations::new(repo_path.clone());
+    commit_tracked_husky_dir(&repo_path);
+
+    // Real modified work, an unrelated untracked scratch file, AND the CAS
+    // husky artifact all at once — only the modified file should block.
+    std::fs::write(repo_path.join("README.md"), "# Modified").unwrap();
+    std::fs::write(repo_path.join("scratch.txt"), "draft").unwrap();
+    std::fs::create_dir_all(repo_path.join(".husky/_")).unwrap();
+    std::fs::write(repo_path.join(".husky/_/husky.sh"), "# shim").unwrap();
+
+    let status = git.classify_dirty_status(&repo_path).unwrap();
+
+    assert!(status.is_blocked());
+    assert_eq!(status.blocking.len(), 1);
+    assert_eq!(status.blocking[0].path, "README.md");
+    assert_eq!(status.warnings.len(), 1);
+    assert_eq!(status.warnings[0].path, "scratch.txt");
+}

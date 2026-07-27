@@ -490,7 +490,10 @@ async fn test_worker_cannot_reopen_closed_task() {
     let id = create_started_and_closed_light_task(&core, "worker reopen rejection").await;
 
     let result = core
-        .cas_task_reopen(Parameters(IdRequest { id: id.clone() }))
+        .cas_task_reopen(Parameters(TaskReopenRequest {
+            id: id.clone(),
+            reason: None,
+        }))
         .await;
 
     match result {
@@ -532,9 +535,12 @@ async fn test_supervisor_can_reopen_closed_task() {
             std::env::set_var("CAS_AGENT_ROLE", "supervisor");
         }
         let text = extract_text(
-            core.cas_task_reopen(Parameters(IdRequest { id: id.clone() }))
-                .await
-                .expect("supervisor reopen should succeed"),
+            core.cas_task_reopen(Parameters(TaskReopenRequest {
+                id: id.clone(),
+                reason: None,
+            }))
+            .await
+            .expect("supervisor reopen should succeed"),
         );
         unsafe {
             std::env::remove_var("CAS_AGENT_ROLE");
@@ -552,6 +558,172 @@ async fn test_supervisor_can_reopen_closed_task() {
         TaskStatus::Open,
         "supervisor reopen must transition the task back to Open"
     );
+}
+
+/// cas-cd24 AC1: `reopen` on a Blocked task transitions it to Open and
+/// records the supplied reason on the audit trail (task.notes) — the
+/// motivating case from BUG-blocked-tasks-cannot-be-reopened.md (a
+/// supervisor withdraws an acceptance criterion that wrongly blocked the
+/// task, and needs a documented way to put it back in play).
+#[tokio::test]
+async fn test_cd24_supervisor_can_reopen_blocked_task_with_reason() {
+    let (temp, core) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    let task_store = open_task_store(&cas_dir).unwrap();
+
+    let created = core
+        .cas_task_create(Parameters(create_req("blocked reopen with reason", Some("light"))))
+        .await
+        .expect("task_create should succeed");
+    let id = extract_task_id(&extract_text(created))
+        .expect("should have task ID")
+        .to_string();
+
+    // Force the task into Blocked directly — there is no dedicated "block"
+    // MCP action; workers block a task via `update status=blocked`, which
+    // this bypasses to isolate the reopen behavior under test.
+    {
+        let mut task = task_store.get(&id).expect("task should exist");
+        task.status = TaskStatus::Blocked;
+        task_store.update(&task).expect("force task to Blocked");
+    }
+
+    let reopen_text = {
+        // SAFETY: held under env_test_lock() for the whole scope.
+        unsafe {
+            std::env::set_var("CAS_AGENT_ROLE", "supervisor");
+        }
+        let text = extract_text(
+            core.cas_task_reopen(Parameters(TaskReopenRequest {
+                id: id.clone(),
+                reason: Some("Withdrew the iOS background-auto-start AC — Apple does not permit it.".to_string()),
+            }))
+            .await
+            .expect("supervisor reopen of a blocked task should succeed"),
+        );
+        unsafe {
+            std::env::remove_var("CAS_AGENT_ROLE");
+        }
+        text
+    };
+    assert!(
+        reopen_text.contains("Reopened task:"),
+        "blocked-task reopen should succeed: {reopen_text}"
+    );
+
+    let task = task_store.get(&id).expect("task should exist");
+    assert_eq!(
+        task.status,
+        TaskStatus::Open,
+        "reopen must transition a Blocked task to Open"
+    );
+    assert!(
+        task.notes.contains("Withdrew the iOS background-auto-start AC"),
+        "reopen reason must be captured in the audit trail (task.notes): {:?}",
+        task.notes
+    );
+    assert!(
+        task.notes.contains("Unblocked"),
+        "blocked-task reopen note should say Unblocked, not Reopened: {:?}",
+        task.notes
+    );
+}
+
+/// cas-cd24 AC2: Closed->Open reopen behavior is unchanged by the
+/// blocked-task support — `closed_at` still clears on reopen.
+#[tokio::test]
+async fn test_cd24_closed_reopen_still_clears_closed_at() {
+    let (temp, core) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    let task_store = open_task_store(&cas_dir).unwrap();
+
+    let id = create_started_and_closed_light_task(&core, "closed reopen clears closed_at").await;
+    let closed_task = task_store.get(&id).expect("task should exist");
+    assert!(
+        closed_task.closed_at.is_some(),
+        "sanity: a closed task must carry closed_at"
+    );
+
+    {
+        // SAFETY: held under env_test_lock() for the whole scope.
+        unsafe {
+            std::env::set_var("CAS_AGENT_ROLE", "supervisor");
+        }
+        core.cas_task_reopen(Parameters(TaskReopenRequest {
+            id: id.clone(),
+            reason: None,
+        }))
+        .await
+        .expect("supervisor reopen should succeed");
+        unsafe {
+            std::env::remove_var("CAS_AGENT_ROLE");
+        }
+    }
+
+    let reopened = task_store.get(&id).expect("task should exist");
+    assert_eq!(reopened.status, TaskStatus::Open);
+    assert!(
+        reopened.closed_at.is_none(),
+        "cas-cd24 must not change the existing Closed->Open closed_at reset"
+    );
+}
+
+/// cas-cd24 AC1 (error-message half of the fix): a task that is neither
+/// Closed nor Blocked still gets a clear rejection, and the rejection now
+/// names the working alternative (`update status=open`) instead of the old
+/// "only closed tasks can be reopened" dead end.
+#[tokio::test]
+async fn test_cd24_reopen_rejects_other_statuses_and_names_alternative() {
+    let (temp, core) = setup_cas();
+    let _env_lock = env_test_lock();
+
+    let created = core
+        .cas_task_create(Parameters(create_req(
+            "in-progress task cannot be reopened",
+            Some("light"),
+        )))
+        .await
+        .expect("task_create should succeed");
+    let id = extract_task_id(&extract_text(created))
+        .expect("should have task ID")
+        .to_string();
+    core.cas_task_start(Parameters(IdRequest { id: id.clone() }))
+        .await
+        .expect("task_start should succeed");
+
+    let result = {
+        // SAFETY: held under env_test_lock() for the whole scope.
+        unsafe {
+            std::env::set_var("CAS_AGENT_ROLE", "supervisor");
+        }
+        let r = core
+            .cas_task_reopen(Parameters(TaskReopenRequest {
+                id: id.clone(),
+                reason: None,
+            }))
+            .await;
+        unsafe {
+            std::env::remove_var("CAS_AGENT_ROLE");
+        }
+        let _ = temp;
+        r
+    };
+
+    match result {
+        Err(e) => {
+            let msg = e.message.to_string();
+            assert!(
+                msg.contains("update id=") && msg.contains("status=open"),
+                "rejection must name the update-status-open alternative: {msg}"
+            );
+        }
+        Ok(ok) => panic!(
+            "expected reopen to be rejected for an in-progress task, got: {}",
+            extract_text(ok)
+        ),
+    }
 }
 
 /// The start-on-closed error message must no longer tell a worker to

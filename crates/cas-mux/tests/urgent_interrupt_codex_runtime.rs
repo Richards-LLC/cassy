@@ -232,3 +232,198 @@ fn multiline_urgent_interrupt_recovers_codex_and_stays_reachable() {
 
     let _ = std::fs::remove_dir_all(&scratch);
 }
+
+/// Live-binary verification for cas-1317: does `Mux::interrupt_and_inject`
+/// recover an ALREADY-IDLE Codex worker — one whose first turn ended
+/// normally (`task_complete` in the rollout, not a cancel) before the urgent
+/// ever arrives?
+///
+/// This is a different shape from
+/// `multiline_urgent_interrupt_recovers_codex_and_stays_reachable` above,
+/// which deliberately catches the pane MID-TURN. The original incident
+/// (task cas-1317 notes) recorded a worker that finished its turn normally,
+/// sat idle for ~3 minutes, then received an urgent that started nothing —
+/// no new rollout record ever appeared. v2.31.0's fix
+/// (`wait_for_injection_readiness`'s quiescence poll) was verified only
+/// against the mid-turn case; for an idle pane the poll is satisfied almost
+/// immediately, so there's a real chance it reduces to the pre-fix
+/// behavior and does NOT cover this variant. This test exercises that path
+/// end to end through the real shipped code
+/// (`Mux::interrupt_and_inject` / `Pane::break_turn`) against a real `codex`
+/// child.
+///
+/// Run explicitly:
+///   cargo test -p cas-mux --test urgent_interrupt_codex_runtime -- --ignored --nocapture already_idle
+#[test]
+#[ignore = "spawns a real `codex` CLI child process — run explicitly, see module docs"]
+fn already_idle_urgent_interrupt_starts_new_turn() {
+    if !codex_available() {
+        eprintln!("SKIP: `codex` not on PATH");
+        return;
+    }
+
+    let scratch = std::env::temp_dir().join(format!(
+        "cas-1317-codex-runtime-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(&scratch).expect("create scratch dir");
+    let _ = std::process::Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .current_dir(&scratch)
+        .status();
+
+    let config = PtyConfig {
+        command: "codex".to_string(),
+        args: vec!["--yolo".to_string(), "--no-alt-screen".to_string()],
+        cwd: Some(scratch.clone()),
+        env: vec![],
+        rows: 24,
+        cols: 80,
+    };
+    let pty = Pty::spawn("cas1317-codex-rt", config).expect("spawn codex pty");
+    let pane = Pane::with_pty("cas1317-codex-rt", PaneKind::Worker, pty, 24, 80, SupervisorCli::Codex)
+        .expect("wrap pty in pane");
+    let mut mux = Mux::new(24, 80);
+    mux.add_pane(pane);
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+    // Drain startup (trust prompt, banner) and accept the trust prompt.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        let _ = mux.poll_batch();
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    rt.block_on(mux.get("cas1317-codex-rt").unwrap().write(b"\r"))
+        .ok();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        let _ = mux.poll_batch();
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    let rollout_deadline = std::time::Instant::now() + Duration::from_secs(15);
+
+    // First turn: short and deterministic, so it completes quickly and
+    // NORMALLY (no cancel involved at all).
+    rt.block_on(mux.inject(
+        "cas1317-codex-rt",
+        "Reply with exactly the text FIRST-TURN-DONE and nothing else.",
+    ))
+    .expect("start first turn");
+
+    let rollout = find_rollout_containing(
+        scratch.to_str().expect("utf8 scratch path"),
+        rollout_deadline,
+    )
+    .expect("rollout file for this scratch cwd must appear");
+
+    // Wait for the first turn to genuinely end on its own — both the reply
+    // text AND an explicit `task_complete` record, so we know this is a
+    // normal completion and not us racing a still-in-flight turn.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut contents = String::new();
+    let mut first_turn_done = false;
+    while std::time::Instant::now() < deadline {
+        let _ = mux.poll_batch();
+        contents.clear();
+        if let Ok(mut f) = std::fs::File::open(&rollout) {
+            let _ = f.read_to_string(&mut contents);
+        }
+        if contents.contains("FIRST-TURN-DONE") && contents.contains("\"type\":\"task_complete\"")
+        {
+            first_turn_done = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    assert!(
+        first_turn_done,
+        "first turn must complete normally (task_complete) before we can test the \
+         idle case — rollout tail:\n{}",
+        contents.lines().rev().take(20).collect::<Vec<_>>().join("\n")
+    );
+
+    // Let the pane go genuinely idle: no more PTY output, well past the
+    // v2.31.0 quiescence poll's own STABILITY_WINDOW (300ms) and MAX_EXTRA_WAIT
+    // (4s), so this urgent cannot benefit from any leftover in-flight state.
+    let idle_until = std::time::Instant::now() + Duration::from_secs(8);
+    while std::time::Instant::now() < idle_until {
+        let _ = mux.poll_batch();
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    eprintln!(
+        "[cas-1317] pane bytes_received before urgent: {:?}",
+        mux.pane_bytes_received("cas1317-codex-rt")
+    );
+
+    // The real production floor (queue_and_events.rs urgent_settle_duration
+    // default), not the deliberately-tiny one the mid-turn test uses — this
+    // test is about the idle-pane shape, not the settle-race shape.
+    let production_floor = Duration::from_millis(1200);
+    rt.block_on(mux.interrupt_and_inject(
+        "cas1317-codex-rt",
+        "URGENT: reply with exactly the text IDLE-URGENT-OK and nothing else.",
+        production_floor,
+    ))
+    .expect("interrupt_and_inject must succeed (no PTY/IO error)");
+
+    // Drain and watch for a SECOND task_complete plus the new reply text —
+    // proof a genuine new turn started and finished, not just that the Esc
+    // + write calls returned Ok (they can return Ok while being silently
+    // swallowed by the TUI, which is exactly the reported symptom).
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut saw_idle_reply = false;
+    while std::time::Instant::now() < deadline {
+        let _ = mux.poll_batch();
+        contents.clear();
+        if let Ok(mut f) = std::fs::File::open(&rollout) {
+            let _ = f.read_to_string(&mut contents);
+        }
+        saw_idle_reply = contents.contains("IDLE-URGENT-OK");
+        if saw_idle_reply {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    assert!(
+        saw_idle_reply,
+        "cas-1317: an urgent message to an ALREADY-IDLE Codex worker must still \
+         start a new turn and be acted on — got silence instead (the reported \
+         symptom: worker alive, message never lands). Rollout tail:\n{}",
+        contents.lines().rev().take(30).collect::<Vec<_>>().join("\n")
+    );
+
+    // AC3 (shared with the P0): the worker must remain reachable afterward.
+    rt.block_on(mux.inject(
+        "cas1317-codex-rt",
+        "Confirm you are still reachable by replying STILL-REACHABLE-IDLE-OK.",
+    ))
+    .expect("normal follow-up inject must succeed");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(45);
+    let mut saw_followup = false;
+    while std::time::Instant::now() < deadline {
+        let _ = mux.poll_batch();
+        contents.clear();
+        if let Ok(mut f) = std::fs::File::open(&rollout) {
+            let _ = f.read_to_string(&mut contents);
+        }
+        if contents.contains("STILL-REACHABLE-IDLE-OK") {
+            saw_followup = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    assert!(
+        saw_followup,
+        "worker must still be reachable after the idle-case urgent interrupt — a \
+         normal follow-up message never landed. Rollout tail:\n{}",
+        contents.lines().rev().take(30).collect::<Vec<_>>().join("\n")
+    );
+
+    let _ = std::fs::remove_dir_all(&scratch);
+}

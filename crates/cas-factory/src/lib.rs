@@ -29,6 +29,7 @@ pub mod config;
 pub mod core;
 pub mod director;
 pub mod notify;
+pub mod probe;
 pub mod recording;
 pub mod session;
 pub mod spec_resolver;
@@ -53,6 +54,7 @@ pub use session::state::{
     SessionType,
 };
 pub use spec_resolver::{
-    ConfigSources, SpecResolverError, resolve_specs, resolve_supervisor_spec,
-    worker_slot_cli_configured, worker_slot_effort_configured,
+    ConfigSources, SpecResolverError, apply_codex_fallback, apply_codex_fallback_for_supervisor,
+    resolve_specs, resolve_supervisor_spec, worker_slot_cli_configured,
+    worker_slot_effort_configured,
 };

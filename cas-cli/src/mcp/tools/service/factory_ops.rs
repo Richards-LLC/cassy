@@ -144,6 +144,31 @@ pub(crate) fn build_spawn_spec_json_with_project_config(
     Ok(json)
 }
 
+/// `[factory] strict_cli` lookup for the cas-7199 / cas-a487 Codex-fallback
+/// check applied in `factory_spawn_workers`. Deliberately NOT inside
+/// `build_spawn_spec_json_with_project_config` above: that function is pure
+/// cascade resolution + serialization, exercised directly by unit tests
+/// (e.g. `spawn_spec_omitted_cli_without_config_uses_stock_codex_defaults`)
+/// that assert the stock/default `cli` value itself and run under an
+/// isolated fake `HOME` — folding a REAL `codex_available()` probe in
+/// there would make those tests depend on whether the isolated `HOME`
+/// happens to contain a `.codex/auth.json` (it never does), silently
+/// changing their resolved `cli` out from under them and making the whole
+/// suite depend on the test machine's actual Codex install/login state.
+/// The availability check belongs at the actual "about to queue this for
+/// spawn" checkpoint instead — see `factory_spawn_workers` below, which
+/// mirrors exactly where `cli/factory/mod.rs` applies the same fallback:
+/// AFTER cascade resolution, not inside it.
+fn strict_cli_from_project_config(project_config: Option<&std::path::Path>) -> bool {
+    project_config
+        .and_then(|p| p.parent())
+        .map(|cas_root| {
+            use crate::config::Config;
+            Config::load(cas_root).unwrap_or_default().factory().strict_cli
+        })
+        .unwrap_or(false)
+}
+
 fn spawn_spec_summary(spec_json: &str) -> String {
     match serde_json::from_str::<cas_mux::WorkerSpec>(spec_json) {
         Ok(spec) => format!(
@@ -297,13 +322,53 @@ impl CasService {
         // Resolve a concrete WorkerSpec for every queued spawn. Omitting model
         // or effort must never inherit the supervisor session's frontier-tier
         // defaults by accident.
-        let spec_json_owned: String = build_spawn_spec_json_with_project_config(
+        let mut spec_json_owned: String = build_spawn_spec_json_with_project_config(
             req.cli.as_deref(),
             req.model.as_deref(),
             req.effort.as_deref(),
             Some(self.inner.cas_root.join("config.toml")),
         )
         .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
+
+        // cas-7199 / cas-a487: this is the mid-session `spawn_workers` MCP
+        // path — the one the original incident actually hit (a worker
+        // whose resolved spec requested Codex on a host without it, queued
+        // and only failing much later as a raw PTY spawn error). Applied
+        // HERE — the "about to actually queue this" checkpoint — rather
+        // than inside `build_spawn_spec_json_with_project_config`, so the
+        // pure-resolution unit tests for that function stay independent of
+        // real host Codex install/login state (see
+        // `strict_cli_from_project_config`'s doc comment for why that
+        // matters). Mirrors exactly where `cli/factory/mod.rs` applies the
+        // same fallback: after cascade resolution, not inside it.
+        let mut codex_fallback_notice = String::new();
+        if let Ok(mut spec) = serde_json::from_str::<cas_mux::WorkerSpec>(&spec_json_owned) {
+            let strict_cli =
+                strict_cli_from_project_config(Some(&self.inner.cas_root.join("config.toml")));
+            let claude_default_model = default_worker_model_for_cli(cas_mux::SupervisorCli::Claude);
+            let notices = cas_factory::apply_codex_fallback(
+                std::slice::from_mut(&mut spec),
+                strict_cli,
+                Some(claude_default_model),
+            )
+            .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?;
+            if !notices.is_empty() {
+                for notice in &notices {
+                    tracing::warn!(target: "cas::factory", "{notice}");
+                }
+                codex_fallback_notice = format!("\nWarning: {}", notices.join("\nWarning: "));
+                // The fallback rewrote `cli` (and possibly `model`) — the
+                // queued spec and the summary shown back to the caller must
+                // reflect what will ACTUALLY spawn, not the pre-fallback request.
+                spec_json_owned = serde_json::to_string(&spec).map_err(|e| {
+                    Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!("failed to re-serialize worker spec after codex fallback: {e}"),
+                    )
+                })?;
+            }
+        }
+
         let spec_summary = spawn_spec_summary(&spec_json_owned);
         let spec_warning =
             spawn_spec_warning(req.model.is_some(), req.effort.is_some(), &spec_json_owned);
@@ -347,11 +412,11 @@ impl CasService {
 
         let msg = if worker_names.is_empty() {
             format!(
-                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{spec_warning}{task_id_note}"
+                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{task_id_note}"
             )
         } else {
             format!(
-                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{spec_warning}{task_id_note}",
+                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{task_id_note}",
                 worker_names.join(", "),
                 request_id
             )
@@ -3097,6 +3162,72 @@ effort = "high"
         assert_eq!(spec.model.as_deref(), Some("opus"));
         assert_eq!(spec.effort, Some(cas_mux::Effort::High));
         assert!(warning.contains("frontier-tier"), "{warning}");
+    }
+
+    // cas-7199 / cas-a487: `strict_cli_from_project_config` tests.
+
+    #[test]
+    fn strict_cli_from_project_config_true_when_set() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("config.toml"),
+            "[factory]\nstrict_cli = true\n",
+        )
+        .unwrap();
+        assert!(strict_cli_from_project_config(Some(
+            &tmp.path().join("config.toml")
+        )));
+    }
+
+    #[test]
+    fn strict_cli_from_project_config_false_by_default() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("config.toml"), "[factory]\n").unwrap();
+        assert!(!strict_cli_from_project_config(Some(
+            &tmp.path().join("config.toml")
+        )));
+    }
+
+    #[test]
+    fn strict_cli_from_project_config_false_when_missing_or_none() {
+        assert!(!strict_cli_from_project_config(None));
+        assert!(!strict_cli_from_project_config(Some(
+            &std::path::PathBuf::from("/tmp/cas-7199-definitely-missing/config.toml")
+        )));
+    }
+
+    /// End-to-end (still deterministic — `HomeGuard::isolated()` guarantees
+    /// no real `~/.codex/auth.json`, so the fallback always fires
+    /// regardless of the test machine's actual Codex install/login state):
+    /// a spec that resolves to Codex, with Codex unavailable, must come
+    /// back rewritten to Claude via `apply_codex_fallback` — the same path
+    /// `factory_spawn_workers` drives. Exercises the resolver + fallback
+    /// composition directly (below the async MCP handler, which needs a
+    /// full task/spawn-queue store to invoke) so this stays a fast unit
+    /// test while still proving the two pieces compose correctly.
+    #[test]
+    fn resolved_codex_spec_falls_back_to_claude_when_codex_unavailable() {
+        let _home = HomeGuard::isolated();
+        let json = build_spawn_spec_json(None, None, None).unwrap();
+        let mut spec = decoded_spawn_spec(&json);
+        assert_eq!(
+            spec.cli,
+            cas_mux::SupervisorCli::Codex,
+            "precondition: stock default must resolve to codex"
+        );
+
+        let claude_default_model = default_worker_model_for_cli(cas_mux::SupervisorCli::Claude);
+        let notices = cas_factory::apply_codex_fallback(
+            std::slice::from_mut(&mut spec),
+            false,
+            Some(claude_default_model),
+        )
+        .unwrap();
+
+        assert_eq!(spec.cli, cas_mux::SupervisorCli::Claude);
+        assert_eq!(spec.model.as_deref(), Some(claude_default_model));
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].contains("codex unavailable"));
     }
 
     #[test]

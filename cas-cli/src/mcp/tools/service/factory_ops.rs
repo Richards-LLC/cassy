@@ -870,7 +870,19 @@ impl CasService {
                     .unwrap_or(false)
                     || in_progress_assignees.contains(agent.name.as_str())
                     || in_progress_assignees.contains(agent.id.as_str());
-                let last_activity = last_worker_activity_secs(&activity_events, &agent.id);
+                // cas-a653: hook-less harnesses (Codex) only emit CAS events
+                // on their own MCP calls — fold in the transcript's own mtime
+                // so this doesn't freeze at the age of the last CAS call
+                // while the worker keeps working via exec_command/apply_patch.
+                // Reuses the same transcript path already resolved above for
+                // context_info/in_flight_tool_call, and the same
+                // wedged::transcript_mtime_age primitive `is-wedged` trusts.
+                let last_activity = last_worker_activity_secs_with_transcript(
+                    &activity_events,
+                    &agent.id,
+                    worker_cli_from_agent(agent),
+                    transcript_path_for_worker.as_deref(),
+                );
                 // cas-d165 (Finding 1): reuse the SAME liveness evidence as
                 // cas-7e85 / `cas factory is-wedged` — an outstanding tool
                 // call (e.g. a dispatched research subagent) proves the
@@ -2057,6 +2069,55 @@ pub(crate) fn last_worker_activity_secs(
             (elapsed, phase)
         })
         .min_by_key(|(elapsed, _)| *elapsed)
+}
+
+/// cas-a653: fold transcript-mtime activity into `last_worker_activity_secs`
+/// for harnesses whose `HarnessCapabilities::supports_hooks` is `false`
+/// (today: Codex only — see `cas_mux::harness::SupervisorCli::capabilities`).
+///
+/// ROOT CAUSE this fixes: a hook-less worker only ever appends to the CAS
+/// **event store** when it voluntarily calls a CAS MCP tool. Its own
+/// `exec_command`/`apply_patch`-class work is invisible to that store, so
+/// `last_worker_activity_secs` alone freezes at the age of the worker's last
+/// CAS call — not the age of its last real activity. A Codex worker doing a
+/// long heads-down stretch (observed live: `worker_status` reported the same
+/// implied timestamp across three samples 20:31:41Z/20:33:55Z/20:34:43Z while
+/// the worker's rollout kept recording tool calls every single minute) is
+/// then structurally indistinguishable from a dead one.
+///
+/// Fix: reuse the SAME primitive `cas factory is-wedged` / the director's
+/// stall gate already trust for this exact harness gap —
+/// `wedged::transcript_mtime_age` against the worker's own resolved
+/// transcript/rollout path — and take whichever of (event-store age,
+/// transcript-mtime age) is FRESHER (smaller). This mirrors the existing
+/// min-of-fresher pattern `wedged::grok_activity_age` already applies across
+/// Grok's `signals.json`/`updates.jsonl` pair, and never regresses hook-
+/// capable harnesses (Claude, Grok — AC5): those return the event-store
+/// value unchanged since this whole path is gated on `!supports_hooks`.
+///
+/// `None` in, `None` out when neither signal resolves — this never invents
+/// an activity age from nothing.
+pub(crate) fn last_worker_activity_secs_with_transcript(
+    events: &[cas_types::Event],
+    agent_id: &str,
+    cli: cas_mux::SupervisorCli,
+    transcript_path: Option<&std::path::Path>,
+) -> Option<(i64, &'static str)> {
+    let event_based = last_worker_activity_secs(events, agent_id);
+    if cli.capabilities().supports_hooks {
+        return event_based;
+    }
+    let Some(path) = transcript_path else {
+        return event_based;
+    };
+    let Some(transcript_age) = crate::cli::factory::wedged::transcript_mtime_age(path) else {
+        return event_based;
+    };
+    let transcript_secs = transcript_age.as_secs() as i64;
+    match event_based {
+        Some((secs, phase)) if secs <= transcript_secs => Some((secs, phase)),
+        _ => Some((transcript_secs, "activity")),
+    }
 }
 
 /// cas-9829: whether a `worker_status` row should render the `⚠ STALLED`
@@ -3246,6 +3307,153 @@ effort = "high"
         assert!(
             elapsed >= 14 && elapsed <= 17,
             "elapsed should be ~15s: {elapsed}"
+        );
+    }
+
+    // --- cas-a653: last_worker_activity_secs_with_transcript ---------------
+    //
+    // Reproduction of the reported defect: a hook-less worker (Codex) whose
+    // last CAS event is far in the past (frozen clock) but whose transcript
+    // is being actively written. Before this fix, `worker_status` fed ONLY
+    // the event-store age into the "last activity" line — indistinguishable
+    // from a genuinely dead worker. These tests pin that the transcript
+    // mtime is now folded in as a second signal, and that Claude/Grok
+    // (hook-capable, AC5) are completely unaffected.
+
+    /// Codex, no CAS events at all, but a transcript that was JUST written —
+    /// must report the transcript's freshness, not `None`. This is the
+    /// literal reported symptom: "last activity: none / frozen" while the
+    /// worker's rollout kept recording tool calls every minute.
+    #[test]
+    fn last_worker_activity_with_transcript_codex_no_events_uses_transcript_mtime() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        // Freshly created/touched -> mtime age ~0s.
+        let got = last_worker_activity_secs_with_transcript(
+            &[],
+            "agent-codex",
+            cas_mux::SupervisorCli::Codex,
+            Some(tmp.path()),
+        );
+        let (elapsed, phase) = got.expect(
+            "a fresh transcript must surface SOME activity age for a hook-less harness, \
+             not None (the frozen/absent-clock symptom cas-a653 reports)",
+        );
+        assert!(elapsed <= 5, "expected a near-zero age, got {elapsed}s");
+        assert_eq!(phase, "activity");
+    }
+
+    /// Codex with a STALE CAS event (e.g. 20 minutes old, well past any
+    /// stall threshold) but a transcript mtime of just a few seconds ago —
+    /// the exact "heads-down between CAS calls" shape from the ozer repro.
+    /// The fresher (transcript) signal must win, not the frozen event age.
+    #[test]
+    fn last_worker_activity_with_transcript_codex_prefers_fresher_transcript_over_stale_event() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let events = vec![make_event(
+            cas_types::EventType::WorkerGitCommit,
+            "agent-codex",
+            20 * 60, // 20 minutes old — the "frozen clock" reading
+        )];
+        let (elapsed, phase) = last_worker_activity_secs_with_transcript(
+            &events,
+            "agent-codex",
+            cas_mux::SupervisorCli::Codex,
+            Some(tmp.path()),
+        )
+        .expect("must resolve an age");
+        assert!(
+            elapsed < 60,
+            "fresher transcript mtime must win over a 20m-stale CAS event; got {elapsed}s"
+        );
+        assert_eq!(phase, "activity");
+    }
+
+    /// Codex with a FRESH CAS event and a stale transcript — the event-store
+    /// signal is still the fresher one here, so it (and its richer phase
+    /// label) must win, not be discarded.
+    #[test]
+    fn last_worker_activity_with_transcript_codex_prefers_fresher_event_over_stale_transcript() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let old_mtime = filetime::FileTime::from_system_time(
+            std::time::SystemTime::now() - std::time::Duration::from_secs(20 * 60),
+        );
+        filetime::set_file_mtime(tmp.path(), old_mtime).unwrap();
+        let events = vec![make_event(
+            cas_types::EventType::WorkerFileEdited,
+            "agent-codex",
+            5,
+        )];
+        let (elapsed, phase) = last_worker_activity_secs_with_transcript(
+            &events,
+            "agent-codex",
+            cas_mux::SupervisorCli::Codex,
+            Some(tmp.path()),
+        )
+        .expect("must resolve an age");
+        assert!(elapsed <= 7, "expected the fresh event's ~5s age: {elapsed}");
+        assert_eq!(
+            phase, "editing",
+            "the richer event-derived phase label must survive, not be flattened to 'activity'"
+        );
+    }
+
+    /// No transcript path resolvable for a Codex worker (e.g. session not
+    /// yet matched) — falls back to the plain event-store behavior instead
+    /// of panicking or fabricating an age.
+    #[test]
+    fn last_worker_activity_with_transcript_codex_no_transcript_falls_back_to_events() {
+        let events = vec![make_event(
+            cas_types::EventType::WorkerFileEdited,
+            "agent-codex",
+            8,
+        )];
+        let (elapsed, phase) = last_worker_activity_secs_with_transcript(
+            &events,
+            "agent-codex",
+            cas_mux::SupervisorCli::Codex,
+            None,
+        )
+        .expect("must resolve from events alone");
+        assert!(elapsed >= 6 && elapsed <= 10);
+        assert_eq!(phase, "editing");
+    }
+
+    /// AC5 guard: Claude (hook-capable) must be completely unaffected by
+    /// this change — even with a fresh transcript sitting right there, a
+    /// stale/absent CAS event must still read as stale/absent, exactly as
+    /// `last_worker_activity_secs` alone would report. Wiring the transcript
+    /// signal into a hook-capable harness would be a silent behavior change
+    /// nobody asked for.
+    #[test]
+    fn last_worker_activity_with_transcript_claude_ignores_fresh_transcript() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile"); // mtime ~0s
+        let got = last_worker_activity_secs_with_transcript(
+            &[],
+            "agent-claude",
+            cas_mux::SupervisorCli::Claude,
+            Some(tmp.path()),
+        );
+        assert!(
+            got.is_none(),
+            "Claude must ignore the transcript signal entirely and report None \
+             exactly like the pre-existing event-only helper; got {got:?}"
+        );
+    }
+
+    /// AC5 guard, Grok variant — same reasoning, different harness.
+    #[test]
+    fn last_worker_activity_with_transcript_grok_ignores_fresh_transcript() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let got = last_worker_activity_secs_with_transcript(
+            &[],
+            "agent-grok",
+            cas_mux::SupervisorCli::Grok,
+            Some(tmp.path()),
+        );
+        assert!(
+            got.is_none(),
+            "Grok must ignore the transcript signal entirely (it has its own \
+             signals.json-based freshness path elsewhere); got {got:?}"
         );
     }
 

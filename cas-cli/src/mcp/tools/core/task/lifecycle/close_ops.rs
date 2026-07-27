@@ -649,13 +649,40 @@ impl CasCore {
                     // the working tree nor the index) so the parked state and
                     // this refusal both name the real situation instead of
                     // reading as "done, pending a formality" either way.
-                    let merge_conflicted = task.assignee.as_deref().is_some_and(|assignee| {
-                        factory_branch_merge_conflicted(
-                            close_project_root,
-                            &resolved_parent_branch,
-                            &format!("factory/{assignee}"),
+                    let conflict_paths = task
+                        .assignee
+                        .as_deref()
+                        .map(|assignee| {
+                            factory_branch_merge_conflict_paths(
+                                close_project_root,
+                                &resolved_parent_branch,
+                                &format!("factory/{assignee}"),
+                            )
+                        })
+                        .unwrap_or_default();
+                    let merge_conflicted = !conflict_paths.is_empty();
+
+                    // cas-a844 AC4: name the alternative in the refusal
+                    // itself when the merge genuinely can't succeed — not
+                    // just in the parked task's notes. Computed before
+                    // parking so the enriched text is what both the parked
+                    // task's activity log AND the returned refusal carry.
+                    let msg = if merge_conflicted {
+                        format!(
+                            "{msg}\n\n\
+                             ⚠️ This branch has a genuine git merge conflict against \
+                             {resolved_parent_branch} (not just unmerged commits) — a \
+                             supervisor merge attempt will fail here. Conflicting \
+                             file(s): {}.\n\nAlternative: the assigned worker can \
+                             `mcp__cas__task action=start id={}` (now permitted from \
+                             `awaiting_merge`) to resolve the conflict directly on \
+                             their factory branch and re-close.",
+                            conflict_paths.join(", "),
+                            task.id
                         )
-                    });
+                    } else {
+                        msg
+                    };
 
                     // cas-627f: a worker looping `close` before the
                     // supervisor merges (the documented #1 worker failure
@@ -694,23 +721,6 @@ impl CasCore {
                         self.mark_awaiting_merge_conflicted(task_store.as_ref(), &task.id);
                     }
 
-                    // cas-a844 AC4: name the alternative in the refusal
-                    // itself when the merge genuinely can't succeed — not
-                    // just in the parked task's notes.
-                    let msg = if merge_conflicted {
-                        format!(
-                            "{msg}\n\n\
-                             ⚠️ This branch has a genuine git merge conflict against \
-                             {resolved_parent_branch} (not just unmerged commits) — a \
-                             supervisor merge attempt may fail here. Alternative: the \
-                             assigned worker can `mcp__cas__task action=start id={}` \
-                             (now permitted from `awaiting_merge`) to resolve the \
-                             conflict directly and re-close.",
-                            task.id
-                        )
-                    } else {
-                        msg
-                    };
                     return Ok(Self::tool_error(msg));
                 }
             }
@@ -3051,15 +3061,18 @@ pub(crate) enum MergeStateGateOutcome {
 /// unknowable state must not be reported as a positive conflict finding,
 /// matching the fail-closed-on-claims-but-fail-open-on-uncertainty posture
 /// used throughout this gate.
-pub(crate) fn factory_branch_merge_conflicted(
+/// Returns the conflicting file paths (empty = cleanly mergeable / unknowable
+/// — see below). Named-paths beat a bare boolean: they're exactly what a
+/// worker needs to go resolve the conflict, and what a supervisor needs to
+/// judge severity, without either party re-running the check by hand.
+pub(crate) fn factory_branch_merge_conflict_paths(
     repo_path: &std::path::Path,
     parent_branch: &str,
     factory_branch: &str,
-) -> bool {
+) -> Vec<String> {
     crate::worktree::GitOperations::new(repo_path.to_path_buf())
         .preflight_merge_conflicts(parent_branch, factory_branch)
-        .map(|conflicts| !conflicts.is_empty())
-        .unwrap_or(false)
+        .unwrap_or_default()
 }
 
 pub(crate) fn run_factory_branch_merge_gate(
@@ -9186,14 +9199,17 @@ mod merge_state_gate_tests {
 
 #[cfg(test)]
 mod merge_conflict_detection_tests {
-    //! cas-a844: `factory_branch_merge_conflicted` distinguishes a genuine
-    //! git merge conflict from simply "not merged yet" — the distinction
-    //! `awaiting_merge`'s status output and refusal message need so a
-    //! conflicted park never reads identically to a clean one. Uses the
-    //! same `git()` / `init_factory_repo` fixtures as
-    //! `merge_state_gate_tests` (pure-function coverage, same rationale:
-    //! no full `CasCore`/`cas_task_close` harness needed to prove the
-    //! detection logic itself).
+    //! cas-a844: `factory_branch_merge_conflict_paths` distinguishes a
+    //! genuine git merge conflict from simply "not merged yet" — the
+    //! distinction `awaiting_merge`'s status output and refusal message need
+    //! so a conflicted park never reads identically to a clean one. It
+    //! returns the conflicting paths themselves (empty = no conflict /
+    //! unknowable) rather than a bare boolean, since the caller uses the
+    //! paths to make the refusal message actionable. Uses the same `git()` /
+    //! `init_factory_repo` fixtures as `merge_state_gate_tests`
+    //! (pure-function coverage, same rationale: no full
+    //! `CasCore`/`cas_task_close` harness needed to prove the detection
+    //! logic itself).
     use super::*;
     use std::process::Command;
 
@@ -9236,7 +9252,7 @@ mod merge_conflict_detection_tests {
         git(p, &["commit", "-q", "-m", "worker change"]);
 
         assert!(
-            !factory_branch_merge_conflicted(p, "main", "factory/worker"),
+            factory_branch_merge_conflict_paths(p, "main", "factory/worker").is_empty(),
             "a clean, non-overlapping divergence must not be reported as conflicted"
         );
     }
@@ -9255,9 +9271,11 @@ mod merge_conflict_detection_tests {
         std::fs::write(p.join("seed.txt"), "main's conflicting edit\n").unwrap();
         git(p, &["commit", "-aq", "-m", "main edits seed differently"]);
 
-        assert!(
-            factory_branch_merge_conflicted(p, "main", "factory/worker"),
-            "overlapping edits to the same file must be reported as a genuine conflict"
+        let paths = factory_branch_merge_conflict_paths(p, "main", "factory/worker");
+        assert_eq!(
+            paths,
+            vec!["seed.txt".to_string()],
+            "must name the actual conflicting file, not just report a bare bool"
         );
     }
 
@@ -9268,18 +9286,16 @@ mod merge_conflict_detection_tests {
         // gate's existing posture elsewhere in this file.
         let dir = init_factory_repo("worker");
         let p = dir.path();
-        assert!(!factory_branch_merge_conflicted(p, "main", "factory/nobody"));
+        assert!(factory_branch_merge_conflict_paths(p, "main", "factory/nobody").is_empty());
     }
 
     #[test]
     fn same_branch_against_itself_is_not_conflicted() {
         let dir = init_factory_repo("worker");
         let p = dir.path();
-        assert!(!factory_branch_merge_conflicted(
-            p,
-            "factory/worker",
-            "factory/worker"
-        ));
+        assert!(
+            factory_branch_merge_conflict_paths(p, "factory/worker", "factory/worker").is_empty()
+        );
     }
 }
 

@@ -347,6 +347,8 @@ impl FactoryDaemon {
                             &prompt,
                             None,
                             Some(super::teams::DIRECTOR_AGENT_COLOR),
+                            None,
+                            None,
                         )
                         .await;
                 }

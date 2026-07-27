@@ -26,9 +26,10 @@ pub use events::{DirectorEvent, DirectorEventDetector};
 pub(crate) use events::{FRESH_HEARTBEAT_SECS, RECENT_ACTIVITY_SECS};
 pub use panel::PanelRegistry;
 pub use prompts::{
-    MergeAlertFreshness, Prompt, check_merge_alert_freshness, compute_gated_task_ids,
-    generate_prompt, revalidate_event_for_delivery_with_context,
+    MergeAlertFreshness, Prompt, check_merge_alert_freshness, check_merge_alert_freshness_for_task,
+    compute_gated_task_ids, generate_prompt, revalidate_event_for_delivery_with_context,
     revalidate_event_for_delivery_with_focus, with_response_instructions,
+    worker_now_has_real_assignment,
 };
 // PanelAreas, SidecarFocus, SidecarState, ViewMode, DiffLine, DiffLineType, render, render_with_state are already public in this module
 

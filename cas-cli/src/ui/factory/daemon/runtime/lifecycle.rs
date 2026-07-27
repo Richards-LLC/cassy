@@ -368,7 +368,7 @@ impl FactoryDaemon {
                     // instead of two independent (and possibly divergent)
                     // full DirectorData loads. See
                     // `revalidate_and_prompt_for_delivery` doc comment.
-                    let (delivery_events, prompts) =
+                    let (delivery_events, prompts, unfiltered_data_for_sweep) =
                         self.app.revalidate_and_prompt_for_delivery(&events);
                     tracing::debug!(
                         target: "cas::coordination",
@@ -400,6 +400,83 @@ impl FactoryDaemon {
                     self.push_cloud_events(&delivery_events);
                     self.push_cloud_state();
 
+                    // cas-ed6c: retract stale WorkerIdle-class alerts already
+                    // queued in the supervisor's inbox — before injecting any
+                    // NEW prompts this tick — using the SAME live snapshot
+                    // just loaded for revalidation (no extra DB load). A
+                    // `WorkerIdle` alert is revalidated against live state
+                    // only at the instant it's written; if the named worker
+                    // gained a real assignment before the recipient's next
+                    // turn boundary (Claude Code only polls its inbox then,
+                    // and `read` is never flipped by production code — see
+                    // `InboxMessage::retract_worker` doc), the written row
+                    // just sits there, stale, with nothing to catch it. This
+                    // is the live-evidence-quoted-a-superseded-tip class of
+                    // bug (three workers announced idle/ready ~7 minutes
+                    // after each had a genuine InProgress assignment).
+                    if let (Some(teams), Some(unfiltered_data)) =
+                        (self.teams.as_ref(), unfiltered_data_for_sweep.as_ref())
+                    {
+                        match teams.prune_stale_idle_alerts("supervisor", |worker| {
+                            crate::ui::factory::director::worker_now_has_real_assignment(
+                                unfiltered_data,
+                                worker,
+                            )
+                        }) {
+                            Ok(0) => {}
+                            Ok(n) => tracing::info!(
+                                target: "cas::coordination",
+                                stage = "retract_stale_idle_alert",
+                                channel = "teams_inbox",
+                                retracted = n,
+                                "swept stale WorkerIdle alert(s) from supervisor inbox before delivery"
+                            ),
+                            Err(e) => tracing::warn!(
+                                target: "cas::coordination",
+                                error = %e,
+                                "prune_stale_idle_alerts failed — non-fatal, stale alerts may still be delivered"
+                            ),
+                        }
+
+                        // cas-e48f: retract stale MERGE REQUIRED alerts the
+                        // same way, keyed on task_id rather than worker name
+                        // — see `InboxMessage::retract_task` / `Prompt::
+                        // retract_task` doc for why `worker_now_has_real_
+                        // assignment` above is the WRONG predicate for this
+                        // alert class. `check_merge_alert_freshness_for_task`
+                        // re-reads the CURRENT epic tip at sweep time (never
+                        // the tip captured when the row was written) — the
+                        // exact live incident this closes: an alert quoting
+                        // "checked against epic tip 811377c" delivered after
+                        // the epic had already advanced past that tip.
+                        let repo_root =
+                            self.app.cas_dir().parent().unwrap_or(self.app.cas_dir()).to_path_buf();
+                        match teams.prune_stale_merge_alerts("supervisor", |task_id| {
+                            matches!(
+                                crate::ui::factory::director::check_merge_alert_freshness_for_task(
+                                    task_id,
+                                    unfiltered_data,
+                                    &repo_root,
+                                ),
+                                crate::ui::factory::director::MergeAlertFreshness::Stale
+                            )
+                        }) {
+                            Ok(0) => {}
+                            Ok(n) => tracing::info!(
+                                target: "cas::coordination",
+                                stage = "retract_stale_merge_alert",
+                                channel = "teams_inbox",
+                                retracted = n,
+                                "swept stale MERGE REQUIRED alert(s) from supervisor inbox before delivery"
+                            ),
+                            Err(e) => tracing::warn!(
+                                target: "cas::coordination",
+                                error = %e,
+                                "prune_stale_merge_alerts failed — non-fatal, stale alerts may still be delivered"
+                            ),
+                        }
+                    }
+
                     // Inject prompts (config already checked in generate_prompt)
                     for prompt in prompts {
                         // cas-f9e8 telemetry: measure director prompt
@@ -420,6 +497,16 @@ impl FactoryDaemon {
                                 // D-4 (cas-405f): pass the director's config.json color so
                                 // the inbox bubble matches the registered team entry.
                                 Some(super::teams::DIRECTOR_AGENT_COLOR),
+                                // cas-ed6c: tag WorkerIdle-class alerts so a
+                                // later sweep can retract them if the named
+                                // worker gains a real assignment before the
+                                // recipient ever reads the queued row.
+                                prompt.retract_worker.as_deref(),
+                                // cas-e48f: tag MERGE REQUIRED alerts so a
+                                // later sweep can retract them if this task's
+                                // merge lands (or it leaves AwaitingMerge)
+                                // before the recipient ever reads the row.
+                                prompt.retract_task.as_deref(),
                             )
                             .await;
                         let inject_ms = inject_started.elapsed().as_secs_f64() * 1000.0;

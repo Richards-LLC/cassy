@@ -189,6 +189,20 @@ pub struct TaskCloseRequest {
     )]
     #[serde(default)]
     pub code_review_findings: Option<String>,
+
+    /// Search manifest for investigation-task (`Spike`) closes (cas-49f1).
+    /// This is the per-action mirror of the unified `TaskRequest` field of
+    /// the same name (`crates/cas-mcp/src/types.rs`).
+    #[schemars(
+        description = "Serialized JSON array of search steps run during an \
+                       investigation (Spike) task, e.g. \
+                       [{\"command\": \"grep -c foo file\", \"hits\": 3}]. \
+                       Optional; when present on a Spike-type close, any \
+                       entry with hits=0 is surfaced as a warning note \
+                       instead of a silent pass."
+    )]
+    #[serde(default)]
+    pub search_manifest: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

@@ -1938,6 +1938,20 @@ impl CasCore {
             }
         }
 
+        // cas-49f1: zero-hit search-manifest guardrail for investigation
+        // (Spike) tasks. Never blocks close — worst case is a loud warning
+        // note on the task's audit trail. Computed here (read-only) but
+        // applied to `task.notes` after the mutable shadow below, alongside
+        // the `depth_light` decision note — the eager clone-persist pattern
+        // used by the code-review gate above gets silently overwritten by
+        // the final `task_store.update(&task)` write, so a note that must
+        // survive close has to land on the same in-memory `task` that write
+        // uses.
+        let search_manifest_warning = match run_search_manifest_gate(&task, &req) {
+            SearchManifestGateOutcome::Proceed => None,
+            SearchManifestGateOutcome::AppendWarningNote(note) => Some(note),
+        };
+
         // Proceed with close
         let mut task = task;
         let now = chrono::Utc::now();
@@ -2042,6 +2056,17 @@ impl CasCore {
                 task.notes = decision_note;
             } else {
                 task.notes = format!("{}\n\n{}", task.notes, decision_note);
+            }
+        }
+
+        // cas-49f1: apply the zero-hit search-manifest warning (computed
+        // above, before the mutable shadow) directly to the in-memory task
+        // so it survives the final `task_store.update(&task)` write below.
+        if let Some(note) = search_manifest_warning {
+            if task.notes.is_empty() {
+                task.notes = note;
+            } else {
+                task.notes = format!("{}\n\n{}", task.notes, note);
             }
         }
 
@@ -4864,6 +4889,90 @@ pub(crate) fn epic_subtask_receipts_are_clean(subtasks: &[Task]) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// cas-49f1: zero-hit search-manifest guardrail for investigation (Spike)
+// task closes
+// ---------------------------------------------------------------------------
+
+/// Outcome of the investigation-task (`Spike`) search-manifest gate
+/// (cas-49f1). Unlike [`CodeReviewGateOutcome`] this gate never rejects a
+/// close — it is a guardrail, not a framework: the loudest it gets is a
+/// warning note appended to the task's audit trail.
+#[derive(Debug)]
+pub(crate) enum SearchManifestGateOutcome {
+    /// Close may proceed. No note to write.
+    Proceed,
+    /// Close may proceed, but the caller should append this warning note
+    /// to the task first — either a malformed manifest, or one or more
+    /// search steps that returned zero hits across all inputs.
+    AppendWarningNote(String),
+}
+
+/// Run the cas-49f1 zero-hit search-manifest guardrail.
+///
+/// Only fires for `TaskType::Spike` (investigation/research) tasks that
+/// supply a non-empty `search_manifest`. Ordinary code tasks, and Spike
+/// tasks that omit the field entirely, are untouched — this is
+/// deliberately opt-in, not a close-time requirement, per the cas-49f1
+/// scope discipline ("do not build a general 'prove your investigation'
+/// framework").
+///
+/// When a manifest is present: any entry reporting `hits == 0` is surfaced
+/// as a loud warning note rather than allowed to blend into a "nothing
+/// found" close narrative silently. A manifest that fails to parse is
+/// itself treated as warning-worthy (the worker claimed to report
+/// coverage and the claim is unreadable).
+pub(crate) fn run_search_manifest_gate(
+    task: &Task,
+    req: &TaskCloseRequest,
+) -> SearchManifestGateOutcome {
+    if task.task_type != TaskType::Spike {
+        return SearchManifestGateOutcome::Proceed;
+    }
+    let raw = match req
+        .search_manifest
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(r) => r,
+        None => return SearchManifestGateOutcome::Proceed,
+    };
+    let manifest = match cas_types::parse_search_manifest(raw) {
+        Ok(m) => m,
+        Err(e) => {
+            let note = format!(
+                "[{}] WARNING: search_manifest could not be parsed and was \
+                 skipped for zero-hit checking: {e}",
+                chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+            );
+            return SearchManifestGateOutcome::AppendWarningNote(note);
+        }
+    };
+    let zero_hits = cas_types::zero_hit_entries(&manifest);
+    if zero_hits.is_empty() {
+        return SearchManifestGateOutcome::Proceed;
+    }
+    let commands = zero_hits
+        .iter()
+        .map(|e| format!("  - `{}` -> 0 hits", e.command))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let note = format!(
+        "[{}] ⚠️ ZERO_HIT_SEARCH_WARNING: {} of {} search step(s) in this \
+         investigation's search_manifest returned 0 hits across all inputs:\n\
+         {commands}\n\n\
+         A search that matches nothing anywhere is far more often a broken \
+         pattern than a clean corpus (cas-49f1). Verify these patterns \
+         against a known-positive input before trusting this close's \
+         conclusion.",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+        zero_hits.len(),
+        manifest.len(),
+    );
+    SearchManifestGateOutcome::AppendWarningNote(note)
+}
+
+// ---------------------------------------------------------------------------
 // cas-b39f (Unit 9): cas-code-review P0 close gate
 // ---------------------------------------------------------------------------
 
@@ -6804,6 +6913,7 @@ mod code_review_gate_tests {
             reason: None,
             bypass_code_review: None,
             code_review_findings: None,
+            search_manifest: None,
         }
     }
 
@@ -7535,6 +7645,129 @@ mod code_review_gate_tests {
 }
 
 #[cfg(test)]
+mod search_manifest_gate_tests {
+    //! Unit tests for the cas-49f1 zero-hit search-manifest guardrail
+    //! ([`run_search_manifest_gate`]). Covers the cas-94a3 regression
+    //! scenario directly: a manifest where one search step (the
+    //! operator-turn grep pattern) returned 0 hits while sibling greps
+    //! against the same corpus returned hundreds.
+    use super::*;
+
+    fn spike_task() -> Task {
+        Task {
+            id: "cas-test-spike".to_string(),
+            title: "investigation task".to_string(),
+            status: TaskStatus::InProgress,
+            task_type: TaskType::Spike,
+            ..Default::default()
+        }
+    }
+
+    fn code_task() -> Task {
+        Task {
+            id: "cas-test-code".to_string(),
+            title: "code task".to_string(),
+            status: TaskStatus::InProgress,
+            task_type: TaskType::Task,
+            ..Default::default()
+        }
+    }
+
+    fn req_with_manifest(id: &str, manifest_json: Option<&str>) -> TaskCloseRequest {
+        TaskCloseRequest {
+            id: id.to_string(),
+            reason: None,
+            bypass_code_review: None,
+            code_review_findings: None,
+            search_manifest: manifest_json.map(str::to_string),
+        }
+    }
+
+    /// cas-94a3 regression: the `"type":"human"` grep returned 0 hits in
+    /// every one of 4 project sweeps while the sibling `"type":"user"`
+    /// grep returned 207. A manifest reporting that exact shape must
+    /// produce a warning note, not a silent Proceed.
+    #[test]
+    fn cas_94a3_zero_hit_step_amid_nonzero_siblings_is_flagged() {
+        let t = spike_task();
+        let manifest = serde_json::json!([
+            {"command": "grep -o '\"message\":{\"type\":\"human\"[^}]*}' project-a/*.jsonl", "hits": 0},
+            {"command": "grep -c '\"type\":\"user\"' project-a/*.jsonl", "hits": 207},
+        ])
+        .to_string();
+        let req = req_with_manifest(&t.id, Some(&manifest));
+        match run_search_manifest_gate(&t, &req) {
+            SearchManifestGateOutcome::AppendWarningNote(note) => {
+                assert!(
+                    note.contains("ZERO_HIT_SEARCH_WARNING"),
+                    "note must be loud: {note}"
+                );
+                assert!(
+                    note.contains("type\":\"human"),
+                    "note must name the offending command: {note}"
+                );
+            }
+            SearchManifestGateOutcome::Proceed => {
+                panic!("a zero-hit search step must not pass silently")
+            }
+        }
+    }
+
+    #[test]
+    fn manifest_with_all_nonzero_hits_proceeds_silently() {
+        let t = spike_task();
+        let manifest = serde_json::json!([
+            {"command": "grep -c foo file", "hits": 3},
+            {"command": "grep -c bar file", "hits": 12},
+        ])
+        .to_string();
+        let req = req_with_manifest(&t.id, Some(&manifest));
+        assert!(matches!(
+            run_search_manifest_gate(&t, &req),
+            SearchManifestGateOutcome::Proceed
+        ));
+    }
+
+    #[test]
+    fn missing_manifest_proceeds_silently_even_for_spike() {
+        let t = spike_task();
+        let req = req_with_manifest(&t.id, None);
+        assert!(matches!(
+            run_search_manifest_gate(&t, &req),
+            SearchManifestGateOutcome::Proceed
+        ));
+    }
+
+    /// AC3: ordinary code tasks must be entirely unaffected — the gate
+    /// doesn't even look at the manifest for a non-Spike task, so a
+    /// zero-hit entry there is never surfaced.
+    #[test]
+    fn ordinary_code_task_is_never_gated_even_with_zero_hit_manifest() {
+        let t = code_task();
+        let manifest = serde_json::json!([{"command": "grep -c foo file", "hits": 0}]).to_string();
+        let req = req_with_manifest(&t.id, Some(&manifest));
+        assert!(matches!(
+            run_search_manifest_gate(&t, &req),
+            SearchManifestGateOutcome::Proceed
+        ));
+    }
+
+    #[test]
+    fn malformed_manifest_json_is_flagged_not_silently_ignored() {
+        let t = spike_task();
+        let req = req_with_manifest(&t.id, Some("not json at all"));
+        match run_search_manifest_gate(&t, &req) {
+            SearchManifestGateOutcome::AppendWarningNote(note) => {
+                assert!(note.contains("WARNING"), "note must warn: {note}");
+            }
+            SearchManifestGateOutcome::Proceed => {
+                panic!("malformed manifest must not proceed silently")
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod merge_state_gate_tests {
     //! Unit tests for the cas-95ce factory-branch merge-state close
     //! gate ([`run_factory_branch_merge_gate`]). The gate sits at
@@ -7625,6 +7858,7 @@ mod merge_state_gate_tests {
             reason: None,
             bypass_code_review: None,
             code_review_findings: None,
+            search_manifest: None,
         }
     }
 
@@ -9666,6 +9900,7 @@ mod epic_status_gate_tests {
             reason: None,
             bypass_code_review: None,
             code_review_findings: None,
+            search_manifest: None,
         }
     }
 

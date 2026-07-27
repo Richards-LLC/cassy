@@ -599,7 +599,14 @@ fn grok_activity_age(updates_jsonl_path: &Path) -> Option<Duration> {
 /// [`grok_activity_age`]); Claude and Codex use the transcript/rollout's
 /// own mtime (Codex rollouts resolved via `factory_ops::resolve_codex_transcript`,
 /// cas-c655).
-fn effective_transcript_age(path: &Path, cli: cas_mux::SupervisorCli) -> Option<Duration> {
+///
+/// `pub(crate)` (cas-c2c2): reused by
+/// `factory_ops::last_worker_activity_secs_with_transcript` so the
+/// `worker_status` "last activity" display folds in the SAME per-harness
+/// transcript-freshness primitive `is-wedged`/the director's stall gate
+/// already trust, instead of a second ad-hoc mtime read that would drift
+/// out of sync with Grok's `signals.json` preference.
+pub(crate) fn effective_transcript_age(path: &Path, cli: cas_mux::SupervisorCli) -> Option<Duration> {
     match cli {
         cas_mux::SupervisorCli::Grok => grok_activity_age(path),
         cas_mux::SupervisorCli::Claude | cas_mux::SupervisorCli::Codex => {

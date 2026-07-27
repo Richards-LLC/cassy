@@ -80,6 +80,20 @@ fn task_assigned_to_worker(data: &DirectorData, task: &TaskSummary, worker: &str
             .any(|(id, name)| name == worker && task.assignee.as_deref() == Some(id.as_str()))
 }
 
+/// cas-ed6c: `pub(crate)` re-export of the same lease-independent
+/// assignment predicate the `WorkerIdle` delivery-time revalidation arm
+/// already uses (`revalidate_event_for_delivery_with_context`), so the
+/// inbox-retraction sweep (`TeamsManager::prune_stale_idle_alerts`, wired
+/// in `lifecycle.rs`) can never disagree with it about what "this worker
+/// is no longer idle" means. Checks the task store's InProgress +
+/// open-Ready assignee fields directly — independent of the lease table,
+/// which cas-d165 already established goes blind mid-task (leases expire
+/// ~30 min in; a worker can hold a genuine assignment with no active
+/// lease at all).
+pub fn worker_now_has_real_assignment(data: &DirectorData, worker: &str) -> bool {
+    worker_has_open_or_in_progress_assignment(data, worker)
+}
+
 fn worker_has_open_or_in_progress_assignment(data: &DirectorData, worker: &str) -> bool {
     data.in_progress_tasks
         .iter()
@@ -515,6 +529,28 @@ pub struct Prompt {
     pub target: String,
     /// Prompt text to inject
     pub text: String,
+    /// cas-ed6c: `Some(worker)` when this prompt is a `WorkerIdle`-class
+    /// alert about `worker` — threaded down to `deliver_to_worker` so the
+    /// queued inbox row can be tagged for later retraction
+    /// (`TeamsManager::prune_stale_idle_alerts`) if the worker gains a real
+    /// assignment before the recipient ever reads it. `None` for every
+    /// other prompt kind, INCLUDING MERGE REQUIRED alerts — those use
+    /// `retract_task` instead (see its doc).
+    pub retract_worker: Option<String>,
+    /// cas-e48f: `Some(task_id)` when this prompt is the actionable MERGE
+    /// REQUIRED / `AwaitingMerge` idle alert (`merge_required_idle_prompt_text`)
+    /// — threaded down to `deliver_to_worker` so the queued inbox row can be
+    /// tagged for later retraction (`TeamsManager::prune_stale_merge_alerts`)
+    /// if the merge lands, or the task leaves `AwaitingMerge`, before the
+    /// recipient ever reads it. Deliberately NOT `retract_worker`: a merge
+    /// alert's staleness is about this task's live unmerged-commit count
+    /// against the CURRENT epic tip, not about the named worker's assignment
+    /// state — a worker can be reassigned elsewhere while its own merge is
+    /// still genuinely outstanding, and a merge can land while the worker
+    /// stays idle with no new assignment at all. `None` for every other
+    /// prompt kind, including the plain informational (non-merge)
+    /// close-rejected idle wording, which still uses `retract_worker`.
+    pub retract_task: Option<String>,
 }
 
 /// Wrap a message with response instructions
@@ -635,6 +671,76 @@ pub fn check_merge_alert_freshness(
         .unwrap_or_else(|| "unknown".to_string());
     MergeAlertFreshness::Fresh(MergeAlertEvidence {
         task_id: task.task_id.clone(),
+        factory_branch,
+        unmerged_count,
+        epic_sha,
+    })
+}
+
+/// Re-validate a MERGE REQUIRED / `AwaitingMerge` alert already SITTING in
+/// the supervisor's inbox, keyed by task id (cas-e48f, follow-on to
+/// `check_merge_alert_freshness` above).
+///
+/// `check_merge_alert_freshness` re-checks a signal against live git state
+/// at the instant its prompt is GENERATED — but the row can then sit
+/// unread in the Teams inbox file for minutes (Claude Code only polls its
+/// inbox at its own turn boundaries; `read` is never flipped to `true` by
+/// production code). This is the sweep-time counterpart: given only a
+/// `task_id` pulled from a queued row's `retract_task` tag, look the task
+/// up fresh in the CURRENT snapshot and re-run the same
+/// `count_unmerged_factory_commits` check against the CURRENT epic tip —
+/// never the tip captured when the row was written.
+///
+/// Returns `Stale` (retract the row) when:
+/// - the task is no longer tracked in `data.in_progress_tasks` at all
+///   (closed, reset, or otherwise resolved since the alert was written), or
+/// - the task is tracked but its status has moved off `AwaitingMerge`
+///   (re-closed, reopened, reassigned), or
+/// - the task is still `AwaitingMerge` but its factory branch now carries
+///   zero unmerged commits against the live epic tip (the merge landed).
+///
+/// Returns `NotApplicable` (preserve the row; caller cannot verify either
+/// way) when the task has no assignee or its epic branch can't be resolved
+/// from this snapshot — the same "don't silently drop a possibly-valid
+/// alert over a data-linking gap" stance `check_merge_alert_freshness`
+/// takes.
+///
+/// Returns `Fresh` (preserve the row) when the merge is still genuinely
+/// outstanding — this also covers the case where the epic tip moved for an
+/// UNRELATED reason (another task's merge): `count_unmerged_factory_commits`
+/// re-diffs against whatever the live epic tip is right now, so an
+/// unrelated tip move that doesn't touch this task's commits still yields a
+/// nonzero count and the alert correctly survives.
+pub fn check_merge_alert_freshness_for_task(
+    task_id: &str,
+    data: &DirectorData,
+    repo_root: &Path,
+) -> MergeAlertFreshness {
+    let Some(task) = data.in_progress_tasks.iter().find(|t| t.id == task_id) else {
+        // No longer tracked as in-progress/awaiting-merge in the current
+        // snapshot at all — whatever happened (closed, reset elsewhere),
+        // the alert's premise no longer holds.
+        return MergeAlertFreshness::Stale;
+    };
+    if task.status != TaskStatus::AwaitingMerge {
+        return MergeAlertFreshness::Stale;
+    }
+    let Some(worker) = task.assignee.clone() else {
+        return MergeAlertFreshness::NotApplicable;
+    };
+    let factory_branch = format!("factory/{worker}");
+    let (_, epic_branch) = resolve_merge_target_for_task(data, task_id);
+    let Some(epic_branch) = epic_branch else {
+        return MergeAlertFreshness::NotApplicable;
+    };
+    let unmerged_count = count_unmerged_factory_commits(repo_root, &factory_branch, &epic_branch);
+    if unmerged_count == 0 {
+        return MergeAlertFreshness::Stale;
+    }
+    let epic_sha = resolve_branch_short_sha(repo_root, &epic_branch)
+        .unwrap_or_else(|| "unknown".to_string());
+    MergeAlertFreshness::Fresh(MergeAlertEvidence {
+        task_id: task_id.to_string(),
         factory_branch,
         unmerged_count,
         epic_sha,
@@ -802,6 +908,8 @@ pub fn generate_prompt(
             Some(Prompt {
                 target: worker.clone(),
                 text: with_response_instructions(&text, supervisor_name, worker_cli),
+                retract_worker: None,
+                retract_task: None,
             })
         }
 
@@ -873,6 +981,8 @@ pub fn generate_prompt(
             Some(Prompt {
                 target: supervisor_name.to_string(),
                 text: with_response_instructions(&text, worker, supervisor_cli),
+                retract_worker: None,
+                retract_task: None,
             })
         }
 
@@ -893,6 +1003,8 @@ pub fn generate_prompt(
             Some(Prompt {
                 target: supervisor_name.to_string(),
                 text: with_response_instructions(&text, worker, supervisor_cli),
+                retract_worker: None,
+                retract_task: None,
             })
         }
 
@@ -1008,9 +1120,25 @@ pub fn generate_prompt(
                     )
                 };
 
+                // cas-e48f: MERGE REQUIRED alerts are tagged with
+                // `retract_task` (this task's own live merge state), NOT
+                // `retract_worker` (the named worker's assignment state) —
+                // the two can diverge in both directions (see `Prompt::
+                // retract_task` doc). The plain informational close-rejected
+                // wording (the `else` branch above, e.g. Blocked parks) is
+                // still genuinely about worker idleness, so it keeps
+                // `retract_worker`.
+                let (retract_worker, retract_task) = if is_merge_required_idle(task) {
+                    (None, Some(task.task_id.clone()))
+                } else {
+                    (Some(worker.clone()), None)
+                };
+
                 return Some(Prompt {
                     target: supervisor_name.to_string(),
                     text: with_response_instructions(&text, worker, supervisor_cli),
+                    retract_worker,
+                    retract_task,
                 });
             }
 
@@ -1052,6 +1180,8 @@ pub fn generate_prompt(
             Some(Prompt {
                 target: supervisor_name.to_string(),
                 text: with_response_instructions(&text, worker, supervisor_cli),
+                retract_worker: Some(worker.clone()),
+                retract_task: None,
             })
         }
 
@@ -1090,6 +1220,8 @@ pub fn generate_prompt(
                 Some(Prompt {
                     target: worker.clone(),
                     text: with_response_instructions(&text, supervisor_name, worker_cli),
+                    retract_worker: None,
+                    retract_task: None,
                 })
             } else {
                 // Still stalled after the nudge — escalate to the supervisor.
@@ -1119,6 +1251,8 @@ pub fn generate_prompt(
                 Some(Prompt {
                     target: supervisor_name.to_string(),
                     text: with_response_instructions(&text, worker, supervisor_cli),
+                    retract_worker: None,
+                    retract_task: None,
                 })
             }
         }
@@ -1177,6 +1311,8 @@ pub fn generate_prompt(
             Some(Prompt {
                 target: supervisor_name.to_string(),
                 text: with_response_instructions(&text, agent_name, supervisor_cli),
+                retract_worker: None,
+                retract_task: None,
             })
         }
 
@@ -1300,6 +1436,8 @@ pub fn generate_prompt(
             Some(Prompt {
                 target: supervisor_name.to_string(),
                 text,
+                retract_worker: None,
+                retract_task: None,
             })
         }
     }
@@ -1870,6 +2008,15 @@ mod tests {
             "Prompt must direct supervisor to live task action=ready (D-3): {}",
             prompt.text
         );
+        // cas-ed6c: every WorkerIdle prompt must tag its worker so a stale
+        // queued copy can be retracted later if the worker gets assigned
+        // real work before the supervisor ever reads this row.
+        assert_eq!(
+            prompt.retract_worker.as_deref(),
+            Some("swift-fox"),
+            "WorkerIdle prompt must carry retract_worker so prune_stale_idle_alerts \
+             can find and retract it later"
+        );
     }
 
     #[test]
@@ -2393,6 +2540,27 @@ mod tests {
             "notification must carry the close-rejected reason: {}",
             prompt.text
         );
+        // cas-e48f (deliberately updated from cas-ed6c's original assertion
+        // here, which expected `retract_worker`): a MERGE-REQUIRED alert's
+        // staleness is about THIS TASK's live merge state, not the named
+        // worker's assignment state — `worker_now_has_real_assignment`
+        // would wrongly retract a still-outstanding merge alert if the
+        // worker got reassigned elsewhere, and would wrongly PRESERVE a
+        // stale one if the merge landed with the worker still idle (the
+        // literal live incident cas-e48f fixes). It must now carry
+        // `retract_task` instead, and must NOT also carry `retract_worker`
+        // (a merge alert tagged with the worker-assignment predicate would
+        // silence itself for the wrong reason).
+        assert_eq!(
+            prompt.retract_task.as_deref(),
+            Some("cas-1234"),
+            "MERGE-REQUIRED WorkerIdle prompt must carry retract_task, keyed on task_id"
+        );
+        assert_eq!(
+            prompt.retract_worker, None,
+            "MERGE-REQUIRED WorkerIdle prompt must NOT also carry retract_worker — \
+             that predicate is wrong for this alert class (see cas-e48f)"
+        );
     }
 
     /// Regression for cas-b67d D-3: the zero-ready-task nudge must NOT instruct
@@ -2858,6 +3026,98 @@ mod tests {
             prompt.is_none(),
             "cas-889d: WorkerIdle must be suppressed when worker has active task (name key), got: {:?}",
             prompt.map(|p| p.text)
+        );
+    }
+
+    // --- cas-ed6c: worker_now_has_real_assignment + retract_worker tagging --
+    //
+    // Direct pin of the AC#1 finding: `worker_now_has_real_assignment` is
+    // the SAME lease-independent predicate the WorkerIdle delivery-time
+    // revalidation arm already uses (`worker_has_open_or_in_progress_assignment`),
+    // so `prune_stale_idle_alerts` can never disagree with it. Also proves
+    // the falsifiable hypothesis in the ticket's original framing ("keys on
+    // lease presence") does NOT hold: a worker with a real InProgress
+    // assignment and NO active_lease at all still reads as assigned here.
+
+    /// The reclaimed-lease-but-still-InProgress-and-assigned shape from
+    /// AC#4/AC#2: `make_data_with_in_progress` builds a task InProgress with
+    /// an assignee, but attaches NO `active_lease` to any agent (there are
+    /// no agents in this snapshot at all) — proving the predicate reads the
+    /// task store directly and does not require a lease to recognize a real
+    /// assignment.
+    #[test]
+    fn worker_now_has_real_assignment_true_for_in_progress_task_with_no_lease() {
+        let data = make_data_with_in_progress("swift-fox");
+        assert!(
+            worker_now_has_real_assignment(&data, "swift-fox"),
+            "an InProgress task assigned to swift-fox must count as a real \
+             assignment even with zero lease data in this snapshot"
+        );
+    }
+
+    /// Negative control: a worker with no matching task anywhere in the
+    /// snapshot is not considered assigned.
+    #[test]
+    fn worker_now_has_real_assignment_false_for_unrelated_worker() {
+        let data = make_data_with_in_progress("swift-fox");
+        assert!(!worker_now_has_real_assignment(&data, "some-other-worker"));
+    }
+
+    /// An Open (not yet started) task assigned to a worker also counts —
+    /// mirrors the WorkerIdle guard's own "assigned-but-not-yet-started"
+    /// gap coverage (the window between `task update assignee=` and
+    /// `task start`).
+    #[test]
+    fn worker_now_has_real_assignment_true_for_open_assigned_task() {
+        let mut data = make_data_with_in_progress("someone-else");
+        data.in_progress_tasks.clear();
+        data.ready_tasks.push(TaskSummary {
+            id: "task-open".to_string(),
+            title: "Open Task".to_string(),
+            status: TaskStatus::Open,
+            priority: Priority::MEDIUM,
+            assignee: Some("swift-fox".to_string()),
+            task_type: TaskType::Task,
+            epic: None,
+            branch: None,
+            updated_at: None,
+            epic_verification_owner: None,
+        });
+        assert!(worker_now_has_real_assignment(&data, "swift-fox"));
+    }
+
+    /// A non-WorkerIdle prompt (e.g. `TaskAssigned`) must never carry
+    /// `retract_worker` — that tag is specific to WorkerIdle-class alerts,
+    /// and accidentally tagging other prompt kinds would let
+    /// `prune_stale_idle_alerts` retract the wrong thing.
+    #[test]
+    fn test_task_assigned_prompt_has_no_retract_worker() {
+        let event = DirectorEvent::TaskAssigned {
+            task_id: "cas-1234".to_string(),
+            task_title: "Some task".to_string(),
+            worker: "swift-fox".to_string(),
+        };
+        let config = default_config();
+        let data = make_data(0);
+        let prompt = generate_prompt(
+            &event,
+            &data,
+            &data,
+            "supervisor",
+            &config,
+            codex(),
+            codex(),
+            &HashSet::new(),
+            None,
+        )
+        .expect("TaskAssigned must produce a prompt");
+        assert_eq!(
+            prompt.retract_worker, None,
+            "only WorkerIdle-class prompts should carry retract_worker"
+        );
+        assert_eq!(
+            prompt.retract_task, None,
+            "only the MERGE-REQUIRED alert should carry retract_task (cas-e48f)"
         );
     }
 
@@ -4411,6 +4671,137 @@ mod tests {
             assert!(
                 !detector.merge_alert_should_emit("cas-6883t", "factory/recipe-be", 3, "def5678"),
                 "repeat of the new evidence must again be suppressed"
+            );
+        }
+
+        // --- cas-e48f: check_merge_alert_freshness_for_task — the sweep-time
+        // counterpart keyed on task_id, re-checked against the live epic tip
+        // at sweep time rather than an event snapshot from generation time.
+
+        /// AC1: the alert's merge has since landed — retract.
+        #[test]
+        fn task_sweep_stale_when_branch_already_fully_merged() {
+            let repo = init_repo("recipe-be");
+            commit_file(repo.path(), "a.rs");
+            merge_worker_into_epic(repo.path(), "recipe-be");
+
+            let data = awaiting_merge_data("recipe-be");
+            let outcome =
+                check_merge_alert_freshness_for_task("cas-6883t", &data, repo.path());
+            assert!(
+                matches!(outcome, MergeAlertFreshness::Stale),
+                "landed merge must be Stale (retract the queued row): {outcome:?}"
+            );
+        }
+
+        /// AC1 (task no longer tracked): if the task has fallen out of the
+        /// current in_progress snapshot entirely (closed, reset elsewhere),
+        /// the alert's premise no longer holds — retract.
+        #[test]
+        fn task_sweep_stale_when_task_no_longer_in_progress() {
+            let repo = init_repo("recipe-be");
+            commit_file(repo.path(), "a.rs");
+
+            let mut data = awaiting_merge_data("recipe-be");
+            data.in_progress_tasks.clear();
+
+            let outcome =
+                check_merge_alert_freshness_for_task("cas-6883t", &data, repo.path());
+            assert!(
+                matches!(outcome, MergeAlertFreshness::Stale),
+                "task absent from the current snapshot must be Stale: {outcome:?}"
+            );
+        }
+
+        /// AC1 (task moved off AwaitingMerge): re-closed / reopened /
+        /// reassigned since the alert was written — retract.
+        #[test]
+        fn task_sweep_stale_when_task_left_awaiting_merge() {
+            let repo = init_repo("recipe-be");
+            commit_file(repo.path(), "a.rs");
+
+            let mut data = awaiting_merge_data("recipe-be");
+            data.in_progress_tasks[0].status = TaskStatus::InProgress;
+
+            let outcome =
+                check_merge_alert_freshness_for_task("cas-6883t", &data, repo.path());
+            assert!(
+                matches!(outcome, MergeAlertFreshness::Stale),
+                "task no longer AwaitingMerge must be Stale: {outcome:?}"
+            );
+        }
+
+        /// AC2: merge is still genuinely outstanding — preserve (Fresh).
+        #[test]
+        fn task_sweep_preserves_when_still_genuinely_outstanding() {
+            let repo = init_repo("recipe-be");
+            commit_file(repo.path(), "a.rs");
+            commit_file(repo.path(), "b.rs");
+
+            let data = awaiting_merge_data("recipe-be");
+            let outcome =
+                check_merge_alert_freshness_for_task("cas-6883t", &data, repo.path());
+            match outcome {
+                MergeAlertFreshness::Fresh(evidence) => {
+                    assert_eq!(evidence.unmerged_count, 2);
+                    assert_eq!(evidence.task_id, "cas-6883t");
+                }
+                other => panic!("still-outstanding merge must be Fresh: {other:?}"),
+            }
+        }
+
+        /// AC4: the epic tip moved for an UNRELATED reason (a second,
+        /// unrelated worker's branch merged into the epic) but THIS task's
+        /// own commits are still unmerged — must NOT be retracted. Proves
+        /// the sweep re-diffs against the live tip rather than trusting any
+        /// snapshot captured when the row was written.
+        #[test]
+        fn task_sweep_preserves_when_epic_tip_moved_for_unrelated_reason() {
+            let repo = init_repo("recipe-be");
+            commit_file(repo.path(), "a.rs");
+
+            // A second, unrelated worker merges into the epic branch first —
+            // the epic tip moves, but recipe-be's own commit is still
+            // unmerged.
+            git(repo.path(), &["checkout", "-q", "epic/test-epic"]);
+            git(repo.path(), &["checkout", "-q", "-b", "factory/other-worker"]);
+            commit_file(repo.path(), "unrelated.rs");
+            merge_worker_into_epic(repo.path(), "other-worker");
+
+            let data = awaiting_merge_data("recipe-be");
+            let outcome =
+                check_merge_alert_freshness_for_task("cas-6883t", &data, repo.path());
+            match outcome {
+                MergeAlertFreshness::Fresh(evidence) => {
+                    assert_eq!(
+                        evidence.unmerged_count, 1,
+                        "recipe-be's own unmerged commit must still be counted \
+                         even though the epic tip moved for an unrelated reason"
+                    );
+                }
+                other => panic!(
+                    "an unrelated epic-tip move must not retract a still-outstanding \
+                     alert: {other:?}"
+                ),
+            }
+        }
+
+        /// `NotApplicable` when the epic branch can't be resolved from this
+        /// snapshot — mirrors `check_merge_alert_freshness`'s stance: don't
+        /// silently drop a possibly-valid alert over a data-linking gap.
+        #[test]
+        fn task_sweep_not_applicable_when_epic_branch_unresolvable() {
+            let repo = init_repo("recipe-be");
+            commit_file(repo.path(), "a.rs");
+
+            let mut data = awaiting_merge_data("recipe-be");
+            data.epic_tasks.clear();
+
+            let outcome =
+                check_merge_alert_freshness_for_task("cas-6883t", &data, repo.path());
+            assert!(
+                matches!(outcome, MergeAlertFreshness::NotApplicable),
+                "unresolvable epic branch must not silently retract: {outcome:?}"
             );
         }
     }

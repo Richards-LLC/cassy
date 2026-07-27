@@ -62,6 +62,53 @@ pub struct InboxMessage {
     pub timestamp: String,
     pub color: String,
     pub read: bool,
+    /// cas-ed6c: worker name a `WorkerIdle`-class alert concerns, if this
+    /// row is one. `None` for every other message kind.
+    ///
+    /// WHY THIS EXISTS: `write_to_inbox` is a plain append to a file Claude
+    /// Code only polls at ITS OWN turn boundaries (see `deliver_to_worker`'s
+    /// doc comment on `TeamsInbox` delivery) — and `read` is never flipped
+    /// to `true` by production code (see the field above), so a written row
+    /// sits here, unmodified, until the recipient happens to read it. A
+    /// `WorkerIdle` alert is generated and revalidated against LIVE state
+    /// at write time (`revalidate_event_for_delivery_with_context`), but
+    /// that only proves it was true THEN — if the named worker is
+    /// subsequently assigned real work before the recipient's next turn
+    /// boundary (which can be minutes away if the recipient is mid-turn),
+    /// the already-written row is stale and nothing retracts it. Live
+    /// incident: three workers (`interrupt-fixer`/`close-guardrail`/
+    /// `activity-clock`) were announced idle/ready in one batch ~7 minutes
+    /// after each had a genuine InProgress assignment — the alert content
+    /// was true at ~21:22Z (before assignment) and false by the time the
+    /// supervisor's client actually surfaced it at ~21:29Z.
+    ///
+    /// `prune_stale_idle_alerts` uses this tag to retract a queued alert
+    /// proactively, before the recipient ever sees it, instead of relying
+    /// on generation-time revalidation alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retract_worker: Option<String>,
+    /// cas-e48f: task id a MERGE REQUIRED / `AwaitingMerge` alert concerns,
+    /// if this row is one. `None` for every other message kind, including
+    /// plain `WorkerIdle` rows (those use `retract_worker` instead).
+    ///
+    /// FOLLOW-ON to `retract_worker` above: MERGE REQUIRED alerts ride the
+    /// identical write-once-and-stale mechanism, but the correct staleness
+    /// predicate is NOT "has the named worker gained a real assignment" —
+    /// a worker can be reassigned to other work while its OWN merge is
+    /// still genuinely outstanding (that must stay queued), and a merge can
+    /// land while the worker sits idle with no new assignment at all (that
+    /// must be retracted). The live incident this fixes: an alert quoting
+    /// "Live evidence: 1 unmerged commit... checked against epic tip
+    /// 811377c" was delivered AFTER the merge had already landed at a newer
+    /// tip — `worker_now_has_real_assignment` would not have caught this,
+    /// since the worker never got a new task.
+    ///
+    /// `prune_stale_merge_alerts` re-checks this task's live unmerged-commit
+    /// count against the CURRENT epic tip (re-read at sweep time, never the
+    /// tip captured when the row was written) and retracts the row when the
+    /// merge has already landed or the task is no longer `AwaitingMerge`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retract_task: Option<String>,
 }
 
 /// Team member entry in config.json.
@@ -610,6 +657,58 @@ impl TeamsManager {
         summary: Option<&str>,
         color: Option<&str>,
     ) -> anyhow::Result<()> {
+        self.write_to_inbox_impl(target, from, message, summary, color, None, None)
+    }
+
+    /// Like [`Self::write_to_inbox`], but tags the queued row with the
+    /// worker name a `WorkerIdle`-class alert concerns (cas-ed6c). Use this
+    /// ONLY for prompts generated from `DirectorEvent::WorkerIdle` — the tag
+    /// is what lets [`Self::prune_stale_idle_alerts`] retract the row later
+    /// if reality changes before the recipient ever reads it.
+    pub fn write_to_inbox_for_worker_idle(
+        &self,
+        target: &str,
+        from: &str,
+        message: &str,
+        summary: Option<&str>,
+        color: Option<&str>,
+        worker: &str,
+    ) -> anyhow::Result<()> {
+        self.write_to_inbox_impl(target, from, message, summary, color, Some(worker), None)
+    }
+
+    /// Like [`Self::write_to_inbox`], but tags the queued row with the task
+    /// id a MERGE REQUIRED / `AwaitingMerge` alert concerns (cas-e48f). Use
+    /// this ONLY for the actionable merge-queue prompt
+    /// (`merge_required_idle_prompt_text`) — the tag is what lets
+    /// [`Self::prune_stale_merge_alerts`] retract the row later if the merge
+    /// lands (or the task moves off `AwaitingMerge`) before the recipient
+    /// ever reads it. Deliberately separate from `retract_worker`: the
+    /// worker-assignment predicate that retracts plain `WorkerIdle` rows is
+    /// the WRONG staleness check for a merge alert (see `InboxMessage::
+    /// retract_task` doc) — a merge alert must never be tagged with both.
+    pub fn write_to_inbox_for_merge_alert(
+        &self,
+        target: &str,
+        from: &str,
+        message: &str,
+        summary: Option<&str>,
+        color: Option<&str>,
+        task_id: &str,
+    ) -> anyhow::Result<()> {
+        self.write_to_inbox_impl(target, from, message, summary, color, None, Some(task_id))
+    }
+
+    fn write_to_inbox_impl(
+        &self,
+        target: &str,
+        from: &str,
+        message: &str,
+        summary: Option<&str>,
+        color: Option<&str>,
+        retract_worker: Option<&str>,
+        retract_task: Option<&str>,
+    ) -> anyhow::Result<()> {
         let inbox_path = self.inboxes_dir.join(format!("{}.json", target));
 
         // Ensure inbox file exists
@@ -711,6 +810,8 @@ impl TeamsManager {
             timestamp: now,
             color: resolved_color,
             read: false,
+            retract_worker: retract_worker.map(str::to_string),
+            retract_task: retract_task.map(str::to_string),
         });
 
         // Write back
@@ -723,6 +824,148 @@ impl TeamsManager {
         tracing::debug!("Wrote message to inbox: {} -> {}", from, target);
 
         Ok(())
+    }
+
+    /// Retract stale `WorkerIdle`-class rows from `target`'s inbox (cas-ed6c).
+    ///
+    /// A `WorkerIdle` alert is revalidated against live state only at the
+    /// moment it's WRITTEN (`revalidate_event_for_delivery_with_context`).
+    /// The row then sits in this file, untouched, until Claude Code polls
+    /// its inbox at ITS OWN turn boundary — which can be minutes away if the
+    /// recipient is mid-turn. If the tagged worker gains a real assignment
+    /// in that gap, the write-time revalidation can never catch it because
+    /// it already ran. This sweep re-checks every UNREAD row carrying a
+    /// `retract_worker` tag against a caller-supplied live predicate and
+    /// drops any whose claim is now false — proactively, before the
+    /// recipient ever sees it, rather than relying on a one-shot check at
+    /// write time. Call once per director tick alongside prompt generation
+    /// (see `revalidate_and_prompt_for_delivery`'s caller in `lifecycle.rs`),
+    /// reusing the same live snapshot already loaded that tick.
+    ///
+    /// `worker_now_has_assignment(worker) == true` means the alert is now
+    /// stale (the worker is no longer idle) and the row is removed. Rows
+    /// without a `retract_worker` tag, or already marked `read`, are left
+    /// untouched — this only ever retracts an alert of the specific kind it
+    /// was built for, never a message a human might already have seen.
+    ///
+    /// Returns the number of rows retracted (0 if the inbox doesn't exist,
+    /// can't be parsed, or nothing matched — never an error for a missing
+    /// file, since "no inbox yet" is not a failure here).
+    pub fn prune_stale_idle_alerts(
+        &self,
+        target: &str,
+        worker_now_has_assignment: impl Fn(&str) -> bool,
+    ) -> anyhow::Result<usize> {
+        self.prune_stale_rows_by_key(
+            target,
+            |m| m.retract_worker.as_deref(),
+            worker_now_has_assignment,
+            "WorkerIdle",
+            "worker gained a real assignment before this row was read",
+        )
+    }
+
+    /// Retract stale MERGE REQUIRED / `AwaitingMerge` rows from `target`'s
+    /// inbox (cas-e48f, follow-on to `prune_stale_idle_alerts` above).
+    ///
+    /// Same write-once-and-stale mechanism as `WorkerIdle` alerts, but a
+    /// DIFFERENT staleness predicate: a merge alert's claim isn't about the
+    /// named worker's assignment state, it's about whether THIS task's
+    /// factory branch still carries unmerged commits against the CURRENT
+    /// epic tip. `merge_alert_is_stale(task_id) == true` means the merge has
+    /// already landed (or the task moved off `AwaitingMerge` entirely) and
+    /// the row should be removed before the recipient acts on stale "go
+    /// merge this" instructions. Rows without a `retract_task` tag, or
+    /// already marked `read`, are left untouched.
+    ///
+    /// Returns the number of rows retracted (0 if the inbox doesn't exist,
+    /// can't be parsed, or nothing matched).
+    pub fn prune_stale_merge_alerts(
+        &self,
+        target: &str,
+        merge_alert_is_stale: impl Fn(&str) -> bool,
+    ) -> anyhow::Result<usize> {
+        self.prune_stale_rows_by_key(
+            target,
+            |m| m.retract_task.as_deref(),
+            merge_alert_is_stale,
+            "MergeRequired",
+            "merge already landed (or task left AwaitingMerge) before this row was read",
+        )
+    }
+
+    /// Shared sweep body for [`Self::prune_stale_idle_alerts`] and
+    /// [`Self::prune_stale_merge_alerts`] (cas-e48f unification): both need
+    /// the identical lock/read/retain/write dance over the same inbox file
+    /// shape, differing only in which tag field they key on and what
+    /// "stale" means for that tag. `extract_key` pulls the row's tag (if
+    /// any); `is_stale(key) == true` removes the row. Already-`read` rows
+    /// are NEVER touched by either caller (AC#3: a human who has seen a
+    /// message must never have it retroactively vanish).
+    fn prune_stale_rows_by_key(
+        &self,
+        target: &str,
+        extract_key: impl Fn(&InboxMessage) -> Option<&str>,
+        is_stale: impl Fn(&str) -> bool,
+        alert_kind: &'static str,
+        log_reason: &'static str,
+    ) -> anyhow::Result<usize> {
+        let inbox_path = self.inboxes_dir.join(format!("{}.json", target));
+        if !inbox_path.exists() {
+            return Ok(0);
+        }
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&inbox_path)?;
+        use std::os::unix::io::AsRawFd;
+        let fd = file.as_raw_fd();
+        let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
+        if ret != 0 {
+            anyhow::bail!(
+                "Failed to lock inbox file {:?}: {}",
+                inbox_path,
+                std::io::Error::last_os_error()
+            );
+        }
+
+        let mut messages: Vec<InboxMessage> = {
+            let content = std::fs::read_to_string(&inbox_path).unwrap_or_else(|_| "[]".to_string());
+            serde_json::from_str(&content).unwrap_or_default()
+        };
+
+        let before = messages.len();
+        messages.retain(|m| {
+            if m.read {
+                return true;
+            }
+            match extract_key(m) {
+                Some(key) if is_stale(key) => {
+                    tracing::info!(
+                        target: "cas::coordination",
+                        stage = "retract_stale_alert",
+                        channel = "teams_inbox",
+                        alert_kind = alert_kind,
+                        key = %key,
+                        target_agent = target,
+                        reason = log_reason,
+                        "retracting queued alert before this row was read"
+                    );
+                    false
+                }
+                _ => true,
+            }
+        });
+        let removed = before - messages.len();
+
+        if removed > 0 {
+            let json = serde_json::to_string_pretty(&messages)?;
+            std::fs::write(&inbox_path, json)?;
+        }
+
+        unsafe { libc::flock(fd, libc::LOCK_UN) };
+        Ok(removed)
     }
 
     /// Ensure an inbox file exists for the given agent.
@@ -1568,6 +1811,396 @@ mod tests {
         );
     }
 
+    // --- cas-ed6c: write_to_inbox_for_worker_idle + prune_stale_idle_alerts -
+
+    /// A tagged write carries `retract_worker` in the persisted row so a
+    /// later sweep can find it.
+    #[test]
+    fn write_to_inbox_for_worker_idle_tags_the_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = manager_in(tmp.path(), "t_tag");
+        std::fs::create_dir_all(&mgr.inboxes_dir).unwrap();
+
+        mgr.write_to_inbox_for_worker_idle(
+            "supervisor",
+            DIRECTOR_AGENT_NAME,
+            "Worker swift-fox is idle with no assigned tasks.",
+            None,
+            None,
+            "swift-fox",
+        )
+        .unwrap();
+
+        let inbox: Vec<InboxMessage> = serde_json::from_str(
+            &std::fs::read_to_string(mgr.inboxes_dir.join("supervisor.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].retract_worker.as_deref(), Some("swift-fox"));
+    }
+
+    /// A plain (untagged) `write_to_inbox` write leaves `retract_worker`
+    /// `None` — the tag is opt-in, not a default every message gets.
+    #[test]
+    fn write_to_inbox_plain_write_has_no_retract_worker_tag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = manager_in(tmp.path(), "t_notag");
+        std::fs::create_dir_all(&mgr.inboxes_dir).unwrap();
+
+        mgr.write_to_inbox("supervisor", DIRECTOR_AGENT_NAME, "hello", None, None)
+            .unwrap();
+
+        let inbox: Vec<InboxMessage> = serde_json::from_str(
+            &std::fs::read_to_string(mgr.inboxes_dir.join("supervisor.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(inbox[0].retract_worker, None);
+    }
+
+    /// The core cas-ed6c fix: a queued, unread WorkerIdle-class alert about
+    /// a worker who has since gained a real assignment is retracted by
+    /// `prune_stale_idle_alerts` — this is the exact live-incident shape
+    /// (three workers announced idle/ready ~7 minutes after each had a
+    /// genuine InProgress assignment) reproduced at the inbox layer.
+    #[test]
+    fn prune_stale_idle_alerts_retracts_row_for_now_assigned_worker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = manager_in(tmp.path(), "t_prune");
+        std::fs::create_dir_all(&mgr.inboxes_dir).unwrap();
+
+        mgr.write_to_inbox_for_worker_idle(
+            "supervisor",
+            DIRECTOR_AGENT_NAME,
+            "Worker swift-fox is idle with no assigned tasks.",
+            None,
+            None,
+            "swift-fox",
+        )
+        .unwrap();
+
+        let removed = mgr
+            .prune_stale_idle_alerts("supervisor", |worker| worker == "swift-fox")
+            .unwrap();
+        assert_eq!(removed, 1, "the stale swift-fox alert must be retracted");
+
+        let inbox: Vec<InboxMessage> = serde_json::from_str(
+            &std::fs::read_to_string(mgr.inboxes_dir.join("supervisor.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            inbox.is_empty(),
+            "retracted row must be removed from the inbox file, got {inbox:?}"
+        );
+    }
+
+    /// Negative control: a tagged alert for a worker who is STILL idle
+    /// (predicate returns false) must survive the sweep — this must not
+    /// trade false positives for silence (AC#3).
+    #[test]
+    fn prune_stale_idle_alerts_preserves_row_for_still_idle_worker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = manager_in(tmp.path(), "t_prune_keep");
+        std::fs::create_dir_all(&mgr.inboxes_dir).unwrap();
+
+        mgr.write_to_inbox_for_worker_idle(
+            "supervisor",
+            DIRECTOR_AGENT_NAME,
+            "Worker swift-fox is idle with no assigned tasks.",
+            None,
+            None,
+            "swift-fox",
+        )
+        .unwrap();
+
+        let removed = mgr
+            .prune_stale_idle_alerts("supervisor", |_worker| false)
+            .unwrap();
+        assert_eq!(removed, 0, "a genuinely still-idle worker's alert must survive");
+
+        let inbox: Vec<InboxMessage> = serde_json::from_str(
+            &std::fs::read_to_string(mgr.inboxes_dir.join("supervisor.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(inbox.len(), 1);
+    }
+
+    /// Untagged messages (no `retract_worker`) and messages tagged for a
+    /// DIFFERENT worker must never be touched by the sweep — it only ever
+    /// retracts the specific kind of row it was built for.
+    #[test]
+    fn prune_stale_idle_alerts_ignores_untagged_and_other_worker_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = manager_in(tmp.path(), "t_prune_selective");
+        std::fs::create_dir_all(&mgr.inboxes_dir).unwrap();
+
+        mgr.write_to_inbox("supervisor", "supervisor", "an unrelated peer message", None, None)
+            .unwrap();
+        mgr.write_to_inbox_for_worker_idle(
+            "supervisor",
+            DIRECTOR_AGENT_NAME,
+            "Worker other-worker is idle with no assigned tasks.",
+            None,
+            None,
+            "other-worker",
+        )
+        .unwrap();
+        mgr.write_to_inbox_for_worker_idle(
+            "supervisor",
+            DIRECTOR_AGENT_NAME,
+            "Worker swift-fox is idle with no assigned tasks.",
+            None,
+            None,
+            "swift-fox",
+        )
+        .unwrap();
+
+        // Only swift-fox is now assigned; other-worker is still idle.
+        let removed = mgr
+            .prune_stale_idle_alerts("supervisor", |worker| worker == "swift-fox")
+            .unwrap();
+        assert_eq!(removed, 1);
+
+        let inbox: Vec<InboxMessage> = serde_json::from_str(
+            &std::fs::read_to_string(mgr.inboxes_dir.join("supervisor.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(inbox.len(), 2, "unrelated + other-worker rows must survive: {inbox:?}");
+        assert!(inbox.iter().any(|m| m.text.contains("unrelated peer message")));
+        assert!(inbox.iter().any(|m| m.text.contains("other-worker")));
+        assert!(!inbox.iter().any(|m| m.text.contains("swift-fox")));
+    }
+
+    /// A `read: true` row must never be retracted even if it matches a
+    /// stale predicate — once (hypothetically) marked read, a human may
+    /// already have seen it; retracting it after the fact would be a
+    /// different, worse bug than the one this fixes.
+    #[test]
+    fn prune_stale_idle_alerts_never_touches_read_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = manager_in(tmp.path(), "t_prune_read");
+        std::fs::create_dir_all(&mgr.inboxes_dir).unwrap();
+
+        let seeded = vec![InboxMessage {
+            from: DIRECTOR_AGENT_NAME.to_string(),
+            text: "Worker swift-fox is idle with no assigned tasks.".to_string(),
+            summary: None,
+            timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            color: "green".to_string(),
+            read: true,
+            retract_worker: Some("swift-fox".to_string()),
+            retract_task: None,
+        }];
+        let inbox_path = mgr.inboxes_dir.join("supervisor.json");
+        std::fs::write(&inbox_path, serde_json::to_string_pretty(&seeded).unwrap()).unwrap();
+
+        let removed = mgr
+            .prune_stale_idle_alerts("supervisor", |_worker| true)
+            .unwrap();
+        assert_eq!(removed, 0, "a read row must never be retracted");
+    }
+
+    // --- cas-e48f: write_to_inbox_for_merge_alert + prune_stale_merge_alerts
+
+    /// A tagged merge-alert write carries `retract_task` in the persisted
+    /// row, and deliberately does NOT set `retract_worker` — the two tags
+    /// are mutually exclusive (see `InboxMessage::retract_task` doc).
+    #[test]
+    fn write_to_inbox_for_merge_alert_tags_the_row_with_task_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = manager_in(tmp.path(), "t_merge_tag");
+        std::fs::create_dir_all(&mgr.inboxes_dir).unwrap();
+
+        mgr.write_to_inbox_for_merge_alert(
+            "supervisor",
+            DIRECTOR_AGENT_NAME,
+            "MERGE REQUIRED for cas-1234",
+            None,
+            None,
+            "cas-1234",
+        )
+        .unwrap();
+
+        let inbox: Vec<InboxMessage> = serde_json::from_str(
+            &std::fs::read_to_string(mgr.inboxes_dir.join("supervisor.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].retract_task.as_deref(), Some("cas-1234"));
+        assert_eq!(
+            inbox[0].retract_worker, None,
+            "a merge alert row must not also carry retract_worker"
+        );
+    }
+
+    /// The core cas-e48f fix: a queued, unread MERGE REQUIRED alert whose
+    /// task the caller's predicate now reports stale (merge landed, or task
+    /// left AwaitingMerge) is retracted by `prune_stale_merge_alerts`.
+    #[test]
+    fn prune_stale_merge_alerts_retracts_row_for_stale_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = manager_in(tmp.path(), "t_merge_prune");
+        std::fs::create_dir_all(&mgr.inboxes_dir).unwrap();
+
+        mgr.write_to_inbox_for_merge_alert(
+            "supervisor",
+            DIRECTOR_AGENT_NAME,
+            "MERGE REQUIRED for cas-1234",
+            None,
+            None,
+            "cas-1234",
+        )
+        .unwrap();
+
+        let removed = mgr
+            .prune_stale_merge_alerts("supervisor", |task_id| task_id == "cas-1234")
+            .unwrap();
+        assert_eq!(removed, 1, "the stale merge alert must be retracted");
+
+        let inbox: Vec<InboxMessage> = serde_json::from_str(
+            &std::fs::read_to_string(mgr.inboxes_dir.join("supervisor.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            inbox.is_empty(),
+            "retracted row must be removed from the inbox file, got {inbox:?}"
+        );
+    }
+
+    /// Negative control: a merge alert whose task is STILL genuinely
+    /// AwaitingMerge (predicate returns false) must survive the sweep.
+    #[test]
+    fn prune_stale_merge_alerts_preserves_row_for_still_outstanding_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = manager_in(tmp.path(), "t_merge_prune_keep");
+        std::fs::create_dir_all(&mgr.inboxes_dir).unwrap();
+
+        mgr.write_to_inbox_for_merge_alert(
+            "supervisor",
+            DIRECTOR_AGENT_NAME,
+            "MERGE REQUIRED for cas-1234",
+            None,
+            None,
+            "cas-1234",
+        )
+        .unwrap();
+
+        let removed = mgr
+            .prune_stale_merge_alerts("supervisor", |_task_id| false)
+            .unwrap();
+        assert_eq!(removed, 0, "a genuinely still-outstanding merge alert must survive");
+
+        let inbox: Vec<InboxMessage> = serde_json::from_str(
+            &std::fs::read_to_string(mgr.inboxes_dir.join("supervisor.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(inbox.len(), 1);
+    }
+
+    /// Untagged messages and `WorkerIdle`-tagged (`retract_worker`) messages
+    /// must never be touched by `prune_stale_merge_alerts` — it only keys on
+    /// `retract_task`, and a plain WorkerIdle row about the SAME worker name
+    /// as a stale task id must not be collaterally removed.
+    #[test]
+    fn prune_stale_merge_alerts_ignores_untagged_and_worker_idle_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = manager_in(tmp.path(), "t_merge_prune_selective");
+        std::fs::create_dir_all(&mgr.inboxes_dir).unwrap();
+
+        mgr.write_to_inbox("supervisor", "supervisor", "an unrelated peer message", None, None)
+            .unwrap();
+        mgr.write_to_inbox_for_worker_idle(
+            "supervisor",
+            DIRECTOR_AGENT_NAME,
+            "Worker swift-fox is idle with no assigned tasks.",
+            None,
+            None,
+            "swift-fox",
+        )
+        .unwrap();
+        mgr.write_to_inbox_for_merge_alert(
+            "supervisor",
+            DIRECTOR_AGENT_NAME,
+            "MERGE REQUIRED for cas-1234",
+            None,
+            None,
+            "cas-1234",
+        )
+        .unwrap();
+
+        // Predicate would ALSO match "swift-fox" if it were consulted for
+        // the WorkerIdle row — proving the sweep only ever looks at
+        // `retract_task`, never `retract_worker`.
+        let removed = mgr
+            .prune_stale_merge_alerts("supervisor", |task_id| {
+                task_id == "cas-1234" || task_id == "swift-fox"
+            })
+            .unwrap();
+        assert_eq!(removed, 1);
+
+        let inbox: Vec<InboxMessage> = serde_json::from_str(
+            &std::fs::read_to_string(mgr.inboxes_dir.join("supervisor.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(inbox.len(), 2, "unrelated + WorkerIdle rows must survive: {inbox:?}");
+        assert!(inbox.iter().any(|m| m.text.contains("unrelated peer message")));
+        assert!(inbox.iter().any(|m| m.text.contains("swift-fox")));
+        assert!(!inbox.iter().any(|m| m.text.contains("cas-1234")));
+    }
+
+    /// A `read: true` merge-alert row must never be retracted — same
+    /// AC#3 guarantee as the WorkerIdle sweep.
+    #[test]
+    fn prune_stale_merge_alerts_never_touches_read_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = manager_in(tmp.path(), "t_merge_prune_read");
+        std::fs::create_dir_all(&mgr.inboxes_dir).unwrap();
+
+        let seeded = vec![InboxMessage {
+            from: DIRECTOR_AGENT_NAME.to_string(),
+            text: "MERGE REQUIRED for cas-1234".to_string(),
+            summary: None,
+            timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            color: "green".to_string(),
+            read: true,
+            retract_worker: None,
+            retract_task: Some("cas-1234".to_string()),
+        }];
+        let inbox_path = mgr.inboxes_dir.join("supervisor.json");
+        std::fs::write(&inbox_path, serde_json::to_string_pretty(&seeded).unwrap()).unwrap();
+
+        let removed = mgr
+            .prune_stale_merge_alerts("supervisor", |_task_id| true)
+            .unwrap();
+        assert_eq!(removed, 0, "a read row must never be retracted");
+    }
+
+    /// Missing inbox file: `prune_stale_merge_alerts` returns `Ok(0)`.
+    #[test]
+    fn prune_stale_merge_alerts_missing_inbox_is_a_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = manager_in(tmp.path(), "t_merge_prune_missing");
+        std::fs::create_dir_all(&mgr.inboxes_dir).unwrap();
+
+        let removed = mgr
+            .prune_stale_merge_alerts("nobody-home", |_task_id| true)
+            .unwrap();
+        assert_eq!(removed, 0);
+    }
+
+    /// Missing inbox file: `prune_stale_idle_alerts` returns `Ok(0)`, not an
+    /// error — "no inbox yet" is not a failure.
+    #[test]
+    fn prune_stale_idle_alerts_missing_inbox_is_a_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = manager_in(tmp.path(), "t_prune_missing");
+        std::fs::create_dir_all(&mgr.inboxes_dir).unwrap();
+
+        let removed = mgr
+            .prune_stale_idle_alerts("nobody-home", |_worker| true)
+            .unwrap();
+        assert_eq!(removed, 0);
+    }
+
     /// cas-73c8: identical (from, text) still present in the inbox is
     /// suppressed regardless of age. A time-bounded window re-delivered
     /// handled messages after 10+ minutes with no redelivery marker.
@@ -1590,6 +2223,8 @@ mod tests {
             // Marked read so retention is not the reason it stays —
             // dedup alone must suppress the re-write.
             read: true,
+            retract_worker: None,
+            retract_task: None,
         }];
         let inbox_path = mgr.inboxes_dir.join("swift-fox.json");
         std::fs::write(&inbox_path, serde_json::to_string_pretty(&seeded).unwrap())
@@ -1631,6 +2266,8 @@ mod tests {
                 timestamp: stale_ts.clone(),
                 color: "green".to_string(),
                 read: false,
+                retract_worker: None,
+                retract_task: None,
             },
             InboxMessage {
                 from: DIRECTOR_AGENT_NAME.to_string(),
@@ -1639,6 +2276,8 @@ mod tests {
                 timestamp: stale_ts,
                 color: "green".to_string(),
                 read: true,
+                retract_worker: None,
+                retract_task: None,
             },
         ];
         let inbox_path = mgr.inboxes_dir.join("swift-fox.json");
@@ -1690,6 +2329,8 @@ mod tests {
             // Must be marked read — unread messages are preserved
             // regardless of age by design.
             read: true,
+            retract_worker: None,
+            retract_task: None,
         }];
         let inbox_path = mgr.inboxes_dir.join("swift-fox.json");
         std::fs::write(&inbox_path, serde_json::to_string_pretty(&seeded).unwrap()).unwrap();

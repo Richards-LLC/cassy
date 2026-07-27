@@ -694,7 +694,7 @@ async fn break_turn_targets_pane_by_name_independent_of_focus() {
 
 #[tokio::test]
 async fn interrupt_and_inject_errors_on_missing_pane() {
-    let mux = Mux::new(24, 80);
+    let mut mux = Mux::new(24, 80);
     let res = mux
         .interrupt_and_inject("nope", "hi", std::time::Duration::from_millis(0))
         .await;
@@ -723,4 +723,97 @@ async fn interrupt_and_inject_breaks_then_injects_by_name() {
         )
         .await;
     assert!(res.is_ok(), "urgent redirect to a live pane must succeed");
+}
+
+// ── cas-4208: post-break settle must observe real quiescence, not a blind
+// sleep, for harnesses without a real textbox submit (Codex) ────────────────
+
+/// A real PTY-backed pane running a script that emits a short burst of
+/// output over ~600ms and then goes quiet (staying alive afterward so the
+/// pane doesn't exit mid-test) — a stand-in for Codex's post-Esc
+/// "Conversation interrupted" transition, which keeps redrawing for a while
+/// before the composer is actually ready for fresh input again. A live
+/// repro against the real `codex` binary (task cas-4208 notes) showed a
+/// flat sleep can race exactly that transition and silently swallow the
+/// follow-up submit; these tests pin the fix against a cheap, deterministic
+/// stand-in rather than requiring the real binary. Returns `None` if `sh`
+/// isn't available so the test skips rather than flakes.
+fn ticking_pane(name: &str, harness: SupervisorCli) -> Option<Pane> {
+    let config = crate::pty::PtyConfig {
+        command: "sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            "i=0; while [ $i -lt 6 ]; do i=$((i+1)); echo tick$i; sleep 0.1; done; sleep 5"
+                .to_string(),
+        ],
+        cwd: Some(PathBuf::from("/tmp")),
+        env: vec![],
+        rows: 24,
+        cols: 80,
+    };
+    let pty = crate::pty::Pty::spawn(name, config).ok()?;
+    Pane::with_pty(name, PaneKind::Worker, pty, 24, 80, harness).ok()
+}
+
+/// The multi-line payload shape from the actual cas-4208 incident (a blank
+/// line plus indented follow-up lines) — pinned specifically so a future
+/// single-line probe can't re-certify this path as working (the original
+/// cas-8d76 live verification used exactly that too-simple single-line
+/// probe, which is why this regression shipped unnoticed).
+const MULTILINE_REDIRECT: &str = "STOP. Abandon that and instead run:\n\n  echo redirected\n\nThen reply INTERRUPTED-OK.";
+
+#[tokio::test]
+async fn interrupt_and_inject_waits_for_real_output_quiescence_on_codex() {
+    let Some(pane) = ticking_pane("cas4208-codex-tick", SupervisorCli::Codex) else {
+        return; // no PTY available — skip
+    };
+    let mut mux = Mux::new(24, 80);
+    mux.add_pane(pane);
+
+    // Deliberately far shorter than the ~600ms output burst the pane emits:
+    // proves the wait is driven by observed quiescence, not just this floor.
+    let floor = std::time::Duration::from_millis(50);
+    let start = std::time::Instant::now();
+    let res = mux
+        .interrupt_and_inject("cas4208-codex-tick", MULTILINE_REDIRECT, floor)
+        .await;
+    let elapsed = start.elapsed();
+
+    assert!(res.is_ok(), "urgent redirect to a live pane must succeed");
+    assert!(
+        elapsed >= std::time::Duration::from_millis(500),
+        "Codex (supports_textbox_submit=false) must wait for the pane's own \
+         output burst to actually go quiet (~600ms here) rather than injecting \
+         right after the {floor:?} floor — got elapsed={elapsed:?}. This is the \
+         cas-4208 regression: a flat sleep races a still-transitioning child \
+         and can leave the correction sitting unsent in the composer."
+    );
+}
+
+#[tokio::test]
+async fn interrupt_and_inject_keeps_flat_floor_for_textbox_submit_harnesses() {
+    // Same ticking child, tagged Claude this time — must NOT wait for the
+    // burst. Regression guard for cas-4208 AC4: Claude/Grok behavior (a flat
+    // sleep already recovers reliably per that task's live control-group
+    // evidence) must stay exactly as before.
+    let Some(pane) = ticking_pane("cas4208-claude-tick", SupervisorCli::Claude) else {
+        return; // no PTY available — skip
+    };
+    let mut mux = Mux::new(24, 80);
+    mux.add_pane(pane);
+
+    let floor = std::time::Duration::from_millis(50);
+    let start = std::time::Instant::now();
+    let res = mux
+        .interrupt_and_inject("cas4208-claude-tick", MULTILINE_REDIRECT, floor)
+        .await;
+    let elapsed = start.elapsed();
+
+    assert!(res.is_ok(), "urgent redirect to a live pane must succeed");
+    assert!(
+        elapsed < std::time::Duration::from_millis(400),
+        "Claude/Grok (supports_textbox_submit=true) must keep the old flat-floor \
+         behavior unchanged — got elapsed={elapsed:?}, which suggests the new \
+         quiescence poll leaked into a harness that must not use it"
+    );
 }

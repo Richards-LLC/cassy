@@ -142,7 +142,7 @@ async fn test_light_depth_solo_close_skips_verification_jail() {
             reason: Some("Feel-driven pass complete.".to_string()),
             bypass_code_review: None,
             code_review_findings: None,
-        }))
+            search_manifest: None,        }))
         .await
         .expect("task_close should return a result"),
     );
@@ -205,7 +205,7 @@ async fn test_deep_depth_solo_close_still_arms_verification_jail() {
             reason: Some("Done.".to_string()),
             bypass_code_review: None,
             code_review_findings: None,
-        }))
+            search_manifest: None,        }))
         .await
         .expect("task_close should return a result"),
     );
@@ -259,7 +259,7 @@ async fn test_unset_depth_solo_close_still_arms_verification_jail() {
             reason: Some("Done.".to_string()),
             bypass_code_review: None,
             code_review_findings: None,
-        }))
+            search_manifest: None,        }))
         .await
         .expect("task_close should return a result"),
     );
@@ -465,7 +465,7 @@ async fn create_started_and_closed_light_task(core: &CasCore, title: &str) -> St
             reason: Some("Feel-driven pass complete.".to_string()),
             bypass_code_review: None,
             code_review_findings: None,
-        }))
+            search_manifest: None,        }))
         .await
         .expect("task_close should return a result"),
     );

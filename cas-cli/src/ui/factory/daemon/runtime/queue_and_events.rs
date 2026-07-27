@@ -240,30 +240,34 @@ impl FactoryDaemon {
         !(has_fresh_heartbeat && has_recent_activity)
     }
 
-    /// Bounded settle window between an urgent turn-break (Esc) and the
-    /// follow-up inject (cas-c931).
+    /// Minimum settle floor between an urgent turn-break (Esc) and the
+    /// follow-up inject (cas-c931 / cas-4208).
     ///
-    /// This is the **timeout fallback** of the confirm-then-inject design:
-    /// injecting before Claude Code has finished cancelling the turn races the
-    /// same window the 2.1.183 tmux fix addressed (keystrokes typed during the
-    /// transition get eaten or leak into the wrong buffer). We pause for a
-    /// fixed window so the PTY child can process the Esc and return to its
-    /// readline prompt before we type.
+    /// This used to be treated as the *entire* wait — this function snapshot-
+    /// logged `bytes_received` and then returned a flat constant that ignored
+    /// it, so nothing ever detected whether the child had actually finished
+    /// cancelling the turn before the daemon typed into it. A live repro
+    /// against a real `codex` binary (task cas-4208 notes) proved that gap is
+    /// real: Codex's TUI shows a transitional "Conversation interrupted"
+    /// banner after Esc, and typing (especially the trailing submit CR) while
+    /// that transition is still in flight gets silently swallowed, leaving
+    /// the correction stuck as an unsent draft — every later message just
+    /// types more text into the same stuck draft instead of delivering,
+    /// matching the reported "turn_aborted then permanent silence" symptom.
     ///
-    /// True per-tick output-quiescence polling is not possible here: the daemon
-    /// main loop drains PTY output (`mux.poll_batch`) and runs
-    /// `process_prompt_queue` sequentially on the same task, so byte counts do
-    /// not advance while this function awaits. We therefore use a bounded fixed
-    /// settle as the safe fallback. The `bytes_received` snapshot is logged so a
-    /// future cross-tick state machine can refine this into a true quiescence
-    /// gate; for now it is observational only.
+    /// The real fix — actively polling `Mux::pane_bytes_received` for
+    /// genuine output quiescence instead of guessing a constant — now lives
+    /// in `Mux::interrupt_and_inject` (Codex only; Claude/Grok keep this flat
+    /// floor verbatim per the cas-4208 control-group evidence that a flat
+    /// sleep already works fine for them). This function's job has therefore
+    /// narrowed to just returning that floor.
     ///
-    /// 1200ms is a single starting value for CC's turn-cancel latency. We do
-    /// NOT yet vary it per CLI: `Pane::inject_prompt`'s Codex-vs-Claude split is
-    /// an *input-buffer* settle, a different quantity from *turn-cancel* latency,
-    /// so inferring a Codex delta here would be unvalidated. Tuning this value
-    /// (and whether Codex needs its own) is part of the deferred live-factory
-    /// e2e for cas-c931.
+    /// 1200ms remains the starting value for CC's turn-cancel latency. We do
+    /// NOT vary it per CLI here: `Pane::inject_prompt`'s Codex-vs-Claude split
+    /// is an *input-buffer* settle, a different quantity from *turn-cancel*
+    /// latency, so inferring a Codex-specific floor delta would be
+    /// unvalidated — Codex's extra safety margin instead comes from the
+    /// quiescence poll, not a bigger flat number.
     pub(super) fn urgent_settle_duration(&self, pane_target: &str) -> std::time::Duration {
         let bytes_before = self.app.mux.pane_bytes_received(pane_target).unwrap_or(0);
         tracing::debug!(
@@ -271,7 +275,7 @@ impl FactoryDaemon {
             stage = "urgent_settle",
             target_agent = %pane_target,
             bytes_before,
-            "urgent interrupt settle snapshot"
+            "urgent interrupt settle snapshot (diagnostic only — actual gating is Mux::interrupt_and_inject's quiescence poll)"
         );
         // 1200ms: comfortably above CC's turn-cancel latency while staying well
         // under the daemon's prompt poll interval so delivery stays prompt.
@@ -645,10 +649,15 @@ impl FactoryDaemon {
                 // Resolve the pane name for diagnostics / event records. Delivery
                 // itself (channel selection + name normalisation) is handled by the
                 // recipient-aware helper (cas-b68a).
+                // Owned (not `&str` borrowed from `self.app`): cas-4208's
+                // `interrupt_and_inject` now takes `&mut self.app.mux` to
+                // actively drain during its quiescence poll, so this name
+                // must not keep `self.app` immutably borrowed across that
+                // call.
                 let pane_target = if target == "supervisor" {
-                    self.app.supervisor_name()
+                    self.app.supervisor_name().to_string()
                 } else {
-                    target.as_str()
+                    target.clone()
                 };
                 let inject_result: anyhow::Result<()> = if queued.urgent {
                     // Urgent: interrupt-and-redirect by name via the PTY,
@@ -657,13 +666,13 @@ impl FactoryDaemon {
                     // actually break, then inject.
                     // cas-ab80: apply shared Codex framing before inject so
                     // urgent direct delivery matches normal PTY framing.
-                    let harness = self.app.harness_for(pane_target);
+                    let harness = self.app.harness_for(&pane_target);
                     let payload = super::delivery::frame_pty_payload(
                         harness,
                         &inbox_source,
                         &prompt_with_instructions,
                     );
-                    let settle = self.urgent_settle_duration(pane_target);
+                    let settle = self.urgent_settle_duration(&pane_target);
                     tracing::info!(
                         target: "cas::coordination",
                         stage = "urgent_interrupt",
@@ -674,7 +683,7 @@ impl FactoryDaemon {
                     );
                     self.app
                         .mux
-                        .interrupt_and_inject(pane_target, &payload, settle)
+                        .interrupt_and_inject(&pane_target, &payload, settle)
                         .await
                         .map_err(Into::into)
                 } else {
@@ -728,7 +737,7 @@ impl FactoryDaemon {
                                 queued.id,
                                 &queued.source,
                                 &queued.target,
-                                pane_target,
+                                &pane_target,
                                 "ok",
                                 None,
                             );
@@ -747,7 +756,7 @@ impl FactoryDaemon {
                         // cas-2c5f status (pending reason / abandoned) is stamped
                         // alongside so message_status stays truthful about *why* a
                         // row is still pending.
-                        let pane_known = self.app.mux.get(pane_target).is_some();
+                        let pane_known = self.app.mux.get(&pane_target).is_some();
                         let target_is_current =
                             self.app.worker_names().contains(&pane_target.to_string())
                                 || pane_target == self.app.supervisor_name();
@@ -779,7 +788,7 @@ impl FactoryDaemon {
                                             queued.id,
                                             &queued.source,
                                             &queued.target,
-                                            pane_target,
+                                            &pane_target,
                                             "error",
                                             Some(e.to_string()),
                                         );
@@ -824,7 +833,7 @@ impl FactoryDaemon {
                                         queued.id,
                                         &queued.source,
                                         &queued.target,
-                                        pane_target,
+                                        &pane_target,
                                         "abandoned",
                                         Some(format!(
                                             "Target '{}' not found in current session",

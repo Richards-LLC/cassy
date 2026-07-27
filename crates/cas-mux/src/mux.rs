@@ -850,29 +850,140 @@ impl Mux {
     }
 
     /// Urgent interrupt-and-redirect: break the target worker's in-flight turn
-    /// (Esc), wait a bounded settle window for the turn to actually break, then
-    /// inject the correction as the worker's next prompt — by name, independent
-    /// of TUI focus.
+    /// (Esc), wait for the turn to actually break, then inject the correction
+    /// as the worker's next prompt — by name, independent of TUI focus.
     ///
-    /// `settle` is the bounded fallback delay between the turn-break and the
-    /// inject. It exists because Claude Code (like the 2.1.183 tmux fix) drops
-    /// or misroutes keystrokes typed before the PTY has finished cancelling the
-    /// turn; injecting immediately races that window. The caller may have
-    /// already confirmed output quiescence via [`Mux::pane_bytes_received`];
-    /// `settle` is the unconditional floor / timeout fallback.
+    /// `floor` is the minimum delay between the turn-break and the inject,
+    /// sized per-harness by the caller. For harnesses with a real textbox
+    /// submit (Claude, Grok) this floor alone is honored unconditionally, same
+    /// as before cas-4208 — the "Claude is unaffected" control group in that
+    /// task's report (7 live interrupts, 100% recovery) showed a flat sleep is
+    /// already sufficient there, so that path stays a zero-risk no-op.
+    ///
+    /// For Codex (`!supports_textbox_submit`) `floor` is only the minimum: see
+    /// [`Mux::wait_for_injection_readiness`] for why a flat sleep alone lost a
+    /// real race for that harness and what replaces it.
+    ///
+    /// Takes `&mut self` (not `&self`, as before cas-4208): the quiescence
+    /// poll needs to actively drain the pane via [`Mux::poll_batch`] — see
+    /// that method's doc for why passively reading
+    /// [`Mux::pane_bytes_received`] is not enough on its own.
     pub async fn interrupt_and_inject(
-        &self,
+        &mut self,
         pane_id: &str,
         prompt: &str,
-        settle: std::time::Duration,
+        floor: std::time::Duration,
     ) -> Result<()> {
+        {
+            let pane = self
+                .panes
+                .get(pane_id)
+                .ok_or_else(|| Error::pane_not_found(pane_id))?;
+            pane.break_turn().await?;
+        }
+        self.wait_for_injection_readiness(pane_id, floor).await;
         let pane = self
             .panes
             .get(pane_id)
             .ok_or_else(|| Error::pane_not_found(pane_id))?;
-        pane.break_turn().await?;
-        tokio::time::sleep(settle).await;
         pane.inject_prompt(prompt).await
+    }
+
+    /// Bounded post-break-turn settle used by [`Mux::interrupt_and_inject`]
+    /// before typing the redirect (cas-4208).
+    ///
+    /// BACKGROUND: `urgent_settle_duration` (cas-cli's
+    /// `queue_and_events.rs`) used to be the *entire* wait — a flat sleep
+    /// with no feedback from the child at all. A live repro against a real
+    /// `codex` binary (task cas-4208 notes) proved that loses a real race:
+    /// after Esc, Codex's TUI renders a transitional "Conversation
+    /// interrupted" banner before its composer is actually ready for fresh
+    /// input again. Typing (and, worse, the trailing CR that submits it)
+    /// while that transition is still in flight gets silently absorbed —
+    /// the correction is left sitting in the composer as an unsent draft
+    /// forever. Every later message (urgent or normal) just types MORE
+    /// text into that same stuck draft rather than delivering a fresh
+    /// prompt, which is exactly the reported "turn_aborted then permanent
+    /// silence, deaf to all later messages" signature: repro'd live with
+    /// settle=0 and confirmed to compound across a second injected
+    /// message; recovered live at floor=1200ms/settle=500ms — see task
+    /// notes for the full rollout excerpts of both.
+    ///
+    /// FIX: for harnesses without a real textbox submit (Codex), actively
+    /// poll [`Mux::pane_bytes_received`] for genuine output quiescence
+    /// instead of trusting a guessed constant — this is the mechanism the
+    /// old doc comment on `interrupt_and_inject` already claimed existed
+    /// ("the caller may have already confirmed output quiescence") but no
+    /// caller actually implemented. `floor` is still honored as an
+    /// absolute minimum (so well-behaved fast panes see no latency
+    /// change), and `MAX_EXTRA_WAIT` bounds the total additional wait so a
+    /// pane that never truly goes quiet (e.g. a long-running background
+    /// command still echoing output) still gets the correction delivered
+    /// rather than stalling delivery forever — same bounded-fallback
+    /// guarantee the flat sleep gave, just no longer blind.
+    ///
+    /// CRITICAL: this loop must actively call [`Mux::poll_batch`] itself on
+    /// every tick, not just read [`Mux::pane_bytes_received`] and sleep.
+    /// The daemon's main loop only drains PTYs once per iteration, strictly
+    /// *before* it awaits `process_prompt_queue` (which is what eventually
+    /// calls this); nothing else runs concurrently to advance the byte
+    /// counters while this same task is parked in `tokio::time::sleep`. An
+    /// earlier version of this fix polled `pane_bytes_received` without
+    /// draining and saw a permanently frozen count — indistinguishable
+    /// from real quiescence on the very first check — which silently
+    /// collapsed back to "inject right after the floor," i.e. no fix at
+    /// all. Draining only the target pane here (not a full
+    /// `poll_batch`-driven event dispatch) keeps the blast radius of this
+    /// extra work scoped to the one pane being interrupted.
+    async fn wait_for_injection_readiness(&mut self, pane_id: &str, floor: std::time::Duration) {
+        let Some(pane) = self.panes.get(pane_id) else {
+            return;
+        };
+        if pane.harness().capabilities().supports_textbox_submit {
+            tokio::time::sleep(floor).await;
+            return;
+        }
+
+        const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(75);
+        const STABILITY_WINDOW: std::time::Duration = std::time::Duration::from_millis(300);
+        const MAX_EXTRA_WAIT: std::time::Duration = std::time::Duration::from_secs(4);
+
+        let start = tokio::time::Instant::now();
+        let max_wait = floor + MAX_EXTRA_WAIT;
+        let mut last_bytes = self.pane_bytes_received(pane_id).unwrap_or(0);
+        let mut last_change_at = start;
+
+        loop {
+            tokio::time::sleep(POLL_INTERVAL).await;
+            // Actively drain this pane so the counter we're about to read
+            // reflects reality — see the doc comment above.
+            if let Some(pane) = self.panes.get_mut(pane_id) {
+                let _ = pane.drain_output();
+            } else {
+                break; // pane gone mid-wait
+            }
+            let Some(bytes) = self.pane_bytes_received(pane_id) else {
+                break;
+            };
+            if bytes != last_bytes {
+                last_bytes = bytes;
+                last_change_at = tokio::time::Instant::now();
+            }
+            let elapsed = start.elapsed();
+            let quiescent_long_enough = last_change_at.elapsed() >= STABILITY_WINDOW;
+            if elapsed >= max_wait || (elapsed >= floor && quiescent_long_enough) {
+                if elapsed >= max_wait {
+                    tracing::debug!(
+                        target: "cas::coordination",
+                        stage = "urgent_settle_timeout",
+                        target_agent = %pane_id,
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        "post-break settle hit max wait without confirmed quiescence; injecting anyway"
+                    );
+                }
+                break;
+            }
+        }
     }
 
     /// Inject a prompt into the focused pane

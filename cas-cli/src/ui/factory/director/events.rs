@@ -22,14 +22,14 @@ const IDLE_RATE_LIMIT: Duration = Duration::from_secs(300);
 /// considered "recently alive" for the purposes of the idle gate (cas-4038).
 /// CC agents heartbeat on every tool call, so a 60s window covers one full
 /// turn without generating a false-idle notification.
-const FRESH_HEARTBEAT_SECS: i64 = 60;
+pub(crate) const FRESH_HEARTBEAT_SECS: i64 = 60;
 
 /// A worker whose `latest_activity` timestamp is within this many seconds of
 /// `now_utc` is considered "recently active" (cas-4038). Combined with the
 /// fresh-heartbeat gate: BOTH must be true to suppress a WorkerIdle tick.
 /// 120s gives one comfortable "between tasks" turn window at the 2s refresh
 /// rate without masking a genuinely stalled worker.
-const RECENT_ACTIVITY_SECS: i64 = 120;
+pub(crate) const RECENT_ACTIVITY_SECS: i64 = 120;
 
 /// Scale the base stall threshold by a worker's configured reasoning effort
 /// (cas-09d0). A high/xhigh-effort worker's read-and-think phase routinely

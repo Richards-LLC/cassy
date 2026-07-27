@@ -2222,8 +2222,9 @@ async fn test_126b_close_guidance_without_target_awaiting_task_fails_closed_to_h
 }
 
 /// cas-6913 AC2: a message to a target that IS registered must say so
-/// honestly — not just "queued", but "queued for next poll (target is
-/// registered)". Regression guard against re-collapsing the two cases.
+/// honestly — the response must confirm registration ("target is
+/// registered") and (cas-893c) must not claim delivery for a merely
+/// enqueued message. Regression guard against re-collapsing the two cases.
 #[tokio::test]
 async fn test_coordination_message_to_registered_target_reports_delivery_status() {
     let _guard = EnvGuard::set(&[
@@ -2244,6 +2245,91 @@ async fn test_coordination_message_to_registered_target_reports_delivery_status(
     assert!(
         !text.contains("not yet registered"),
         "a registered target must not read as unregistered: {text}"
+    );
+}
+
+/// cas-893c AC2: a non-urgent message to a registered target must NOT read
+/// as delivered. "queued for next poll" previously implied success; the
+/// response must now say it's merely enqueued and point at `message_status`
+/// to check the real state before escalating.
+#[tokio::test]
+async fn test_coordination_message_non_urgent_does_not_claim_delivery() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "supervisor"),
+    ]);
+    let env = FactoryTestEnv::new();
+    env.register_worker("swift-fox");
+
+    let req = coord_msg("message", "swift-fox", "status update", None);
+    let result = env.service.coordination(Parameters(req)).await;
+    assert!(result.is_ok(), "message should succeed: {result:?}");
+    let text = get_text(&result.unwrap());
+    assert!(
+        !text.contains("queued for next poll"),
+        "must not use the old delivery-implying phrasing: {text}"
+    );
+    assert!(
+        text.contains("not yet confirmed delivered"),
+        "must honestly state delivery is not confirmed: {text}"
+    );
+    assert!(
+        text.contains("message_status"),
+        "must point the sender at message_status to check the real state: {text}"
+    );
+}
+
+/// cas-893c AC2: `message_status` must expose how long a message has been
+/// undelivered rather than only a bare stage string. A freshly enqueued,
+/// never-acked message must report a non-negative `undelivered_after_secs`
+/// (both in the JSON payload and the human-readable line), and the JSON
+/// must be well-formed (parseable) so scripted callers can consume it.
+#[tokio::test]
+async fn test_message_status_exposes_undelivered_after() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "supervisor"),
+    ]);
+    let env = FactoryTestEnv::new();
+    env.register_worker("swift-fox");
+
+    let send_req = coord_msg("message", "swift-fox", "status update", None);
+    let send_result = env.service.coordination(Parameters(send_req)).await;
+    assert!(send_result.is_ok(), "message should succeed: {send_result:?}");
+
+    let prompts = env.prompt_queue().peek_all(10).expect("peek");
+    assert_eq!(prompts.len(), 1);
+    let message_id = prompts[0].id;
+
+    let mut status_req = coord_msg("message_status", "swift-fox", "unused", None);
+    status_req.notification_id = Some(message_id);
+    let status_result = env.service.coordination(Parameters(status_req)).await;
+    assert!(
+        status_result.is_ok(),
+        "message_status should succeed: {status_result:?}"
+    );
+    let text = get_text(&status_result.unwrap());
+
+    assert!(
+        text.contains("undelivered_after:"),
+        "human-readable line must expose undelivered_after: {text}"
+    );
+
+    // The JSON body is everything after the human-readable header lines —
+    // find the first `{` and parse from there.
+    let json_start = text.find('{').expect("response must contain a JSON body");
+    let json: serde_json::Value =
+        serde_json::from_str(&text[json_start..]).expect("undelivered status JSON must parse");
+    let undelivered_after_secs = json
+        .get("undelivered_after_secs")
+        .expect("JSON must carry undelivered_after_secs");
+    assert!(
+        undelivered_after_secs.is_number(),
+        "a never-acked message must report a numeric undelivered_after_secs, got: {json}"
+    );
+    assert!(
+        undelivered_after_secs.as_i64().unwrap() >= 0,
+        "undelivered_after_secs must be non-negative: {json}"
     );
 }
 

@@ -680,6 +680,25 @@ impl CasService {
         let owned = supervisor_owned_workers();
         let mut output = String::from("Worker Status\n=============\n\n");
 
+        // cas-d165 (Finding 2): assignees of currently InProgress tasks,
+        // resolved ONCE for the whole roster. `has_in_progress_task` below
+        // must not rely on lease presence alone — leases are a fixed-
+        // duration claim nothing in production renews (see the long
+        // comment at the `has_in_progress_task` computation), so they
+        // silently expire under a genuinely working agent. Real task
+        // assignment is the ground truth; a lease is corroborating (and
+        // currently the only) evidence *before* that expiry.
+        let in_progress_assignees: std::collections::HashSet<String> = {
+            use crate::store::open_task_store;
+            open_task_store(&self.inner.cas_root)
+                .ok()
+                .and_then(|ts| ts.list(Some(cas_types::TaskStatus::InProgress)).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|t| t.assignee)
+                .collect()
+        };
+
         let workers: Vec<_> = agents
             .iter()
             .filter(|a| {
@@ -792,9 +811,18 @@ impl CasService {
                 // transcript to surface a coarse band so the supervisor can
                 // proactively preserve work before compaction. Falls back
                 // silently when the transcript isn't found yet (new workers).
+                //
+                // cas-d165: hoisted out of the `context_info` block so the
+                // same resolved path can also feed the in-flight-tool-call
+                // check below — one resolution, two consumers, instead of
+                // globbing/reading the transcript twice per worker.
+                let transcript_path_for_worker =
+                    transcript_path_fast(clone_path.as_deref(), session_uuid);
                 let context_info = {
-                    let tp = transcript_path_fast(clone_path.as_deref(), session_uuid);
-                    match tp.and_then(|p| read_context_usage_from_tail(&p)) {
+                    match transcript_path_for_worker
+                        .as_deref()
+                        .and_then(read_context_usage_from_tail)
+                    {
                         Some(total) => {
                             let band = context_band(total);
                             let ktok = total / 1_000;
@@ -812,32 +840,113 @@ impl CasService {
                 // activity past `stall_threshold_secs` is STALLED, not
                 // merely "investigating" — the soft hedge reads as fine and
                 // is easy to skim past in a supervisor's manual poll.
+                //
+                // cas-d165 (Finding 2, ozer wave-2 report): a lease is a
+                // fixed-duration claim that NOTHING in production ever
+                // renews (`renew_lease` has no MCP-tool call site — grep
+                // confirms it's dead outside tests). Any task that runs
+                // longer than the configured lease duration (default 30m,
+                // `[lease] default_duration_mins`) has its lease reclaimed
+                // by the `reclaim_expired_leases` sweep above **even while
+                // the worker is genuinely, actively working** — heartbeat
+                // freshness alone keeps `recover_expired_leases_for_dead_holders`
+                // from touching the task, so `task.status`/`assignee` stay
+                // exactly as they were, but `list_agent_leases` now returns
+                // empty. Gating `has_in_progress_task` on the lease alone
+                // therefore silently goes blind ~30 minutes into every
+                // single task, tripping exactly the "task list
+                // status=in_progress returns ZERO despite every worker
+                // having an assignee" symptom from the fleet-wide-wedge
+                // report. Fixed by ALSO checking real task assignment
+                // (`in_progress_assignees`, built once above from
+                // `task_store.list(InProgress)`) — a worker counts as
+                // holding an assignment if it has an active lease OR an
+                // InProgress task assigned to its name/id, matching the
+                // supervisor's "assignment-or-lease, not lease alone"
+                // guidance.
                 let has_in_progress_task = store
                     .list_agent_leases(&agent.id)
                     .map(|leases| !leases.is_empty())
-                    .unwrap_or(false);
+                    .unwrap_or(false)
+                    || in_progress_assignees.contains(agent.name.as_str())
+                    || in_progress_assignees.contains(agent.id.as_str());
                 let last_activity = last_worker_activity_secs(&activity_events, &agent.id);
+                // cas-d165 (Finding 1): reuse the SAME liveness evidence as
+                // cas-7e85 / `cas factory is-wedged` — an outstanding tool
+                // call (e.g. a dispatched research subagent) proves the
+                // worker is actively waiting on real work, regardless of
+                // checkpoint age. Before this fix, that evidence only fed
+                // the director's WorkerStalled auto-nudge/escalation path
+                // (director/events.rs); this human-facing `⚠ STALLED`
+                // banner had NO in-flight input at all, so the two could
+                // (and did, live: agile-puma-14) disagree at the same
+                // instant — `is-wedged` says `in-flight tool call: true`
+                // while this banner said `⚠ STALLED`. Do not invent a
+                // second detector: call the identical
+                // `wedged::transcript_has_in_flight_tool_call` primitive
+                // against the same transcript path/cli resolution already
+                // computed for `context_info` above.
+                let in_flight_tool_call = transcript_path_for_worker
+                    .as_deref()
+                    .is_some_and(|p| {
+                        crate::cli::factory::wedged::transcript_has_in_flight_tool_call(
+                            p,
+                            worker_cli_from_agent(agent),
+                        )
+                    });
                 let stalled = is_worker_stalled(
                     has_in_progress_task,
                     last_activity.map(|(secs, _)| secs),
                     stall_threshold_secs,
+                    in_flight_tool_call,
                 );
-                let activity_info = match (last_activity, stalled) {
-                    (Some((secs, phase)), true) => {
-                        format!(
+                let activity_info = if !has_in_progress_task {
+                    match last_activity {
+                        Some((secs, phase)) => {
+                            format!("\n    last activity: {secs}s ago ({phase})")
+                        }
+                        None => {
+                            "\n    last activity: none in last 10m (may be investigating or idle)"
+                                .to_string()
+                        }
+                    }
+                } else if stalled {
+                    match last_activity {
+                        Some((secs, phase)) => format!(
                             "\n    last activity: {secs}s ago ({phase}) ⚠ STALLED (no activity ≥{stall_threshold_secs}s while task in progress)"
-                        )
+                        ),
+                        None => "\n    ⚠ STALLED: no activity in last 10m while task in progress"
+                            .to_string(),
                     }
-                    (Some((secs, phase)), false) => {
-                        format!("\n    last activity: {secs}s ago ({phase})")
+                } else if in_flight_tool_call {
+                    // Has an assignment, would otherwise read as stalled
+                    // (old/absent checkpoint), but an in-flight tool call
+                    // is direct evidence of real work in progress — never
+                    // render the ambiguous "may be investigating or idle"
+                    // hedge for a worker holding an assignment (AC3).
+                    match last_activity {
+                        Some((secs, phase)) => format!(
+                            "\n    last activity: {secs}s ago ({phase}) — in-flight tool call (busy, not stalled)"
+                        ),
+                        None => "\n    in-flight tool call in progress (busy, not stalled — no checkpoint-class activity yet)"
+                            .to_string(),
                     }
-                    (None, true) => {
-                        "\n    ⚠ STALLED: no activity in last 10m while task in progress"
-                            .to_string()
-                    }
-                    (None, false) => {
-                        "\n    last activity: none in last 10m (may be investigating or idle)"
-                            .to_string()
+                } else {
+                    match last_activity {
+                        Some((secs, phase)) => {
+                            format!("\n    last activity: {secs}s ago ({phase})")
+                        }
+                        None => {
+                            // Unreachable in practice: has_in_progress_task
+                            // && !in_flight_tool_call && last_activity==None
+                            // always makes is_worker_stalled return true
+                            // above (the None arm there stalls
+                            // unconditionally absent in-flight evidence).
+                            // Kept as a safe, non-hedging fallback in case
+                            // that invariant ever changes.
+                            "\n    last activity: none in last 10m (assigned task in progress — check in)"
+                                .to_string()
+                        }
                     }
                 };
                 output.push_str(&format!(
@@ -1953,19 +2062,32 @@ pub(crate) fn last_worker_activity_secs(
 /// cas-9829: whether a `worker_status` row should render the `⚠ STALLED`
 /// marker instead of the soft "may be investigating or idle" hedge.
 ///
-/// True when the worker has an in-progress task (a claimed lease) AND
-/// either:
+/// True when the worker has an in-progress task (a lease and/or a real
+/// task assignment — see the `has_in_progress_task` computation in
+/// `factory_worker_status`, cas-d165 Finding 2) AND there is no in-flight
+/// tool call (cas-d165 Finding 1) AND either:
 /// - its last observable activity is at/past `stall_threshold_secs`, or
 /// - no activity was observed at all within the query window (`None`).
 ///
 /// A worker with no in-progress task is never "stalled" in this sense —
 /// idle-with-no-task is a distinct, already-signaled state (`WorkerIdle`).
+///
+/// `in_flight_tool_call` is the SAME evidence cas-7e85 / `cas factory
+/// is-wedged` consume (`wedged::transcript_has_in_flight_tool_call`) —
+/// checked first and short-circuits to "not stalled" unconditionally,
+/// mirroring `transcript_confirms_stall_for_age`'s AC1 in
+/// `director/events.rs`. Before this parameter existed, this
+/// human-facing banner had no in-flight input at all and could render
+/// `⚠ STALLED` for a worker `cas factory is-wedged` simultaneously
+/// reported as `in-flight tool call: true` — two disagreeing notions of
+/// "not working" for the same worker at the same instant.
 fn is_worker_stalled(
     has_in_progress_task: bool,
     last_activity_secs_ago: Option<i64>,
     stall_threshold_secs: i64,
+    in_flight_tool_call: bool,
 ) -> bool {
-    if !has_in_progress_task {
+    if !has_in_progress_task || in_flight_tool_call {
         return false;
     }
     match last_activity_secs_ago {
@@ -2990,20 +3112,51 @@ effort = "high"
     fn is_worker_stalled_false_without_in_progress_task() {
         // Idle worker with no observed activity at all — not "stalled",
         // that's the pre-existing "may be investigating or idle" case.
-        assert!(!is_worker_stalled(false, None, 300));
-        assert!(!is_worker_stalled(false, Some(1_000), 300));
+        assert!(!is_worker_stalled(false, None, 300, false));
+        assert!(!is_worker_stalled(false, Some(1_000), 300, false));
     }
 
     #[test]
     fn is_worker_stalled_true_when_no_activity_observed_with_task() {
-        assert!(is_worker_stalled(true, None, 300));
+        assert!(is_worker_stalled(true, None, 300, false));
     }
 
     #[test]
     fn is_worker_stalled_compares_against_threshold() {
-        assert!(!is_worker_stalled(true, Some(299), 300));
-        assert!(is_worker_stalled(true, Some(300), 300));
-        assert!(is_worker_stalled(true, Some(301), 300));
+        assert!(!is_worker_stalled(true, Some(299), 300, false));
+        assert!(is_worker_stalled(true, Some(300), 300, false));
+        assert!(is_worker_stalled(true, Some(301), 300, false));
+    }
+
+    // --- cas-d165: is_worker_stalled in-flight-tool-call suppression --------
+    //
+    // Live no-fire fixture that motivated this: agile-puma-14 held an
+    // in-progress task, `cas factory is-wedged` reported
+    // `in-flight tool call: true` (it had dispatched a research subagent),
+    // yet the OLD 3-arg `is_worker_stalled` had no way to know that and
+    // would have kept reporting `⚠ STALLED` on old/absent checkpoint data.
+
+    #[test]
+    fn is_worker_stalled_suppressed_by_in_flight_tool_call_even_with_no_activity() {
+        // Same shape as `is_worker_stalled_true_when_no_activity_observed_with_task`
+        // but with an in-flight call — must now report false.
+        assert!(!is_worker_stalled(true, None, 300, true));
+    }
+
+    #[test]
+    fn is_worker_stalled_suppressed_by_in_flight_tool_call_past_threshold() {
+        // Checkpoint age well past the threshold would normally stall —
+        // an in-flight tool call overrides that regardless of age.
+        assert!(!is_worker_stalled(true, Some(10_000), 300, true));
+    }
+
+    #[test]
+    fn is_worker_stalled_still_fires_without_in_flight_evidence() {
+        // Safety property (mirrors cas-7e85 AC2): absence of an in-flight
+        // call must NOT itself suppress — a genuinely cold worker with no
+        // outstanding call still stalls exactly as before.
+        assert!(is_worker_stalled(true, Some(301), 300, false));
+        assert!(is_worker_stalled(true, None, 300, false));
     }
 
     // --- cas-86c5: last_worker_activity_secs helper -------------------------

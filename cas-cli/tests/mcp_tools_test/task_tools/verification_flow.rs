@@ -549,6 +549,281 @@ async fn test_merge_required_close_parks_awaiting_merge_and_releases_gate_cas_8d
     );
 }
 
+/// cas-a844: when the worker's factory branch has a genuine git merge
+/// conflict against the parent branch (not just unmerged commits), the
+/// MERGE REQUIRED close rejection must say so and name the alternative
+/// (worker `task start`), and the parked task must record
+/// `deliverables.merge_conflicted = true` — so status output never reads a
+/// conflicted park identically to a clean, supervisor-actionable one.
+#[tokio::test]
+async fn test_a844_merge_conflict_flags_task_and_names_alternative() {
+    use std::process::Command;
+
+    let (temp, service) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    let agent_store = open_agent_store(&cas_dir).expect("open agent store");
+    {
+        let mut agent = agent_store
+            .list(None)
+            .expect("list agents")
+            .into_iter()
+            .find(|agent| agent.name == "test-agent")
+            .expect("test agent exists");
+        agent.role = AgentRole::Worker;
+        agent_store.update(&agent).expect("mark test agent worker");
+    }
+
+    let repo = temp.path();
+    let git = |args: &[&str]| {
+        let ok = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .expect("git")
+            .success();
+        assert!(ok, "git {args:?} failed");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("seed.txt"), "seed\n").unwrap();
+    git(&["add", "seed.txt"]);
+    git(&["commit", "-q", "-m", "seed"]);
+    git(&["checkout", "-q", "-b", "epic/cas-a844"]);
+    git(&["checkout", "-q", "-b", "factory/test-agent"]);
+    // Worker edits seed.txt on its factory branch.
+    std::fs::write(repo.join("seed.txt"), "worker's edit\n").unwrap();
+    git(&["commit", "-q", "-am", "worker edits seed"]);
+    // The epic branch picks up a CONFLICTING edit to the same file
+    // underneath the worker (e.g. another task landed and touched it).
+    git(&["checkout", "-q", "epic/cas-a844"]);
+    std::fs::write(repo.join("seed.txt"), "epic's conflicting edit\n").unwrap();
+    git(&["commit", "-q", "-am", "epic edits seed differently"]);
+    git(&["checkout", "-q", "factory/test-agent"]);
+
+    let task_store = open_task_store(&cas_dir).expect("open task store");
+
+    let epic_id = extract_task_id(&extract_text(
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: "Merge epic".to_string(),
+                description: None,
+                priority: 2,
+                task_type: "epic".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: None,
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("create epic"),
+    ))
+    .expect("epic id")
+    .to_string();
+    {
+        let mut epic = task_store.get(&epic_id).expect("epic exists");
+        epic.branch = Some("epic/cas-a844".to_string());
+        task_store.update(&epic).expect("update epic branch");
+    }
+
+    let id_a = extract_task_id(&extract_text(
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                epic: Some(epic_id.clone()),
+                ..simple_task_req("Task A")
+            }))
+            .await
+            .expect("create A"),
+    ))
+    .expect("id A")
+    .to_string();
+    service
+        .cas_task_start(Parameters(IdRequest { id: id_a.clone() }))
+        .await
+        .expect("start A");
+    {
+        let mut task_a = task_store.get(&id_a).expect("A exists after start");
+        task_a.assignee = Some("test-agent".to_string());
+        task_store.update(&task_a).expect("set A assignee");
+    }
+
+    let close_text = extract_text(
+        service
+            .cas_task_close(Parameters(TaskCloseRequest {
+                id: id_a.clone(),
+                reason: Some("ready for merge".to_string()),
+                bypass_code_review: None,
+                code_review_findings: None,
+            }))
+            .await
+            .expect("close A returns"),
+    );
+    assert!(
+        close_text.contains("MERGE REQUIRED"),
+        "close must still reject on stranded factory branch: {close_text}"
+    );
+    assert!(
+        close_text.to_lowercase().contains("conflict"),
+        "refusal must say this is a genuine conflict, not just unmerged commits: {close_text}"
+    );
+    assert!(
+        close_text.contains("task action=start") || close_text.contains("action=start"),
+        "refusal must name the worker task-start alternative: {close_text}"
+    );
+    assert!(
+        close_text.contains("seed.txt"),
+        "refusal must name the actual conflicting file(s), not just say 'conflict': {close_text}"
+    );
+
+    let parked = task_store.get(&id_a).expect("A exists");
+    assert_eq!(parked.status, TaskStatus::AwaitingMerge);
+    assert!(
+        parked.deliverables.merge_conflicted,
+        "a genuine conflict must be flagged on the parked task"
+    );
+    assert_eq!(
+        parked.deliverables.parked_branch.as_deref(),
+        Some("factory/test-agent")
+    );
+}
+
+/// cas-a844 negative control: unmerged-but-cleanly-mergeable commits must
+/// NOT be flagged as conflicted, and the refusal must not claim a conflict
+/// that doesn't exist.
+#[tokio::test]
+async fn test_a844_clean_divergence_not_flagged_as_conflict() {
+    use std::process::Command;
+
+    let (temp, service) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    let agent_store = open_agent_store(&cas_dir).expect("open agent store");
+    {
+        let mut agent = agent_store
+            .list(None)
+            .expect("list agents")
+            .into_iter()
+            .find(|agent| agent.name == "test-agent")
+            .expect("test agent exists");
+        agent.role = AgentRole::Worker;
+        agent_store.update(&agent).expect("mark test agent worker");
+    }
+
+    let repo = temp.path();
+    let git = |args: &[&str]| {
+        let ok = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .expect("git")
+            .success();
+        assert!(ok, "git {args:?} failed");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("seed.txt"), "seed\n").unwrap();
+    git(&["add", "seed.txt"]);
+    git(&["commit", "-q", "-m", "seed"]);
+    git(&["checkout", "-q", "-b", "epic/cas-a844-clean"]);
+    git(&["checkout", "-q", "-b", "factory/test-agent"]);
+    std::fs::write(repo.join("worker.txt"), "worker\n").unwrap();
+    git(&["add", "worker.txt"]);
+    git(&["commit", "-q", "-m", "worker change"]);
+
+    let task_store = open_task_store(&cas_dir).expect("open task store");
+    let epic_id = extract_task_id(&extract_text(
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: "Merge epic".to_string(),
+                description: None,
+                priority: 2,
+                task_type: "epic".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: None,
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("create epic"),
+    ))
+    .expect("epic id")
+    .to_string();
+    {
+        let mut epic = task_store.get(&epic_id).expect("epic exists");
+        epic.branch = Some("epic/cas-a844-clean".to_string());
+        task_store.update(&epic).expect("update epic branch");
+    }
+
+    let id_a = extract_task_id(&extract_text(
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                epic: Some(epic_id.clone()),
+                ..simple_task_req("Task A")
+            }))
+            .await
+            .expect("create A"),
+    ))
+    .expect("id A")
+    .to_string();
+    service
+        .cas_task_start(Parameters(IdRequest { id: id_a.clone() }))
+        .await
+        .expect("start A");
+    {
+        let mut task_a = task_store.get(&id_a).expect("A exists after start");
+        task_a.assignee = Some("test-agent".to_string());
+        task_store.update(&task_a).expect("set A assignee");
+    }
+
+    let close_text = extract_text(
+        service
+            .cas_task_close(Parameters(TaskCloseRequest {
+                id: id_a.clone(),
+                reason: Some("ready for merge".to_string()),
+                bypass_code_review: None,
+                code_review_findings: None,
+            }))
+            .await
+            .expect("close A returns"),
+    );
+    assert!(close_text.contains("MERGE REQUIRED"));
+    assert!(
+        !close_text.to_lowercase().contains("conflict"),
+        "a cleanly-mergeable divergence must not be described as a conflict: {close_text}"
+    );
+
+    let parked = task_store.get(&id_a).expect("A exists");
+    assert_eq!(parked.status, TaskStatus::AwaitingMerge);
+    assert!(
+        !parked.deliverables.merge_conflicted,
+        "clean divergence must not be flagged as a merge conflict"
+    );
+}
+
 /// cas-627f: a worker retrying `close` on an already-parked (AwaitingMerge)
 /// task — the documented #1 worker failure mode while waiting on a
 /// supervisor merge — must get the same rejection message WITHOUT

@@ -24,6 +24,28 @@ impl CasCore {
             task.depth
         );
 
+        // cas-a844: `awaiting_merge` alone reads as "done, just a formality" —
+        // whether that's true depends entirely on whether the parked branch
+        // can actually merge cleanly. Surface the distinction explicitly so
+        // a conflicted parked task never looks indistinguishable from a
+        // clean one queued for the supervisor.
+        if task.status == TaskStatus::AwaitingMerge {
+            if task.deliverables.merge_conflicted {
+                output.push_str(
+                    "⚠️  MERGE CONFLICT — this task is NOT complete. The parked branch \
+                     failed to merge cleanly; the assigned worker can `task start` it \
+                     to resolve the conflict directly.\n",
+                );
+            } else {
+                output.push_str(
+                    "(mergeable — queued for the supervisor to merge the factory branch)\n",
+                );
+            }
+            if let Some(ref branch) = task.deliverables.parked_branch {
+                output.push_str(&format!("Parked branch: {branch}\n"));
+            }
+        }
+
         if !task.description.is_empty() {
             output.push_str(&format!("\nDescription:\n{}\n", task.description));
         }
@@ -403,9 +425,17 @@ impl CasCore {
             filtered.len().min(limit)
         );
         for task in filtered.iter().take(limit) {
+            // cas-a844: flag a conflicted awaiting_merge distinctly from a
+            // clean one right in the list view, not just on `show`.
+            let conflict_marker =
+                if task.status == TaskStatus::AwaitingMerge && task.deliverables.merge_conflicted {
+                    " [MERGE CONFLICT]"
+                } else {
+                    ""
+                };
             output.push_str(&format!(
-                "- [{}] {:?} P{} {} - {}\n",
-                task.id, task.status, task.priority.0, task.task_type, task.title
+                "- [{}] {:?}{} P{} {} - {}\n",
+                task.id, task.status, conflict_marker, task.priority.0, task.task_type, task.title
             ));
         }
 

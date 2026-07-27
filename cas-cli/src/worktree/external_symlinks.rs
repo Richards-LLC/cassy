@@ -129,37 +129,21 @@ fn scan_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::with_temp_home;
     use tempfile::TempDir;
 
-    /// Point `$HOME` at a scratch dir for the duration of `f`, restoring the
-    /// previous value afterward. Tests in this module must not run
-    /// concurrently with each other (they mutate process-global env) —
-    /// `cargo test` runs tests in a module single-file-ish but across
-    /// threads by default, so each test creates and clears its own $HOME
-    /// scoped to a serial guard via a per-test mutex.
-    fn with_scoped_home<F: FnOnce(&Path)>(home: &Path, f: F) {
-        static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = HOME_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let prior = std::env::var_os("HOME");
-        unsafe {
-            std::env::set_var("HOME", home);
-        }
-        f(home);
-        unsafe {
-            match prior {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
-    }
+    // `$HOME` is process-global, so every test here goes through the
+    // crate-wide `test_support::with_temp_home` helper (not a module-local
+    // mutex) — it's the single serialization point shared by every
+    // HOME-mutating test in the crate (see lib.rs). A second, uncoordinated
+    // lock here would race against e.g. worktree::discovery's HOME tests.
 
     #[test]
     fn no_symlinks_returns_empty() {
-        let home = TempDir::new().unwrap();
-        let worktree = TempDir::new().unwrap();
-        std::fs::write(home.path().join(".gitconfig"), "[user]\n").unwrap();
+        with_temp_home(|home| {
+            let worktree = TempDir::new().unwrap();
+            std::fs::write(home.join(".gitconfig"), "[user]\n").unwrap();
 
-        with_scoped_home(home.path(), |_| {
             let found = scan_external_symlinks_into(worktree.path());
             assert!(found.is_empty());
         });
@@ -167,16 +151,15 @@ mod tests {
 
     #[test]
     fn direct_home_symlink_into_worktree_is_detected() {
-        let home = TempDir::new().unwrap();
-        let worktree = TempDir::new().unwrap();
-        let real_file = worktree.path().join("gitconfig");
-        std::fs::write(&real_file, "[user]\nname = test\n").unwrap();
+        with_temp_home(|home| {
+            let worktree = TempDir::new().unwrap();
+            let real_file = worktree.path().join("gitconfig");
+            std::fs::write(&real_file, "[user]\nname = test\n").unwrap();
 
-        let link = home.path().join(".gitconfig");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&real_file, &link).unwrap();
+            let link = home.join(".gitconfig");
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&real_file, &link).unwrap();
 
-        with_scoped_home(home.path(), |_| {
             let found = scan_external_symlinks_into(worktree.path());
             assert_eq!(found.len(), 1, "found: {found:?}");
             assert_eq!(found[0].link, link);
@@ -185,20 +168,19 @@ mod tests {
 
     #[test]
     fn nested_config_symlink_into_worktree_is_detected() {
-        let home = TempDir::new().unwrap();
-        let worktree = TempDir::new().unwrap();
-        let real_dir = worktree.path().join("systemd-units");
-        std::fs::create_dir_all(&real_dir).unwrap();
-        let real_file = real_dir.join("my-service.service");
-        std::fs::write(&real_file, "[Unit]\n").unwrap();
+        with_temp_home(|home| {
+            let worktree = TempDir::new().unwrap();
+            let real_dir = worktree.path().join("systemd-units");
+            std::fs::create_dir_all(&real_dir).unwrap();
+            let real_file = real_dir.join("my-service.service");
+            std::fs::write(&real_file, "[Unit]\n").unwrap();
 
-        let unit_dir = home.path().join(".config/systemd/user");
-        std::fs::create_dir_all(&unit_dir).unwrap();
-        let link = unit_dir.join("my-service.service");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&real_file, &link).unwrap();
+            let unit_dir = home.join(".config/systemd/user");
+            std::fs::create_dir_all(&unit_dir).unwrap();
+            let link = unit_dir.join("my-service.service");
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&real_file, &link).unwrap();
 
-        with_scoped_home(home.path(), |_| {
             let found = scan_external_symlinks_into(worktree.path());
             assert_eq!(found.len(), 1, "found: {found:?}");
             assert_eq!(found[0].link, link);
@@ -207,17 +189,16 @@ mod tests {
 
     #[test]
     fn symlink_pointing_elsewhere_is_not_flagged() {
-        let home = TempDir::new().unwrap();
-        let worktree = TempDir::new().unwrap();
-        let elsewhere = TempDir::new().unwrap();
-        let real_file = elsewhere.path().join("unrelated.txt");
-        std::fs::write(&real_file, "unrelated").unwrap();
+        with_temp_home(|home| {
+            let worktree = TempDir::new().unwrap();
+            let elsewhere = TempDir::new().unwrap();
+            let real_file = elsewhere.path().join("unrelated.txt");
+            std::fs::write(&real_file, "unrelated").unwrap();
 
-        let link = home.path().join(".unrelated-link");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&real_file, &link).unwrap();
+            let link = home.join(".unrelated-link");
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&real_file, &link).unwrap();
 
-        with_scoped_home(home.path(), |_| {
             let found = scan_external_symlinks_into(worktree.path());
             assert!(found.is_empty(), "found: {found:?}");
         });
@@ -225,14 +206,13 @@ mod tests {
 
     #[test]
     fn dangling_symlink_is_not_flagged() {
-        let home = TempDir::new().unwrap();
-        let worktree = TempDir::new().unwrap();
+        with_temp_home(|home| {
+            let worktree = TempDir::new().unwrap();
 
-        let link = home.path().join(".dangling");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(worktree.path().join("gone"), &link).unwrap();
+            let link = home.join(".dangling");
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(worktree.path().join("gone"), &link).unwrap();
 
-        with_scoped_home(home.path(), |_| {
             let found = scan_external_symlinks_into(worktree.path());
             assert!(found.is_empty(), "a dangling link can't reference a live worktree: {found:?}");
         });

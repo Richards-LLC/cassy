@@ -1240,6 +1240,122 @@ fn abandon_untracked_non_cas_file_blocks_and_file_survives() {
     assert!(new_file.exists(), "the untracked file must survive");
 }
 
+// --- cas-df97: worktree removal must not destroy live external symlink targets ---
+
+/// AC1/AC2 end-to-end: a real external symlink (outside the worktree,
+/// resolved via a scoped `$HOME`) pointing into the worktree blocks
+/// `remove_worker`, is surfaced through the existing `WorktreeError` type
+/// (not a parallel mechanism), and the worktree — and the symlink's live
+/// target — both survive the refusal.
+#[test]
+fn remove_worker_external_symlink_blocks_and_survives() {
+    let (_temp, repo_path) = create_test_repo();
+    let config = WorktreeConfig::default();
+    let mut manager = WorktreeManager::new(&repo_path, config).unwrap();
+
+    let worktree = manager.ensure_worker_worktree("symlink-remove").unwrap();
+    let path = worktree.path.clone();
+    let real_file = path.join("dotfile-target.txt");
+    std::fs::write(&real_file, "live config").unwrap();
+
+    crate::test_support::with_temp_home(|home| {
+        let link = home.join(".dotfile-link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real_file, &link).unwrap();
+
+        let err = manager
+            .remove_worker("symlink-remove", false)
+            .expect_err("a live external symlink into the worktree must block removal");
+
+        assert!(
+            matches!(err, WorktreeError::ExternalSymlinksDetected(_)),
+            "must surface through the existing WorktreeError type: {err:?}"
+        );
+        assert!(
+            err.to_string().contains(&link.display().to_string()),
+            "error must name the offending link: {err}"
+        );
+        assert!(link.exists(), "the external symlink itself must still resolve");
+    });
+
+    assert!(path.exists(), "worktree must survive the refusal");
+    assert!(real_file.exists(), "the symlink's live target must survive");
+}
+
+/// Same guard via `attempt_remove_worker` — the actual production path
+/// `finalize_worker_worktree` calls on graceful worker shutdown (see
+/// ui/factory/app/render_and_ops/epic_workers.rs), surfaced through
+/// `RemoveOutcome` per AC2.
+#[test]
+fn attempt_remove_worker_external_symlink_blocks_and_survives() {
+    let (_temp, repo_path) = create_test_repo();
+    let config = WorktreeConfig::default();
+    let mut manager = WorktreeManager::new(&repo_path, config).unwrap();
+
+    let worktree = manager.ensure_worker_worktree("symlink-attempt").unwrap();
+    let path = worktree.path.clone();
+    let real_file = path.join("dotfile-target.txt");
+    std::fs::write(&real_file, "live config").unwrap();
+
+    crate::test_support::with_temp_home(|home| {
+        let link = home.join(".dotfile-link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real_file, &link).unwrap();
+
+        let outcome = manager.attempt_remove_worker("symlink-attempt").unwrap();
+
+        match outcome {
+            RemoveOutcome::ExternalSymlinksBlocked(warning) => {
+                assert_eq!(warning.worker_name, "symlink-attempt");
+                assert_eq!(warning.links.len(), 1);
+                assert_eq!(warning.links[0].link, link);
+            }
+            other => panic!("expected ExternalSymlinksBlocked, got {other:?}"),
+        }
+        assert!(link.exists());
+    });
+
+    assert!(path.exists(), "worktree must survive the refusal");
+    assert!(
+        manager.get_worker("symlink-attempt").is_some(),
+        "manager must keep tracking the blocked worker so it can be retried later"
+    );
+    assert!(real_file.exists());
+}
+
+/// Same guard via `cleanup_workers`, surfaced through
+/// `CleanupReport::external_symlinks_blocked` per AC2 — and proven
+/// independent of `force`, since force means "bypass git dirty-tree
+/// protection", not "destroy my $HOME symlinks".
+#[test]
+fn cleanup_workers_external_symlink_blocks_even_with_force() {
+    let (_temp, repo_path) = create_test_repo();
+    let config = WorktreeConfig::default();
+    let mut manager = WorktreeManager::new(&repo_path, config).unwrap();
+
+    let worktree = manager.ensure_worker_worktree("symlink-cleanup").unwrap();
+    let path = worktree.path.clone();
+    let real_file = path.join("dotfile-target.txt");
+    std::fs::write(&real_file, "live config").unwrap();
+
+    crate::test_support::with_temp_home(|home| {
+        let link = home.join(".dotfile-link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real_file, &link).unwrap();
+
+        let report = manager.cleanup_workers(true).unwrap();
+
+        assert!(report.cleaned.is_empty());
+        assert_eq!(report.external_symlinks_blocked.len(), 1);
+        assert_eq!(report.external_symlinks_blocked[0].worker_name, "symlink-cleanup");
+        assert_eq!(report.external_symlinks_blocked[0].links[0].link, link);
+        assert!(link.exists());
+    });
+
+    assert!(path.exists(), "worktree must survive even force=true cleanup");
+    assert!(real_file.exists());
+}
+
 #[test]
 fn test_create_epic_branch_without_config_still_defaults_to_detected_trunk() {
     // No .cas/config.toml at all — epic_base_branch must default to None,

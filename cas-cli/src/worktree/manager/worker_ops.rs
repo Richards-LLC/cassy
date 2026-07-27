@@ -357,6 +357,21 @@ impl WorktreeManager {
         };
 
         if worktree.path.exists() {
+            // cas-df97: live external symlinks block regardless of dirty
+            // state — this is the actual production path
+            // (finalize_worker_worktree) that the reported incident went
+            // through.
+            let links = scan_external_symlinks_into(&worktree.path);
+            if !links.is_empty() {
+                let warning = ExternalSymlinkWarning {
+                    worker_name: worker_name.to_string(),
+                    path: worktree.path.clone(),
+                    links,
+                };
+                self.workers.insert(worker_name.to_string(), worktree);
+                return Ok(RemoveOutcome::ExternalSymlinksBlocked(warning));
+            }
+
             let file_count = self
                 .git
                 .uncommitted_file_count(&worktree.path)

@@ -187,6 +187,18 @@ pub(crate) fn cleanup_agent_leases(
 ///
 /// Finds in_progress tasks that have no active lease (from crashed/interrupted sessions)
 /// and resets them to Open status so they can be worked on again.
+///
+/// cas-85d9: this is the most consequential consumer of `list_active_leases`
+/// found while auditing the "task leases are never renewed" gap (cas-d165).
+/// Before task leases renewed on heartbeat, ANY task held past its ~30min
+/// claim duration would have "no active lease" here even though its worker
+/// was alive, heartbeating, and actively working — and this function would
+/// silently reopen it to `Open` on the very next `SessionStart` of ANY
+/// agent in the factory (not just the task's own worker), letting a second
+/// worker pick up and duplicate work the first was still doing. Task-lease
+/// heartbeat renewal (`agent_heartbeat` in
+/// `crates/cas-store/src/agent_store/ops_agent.rs`) is what keeps this
+/// function's "no active lease ⇒ orphaned" assumption true in practice now.
 pub(crate) fn cleanup_orphaned_tasks(cas_root: &std::path::Path) -> usize {
     let task_store = match open_task_store(cas_root) {
         Ok(store) => store,
@@ -566,4 +578,130 @@ pub fn handle_subagent_start(
     }
 
     Ok(HookOutput::empty())
+}
+
+#[cfg(test)]
+mod cas_85d9_lease_renewal_tests {
+    use super::*;
+    use crate::store::init_cas_dir;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    struct CasDir {
+        _tmp: TempDir,
+        pub root: PathBuf,
+    }
+
+    fn setup_cas() -> CasDir {
+        let tmp = tempfile::tempdir().expect("TempDir");
+        let root = init_cas_dir(tmp.path()).expect("init_cas_dir");
+        CasDir { _tmp: tmp, root }
+    }
+
+    /// cas-85d9 AC3: a task held by a live, heartbeating worker past the
+    /// lease duration must still be observable as in-progress — proven at
+    /// the level that actually bit us (docs/requests wave-2 report):
+    /// `cleanup_orphaned_tasks`, which used to treat "no active lease" as
+    /// unconditional proof of a crashed session and silently reopen the
+    /// task to `Open`, corrupting ownership for a worker that was still
+    /// actively working it.
+    #[test]
+    fn heartbeating_worker_past_original_lease_duration_is_not_reopened() {
+        let cas = setup_cas();
+        let agent_store = open_agent_store(&cas.root).expect("open_agent_store");
+        let task_store = open_task_store(&cas.root).expect("open_task_store");
+
+        let agent = Agent::new("agent-85d9".to_string(), "Lease Renewal Test".to_string());
+        agent_store.register(&agent).expect("register");
+
+        let mut task = Task::new("cas-85d9-t1".to_string(), "Long-running task".to_string());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some("agent-85d9".to_string());
+        task_store.add(&task).expect("task.add");
+
+        // Claim with a very short duration — simulates a task claimed near
+        // (or past) the default ~30min window.
+        agent_store
+            .try_claim("cas-85d9-t1", "agent-85d9", 1, None)
+            .expect("try_claim");
+
+        // The worker heartbeats normally while still working — this is
+        // what production does every ~5-30s via the daemon tick.
+        agent_store.heartbeat("agent-85d9").expect("heartbeat");
+
+        // Wait past the ORIGINAL 1s claim duration. Before cas-85d9, the
+        // lease would now be expired and `cleanup_orphaned_tasks` would
+        // reopen the task on the next SessionStart despite the worker
+        // being alive and having just heartbeated.
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        // Model the same production reclaim-sweep timing as the sibling
+        // no-heartbeat test below — must be a no-op here since the
+        // heartbeat already pushed `expires_at` well into the future.
+        agent_store.reclaim_expired_leases().expect("reclaim_expired_leases");
+
+        let reopened = cleanup_orphaned_tasks(&cas.root);
+        assert_eq!(
+            reopened, 0,
+            "a heartbeat-renewed lease must not be treated as orphaned"
+        );
+
+        let after = task_store.get("cas-85d9-t1").expect("task.get");
+        assert_eq!(
+            after.status,
+            TaskStatus::InProgress,
+            "task held by a live, heartbeating worker past the original lease \
+             duration must remain observable as in-progress, not silently reopened"
+        );
+    }
+
+    /// Safety property: renewal only happens ON heartbeat. An agent that
+    /// stops heartbeating (crashes, hangs before ever heartbeating again)
+    /// must still let its lease expire and the orphaned task recover
+    /// normally — auto-renewal must not create an unrecoverable lease.
+    #[test]
+    fn non_heartbeating_worker_past_lease_duration_is_still_reopened() {
+        let cas = setup_cas();
+        let agent_store = open_agent_store(&cas.root).expect("open_agent_store");
+        let task_store = open_task_store(&cas.root).expect("open_task_store");
+
+        let agent = Agent::new("agent-85d9-dead".to_string(), "No Heartbeat Test".to_string());
+        agent_store.register(&agent).expect("register");
+
+        let mut task = Task::new("cas-85d9-t2".to_string(), "Abandoned task".to_string());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some("agent-85d9-dead".to_string());
+        task_store.add(&task).expect("task.add");
+
+        agent_store
+            .try_claim("cas-85d9-t2", "agent-85d9-dead", 1, None)
+            .expect("try_claim");
+
+        // No heartbeat call — the agent is presumed crashed/hung before
+        // ever heartbeating on this lease.
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        // `list_active_leases` (which `cleanup_orphaned_tasks` consults)
+        // returns any row still `status='active'` regardless of whether
+        // `expires_at` has passed — the flip to `status='expired'` only
+        // happens via an explicit `reclaim_expired_leases()` sweep. In
+        // production this runs continuously (daemon maintenance tick,
+        // every `worker_status` poll, etc.), so an overdue lease is
+        // reclaimed within moments; a standalone test has to trigger that
+        // sweep explicitly to model the same production timing.
+        agent_store.reclaim_expired_leases().expect("reclaim_expired_leases");
+
+        let reopened = cleanup_orphaned_tasks(&cas.root);
+        assert_eq!(
+            reopened, 1,
+            "a lease with no heartbeat renewal must still expire and recover normally"
+        );
+
+        let after = task_store.get("cas-85d9-t2").expect("task.get");
+        assert_eq!(
+            after.status,
+            TaskStatus::Open,
+            "an orphaned task with no renewing heartbeat must still be recoverable"
+        );
+    }
 }

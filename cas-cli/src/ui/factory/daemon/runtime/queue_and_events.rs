@@ -584,6 +584,7 @@ impl FactoryDaemon {
                             &prompt_with_instructions,
                             queued.summary.as_deref(),
                             None,
+                            None,
                         )
                         .await
                     };

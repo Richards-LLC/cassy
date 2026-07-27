@@ -693,12 +693,19 @@ impl FactoryApp {
     /// revalidate, and share a single load between revalidation and prompt
     /// generation so the two steps can never observe two different
     /// snapshots.
+    ///
+    /// cas-ed6c: also returns the `unfiltered_data` snapshot this tick
+    /// loaded (`None` on the empty-events short-circuit) so the caller can
+    /// run `TeamsManager::prune_stale_idle_alerts` against the SAME
+    /// snapshot instead of triggering a second full `DirectorData` reload
+    /// just for the sweep — reusing this tick's data, not adding a new
+    /// DB-load path back into the empty-tick case cas-627f eliminated.
     pub fn revalidate_and_prompt_for_delivery(
         &mut self,
         events: &[DirectorEvent],
-    ) -> (Vec<DirectorEvent>, Vec<Prompt>) {
+    ) -> (Vec<DirectorEvent>, Vec<Prompt>, Option<DirectorData>) {
         if events.is_empty() {
-            return (Vec::new(), Vec::new());
+            return (Vec::new(), Vec::new(), None);
         }
 
         let unfiltered_data = self.load_unfiltered_director_data_for_delivery();
@@ -799,7 +806,7 @@ impl FactoryApp {
             }
         }
 
-        (delivery_events, prompts)
+        (delivery_events, prompts, Some(unfiltered_data))
     }
 
     fn load_unfiltered_director_data_for_delivery(&self) -> DirectorData {

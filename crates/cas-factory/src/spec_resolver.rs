@@ -53,6 +53,18 @@ pub enum SpecResolverError {
     /// A CLI string was not recognised.
     #[error("invalid cli value {0:?}: expected 'claude' or 'codex'")]
     InvalidCli(String),
+
+    /// A spec requested Codex, Codex is unavailable on this host, and
+    /// strict-CLI mode (`--strict-cli` / `[factory] strict_cli`) is set —
+    /// so the resolver bails instead of silently falling back to Claude
+    /// (cas-7199 / cas-a487).
+    #[error(
+        "worker {worker:?} requests codex, but codex is unavailable ({reason}), and \
+         --strict-cli / [factory] strict_cli is set — refusing to silently fall back. \
+         Install codex from https://developers.openai.com/codex and complete `codex login`, \
+         or drop --strict-cli to allow falling back to claude."
+    )]
+    CodexUnavailableStrict { worker: String, reason: String },
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -396,6 +408,169 @@ pub fn resolve_supervisor_spec(sources: ConfigSources) -> Result<WorkerSpec, Spe
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Codex availability fallback (cas-7199 / cas-a487)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Apply the post-cascade Codex availability fallback to a batch of already-
+/// resolved specs, IN PLACE.
+///
+/// Any layer of [`resolve_specs`]'s cascade (built-in default, config file,
+/// CLI flag, or a per-worker `--worker-spec`/`[[factory.workers]]` override)
+/// can independently land a spec on `cli = Codex` — cas-fbac made it the
+/// built-in default too, so this now runs on effectively every fresh
+/// install. Call this once, after the cascade has fully resolved, so the
+/// fallback decision is made exactly once per spec regardless of which
+/// layer set `cli = Codex`, and BEFORE the spec is queued for spawn — a
+/// worker whose spec is already rewritten to `claude` here never goes
+/// through worktree/agent-registration setup for the wrong harness.
+///
+/// Behavior (cas-e9e9 decision via cas-a487, binding over cas-7199's
+/// original "symmetric fallback" framing — see that ticket's amended AC#2):
+/// - `codex` unavailable (binary absent OR `~/.codex/auth.json` absent —
+///   ChatGPT login only, deliberately no `OPENAI_API_KEY` fallback) and
+///   `strict == false` (default): rewrite `cli` to `Claude`, drop `model`
+///   unless it already looks Claude-compatible (else `default_model`),
+///   keep `effort` (shared vocabulary across harnesses). Returns one
+///   human-readable notice per rewritten spec for the caller to
+///   `tracing::warn!` and surface as an operator-visible banner — this
+///   fallback must never be silent.
+/// - Same, but `strict == true`: returns
+///   [`SpecResolverError::CodexUnavailableStrict`] on the first affected
+///   spec instead of rewriting anything.
+/// - `cli == Claude` specs are never touched here — there is no reverse
+///   fallback. A missing `claude` binary is a setup error surfaced
+///   elsewhere (spawn time), not something this resolver routes around.
+///
+/// The two `codex_available` probes are subprocess + filesystem calls
+/// (see [`crate::probe`]); this function evaluates them **at most once**
+/// per call (not once per spec) and only when at least one spec actually
+/// requests Codex, so specs that don't request it — the common case once a
+/// host is properly set up — never pay the probe cost.
+pub fn apply_codex_fallback(
+    specs: &mut [WorkerSpec],
+    strict: bool,
+    default_model: Option<&str>,
+) -> Result<Vec<String>, SpecResolverError> {
+    apply_codex_fallback_with(
+        specs,
+        strict,
+        default_model,
+        WORKER_LABEL,
+        crate::probe::codex_binary_present,
+        crate::probe::codex_auth_present,
+    )
+}
+
+/// Same fallback, applied to the single supervisor spec.
+///
+/// The bug is identical for a supervisor slot explicitly configured to
+/// Codex, and the blast radius is worse: a worker that fails to launch
+/// costs one lane, a supervisor that fails to launch costs the whole
+/// session. Kept as a distinct function (rather than a boolean flag on
+/// [`apply_codex_fallback`]) so the notice/error wording is unmistakably
+/// about the SUPERVISOR falling back — not a generic "worker X" line that
+/// could read as just another lane hiccup.
+pub fn apply_codex_fallback_for_supervisor(
+    spec: &mut WorkerSpec,
+    strict: bool,
+    default_model: Option<&str>,
+) -> Result<Vec<String>, SpecResolverError> {
+    apply_codex_fallback_with(
+        std::slice::from_mut(spec),
+        strict,
+        default_model,
+        SUPERVISOR_LABEL,
+        crate::probe::codex_binary_present,
+        crate::probe::codex_auth_present,
+    )
+}
+
+const WORKER_LABEL: &str = "worker";
+const SUPERVISOR_LABEL: &str = "SUPERVISOR";
+
+/// Testable core shared by [`apply_codex_fallback`] and
+/// [`apply_codex_fallback_for_supervisor`] — takes the two probes as
+/// closures so tests can simulate "codex missing" / "codex present but not
+/// logged in" / "codex fully available" without depending on real host
+/// state, and `role_label` so the notice/error wording distinguishes a
+/// worker rewrite from the (louder, higher-stakes) supervisor rewrite.
+fn apply_codex_fallback_with(
+    specs: &mut [WorkerSpec],
+    strict: bool,
+    default_model: Option<&str>,
+    role_label: &str,
+    binary_present: impl Fn() -> bool,
+    auth_present: impl Fn() -> bool,
+) -> Result<Vec<String>, SpecResolverError> {
+    if !specs.iter().any(|s| s.cli == SupervisorCli::Codex) {
+        return Ok(Vec::new());
+    }
+
+    let binary_ok = binary_present();
+    let auth_ok = auth_present();
+    if binary_ok && auth_ok {
+        return Ok(Vec::new());
+    }
+    let reason = if !binary_ok {
+        "codex binary not found on PATH"
+    } else {
+        "~/.codex/auth.json not found (not logged in — run `codex login`)"
+    };
+
+    let mut notices = Vec::new();
+    for spec in specs.iter_mut() {
+        if spec.cli != SupervisorCli::Codex {
+            continue;
+        }
+        // Workers get "worker <name-or-'worker'>" as the label; the
+        // supervisor label is always the fixed, shout-cased
+        // `SUPERVISOR_LABEL` alone — there is only one, a name would add
+        // nothing, and it must not read as just another worker line.
+        let label = if role_label == SUPERVISOR_LABEL {
+            SUPERVISOR_LABEL.to_string()
+        } else {
+            format!(
+                "{role_label} {}",
+                spec.name.clone().unwrap_or_else(|| role_label.to_string())
+            )
+        };
+        if strict {
+            return Err(SpecResolverError::CodexUnavailableStrict {
+                worker: label,
+                reason: reason.to_string(),
+            });
+        }
+        notices.push(format!(
+            "{label}: codex unavailable ({reason}) — falling back to claude"
+        ));
+        spec.cli = SupervisorCli::Claude;
+        if !spec
+            .model
+            .as_deref()
+            .is_some_and(model_is_claude_compatible)
+        {
+            spec.model = default_model.map(str::to_string);
+        }
+        // effort is intentionally left untouched — shared vocabulary
+        // (low/medium/high/xhigh) across harnesses per cas-a487.
+    }
+    Ok(notices)
+}
+
+/// Loose heuristic for "does this model name belong to the Claude family",
+/// mirroring the existing `is_frontier_model` substring-match convention in
+/// `cas-cli/src/mcp/tools/service/factory_ops.rs` rather than inventing a
+/// stricter parser — model catalogs change too often for an exhaustive
+/// allowlist to stay accurate, and a false negative here only costs an
+/// unnecessary fallback to `default_model`, not a broken spawn.
+fn model_is_claude_compatible(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    ["claude", "sonnet", "opus", "haiku", "fable", "mythos"]
+        .iter()
+        .any(|needle| m.contains(needle))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Private helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -520,4 +695,262 @@ fn parse_cli(s: &str) -> Result<SupervisorCli, SpecResolverError> {
 fn parse_effort(s: &str) -> Result<Effort, SpecResolverError> {
     s.parse::<Effort>()
         .map_err(|e| SpecResolverError::InvalidEffort(s.to_string(), e))
+}
+
+#[cfg(test)]
+mod codex_fallback_tests {
+    //! cas-7199 / cas-a487: `apply_codex_fallback` tests. Uses the private
+    //! `..._with` core (injectable probes) rather than the public
+    //! `apply_codex_fallback`, which calls the REAL `codex --version` /
+    //! `~/.codex/auth.json` probes — those are environment-dependent
+    //! (whether this test runs on a host with codex installed and logged
+    //! in) and would make these tests nondeterministic. Lives inside
+    //! `src/` rather than `tests/spec_resolver.rs` for exactly that reason
+    //! — the injectable core is private to this module.
+    use super::*;
+
+    fn codex_spec(name: &str) -> WorkerSpec {
+        WorkerSpec {
+            name: Some(name.to_string()),
+            cli: SupervisorCli::Codex,
+            model: None,
+            effort: Some(Effort::High),
+        }
+    }
+
+    /// cas-a487 Tests spec: "spec has cli=codex, probe fails -> spec
+    /// rewritten to cli=claude with warn captured".
+    #[test]
+    fn codex_missing_falls_back_to_claude_with_notice() {
+        let mut specs = vec![codex_spec("alice")];
+        let notices =
+            apply_codex_fallback_with(&mut specs, false, None, WORKER_LABEL, || false, || false)
+                .unwrap();
+        assert_eq!(specs[0].cli, SupervisorCli::Claude);
+        assert_eq!(
+            specs[0].effort,
+            Some(Effort::High),
+            "effort must be preserved across the fallback rewrite"
+        );
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].contains("alice"));
+        assert!(notices[0].contains("claude"));
+    }
+
+    /// Auth-only failure (binary present, no login) must still fall back,
+    /// with a message that names the actual cause rather than a generic
+    /// "not found".
+    #[test]
+    fn codex_binary_present_but_not_logged_in_falls_back_with_auth_specific_reason() {
+        let mut specs = vec![codex_spec("bob")];
+        let notices =
+            apply_codex_fallback_with(&mut specs, false, None, WORKER_LABEL, || true, || false)
+                .unwrap();
+        assert_eq!(specs[0].cli, SupervisorCli::Claude);
+        assert!(
+            notices[0].contains("auth.json") || notices[0].contains("logged in"),
+            "reason must distinguish 'not logged in' from 'not installed' — got: {}",
+            notices[0]
+        );
+    }
+
+    /// cas-a487 Tests spec: "strict mode -> error returned" — and no spec
+    /// mutation happens on that path.
+    #[test]
+    fn codex_missing_in_strict_mode_errors_without_mutating_spec() {
+        let mut specs = vec![codex_spec("carol")];
+        let err = apply_codex_fallback_with(&mut specs, true, None, WORKER_LABEL, || false, || false)
+            .expect_err("strict mode must error, not fall back");
+        assert!(matches!(
+            err,
+            SpecResolverError::CodexUnavailableStrict { .. }
+        ));
+        assert_eq!(
+            specs[0].cli,
+            SupervisorCli::Codex,
+            "strict-mode error path must not rewrite the spec"
+        );
+    }
+
+    /// Both probes passing must be a pure no-op: no notices, no mutation,
+    /// and — implicitly, since the closures would need to be called to
+    /// observe anything — a fast path when nothing needs to change.
+    #[test]
+    fn codex_available_is_a_no_op() {
+        let mut specs = vec![codex_spec("dana")];
+        let notices =
+            apply_codex_fallback_with(&mut specs, false, None, WORKER_LABEL, || true, || true)
+                .unwrap();
+        assert!(notices.is_empty());
+        assert_eq!(specs[0].cli, SupervisorCli::Codex);
+    }
+
+    /// cas-a487 Tests spec ("Reverse: spec has cli=claude, probe fails ->
+    /// error always (no fallback)") — interpreted precisely for THIS
+    /// function's contract: `apply_codex_fallback` only ever probes/acts on
+    /// Codex specs. A Claude spec is never touched, rewritten, or errored
+    /// here, regardless of codex/claude availability — a missing claude
+    /// binary is a setup error surfaced elsewhere (at spawn time / the
+    /// existing `resolve_cli_choice` preflight in `cas-cli`), not something
+    /// this resolver-level function is responsible for detecting. This test
+    /// pins "never touched", the necessary precondition for "no fallback
+    /// happens here".
+    #[test]
+    fn claude_spec_is_never_touched_regardless_of_probe_results() {
+        let mut specs = vec![WorkerSpec {
+            name: Some("erin".to_string()),
+            cli: SupervisorCli::Claude,
+            model: Some("sonnet".to_string()),
+            effort: Some(Effort::Medium),
+        }];
+        let before = specs[0].clone();
+        let notices =
+            apply_codex_fallback_with(&mut specs, false, None, WORKER_LABEL, || false, || false)
+                .unwrap();
+        assert!(notices.is_empty());
+        assert_eq!(specs[0], before);
+    }
+
+    /// A model that isn't Claude-compatible must be replaced by
+    /// `default_model`, not carried over verbatim (e.g. a codex model name
+    /// landing on a claude spawn command).
+    #[test]
+    fn non_claude_model_falls_back_to_default_model_on_rewrite() {
+        let mut specs = vec![WorkerSpec {
+            model: Some("gpt-5.6-sol".to_string()),
+            ..codex_spec("frank")
+        }];
+        apply_codex_fallback_with(&mut specs, false, Some("sonnet"), WORKER_LABEL, || false, || false)
+            .unwrap();
+        assert_eq!(specs[0].model.as_deref(), Some("sonnet"));
+    }
+
+    /// A model that already looks Claude-compatible must survive the
+    /// rewrite unchanged, even with a different `default_model` supplied.
+    #[test]
+    fn claude_compatible_model_survives_rewrite() {
+        let mut specs = vec![WorkerSpec {
+            model: Some("claude-opus-4-5".to_string()),
+            ..codex_spec("grace")
+        }];
+        apply_codex_fallback_with(
+            &mut specs,
+            false,
+            Some("some-other-model"),
+            WORKER_LABEL,
+            || false,
+            || false,
+        )
+        .unwrap();
+        assert_eq!(specs[0].model.as_deref(), Some("claude-opus-4-5"));
+    }
+
+    /// No spec requests Codex at all: the probe closures must never be
+    /// invoked (the doc comment's "at most once, and only when needed"
+    /// guarantee) — proven by panicking closures instead of just asserting
+    /// the (trivial) empty-notices result.
+    #[test]
+    fn no_codex_specs_never_calls_the_probes() {
+        let mut specs = vec![WorkerSpec {
+            name: Some("henry".to_string()),
+            cli: SupervisorCli::Claude,
+            model: None,
+            effort: None,
+        }];
+        let notices = apply_codex_fallback_with(
+            &mut specs,
+            false,
+            None,
+            WORKER_LABEL,
+            || panic!("binary probe must not run when no spec requests codex"),
+            || panic!("auth probe must not run when no spec requests codex"),
+        )
+        .unwrap();
+        assert!(notices.is_empty());
+    }
+
+    #[test]
+    fn model_is_claude_compatible_matches_known_families() {
+        for m in ["sonnet", "claude-opus-4-5", "Fable-5", "MYTHOS-5", "haiku"] {
+            assert!(model_is_claude_compatible(m), "{m} should match");
+        }
+        for m in ["gpt-5.6-sol", "o3", "grok-4.5"] {
+            assert!(!model_is_claude_compatible(m), "{m} should not match");
+        }
+    }
+
+    // ── apply_codex_fallback_for_supervisor (supervisor blast-radius) ──────
+
+    /// The supervisor-facing entry point must produce a notice that names
+    /// the SUPERVISOR unmistakably — not a generic "worker X" line, since a
+    /// supervisor fallback changes the harness of the whole session's
+    /// coordinator, a strictly bigger deal than one worker lane.
+    #[test]
+    fn supervisor_codex_missing_falls_back_with_supervisor_labeled_notice() {
+        let mut spec = WorkerSpec {
+            name: None,
+            cli: SupervisorCli::Codex,
+            model: None,
+            effort: Some(Effort::High),
+        };
+        let notices =
+            apply_codex_fallback_with(std::slice::from_mut(&mut spec), false, None, SUPERVISOR_LABEL, || false, || false)
+                .unwrap();
+        assert_eq!(spec.cli, SupervisorCli::Claude);
+        assert_eq!(notices.len(), 1);
+        assert!(
+            notices[0].starts_with("SUPERVISOR:"),
+            "supervisor notice must be unmistakable, not a generic worker line — got: {}",
+            notices[0]
+        );
+        assert!(
+            !notices[0].to_ascii_lowercase().contains("worker"),
+            "supervisor notice must not read as a worker line — got: {}",
+            notices[0]
+        );
+    }
+
+    /// Strict mode on the supervisor path errors the same way as workers —
+    /// same policy, just the louder wording.
+    #[test]
+    fn supervisor_codex_missing_in_strict_mode_errors() {
+        let mut spec = WorkerSpec {
+            name: None,
+            cli: SupervisorCli::Codex,
+            model: None,
+            effort: None,
+        };
+        let err = apply_codex_fallback_with(
+            std::slice::from_mut(&mut spec),
+            true,
+            None,
+            SUPERVISOR_LABEL,
+            || false,
+            || false,
+        )
+        .expect_err("strict mode must error for the supervisor too");
+        match err {
+            SpecResolverError::CodexUnavailableStrict { worker, .. } => {
+                assert_eq!(worker, "SUPERVISOR");
+            }
+            other => panic!("expected CodexUnavailableStrict, got {other:?}"),
+        }
+        assert_eq!(spec.cli, SupervisorCli::Codex, "must not mutate on error");
+    }
+
+    /// Public wrapper smoke test — `apply_codex_fallback_for_supervisor`
+    /// must be a real, callable public API (uses the REAL probes, so this
+    /// only asserts it compiles and runs without panicking; behavior is
+    /// covered exhaustively above via the injectable core).
+    #[test]
+    fn apply_codex_fallback_for_supervisor_is_callable() {
+        let mut spec = WorkerSpec {
+            name: None,
+            cli: SupervisorCli::Claude,
+            model: None,
+            effort: None,
+        };
+        let notices = apply_codex_fallback_for_supervisor(&mut spec, false, None).unwrap();
+        assert!(notices.is_empty(), "claude spec must never be touched");
+    }
 }

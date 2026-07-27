@@ -151,6 +151,14 @@ pub struct FactoryConfig {
     /// correction after the fact (BUG/FEATURE 2026-07-08, cas-b082).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epic_base_branch: Option<String>,
+
+    /// Refuse to silently fall back when a resolved worker/supervisor spec
+    /// requests Codex but Codex is unavailable — bail with an actionable
+    /// error instead of rewriting to Claude (cas-7199 / cas-a487). OR'd
+    /// with the `--strict-cli` CLI flag; either being true enables strict
+    /// mode. Default `false`: fall back to Claude with a loud warning.
+    #[serde(default)]
+    pub strict_cli: bool,
 }
 
 /// Durable staging configuration for large generated artifacts.
@@ -209,6 +217,7 @@ impl Default for FactoryConfig {
             nice_cargo: true,
             stall_threshold_secs: default_stall_threshold_secs(),
             epic_base_branch: None,
+            strict_cli: false,
         }
     }
 }
@@ -930,6 +939,20 @@ mod tests {
             FactoryConfig::default().stall_threshold_secs,
             cas_factory::DEFAULT_STALL_THRESHOLD_SECS
         );
+    }
+
+    /// cas-7199 / cas-a487: `[factory] strict_cli` defaults to `false`
+    /// (fall back to Claude with a warning) and is overridable to `true`
+    /// (bail instead of falling back on a missing Codex install/login).
+    #[test]
+    fn factory_config_strict_cli_configurable() {
+        assert!(!FactoryConfig::default().strict_cli);
+
+        let toml_str = "[factory]\nstrict_cli = true\n";
+        let parsed: std::collections::HashMap<String, FactoryConfig> =
+            toml::from_str(toml_str).expect("valid toml");
+        let fc = parsed.get("factory").expect("section present");
+        assert!(fc.strict_cli);
     }
 
     /// cas-b082: `epic_base_branch` defaults to `None` (repo default branch)

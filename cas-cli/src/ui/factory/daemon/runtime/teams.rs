@@ -854,6 +854,17 @@ case \"$branch\" in
 esac
 ";
 
+    /// Marker string that identifies a CAS-installed guard hook (any version).
+    const GUARD_MARKER: &'static str = "CAS factory worker guard";
+
+    /// The exact block header [`Self::write_guard_alongside`] appends when
+    /// chaining the guard onto a pre-existing project hook. Also used by
+    /// [`Self::cleanup_legacy_shared_guard`] to find where a chained CAS
+    /// block begins so it can be stripped without touching the project
+    /// hook's own content. Keep these two in sync.
+    const GUARD_SOURCING_HEADER: &'static str =
+        "\n# CAS factory worker guard (sourced by cas factory — do not remove)\n";
+
     /// Resolve an absolute path from a `git -C <dir> rev-parse --git-path <arg>`
     /// (or `--git-dir`) invocation. Relative results (as returned for plain,
     /// non-worktree repos) are joined against `dir` so callers always get an
@@ -910,21 +921,82 @@ esac
         existing_content: &str,
     ) -> anyhow::Result<()> {
         use std::os::unix::fs::PermissionsExt;
-        const GUARD_MARKER: &str = "CAS factory worker guard";
 
         let guard_path = hooks_dir.join("pre-commit-cas-guard");
         std::fs::write(&guard_path, Self::WORKER_PRE_COMMIT_HOOK)?;
         std::fs::set_permissions(&guard_path, std::fs::Permissions::from_mode(0o755))?;
 
         let sourcing_line = format!(
-            "\n# {GUARD_MARKER} (sourced by cas factory — do not remove)\n\
-             _cas_guard=\"$(git rev-parse --git-path hooks 2>/dev/null)/pre-commit-cas-guard\"\n\
-             [ -f \"$_cas_guard\" ] && . \"$_cas_guard\"\n"
+            "{}_cas_guard=\"$(git rev-parse --git-path hooks 2>/dev/null)/pre-commit-cas-guard\"\n\
+             [ -f \"$_cas_guard\" ] && . \"$_cas_guard\"\n",
+            Self::GUARD_SOURCING_HEADER,
         );
         let mut updated = existing_content.to_string();
         updated.push_str(&sourcing_line);
         std::fs::write(hook_path, &updated)?;
         std::fs::set_permissions(hook_path, std::fs::Permissions::from_mode(0o755))?;
+        Ok(())
+    }
+
+    /// Detect and remove a legacy CAS worker guard that a pre-cas-2491 build
+    /// wrote directly into the SHARED/common hooks directory.
+    ///
+    /// Before the worktree-scoping fix, `install_worker_pre_commit_hook`
+    /// wrote unconditionally into whatever `git rev-parse --git-path hooks`
+    /// reported — which, for the primary checkout, is the repo's real,
+    /// permanent hooks directory. Any repo that ever ran an old `cas factory`
+    /// session is left with a guard there that permanently blocks the
+    /// owner's own commits on `main`/`master`, with no clean-shutdown path
+    /// that would have removed it. This is a one-time migration: it runs
+    /// every time a worker guard is (re)installed, targets the COMMON dir
+    /// (not the worktree-private one), and is a no-op once the shared hook
+    /// has been cleaned or never had a CAS guard to begin with.
+    ///
+    /// - If the shared hook is guard-only (no evidence of a chained project
+    ///   hook), the file is deleted outright — that matches exactly what the
+    ///   pre-fix installer wrote when no project hook pre-existed.
+    /// - If the guard was chained onto a project hook (contains
+    ///   [`Self::GUARD_SOURCING_HEADER`]), only the appended CAS block is
+    ///   stripped and the sibling `pre-commit-cas-guard` file is removed;
+    ///   the original project hook content is left untouched.
+    fn cleanup_legacy_shared_guard(worktree_path: &std::path::Path) -> anyhow::Result<()> {
+        let common_dir = Self::run_git_path(worktree_path, &["rev-parse", "--git-common-dir"])?;
+        let shared_hooks_dir = common_dir.join("hooks");
+        let shared_hook_path = shared_hooks_dir.join("pre-commit");
+
+        if !shared_hook_path.exists() {
+            return Ok(());
+        }
+        let content = match std::fs::read_to_string(&shared_hook_path) {
+            Ok(c) => c,
+            Err(_) => return Ok(()), // unreadable — not ours to touch
+        };
+        if !content.contains(Self::GUARD_MARKER) {
+            return Ok(()); // not a CAS guard (or already cleaned) — leave alone
+        }
+
+        if let Some(idx) = content.find(Self::GUARD_SOURCING_HEADER) {
+            // Chained onto a project hook: keep everything before our
+            // appended block, drop the sibling guard file.
+            let stripped = content[..idx].to_string();
+            std::fs::write(&shared_hook_path, &stripped)?;
+            let sibling = shared_hooks_dir.join("pre-commit-cas-guard");
+            if sibling.exists() {
+                let _ = std::fs::remove_file(&sibling);
+            }
+            tracing::info!(
+                "cas-2491 migration: stripped legacy CAS guard chained onto project hook at {:?}",
+                shared_hook_path
+            );
+        } else {
+            // Guard-only file (the unconditional pre-cas-2491 case) — remove outright.
+            std::fs::remove_file(&shared_hook_path)?;
+            tracing::info!(
+                "cas-2491 migration: removed legacy guard-only pre-commit hook at {:?}",
+                shared_hook_path
+            );
+        }
+
         Ok(())
     }
 
@@ -959,12 +1031,28 @@ esac
     /// previously-effective (shared) location, its content is preserved via
     /// [`Self::write_guard_alongside`].
     ///
+    /// # Migration for already-leaked guards
+    ///
+    /// Scoping alone only stops *future* installs from leaking — it does
+    /// nothing for a shared-hooks-dir guard a pre-fix build already wrote
+    /// (which, on a real machine, silently blocks the owner's commits right
+    /// now). Every call therefore starts with
+    /// [`Self::cleanup_legacy_shared_guard`], which detects and removes that
+    /// specific artifact before anything else runs.
+    ///
     /// Non-fatal failures are logged as warnings by callers — LAYER 1
     /// (PreToolUse) and LAYER 3 (SessionStart) are the primary guards.
     pub fn install_worker_pre_commit_hook(
         worktree_path: &std::path::Path,
     ) -> anyhow::Result<()> {
         use std::os::unix::fs::PermissionsExt;
+
+        // Migration (cas-2491): remove any guard a pre-fix build left behind
+        // directly in the shared/common hooks dir, BEFORE inspecting that
+        // location for a "pre-existing project hook" to preserve below —
+        // otherwise a legacy CAS guard would be mistaken for one and chained
+        // into the new private hook instead of being cleaned up.
+        Self::cleanup_legacy_shared_guard(worktree_path)?;
 
         // Private git-dir for this worktree: `.git` for a plain checkout, or
         // `.git/worktrees/<name>` for a linked worktree (never shared).
@@ -978,13 +1066,12 @@ esac
         let private_hooks_dir = git_dir.join("hooks-cas-guard");
         std::fs::create_dir_all(&private_hooks_dir)?;
 
-        const GUARD_MARKER: &str = "CAS factory worker guard";
         let hook_path = private_hooks_dir.join("pre-commit");
 
         if hook_path.exists()
             && std::fs::read_to_string(&hook_path)
                 .unwrap_or_default()
-                .contains(GUARD_MARKER)
+                .contains(Self::GUARD_MARKER)
         {
             tracing::debug!("CAS pre-commit guard already installed at {:?}", hook_path);
         } else {
@@ -2003,6 +2090,185 @@ mod tests {
         );
 
         // Best-effort cleanup so temp dirs don't linger as registered worktrees.
+        let _ = std::process::Command::new("git")
+            .args(["worktree", "remove", "--force", &wt_path.to_string_lossy()])
+            .current_dir(repo)
+            .output();
+    }
+
+    /// Migration regression test for cas-2491 fix round 2: a repo that ran an
+    /// OLD (pre-fix) `cas factory` build has a guard-only, unconditional
+    /// `pre-commit` sitting in the shared/common hooks dir — exactly the
+    /// artifact found on the reporting machine (dated well before this fix).
+    /// Scoping alone (fix round 1) only stops *future* leaks; it does nothing
+    /// for that already-installed file, so `main` stays blocked forever
+    /// unless something removes it. This seeds that exact legacy artifact,
+    /// then asserts that installing the guard into a (separate) worker
+    /// worktree also cleans up the shared leftover, and a commit on `main`
+    /// in the primary checkout succeeds.
+    #[test]
+    fn install_worker_pre_commit_hook_cleans_up_legacy_guard_only_hook_in_shared_dir() {
+        let tmp = make_git_repo_for_hook_test();
+        let repo = tmp.path();
+
+        // Seed the exact artifact the pre-fix installer left behind: an
+        // unconditional guard written straight into the shared hooks dir,
+        // with no chaining (no pre-existing project hook at the time).
+        let shared_hooks_dir = repo.join(".git").join("hooks");
+        std::fs::create_dir_all(&shared_hooks_dir).unwrap();
+        let legacy_hook_path = shared_hooks_dir.join("pre-commit");
+        std::fs::write(&legacy_hook_path, TeamsManager::WORKER_PRE_COMMIT_HOOK).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&legacy_hook_path, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+
+        // Sanity check: before cleanup, main is indeed blocked by the legacy
+        // artifact (guards against a fixture bug making this test vacuous).
+        std::fs::write(repo.join("pre-fix-change.txt"), "x").unwrap();
+        std::process::Command::new("git").args(["add", "."]).current_dir(repo).output().unwrap();
+        let blocked = std::process::Command::new("git")
+            .args(["commit", "-m", "should still be blocked before cleanup runs"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(
+            !blocked.status.success(),
+            "fixture bug: legacy guard should block main before install/cleanup runs"
+        );
+
+        // Install into a SEPARATE worker worktree — the cleanup must reach
+        // into the shared dir regardless of which worktree triggered it.
+        let wt_path = repo
+            .parent()
+            .unwrap()
+            .join(format!("{}-wt", repo.file_name().unwrap().to_string_lossy()));
+        let add_out = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "factory/legacy-cleanup-worker",
+                &wt_path.to_string_lossy(),
+                "main",
+            ])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(add_out.status.success(), "git worktree add failed: {}", String::from_utf8_lossy(&add_out.stderr));
+
+        TeamsManager::install_worker_pre_commit_hook(&wt_path)
+            .expect("install should succeed and clean up the legacy shared guard");
+
+        assert!(
+            !legacy_hook_path.exists(),
+            "legacy guard-only hook must be removed from the shared hooks dir"
+        );
+
+        // The owner's commit on main in the primary checkout must now succeed.
+        std::fs::write(repo.join("post-fix-change.txt"), "y").unwrap();
+        std::process::Command::new("git").args(["add", "."]).current_dir(repo).output().unwrap();
+        let main_commit = std::process::Command::new("git")
+            .args(["commit", "-m", "owner commit after legacy guard cleanup"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(
+            main_commit.status.success(),
+            "commit on main must succeed once the legacy shared guard is cleaned up; stderr: {}",
+            String::from_utf8_lossy(&main_commit.stderr)
+        );
+
+        let _ = std::process::Command::new("git")
+            .args(["worktree", "remove", "--force", &wt_path.to_string_lossy()])
+            .current_dir(repo)
+            .output();
+    }
+
+    /// Same migration as above, but the legacy guard was chained onto a
+    /// pre-existing project hook (the `write_guard_alongside` shape): the
+    /// shared `pre-commit` has the project's own content followed by the CAS
+    /// sourcing block, plus a sibling `pre-commit-cas-guard` file. Cleanup
+    /// must strip only the CAS-appended portion and remove the sibling,
+    /// leaving the project's own hook content intact.
+    #[test]
+    fn install_worker_pre_commit_hook_cleans_up_legacy_guard_chained_onto_project_hook() {
+        let tmp = make_git_repo_for_hook_test();
+        let repo = tmp.path();
+
+        let shared_hooks_dir = repo.join(".git").join("hooks");
+        std::fs::create_dir_all(&shared_hooks_dir).unwrap();
+
+        let project_hook_content = "#!/bin/sh\n# My existing project hook\necho project-hook-ran\n";
+        let sibling_guard_path = shared_hooks_dir.join("pre-commit-cas-guard");
+        std::fs::write(&sibling_guard_path, TeamsManager::WORKER_PRE_COMMIT_HOOK).unwrap();
+
+        let chained_content = format!(
+            "{project_hook_content}{}_cas_guard=\"$(git rev-parse --git-path hooks 2>/dev/null)/pre-commit-cas-guard\"\n\
+             [ -f \"$_cas_guard\" ] && . \"$_cas_guard\"\n",
+            TeamsManager::GUARD_SOURCING_HEADER,
+        );
+        let legacy_hook_path = shared_hooks_dir.join("pre-commit");
+        std::fs::write(&legacy_hook_path, &chained_content).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&legacy_hook_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&sibling_guard_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let wt_path = repo
+            .parent()
+            .unwrap()
+            .join(format!("{}-wt", repo.file_name().unwrap().to_string_lossy()));
+        let add_out = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "factory/legacy-cleanup-chained-worker",
+                &wt_path.to_string_lossy(),
+                "main",
+            ])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(add_out.status.success(), "git worktree add failed: {}", String::from_utf8_lossy(&add_out.stderr));
+
+        TeamsManager::install_worker_pre_commit_hook(&wt_path)
+            .expect("install should succeed and clean up the chained legacy guard");
+
+        assert!(
+            !sibling_guard_path.exists(),
+            "sibling pre-commit-cas-guard file must be removed"
+        );
+        let remaining = std::fs::read_to_string(&legacy_hook_path).unwrap();
+        assert!(
+            remaining.contains("My existing project hook"),
+            "project hook content must survive cleanup: {remaining:?}"
+        );
+        assert!(
+            !remaining.contains("CAS factory worker guard"),
+            "CAS guard block must be fully stripped: {remaining:?}"
+        );
+
+        // The owner's commit on main must succeed (the remaining project
+        // hook here is a no-op `echo`, so nothing else blocks it).
+        std::fs::write(repo.join("post-fix-change.txt"), "z").unwrap();
+        std::process::Command::new("git").args(["add", "."]).current_dir(repo).output().unwrap();
+        let main_commit = std::process::Command::new("git")
+            .args(["commit", "-m", "owner commit after chained legacy guard cleanup"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(
+            main_commit.status.success(),
+            "commit on main must succeed once the chained legacy guard is stripped; stderr: {}",
+            String::from_utf8_lossy(&main_commit.stderr)
+        );
+
         let _ = std::process::Command::new("git")
             .args(["worktree", "remove", "--force", &wt_path.to_string_lossy()])
             .current_dir(repo)

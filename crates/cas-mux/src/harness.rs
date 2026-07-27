@@ -84,6 +84,15 @@ impl FromStr for SupervisorCli {
 pub struct HarnessCapabilities {
     pub supports_hooks: bool,
     pub supports_subagents: bool,
+    /// Whether this harness's turn-cancel (Esc) returns to an input-ready
+    /// state promptly enough that a flat post-cancel sleep is safe before
+    /// injecting a follow-up prompt. Consumed by
+    /// `Mux::wait_for_injection_readiness` (cas-4208): `true` (Claude, Grok)
+    /// keeps the old flat-sleep-only settle verbatim; `false` (Codex) — whose
+    /// TUI renders a transitional "Conversation interrupted" banner after Esc
+    /// that a flat sleep can silently race, swallowing the follow-up submit —
+    /// gets an active `pane_bytes_received` quiescence poll instead of a
+    /// guessed constant.
     pub supports_textbox_submit: bool,
     pub tool_prefix: &'static str,
 }

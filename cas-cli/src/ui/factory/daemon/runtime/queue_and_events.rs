@@ -1,6 +1,40 @@
 use crate::ui::factory::daemon::imports::*;
 use crate::ui::factory::director::AgentSummary;
 
+const PROMPT_POISON_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
+fn prompt_poison_sweep_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_some_and(|last| now.saturating_duration_since(last) >= PROMPT_POISON_SWEEP_INTERVAL)
+}
+
+fn registered_prompt_sweep_agents(
+    agents: &[cas_types::Agent],
+    factory_session: &str,
+) -> Vec<String> {
+    agents
+        .iter()
+        .filter(|agent| agent.factory_session.as_deref() == Some(factory_session))
+        .map(|agent| agent.name.clone())
+        .collect()
+}
+
+fn prompt_poison_sweep_targets(
+    supervisor_name: &str,
+    worker_names: &[String],
+    registered_session_agents: &[String],
+) -> std::collections::HashSet<String> {
+    let mut targets = std::collections::HashSet::with_capacity(
+        worker_names.len() + registered_session_agents.len() + 4,
+    );
+    targets.insert(supervisor_name.to_string());
+    targets.insert("supervisor".to_string());
+    targets.insert("all_workers".to_string());
+    targets.insert(super::teams::DIRECTOR_AGENT_NAME.to_string());
+    targets.extend(worker_names.iter().cloned());
+    targets.extend(registered_session_agents.iter().cloned());
+    targets
+}
+
 /// Select the next control action without allowing a slow worker spawn to
 /// wedge shutdown. Ordinary actions remain FIFO and wait for the in-flight
 /// spawn; shutdown is allowed to jump that queue so it can cancel the spawn.
@@ -336,22 +370,22 @@ impl FactoryDaemon {
         // Native-extension agents consume their own queue rows. Excluding them
         // from the daemon's target universe prevents this PTY/inbox processor
         // from repeatedly selecting rows it deliberately cannot consume.
-        let native_agents: std::collections::HashSet<String> = open_agent_store(self.app.cas_dir())
+        let registered_agents = open_agent_store(self.app.cas_dir())
             .ok()
             .and_then(|store| store.list(None).ok())
-            .map(|agents| {
-                agents
-                    .into_iter()
-                    .filter(|a| {
-                        a.metadata
-                            .get("native_extension")
-                            .map(|v| v == "true")
-                            .unwrap_or(false)
-                    })
-                    .map(|a| a.name)
-                    .collect()
-            })
             .unwrap_or_default();
+        let native_agents: std::collections::HashSet<String> = registered_agents
+            .iter()
+            .filter(|agent| {
+                agent
+                    .metadata
+                    .get("native_extension")
+                    .is_some_and(|value| value == "true")
+            })
+            .map(|agent| agent.name.clone())
+            .collect();
+        let registered_session_agents =
+            registered_prompt_sweep_agents(&registered_agents, &self.session_name);
 
         // Build target list: this session's supervisor + workers + "all_workers".
         // This prevents us from consuming messages meant for a different factory
@@ -363,23 +397,21 @@ impl FactoryDaemon {
         // inbound director → agent delivery. Without this, messages queued
         // to target=director sat forever while registration reported them
         // as "not yet registered".
-        let mut valid_targets: Vec<&str> = Vec::with_capacity(worker_names.len() + 4);
-        valid_targets.push(&supervisor_name);
-        valid_targets.push("supervisor");
-        valid_targets.push("all_workers");
-        valid_targets.push(super::teams::DIRECTOR_AGENT_NAME);
-        for w in &worker_names {
-            valid_targets.push(w.as_str());
-        }
+        let valid_target_names = prompt_poison_sweep_targets(
+            &supervisor_name,
+            &worker_names,
+            &registered_session_agents,
+        );
+        let valid_targets: Vec<&str> = valid_target_names.iter().map(String::as_str).collect();
 
         // Aged session-scoped rows for agents no longer in the roster are
         // terminal poison, not work for another tick. Fresh unknown targets
-        // retain the registration grace promised by action=message.
-        if self
-            .last_prompt_poison_sweep
-            .is_none_or(|last| last.elapsed() >= std::time::Duration::from_secs(60))
-        {
-            self.last_prompt_poison_sweep = Some(std::time::Instant::now());
+        // retain the registration grace promised by action=message. Constructors
+        // seed the timer so a restarted daemon cannot sweep before its first
+        // worker roster has had a full interval to populate.
+        let now = Instant::now();
+        if prompt_poison_sweep_due(self.last_prompt_poison_sweep, now) {
+            self.last_prompt_poison_sweep = Some(now);
             if let Ok(expired) = queue.abandon_ineligible_session_targets(
                 &valid_targets,
                 &self.session_name,
@@ -1863,14 +1895,123 @@ fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
 mod tests {
     use super::{
         cancel_targeted_in_flight_spawn, enqueue_spawn_cancelled_notice,
-        is_exact_agent_name_match, matches_event_filter, reminder_matches_factory_session,
-        shutdown_targets, take_next_pending_spawn, take_spawn_cancellation,
+        is_exact_agent_name_match, matches_event_filter, prompt_poison_sweep_due,
+        prompt_poison_sweep_targets, registered_prompt_sweep_agents,
+        reminder_matches_factory_session, shutdown_targets, take_next_pending_spawn,
+        take_spawn_cancellation,
     };
     use crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound;
     use crate::ui::factory::daemon::{FactoryDaemon, PendingSpawn};
     use crate::ui::factory::director::{AgentSummary, DirectorData, DirectorEvent};
+    use cas_store::DeliveryStage;
     use cas_types::{AgentStatus, Task, TaskStatus};
     use std::collections::{HashMap, HashSet, VecDeque};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn first_prompt_queue_tick_with_empty_roster_does_not_abandon_pending_rows() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let row_id = queue
+            .enqueue_with_session(
+                "supervisor",
+                "not-yet-paneled",
+                "start assigned task",
+                "reused-session",
+            )
+            .unwrap();
+        let daemon_started_at = Instant::now();
+        let valid_target_names = prompt_poison_sweep_targets("lead", &[], &[]);
+        let valid_targets: Vec<&str> = valid_target_names.iter().map(String::as_str).collect();
+
+        if prompt_poison_sweep_due(Some(daemon_started_at), daemon_started_at) {
+            queue
+                .abandon_ineligible_session_targets(&valid_targets, "reused-session", -1)
+                .unwrap();
+        }
+
+        let report = queue.message_delivery_report(row_id).unwrap().unwrap();
+        assert_eq!(
+            report.stage,
+            DeliveryStage::Enqueued,
+            "the daemon's first tick must preserve a queued row while its roster is still empty"
+        );
+    }
+
+    #[test]
+    fn registered_but_not_paneled_agent_is_eligible_for_poison_sweep() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let agent_store = crate::store::open_agent_store(&cas_dir).unwrap();
+        let mut registered =
+            cas_types::Agent::new("agent-registered".into(), "registered-worker".into());
+        registered.factory_session = Some("factory-session".into());
+        agent_store.register(&registered).unwrap();
+        let mut foreign = cas_types::Agent::new("agent-foreign".into(), "foreign-worker".into());
+        foreign.factory_session = Some("other-session".into());
+        agent_store.register(&foreign).unwrap();
+
+        let agents = agent_store.list(None).unwrap();
+        let registered_names = registered_prompt_sweep_agents(&agents, "factory-session");
+        let valid = prompt_poison_sweep_targets("lead", &[], &registered_names);
+        let valid_targets: Vec<&str> = valid.iter().map(String::as_str).collect();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let row_id = queue
+            .enqueue_with_session(
+                "supervisor",
+                "registered-worker",
+                "wait for pane",
+                "factory-session",
+            )
+            .unwrap();
+
+        assert!(valid.contains("registered-worker"));
+        assert!(!valid.contains("foreign-worker"));
+        assert_eq!(
+            queue
+                .abandon_ineligible_session_targets(&valid_targets, "factory-session", -1)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            queue
+                .message_delivery_report(row_id)
+                .unwrap()
+                .unwrap()
+                .stage,
+            DeliveryStage::Enqueued
+        );
+    }
+
+    #[test]
+    fn genuinely_orphaned_prompt_is_reclaimed_after_sweep_interval() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let row_id = queue
+            .enqueue_with_session(
+                "supervisor",
+                "never-registered",
+                "orphaned work",
+                "factory-session",
+            )
+            .unwrap();
+        let now = Instant::now();
+        let last_sweep = now - Duration::from_secs(61);
+        let valid_target_names = prompt_poison_sweep_targets("lead", &[], &[]);
+        let valid_targets: Vec<&str> = valid_target_names.iter().map(String::as_str).collect();
+
+        assert!(prompt_poison_sweep_due(Some(last_sweep), now));
+        assert_eq!(
+            queue
+                .abandon_ineligible_session_targets(&valid_targets, "factory-session", -1)
+                .unwrap(),
+            1
+        );
+        let report = queue.message_delivery_report(row_id).unwrap().unwrap();
+        assert_eq!(report.stage, DeliveryStage::Abandoned);
+    }
 
     // -----------------------------------------------------------------------
     // cas-893c: idle-nudge eligibility (`FactoryDaemon::worker_looks_idle`)

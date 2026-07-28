@@ -185,7 +185,7 @@ impl FactoryDaemon {
             dead_workers: std::collections::HashSet::new(),
             cancelled_spawns: std::collections::HashSet::new(),
             last_idle_message_times: HashMap::new(),
-            last_prompt_poison_sweep: None,
+            last_prompt_poison_sweep: Some(Instant::now()),
             resumed_epic_ids: std::collections::HashSet::new(),
         })
     }

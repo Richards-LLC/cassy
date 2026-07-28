@@ -216,6 +216,9 @@ pub struct FactoryDaemon {
     /// Tracks last idle-like message time per worker source for dedup.
     /// Prevents idle spam when workers send repeated "standing by" / "ready" messages.
     last_idle_message_times: HashMap<String, std::time::Instant>,
+    /// Last bounded sweep that terminalized aged prompts for targets no
+    /// longer belonging to this factory session.
+    last_prompt_poison_sweep: Option<std::time::Instant>,
     /// Epic IDs already logged as "resuming" (prevents log spam every refresh cycle)
     resumed_epic_ids: std::collections::HashSet<String>,
 }

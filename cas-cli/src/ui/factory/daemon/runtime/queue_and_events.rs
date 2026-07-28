@@ -333,6 +333,26 @@ impl FactoryDaemon {
 
         let queue = open_prompt_queue_store(self.app.cas_dir())?;
 
+        // Native-extension agents consume their own queue rows. Excluding them
+        // from the daemon's target universe prevents this PTY/inbox processor
+        // from repeatedly selecting rows it deliberately cannot consume.
+        let native_agents: std::collections::HashSet<String> = open_agent_store(self.app.cas_dir())
+            .ok()
+            .and_then(|store| store.list(None).ok())
+            .map(|agents| {
+                agents
+                    .into_iter()
+                    .filter(|a| {
+                        a.metadata
+                            .get("native_extension")
+                            .map(|v| v == "true")
+                            .unwrap_or(false)
+                    })
+                    .map(|a| a.name)
+                    .collect()
+            })
+            .unwrap_or_default();
+
         // Build target list: this session's supervisor + workers + "all_workers".
         // This prevents us from consuming messages meant for a different factory
         // session running in the same project directory.
@@ -343,13 +363,43 @@ impl FactoryDaemon {
         // inbound director → agent delivery. Without this, messages queued
         // to target=director sat forever while registration reported them
         // as "not yet registered".
-        let mut targets: Vec<&str> = Vec::with_capacity(worker_names.len() + 3);
-        targets.push(&supervisor_name);
-        targets.push("all_workers");
-        targets.push(super::teams::DIRECTOR_AGENT_NAME);
+        let mut valid_targets: Vec<&str> = Vec::with_capacity(worker_names.len() + 4);
+        valid_targets.push(&supervisor_name);
+        valid_targets.push("supervisor");
+        valid_targets.push("all_workers");
+        valid_targets.push(super::teams::DIRECTOR_AGENT_NAME);
         for w in &worker_names {
-            targets.push(w.as_str());
+            valid_targets.push(w.as_str());
         }
+
+        // Aged session-scoped rows for agents no longer in the roster are
+        // terminal poison, not work for another tick. Fresh unknown targets
+        // retain the registration grace promised by action=message.
+        if self
+            .last_prompt_poison_sweep
+            .is_none_or(|last| last.elapsed() >= std::time::Duration::from_secs(60))
+        {
+            self.last_prompt_poison_sweep = Some(std::time::Instant::now());
+            if let Ok(expired) = queue.abandon_ineligible_session_targets(
+                &valid_targets,
+                &self.session_name,
+                cas_store::PROMPT_RETRY_MAX_AGE_SECS,
+            ) {
+                if expired > 0 {
+                    tracing::warn!(
+                        expired,
+                        factory_session = %self.session_name,
+                        "abandoned aged prompt_queue rows for targets outside the live session"
+                    );
+                }
+            }
+        }
+
+        let targets: Vec<&str> = valid_targets
+            .iter()
+            .copied()
+            .filter(|target| !native_agents.contains(*target))
+            .collect();
 
         // Peek first, only ack after successful injection to provide at-least-once delivery.
         // Filter by targets AND session to prevent cross-session message theft.
@@ -385,26 +435,6 @@ impl FactoryDaemon {
 
         // Best-effort event recording (for external tooling acks, activity feed, playback).
         let event_store = SqliteEventStore::open(self.app.cas_dir()).ok();
-
-        // Build a set of agent names with native_extension=true.
-        // These agents handle message delivery via their own extension
-        // so we skip PTY text injection for them.
-        let native_agents: std::collections::HashSet<String> = open_agent_store(self.app.cas_dir())
-            .ok()
-            .and_then(|store| store.list(None).ok())
-            .map(|agents| {
-                agents
-                    .into_iter()
-                    .filter(|a| {
-                        a.metadata
-                            .get("native_extension")
-                            .map(|v| v == "true")
-                            .unwrap_or(false)
-                    })
-                    .map(|a| a.name)
-                    .collect()
-            })
-            .unwrap_or_default();
 
         for queued in prompts {
             let target = &queued.target;
@@ -503,9 +533,9 @@ impl FactoryDaemon {
                                 true,
                             )));
                 if pty_delivered && !self.app.mux.pane_ready_for_injection(pane_target) {
-                    // Don't ack — the prompt stays in the queue for the next tick.
-                    // cas-2c5f: durable pending reason for message_status.
-                    let _ = queue.record_pending_reason(
+                    // Don't ack. Schedule a bounded, persisted retry so a
+                    // permanently unready pane cannot spin every 100ms forever.
+                    let _ = queue.record_retry(
                         queued.id,
                         cas_store::PendingReason::GatedNotReady,
                         Some("pane not ready for injection"),
@@ -591,6 +621,11 @@ impl FactoryDaemon {
                         0,
                         0,
                         Some("no non-native workers for all_workers broadcast"),
+                    );
+                    let _ = queue.record_retry(
+                        queued.id,
+                        cas_store::PendingReason::TargetUnavailable,
+                        Some("all_workers broadcast has no non-native recipients"),
                     );
                     continue;
                 }
@@ -687,6 +722,15 @@ impl FactoryDaemon {
                         "Failed to stamp broadcast outcome for prompt {}: {}",
                         queued.id,
                         e
+                    );
+                }
+                if succeeded == 0 {
+                    let _ = queue.record_retry(
+                        queued.id,
+                        cas_store::PendingReason::AdapterRetryable,
+                        detail
+                            .as_deref()
+                            .or(Some("all_workers broadcast reached zero recipients")),
                     );
                 }
                 // Do not fall through to mark_transport_delivered — outcome already stamped.
@@ -823,7 +867,7 @@ impl FactoryDaemon {
                                     // next tick.
                                     tracing::error!("Failed to inject to '{}': {}", pane_target, e);
                                     // cas-2c5f: adapter failure leaves row pending for retry.
-                                    let _ = queue.record_pending_reason(
+                                    let _ = queue.record_retry(
                                         queued.id,
                                         cas_store::PendingReason::AdapterRetryable,
                                         Some(&e.to_string()),
@@ -843,7 +887,7 @@ impl FactoryDaemon {
                                     // Pane missing but the target is still a current
                                     // session member (mid-spawn) — bare retry.
                                     // cas-2c5f: known target still spawning — retryable unavail.
-                                    let _ = queue.record_pending_reason(
+                                    let _ = queue.record_retry(
                                         queued.id,
                                         cas_store::PendingReason::TargetUnavailable,
                                         Some("pane missing; target is current session member"),

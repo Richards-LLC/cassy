@@ -355,6 +355,52 @@ fn already_idle_urgent_interrupt_starts_new_turn() {
         std::thread::sleep(Duration::from_millis(200));
     }
 
+    let first_user_messages = contents.matches("\"type\":\"user_message\"").count();
+    let first_completions = contents.matches("\"type\":\"task_complete\"").count();
+
+    // cas-a5a7 AC4: exercise the exact normal coordination-message PTY shape
+    // first. The literal framing is what `frame_pty_payload` supplies for a
+    // Codex recipient. Count rollout records instead of searching for the
+    // requested reply token: that token also occurs in the injected prompt,
+    // so a swallowed composer draft could otherwise produce a false pass.
+    rt.block_on(mux.inject(
+        "cas1317-codex-rt",
+        "Message from supervisor: Reply with exactly IDLE-NONURGENT-OK and nothing else.",
+    ))
+    .expect("normal coordination inject must succeed");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(45);
+    let mut nonurgent_observed = false;
+    while std::time::Instant::now() < deadline {
+        let _ = mux.poll_batch();
+        contents.clear();
+        if let Ok(mut f) = std::fs::File::open(&rollout) {
+            let _ = f.read_to_string(&mut contents);
+        }
+        let user_messages = contents.matches("\"type\":\"user_message\"").count();
+        let completions = contents.matches("\"type\":\"task_complete\"").count();
+        if user_messages > first_user_messages && completions > first_completions {
+            nonurgent_observed = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    assert!(
+        nonurgent_observed,
+        "cas-a5a7: a normal coordination message to an ALREADY-IDLE Codex worker \
+         must create a new user_message and complete a new turn. Rollout tail:\n{}",
+        contents.lines().rev().take(30).collect::<Vec<_>>().join("\n")
+    );
+
+    // Return to a genuinely idle prompt before testing urgent delivery.
+    let idle_until = std::time::Instant::now() + Duration::from_secs(8);
+    while std::time::Instant::now() < idle_until {
+        let _ = mux.poll_batch();
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let before_urgent_user_messages = contents.matches("\"type\":\"user_message\"").count();
+    let before_urgent_completions = contents.matches("\"type\":\"task_complete\"").count();
+
     eprintln!(
         "[cas-1317] pane bytes_received before urgent: {:?}",
         mux.pane_bytes_received("cas1317-codex-rt")
@@ -366,62 +412,33 @@ fn already_idle_urgent_interrupt_starts_new_turn() {
     let production_floor = Duration::from_millis(1200);
     rt.block_on(mux.interrupt_and_inject(
         "cas1317-codex-rt",
-        "URGENT: reply with exactly the text IDLE-URGENT-OK and nothing else.",
+        "Message from supervisor: URGENT: reply with exactly IDLE-URGENT-OK and nothing else.",
         production_floor,
     ))
     .expect("interrupt_and_inject must succeed (no PTY/IO error)");
 
-    // Drain and watch for a SECOND task_complete plus the new reply text —
-    // proof a genuine new turn started and finished, not just that the Esc
-    // + write calls returned Ok (they can return Ok while being silently
-    // swallowed by the TUI, which is exactly the reported symptom).
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    let mut saw_idle_reply = false;
-    while std::time::Instant::now() < deadline {
-        let _ = mux.poll_batch();
-        contents.clear();
-        if let Ok(mut f) = std::fs::File::open(&rollout) {
-            let _ = f.read_to_string(&mut contents);
-        }
-        saw_idle_reply = contents.contains("IDLE-URGENT-OK");
-        if saw_idle_reply {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(300));
-    }
-    assert!(
-        saw_idle_reply,
-        "cas-1317: an urgent message to an ALREADY-IDLE Codex worker must still \
-         start a new turn and be acted on — got silence instead (the reported \
-         symptom: worker alive, message never lands). Rollout tail:\n{}",
-        contents.lines().rev().take(30).collect::<Vec<_>>().join("\n")
-    );
-
-    // AC3 (shared with the P0): the worker must remain reachable afterward.
-    rt.block_on(mux.inject(
-        "cas1317-codex-rt",
-        "Confirm you are still reachable by replying STILL-REACHABLE-IDLE-OK.",
-    ))
-    .expect("normal follow-up inject must succeed");
-
+    // A successful write is not sufficient: the rollout must show both a
+    // fresh user_message and a completed fresh turn.
     let deadline = std::time::Instant::now() + Duration::from_secs(45);
-    let mut saw_followup = false;
+    let mut urgent_observed = false;
     while std::time::Instant::now() < deadline {
         let _ = mux.poll_batch();
         contents.clear();
         if let Ok(mut f) = std::fs::File::open(&rollout) {
             let _ = f.read_to_string(&mut contents);
         }
-        if contents.contains("STILL-REACHABLE-IDLE-OK") {
-            saw_followup = true;
+        let user_messages = contents.matches("\"type\":\"user_message\"").count();
+        let completions = contents.matches("\"type\":\"task_complete\"").count();
+        if user_messages > before_urgent_user_messages && completions > before_urgent_completions {
+            urgent_observed = true;
             break;
         }
         std::thread::sleep(Duration::from_millis(300));
     }
     assert!(
-        saw_followup,
-        "worker must still be reachable after the idle-case urgent interrupt — a \
-         normal follow-up message never landed. Rollout tail:\n{}",
+        urgent_observed,
+        "cas-a5a7: an urgent coordination message to an ALREADY-IDLE Codex \
+         worker must create a new user_message and complete a new turn. Rollout tail:\n{}",
         contents.lines().rev().take(30).collect::<Vec<_>>().join("\n")
     );
 

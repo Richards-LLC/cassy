@@ -2659,10 +2659,9 @@ fn resolve_codex_transcript(
 
 /// Pick the concrete evidence path from a transcript resolution.
 ///
-/// This is shared by `worker_status` and `cas factory is-wedged` so both
-/// surfaces consume identical evidence. A synthesized path is deliberately
-/// not evidence that a transcript exists (cas-de95). When multiple real
-/// candidates exist, both surfaces deterministically use the freshest one.
+/// This preserves `cas factory is-wedged`'s historical ambiguity behavior.
+/// `worker_status` uses a stricter Resolved-only selector below: choosing
+/// among multiple Codex cwd matches belongs to cas-479f, not cas-fa69.
 pub(crate) fn transcript_path_from_resolution(
     resolution: TranscriptResolution,
 ) -> Option<std::path::PathBuf> {
@@ -2707,12 +2706,44 @@ fn worker_status_transcript_path(
     cli: cas_mux::SupervisorCli,
 ) -> Option<std::path::PathBuf> {
     match cli {
-        cas_mux::SupervisorCli::Codex => {
-            resolve_worker_transcript_path(clone_path, session_id, cli)
-        }
+        cas_mux::SupervisorCli::Codex => worker_status_codex_transcript_path(
+            clone_path,
+            session_id,
+        ),
         cas_mux::SupervisorCli::Claude | cas_mux::SupervisorCli::Grok => {
             transcript_path_fast(clone_path, session_id)
         }
+    }
+}
+
+fn worker_status_codex_transcript_path(
+    clone_path: Option<&str>,
+    session_id: &str,
+) -> Option<std::path::PathBuf> {
+    let sessions_dir = default_codex_sessions_dir();
+    worker_status_codex_transcript_path_in(
+        sessions_dir.as_deref(),
+        clone_path,
+        session_id,
+    )
+}
+
+/// Codex worker_status accepts only a unique real rollout. Synthesized paths
+/// are not evidence (cas-de95), and Ambiguous cwd matches remain unresolved
+/// until cas-479f defines how to distinguish the worker from codex_exec.
+fn worker_status_codex_transcript_path_in(
+    sessions_dir: Option<&std::path::Path>,
+    clone_path: Option<&str>,
+    session_id: &str,
+) -> Option<std::path::PathBuf> {
+    match resolve_transcript(
+        sessions_dir,
+        clone_path,
+        session_id,
+        cas_mux::SupervisorCli::Codex,
+    ) {
+        TranscriptResolution::Resolved(path) => Some(path),
+        TranscriptResolution::Synthesized(_) | TranscriptResolution::Ambiguous { .. } => None,
     }
 }
 
@@ -4176,15 +4207,42 @@ effort = "high"
     #[test]
     fn worker_status_transcript_path_rejects_synthesized_codex_path() {
         let (_tmp, sessions) = fake_codex_sessions_dir(&[]);
-        let got = resolve_worker_transcript_path_in(
+        let got = worker_status_codex_transcript_path_in(
             Some(&sessions),
             Some("/tmp/no-such-worker"),
             "codex-worker-missing",
-            cas_mux::SupervisorCli::Codex,
         );
         assert_eq!(
             got, None,
             "a synthesized rollout path is not evidence that the rollout exists"
+        );
+    }
+
+    #[test]
+    fn worker_status_transcript_path_rejects_ambiguous_codex_cwd_matches() {
+        let clone = "/tmp/codex-worker-with-exec";
+        let worker_rel = "2026/07/28/rollout-2026-07-28T07-59-08-worker.jsonl";
+        let exec_rel = "2026/07/28/rollout-2026-07-28T08-03-58-codex-exec.jsonl";
+        let (_tmp, sessions) =
+            fake_codex_sessions_dir(&[(worker_rel, clone), (exec_rel, clone)]);
+        let resolution = resolve_transcript(
+            Some(&sessions),
+            Some(clone),
+            "codex-worker-cas-session",
+            cas_mux::SupervisorCli::Codex,
+        );
+        assert!(
+            matches!(resolution, TranscriptResolution::Ambiguous { .. }),
+            "two rollouts sharing a cwd must remain Ambiguous for cas-479f"
+        );
+        assert_eq!(
+            worker_status_codex_transcript_path_in(
+                Some(&sessions),
+                Some(clone),
+                "codex-worker-cas-session",
+            ),
+            None,
+            "cas-fa69 must not choose among Ambiguous worker/codex_exec rollouts"
         );
     }
 

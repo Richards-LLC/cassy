@@ -575,6 +575,31 @@ pub(crate) fn epic_branch_name(title: &str) -> String {
     format!("epic/{}", slugify(title))
 }
 
+/// Resolve the branch recorded on the active epic task.
+///
+/// The task store is authoritative because an operator may deliberately move
+/// or rename an epic branch after creation (stacked epics are one example).
+/// Title-derived naming remains only as a compatibility fallback for legacy
+/// epic summaries that predate persisted `branch` metadata.
+pub(crate) fn epic_branch_for_state(
+    data: &DirectorData,
+    state: &EpicState,
+) -> Option<String> {
+    let EpicState::Active {
+        epic_id,
+        epic_title,
+    } = state
+    else {
+        return None;
+    };
+
+    data.epic_tasks
+        .iter()
+        .find(|epic| epic.id == *epic_id)
+        .and_then(|epic| epic.branch.clone())
+        .or_else(|| Some(epic_branch_name(epic_title)))
+}
+
 /// cas-889d / cas-9eae: determine whether a task belongs to the current
 /// factory session for director visibility purposes (i.e. whether it
 /// should remain in the `ready_tasks`/`in_progress_tasks` buckets the
@@ -1052,6 +1077,9 @@ impl FactoryApp {
             && self.current_epic_id.as_deref() == focus.epic_id.as_deref()
             && (focus.epic_id.is_none() || self.current_epic_source == focus.source);
         if already_synced {
+            // Branch metadata can change while the focused epic ID stays the
+            // same. Keep spawn state live even on this fast path.
+            self.epic_branch = epic_branch_for_state(&self.director_data, &self.epic_state);
             return;
         }
 
@@ -1060,6 +1088,7 @@ impl FactoryApp {
         self.current_epic_source = epic_state
             .epic_id()
             .map(|_| focus.source.unwrap_or(EpicFocusSource::Inference));
+        self.epic_branch = epic_branch_for_state(&self.director_data, &epic_state);
         self.epic_state = epic_state;
     }
 
@@ -3705,7 +3734,10 @@ mod tests {
         };
         app.director_data = data_with_epics(vec![
             epic_summary("cas-session", "Session Epic", TaskStatus::Open),
-            epic_summary("cas-pinned", "Pinned Epic", TaskStatus::Open),
+            TaskSummary {
+                branch: Some("epic/stacked-base".to_string()),
+                ..epic_summary("cas-pinned", "Pinned Epic", TaskStatus::Open)
+            },
         ]);
 
         app.apply_session_metadata_focus();
@@ -3714,6 +3746,11 @@ mod tests {
         assert_eq!(
             app.current_epic_source,
             Some(super::EpicFocusSource::Pinned)
+        );
+        assert_eq!(
+            app.epic_branch.as_deref(),
+            Some("epic/stacked-base"),
+            "focus_epic must update the spawn branch from task.branch"
         );
         match app.epic_state {
             EpicState::Active {

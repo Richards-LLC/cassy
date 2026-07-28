@@ -28,6 +28,9 @@
 //! resuming" symptom this task investigated is therefore NOT an idle-gate
 //! problem — see the companion busy-injection note in the task record.
 
+#[path = "support/real_pty_serial.rs"]
+mod real_pty_serial;
+
 use cas_mux::{Pane, PaneKind, Pty, PtyConfig, SupervisorCli};
 use std::io::Read;
 use std::time::Duration;
@@ -35,6 +38,8 @@ use std::time::Duration;
 #[test]
 #[ignore = "spawns a real PTY child process — run explicitly, see module docs"]
 fn idle_pane_injection_auto_submits_real_pty() {
+    let _serial = real_pty_serial::lock();
+
     let tmp = std::env::temp_dir().join(format!(
         "cas-893c-idle-inject-{}-{}.log",
         std::process::id(),
@@ -141,6 +146,8 @@ fn idle_pane_injection_auto_submits_real_pty() {
 #[test]
 #[ignore = "spawns a real PTY child process — run explicitly, see module docs"]
 fn non_urgent_injection_does_not_break_in_flight_turn() {
+    let _serial = real_pty_serial::lock();
+
     let tmp = std::env::temp_dir().join(format!(
         "cas-a5a7-nonurgent-{}-{}.log",
         std::process::id(),

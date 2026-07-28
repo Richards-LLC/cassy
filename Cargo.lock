@@ -775,6 +775,7 @@ dependencies = [
  "cas-recording",
  "criterion 0.6.0",
  "crossterm 0.29.0",
+ "fs2",
  "ghostty_vt",
  "indexmap",
  "memchr",

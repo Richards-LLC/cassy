@@ -182,6 +182,7 @@ mod m203_spawn_queue_add_factory_session;
 mod m204_agents_add_factory_session;
 mod m205_agents_factory_session_index;
 mod m206_spawn_queue_add_task_id;
+mod m207_task_lease_history_add_reason;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -371,6 +372,8 @@ pub const MIGRATIONS: &[Migration] = &[
     m205_agents_factory_session_index::MIGRATION,
     // Add task_id column to spawn_queue for spawn-time task pre-assignment (cas-6913)
     m206_spawn_queue_add_task_id::MIGRATION,
+    // Separate human-readable lease event reasons from transfer agent IDs (cas-7aef)
+    m207_task_lease_history_add_reason::MIGRATION,
 ];
 
 #[cfg(test)]

@@ -109,7 +109,8 @@ mod tests {
                 epoch INTEGER NOT NULL DEFAULT 1,
                 timestamp TEXT NOT NULL,
                 details TEXT,
-                previous_agent_id TEXT
+                previous_agent_id TEXT,
+                reason TEXT
             );
 
             -- Daemon instances (needed by agent store)

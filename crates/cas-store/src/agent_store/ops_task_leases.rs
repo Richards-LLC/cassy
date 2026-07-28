@@ -73,6 +73,7 @@ impl SqliteAgentStore {
                                     r#"{{"to_agent":"{agent_id}","reason":"worker_takeover"}}"#
                                 )),
                                 Some(agent_id),
+                                None,
                             )?;
                             // Fall through to update lease for worker
                         } else {
@@ -148,6 +149,7 @@ impl SqliteAgentStore {
             new_epoch,
             details.as_deref(),
             None,
+            None,
         )?;
 
         tx.commit()?;
@@ -189,6 +191,7 @@ impl SqliteAgentStore {
                     agent_id,
                     "released",
                     epoch as u64,
+                    None,
                     None,
                     None,
                 )?;
@@ -239,6 +242,7 @@ impl SqliteAgentStore {
                 &agent_id,
                 "released",
                 epoch as u64,
+                None,
                 None,
                 Some(reason),
             )?;
@@ -293,6 +297,7 @@ impl SqliteAgentStore {
                 "renewed",
                 ep as u64,
                 Some(&details),
+                None,
                 None,
             )?;
         }
@@ -394,6 +399,7 @@ impl SqliteAgentStore {
                 *epoch as u64,
                 None,
                 None,
+                None,
             )?;
         }
 
@@ -409,7 +415,7 @@ impl SqliteAgentStore {
         let limit_val = limit.unwrap_or(100) as i64;
 
         let mut stmt = conn.prepare_cached(
-            "SELECT id, task_id, agent_id, event_type, epoch, timestamp, details, previous_agent_id
+            "SELECT id, task_id, agent_id, event_type, epoch, timestamp, details, previous_agent_id, reason
              FROM task_lease_history
              WHERE task_id = ?
              ORDER BY timestamp DESC
@@ -420,15 +426,24 @@ impl SqliteAgentStore {
             .query_map(params![task_id, limit_val], |row| {
                 let timestamp_str: String = row.get(5)?;
                 let timestamp = Self::parse_datetime(&timestamp_str).unwrap_or_else(Utc::now);
+                let event_type: String = row.get(3)?;
+                let previous_agent_id: Option<String> = row.get(7)?;
+                let reason: Option<String> = row.get(8)?;
+                let reason = reason.or_else(|| {
+                    (event_type == "released")
+                        .then(|| previous_agent_id.clone())
+                        .flatten()
+                });
                 Ok(LeaseHistoryEntry {
                     id: row.get(0)?,
                     task_id: row.get(1)?,
                     agent_id: row.get(2)?,
-                    event_type: row.get(3)?,
+                    event_type,
                     epoch: row.get::<_, i64>(4).unwrap_or(1) as u64,
                     timestamp,
                     details: row.get(6)?,
-                    previous_agent_id: row.get(7)?,
+                    previous_agent_id,
+                    reason,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;

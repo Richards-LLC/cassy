@@ -60,6 +60,7 @@ impl SqliteAgentStore {
                 *epoch as u64,
                 Some(r#"{"reason":"graceful_shutdown"}"#),
                 None,
+                Some("graceful_shutdown"),
             )?;
         }
 

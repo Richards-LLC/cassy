@@ -35,6 +35,8 @@ pub struct LeaseHistoryEntry {
     pub details: Option<String>,
     /// For transfers, the previous agent that held the lease
     pub previous_agent_id: Option<String>,
+    /// Human-readable reason for the event
+    pub reason: Option<String>,
 }
 
 /// Schema for agents and task leases tables.
@@ -110,7 +112,8 @@ CREATE TABLE IF NOT EXISTS task_lease_history (
     epoch INTEGER NOT NULL DEFAULT 1,
     timestamp TEXT NOT NULL,
     details TEXT,  -- JSON with additional context
-    previous_agent_id TEXT  -- For transfers, who held it before
+    previous_agent_id TEXT,  -- For transfers, who held it before
+    reason TEXT  -- Human-readable reason for the event
 );
 
 CREATE INDEX IF NOT EXISTS idx_lease_history_task ON task_lease_history(task_id);
@@ -535,10 +538,11 @@ impl SqliteAgentStore {
         epoch: u64,
         details: Option<&str>,
         previous_agent_id: Option<&str>,
+        reason: Option<&str>,
     ) -> Result<()> {
         conn.execute(
-            "INSERT INTO task_lease_history (task_id, agent_id, event_type, epoch, timestamp, details, previous_agent_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO task_lease_history (task_id, agent_id, event_type, epoch, timestamp, details, previous_agent_id, reason)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 task_id,
                 agent_id,
@@ -547,6 +551,7 @@ impl SqliteAgentStore {
                 Utc::now().to_rfc3339(),
                 details,
                 previous_agent_id,
+                reason,
             ],
         )?;
         Ok(())

@@ -1756,7 +1756,8 @@ impl CasService {
         use cas_types::{AgentRole, AgentStatus, WorktreeStatus};
         use std::path::Path;
 
-        let stale_after = req.older_than_secs.unwrap_or(120);
+        let prompt_expiry_age = req.older_than_secs;
+        let stale_after = prompt_expiry_age.unwrap_or(120);
         let agent_store = open_agent_store(&self.inner.cas_root).map_err(|e| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
@@ -1808,6 +1809,7 @@ impl CasService {
 
         // Clear prompt queue only when explicitly forced.
         let mut cleared_prompts = 0usize;
+        let mut expired_prompts = 0usize;
         if req.force.unwrap_or(false) {
             let prompt_queue = open_prompt_queue_store(&self.inner.cas_root).map_err(|e| {
                 Self::error(
@@ -1815,7 +1817,17 @@ impl CasService {
                     format!("Failed to open prompt queue: {e}"),
                 )
             })?;
-            cleared_prompts = prompt_queue.clear().unwrap_or(0);
+            if let Some(older_than_secs) = prompt_expiry_age {
+                // Targeted poison-queue remediation: preserve forensic rows
+                // and terminally abandon only pending entries older than the
+                // explicit cutoff. Omitting the cutoff retains the legacy
+                // force-clear behavior.
+                expired_prompts = prompt_queue
+                    .abandon_pending_older_than(older_than_secs)
+                    .unwrap_or(0);
+            } else {
+                cleared_prompts = prompt_queue.clear().unwrap_or(0);
+            }
         }
 
         const SKILL_MARKER_MAX_AGE: std::time::Duration =
@@ -1824,7 +1836,7 @@ impl CasService {
             cleanup_stale_skill_markers(&self.inner.cas_root, SKILL_MARKER_MAX_AGE);
 
         Ok(Self::success(format!(
-            "Factory GC cleanup complete.\n\nStale agents marked: {stale_marked}\nDead agent records purged: {dead_agent_records_purged}\nOrphan worktrees marked removed: {orphan_marked_removed}\nPrompt queue entries cleared: {cleared_prompts}\nStale skill markers removed: {stale_skill_markers_removed}"
+            "Factory GC cleanup complete.\n\nStale agents marked: {stale_marked}\nDead agent records purged: {dead_agent_records_purged}\nOrphan worktrees marked removed: {orphan_marked_removed}\nPrompt queue entries expired: {expired_prompts}\nPrompt queue entries cleared: {cleared_prompts}\nStale skill markers removed: {stale_skill_markers_removed}"
         )))
     }
 }

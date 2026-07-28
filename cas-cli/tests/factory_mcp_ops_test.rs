@@ -1885,6 +1885,35 @@ async fn test_gc_cleanup_with_force() {
 }
 
 #[tokio::test]
+async fn test_gc_cleanup_force_with_age_expires_without_deleting_prompt_rows() {
+    let env = FactoryTestEnv::new();
+    let pq = env.prompt_queue();
+    let id = pq.enqueue("src", "dead-worker", "poison").expect("enqueue");
+
+    let mut req = factory_req("gc_cleanup");
+    req.force = Some(true);
+    req.older_than_secs = Some(0);
+    let result = env.service.factory(Parameters(req)).await.unwrap();
+    let text = get_text(&result);
+
+    assert!(
+        text.contains("Prompt queue entries expired: 1"),
+        "targeted remediation must report terminalized rows: {text}"
+    );
+    assert!(
+        text.contains("Prompt queue entries cleared: 0"),
+        "age-targeted remediation must preserve history: {text}"
+    );
+    assert_eq!(pq.pending_count().unwrap(), 0);
+    let report = pq
+        .message_delivery_report(id)
+        .unwrap()
+        .expect("expired row remains queryable");
+    assert_eq!(report.stage, cas_store::DeliveryStage::Abandoned);
+    assert!(report.delivered_at.is_none());
+}
+
+#[tokio::test]
 async fn test_gc_cleanup_purges_stale_and_shutdown_worker_records() {
     let env = FactoryTestEnv::new();
 

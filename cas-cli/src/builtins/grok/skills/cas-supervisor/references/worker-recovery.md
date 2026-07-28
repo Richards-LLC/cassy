@@ -13,6 +13,12 @@
 3. **Supporting:** last activity / transcript age, worktree dirty, active leases, `is-wedged`.
 4. **Never** act on `Workers: None active` or `Filtered stale` alone — confirm `ps`/worktree/`is-wedged` first (cas-3e56 residual: false-empty roster nearly killed mid-turn Grok). Use `gc_cleanup` to purge dead registry rows.
 
+Prompt-queue poison remediation requires an explicit age cutoff and supervisor sign-off:
+`cas__coordination action=gc_cleanup force=true older_than_secs=86400` terminally
+abandons only pending prompts older than one day and preserves the rows for forensics.
+Run `gc_report` first. `force=true` without `older_than_secs` retains the legacy,
+destructive whole-queue clear and should not be used for targeted recovery.
+
 ## Is the worker actually dead? (cas-4513 triage)
 
 Before you run `shutdown_workers` on a pane that *looks* broken, spend 60 seconds on triage. The supervisor TUI is not ground truth for worker liveness — the most common false-positive failure mode is a worker that's mid-way through a long tool call or showing Claude Code's Bun/React-Ink crash screen (which leaves the process alive with an unresponsive UI). Destructive recovery on a live worker rips its worktree out from under itself and turns a recoverable hang into a real crash.

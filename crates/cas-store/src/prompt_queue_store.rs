@@ -14,6 +14,28 @@ use crate::Result;
 use crate::recording_store::capture_message_event;
 use crate::supervisor_queue_store::NotificationPriority;
 
+/// Retry policy for daemon-owned prompt delivery.
+///
+/// The delay is exponential (250ms → 5s cap), while either 120 failed
+/// attempts or fifteen minutes of age makes the row terminal. Keeping the
+/// policy in the store ensures every daemon caller applies the same bound.
+pub const PROMPT_RETRY_MAX_ATTEMPTS: u32 = 120;
+pub const PROMPT_RETRY_MAX_AGE_SECS: i64 = 15 * 60;
+const PROMPT_RETRY_BASE_DELAY_MS: i64 = 250;
+const PROMPT_RETRY_MAX_DELAY_MS: i64 = 5_000;
+
+/// Result of recording a failed daemon delivery attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptRetryDisposition {
+    /// The row remains pending but is ineligible until `retry_at`.
+    Scheduled {
+        attempts: u32,
+        retry_at: DateTime<Utc>,
+    },
+    /// The bounded retry/age policy terminally abandoned the row.
+    Abandoned { attempts: u32 },
+}
+
 /// A prompt in the queue
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueuedPrompt {
@@ -410,6 +432,12 @@ ALTER TABLE prompt_queue ADD COLUMN broadcast_succeeded INTEGER;
 const PROMPT_QUEUE_BROADCAST_FAILED_MIGRATION: &str = r#"
 ALTER TABLE prompt_queue ADD COLUMN broadcast_failed INTEGER;
 "#;
+const PROMPT_QUEUE_DELIVERY_ATTEMPTS_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN delivery_attempts INTEGER NOT NULL DEFAULT 0;
+"#;
+const PROMPT_QUEUE_NEXT_ATTEMPT_AT_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN next_attempt_at TEXT;
+"#;
 
 /// Trait for prompt queue operations
 pub trait PromptQueueStore: Send + Sync {
@@ -588,6 +616,17 @@ pub trait PromptQueueStore: Send + Sync {
         detail: Option<&str>,
     ) -> Result<()>;
 
+    /// Record a failed daemon handoff with bounded exponential retry.
+    ///
+    /// Rows remain pending but are omitted from peeks until their retry time.
+    /// Exhausted or over-age rows become terminal `Abandoned`.
+    fn record_retry(
+        &self,
+        prompt_id: i64,
+        reason: PendingReason,
+        detail: Option<&str>,
+    ) -> Result<PromptRetryDisposition>;
+
     /// Authoritative full transport handoff (all intended recipients Ok).
     /// Atomically sets `transport_delivered_at` + stage Delivered + `processed_at`.
     fn mark_transport_delivered(&self, prompt_id: i64) -> Result<()>;
@@ -618,6 +657,22 @@ pub trait PromptQueueStore: Send + Sync {
 
     /// Get count of pending prompts
     fn pending_count(&self) -> Result<usize>;
+
+    /// Terminally abandon pending prompts older than the requested age.
+    ///
+    /// This is the safe remediation primitive for historical poison queues:
+    /// it preserves rows and their forensic status instead of deleting them.
+    fn abandon_pending_older_than(&self, older_than_secs: i64) -> Result<usize>;
+
+    /// Abandon aged, session-scoped rows whose target is no longer a member
+    /// of that session. Fresh rows stay pending so pre-registration delivery
+    /// retains its grace period.
+    fn abandon_ineligible_session_targets(
+        &self,
+        targets: &[&str],
+        factory_session: &str,
+        older_than_secs: i64,
+    ) -> Result<usize>;
 
     /// Clear all prompts (for cleanup)
     fn clear(&self) -> Result<usize>;
@@ -676,6 +731,83 @@ impl SqlitePromptQueueStore {
             priority: NotificationPriority::from(priority),
             acked_at,
             urgent,
+        })
+    }
+
+    fn record_retry(
+        &self,
+        prompt_id: i64,
+        reason: PendingReason,
+        detail: Option<&str>,
+    ) -> Result<PromptRetryDisposition> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = self.conn.lock().unwrap();
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            let row = tx
+                .query_row(
+                    "SELECT created_at, delivery_attempts
+                     FROM prompt_queue
+                     WHERE id = ? AND processed_at IS NULL",
+                    params![prompt_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?)),
+                )
+                .optional()?;
+            let Some((created_at_raw, attempts_before)) = row else {
+                return Ok(PromptRetryDisposition::Abandoned { attempts: 0 });
+            };
+
+            let now = Utc::now();
+            let attempts = attempts_before.saturating_add(1);
+            let age_secs = Self::parse_datetime(&created_at_raw)
+                .map(|created| (now - created).num_seconds().max(0))
+                .unwrap_or(PROMPT_RETRY_MAX_AGE_SECS);
+            if attempts >= PROMPT_RETRY_MAX_ATTEMPTS || age_secs >= PROMPT_RETRY_MAX_AGE_SECS {
+                let exhaustion = format!(
+                    "{}; delivery abandoned after {attempts} failed attempts / {age_secs}s age",
+                    detail.unwrap_or("delivery retry exhausted")
+                );
+                Self::atomic_stage_stamp_in_tx(
+                    &tx,
+                    prompt_id,
+                    DeliveryStage::Abandoned,
+                    AtomicStampOpts {
+                        reason: Some(PendingReason::AbandonedUnknownTarget),
+                        detail: Some(&exhaustion),
+                        set_processed: true,
+                        broadcast_attempted: None,
+                        broadcast_succeeded: None,
+                        broadcast_failed: None,
+                    },
+                )?;
+                tx.execute(
+                    "UPDATE prompt_queue
+                     SET delivery_attempts = ?, next_attempt_at = NULL
+                     WHERE id = ?",
+                    params![attempts, prompt_id],
+                )?;
+                tx.commit()?;
+                return Ok(PromptRetryDisposition::Abandoned { attempts });
+            }
+
+            let exponent = attempts.saturating_sub(1).min(20);
+            let delay_ms = PROMPT_RETRY_BASE_DELAY_MS
+                .saturating_mul(1_i64 << exponent)
+                .min(PROMPT_RETRY_MAX_DELAY_MS);
+            let retry_at = now + chrono::Duration::milliseconds(delay_ms);
+            Self::atomic_stage_stamp_in_tx(
+                &tx,
+                prompt_id,
+                reason.implied_stage(),
+                AtomicStampOpts::reason(reason, detail),
+            )?;
+            tx.execute(
+                "UPDATE prompt_queue
+                 SET delivery_attempts = ?, next_attempt_at = ?
+                 WHERE id = ?",
+                params![attempts, retry_at.to_rfc3339(), prompt_id],
+            )?;
+            tx.commit()?;
+            Ok(PromptRetryDisposition::Scheduled { attempts, retry_at })
         })
     }
 
@@ -998,6 +1130,11 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     PROMPT_QUEUE_BROADCAST_SUCCEEDED_MIGRATION,
                 ),
                 ("broadcast_failed", PROMPT_QUEUE_BROADCAST_FAILED_MIGRATION),
+                (
+                    "delivery_attempts",
+                    PROMPT_QUEUE_DELIVERY_ATTEMPTS_MIGRATION,
+                ),
+                ("next_attempt_at", PROMPT_QUEUE_NEXT_ATTEMPT_AT_MIGRATION),
                 ("dedupe_key", PROMPT_QUEUE_DEDUPE_KEY_MIGRATION),
             ] {
                 crate::shared_db::ensure_column(&conn, "prompt_queue", col, mig)?;
@@ -1253,11 +1390,12 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         factory_session: Option<&str>,
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>> {
-        if limit == 0 || (targets.is_empty() && factory_session.is_none()) {
+        if limit == 0 || targets.is_empty() {
             return Ok(Vec::new());
         }
 
         let conn = self.conn.lock().unwrap();
+        let now = Utc::now().to_rfc3339();
 
         // Legacy path (no session): single-lane target filter.
         let Some(session) = factory_session else {
@@ -1273,16 +1411,20 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                      ) AS cas_target_rn
                      FROM prompt_queue
                      WHERE processed_at IS NULL
+                       AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
                        AND target IN ({})
                  )
                  ORDER BY priority ASC, cas_target_rn ASC, id ASC
                  LIMIT ?",
                 placeholders.join(", ")
             );
-            let mut params: Vec<Box<dyn rusqlite::ToSql>> = targets
-                .iter()
-                .map(|t| Box::new(t.to_string()) as Box<dyn rusqlite::ToSql>)
-                .collect();
+            let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+                vec![Box::new(now.clone()) as Box<dyn rusqlite::ToSql>];
+            params.extend(
+                targets
+                    .iter()
+                    .map(|t| Box::new(t.to_string()) as Box<dyn rusqlite::ToSql>),
+            );
             params.push(Box::new(limit as i64));
             return Self::query_lane(&conn, &sql, &params);
         };
@@ -1315,20 +1457,29 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         // never appears in the peeked batch at all — not retried, not
         // logged as failing, simply invisible. Reproduced at
         // `peek_for_targets_gives_active_target_a_slot_despite_another_targets_stuck_backlog`.
-        let session_sql = "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session
+        let placeholders: Vec<&str> = std::iter::repeat_n("?", targets.len()).collect();
+        let session_sql = format!("SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session
              FROM (
                  SELECT *, ROW_NUMBER() OVER (
                      PARTITION BY target, priority ORDER BY id ASC
                  ) AS cas_target_rn
                  FROM prompt_queue
                  WHERE processed_at IS NULL
+                   AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
                    AND factory_session = ?
+                   AND target IN ({})
              )
              ORDER BY priority ASC, cas_target_rn ASC, id ASC
-             LIMIT ?";
-        let session_params: Vec<Box<dyn rusqlite::ToSql>> =
-            vec![Box::new(session.to_string()), Box::new(limit as i64)];
-        let session_lane = Self::query_lane(&conn, session_sql, &session_params)?;
+             LIMIT ?", placeholders.join(", "));
+        let mut session_params: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(now.clone()), Box::new(session.to_string())];
+        session_params.extend(
+            targets
+                .iter()
+                .map(|t| Box::new(t.to_string()) as Box<dyn rusqlite::ToSql>),
+        );
+        session_params.push(Box::new(limit as i64));
+        let session_lane = Self::query_lane(&conn, &session_sql, &session_params)?;
 
         let legacy_lane = if targets.is_empty() {
             Vec::new()
@@ -1342,6 +1493,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                      ) AS cas_target_rn
                      FROM prompt_queue
                      WHERE processed_at IS NULL
+                       AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
                        AND factory_session IS NULL
                        AND target IN ({})
                  )
@@ -1349,10 +1501,13 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                  LIMIT ?",
                 placeholders.join(", ")
             );
-            let mut legacy_params: Vec<Box<dyn rusqlite::ToSql>> = targets
-                .iter()
-                .map(|t| Box::new(t.to_string()) as Box<dyn rusqlite::ToSql>)
-                .collect();
+            let mut legacy_params: Vec<Box<dyn rusqlite::ToSql>> =
+                vec![Box::new(now) as Box<dyn rusqlite::ToSql>];
+            legacy_params.extend(
+                targets
+                    .iter()
+                    .map(|t| Box::new(t.to_string()) as Box<dyn rusqlite::ToSql>),
+            );
             legacy_params.push(Box::new(limit as i64));
             Self::query_lane(&conn, &legacy_sql, &legacy_params)?
         };
@@ -1695,6 +1850,15 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         })
     }
 
+    fn record_retry(
+        &self,
+        prompt_id: i64,
+        reason: PendingReason,
+        detail: Option<&str>,
+    ) -> Result<PromptRetryDisposition> {
+        SqlitePromptQueueStore::record_retry(self, prompt_id, reason, detail)
+    }
+
     fn mark_transport_delivered(&self, prompt_id: i64) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
             let conn = self.conn.lock().unwrap();
@@ -1857,6 +2021,74 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         )?;
 
         Ok(count as usize)
+    }
+
+    fn abandon_pending_older_than(&self, older_than_secs: i64) -> Result<usize> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = self.conn.lock().unwrap();
+            let cutoff = (Utc::now() - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
+            let now = Utc::now().to_rfc3339();
+            let detail = format!(
+                "expired by explicit queue remediation (older_than_secs={older_than_secs})"
+            );
+            let rows = conn.execute(
+                "UPDATE prompt_queue
+                 SET processed_at = COALESCE(processed_at, ?),
+                     highest_stage = 'abandoned',
+                     last_pending_reason = 'abandoned_unknown_target',
+                     last_pending_detail = ?,
+                     next_attempt_at = NULL
+                 WHERE processed_at IS NULL AND created_at < ?",
+                params![now, detail, cutoff],
+            )?;
+            Ok(rows)
+        })
+    }
+
+    fn abandon_ineligible_session_targets(
+        &self,
+        targets: &[&str],
+        factory_session: &str,
+        older_than_secs: i64,
+    ) -> Result<usize> {
+        if targets.is_empty() {
+            return Ok(0);
+        }
+        crate::shared_db::with_write_retry(|| {
+            let conn = self.conn.lock().unwrap();
+            let cutoff = (Utc::now() - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
+            let now = Utc::now().to_rfc3339();
+            let placeholders = std::iter::repeat_n("?", targets.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "UPDATE prompt_queue
+                 SET processed_at = COALESCE(processed_at, ?),
+                     highest_stage = 'abandoned',
+                     last_pending_reason = 'abandoned_unknown_target',
+                     last_pending_detail = 'target no longer belongs to factory session',
+                     next_attempt_at = NULL
+                 WHERE processed_at IS NULL
+                   AND factory_session = ?
+                   AND created_at < ?
+                   AND target NOT IN ({placeholders})"
+            );
+            let mut query_params: Vec<Box<dyn rusqlite::ToSql>> = vec![
+                Box::new(now),
+                Box::new(factory_session.to_string()),
+                Box::new(cutoff),
+            ];
+            query_params.extend(
+                targets
+                    .iter()
+                    .map(|target| Box::new((*target).to_string()) as Box<dyn rusqlite::ToSql>),
+            );
+            let rows = conn.execute(
+                &sql,
+                rusqlite::params_from_iter(query_params.iter().map(|param| param.as_ref())),
+            )?;
+            Ok(rows)
+        })
     }
 
     fn clear(&self) -> Result<usize> {
@@ -2270,12 +2502,143 @@ mod tests {
             .unwrap();
         assert_eq!(by_target.len(), 0);
 
-        // peek_for_targets with wrong target but matching session still sees it
+        // Matching the session is not enough: the daemon must explicitly own
+        // the target, otherwise stale session rows poison its LIMIT window.
         let by_session = store
             .peek_for_targets(&["nonexistent"], Some("my-session"), 10)
             .unwrap();
-        assert_eq!(by_session.len(), 1); // session match
-        assert_eq!(by_session[0].factory_session.as_deref(), Some("my-session"));
+        assert!(by_session.is_empty());
+
+        let owned = store
+            .peek_for_targets(&["worker-1"], Some("my-session"), 10)
+            .unwrap();
+        assert_eq!(owned.len(), 1);
+        assert_eq!(owned[0].factory_session.as_deref(), Some("my-session"));
+    }
+
+    #[test]
+    fn poison_head_does_not_block_live_target_in_same_session() {
+        let (_temp, store) = create_test_store();
+        let poison = store
+            .enqueue_with_session("supervisor", "dead-worker", "old poison", "factory-a")
+            .unwrap();
+        let live = store
+            .enqueue_with_session("supervisor", "live-worker", "start work", "factory-a")
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE prompt_queue SET created_at = ? WHERE id = ?",
+                params![
+                    (Utc::now()
+                        - chrono::Duration::seconds(PROMPT_RETRY_MAX_AGE_SECS + 1))
+                    .to_rfc3339(),
+                    poison
+                ],
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            store
+                .abandon_ineligible_session_targets(
+                    &["live-worker"],
+                    "factory-a",
+                    PROMPT_RETRY_MAX_AGE_SECS,
+                )
+                .unwrap(),
+            1
+        );
+
+        let selected = store
+            .peek_for_targets(&["live-worker"], Some("factory-a"), 10)
+            .unwrap();
+        assert_eq!(
+            selected.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![live],
+            "a stale session row for an unowned target must not occupy the live target's window"
+        );
+        assert!(!selected.iter().any(|row| row.id == poison));
+        let poison_report = store.message_delivery_report(poison).unwrap().unwrap();
+        assert_eq!(poison_report.stage, DeliveryStage::Abandoned);
+        assert!(poison_report.delivered_at.is_none());
+    }
+
+    #[test]
+    fn retry_is_backed_off_then_permanently_terminal_after_bound() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_with_session("supervisor", "worker", "deliver me", "factory-a")
+            .unwrap();
+
+        let first = store
+            .record_retry(id, PendingReason::TargetUnavailable, Some("pane missing"))
+            .unwrap();
+        assert!(matches!(
+            first,
+            PromptRetryDisposition::Scheduled { attempts: 1, .. }
+        ));
+        assert!(
+            store
+                .peek_for_targets(&["worker"], Some("factory-a"), 10)
+                .unwrap()
+                .is_empty(),
+            "a failed row must not be selected again on the next 100ms daemon tick"
+        );
+
+        for _ in 1..PROMPT_RETRY_MAX_ATTEMPTS {
+            store
+                .record_retry(id, PendingReason::TargetUnavailable, Some("pane missing"))
+                .unwrap();
+        }
+
+        assert!(
+            store
+                .peek_for_targets(&["worker"], Some("factory-a"), 10)
+                .unwrap()
+                .is_empty(),
+            "an exhausted row must never become selectable again"
+        );
+        let report = store.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(report.stage, DeliveryStage::Abandoned);
+        assert_eq!(report.legacy_status, MessageStatus::Delivered);
+        assert!(report.delivered_at.is_none());
+        assert_eq!(
+            report.pending_reason,
+            Some(PendingReason::AbandonedUnknownTarget)
+        );
+    }
+
+    #[test]
+    fn explicit_age_remediation_abandons_only_old_pending_rows() {
+        let (_temp, store) = create_test_store();
+        let old = store.enqueue("supervisor", "dead-worker", "old").unwrap();
+        let recent = store
+            .enqueue("supervisor", "live-worker", "recent")
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE prompt_queue SET created_at = ? WHERE id = ?",
+                params![(Utc::now() - chrono::Duration::days(30)).to_rfc3339(), old],
+            )
+            .unwrap();
+        }
+
+        assert_eq!(store.abandon_pending_older_than(24 * 60 * 60).unwrap(), 1);
+        assert_eq!(
+            store.message_delivery_report(old).unwrap().unwrap().stage,
+            DeliveryStage::Abandoned
+        );
+        assert_eq!(
+            store
+                .peek_for_targets(&["live-worker"], None, 10)
+                .unwrap()
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![recent]
+        );
     }
 
     #[test]

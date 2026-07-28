@@ -17,8 +17,11 @@ use crate::supervisor_queue_store::NotificationPriority;
 /// Retry policy for daemon-owned prompt delivery.
 ///
 /// The delay is exponential (250ms → 5s cap), while either 120 failed
-/// attempts or fifteen minutes of age makes the row terminal. Keeping the
-/// policy in the store ensures every daemon caller applies the same bound.
+/// attempts or fifteen minutes since the first failed attempt makes the row
+/// terminal. Queueing age is deliberately excluded: a target may legitimately
+/// remain unregistered for longer than the retry window without any delivery
+/// having been attempted. Keeping the policy in the store ensures every daemon
+/// caller applies the same bound.
 pub const PROMPT_RETRY_MAX_ATTEMPTS: u32 = 120;
 pub const PROMPT_RETRY_MAX_AGE_SECS: i64 = 15 * 60;
 const PROMPT_RETRY_BASE_DELAY_MS: i64 = 250;
@@ -438,6 +441,9 @@ ALTER TABLE prompt_queue ADD COLUMN delivery_attempts INTEGER NOT NULL DEFAULT 0
 const PROMPT_QUEUE_NEXT_ATTEMPT_AT_MIGRATION: &str = r#"
 ALTER TABLE prompt_queue ADD COLUMN next_attempt_at TEXT;
 "#;
+const PROMPT_QUEUE_FIRST_ATTEMPT_AT_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN first_attempt_at TEXT;
+"#;
 
 /// Trait for prompt queue operations
 pub trait PromptQueueStore: Send + Sync {
@@ -619,7 +625,8 @@ pub trait PromptQueueStore: Send + Sync {
     /// Record a failed daemon handoff with bounded exponential retry.
     ///
     /// Rows remain pending but are omitted from peeks until their retry time.
-    /// Exhausted or over-age rows become terminal `Abandoned`.
+    /// Exhausted rows, or rows over-age since their first failed attempt,
+    /// become terminal `Abandoned`.
     fn record_retry(
         &self,
         prompt_id: i64,
@@ -745,22 +752,27 @@ impl SqlitePromptQueueStore {
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let row = tx
                 .query_row(
-                    "SELECT created_at, delivery_attempts
+                    "SELECT first_attempt_at, delivery_attempts
                      FROM prompt_queue
                      WHERE id = ? AND processed_at IS NULL",
                     params![prompt_id],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?)),
+                    |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, u32>(1)?)),
                 )
                 .optional()?;
-            let Some((created_at_raw, attempts_before)) = row else {
+            let Some((first_attempt_at_raw, attempts_before)) = row else {
                 return Ok(PromptRetryDisposition::Abandoned { attempts: 0 });
             };
 
             let now = Utc::now();
             let attempts = attempts_before.saturating_add(1);
-            let age_secs = Self::parse_datetime(&created_at_raw)
-                .map(|created| (now - created).num_seconds().max(0))
+            let first_attempt_at = first_attempt_at_raw
+                .as_deref()
+                .map(Self::parse_datetime)
+                .unwrap_or(Some(now));
+            let age_secs = first_attempt_at
+                .map(|first_attempt| (now - first_attempt).num_seconds().max(0))
                 .unwrap_or(PROMPT_RETRY_MAX_AGE_SECS);
+            let first_attempt_at_stamp = first_attempt_at_raw.unwrap_or_else(|| now.to_rfc3339());
             if attempts >= PROMPT_RETRY_MAX_ATTEMPTS || age_secs >= PROMPT_RETRY_MAX_AGE_SECS {
                 let exhaustion = format!(
                     "{}; delivery abandoned after {attempts} failed attempts / {age_secs}s age",
@@ -781,9 +793,11 @@ impl SqlitePromptQueueStore {
                 )?;
                 tx.execute(
                     "UPDATE prompt_queue
-                     SET delivery_attempts = ?, next_attempt_at = NULL
+                     SET delivery_attempts = ?,
+                         first_attempt_at = COALESCE(first_attempt_at, ?),
+                         next_attempt_at = NULL
                      WHERE id = ?",
-                    params![attempts, prompt_id],
+                    params![attempts, first_attempt_at_stamp, prompt_id],
                 )?;
                 tx.commit()?;
                 return Ok(PromptRetryDisposition::Abandoned { attempts });
@@ -802,9 +816,16 @@ impl SqlitePromptQueueStore {
             )?;
             tx.execute(
                 "UPDATE prompt_queue
-                 SET delivery_attempts = ?, next_attempt_at = ?
+                 SET delivery_attempts = ?,
+                     first_attempt_at = COALESCE(first_attempt_at, ?),
+                     next_attempt_at = ?
                  WHERE id = ?",
-                params![attempts, retry_at.to_rfc3339(), prompt_id],
+                params![
+                    attempts,
+                    first_attempt_at_stamp,
+                    retry_at.to_rfc3339(),
+                    prompt_id
+                ],
             )?;
             tx.commit()?;
             Ok(PromptRetryDisposition::Scheduled { attempts, retry_at })
@@ -1135,6 +1156,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     PROMPT_QUEUE_DELIVERY_ATTEMPTS_MIGRATION,
                 ),
                 ("next_attempt_at", PROMPT_QUEUE_NEXT_ATTEMPT_AT_MIGRATION),
+                ("first_attempt_at", PROMPT_QUEUE_FIRST_ATTEMPT_AT_MIGRATION),
                 ("dedupe_key", PROMPT_QUEUE_DEDUPE_KEY_MIGRATION),
             ] {
                 crate::shared_db::ensure_column(&conn, "prompt_queue", col, mig)?;
@@ -2562,6 +2584,130 @@ mod tests {
         let poison_report = store.message_delivery_report(poison).unwrap().unwrap();
         assert_eq!(poison_report.stage, DeliveryStage::Abandoned);
         assert!(poison_report.delivered_at.is_none());
+    }
+
+    #[test]
+    fn aged_pre_registration_wait_survives_first_gated_not_ready_delivery_pass() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_with_session("supervisor", "late-worker", "briefing", "factory-a")
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE prompt_queue SET created_at = ? WHERE id = ?",
+                params![
+                    (Utc::now() - chrono::Duration::seconds(PROMPT_RETRY_MAX_AGE_SECS + 1))
+                        .to_rfc3339(),
+                    id
+                ],
+            )
+            .unwrap();
+        }
+
+        // The target becomes eligible only when it registers into the daemon's
+        // live target set. Its first delivery pass finds the pane startup gate
+        // closed, before any transport attempt is made.
+        assert_eq!(
+            store
+                .peek_for_targets(&["late-worker"], Some("factory-a"), 10)
+                .unwrap()
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![id]
+        );
+        store
+            .record_pending_reason(
+                id,
+                PendingReason::GatedNotReady,
+                Some("pane not ready for injection"),
+            )
+            .unwrap();
+
+        let (attempts, first_attempt_at): (u32, Option<String>) = {
+            let conn = store.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT delivery_attempts, first_attempt_at
+                 FROM prompt_queue WHERE id = ?",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            attempts, 0,
+            "pane readiness is a precondition, not a delivery attempt"
+        );
+        assert!(
+            first_attempt_at.is_none(),
+            "pre-registration queue age and readiness gating must not start retry age"
+        );
+        assert_eq!(
+            store
+                .peek_for_targets(&["late-worker"], Some("factory-a"), 10)
+                .unwrap()
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![id],
+            "the aged briefing must remain deliverable after its first gated pass"
+        );
+
+        let first_real_failure = store
+            .record_retry(
+                id,
+                PendingReason::TargetUnavailable,
+                Some("transport unavailable"),
+            )
+            .unwrap();
+        assert!(matches!(
+            first_real_failure,
+            PromptRetryDisposition::Scheduled { attempts: 1, .. }
+        ));
+        assert_ne!(
+            store.message_delivery_report(id).unwrap().unwrap().stage,
+            DeliveryStage::Abandoned,
+            "created_at age must not terminally abandon the first real attempt"
+        );
+    }
+
+    #[test]
+    fn retry_age_exhaustion_is_measured_from_first_attempt() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_with_session("supervisor", "worker", "deliver me", "factory-a")
+            .unwrap();
+        let first = store
+            .record_retry(id, PendingReason::TargetUnavailable, Some("pane missing"))
+            .unwrap();
+        assert!(matches!(
+            first,
+            PromptRetryDisposition::Scheduled { attempts: 1, .. }
+        ));
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE prompt_queue SET first_attempt_at = ? WHERE id = ?",
+                params![
+                    (Utc::now() - chrono::Duration::seconds(PROMPT_RETRY_MAX_AGE_SECS + 1))
+                        .to_rfc3339(),
+                    id
+                ],
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            store
+                .record_retry(
+                    id,
+                    PendingReason::TargetUnavailable,
+                    Some("still unavailable"),
+                )
+                .unwrap(),
+            PromptRetryDisposition::Abandoned { attempts: 2 }
+        );
     }
 
     #[test]

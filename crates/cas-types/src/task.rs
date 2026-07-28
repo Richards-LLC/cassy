@@ -222,10 +222,10 @@ pub struct TaskDeliverables {
     /// re-running the gate. Serialized as a JSON string.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_envelope: Option<String>,
-    /// cas-4b3f: the worker's `factory/<assignee>` branch commit sha, snapshotted
-    /// the FIRST time the close-time merge-state guard (`run_factory_branch_merge_gate`)
-    /// rejects this task with "MERGE REQUIRED". Anchors later merge-state checks to
-    /// THIS task's own commit range instead of the branch's current HEAD.
+    /// cas-4b3f/cas-3d37: the worker's `factory/<assignee>` branch commit SHA,
+    /// captured after successful commits and, as a fallback, the first time
+    /// the close-time merge-state guard rejects with "MERGE REQUIRED". Anchors
+    /// later merge-state checks to THIS task's own work instead of live HEAD.
     ///
     /// Without this anchor, a worker who starts a second task on the same
     /// `factory/<assignee>` branch before the first task's commits are merged
@@ -235,19 +235,23 @@ pub struct TaskDeliverables {
     /// rejects the first task's close even after its commits landed on the
     /// parent branch. See BUG-close-guard-branch-head-not-task-commits.md.
     ///
+    /// The worker PostToolUse hook refreshes this to the full SHA after each
+    /// successful commit. The merge-required close path also records it as a
+    /// fallback for commits made before commit-time capture existed.
+    ///
     /// Stored as JSON inside the existing `deliverables` column (no migration
     /// needed — serde `default` keeps old rows deserializing as `None`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub factory_branch_anchor: Option<String>,
 
-    /// cas-a844: the `factory/<assignee>` branch name recorded the first
-    /// time a close is rejected with MERGE REQUIRED (same call site as
-    /// `factory_branch_anchor`, but the branch NAME rather than a commit
-    /// sha). `factory_branch_anchor` is only useful if you already know
+    /// cas-a844: the `factory/<assignee>` branch name recorded alongside
+    /// `factory_branch_anchor` at commit time, with MERGE REQUIRED parking as
+    /// a fallback. `factory_branch_anchor` is only useful if you already know
     /// which branch to resolve it against; when the original assignee is
     /// lost (fleet restart, reassignment), the branch name itself is the
-    /// only thing that still points at the orphaned commits. Never
-    /// overwritten once set — see `park_task_awaiting_merge`.
+    /// only thing that still points at the orphaned commits. Commit-time
+    /// capture refreshes it together with the anchor; merge parking preserves
+    /// an existing value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parked_branch: Option<String>,
 

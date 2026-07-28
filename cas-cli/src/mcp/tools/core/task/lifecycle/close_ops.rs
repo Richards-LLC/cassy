@@ -245,13 +245,10 @@ impl CasCore {
         // below); a later preflight re-check on retry (see call site) can
         // still flip it true if the situation changes after park.
         parked.deliverables.merge_conflicted = merge_conflicted;
-        // cas-4b3f: snapshot the factory branch's current tip onto the task
-        // the FIRST time it parks (this fn's only call site already guards
-        // on `task.status != AwaitingMerge`, so this only fires once per
-        // task). Anchors `run_factory_branch_merge_gate`'s later retries to
-        // THIS task's own commit range instead of whatever the branch HEAD
-        // has drifted to if a second task starts on the same branch before
-        // this one's commits are merged. Never overwrite an existing anchor.
+        // cas-4b3f/cas-3d37: retain the commit-time task anchor when present;
+        // otherwise snapshot the factory tip the FIRST time this task parks.
+        // Anchors `run_factory_branch_merge_gate`'s later retries to THIS
+        // task's own work instead of a reused branch's live HEAD.
         if parked.deliverables.factory_branch_anchor.is_none() {
             parked.deliverables.factory_branch_anchor = factory_branch_anchor;
         }
@@ -4422,12 +4419,13 @@ pub(crate) fn commit_is_merged_into_parent(
 ///    gate handles that case):
 ///    → `Proceed`. No ambiguity.
 ///
-/// 3. **Merge-satisfied** (cas-127f): `count == 0` but
+/// 3. **Merge-satisfied** (cas-127f/cas-3d37): `count == 0` but
 ///    `factory_branch_anchor` is set and that SHA is an ancestor of
-///    `parent_branch` (work was committed, MERGE REQUIRED parked the tip,
-///    supervisor merged into the epic). → `Proceed`. Without this path,
-///    post-merge close false-rejects ZERO-COMMIT because the worker tip
-///    is no longer *ahead of* parent even though the work landed.
+///    `parent_branch` (work was committed, the PostToolUse hook captured the
+///    tip, and the supervisor merged into the epic either before or after
+///    the first close). → `Proceed`. Without this path, post-merge close
+///    false-rejects ZERO-COMMIT because the worker tip is no longer *ahead
+///    of* parent even though the work landed.
 ///
 /// 4. **Ambiguous zero-commit** (`count == 0`, no anchor / anchor not
 ///    integrated, no `execution_note`, task type is Bug/Feature/Task, no
@@ -4439,10 +4437,9 @@ pub(crate) fn commit_is_merged_into_parent(
 /// When true, the cas-490f gate fires upstream; this function returns `Proceed`
 /// so the two gates don't double-reject.
 ///
-/// `factory_branch_anchor`: optional tip SHA recorded by
-/// `park_task_awaiting_merge` the first time the merge gate rejected this
-/// task. Only set when the factory branch had unmerged commits — genuine
-/// zero-commit tasks never park, so they never get an anchor.
+/// `factory_branch_anchor`: optional full tip SHA recorded after a successful
+/// worker commit, with `park_task_awaiting_merge` as a legacy/fallback capture.
+/// Genuine zero-commit tasks never receive an anchor.
 ///
 /// Returns `Proceed` on any git failure for the count path (graceful
 /// degradation — not ambiguous when history is unknowable). Ancestor
@@ -4535,8 +4532,11 @@ pub(crate) fn check_zero_commit_close(
            docs-only, characterization-only): update the task with an \
            execution_note to signal intentional no-code work:\n\
            `mcp__cas__task action=update id={task_id} execution_note=additive-only`\n\
-        3. Supervisors may bypass this gate with bypass_code_review=true \
-           (logged as a decision note)."
+        3. If this task's work was merged before its first close attempt and \
+           this message still appears, ask the supervisor to verify the task \
+           commit is an ancestor of {parent_branch}, then close it with \
+           `bypass_code_review=true`. Only a supervisor can perform that \
+           audited recovery; workers cannot self-bypass this gate."
     ))
 }
 
@@ -10836,11 +10836,71 @@ mod zero_change_close_tests {
                     msg.contains("execution_note"),
                     "rejection must guide worker to set execution_note: {msg}"
                 );
+                assert!(
+                    msg.contains("ask the supervisor")
+                        && msg.contains("bypass_code_review=true")
+                        && msg.contains("Only a supervisor"),
+                    "worker-unrecoverable refusal must name the concrete \
+                     supervisor-side remedy: {msg}"
+                );
             }
             ZeroCommitCloseOutcome::Proceed => {
                 panic!("case 3 must reject ambiguous zero-commit bug task");
             }
         }
+    }
+
+    /// cas-3d37: literal merge-before-first-close shape. Commit-time capture
+    /// recorded `anchor` before any close attempt; the supervisor then merged
+    /// the worker branch, leaving it zero-ahead. The first close gate check
+    /// must recognize the task's merged work and proceed.
+    #[test]
+    fn merge_before_first_close_uses_commit_time_anchor() {
+        let dir = init_worker_repo();
+        std::fs::write(dir.path().join("work.rs"), "fn work() {}\n").unwrap();
+        git(dir.path(), &["add", "work.rs"]);
+        git(dir.path(), &["commit", "-q", "-m", "fix: task work"]);
+        let anchor = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(dir.path())
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+
+        // Supervisor merges without any prior close/MERGE REQUIRED park.
+        git(dir.path(), &["checkout", "-q", "main"]);
+        git(
+            dir.path(),
+            &[
+                "merge",
+                "--no-ff",
+                "-m",
+                "merge worker before close",
+                "factory/test-worker",
+            ],
+        );
+        git(dir.path(), &["checkout", "-q", "factory/test-worker"]);
+        assert_eq!(count_worker_branch_commits(dir.path(), "main"), 0);
+
+        let outcome = check_zero_commit_close(
+            dir.path(),
+            "main",
+            "cas-merge-before-close",
+            &TaskType::Bug,
+            None,
+            false,
+            Some(&anchor),
+        );
+        assert!(
+            matches!(outcome, ZeroCommitCloseOutcome::Proceed),
+            "first close after a supervisor merge must accept the commit-time \
+             task anchor, got {outcome:?}"
+        );
     }
 
     /// Case 4a: zero commits but execution_note set → deliberate no-code signal.

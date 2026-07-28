@@ -1960,9 +1960,10 @@ impl CasCore {
         // cas-eaf8: preserve the task-specific factory anchor after close.
         // The epic close guard needs this durable receipt to distinguish
         // this task's merged work from later, unrelated commits added when
-        // the same worker branch is reused for another epic. Reopen clears
-        // the anchor before any rework starts, preserving cas-cf64's stale-
-        // anchor protection across close/reopen cycles.
+        // the same worker branch is reused for another epic. The task-store
+        // update boundary clears the anchor on every Closed -> non-Closed
+        // transition before rework starts, preserving cas-cf64's stale-anchor
+        // protection even when callers bypass the dedicated reopen action.
 
         // cas-778a: apply worker-owned verification fields to the now-mutable
         // `task` so the final task_store.update(&task) below carries them.
@@ -3026,11 +3027,10 @@ pub(crate) enum MergeStateGateOutcome {
 /// An anchor is written exactly once, by `park_task_awaiting_merge`, which
 /// sets `status = AwaitingMerge` in the SAME update — so in the intended
 /// lifecycle an anchor is never present without that status. This is a
-/// defense-in-depth guard against a data anomaly (a stale anchor surviving
-/// some state transition that isn't `cas_task_reopen` or a normal close,
-/// both of which now clear it): if `status` isn't `AwaitingMerge`, an
-/// existing anchor value is ignored and the gate falls back to the live
-/// branch name, matching first-attempt behavior.
+/// defense-in-depth guard against a data anomaly (for example, a legacy
+/// stale anchor that predates the task-store invariant): if `status` isn't
+/// `AwaitingMerge`, an existing anchor value is ignored and the gate falls
+/// back to the live branch name, matching first-attempt behavior.
 ///
 /// ## cas-2938: squash-equivalent convergence (content + live-ref)
 ///
@@ -8362,11 +8362,10 @@ mod merge_state_gate_tests {
 
     /// cas-cf64 (P2, anchor freshness): an anchor present on a task whose
     /// `status` is NOT `AwaitingMerge` must be ignored — this is a defense-
-    /// in-depth guard against a stale anchor surviving some state
-    /// transition that isn't `cas_task_reopen` or a normal close (both of
-    /// which now clear it). The gate must fall back to the live branch
-    /// name (first-attempt behavior) rather than trusting a sha that no
-    /// longer corresponds to "this task is genuinely parked awaiting merge."
+    /// in-depth guard against legacy/corrupt data bypassing the task-store
+    /// transition invariant. The gate must fall back to the live branch name
+    /// (first-attempt behavior) rather than trusting a sha that no longer
+    /// corresponds to "this task is genuinely parked awaiting merge."
     #[test]
     fn anchor_present_but_status_not_awaiting_merge_is_ignored() {
         let dir = init_factory_repo("worker");

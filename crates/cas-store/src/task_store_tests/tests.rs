@@ -73,6 +73,34 @@ fn test_task_depth_roundtrip() {
 }
 
 #[test]
+fn closed_to_non_closed_update_clears_only_the_factory_branch_anchor() {
+    let (_temp, store) = create_test_store();
+    let mut task = Task::new(
+        store.generate_id().unwrap(),
+        "Task with close-cycle evidence".to_string(),
+    );
+    task.status = TaskStatus::Closed;
+    task.deliverables.factory_branch_anchor = Some("old-close-sha".to_string());
+    task.deliverables.parked_branch = Some("factory/worker".to_string());
+    store.add(&task).unwrap();
+
+    task.status = TaskStatus::Blocked;
+    store.update(&task).unwrap();
+
+    let reopened = store.get(&task.id).unwrap();
+    assert_eq!(reopened.status, TaskStatus::Blocked);
+    assert!(
+        reopened.deliverables.factory_branch_anchor.is_none(),
+        "the prior close cycle's commit receipt must be invalidated"
+    );
+    assert_eq!(
+        reopened.deliverables.parked_branch.as_deref(),
+        Some("factory/worker"),
+        "branch identity remains useful for diagnostics and matches cas_task_reopen"
+    );
+}
+
+#[test]
 fn test_dependencies() {
     let (_temp, store) = create_test_store();
 

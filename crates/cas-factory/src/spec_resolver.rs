@@ -518,21 +518,25 @@ fn apply_codex_fallback_with(
     };
 
     let mut notices = Vec::new();
-    for spec in specs.iter_mut() {
+    for (slot_index, spec) in specs.iter_mut().enumerate() {
         if spec.cli != SupervisorCli::Codex {
             continue;
         }
-        // Workers get "worker <name-or-'worker'>" as the label; the
-        // supervisor label is always the fixed, shout-cased
-        // `SUPERVISOR_LABEL` alone — there is only one, a name would add
-        // nothing, and it must not read as just another worker line.
+        // Workers get "worker <name>" when the cascade already resolved a
+        // name, otherwise the stable one-based spec position identifies the
+        // unnamed slot honestly. The supervisor label remains the fixed,
+        // shout-cased `SUPERVISOR_LABEL` alone — there is only one, a name
+        // would add nothing, and it must not read as another worker line.
         let label = if role_label == SUPERVISOR_LABEL {
             SUPERVISOR_LABEL.to_string()
         } else {
-            format!(
-                "{role_label} {}",
-                spec.name.clone().unwrap_or_else(|| role_label.to_string())
-            )
+            spec.name
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+                .map_or_else(
+                    || format!("{role_label} slot {}", slot_index + 1),
+                    |name| format!("{role_label} {name}"),
+                )
         };
         if strict {
             return Err(SpecResolverError::CodexUnavailableStrict {
@@ -737,6 +741,31 @@ mod codex_fallback_tests {
         assert!(notices[0].contains("claude"));
     }
 
+    /// cas-8535: mid-session `spawn_workers` resolves one shared spec before
+    /// the daemon generates a worker name. The warning must identify that
+    /// unnamed slot instead of degrading to the anonymous "worker worker".
+    #[test]
+    fn unnamed_worker_fallback_notice_names_the_resolved_slot() {
+        let mut specs = vec![WorkerSpec {
+            name: None,
+            cli: SupervisorCli::Codex,
+            model: None,
+            effort: Some(Effort::High),
+        }];
+
+        let notices =
+            apply_codex_fallback_with(&mut specs, false, None, WORKER_LABEL, || false, || false)
+                .unwrap();
+
+        assert_eq!(
+            notices,
+            vec![
+                "worker slot 1: codex unavailable (codex binary not found on PATH) — falling back to claude"
+            ]
+        );
+        assert_eq!(specs[0].cli, SupervisorCli::Claude);
+    }
+
     /// Auth-only failure (binary present, no login) must still fall back,
     /// with a message that names the actual cause rather than a generic
     /// "not found".
@@ -769,6 +798,38 @@ mod codex_fallback_tests {
             specs[0].cli,
             SupervisorCli::Codex,
             "strict-mode error path must not rewrite the spec"
+        );
+    }
+
+    /// cas-8535: strict mode must report the same improved slot identifier
+    /// as the fallback warning when the real spawn-path spec has no name.
+    #[test]
+    fn unnamed_worker_strict_error_names_the_resolved_slot() {
+        let mut specs = vec![WorkerSpec {
+            name: None,
+            cli: SupervisorCli::Codex,
+            model: None,
+            effort: None,
+        }];
+
+        let err =
+            apply_codex_fallback_with(&mut specs, true, None, WORKER_LABEL, || false, || false)
+                .expect_err("strict mode must identify the unnamed worker slot");
+
+        match &err {
+            SpecResolverError::CodexUnavailableStrict { worker, .. } => {
+                assert_eq!(worker, "worker slot 1");
+            }
+            other => panic!("expected CodexUnavailableStrict, got {other:?}"),
+        }
+        assert!(
+            err.to_string().contains("worker slot 1"),
+            "rendered strict-mode error must carry the slot identifier — got: {err}"
+        );
+        assert_eq!(
+            specs[0].cli,
+            SupervisorCli::Codex,
+            "must not mutate on error"
         );
     }
 
@@ -893,15 +954,22 @@ mod codex_fallback_tests {
             model: None,
             effort: Some(Effort::High),
         };
-        let notices =
-            apply_codex_fallback_with(std::slice::from_mut(&mut spec), false, None, SUPERVISOR_LABEL, || false, || false)
-                .unwrap();
+        let notices = apply_codex_fallback_with(
+            std::slice::from_mut(&mut spec),
+            false,
+            None,
+            SUPERVISOR_LABEL,
+            || false,
+            || false,
+        )
+        .unwrap();
         assert_eq!(spec.cli, SupervisorCli::Claude);
-        assert_eq!(notices.len(), 1);
-        assert!(
-            notices[0].starts_with("SUPERVISOR:"),
-            "supervisor notice must be unmistakable, not a generic worker line — got: {}",
-            notices[0]
+        assert_eq!(
+            notices,
+            vec![
+                "SUPERVISOR: codex unavailable (codex binary not found on PATH) — falling back to claude"
+            ],
+            "supervisor banner wording must remain unchanged"
         );
         assert!(
             !notices[0].to_ascii_lowercase().contains("worker"),

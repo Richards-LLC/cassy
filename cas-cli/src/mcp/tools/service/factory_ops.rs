@@ -3498,7 +3498,15 @@ effort = "high"
         assert_eq!(spec.cli, cas_mux::SupervisorCli::Claude);
         assert_eq!(spec.model.as_deref(), Some(claude_default_model));
         assert_eq!(notices.len(), 1);
-        assert!(notices[0].contains("codex unavailable"));
+        assert!(
+            notices[0].starts_with("worker slot 1: codex unavailable ("),
+            "real spawn-path wrapper must identify the unnamed resolved slot — got: {}",
+            notices[0]
+        );
+        assert!(
+            !notices[0].contains("worker worker"),
+            "unnamed spawn specs must never repeat the role as the identifier"
+        );
     }
 
     #[test]

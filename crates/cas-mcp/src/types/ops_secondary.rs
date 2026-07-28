@@ -656,8 +656,10 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub priority: Option<String>,
 
-    /// Notification ID (for queue_ack)
-    #[schemars(description = "Notification ID to acknowledge")]
+    /// Notification ID (for queue_ack, message_ack, message_status)
+    #[schemars(
+        description = "Notification ID for queue_ack, message_ack, or message_status. The message action returns this value as notification_id."
+    )]
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub notification_id: Option<i64>,
 

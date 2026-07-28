@@ -40,10 +40,20 @@ const LOCKFILE_NAME: &str = "integrate.lock";
 /// Held-while-alive guard. Drops the underlying flock when this value goes
 /// out of scope.
 pub struct IntegrateLock {
-    /// The lock file. `Drop` on `File` closes the descriptor, which releases
-    /// the advisory lock on POSIX systems.
+    /// The lock file. `IntegrateLock::drop` explicitly unlocks it before the
+    /// descriptor is closed.
     _file: File,
     path: PathBuf,
+}
+
+impl Drop for IntegrateLock {
+    fn drop(&mut self) {
+        // Do not rely solely on File's best-effort close-on-drop for the
+        // synchronization boundary. An explicit unlock makes the lock
+        // available before destruction continues; closing the descriptor
+        // remains the fallback if the unlock syscall fails.
+        let _ = FileExt::unlock(&self._file);
+    }
 }
 
 impl IntegrateLock {
@@ -155,8 +165,15 @@ mod tests {
         {
             let _held = IntegrateLock::acquire(tmp.path()).unwrap();
         }
-        let lock = IntegrateLock::try_acquire(tmp.path()).unwrap();
-        assert!(lock.is_some(), "lock must be re-acquirable after drop");
+        let path = tmp.path().to_path_buf();
+        let lock = std::thread::spawn(move || IntegrateLock::try_acquire(&path))
+            .join()
+            .unwrap()
+            .unwrap();
+        assert!(
+            lock.is_some(),
+            "lock must be re-acquirable by another thread after drop"
+        );
     }
 
     #[test]

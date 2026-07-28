@@ -9,7 +9,10 @@ use std::time::{Duration, Instant};
 
 use clap::Args;
 
-use crate::builtins::{prune_stale_user_skills_for_harness, sync_all_builtins_for_harness};
+use crate::builtins::{
+    SyncResult, mark_missing_owned_references_for_replacement,
+    prune_stale_user_skills_for_harness, sync_all_builtins_for_harness,
+};
 use crate::cli::Cli;
 use crate::cli::factory_tooling;
 use crate::cli::hook::{configure_claude_hooks, configure_codex_mcp_server, configure_mcp_server};
@@ -22,6 +25,34 @@ use crate::ui::components::Formatter;
 use crate::ui::theme::ActiveTheme;
 
 mod preview;
+
+fn report_modified_builtin_references(
+    result: &SyncResult,
+    location: &str,
+    theme: &ActiveTheme,
+) -> std::io::Result<()> {
+    if !result.has_modified_references() {
+        return Ok(());
+    }
+
+    let mut out = io::stdout();
+    let mut fmt = Formatter::stdout(&mut out, theme.clone());
+    fmt.write_raw("  ")?;
+    fmt.warning(&format!(
+        "{} locally modified or pre-ledger builtin reference file(s) in {location} \
+         were preserved:",
+        result.modified_reference_files.len()
+    ))?;
+    for file in &result.modified_reference_files {
+        fmt.write_raw(&format!("    ! {file}"))?;
+        fmt.newline()?;
+    }
+    fmt.write_raw("    ")?;
+    fmt.write_raw(
+        "Review each file; to accept the CAS version, delete it and rerun `cas update --sync`.",
+    )?;
+    fmt.newline()
+}
 
 /// GitHub repository owner
 const REPO_OWNER: &str = "pippenz";
@@ -265,6 +296,26 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
     let rule_syncer = Syncer::with_defaults(project_root);
     let rule_report = rule_syncer.sync_all(&rules)?;
 
+    // Capture explicit reference deletions before database skill sync can
+    // rehydrate an older stored copy. Builtin sync consumes these one-shot
+    // markers below and installs the current embedded reference.
+    mark_missing_owned_references_for_replacement(
+        cas_mux::SupervisorCli::Claude,
+        &claude_dir,
+    )?;
+    if codex_enabled {
+        mark_missing_owned_references_for_replacement(
+            cas_mux::SupervisorCli::Codex,
+            &codex_dir,
+        )?;
+    }
+    if grok_enabled {
+        mark_missing_owned_references_for_replacement(
+            cas_mux::SupervisorCli::Grok,
+            &grok_dir,
+        )?;
+    }
+
     // Sync database skills (this may remove stale dirs)
     let skill_store = open_skill_store(&cas_root)?;
     let skills = skill_store.list(None)?;
@@ -275,6 +326,9 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
     // (so they don't get removed as "stale" by the skill syncer)
     let builtin_result =
         sync_all_builtins_for_harness(cas_mux::SupervisorCli::Claude, &claude_dir)?;
+    if !cli.json {
+        report_modified_builtin_references(&builtin_result, ".claude", &theme)?;
+    }
 
     // After all skill writes complete, refresh the skill-sync sentinel so that
     // live sessions can detect the new content and emit `reloadSkills: true`
@@ -305,6 +359,7 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
     };
 
     // Codex config + built-ins
+    let mut codex_modified_references = 0;
     let codex_builtins_updated = if codex_enabled {
         if !cli.json {
             let mut out = io::stdout();
@@ -335,6 +390,10 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
 
         let codex_result =
             sync_all_builtins_for_harness(cas_mux::SupervisorCli::Codex, &codex_dir)?;
+        codex_modified_references = codex_result.modified_reference_files.len();
+        if !cli.json {
+            report_modified_builtin_references(&codex_result, ".codex", &theme)?;
+        }
         codex_result.total_updated()
     } else {
         0
@@ -343,6 +402,7 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
     // Grok built-ins (EPIC cas-8888, Phase 5). No separate config writer:
     // `.mcp.json` is already kept current by the unconditional
     // configure_mcp_server call above, which Grok reads directly.
+    let mut grok_modified_references = 0;
     let grok_builtins_updated = if grok_enabled {
         if !cli.json {
             let mut out = io::stdout();
@@ -351,6 +411,10 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
         }
 
         let grok_result = sync_all_builtins_for_harness(cas_mux::SupervisorCli::Grok, &grok_dir)?;
+        grok_modified_references = grok_result.modified_reference_files.len();
+        if !cli.json {
+            report_modified_builtin_references(&grok_result, ".grok", &theme)?;
+        }
         grok_result.total_updated()
     } else {
         0
@@ -363,12 +427,15 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
             .map(|s| format!("\"{s}\""))
             .collect();
         println!(
-            r#"{{"config_updated":[{}],"builtins_updated":{},"codex_config_updated":[{}],"codex_builtins_updated":{},"grok_builtins_updated":{},"rules_synced":{},"rules_removed":{},"skills_synced":{},"skills_removed":{},"factory_tooling":"{}"}}"#,
+            r#"{{"config_updated":[{}],"builtins_updated":{},"builtin_reference_conflicts":{},"codex_config_updated":[{}],"codex_builtins_updated":{},"codex_builtin_reference_conflicts":{},"grok_builtins_updated":{},"grok_builtin_reference_conflicts":{},"rules_synced":{},"rules_removed":{},"skills_synced":{},"skills_removed":{},"factory_tooling":"{}"}}"#,
             config_json.join(","),
             builtin_result.total_updated(),
+            builtin_result.modified_reference_files.len(),
             codex_config_json.join(","),
             codex_builtins_updated,
+            codex_modified_references,
             grok_builtins_updated,
+            grok_modified_references,
             rule_report.synced,
             rule_report.removed,
             skill_report.synced,
@@ -511,6 +578,8 @@ fn sync_user_builtins(cli: &Cli) -> anyhow::Result<()> {
                 fmt.write_raw(&format!("    - skills/{name} (removed stale orphan)"))?;
                 fmt.newline()?;
             }
+            drop(fmt);
+            report_modified_builtin_references(&r, "~/.claude", &theme)?;
         }
         Some(r)
     } else {
@@ -545,6 +614,8 @@ fn sync_user_builtins(cli: &Cli) -> anyhow::Result<()> {
                 fmt.write_raw(&format!("    - skills/{name} (removed stale orphan)"))?;
                 fmt.newline()?;
             }
+            drop(fmt);
+            report_modified_builtin_references(&r, "~/.codex", &theme)?;
         }
         Some(r)
     } else {
@@ -574,6 +645,8 @@ fn sync_user_builtins(cli: &Cli) -> anyhow::Result<()> {
                 fmt.write_raw(&format!("    - skills/{name} (removed stale orphan)"))?;
                 fmt.newline()?;
             }
+            drop(fmt);
+            report_modified_builtin_references(&r, "~/.grok", &theme)?;
         }
         Some(r)
     } else {
@@ -592,8 +665,20 @@ fn sync_user_builtins(cli: &Cli) -> anyhow::Result<()> {
         let claude_pruned_n = claude_pruned.len();
         let codex_pruned_n = codex_pruned.len();
         let grok_pruned_n = grok_pruned.len();
+        let claude_conflicts = claude_result
+            .as_ref()
+            .map(|r| r.modified_reference_files.len())
+            .unwrap_or(0);
+        let codex_conflicts = codex_result
+            .as_ref()
+            .map(|r| r.modified_reference_files.len())
+            .unwrap_or(0);
+        let grok_conflicts = grok_result
+            .as_ref()
+            .map(|r| r.modified_reference_files.len())
+            .unwrap_or(0);
         println!(
-            r#"{{"claude_present":{claude_present},"claude_builtins_updated":{claude_total},"claude_skills_pruned":{claude_pruned_n},"codex_present":{codex_present},"codex_builtins_updated":{codex_total},"codex_skills_pruned":{codex_pruned_n},"grok_present":{grok_present},"grok_builtins_updated":{grok_total},"grok_skills_pruned":{grok_pruned_n}}}"#
+            r#"{{"claude_present":{claude_present},"claude_builtins_updated":{claude_total},"claude_builtin_reference_conflicts":{claude_conflicts},"claude_skills_pruned":{claude_pruned_n},"codex_present":{codex_present},"codex_builtins_updated":{codex_total},"codex_builtin_reference_conflicts":{codex_conflicts},"codex_skills_pruned":{codex_pruned_n},"grok_present":{grok_present},"grok_builtins_updated":{grok_total},"grok_builtin_reference_conflicts":{grok_conflicts},"grok_skills_pruned":{grok_pruned_n}}}"#
         );
     }
 

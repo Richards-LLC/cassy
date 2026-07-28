@@ -2,6 +2,8 @@
 //!
 //! These definitions are managed by CAS and regenerated on `cas update`.
 //! Files with `managed_by: cas` in frontmatter are overwritten on update.
+//! References beneath a managed builtin skill inherit directory ownership and
+//! use a last-synced hash to propagate CAS changes without clobbering local edits.
 //!
 //! All content uses MCP tools (`mcp__cas__*`).
 //!
@@ -9,7 +11,9 @@
 //! guidance that gets injected into supervisor/worker context.
 
 use cas_mux::SupervisorCli;
-use std::collections::HashSet;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
 /// Factory supervisor guide - embedded at compile time (source of truth)
@@ -25,6 +29,7 @@ pub const SEARCH_GUIDE: &str = include_str!("builtins/skills/cas-search.md");
 pub const CHECKLIST_GUIDE: &str = include_str!("builtins/skills/cas-supervisor-checklist.md");
 
 /// A built-in file that CAS manages
+#[derive(Clone, Copy)]
 pub struct BuiltinFile {
     /// Relative path within .claude/ (e.g., "agents/task-verifier.md")
     pub path: &'static str,
@@ -1174,6 +1179,11 @@ pub enum SyncOutcome {
     /// (cas-4900): the file at the destination is provably stale and
     /// the caller should surface it in CLI output.
     SkippedNotManaged,
+    /// The file is a reference owned by a managed builtin skill, but its
+    /// destination does not match the last content CAS synced. Preserve the
+    /// local content and surface the conflict instead of silently clobbering
+    /// an intentional customization.
+    SkippedModifiedReference,
 }
 
 impl SyncOutcome {
@@ -1251,6 +1261,183 @@ pub fn sync_builtin(builtin: &BuiltinFile, target_dir: &Path) -> std::io::Result
     Ok(sync_builtin_detailed(builtin, target_dir)?.wrote())
 }
 
+const BUILTIN_REFERENCE_STATE_FILE: &str = ".cas-builtin-reference-state.json";
+
+fn builtin_reference_state_path(target_dir: &Path) -> std::path::PathBuf {
+    let project_cache = target_dir
+        .parent()
+        .map(|parent| parent.join(".cas").join("cache"))
+        .filter(|cache| cache.parent().is_some_and(Path::is_dir));
+    if let Some(cache) = project_cache {
+        let harness = target_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("harness")
+            .trim_start_matches('.');
+        return cache
+            .join("builtin-reference-state")
+            .join(format!("{harness}.json"));
+    }
+    target_dir.join(BUILTIN_REFERENCE_STATE_FILE)
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct BuiltinReferenceState {
+    /// Schema version for forward-compatible state migrations.
+    version: u8,
+    /// SHA-256 of the source content CAS last installed at each reference path.
+    files: BTreeMap<String, String>,
+    /// References the user deleted before project sync. Database skill sync
+    /// may rehydrate an old copy before builtin sync runs, so retain deletion
+    /// as explicit consent to replace that copy once.
+    #[serde(default)]
+    replace_on_next_sync: BTreeSet<String>,
+}
+
+impl BuiltinReferenceState {
+    fn load(target_dir: &Path) -> std::io::Result<Self> {
+        let path = builtin_reference_state_path(target_dir);
+        match std::fs::read_to_string(path) {
+            Ok(content) => match serde_json::from_str(&content) {
+                Ok(state) => Ok(state),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "builtin reference sync state is unreadable; treating all divergent \
+                         references as local modifications"
+                    );
+                    Ok(Self {
+                        version: 1,
+                        files: BTreeMap::new(),
+                        replace_on_next_sync: BTreeSet::new(),
+                    })
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self {
+                version: 1,
+                files: BTreeMap::new(),
+                replace_on_next_sync: BTreeSet::new(),
+            }),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn save(&self, target_dir: &Path) -> std::io::Result<()> {
+        let content = serde_json::to_string_pretty(self)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let path = builtin_reference_state_path(target_dir);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, format!("{content}\n"))
+    }
+}
+
+/// Remember body-owned references that are absent before database skill sync.
+/// The database layer can rehydrate an older copy before builtin sync runs;
+/// this one-shot marker preserves deletion as explicit acceptance of the
+/// current embedded CAS version.
+pub fn mark_missing_owned_references_for_replacement(
+    harness: SupervisorCli,
+    target_dir: &Path,
+) -> std::io::Result<usize> {
+    let skills = match harness {
+        SupervisorCli::Claude => BUILTIN_SKILLS,
+        SupervisorCli::Codex => CODEX_BUILTIN_SKILLS,
+        SupervisorCli::Grok => GROK_BUILTIN_SKILLS,
+    };
+    let mut state = BuiltinReferenceState::load(target_dir)?;
+    let mut marked = 0;
+    for builtin in skills {
+        if is_reference_owned_by_managed_skill(builtin, skills)
+            && !target_dir.join(builtin.path).exists()
+            && state
+                .replace_on_next_sync
+                .insert(builtin.path.to_string())
+        {
+            marked += 1;
+        }
+    }
+    if marked > 0 {
+        state.save(target_dir)?;
+    }
+    Ok(marked)
+}
+
+fn builtin_content_hash(content: &str) -> String {
+    format!("{:x}", Sha256::digest(content.as_bytes()))
+}
+
+/// A reference is owned by its skill directory when that directory has a
+/// cataloged, managed `SKILL.md`. This makes ownership automatic for newly
+/// added reference files instead of relying on an easy-to-forget per-file
+/// frontmatter marker.
+fn is_reference_owned_by_managed_skill(builtin: &BuiltinFile, skills: &[BuiltinFile]) -> bool {
+    let Some(relative) = builtin.path.strip_prefix("skills/") else {
+        return false;
+    };
+    let Some((skill_dir, child_path)) = relative.split_once('/') else {
+        return false;
+    };
+    if !child_path.starts_with("references/") {
+        return false;
+    }
+
+    let body_path = format!("skills/{skill_dir}/SKILL.md");
+    skills
+        .iter()
+        .find(|candidate| candidate.path == body_path)
+        .is_some_and(|body| is_managed_by_cas(body.content))
+}
+
+fn sync_owned_reference(
+    builtin: &BuiltinFile,
+    target_dir: &Path,
+    state: &mut BuiltinReferenceState,
+) -> std::io::Result<SyncOutcome> {
+    let target = target_dir.join(builtin.path);
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let source_hash = builtin_content_hash(builtin.content);
+    let replacement_requested = state.replace_on_next_sync.remove(builtin.path);
+    match std::fs::read_to_string(&target) {
+        Ok(existing) if existing == builtin.content => {
+            state.files.insert(builtin.path.to_string(), source_hash);
+            Ok(SyncOutcome::Unchanged)
+        }
+        Ok(existing) => {
+            let destination_hash = builtin_content_hash(&existing);
+            let matches_baseline = replacement_requested
+                || state
+                    .files
+                    .get(builtin.path)
+                    .is_some_and(|baseline| baseline == &destination_hash);
+            if !matches_baseline {
+                tracing::warn!(
+                    path = %builtin.path,
+                    "builtin skill reference differs from its last CAS-synced content; \
+                     preserving the destination as a possible local customization. \
+                     Review it, then delete the destination and rerun `cas update --sync` \
+                     to accept the CAS version."
+                );
+                return Ok(SyncOutcome::SkippedModifiedReference);
+            }
+
+            std::fs::write(&target, builtin.content)?;
+            state.files.insert(builtin.path.to_string(), source_hash);
+            Ok(SyncOutcome::Updated)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::write(&target, builtin.content)?;
+            state.files.insert(builtin.path.to_string(), source_hash);
+            Ok(SyncOutcome::Created)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// Sync all built-in files to the target directory
 fn sync_all_builtins_inner(
     target_dir: &Path,
@@ -1258,6 +1445,7 @@ fn sync_all_builtins_inner(
     skills: &[BuiltinFile],
 ) -> std::io::Result<SyncResult> {
     let mut result = SyncResult::default();
+    let mut reference_state = BuiltinReferenceState::load(target_dir)?;
 
     // Sync agents
     for builtin in agents {
@@ -1269,13 +1457,23 @@ fn sync_all_builtins_inner(
             SyncOutcome::SkippedNotManaged => {
                 result.skipped_files.push(builtin.path.to_string());
             }
+            SyncOutcome::SkippedModifiedReference => {
+                result
+                    .modified_reference_files
+                    .push(builtin.path.to_string());
+            }
             SyncOutcome::Unchanged => {}
         }
     }
 
     // Sync skills
     for builtin in skills {
-        match sync_builtin_detailed(builtin, target_dir)? {
+        let outcome = if is_reference_owned_by_managed_skill(builtin, skills) {
+            sync_owned_reference(builtin, target_dir, &mut reference_state)?
+        } else {
+            sync_builtin_detailed(builtin, target_dir)?
+        };
+        match outcome {
             SyncOutcome::Created | SyncOutcome::Updated => {
                 result.skills_updated += 1;
                 result.updated_files.push(builtin.path.to_string());
@@ -1283,10 +1481,16 @@ fn sync_all_builtins_inner(
             SyncOutcome::SkippedNotManaged => {
                 result.skipped_files.push(builtin.path.to_string());
             }
+            SyncOutcome::SkippedModifiedReference => {
+                result
+                    .modified_reference_files
+                    .push(builtin.path.to_string());
+            }
             SyncOutcome::Unchanged => {}
         }
     }
 
+    reference_state.save(target_dir)?;
     Ok(result)
 }
 
@@ -1464,6 +1668,10 @@ pub struct SyncResult {
     /// knowingly. Distinct from "no-op" (`Unchanged`) where source and
     /// destination already match.
     pub skipped_files: Vec<String>,
+    /// Body-owned builtin references whose destination differs from the
+    /// last CAS-synced baseline. These are preserved as possible intentional
+    /// local customizations and must be surfaced to the user.
+    pub modified_reference_files: Vec<String>,
 }
 
 impl SyncResult {
@@ -1475,6 +1683,10 @@ impl SyncResult {
     /// managed-by gate would not let us overwrite. cas-4900.
     pub fn has_silent_skips(&self) -> bool {
         !self.skipped_files.is_empty()
+    }
+
+    pub fn has_modified_references(&self) -> bool {
+        !self.modified_reference_files.is_empty()
     }
 }
 
@@ -2788,26 +3000,41 @@ This is the body content."#;
             .expect("planning.md must be registered in BUILTIN_SKILLS")
             .content;
 
-        // Stage 1: overwrite planning.md with stale content (keep the
-        // managed_by:cas frontmatter so the gate at sync_builtin:571
-        // routes us into the write path).
+        // Stage 1: model a reference installed by an older CAS version:
+        // destination content and the last-synced ledger both carry the old
+        // source hash. This is deliberately distinct from a local edit, where
+        // the destination would diverge from the ledger and must be preserved.
         let stale_marker = "STALE CAS-4900 SENTINEL — should be overwritten on next sync";
-        std::fs::write(
-            &planning_path,
-            format!("---\nname: planning\nmanaged_by: cas\n---\n\n{stale_marker}\n"),
-        )
-        .unwrap();
+        let stale_content =
+            format!("---\nname: planning\nmanaged_by: cas\n---\n\n{stale_marker}\n");
+        std::fs::write(&planning_path, &stale_content).unwrap();
+        let mut reference_state = BuiltinReferenceState::load(&claude_dir).unwrap();
+        reference_state.files.insert(
+            "skills/cas-supervisor/references/planning.md".to_string(),
+            builtin_content_hash(&stale_content),
+        );
+        reference_state.save(&claude_dir).unwrap();
 
-        // Stage 2: delete close-gate.md outright. The next sync must
-        // recreate it from BUILTIN_SKILLS source.
+        // Stage 2: delete close-gate.md outright and capture that intent
+        // before modeling database skill sync rehydrating an old copy.
         std::fs::remove_file(&close_gate_path).unwrap();
         assert!(
             !close_gate_path.exists(),
             "precondition: deletion took effect"
         );
+        assert_eq!(
+            mark_missing_owned_references_for_replacement(
+                SupervisorCli::Claude,
+                &claude_dir
+            )
+            .unwrap(),
+            1,
+            "the deleted real reference must be marked for one-shot replacement"
+        );
+        std::fs::write(&close_gate_path, "# stale database-skill copy\n").unwrap();
 
-        // Re-run sync. This is the call that was reported to silently
-        // no-op in per-project context.
+        // Re-run sync. The one-shot marker must win over the intervening
+        // database copy, matching the real `cas update --sync` ordering.
         let result = sync_all_builtins(&claude_dir).unwrap();
 
         // Recreation invariant.
@@ -2922,6 +3149,92 @@ This is the body content."#;
             "any populated skipped_files entry must flip has_silent_skips() to true"
         );
         assert_eq!(result.skipped_files.len(), 1);
+    }
+
+    #[test]
+    fn managed_skill_owns_unmarked_references_without_clobbering_local_changes() {
+        use tempfile::tempdir;
+
+        const BODY: &str = "---\nname: cas-test\nmanaged_by: cas\n---\n# Test\n";
+        const REFERENCE_V1: &str = "# Reference\n\nversion one\n";
+        const REFERENCE_V2: &str = "# Reference\n\nversion two\n";
+        const REFERENCE_V3: &str = "# Reference\n\nversion three\n";
+        const LOCAL_EDIT: &str = "# Reference\n\nproject customization\n";
+        const BODY_FILE: BuiltinFile = BuiltinFile {
+            path: "skills/cas-test/SKILL.md",
+            content: BODY,
+        };
+        const REFERENCE_FILE_V1: BuiltinFile = BuiltinFile {
+            path: "skills/cas-test/references/new-reference.md",
+            content: REFERENCE_V1,
+        };
+        const REFERENCE_FILE_V2: BuiltinFile = BuiltinFile {
+            path: "skills/cas-test/references/new-reference.md",
+            content: REFERENCE_V2,
+        };
+        const REFERENCE_FILE_V3: BuiltinFile = BuiltinFile {
+            path: "skills/cas-test/references/new-reference.md",
+            content: REFERENCE_V3,
+        };
+
+        let temp = tempdir().unwrap();
+        let target_dir = temp.path().join(".claude");
+        let target_reference = target_dir.join(REFERENCE_FILE_V1.path);
+
+        let first =
+            sync_all_builtins_inner(&target_dir, &[], &[BODY_FILE, REFERENCE_FILE_V1]).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&target_reference).unwrap(),
+            REFERENCE_V1,
+            "a new reference without frontmatter must install with its managed skill"
+        );
+        assert!(
+            first
+                .updated_files
+                .contains(&REFERENCE_FILE_V1.path.to_string()),
+            "fresh sync must report the body-owned reference as created"
+        );
+
+        let second =
+            sync_all_builtins_inner(&target_dir, &[], &[BODY_FILE, REFERENCE_FILE_V2]).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&target_reference).unwrap(),
+            REFERENCE_V2,
+            "an unchanged downstream reference must receive later source updates"
+        );
+        assert!(
+            second
+                .updated_files
+                .contains(&REFERENCE_FILE_V2.path.to_string()),
+            "propagated reference update must be visible in the sync result"
+        );
+
+        std::fs::write(&target_reference, LOCAL_EDIT).unwrap();
+        let third =
+            sync_all_builtins_inner(&target_dir, &[], &[BODY_FILE, REFERENCE_FILE_V3]).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&target_reference).unwrap(),
+            LOCAL_EDIT,
+            "a locally customized reference must never be silently overwritten"
+        );
+        assert_eq!(
+            third.modified_reference_files,
+            vec![REFERENCE_FILE_V3.path.to_string()],
+            "the preserved customization must be surfaced to the caller"
+        );
+
+        std::fs::remove_file(&target_reference).unwrap();
+        let remediated =
+            sync_all_builtins_inner(&target_dir, &[], &[BODY_FILE, REFERENCE_FILE_V3]).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&target_reference).unwrap(),
+            REFERENCE_V3,
+            "delete-and-resync remediation must install and baseline the current CAS reference"
+        );
+        assert!(
+            remediated.modified_reference_files.is_empty(),
+            "a remediated reference must no longer report a customization conflict"
+        );
     }
 
     #[test]

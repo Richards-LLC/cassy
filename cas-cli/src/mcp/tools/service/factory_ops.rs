@@ -882,8 +882,11 @@ impl CasService {
                 // check below — one resolution, two consumers, instead of
                 // globbing/reading the transcript twice per worker.
                 let worker_cli = worker_cli_from_agent(agent);
-                let transcript_path_for_worker =
-                    resolve_worker_transcript_path(clone_path.as_deref(), session_uuid, worker_cli);
+                let transcript_path_for_worker = worker_status_transcript_path(
+                    clone_path.as_deref(),
+                    session_uuid,
+                    worker_cli,
+                );
                 let context_info = {
                     match transcript_path_for_worker
                         .as_deref()
@@ -2692,6 +2695,27 @@ pub(crate) fn resolve_worker_transcript_path(
     resolve_worker_transcript_path_in(base_dir.as_deref(), clone_path, session_id, cli)
 }
 
+/// Resolve the activity/context path for `worker_status`.
+///
+/// Codex is the cas-fa69 fix: use the existing cli-aware resolver so a real
+/// rollout is reachable. Claude and Grok intentionally retain the historical
+/// single-stat fast path byte-for-byte (AC7); changing those harnesses belongs
+/// to a separately characterized change.
+fn worker_status_transcript_path(
+    clone_path: Option<&str>,
+    session_id: &str,
+    cli: cas_mux::SupervisorCli,
+) -> Option<std::path::PathBuf> {
+    match cli {
+        cas_mux::SupervisorCli::Codex => {
+            resolve_worker_transcript_path(clone_path, session_id, cli)
+        }
+        cas_mux::SupervisorCli::Claude | cas_mux::SupervisorCli::Grok => {
+            transcript_path_fast(clone_path, session_id)
+        }
+    }
+}
+
 /// Injectable half of [`resolve_worker_transcript_path`] for deterministic
 /// path-resolution and latency tests.
 fn resolve_worker_transcript_path_in(
@@ -2794,6 +2818,31 @@ pub(crate) fn context_band(total_input_tokens: u64) -> &'static str {
         50..=79 => "approaching",
         _ => "near-limit",
     }
+}
+
+/// Historical live-worker path lookup used by Claude and Grok reporting.
+///
+/// Reconstructs the Claude-layout path from `clone_path` + `session_id` and
+/// checks it with one `stat(2)`. Keeping this unchanged preserves the
+/// cas-573c latency and output contract for non-Codex harnesses.
+fn transcript_path_fast(
+    clone_path: Option<&str>,
+    session_id: &str,
+) -> Option<std::path::PathBuf> {
+    let home = dirs::home_dir()?;
+    transcript_path_fast_in(&home, clone_path, session_id)
+}
+
+fn transcript_path_fast_in(
+    home: &std::path::Path,
+    clone_path: Option<&str>,
+    session_id: &str,
+) -> Option<std::path::PathBuf> {
+    let clone = clone_path?;
+    let synthesized = synthesized_transcript_path(clone, session_id);
+    let relative = synthesized.strip_prefix("~/")?;
+    let real = home.join(relative);
+    if real.exists() { Some(real) } else { None }
 }
 
 /// Read the last ≤ 8 KB of a JSONL session transcript and return the total
@@ -4102,15 +4151,25 @@ effort = "high"
     /// cwd-aware resolver, so that production path must return it too.
     #[test]
     fn worker_status_transcript_path_resolves_codex_rollout_by_cwd() {
+        let _lock = crate::hooks::test_env_lock();
         let clone = "/home/pippenz/Petrastella/ozer/.cas/worktrees/worker-android";
         let rel = "2026/07/21/rollout-2026-07-21T08-38-21-019f84af-3121-7950-ba14-b01db2dad6c7.jsonl";
-        let (_tmp, sessions) = fake_codex_sessions_dir(&[(rel, clone)]);
-        let got = resolve_worker_transcript_path_in(
-            Some(&sessions),
+        let (tmp, sessions) = fake_codex_sessions_dir(&[(rel, clone)]);
+        let old = std::env::var("CODEX_HOME").ok();
+        unsafe {
+            std::env::set_var("CODEX_HOME", tmp.path());
+        }
+        let got = worker_status_transcript_path(
             Some(clone),
             "codex-worker-android-2f828ac6-deadbeefcafe",
             cas_mux::SupervisorCli::Codex,
         );
+        unsafe {
+            match old {
+                Some(value) => std::env::set_var("CODEX_HOME", value),
+                None => std::env::remove_var("CODEX_HOME"),
+            }
+        }
         assert_eq!(got, Some(sessions.join(rel)));
     }
 
@@ -4131,35 +4190,42 @@ effort = "high"
 
     #[test]
     fn worker_status_transcript_path_preserves_claude_resolution() {
-        let (_tmp, projects) = fake_projects_dir(&[("arbitrary-project", &[TEST_SESSION])]);
-        let expected = projects
-            .join("arbitrary-project")
-            .join(format!("{TEST_SESSION}.jsonl"));
-        let got = resolve_worker_transcript_path_in(
-            Some(&projects),
-            Some("/home/alice/project"),
-            TEST_SESSION,
-            cas_mux::SupervisorCli::Claude,
-        );
+        let home = tempfile::tempdir().unwrap();
+        let clone = "/home/alice/project";
+        let relative = synthesized_transcript_path(clone, TEST_SESSION)
+            .strip_prefix("~/")
+            .unwrap()
+            .to_string();
+        let expected = home.path().join(relative);
+        std::fs::create_dir_all(expected.parent().unwrap()).unwrap();
+        std::fs::write(&expected, b"").unwrap();
+        let got = transcript_path_fast_in(home.path(), Some(clone), TEST_SESSION);
         assert_eq!(got, Some(expected));
     }
 
     #[test]
-    fn worker_status_transcript_path_preserves_grok_resolution() {
+    fn worker_status_transcript_path_preserves_grok_fast_path_behavior() {
         let session = "grok-session-0000-0000-000000000000";
         let (_tmp, sessions) =
             fake_grok_sessions_dir(&[("%2Fhome%2Falice%2Fworkspace", &[session])]);
-        let expected = sessions
-            .join("%2Fhome%2Falice%2Fworkspace")
-            .join(session)
-            .join("updates.jsonl");
-        let got = resolve_worker_transcript_path_in(
-            Some(&sessions),
+        let home = tempfile::tempdir().unwrap();
+        let got = transcript_path_fast_in(
+            home.path(),
             Some("/home/alice/workspace"),
             session,
-            cas_mux::SupervisorCli::Grok,
         );
-        assert_eq!(got, Some(expected));
+        assert_eq!(
+            got, None,
+            "the existing Grok worker_status fast path must remain unchanged"
+        );
+        assert!(
+            sessions
+                .join("%2Fhome%2Falice%2Fworkspace")
+                .join(session)
+                .join("updates.jsonl")
+                .exists(),
+            "the fixture must contain a real Grok transcript"
+        );
     }
 
     #[test]

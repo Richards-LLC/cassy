@@ -27,6 +27,9 @@
 //! (`Mux::interrupt_and_inject` / `wait_for_injection_readiness`) with a
 //! deliberately tiny floor (the exact conditions that reproduced the bug
 //! manually) and asserts the fix's quiescence poll compensates for it.
+#[path = "support/real_pty_serial.rs"]
+mod real_pty_serial;
+
 use cas_mux::{Mux, Pane, PaneKind, Pty, PtyConfig, SupervisorCli};
 use std::io::Read;
 use std::path::PathBuf;
@@ -94,6 +97,8 @@ fn glob_jsonl(root: &PathBuf) -> std::io::Result<Vec<PathBuf>> {
 #[test]
 #[ignore = "spawns a real `codex` CLI child process — run explicitly, see module docs"]
 fn multiline_urgent_interrupt_recovers_codex_and_stays_reachable() {
+    let _serial = real_pty_serial::lock();
+
     if !codex_available() {
         eprintln!("SKIP: `codex` not on PATH");
         return;
@@ -257,6 +262,8 @@ fn multiline_urgent_interrupt_recovers_codex_and_stays_reachable() {
 #[test]
 #[ignore = "spawns a real `codex` CLI child process — run explicitly, see module docs"]
 fn already_idle_urgent_interrupt_starts_new_turn() {
+    let _serial = real_pty_serial::lock();
+
     if !codex_available() {
         eprintln!("SKIP: `codex` not on PATH");
         return;

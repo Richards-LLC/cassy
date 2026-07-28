@@ -46,8 +46,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crate::mcp::tools::service::factory_ops::{
-    TranscriptResolution, default_claude_projects_dir, default_codex_sessions_dir,
-    default_grok_sessions_dir, resolve_transcript, worker_cli_from_agent,
+    resolve_worker_transcript_path, worker_cli_from_agent,
 };
 
 /// Window in which a Claude transcript mtime counts as "recent" — used to
@@ -729,39 +728,12 @@ pub(crate) fn resolve_worker(
         .cc_session_id
         .clone()
         .unwrap_or_else(|| agent.id.clone());
-    // cas-058f / cas-c655: which harness this worker runs determines both
-    // the transcript layout (Claude JSONL / Grok session dir / Codex
-    // rollout tree) and the base dir to glob under.
+    // cas-058f / cas-c655 / cas-fa69: use the exact same harness-aware path
+    // resolver as worker_status so the human and director stall surfaces
+    // cannot disagree about which transcript is evidence.
     let cli = worker_cli_from_agent(&agent);
-    let base_dir = match cli {
-        cas_mux::SupervisorCli::Grok => default_grok_sessions_dir(),
-        cas_mux::SupervisorCli::Codex => default_codex_sessions_dir(),
-        cas_mux::SupervisorCli::Claude => default_claude_projects_dir(),
-    };
-    let transcript_path = match resolve_transcript(base_dir.as_deref(), clone_path.as_deref(), &session_id, cli) {
-        TranscriptResolution::Resolved(p) => Some(p),
-        TranscriptResolution::Ambiguous { mut matches, .. } => {
-            // Deterministic: most-recently-modified first. Ambiguity is rare
-            // and always logged in the evidence; picking the freshest minimizes
-            // the surprise when the supervisor runs `debug` on the chosen path.
-            matches.sort_by_key(|p| {
-                std::fs::metadata(p)
-                    .and_then(|m| m.modified())
-                    .ok()
-            });
-            matches.pop()
-        }
-        TranscriptResolution::Synthesized(_) => {
-            // Synthesized paths are a best-guess reconstruction of the
-            // `<escaped-cwd>` — probably wrong on unicode / space paths
-            // (which is the whole reason cas-900b exists). Treat as
-            // unresolved here so the mtime and signature checks do not
-            // fire against a potentially bogus path; the classifier
-            // will fall through to Starved-or-Dead and the operator
-            // runs `debug` with an explicit path if they need more.
-            None
-        }
-    };
+    let transcript_path =
+        resolve_worker_transcript_path(clone_path.as_deref(), &session_id, cli);
     Ok(ResolvedWorker {
         name: worker_name.to_string(),
         pid,

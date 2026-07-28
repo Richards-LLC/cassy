@@ -806,6 +806,42 @@ impl CasCore {
 }
 
 #[cfg(test)]
+mod status_transition_tests {
+    use super::*;
+    use cas_types::{Task, TaskStatus};
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn task_update_closed_to_in_progress_clears_factory_branch_anchor() {
+        let temp = TempDir::new().unwrap();
+        let cas_dir = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        let core = CasCore::with_daemon(cas_dir, None, None);
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+
+        let mut task = Task::new("cas-anchor".into(), "Anchored closed task".into());
+        task.status = TaskStatus::Closed;
+        task.deliverables.factory_branch_anchor = Some("already-merged-sha".into());
+        store.add(&task).unwrap();
+
+        let req: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+            "id": task.id,
+            "status": "in_progress"
+        }))
+        .unwrap();
+        core.cas_task_update(Parameters(req)).await.unwrap();
+
+        let updated = store.get("cas-anchor").unwrap();
+        assert_eq!(updated.status, TaskStatus::InProgress);
+        assert!(
+            updated.deliverables.factory_branch_anchor.is_none(),
+            "a Closed -> non-Closed transition must invalidate the prior close cycle's anchor"
+        );
+    }
+}
+
+#[cfg(test)]
 mod epic_owner_transfer_auth_tests {
     use super::*;
     use cas_types::{Agent, AgentRole, AgentStatus};

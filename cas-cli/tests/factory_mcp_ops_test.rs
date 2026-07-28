@@ -1690,6 +1690,71 @@ async fn test_worker_activity_includes_idle_workers() {
     );
 }
 
+#[tokio::test]
+async fn test_worker_activity_codex_tool_call_uses_worker_status_rollout_signal() {
+    use std::io::Write;
+
+    let codex_home = tempfile::tempdir().expect("codex home");
+    let clone_path = "/tmp/cas-a568-codex-worker";
+    let rollout = codex_home
+        .path()
+        .join("sessions/2026/07/28/rollout-2026-07-28T12-00-00-live.jsonl");
+    std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+    let mut file = std::fs::File::create(&rollout).unwrap();
+    writeln!(
+        file,
+        "{}",
+        serde_json::json!({
+            "type": "session_meta",
+            "payload": {
+                "session_id": "019fa8b8-activity-feed",
+                "cwd": clone_path,
+                "originator": "codex-tui",
+                "source": "cli"
+            }
+        })
+    )
+    .unwrap();
+    writeln!(
+        file,
+        r#"{{"type":"response_item","payload":{{"type":"function_call","call_id":"call-live","name":"apply_patch"}}}}"#
+    )
+    .unwrap();
+    drop(file);
+
+    let _guard = EnvGuard::set(&[(
+        "CODEX_HOME",
+        codex_home.path().to_str().expect("utf-8 temp path"),
+    )]);
+    let env = FactoryTestEnv::new();
+    let mut metadata = HashMap::new();
+    metadata.insert("worker_cli".to_string(), "codex".to_string());
+    metadata.insert("clone_path".to_string(), clone_path.to_string());
+    env.register_worker_with_metadata("codex-worker", metadata);
+
+    let mut req = factory_req("worker_activity");
+    req.target = Some("codex-worker".to_string());
+    let result = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect("worker_activity should consume the resolved Codex rollout");
+    let text = get_text(&result);
+
+    assert!(
+        text.contains("codex-worker - in-flight tool call"),
+        "the same rollout fixture that refutes worker_status STALLED must appear here: {text}"
+    );
+    assert!(
+        text.contains("transcript-backed"),
+        "the feed must distinguish rollout freshness from CAS event rows: {text}"
+    );
+    assert!(
+        !text.contains("No recent worker activity"),
+        "an active Codex tool call must not produce the empty feed: {text}"
+    );
+}
+
 // =============================================================================
 // clear_context tests
 // =============================================================================

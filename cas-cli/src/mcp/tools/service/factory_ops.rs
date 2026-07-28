@@ -1112,7 +1112,9 @@ impl CasService {
         let visible_worker_names: std::collections::HashSet<String> =
             visible_workers.iter().map(|a| a.name.clone()).collect();
 
-        // Get recent worker activity events
+        // Get recent worker activity events. These are only the activity
+        // classes CAS hooks/MCP calls explicitly persist; ordinary Codex tool
+        // calls do not create rows here (cas-a568).
         let events = event_store.list_recent(50).map_err(|e| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
@@ -1145,9 +1147,44 @@ impl CasService {
             .take(20)
             .collect();
 
-        if worker_events.is_empty() {
+        // cas-a568: `worker_activity` is the supervisor's corroborating view
+        // for worker_status's STALLED verdict, so it must consume the same
+        // corrected signal. In particular, Codex tool calls update the rollout
+        // but usually do not emit a CAS event. Resolve the same concrete path
+        // as worker_status (including cas-fa69's Resolved-only Codex rule) and
+        // add a transcript-backed row only when it is fresher than that
+        // worker's event-store signal. This augments the event feed rather
+        // than introducing a second activity detector.
+        let transcript_activity: Vec<_> = visible_workers
+            .iter()
+            .filter_map(|agent| {
+                let cli = worker_cli_from_agent(agent);
+                let clone_path = agent.metadata.get("clone_path").map(String::as_str);
+                let session_id = agent.cc_session_id.as_deref().unwrap_or(&agent.id);
+                let transcript_path =
+                    worker_status_transcript_path(clone_path, session_id, cli)?;
+                let event_activity = last_worker_activity_secs(&worker_events, &agent.id);
+                let effective_activity = last_worker_activity_secs_with_transcript(
+                    &worker_events,
+                    &agent.id,
+                    cli,
+                    Some(&transcript_path),
+                )?;
+                if event_activity.is_some_and(|(event_age, _)| event_age <= effective_activity.0) {
+                    return None;
+                }
+                let in_flight =
+                    crate::cli::factory::wedged::transcript_has_in_flight_tool_call(
+                        &transcript_path,
+                        cli,
+                    );
+                Some((agent.name.clone(), effective_activity.0, in_flight))
+            })
+            .collect();
+
+        if worker_events.is_empty() && transcript_activity.is_empty() {
             return Ok(Self::success(
-                "No recent worker activity.\n\nWorker activity is tracked when workers edit files, run subagents, or commit code.",
+                "No recent worker activity.\n\nworker_activity combines CAS-recorded file-edit, commit, subagent, and verification events with resolved worker transcript/rollout freshness. Not every tool call creates a CAS event; transcript activity is unavailable when a worker's transcript cannot be resolved.",
             ));
         }
 
@@ -1162,6 +1199,16 @@ impl CasService {
             output.push_str(&format!(
                 "• {} - {} ({})\n",
                 session_short, event.summary, ago
+            ));
+        }
+        for (worker_name, age_secs, in_flight) in transcript_activity {
+            let activity = if in_flight {
+                "in-flight tool call"
+            } else {
+                "transcript/tool activity"
+            };
+            output.push_str(&format!(
+                "• {worker_name} - {activity} ({age_secs}s ago; transcript-backed)\n"
             ));
         }
 

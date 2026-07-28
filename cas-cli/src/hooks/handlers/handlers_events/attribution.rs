@@ -198,15 +198,17 @@ pub fn detect_and_link_git_commit(cas_root: &std::path::Path, input: &HookInput)
         return; // Commit failed
     }
 
-    // Resolve the committed tip from git itself. Git's normal stdout only
-    // carries an abbreviated hash and `git commit -q` carries none at all;
-    // HEAD is the durable, full-SHA signal both attribution and task close
-    // need after a supervisor merges the branch before the first close.
+    // Git's commit output identifies the object the invocation created even
+    // when a later command moves HEAD. Resolve that object to a full SHA.
+    // Quiet commits carry no hash, so HEAD remains the fallback proxy.
     let stdout = tool_response
         .get("stdout")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let commit_hash = match resolve_commit_head(input).or_else(|| extract_commit_hash(stdout)) {
+    let commit_hash = match extract_commit_hash(stdout)
+        .and_then(|hash| resolve_git_revision(input, &hash))
+        .or_else(|| resolve_commit_head(input))
+    {
         Some(hash) => hash,
         None => return, // Couldn't find commit hash
     };
@@ -272,13 +274,12 @@ pub fn detect_and_link_git_commit(cas_root: &std::path::Path, input: &HookInput)
     let _ = file_change_store.link_to_commit(&change_ids, &commit_hash);
 }
 
-/// Resolve the full SHA at HEAD in the tool invocation's working directory.
-///
-/// `HookInput.cwd` is authoritative for PostToolUse. Empty legacy inputs fall
-/// back to the hook process cwd so existing harnesses keep working.
-fn resolve_commit_head(input: &HookInput) -> Option<String> {
+/// Resolve a revision to its full SHA in the tool invocation's working
+/// directory. `HookInput.cwd` is authoritative for PostToolUse. Empty legacy
+/// inputs fall back to the hook process cwd so existing harnesses keep working.
+fn resolve_git_revision(input: &HookInput, revision: &str) -> Option<String> {
     let mut command = std::process::Command::new("git");
-    command.args(["rev-parse", "HEAD"]);
+    command.args(["rev-parse", revision]);
     if !input.cwd.trim().is_empty() {
         command.current_dir(&input.cwd);
     }
@@ -292,6 +293,10 @@ fn resolve_commit_head(input: &HookInput) -> Option<String> {
     } else {
         None
     }
+}
+
+fn resolve_commit_head(input: &HookInput) -> Option<String> {
+    resolve_git_revision(input, "HEAD")
 }
 
 /// Persist commit-time merge evidence on the one active task held by a
@@ -366,7 +371,14 @@ pub fn is_git_commit_command(command: &str) -> bool {
 /// Git commit output format: "[branch hash] message"
 /// Example: "[main abc1234] Add new feature"
 pub fn extract_commit_hash(stdout: &str) -> Option<String> {
-    // Look for pattern: [branch hash] or just a commit hash line
+    let mut bracket_hash = None;
+    let mut full_hash = None;
+
+    // Prefer the final `[branch hash]` commit-status line. Chained invocations
+    // may create more than one object (for example commit then amend), and the
+    // final object is the deliverable tip. Only use a bare full hash when no
+    // commit-status line exists, so a later `git rev-parse` cannot override
+    // the commit's own output.
     for line in stdout.lines() {
         let line = line.trim();
 
@@ -382,19 +394,19 @@ pub fn extract_commit_hash(stdout: &str) -> Option<String> {
                     if potential_hash.len() >= 7
                         && potential_hash.chars().all(|c| c.is_ascii_hexdigit())
                     {
-                        return Some(potential_hash.to_string());
+                        bracket_hash = Some(potential_hash.to_string());
                     }
                 }
             }
         }
 
-        // Also check for full 40-char hash
+        // Also support scripts that print only the full created commit hash.
         if line.len() == 40 && line.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Some(line.to_string());
+            full_hash = Some(line.to_string());
         }
     }
 
-    None
+    bracket_hash.or(full_hash)
 }
 
 /// Extract commit message from git commit command
@@ -583,6 +595,66 @@ mod commit_anchor_tests {
                 tool_name: Some("Bash".to_string()),
                 tool_input: Some(serde_json::json!({
                     "command": "git commit -m 'fix: task work' && git reset --hard HEAD~1"
+                })),
+                tool_response: Some(serde_json::json!({
+                    "exitCode": 0,
+                    "stdout": stdout
+                })),
+                agent_role: Some("worker".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let anchored = task_store.get(&task.id).expect("anchored task");
+        assert_eq!(
+            anchored.deliverables.factory_branch_anchor.as_deref(),
+            Some(expected.as_str())
+        );
+    }
+
+    #[test]
+    fn commit_then_amend_records_final_created_commit() {
+        let (_temp, cas_root, agent, task, task_store) = worker_task_fixture();
+        let repo = cas_root.parent().expect("repo");
+        std::fs::write(repo.join("work.rs"), "fn work() {}\n").unwrap();
+        git(repo, &["add", "work.rs"]);
+
+        let output = Command::new("bash")
+            .args([
+                "-c",
+                "git commit -m 'work v1' && printf '\\n// amended\\n' >> work.rs \
+                 && git add work.rs && git commit --amend -m 'work v2'",
+            ])
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("commit then amend");
+        assert!(output.status.success(), "commit then amend failed");
+        let stdout = String::from_utf8(output.stdout).expect("command stdout");
+        let expected = git_output(repo, &["rev-parse", "HEAD"]).trim().to_string();
+        let original = git_output(repo, &["rev-parse", "HEAD@{1}"])
+            .trim()
+            .to_string();
+        assert_ne!(
+            expected, original,
+            "fixture must replace the original commit"
+        );
+
+        detect_and_link_git_commit(
+            &cas_root,
+            &HookInput {
+                session_id: agent.id,
+                cwd: repo.display().to_string(),
+                hook_event_name: "PostToolUse".to_string(),
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({
+                    "command": "git commit -m 'work v1' && printf '\\n// amended\\n' >> work.rs \
+                                && git add work.rs && git commit --amend -m 'work v2'"
                 })),
                 tool_response: Some(serde_json::json!({
                     "exitCode": 0,

@@ -1,180 +1,108 @@
 # cas — Codemap
 > Auto-generated structural map. Regenerate with `/codemap` when the layout drifts (modules added, removed, or renamed).
 
+Rust workspace (edition 2024, MSRV 1.85): one binary crate (`cas-cli`) + 16 library crates. Product/domain content belongs in `docs/PRODUCT_OVERVIEW.md` (`project-overview` skill) — this file is structure only.
+
 ## Top-level layout
-- `cas-cli/` — Rust binary crate (`cas`); CLI commands, hooks, factory TUI, MCP server, bridge HTTP server, daemon
-- `crates/` — 16 workspace member crates (see Workspace section)
-- `docs/` — planning artifacts (brainstorms, ideation, guides, notes, requests/inbox, reviews, spikes, onboarding, release-notes, reports); requests/completed/ archives closed work
-- `migration/` — one-shot migration scripts and phase logs (Phase 2/3/7/8 cloud move)
-- `scripts/` — `worktree-boot.sh` + provisioning (`provision-hetzner.sh`); release/install scripts live in `~/.local/bin/`
-- `homebrew/` — `cas.rb` Homebrew formula + update script
-- `slack-bridge/` — separate TypeScript service for Slack integration
+- `cas-cli/` — binary crate `cas`; CLI subcommands, hooks, factory TUI, MCP server, bridge HTTP server, daemon
+- `crates/` — 16 workspace library crates (see Workspace section)
+- `docs/` — planning artifacts: `requests/` (cross-team BUG/FEATURE inbox, `completed/` archive), `release-notes/`, `notes/`, `guides/`, `brainstorms/`, `ideation/`, `reviews/`, `spikes/`, `onboarding/`, `reports/`
+- `scripts/` — `release.sh`, `bump-release-version.sh`, `cas-install.sh`, `bootstrap-zig.sh`, `check-build-regression.sh`, `benchmark-build.sh`, `install-git-hooks.sh`, `worktree-boot.sh`, `provision-hetzner.sh`
+- `migration/` — one-shot cloud-move phase logs and docs. Not active build infra (schema migrations live in `cas-cli/src/migration/`)
+- `homebrew/` — `cas.rb` formula + `update-formula.sh`
+- `slack-bridge/` — standalone Node/TS Slack relay service (own `package.json`)
 - `site/` — static landing page (`index.html`, PDF)
-- `vendor/` — vendored upstream sources (`ghostty/`)
-- `target/` — cargo build output (skip)
-- `.claude/` — harness config (`settings.json`, `CODEMAP.md` — tracked; commit after `/codemap` to reset the git-history freshness gate, despite a vestigial `.gitignore` entry); `.claude/agents/` + `.claude/skills/` are sync output of `cas integrate`; `.claude/workflows/` holds the cas-code-review Workflow scripts (synced from `cas-cli/src/builtins/workflows/`)
-- `.codex/` — Codex CLI mirror: `agents/`, `skills/`, `config.toml`; auto-built from `.claude/` for `--supervisor-cli codex` / `--worker-cli codex`
-- `.cas/` — agent state, factory config, codemap-pending tracker; `.cas/worktrees/` houses isolated factory worker checkouts
-- `.context/` — gitignored vendored toolchains (currently `zig/`); export `ZIG=$PWD/.context/zig/zig` before any cargo build that pulls ghostty-vt
-- `.fallow/` — fallow static-analysis cache (sub-second JS/TS audits invoked from the `fallow` skill)
-- `.cargo/` — cargo config (release profile knobs, registry overrides)
-- `.github/` — CI workflows
-- Root files: `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `CLAUDE.md`, `CAS-DEEP-DIVE.md`, `LICENSE`, `Cargo.toml`/`Cargo.lock`, `.mcp.json`, `.env.worktree.template`, `casdemo.png`, `investigation-mcp-worktree.md`
+- `vendor/ghostty` — vendored libghostty-vt C source
+- `.context/zig` — gitignored pinned Zig toolchain; `export ZIG=$PWD/.context/zig/zig` before any cargo build pulling ghostty-vt
+- `.claude/` — `CODEMAP.md` (tracked; commit after `/codemap` to reset the git-history freshness gate), `settings.json`, plus `agents/`/`skills/`/`workflows/` which are sync **output** of `cas integrate`
+- `.codex/` — Codex CLI mirror (`agents/`, `skills/`, `config.toml`) built from `.claude/`
+- `.cas/` — project SQLite DB (`cas.db`), logs, `worktrees/` (isolated factory worker checkouts)
+- `.fallow/`, `.cargo/`, `.github/` — fallow analysis cache, cargo config, CI
+- Root: `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `CLAUDE.md`, `CAS-DEEP-DIVE.md`, `Cargo.toml`, `.mcp.json`, `.env.worktree.template`
 
 ## Workspace / packages
-Top-level `Cargo.toml` defines a workspace (`resolver = 2`). The binary lives in `cas-cli`; everything else is a library crate consumed by it. Release profiles enforce `panic = "unwind"` (MCP catcher requirement).
+Binary lives in `cas-cli`; everything else is a library consumed by it. Release profiles enforce `panic = "unwind"` — a compile-time guard in `cas-cli/src/lib.rs` rejects `panic = "abort"` for non-test builds (the MCP panic catcher depends on unwinding).
 
-- `cas-cli` — binary crate `cas`. Glue between CLI commands, hooks, TUI, MCP server, daemon, bridge
-- `crates/cas-types` — shared types (Task, Agent, Memory, HookInput, etc.) used across all crates
-- `crates/cas-store` — SQLite storage layer, schema, migrations; `TaskStore` trait + `remove_dependency_of_type` (cas-6009)
-- `crates/cas-search` — hybrid search: BM25 + semantic vectors over memories/tasks/code
+- `cas-cli` — binary `cas`; glue between CLI, hooks, TUI, MCP server, daemon, bridge
+- `crates/cas-types` — shared types (Task, Agent, Memory, HookInput, `search_manifest.rs`, `verification.rs`, `visibility.rs`)
+- `crates/cas-store` — SQLite storage layer, schema, store traits
+- `crates/cas-search` — hybrid BM25 + semantic search over memories/tasks/code
 - `crates/cas-core` — business logic and hook context computation
 - `crates/cas-code` — code indexing and symbol search
-- `crates/cas-mcp` — MCP server protocol handlers
+- `crates/cas-mcp` — MCP protocol types/handlers; `types/ops_secondary.rs` holds `CoordinationRequest`
 - `crates/cas-mcp-proxy` — MCP proxy engine
-- `crates/cas-factory` — factory orchestration (worker spawn, lease, merge gates); per-worker spec cascade resolver; director event detector (idle-vs-pending guard, heartbeat-vs-activity guard)
-- `crates/cas-factory-protocol` — wire types for factory client-server messaging
-- `crates/cas-mux` — terminal multiplexer for factory TUI panes; per-worker `WorkerSpec` (cli/model/effort); alt-screen wheel-forwarding via `ScrollAction::AltScreen`
-- `crates/cas-pty` — PTY management; `PtyConfig::claude` and `PtyConfig::codex` constructors
+- `crates/cas-factory` — spawn pipeline, spec resolution, availability probe, director detection
+- `crates/cas-factory-protocol` — wire types for factory client↔server messaging
+- `crates/cas-mux` — terminal multiplexer owning every factory PTY pane
+- `crates/cas-pty` — PTY management; `PtyConfig::claude` / `PtyConfig::codex`
 - `crates/cas-recording` — asciinema-style terminal recording
 - `crates/cas-diffs` — diff parsing, rendering, syntax highlighting
 - `crates/cas-tui-test` — PTY-based TUI test framework
-- `crates/ghostty_vt` — safe Rust wrapper for libghostty-vt terminal emulation
-- `crates/ghostty_vt_sys` — `-sys` crate with low-level bindings to libghostty-vt
+- `crates/ghostty_vt` / `ghostty_vt_sys` — safe wrapper + FFI bindings to libghostty-vt
 
-## cas-cli (`cas-cli/src/`)
+## cas-cli/src — CLI surface (`cli/`)
+`cli/mod.rs` is the clap dispatch root.
+- `cli/factory/` — `cas factory` subtree: `mod.rs` (builds `FactoryConfig`, launches daemon), `wedged.rs` (`is-wedged`/`debug`/`kill` liveness triage + `transcript_mtime_age`), `parity.rs` (skill/instruction parity gate), `probe_comm/` (end-to-end comms probe), `lifecycle.rs`, `queries.rs`, `worktree_ops.rs`, `cloud_attach.rs`, `remote_attach.rs`
+- `cli/integrate/` — `cas integrate <platform>` (Vercel/Neon/GitHub); `lock.rs` holds `IntegrateLock`
+- `cli/init/`, `cli/config/`, `cli/config_tui/` — project init, config read/write, config TUI. `config/settings.rs` holds `STOCK_WORKER_{HARNESS,MODEL,REASONING_EFFORT}` and `FactoryConfig.strict_cli`
+- `cli/update/`, `cli/hook/`, `cli/hook_tests/` — `cas update` atomic rewrite of `managed_by:cas` files; hook install/inspect + golden-JSON tests
+- `cli/codemap_cmd.rs`, `cli/project_overview_cmd.rs` — freshness-gate subcommands
+- `cli/{doctor,status,list,queue,open,known_repos,memory,mcp_cmd,bridge,changelog,claude_md,auth,device,cloud}.rs`
 
-Binary entrypoint and the only crate users interact with directly. Contains every CLI subcommand, the hook dispatcher, the factory TUI, the MCP server bootstrap, and the bridge HTTP server.
+## cas-cli/src/mcp — MCP server
+Tool dispatch for `mcp__cas__*`; each call is panic-isolated via `tokio::spawn` + `JoinError::is_panic`.
+- `mcp/{daemon,socket,mod}.rs`, `mcp/server/` — lifecycle, unix socket, request routing
+- `tools/core/task/lifecycle/close_ops.rs` — the close gates: commit-claim, zero-commit routing, zero-diff guard, per-task and per-epic merge-state gates, `park_task_awaiting_merge` (writes `factory_branch_anchor`)
+- `tools/core/task/lifecycle/{stale_close_guard,supervisor_push}.rs` — post-close guards, transition→supervisor push seam
+- `tools/core/agent_coordination/` — register/whoami/messaging, `agent_management.rs` (lease-history renderer), task claiming + supervisor force-transfer
+- `tools/core/{memory,search,rules,skills,system,knowledge,maintenance}.rs`, `tools/core/workflow/`
+- `tools/service/factory_ops.rs` — `worker_status`, `worker_activity`, `spawn_workers`, `epic_status`; Codex rollout resolution + activity/in-flight/context signals
+- `tools/service/agent_search_system/message.rs` — `message` / `message_status` and delivery-report formatting
+- `tools/service/{agent_liveness,orphan_recovery,factory_remind}.rs`
 
-- `main.rs`, `lib.rs` — entrypoint and library root
-- `cli/` — every CLI subcommand:
-  - `mod.rs` — top-level `clap` dispatch
-  - `auth.rs`, `device.rs`, `cloud.rs` — cloud/auth flows
-  - `codemap_cmd.rs` — `cas codemap status|pending|clear`; `status` now delegates to `check_codemap_freshness` (single source of truth, cas-2de1)
-  - `project_overview_cmd.rs` — `cas project-overview clear`
-  - `factory/` — factory subcommands; `factory/mod.rs` builds `FactoryConfig` and launches the daemon; `wedged.rs` — `cas factory is-wedged/status/debug` worker-liveness triage + recovery verbs (cas-4513); `parity.rs` — launched-agent skill/instruction parity conformance gate (cas-bd9d); `probe_comm.rs` + `probe_comm/adapters.rs` — end-to-end comms probe harness; `lifecycle.rs`, `queries.rs`, `daemon.rs`, `cloud_attach.rs`, `remote_attach.rs`, `worktree_ops.rs`
-  - `factory_tooling.rs` — `cas init` worktree helper templates
-  - `hook.rs`, `hook/` — `cas hook` dispatcher (called from settings.json); exec-form `args: [...]` emitters in `config/config_gen.rs` (cas-9a60)
-  - `hook_tests/` — golden-JSON hook tests
-  - `init/`, `init.rs` — `cas init` (writes CLAUDE.md, .claude/, .cas/); `init/docs_and_skill.rs` houses `CAS_DIRECTIVE_CONTENT` template + ancestor-dedup walker (cas-253e)
-  - `integrate/` — `cas integrate <platform> <action>` for Vercel/Neon/GitHub
-  - `known_repos.rs`, `open.rs` — known-repos DB and project picker
-  - `update/`, `update.rs`, `update_transaction.rs`, `update_tests/` — `cas update` rewrites managed_by:cas files atomically
-  - `mcp_cmd.rs`, `memory.rs`, `queue.rs`, `worktree.rs`, `doctor.rs`, `status.rs`, `list.rs`, `sweep.rs`, `bridge.rs`, `changelog.rs`, `claude_md.rs`, `interactive.rs`
-  - `config/`, `config_tui/`, `config_tui.rs` — config read/write + the config TUI; `config/settings.rs` holds `STOCK_WORKER_{HARNESS,MODEL,REASONING_EFFORT}` (codex/gpt-5.5/medium floors) + `{model,harness,reasoning_effort}_for_role`; `config/access/io.rs` `Config::load` (project `.cas/config.toml` only — no user merge); `config/meta/seed/` seeds
-  - `statusline/`, `statusline.rs` — `cas statusline` for shell prompts
-- `hooks/` — hook input handling
-  - `mod.rs`, `handlers.rs`, `handlers/` — `SessionStart`, `PreToolUse`, `PostToolUse`, `Stop`, `Notification` handlers
-  - `handlers/handlers_events/` — codemap freshness (git-only after cas-2de1), project-overview drift, notifications, pre-tool gates
-  - `handlers/handlers_middle/` — post-tool, session-stop, session-hygiene; `post_tool.rs` carries `is_file_within_project` (cas-9aeb ripple-check scoping)
-  - `handlers/handlers_tests/ripple_path_scope.rs` — project-boundary tests for ripple-check (cas-9aeb)
-  - `handlers/handlers_session.rs`, `handlers_state.rs`, `session_hygiene.rs` — session lifecycle + WIP triage banner
-  - `context.rs`, `scorer.rs`, `transcript.rs` — hook context assembly
-- `mcp/` — MCP server
-  - `daemon.rs`, `mod.rs`, `socket.rs` — server lifecycle, unix socket
-  - `server/` — request routing (`mod.rs`, `prompts.rs`, `resources.rs`, `runtime.rs`)
-  - `tools/core/` — every MCP tool, grouped: `agent_coordination/` (factory ops + `task_claiming` with supervisor force-transfer, cas-3ed5), `memory.rs` (auto-promote team_id from CloudConfig, cas-6d96), `rules.rs`, `search.rs`, `skills.rs`, `system.rs`, `task/` (`lifecycle/close_ops.rs` — commit-claim gate + zero-commit routing (cas-490f, cas-ee2b) + zero-diff guard (cas-9eae) + merge-state gate/`park_task_awaiting_merge`; `lifecycle/stale_close_guard.rs` — post-close stale-instruction guards (cas-b269); `lifecycle/supervisor_push.rs` — task-transition → owning-supervisor push seam (cas-062d)), `workflow/`, `knowledge.rs`, `maintenance.rs`
-  - `tools/service/`, `tools/types/` — tool plumbing; `RememberRequest.personal: Option<bool>` (cas-6d96); `service/agent_liveness.rs` — single authoritative "who is alive" for supervisors (cas-e98e); `service/orphan_recovery.rs` — task recovery when a worker vanishes mid-task (cas-2e81); `service/agent_search_system/message.rs` — `message_status_query` delivery report formatter
-  - `daemon_tests/`
-- `store/` — storage adapter on top of cas-store
-  - `mod.rs`, `layered.rs` — composed store (project + global)
-  - `notifying_*.rs` (entry/rule/skill/task) — observer wrappers
-  - `syncing.rs` + `syncing_*.rs` (entry/skill/task) — cloud-sync wrappers
-  - `share_policy.rs` — sharing rules between project/team/global scopes
-  - `markdown.rs` — markdown serialization for memories
-  - `detect.rs`, `known_repos.rs` — repo/scope detection
-  - `mock/` — in-memory test stores
-- `daemon/` — background maintenance (decay, prune, checkpoint, queue, watcher, observation, indexing)
-- `cloud/` — cloud sync (`coordinator.rs`, `syncer/` with strict `entity_matches_project` per cas-6479, `sync_queue/`, `config.rs`, `device.rs`)
-- `sync/` — skill/agent sync from `builtins/` to `.claude/` (`mod.rs`, `skills.rs`, `skills_tests/`)
-- `ui/` — TUI
-  - `factory/` — multi-pane factory TUI (the `cas` binary launches into this)
-  - `factory/boot.rs`, `factory/boot/` — startup sequencing
-  - `factory/protocol.rs` — `ClientMessage::SpawnWorkers`, `MouseScrollUp/Down`, `Input` — daemon ↔ TUI/cloud client wire schema
-  - `factory/daemon/` — daemon process lifecycle, cloud client, runtime (ws_client, gui_client, queue_and_events, teams, fork_first)
-  - `factory/app/` — `FactoryApp` state, render/ops, panels_and_modes; `sidecar_and_selection.rs` houses `ScrollAction::AltScreen` + arrow-key forwarding for alt-screen TUIs (cas-3b18 / cas-d5fa lineage); `branch_visibility.rs` — epic/worker branch visibility in panes
-  - `factory/renderer/` — buffer composition for pane drawing
-  - `factory/director/` — director pane: `events.rs` (`DirectorEvent`, incl. `WorkerStalled` activity-based stall nudge→escalate, cas-9829), `prompts.rs` (idle/ready/stall nudge text; assignee guidance uses display name per cas-dbbb), rendering
-  - `factory/buffer_backend.rs`, `factory/phoenix.rs`, `factory/notification.rs`, `factory/status_bar.rs`, `factory/input.rs`, `factory/layout.rs`, `factory/session.rs`, `factory/client.rs`, `factory/client_input.rs` (mouse-event → PTY plumbing)
-  - `components/`, `widgets/`, `markdown/`, `theme/`
-- `bridge/` — HTTP bridge server (web UI backend); `bridge/server/factory.rs` is the factory-start endpoint
-- `builtins.rs` + `builtins/` — embedded skills, agents, content
-  - `builtins/skills/` — Claude-variant SKILL.md files: cas-supervisor, cas-worker, cas-search, cas-brainstorm, cas-memory-management, cas-task-tracking, cas-code-review (5 always-on personas including `fallow.md`), cas-supervisor-checklist, cas-ideate, codemap, project-overview, fallow, session-learn, verify-before-claim, cas-nuxt-playwright (Nuxt 3/4 + Playwright E2E; replaces cas-playwright-debug)
-  - `builtins/codex/skills/` — Codex-variant mirror (full parity); adds `cas-codex-exec` (one-shot `codex exec` read-only investigation) + `cas-supervisor/references/model-selection.md` (model-routing rubric)
-  - `builtins/grok/` — Grok-variant mirror (third harness, 2026-07-09): `agents/` + `skills/` twins so a `.grok`/`~/.grok` home works with no Claude tree present
-  - `builtins/agents/` — task-verifier, learning-reviewer, rule-reviewer, duplicate-detector, session-summarizer, git-history-analyzer, issue-intelligence-analyst, code-reviewer
-  - `builtins/workflows/` — embedded Workflow scripts (`cas-code-review.js`); synced out to `.claude/workflows/` where the dev copies + tests + `merge-findings.js` + `fixtures/` live (cas-b667 Workflow migration)
-  - `BUILTIN_SKILLS` / `CODEX_BUILTIN_SKILLS` arrays drive `cas sync`
-  - `supervisor_guidance()` / `worker_guidance()` — SessionStart bundles
-- `extraction/` — memory/learning extraction from transcripts; `extract_learnings_async/sync` are the existing path session-learn auto-trigger will parallel
-- `consolidation/` — memory consolidation passes
-- `hybrid_search/` — search frontend on top of cas-search
-- `migration/` — numbered schema migrations (`migrations/m1xx–m206`); m203–m205 add `factory_session` scoping to spawn_queue/agents, m206 adds `spawn_queue.task_id`
-- `notifications/` — notification dispatch
-- `orchestration/` — worker name allocation
-- `rules/` — rule loading and application
+## cas-cli/src/ui/factory — factory TUI
+Rust TUI over an in-process PTY mux (not tmux); `cas` with no subcommand launches it.
+- `factory/daemon/runtime/` — `queue_and_events.rs` (prompt-queue drain, generation-scoped spawn cancellation), `delivery.rs` (`deliver_to_worker` → `Mux::inject`; shared by normal and urgent paths), `teams.rs`, `ws_client.rs`, `gui_client.rs`, `fork_first.rs`
+- `factory/app/` — `FactoryApp` state; `render_and_ops/epic_workers.rs` (spawn/shutdown, task pre-assign/release), `sidecar_and_selection.rs` (alt-screen scroll forwarding), `branch_visibility.rs`
+- `factory/director/` — `events.rs` (`DirectorEvent`, `WorkerStalled` detection), `prompts.rs` (assignment/idle/stall prompt text)
+- `factory/{boot,renderer,protocol,layout,input,client,client_input,status_bar,notification,session,phoenix}.rs`
+- `ui/{components,widgets,markdown,theme}/` — shared TUI primitives
+
+## cas-cli/src — other subsystems
+- `hooks/handlers/handlers_events/` — SessionStart/PreToolUse gates, codemap + project-overview freshness, `attribution.rs` (PostToolUse commit attribution, writes task anchors)
+- `hooks/handlers/handlers_middle/` — post-tool, session-stop, session hygiene/WIP banner
+- `builtins/` + `builtins.rs` — embedded skills/agents/workflows and the sync gate. `builtins/skills/` (Claude), `builtins/codex/` and `builtins/grok/` (harness mirrors), `builtins/agents/`, `builtins/workflows/` (`cas-code-review.js`). A managed skill body owns its `references/` directory for sync purposes
+- `migration/migrations/` — numbered schema migrations `m1xx`–`m207` (`m207_task_lease_history_add_reason.rs` is the current pattern: nullable column + idempotent `detect`)
+- `store/` — layered project+global store, `notifying_*`/`syncing_*` wrappers, `share_policy.rs`, `mock/`
+- `cloud/`, `sync/`, `bridge/`, `daemon/` — cloud sync, builtin→`.claude/` sync, HTTP bridge, background maintenance
+- `extraction/`, `consolidation/`, `hybrid_search/`, `rules/` — memory pipeline
 - `telemetry/`, `tracing/`, `otel.rs`, `sentry.rs`, `logging.rs` — observability
-- `worktree/` — worktree creation, salvage, cleanup
-- `harness_policy.rs` (single crate-level `env_test_lock` per cas-d25d), `agent_id.rs`, `duplicate_check.rs`, `error.rs`, `async_runtime.rs`
+- `worktree/` — worktree creation, salvage, sweep, cleanup
+- `harness_policy.rs`, `agent_id.rs`, `duplicate_check.rs`, `error.rs`, `async_runtime.rs`
 
-## crates/cas-factory (`crates/cas-factory/src/`)
-
-Factory orchestration: spawn pipeline, lease management, merge gates, per-worker spec resolution, director event detection.
-
-- `lib.rs` — public surface (`FactoryCore`, `FactoryConfig`, spec resolver re-exports)
-- `core.rs` — `FactoryCore` (worker lifecycle, lease ownership, status reporting)
-- `config.rs` — `FactoryConfig` (workers, names, supervisor/worker `cli`/`model`/`effort`, resolved specs, `stall_threshold_secs` for worker-stall detection — cas-9829)
-- `spec_resolver.rs` — `resolve_specs(workers, sources)` 6-layer cascade (built-in → user `~/.cas/config.toml` → project `.cas/config.toml` → CLI flags → `--worker-spec` JSON)
-- `tests/spec_resolver.rs` — 22 unit tests covering each cascade layer
-- `director.rs` — `DirectorEventDetector.detect_changes` with idle-vs-pending guard (cas-afb7) + heartbeat-vs-activity guard (cas-1ec7); `AgentSummary.pending_messages` + `has_recent_worker_io_activity`
-- `changes.rs`, `notify.rs`, `recording.rs` — supporting subsystems
-- `session/` — session state and cleanup
-- `tests/concurrent_factory_session_isolation.rs` — two factories on one project dir stay isolated
-
-## crates/cas-mux (`crates/cas-mux/src/`)
-
-Terminal multiplexer that owns every PTY pane in the factory TUI.
-
-- `lib.rs` — public surface (`Mux`, `MuxConfig`, `WorkerSpec`, `Effort`)
-- `mux.rs` — `Mux` and `MuxConfig`; `factory()` constructor and `factory_pane_configs()` helper for tests
-- `spec.rs` — `WorkerSpec { name, cli, model, effort }`, `Effort` enum with `as_claude_arg()` / `as_codex_config()`, `WorkerSpec::builtin_default()`
-- `pane/` — `Pane` constructors; `in_alt_screen` tracking + `update_alt_screen()` scanner with carry-buffer for partial sequences; `build_worker_config` / `build_supervisor_config` branch on `cli` to `PtyConfig::claude` vs `PtyConfig::codex`
-- `pane/tests.rs` — empty-pane scroll no-error contract (cas-3b18 characterization)
-- `input_stream.rs` — keystream/bracketed-paste classification for prompt-submit detection
-- `harness.rs`, `render.rs`, `error.rs`
-- `mux_tests/` — `factory_pane_configs` tests verifying config → CLI argv chain
-
-## docs/
-
-Planning artifacts only — product/domain content lives in `docs/PRODUCT_OVERVIEW.md` (`project-overview` skill).
-
-- `brainstorms/` — `YYYY-MM-DD-<topic>-requirements.md` from the `cas-brainstorm` skill
-- `ideation/` — survivor lists from the `cas-ideate` skill
-- `requests/` — cross-team BUG/FEATURE inbox (`README.md` documents the protocol). `BUG-*.md`/`FEATURE-*.md` are the live queue (high churn — don't rely on this line for what's open; `ls docs/requests/`). `RESPONSE-`/`SHIPPED-`/`RESOLVED-` prefixes track closed threads; resolved docs are `git mv`'d into `requests/completed/` with a resolution note; `artifacts/` holds attachments; `team-memories-filter-policy.md` is a standing policy doc
-- `guides/` — user-facing guides (`task-depth.md` — deep vs light speed-mode, cas-9d74)
-- `release-notes/` — `YYYY-MM-DD-<topic>-slack.md` postable drafts for #cas-internal (mandatory on every main merge; rubric at `docs/RELEASE_SLACK_RUBRIC.md`)
-- `reports/` — generated smoke-test outputs (`smoke-test-<date>-<harness>-<name>.{html,pdf}`, e.g. claude-jester / codex-jester)
-- `notes/` — working notes + design records: `2026-06-02-cc160-hook-surface.md` (CC hook EPIC), `2026-06-22-mid-turn-interrupt-redirect-design.md` (cas-321da), `claude-code-changelog-diary.md` + `codex-changelog-diary.md` + `grok-changelog-diary.md` (rolling harness-release → CAS-response ledgers)
-- `reviews/` — archived cas-code-review outputs (e.g. `2026-06-07-cas-073f.md`, the isolated-worker commit-leak EPIC review)
-- `requests/completed/` — archive of resolved BUG/FEATURE docs, each carrying a resolution note (fixing commit/task). Grows steadily; includes the 2026-07-02 cas-fff9 backlog-triage batch (director/liveness cluster, phantom-close, worker-stall, team-push chunking, rule-id collision, branch-base, cloud-sync, etc.)
-- `spikes/` — investigation outputs (e.g., `2026-05-01-factory-agent-teams-enrollment-spike.md`)
-- `onboarding/` — onboarding notes (`macbook-from-zero.md`, etc.)
-- Standalone planning docs at `docs/` root: `compound-engineering-roadmap.md`, `verifier-dispatch-trace.md`, `FEATURE-REQUEST-TEAM-PROJECT-MEMORIES.md`, `SCOPE-PROJECT-ID-REQUIRED.md`, `session-2026-05-15-orchestration-issues.md`
+## crates — notable internals
+- `cas-store/src/agent_store/` — agents + task leases; `ops_task_leases.rs`, lease history (`reason` column since m207)
+- `cas-store/src/prompt_queue_store.rs` — prompt queue: enqueue, delivery stages, bounded retry/abandon, per-target progress
+- `cas-store/src/{event_store,code_store,entity_store,file_change_store,layered,mock}.rs`
+- `cas-factory/src/spec_resolver.rs` — multi-layer worker/supervisor spec cascade + `apply_codex_fallback` (Codex→Claude, no reverse)
+- `cas-factory/src/probe.rs` — Codex availability probe (`codex --version` + `~/.codex/auth.json`)
+- `cas-factory/src/{core,config,director,changes,notify,recording}.rs`, `session/`
+- `cas-mux/src/mux.rs` — `Mux::inject` pane routing; `pane/mod.rs` — `Pane::inject_prompt` (the PTY write boundary), alt-screen tracking
+- `cas-mux/src/spec.rs` — `WorkerSpec { name, cli, model, effort }`, `Effort::as_claude_arg()` / `as_codex_config()`
 
 ## Cross-cutting
-
-- **Tests:** Rust convention — inline `#[cfg(test)] mod tests` per file, plus heavy `cas-cli/tests/` integration suite (45 test files): factory (`factory_server_test.rs`, `factory_latency_test.rs`, `factory_mcp_ops_test.rs`, `factory_codex_skill_guardrails.rs`, `distributed_factory_test.rs`, `multi_agent_test.rs`, `worktree_surface_test.rs` — isolated-worker commit-surface guard, cas-073f; `factory_parity_test.rs` — launched-agent skill parity; `factory_probe_comm_test.rs`; `e2e/factory_e2e/conformance.rs`), team cloud sync (`team_pull_wiring_test.rs`, `team_pull_watermark_scope_test.rs`, `team_set_slug_resolution_test.rs`, `team_memories_e2e_test.rs`, `team_sync_test.rs`, `memory_share_test.rs`, `pull_scoping_regression_test.rs`, `push_skipped_test.rs`, `team_scope_e2e_test.rs`, `team_backfill_test.rs`, `teams_fetch_test.rs`), MCP (`mcp_protocol_test.rs`, `mcp_proxy_test.rs`, `mcp_tools_test*` — 160+ tests covering close-gate composition, dep_remove typing, transfer override, memory team-promote; `mcp_tools_test/task_tools/{dependencies,double_close}.rs`), bridge (`bridge_server_test.rs`, `bridge_server_sse_test.rs`), search (`search_scoring_test.rs`, `search_frontmatter_test.rs`, `search_utf8_regression_test.rs`), code review (`code_review_e2e_test.rs`, `code_review_parity_test.rs`), hooks (`hook_schema.rs`, `hooks_test/`), proptest fuzz (`proptest_test.rs`, `proptest/`), plus `auth_integration_test.rs`, `verify_before_claim_skill_test.rs`, `verification_test.rs`, `service_tools_test.rs`, `integrate_lifecycle_test.rs`, `e2e_test.rs`, `active_team_id_integration_test.rs`, `team_default_test.rs`, `push_rehome_guard_test.rs`, `worktree_test.rs`, `blame_attribution_test.rs`, `loop_test.rs`, `component_output_test.rs`, `openclaw_bridge_test.rs`, `cli_test.rs`. PTY-based TUI tests use `crates/cas-tui-test`. Parallel-safe envronment locking via crate-level `env_test_lock` in `harness_policy.rs` (cas-d25d).
-- **Docs:** `README.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, `CAS-DEEP-DIVE.md` at repo root; CLAUDE.md cascades from `~/CLAUDE.md` → `cas-src/CLAUDE.md` (per-project ancestor-dedup walker skips middle ancestors, cas-253e).
-- **Tooling / scripts:** `scripts/worktree-boot.sh`, `scripts/provision-hetzner.sh`; release/install/bootstrap scripts live in `~/.local/bin/` (cas-update, cas-refresh, cas-login). `homebrew/cas.rb` is the formula.
-- **Config:** `.claude/settings.json` (harness hooks + permissions; exec-form `args: [...]` emitters per cas-9a60, requires CC ≥ 2.1.142), `.codex/config.toml` (Codex CLI registers cas MCP server), `.mcp.json` (MCP servers — playwright uses `${HOME}`, neon uses hosted HTTP MCP at `mcp.neon.tech/mcp`), `.cas/config.toml` (factory knobs + `[code_review] owner = "supervisor"` default), `Cargo.toml` (workspace + profiles, `panic = "unwind"` enforced).
-- **Migration:** one-shot scripts in `migration/` (Phase 2/3/7/8 logs from the cloud move). Not active build infra.
+- **Tests:** inline `#[cfg(test)] mod tests` per file, plus 50 integration files in `cas-cli/tests/` (factory, MCP tools, team cloud sync, bridge, search, code-review, hooks, proptest) with `common/` and `e2e/` helpers. Crate-level suites in `crates/*/tests/`.
+- **Test env isolation:** ONE canonical guard — `TestEnvGuard` in `cas-cli/src/lib.rs` (`temp_home`, `with_vars`, `with_optional_vars`, `set`, `remove`, `set_current_dir`), serialized on a single lock and restoring via `Drop`. Do not add a second HOME/env helper; the four that previously existed were consolidated into this one.
+- **Real-process tests:** `#[ignore]`d and run explicitly (`-- --ignored`), e.g. `crates/cas-mux/tests/{idle_pty_injection_runtime,urgent_interrupt_codex_runtime}.rs`. They serialize across binaries via the file lock in `crates/cas-mux/tests/support/real_pty_serial.rs`.
+- **Docs:** `CLAUDE.md` cascades `~/CLAUDE.md` → `cas-src/CLAUDE.md`. Release notes are mandatory on every main merge — rubric at `docs/RELEASE_SLACK_RUBRIC.md`, drafts in `docs/release-notes/`.
+- **Config:** `.claude/settings.json` (hooks + permissions, exec-form `args: [...]`), `.codex/config.toml`, `.mcp.json`, `.cas/config.toml` (factory knobs, `[code_review] owner = "supervisor"`), `~/.cas/config.toml` (user).
 
 ## Entrypoints
-
-- CLI: `cas-cli/src/main.rs` → binary `cas` (users run `cas`)
-- TUI: `cas-cli/src/ui/factory/app/mod.rs` (the `cas` binary defaults to launching the factory TUI)
-- MCP server: `cas-cli/src/mcp/daemon.rs` (started via `cas serve`, managed as a long-running daemon)
-- HTTP bridge: `cas-cli/src/bridge/server/` (web UI backend, `cas bridge serve`)
-- Hook dispatch: `cas-cli/src/cli/hook.rs` (`cas hook <event>` invoked from `.claude/settings.json`)
-- Tests: `cargo test -p cas` for cas-cli; `cargo test --workspace` for everything
-- Build: `cargo build --release` then restart any running `cas serve` (factory work depends on the daemon matching HEAD)
+- CLI: `cas-cli/src/main.rs` → binary `cas`
+- Library: `cas-cli/src/lib.rs` (crate `cas`; also hosts `TestEnvGuard`)
+- Factory TUI: `cas-cli/src/ui/factory/app/mod.rs` (bare `cas` launches this)
+- MCP server: `cas-cli/src/mcp/daemon.rs` via `cas serve` (feature `mcp-server`, default on)
+- HTTP bridge: `cas-cli/src/bridge/server/` via `cas bridge serve`
+- Hook dispatch: `cas-cli/src/cli/hook.rs` via `cas hook <event>`
+- Tests: `cargo test -p cas --lib` (fast), `cargo test --workspace --no-fail-fast` (gate), `cargo bench --bench code_indexing`
+- Build: `cargo build --release`, then restart any running `cas serve` — factory behavior depends on the daemon matching HEAD

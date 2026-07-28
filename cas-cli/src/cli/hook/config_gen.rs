@@ -536,8 +536,6 @@ pub fn configure_codex_mcp_server(project_root: &Path) -> anyhow::Result<bool> {
         std::fs::create_dir_all(&codex_dir)?;
     }
 
-    let hooks_changed = configure_codex_post_tool_use_hook(&codex_dir)?;
-
     let existing_content = if config_path.exists() {
         Some(std::fs::read_to_string(&config_path)?)
     } else {
@@ -631,6 +629,8 @@ pub fn configure_codex_mcp_server(project_root: &Path) -> anyhow::Result<bool> {
             changed = true;
         }
     }
+
+    let hooks_changed = configure_codex_post_tool_use_hook(&codex_dir)?;
 
     if changed {
         let formatted = toml::to_string_pretty(&config)?;

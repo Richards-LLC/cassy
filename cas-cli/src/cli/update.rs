@@ -370,11 +370,14 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
         match configure_codex_mcp_server(project_root) {
             Ok(true) => {
                 codex_config_updated.push("config.toml");
+                codex_config_updated.push("hooks.json");
                 if !cli.json {
                     let mut out = io::stdout();
                     let mut fmt = Formatter::stdout(&mut out, theme.clone());
                     fmt.write_raw("  ")?;
-                    fmt.success("Updated .codex/config.toml")?;
+                    fmt.success("Updated .codex/config.toml and .codex/hooks.json")?;
+                    fmt.write_raw("  ")?;
+                    fmt.warning("Review the new Codex hook with /hooks before it can run")?;
                 }
             }
             Ok(false) => {} // No changes needed

@@ -362,7 +362,7 @@ fn execute_json(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
     let steps = next_steps_needed(cwd);
 
     println!(
-        r#"{{"status":"initialized","path":"{}","agents":{},"hooks_configured":{},"claude_md_updated":{},"skill_generated":{},"builtins_synced":{},"codex_configured":{},"grok_configured":{},"factory_tooling":"{}","next_steps":{}}}"#,
+        r#"{{"status":"initialized","path":"{}","agents":{},"hooks_configured":{},"claude_md_updated":{},"skill_generated":{},"builtins_synced":{},"codex_configured":{},"codex_hooks_review_required":{},"grok_configured":{},"factory_tooling":"{}","next_steps":{}}}"#,
         cas_dir.display(),
         serde_json::json!({
             "claude": config.agents.claude,
@@ -374,6 +374,7 @@ fn execute_json(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
         skill_generated,
         builtins_count,
         codex_configured,
+        config.agents.codex,
         grok_configured,
         factory_tooling_result,
         serde_json::json!(steps),
@@ -603,6 +604,7 @@ fn confirm_and_apply(
     let claude_md_exists = cwd.join("CLAUDE.md").exists();
     let skill_exists = cwd.join(".claude/skills/cas/SKILL.md").exists();
     let codex_config_exists = cwd.join(".codex/config.toml").exists();
+    let codex_hooks_exists = cwd.join(".codex/hooks.json").exists();
     let gitignore_exists = cwd.join(".gitignore").exists();
 
     // Files to create
@@ -633,6 +635,13 @@ fn confirm_and_apply(
     if config.agents.codex {
         if !codex_config_exists {
             print_file_item(".codex/config.toml", "Codex MCP config", colors::GREEN)?;
+        }
+        if !codex_hooks_exists {
+            print_file_item(
+                ".codex/hooks.json",
+                "CAS hook (review with /hooks)",
+                colors::GREEN,
+            )?;
         }
         print_file_item(".codex/agents/", "Built-in agents", colors::GREEN)?;
         print_file_item(".codex/commands/", "Built-in commands", colors::GREEN)?;
@@ -669,7 +678,7 @@ fn confirm_and_apply(
     // Files to modify
     let has_modifications = (config.agents.claude
         && (settings_exists || mcp_exists || claude_md_exists))
-        || (config.agents.codex && codex_config_exists)
+        || (config.agents.codex && (codex_config_exists || codex_hooks_exists))
         || (config.agents.grok && mcp_exists && !config.agents.claude)
         || gitignore_exists;
     if has_modifications {
@@ -694,8 +703,17 @@ fn confirm_and_apply(
             }
         }
 
-        if config.agents.codex && codex_config_exists {
-            print_file_item(".codex/config.toml", "Add CAS server", colors::ORANGE)?;
+        if config.agents.codex {
+            if codex_config_exists {
+                print_file_item(".codex/config.toml", "Add CAS server", colors::ORANGE)?;
+            }
+            if codex_hooks_exists {
+                print_file_item(
+                    ".codex/hooks.json",
+                    "Install CAS hook (review with /hooks)",
+                    colors::ORANGE,
+                )?;
+            }
         }
 
         // Only print .mcp.json's "Modify" row once — claude's clause above
@@ -790,7 +808,7 @@ fn apply_configuration(
     if config.agents.codex {
         execute_step("Configuring Codex MCP server", animate, || {
             configure_codex_mcp_server(cwd)?;
-            Ok(".codex/config.toml".to_string())
+            Ok(".codex/config.toml + .codex/hooks.json; review with /hooks".to_string())
         })?;
 
         execute_step("Syncing Codex built-in files", animate, || {

@@ -118,7 +118,12 @@ impl TaskStore for SyncingTaskStore {
 
     fn update(&self, task: &Task) -> Result<()> {
         self.inner.update(task)?;
-        self.queue_upsert(task);
+        // The inner store may enforce transition invariants while persisting
+        // (for example, clearing a prior close-cycle branch anchor when a
+        // Closed task returns to work). Queue the canonical stored row so a
+        // stale caller-owned value cannot be synced back over that invariant.
+        let persisted = self.inner.get(&task.id)?;
+        self.queue_upsert(&persisted);
         Ok(())
     }
 

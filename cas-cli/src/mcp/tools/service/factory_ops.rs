@@ -4008,6 +4008,35 @@ effort = "high"
         assert_eq!(got, TranscriptResolution::Resolved(expected));
     }
 
+    /// Characterization for cas-fa69: worker_status resolves its live
+    /// activity/context/in-flight path through `transcript_path_fast`.
+    /// A real Codex rollout exists and is discoverable by the established
+    /// cwd-aware resolver, so that production path must return it too.
+    #[test]
+    fn worker_status_transcript_path_resolves_codex_rollout_by_cwd() {
+        let _lock = crate::hooks::test_env_lock();
+        let clone = "/home/pippenz/Petrastella/ozer/.cas/worktrees/worker-android";
+        let rel = "2026/07/21/rollout-2026-07-21T08-38-21-019f84af-3121-7950-ba14-b01db2dad6c7.jsonl";
+        let (tmp, sessions) = fake_codex_sessions_dir(&[(rel, clone)]);
+        let old = std::env::var("CODEX_HOME").ok();
+        unsafe {
+            std::env::set_var("CODEX_HOME", tmp.path());
+        }
+
+        let got = transcript_path_fast(
+            Some(clone),
+            "codex-worker-android-2f828ac6-deadbeefcafe",
+        );
+
+        unsafe {
+            match old {
+                Some(value) => std::env::set_var("CODEX_HOME", value),
+                None => std::env::remove_var("CODEX_HOME"),
+            }
+        }
+        assert_eq!(got, Some(sessions.join(rel)));
+    }
+
     #[test]
     fn resolve_codex_transcript_matches_by_rollout_uuid_in_filename() {
         let clone = "/tmp/other-worktree";

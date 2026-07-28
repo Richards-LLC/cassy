@@ -4566,8 +4566,11 @@ pub(crate) struct EpicChildBranchStatus {
 /// task-specific and remains stable when a worker later reuses the same
 /// factory branch for another epic. `parked_branch` is the authoritative
 /// branch name for diagnostics and survives reassignment. Legacy/non-parked
-/// tasks without either recorded datum are left unknown rather than deriving
-/// the assignee's live branch and attributing unrelated later work to them.
+/// tasks without either recorded datum fall back to the assignee-derived live
+/// branch. That fallback is load-bearing for workers whose harness did not
+/// record a commit-time receipt: treating missing evidence as zero unmerged
+/// commits would make the hard close gate fail open. Recorded evidence always
+/// wins, so later branch reuse cannot re-strand a task whose anchor was captured.
 ///
 /// Used by both:
 /// - `factory_epic_status` (read-only diagnostic — renders all rows)
@@ -4586,7 +4589,15 @@ pub(crate) fn collect_epic_branch_statuses(
     subtasks
         .iter()
         .map(|t| {
-            let factory_branch = t.deliverables.parked_branch.clone();
+            let factory_branch = t.deliverables.parked_branch.clone().or_else(|| {
+                if t.deliverables.factory_branch_anchor.is_none() {
+                    t.assignee
+                        .as_ref()
+                        .map(|assignee| format!("factory/{assignee}"))
+                } else {
+                    None
+                }
+            });
             let commit_ish = t
                 .deliverables
                 .factory_branch_anchor
@@ -10028,7 +10039,7 @@ mod epic_status_gate_tests {
     }
 
     #[test]
-    fn epic_close_does_not_derive_live_branch_for_legacy_child() {
+    fn epic_close_derives_live_branch_for_legacy_child_without_evidence() {
         let dir = init_epic_repo(&[("worker", 1)]);
         let legacy_child = Task {
             id: "cas-legacy".to_string(),
@@ -10041,10 +10052,15 @@ mod epic_status_gate_tests {
 
         assert_eq!(statuses.len(), 1);
         assert_eq!(
-            statuses[0].factory_branch, None,
-            "the assignee's current factory branch is not task-specific evidence"
+            statuses[0].factory_branch.as_deref(),
+            Some("factory/worker"),
+            "without a recorded receipt, the live branch is the only available \
+             merge-state evidence and must be checked rather than silently passed"
         );
-        assert_eq!(statuses[0].unmerged_count, 0);
+        assert_eq!(
+            statuses[0].unmerged_count, 1,
+            "the legacy/no-receipt fallback must expose the stranded commit"
+        );
     }
 
     /// cas-54ca: missing task-specific evidence must not turn UNKNOWN into

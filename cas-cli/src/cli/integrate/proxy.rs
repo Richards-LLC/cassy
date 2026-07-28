@@ -310,11 +310,12 @@ mod tests {
         // an empty servers map → ensure! fires BEFORE the engine is
         // installed into self.state. engine_constructed must remain
         // false so a follow-on retry hits the same code path.
+        let _env_guard = crate::hooks::test_env_lock();
         let tmp = tempfile::TempDir::new().unwrap();
         let prev_home = std::env::var_os("HOME");
         let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
-        // SAFETY: env mutation; this test is single-threaded and restores
-        // on Drop.
+        // SAFETY: test_env_lock serializes every cooperating env writer;
+        // the Restore guard restores both variables on drop.
         unsafe {
             std::env::set_var("HOME", tmp.path());
             std::env::set_var("XDG_CONFIG_HOME", tmp.path().join(".config"));

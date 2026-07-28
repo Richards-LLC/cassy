@@ -57,12 +57,7 @@ pub mod worktree;
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::path::Path;
-    use std::sync::Mutex;
     use tempfile::TempDir;
-
-    /// Serializes tests that mutate `HOME`. `std::env::set_var` is
-    /// process-global; parallel tests would otherwise race.
-    pub static HOME_MUTEX: Mutex<()> = Mutex::new(());
 
     /// Run `f` with `HOME` pointed at a fresh `TempDir`, serialized against
     /// every other HOME-mutating test in the crate. Restores the previous
@@ -70,9 +65,7 @@ pub(crate) mod test_support {
     /// tests in multiple modules so a future change to the HOME-isolation
     /// protocol lives in one place.
     pub fn with_temp_home<F: FnOnce(&Path)>(f: F) {
-        let _guard = HOME_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::hooks::test_env_lock();
         let temp = TempDir::new().unwrap();
         let prev = std::env::var_os("HOME");
 
@@ -81,7 +74,7 @@ pub(crate) mod test_support {
         struct HomeGuard(Option<std::ffi::OsString>);
         impl Drop for HomeGuard {
             fn drop(&mut self) {
-                // SAFETY: HOME_MUTEX is held by the enclosing scope (not
+                // SAFETY: test_env_lock is held by the enclosing scope (not
                 // dropped until after this guard); no concurrent writer can
                 // race with this restoration.
                 unsafe {
@@ -94,7 +87,7 @@ pub(crate) mod test_support {
         }
         let _home_guard = HomeGuard(prev);
 
-        // SAFETY: HOME_MUTEX serializes concurrent writers within this
+        // SAFETY: test_env_lock serializes concurrent writers within this
         // test binary; the HomeGuard above guarantees restoration on drop.
         unsafe {
             std::env::set_var("HOME", temp.path());

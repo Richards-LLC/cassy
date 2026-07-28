@@ -2097,36 +2097,17 @@ mod tests {
         }
         }
 
-    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    // cas-eb7f: this crate has (at least) two independent, uncoordinated
-    // locks guarding process-global env-var mutation: this file's own
-    // `ENV_MUTEX` (used by `EnvGuard`, below) and `crate::test_support::
-    // HOME_MUTEX` (used by `with_temp_home`, adopted more widely — e.g.
-    // worktree/discovery.rs, migration/mod.rs, store/known_repos.rs).
-    // Neither serializes against the other, so any test using one races
-    // under `cargo test`'s default parallelism against any test using the
-    // other whenever both mutate `HOME` — confirmed: `cargo test --no-fail-fast`
-    // intermittently failed both `set_factory_session_handles_missing_
-    // malformed_and_valid_created_at` (this file, EnvGuard) and unrelated
-    // `worktree::discovery::tests::*` (test_support::with_temp_home) when
-    // scheduled concurrently. `EnvGuard` now also holds `HOME_MUTEX` for its
-    // lifetime so it serializes against BOTH lock domains; always acquired
-    // ENV_MUTEX-then-HOME_MUTEX (never the reverse) to rule out deadlock.
+    // Process-global environment mutation must use the same crate-wide lock
+    // as HOME-changing fixtures in other modules. Independent per-module
+    // mutexes do not serialize parallel lib tests.
     struct EnvGuard {
         saved: Vec<(String, Option<String>)>,
         _lock: std::sync::MutexGuard<'static, ()>,
-        _home_lock: std::sync::MutexGuard<'static, ()>,
     }
 
     impl EnvGuard {
         fn set(vars: &[(&str, &str)]) -> Self {
-            let lock = ENV_MUTEX
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let home_lock = crate::test_support::HOME_MUTEX
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let lock = crate::hooks::test_env_lock();
             let mut saved = Vec::with_capacity(vars.len());
             for (key, value) in vars {
                 let key = (*key).to_string();
@@ -2137,17 +2118,11 @@ mod tests {
             Self {
                 saved,
                 _lock: lock,
-                _home_lock: home_lock,
             }
         }
 
         fn set_optional(vars: &[(&str, Option<&str>)]) -> Self {
-            let lock = ENV_MUTEX
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let home_lock = crate::test_support::HOME_MUTEX
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let lock = crate::hooks::test_env_lock();
             let mut saved = Vec::with_capacity(vars.len());
             for (key, value) in vars {
                 let key = (*key).to_string();
@@ -2161,7 +2136,6 @@ mod tests {
             Self {
                 saved,
                 _lock: lock,
-                _home_lock: home_lock,
             }
         }
     }
@@ -2737,13 +2711,9 @@ mod tests {
     /// (not a hand-written JSON literal) so this test can't drift from the
     /// struct's actual required-field shape as fields are added.
     ///
-    /// Uses this file's own `EnvGuard` (not `test_support::with_temp_home`)
-    /// to override `HOME` — `apply_session_metadata_focus_*` below also
-    /// mutates `HOME` via `EnvGuard`'s `ENV_MUTEX`, and that mutex does not
-    /// coordinate with `test_support::HOME_MUTEX`, so mixing the two here
-    /// races under parallel test execution (confirmed: using
-    /// `with_temp_home` intermittently failed both this test and the
-    /// `apply_session_metadata_focus_*` tests when scheduled concurrently).
+    /// Uses `EnvGuard` to override `HOME`; both it and
+    /// `test_support::with_temp_home` now share the crate-wide environment
+    /// lock, so parallel tests cannot interleave their process-global writes.
     #[test]
     fn set_factory_session_handles_missing_malformed_and_valid_created_at() {
         use crate::ui::factory::protocol::{AgentInfo, SessionMetadata};

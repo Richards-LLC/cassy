@@ -3334,6 +3334,7 @@ mod tests {
     struct HomeGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
         old_home: Option<String>,
+        old_path: Option<Option<std::ffi::OsString>>,
         _tmp: tempfile::TempDir,
     }
 
@@ -3348,8 +3349,24 @@ mod tests {
             Self {
                 _lock: lock,
                 old_home,
+                old_path: None,
                 _tmp: tmp,
             }
+        }
+
+        fn isolated_without_host_binaries() -> Self {
+            let mut guard = Self::isolated();
+            let empty_path = guard._tmp.path().join("empty-path");
+            std::fs::create_dir(&empty_path).expect("empty PATH directory");
+            guard.old_path = Some(std::env::var_os("PATH"));
+            unsafe {
+                std::env::set_var("PATH", empty_path);
+            }
+            guard
+        }
+
+        fn home(&self) -> &std::path::Path {
+            self._tmp.path()
         }
     }
 
@@ -3359,6 +3376,12 @@ mod tests {
                 match &self.old_home {
                     Some(home) => std::env::set_var("HOME", home),
                     None => std::env::remove_var("HOME"),
+                }
+                if let Some(old_path) = &self.old_path {
+                    match old_path {
+                        Some(path) => std::env::set_var("PATH", path),
+                        None => std::env::remove_var("PATH"),
+                    }
                 }
             }
         }
@@ -3526,9 +3549,11 @@ effort = "high"
         )));
     }
 
-    /// End-to-end (still deterministic — `HomeGuard::isolated()` guarantees
-    /// no real `~/.codex/auth.json`, so the fallback always fires
-    /// regardless of the test machine's actual Codex install/login state):
+    /// End-to-end and hermetic: HOME and PATH are both isolated, so neither
+    /// the host's Codex install nor its real `~/.codex/auth.json` can affect
+    /// the verdict. The two iterations also prove that an auth file in the
+    /// isolated HOME does not alter the result when the controlled PATH has
+    /// no Codex binary.
     /// a spec that resolves to Codex, with Codex unavailable, must come
     /// back rewritten to Claude via `apply_codex_fallback` — the same path
     /// `factory_spawn_workers` drives. Exercises the resolver + fallback
@@ -3537,35 +3562,50 @@ effort = "high"
     /// test while still proving the two pieces compose correctly.
     #[test]
     fn resolved_codex_spec_falls_back_to_claude_when_codex_unavailable() {
-        let _home = HomeGuard::isolated();
-        let json = build_spawn_spec_json(None, None, None).unwrap();
-        let mut spec = decoded_spawn_spec(&json);
-        assert_eq!(
-            spec.cli,
-            cas_mux::SupervisorCli::Codex,
-            "precondition: stock default must resolve to codex"
-        );
+        let home = HomeGuard::isolated_without_host_binaries();
+        for auth_present in [false, true] {
+            let auth_path = home.home().join(".codex/auth.json");
+            if auth_present {
+                std::fs::create_dir_all(auth_path.parent().unwrap()).unwrap();
+                std::fs::write(&auth_path, "{}").unwrap();
+            } else if auth_path.exists() {
+                std::fs::remove_file(&auth_path).unwrap();
+            }
 
-        let claude_default_model = default_worker_model_for_cli(cas_mux::SupervisorCli::Claude);
-        let notices = cas_factory::apply_codex_fallback(
-            std::slice::from_mut(&mut spec),
-            false,
-            Some(claude_default_model),
-        )
-        .unwrap();
+            let json = build_spawn_spec_json(None, None, None).unwrap();
+            let mut spec = decoded_spawn_spec(&json);
+            assert_eq!(
+                spec.cli,
+                cas_mux::SupervisorCli::Codex,
+                "precondition: stock default must resolve to codex"
+            );
 
-        assert_eq!(spec.cli, cas_mux::SupervisorCli::Claude);
-        assert_eq!(spec.model.as_deref(), Some(claude_default_model));
-        assert_eq!(notices.len(), 1);
-        assert!(
-            notices[0].starts_with("worker slot 1: codex unavailable ("),
-            "real spawn-path wrapper must identify the unnamed resolved slot — got: {}",
-            notices[0]
-        );
-        assert!(
-            !notices[0].contains("worker worker"),
-            "unnamed spawn specs must never repeat the role as the identifier"
-        );
+            let claude_default_model =
+                default_worker_model_for_cli(cas_mux::SupervisorCli::Claude);
+            let notices = cas_factory::apply_codex_fallback(
+                std::slice::from_mut(&mut spec),
+                false,
+                Some(claude_default_model),
+            )
+            .unwrap();
+
+            assert_eq!(
+                spec.cli,
+                cas_mux::SupervisorCli::Claude,
+                "controlled missing binary must fall back with auth_present={auth_present}"
+            );
+            assert_eq!(spec.model.as_deref(), Some(claude_default_model));
+            assert_eq!(notices.len(), 1);
+            assert!(
+                notices[0].starts_with("worker slot 1: codex unavailable ("),
+                "real spawn-path wrapper must identify the unnamed resolved slot — got: {}",
+                notices[0]
+            );
+            assert!(
+                !notices[0].contains("worker worker"),
+                "unnamed spawn specs must never repeat the role as the identifier"
+            );
+        }
     }
 
     #[test]

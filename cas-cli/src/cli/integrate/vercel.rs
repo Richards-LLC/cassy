@@ -1824,19 +1824,18 @@ mod tests {
     /// Run `f` with `HOME` and `XDG_CONFIG_HOME` redirected to a fresh
     /// tempdir so cmcp_core::config::Config::load_merged cannot pick up
     /// the developer's real `~/.config/code-mode-mcp/config.toml`. This
-    /// is a same-process env mutation and is not thread-safe across
-    /// parallel tests — but cargo test serializes per-binary by default
-    /// for tests that touch the same env var, and these are the only two
-    /// tests that flip HOME.
+    /// is a same-process env mutation, so it must use the crate-wide
+    /// environment lock shared by every test that changes `HOME`.
     #[cfg(feature = "mcp-proxy")]
     fn with_hermetic_home<F, T>(f: F) -> T
     where
         F: FnOnce() -> T,
     {
+        let _env_guard = crate::hooks::test_env_lock();
         let tmp = TempDir::new().unwrap();
         let prev_home = std::env::var_os("HOME");
         let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
-        // SAFETY: env mutation. See note above on parallelism.
+        // SAFETY: test_env_lock serializes every cooperating env writer.
         unsafe {
             std::env::set_var("HOME", tmp.path());
             std::env::set_var("XDG_CONFIG_HOME", tmp.path().join(".config"));

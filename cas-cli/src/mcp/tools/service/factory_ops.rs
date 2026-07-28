@@ -2551,21 +2551,88 @@ fn synthesized_unknown_codex_clone_path(session_id: &str) -> String {
     )
 }
 
+#[derive(Debug, Default)]
+struct CodexRolloutMetadata {
+    cwd: Option<String>,
+    originator: Option<String>,
+    source: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CodexRolloutKind {
+    InteractiveCli,
+    Exec,
+    Other,
+}
+
+impl CodexRolloutMetadata {
+    fn kind(&self) -> CodexRolloutKind {
+        // `source` is Codex's serialized SessionSource enum and is the
+        // strongest signal. `originator` covers older rollouts where source
+        // was absent and independently confirms today's cli/exec values.
+        match self.source.as_deref() {
+            Some(source) if source.eq_ignore_ascii_case("exec") => CodexRolloutKind::Exec,
+            Some(source) if source.eq_ignore_ascii_case("cli") => {
+                CodexRolloutKind::InteractiveCli
+            }
+            _ => match self.originator.as_deref() {
+                Some(originator)
+                    if originator.eq_ignore_ascii_case("codex_exec")
+                        || originator.eq_ignore_ascii_case("codex-exec") =>
+                {
+                    CodexRolloutKind::Exec
+                }
+                Some(originator)
+                    if originator.eq_ignore_ascii_case("codex-tui")
+                        || originator.eq_ignore_ascii_case("codex_cli")
+                        || originator.eq_ignore_ascii_case("codex-cli") =>
+                {
+                    CodexRolloutKind::InteractiveCli
+                }
+                _ => CodexRolloutKind::Other,
+            },
+        }
+    }
+}
+
+/// Read the first Codex JSONL line's session metadata. Returns defaults on
+/// parse/IO failure so callers can conservatively treat it as an unknown
+/// rollout rather than an exec child.
+fn codex_rollout_metadata(path: &std::path::Path) -> CodexRolloutMetadata {
+    let Ok(file) = std::fs::File::open(path) else {
+        return CodexRolloutMetadata::default();
+    };
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
+    if std::io::BufRead::read_line(&mut reader, &mut line).is_err() {
+        return CodexRolloutMetadata::default();
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+        return CodexRolloutMetadata::default();
+    };
+    // Be tolerant of missing/mismatched type — still try payload.cwd.
+    let payload = value.get("payload");
+    CodexRolloutMetadata {
+        cwd: payload
+            .and_then(|p| p.get("cwd"))
+            .and_then(|value| value.as_str())
+            .map(str::to_owned),
+        originator: payload
+            .and_then(|p| p.get("originator"))
+            .and_then(|value| value.as_str())
+            .map(str::to_owned),
+        source: payload
+            .and_then(|p| p.get("source"))
+            .and_then(|value| value.as_str())
+            .map(str::to_owned),
+    }
+}
+
 /// Read `payload.cwd` from the first JSONL line when it is a `session_meta`
 /// event. Returns `None` on any parse/IO failure — callers treat that as
 /// "this rollout does not match by cwd".
 pub(crate) fn codex_rollout_cwd(path: &std::path::Path) -> Option<String> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut reader = std::io::BufReader::new(file);
-    let mut line = String::new();
-    std::io::BufRead::read_line(&mut reader, &mut line).ok()?;
-    let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
-    // Be tolerant of missing/mismatched type — still try payload.cwd.
-    value
-        .get("payload")
-        .and_then(|p| p.get("cwd"))
-        .and_then(|c| c.as_str())
-        .map(|s| s.to_string())
+    codex_rollout_metadata(path).cwd
 }
 
 /// Scan budget for `**/rollout-*.jsonl` under the sessions root. Codex hosts
@@ -2630,38 +2697,77 @@ fn resolve_codex_transcript(
         return TranscriptResolution::Synthesized(synthesized);
     };
     let candidates = collect_codex_rollouts(dir);
-    let mut matches = Vec::new();
+    let mut id_matches = Vec::new();
+    let mut cli_matches = Vec::new();
+    let mut fallback_matches = Vec::new();
     let mut truncated = false;
     for path in candidates {
+        let metadata = codex_rollout_metadata(&path);
         let cwd_hit = clone_path
-            .map(|cwd| codex_rollout_cwd(&path).as_deref() == Some(cwd))
+            .map(|cwd| metadata.cwd.as_deref() == Some(cwd))
             .unwrap_or(false);
         let id_hit = codex_rollout_filename_matches_session(&path, session_id);
-        if !cwd_hit && !id_hit {
+        if id_hit {
+            if id_matches.len() >= MAX_TRANSCRIPT_CANDIDATES {
+                truncated = true;
+                continue;
+            }
+            id_matches.push(path);
             continue;
         }
-        if matches.len() >= MAX_TRANSCRIPT_CANDIDATES {
-            truncated = true;
-            break;
+        if !cwd_hit {
+            continue;
         }
-        matches.push(path);
+        let destination = match metadata.kind() {
+            CodexRolloutKind::InteractiveCli => &mut cli_matches,
+            CodexRolloutKind::Exec => continue,
+            CodexRolloutKind::Other => &mut fallback_matches,
+        };
+        if destination.len() >= MAX_TRANSCRIPT_CANDIDATES {
+            truncated = true;
+            continue;
+        }
+        destination.push(path);
     }
-    match matches.len() {
-        0 => TranscriptResolution::Synthesized(synthesized),
-        1 => TranscriptResolution::Resolved(matches.remove(0)),
-        _ => TranscriptResolution::Ambiguous {
-            matches,
-            synthesized,
-            truncated,
-        },
+
+    match id_matches.len() {
+        1 => return TranscriptResolution::Resolved(id_matches.remove(0)),
+        2.. => {
+            return TranscriptResolution::Ambiguous {
+                matches: id_matches,
+                synthesized,
+                truncated,
+            };
+        }
+        0 => {}
+    }
+
+    // `collect_codex_rollouts` is newest-first. Choose freshness only after
+    // excluding exec children, never across the raw cwd match set.
+    if let Some(path) = cli_matches.into_iter().next() {
+        return TranscriptResolution::Resolved(path);
+    }
+    if let Some(path) = fallback_matches.into_iter().next() {
+        return TranscriptResolution::Resolved(path);
+    }
+    TranscriptResolution::Synthesized(synthesized)
+}
+
+fn worker_status_codex_path_from_resolution(
+    resolution: TranscriptResolution,
+) -> Option<std::path::PathBuf> {
+    match resolution {
+        TranscriptResolution::Resolved(path) => Some(path),
+        TranscriptResolution::Synthesized(_) | TranscriptResolution::Ambiguous { .. } => None,
     }
 }
 
 /// Pick the concrete evidence path from a transcript resolution.
 ///
 /// This preserves `cas factory is-wedged`'s historical ambiguity behavior.
-/// `worker_status` uses a stricter Resolved-only selector below: choosing
-/// among multiple Codex cwd matches belongs to cas-479f, not cas-fa69.
+/// `worker_status` uses a stricter Resolved-only selector below. The Codex
+/// resolver now disambiguates normal cli+exec cwd collisions before either
+/// selector sees them, but exact-ID collisions can still be Ambiguous.
 pub(crate) fn transcript_path_from_resolution(
     resolution: TranscriptResolution,
 ) -> Option<std::path::PathBuf> {
@@ -2728,23 +2834,20 @@ fn worker_status_codex_transcript_path(
     )
 }
 
-/// Codex worker_status accepts only a unique real rollout. Synthesized paths
-/// are not evidence (cas-de95), and Ambiguous cwd matches remain unresolved
-/// until cas-479f defines how to distinguish the worker from codex_exec.
+/// Codex worker_status accepts only a resolved real rollout. Synthesized paths
+/// are not evidence (cas-de95), and any residual Ambiguous result remains
+/// unresolved rather than inventing an activity age.
 fn worker_status_codex_transcript_path_in(
     sessions_dir: Option<&std::path::Path>,
     clone_path: Option<&str>,
     session_id: &str,
 ) -> Option<std::path::PathBuf> {
-    match resolve_transcript(
+    worker_status_codex_path_from_resolution(resolve_transcript(
         sessions_dir,
         clone_path,
         session_id,
         cas_mux::SupervisorCli::Codex,
-    ) {
-        TranscriptResolution::Resolved(path) => Some(path),
-        TranscriptResolution::Synthesized(_) | TranscriptResolution::Ambiguous { .. } => None,
-    }
+    ))
 }
 
 /// Injectable half of [`resolve_worker_transcript_path`] for deterministic
@@ -4118,9 +4221,24 @@ effort = "high"
     fn fake_codex_sessions_dir(
         rollouts: &[(&str /* relative path under sessions */, &str /* cwd */)],
     ) -> (tempfile::TempDir, std::path::PathBuf) {
+        let rollouts = rollouts
+            .iter()
+            .map(|(rel, cwd)| (*rel, *cwd, "codex-tui", "cli"))
+            .collect::<Vec<_>>();
+        fake_codex_sessions_dir_with_metadata(&rollouts)
+    }
+
+    fn fake_codex_sessions_dir_with_metadata(
+        rollouts: &[(
+            &str, /* relative path under sessions */
+            &str, /* cwd */
+            &str, /* originator */
+            &str, /* source */
+        )],
+    ) -> (tempfile::TempDir, std::path::PathBuf) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let sessions = tmp.path().join("sessions");
-        for (rel, cwd) in rollouts {
+        for (rel, cwd, originator, source) in rollouts {
             let path = sessions.join(rel);
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).unwrap();
@@ -4131,7 +4249,8 @@ effort = "high"
                 "payload": {
                     "session_id": "019f84af-3121-7950-ba14-b01db2dad6c7",
                     "cwd": cwd,
-                    "originator": "codex-tui"
+                    "originator": originator,
+                    "source": source
                 }
             });
             std::fs::write(&path, format!("{meta}\n")).unwrap();
@@ -4220,29 +4339,176 @@ effort = "high"
 
     #[test]
     fn worker_status_transcript_path_rejects_ambiguous_codex_cwd_matches() {
+        let synthesized = "not-real".to_string();
+        assert_eq!(
+            worker_status_codex_path_from_resolution(TranscriptResolution::Ambiguous {
+                matches: vec!["worker.jsonl".into(), "exec.jsonl".into()],
+                synthesized,
+                truncated: false,
+            }),
+            None,
+            "worker_status must never invent a selection for Ambiguous resolution"
+        );
+    }
+
+    #[test]
+    fn resolve_codex_transcript_prefers_cli_rollout_over_exec_in_same_cwd() {
         let clone = "/tmp/codex-worker-with-exec";
         let worker_rel = "2026/07/28/rollout-2026-07-28T07-59-08-worker.jsonl";
         let exec_rel = "2026/07/28/rollout-2026-07-28T08-03-58-codex-exec.jsonl";
-        let (_tmp, sessions) =
-            fake_codex_sessions_dir(&[(worker_rel, clone), (exec_rel, clone)]);
-        let resolution = resolve_transcript(
-            Some(&sessions),
-            Some(clone),
-            "codex-worker-cas-session",
-            cas_mux::SupervisorCli::Codex,
-        );
-        assert!(
-            matches!(resolution, TranscriptResolution::Ambiguous { .. }),
-            "two rollouts sharing a cwd must remain Ambiguous for cas-479f"
-        );
+        let (_tmp, sessions) = fake_codex_sessions_dir_with_metadata(&[
+            (worker_rel, clone, "codex-tui", "cli"),
+            (exec_rel, clone, "codex_exec", "exec"),
+        ]);
+
         assert_eq!(
-            worker_status_codex_transcript_path_in(
+            resolve_codex_transcript(
                 Some(&sessions),
                 Some(clone),
                 "codex-worker-cas-session",
             ),
-            None,
-            "cas-fa69 must not choose among Ambiguous worker/codex_exec rollouts"
+            TranscriptResolution::Resolved(sessions.join(worker_rel))
+        );
+    }
+
+    #[test]
+    fn resolve_codex_transcript_ignores_several_exec_rollouts() {
+        let clone = "/tmp/codex-worker-with-several-execs";
+        let worker_rel = "2026/07/28/rollout-2026-07-28T07-59-08-worker.jsonl";
+        let (_tmp, sessions) = fake_codex_sessions_dir_with_metadata(&[
+            (worker_rel, clone, "codex-tui", "cli"),
+            (
+                "2026/07/28/rollout-2026-07-28T08-03-58-exec-one.jsonl",
+                clone,
+                "codex_exec",
+                "exec",
+            ),
+            (
+                "2026/07/28/rollout-2026-07-28T08-05-12-exec-two.jsonl",
+                clone,
+                "codex_exec",
+                "exec",
+            ),
+            (
+                "2026/07/28/rollout-2026-07-28T08-08-44-exec-three.jsonl",
+                clone,
+                "codex_exec",
+                "exec",
+            ),
+        ]);
+
+        assert_eq!(
+            resolve_codex_transcript(
+                Some(&sessions),
+                Some(clone),
+                "codex-worker-cas-session",
+            ),
+            TranscriptResolution::Resolved(sessions.join(worker_rel))
+        );
+    }
+
+    #[test]
+    fn worker_status_activity_does_not_latch_onto_active_exec_rollout() {
+        use std::io::Write;
+
+        let _lock = crate::hooks::test_env_lock();
+        let clone = "/tmp/codex-worker-active-exec";
+        let worker_rel = "2026/07/28/rollout-2026-07-28T07-59-08-worker.jsonl";
+        let exec_rel = "2026/07/28/rollout-2026-07-28T08-03-58-active-exec.jsonl";
+        let (tmp, sessions) = fake_codex_sessions_dir_with_metadata(&[
+            (worker_rel, clone, "codex-tui", "cli"),
+            (exec_rel, clone, "codex_exec", "exec"),
+        ]);
+        let worker = sessions.join(worker_rel);
+        let exec = sessions.join(exec_rel);
+        let worker_mtime = filetime::FileTime::from_system_time(
+            std::time::SystemTime::now() - std::time::Duration::from_secs(2),
+        );
+        filetime::set_file_mtime(&worker, worker_mtime).unwrap();
+        let mut active_exec = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&exec)
+            .unwrap();
+        writeln!(
+            active_exec,
+            r#"{{"type":"response_item","payload":{{"type":"function_call","call_id":"exec-live","name":"shell"}}}}"#
+        )
+        .unwrap();
+
+        let old = std::env::var("CODEX_HOME").ok();
+        unsafe {
+            std::env::set_var("CODEX_HOME", tmp.path());
+        }
+        let path = worker_status_transcript_path(
+            Some(clone),
+            "codex-worker-cas-session",
+            cas_mux::SupervisorCli::Codex,
+        )
+        .expect("the worker rollout must resolve despite the active exec child");
+        unsafe {
+            match old {
+                Some(value) => std::env::set_var("CODEX_HOME", value),
+                None => std::env::remove_var("CODEX_HOME"),
+            }
+        }
+        assert_eq!(path, worker, "worker_status must not latch onto codex_exec");
+
+        let events = vec![make_event(
+            cas_types::EventType::WorkerGitCommit,
+            "codex-worker-cas-session",
+            10 * 60,
+        )];
+        let (age, _) = last_worker_activity_secs_with_transcript(
+            &events,
+            "codex-worker-cas-session",
+            cas_mux::SupervisorCli::Codex,
+            Some(&path),
+        )
+        .expect("the worker rollout mtime is activity evidence");
+        assert!(age <= 5, "activity must track the live worker rollout: {age}");
+        assert!(
+            !is_worker_stalled(true, Some(age), 300, false),
+            "a worker active seconds ago must not be labelled STALLED"
+        );
+    }
+
+    #[test]
+    fn codex_rollout_kind_uses_source_then_originator_fallback() {
+        assert_eq!(
+            CodexRolloutMetadata {
+                source: Some("cli".into()),
+                originator: Some("codex-tui".into()),
+                ..Default::default()
+            }
+            .kind(),
+            CodexRolloutKind::InteractiveCli
+        );
+        assert_eq!(
+            CodexRolloutMetadata {
+                source: Some("exec".into()),
+                originator: Some("codex_exec".into()),
+                ..Default::default()
+            }
+            .kind(),
+            CodexRolloutKind::Exec
+        );
+        assert_eq!(
+            CodexRolloutMetadata {
+                originator: Some("codex_exec".into()),
+                ..Default::default()
+            }
+            .kind(),
+            CodexRolloutKind::Exec,
+            "legacy rollouts without source must still exclude codex_exec"
+        );
+        assert_eq!(
+            CodexRolloutMetadata {
+                originator: Some("codex_cli".into()),
+                ..Default::default()
+            }
+            .kind(),
+            CodexRolloutKind::InteractiveCli,
+            "legacy codex_cli originator remains a worker candidate"
         );
     }
 

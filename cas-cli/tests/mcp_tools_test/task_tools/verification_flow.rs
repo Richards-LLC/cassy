@@ -617,9 +617,12 @@ async fn test_merge_required_close_parks_awaiting_merge_and_releases_gate_cas_8d
         close_after_merge.contains("Closed task:"),
         "awaiting_merge task must become closeable after merge guard passes: {close_after_merge}"
     );
-    assert_eq!(
-        task_store.get(&id_a).expect("A exists").status,
-        TaskStatus::Closed
+    let closed = task_store.get(&id_a).expect("A exists");
+    assert_eq!(closed.status, TaskStatus::Closed);
+    assert!(
+        closed.deliverables.factory_branch_anchor.is_some(),
+        "successful close must preserve the task-specific anchor as a durable \
+         receipt for the parent epic close guard"
     );
 }
 
@@ -1476,9 +1479,10 @@ async fn test_stale_local_epic_ref_falls_back_to_origin_cas_38e2() {
 /// the tip at the first rejection) was NEVER cleared or updated once a
 /// task closed and was later reopened — so a second round of genuinely
 /// new, unmerged work would still check against the OLD (already-merged)
-/// anchor and false-Proceed. Post-fix, both `cas_task_reopen` and a
-/// successful close clear the anchor, so the reworked task's retry
-/// correctly re-evaluates from scratch.
+/// anchor and false-Proceed. `cas_task_reopen` clears the anchor before
+/// rework starts, so the reworked task's retry correctly re-evaluates from
+/// scratch; cas-eaf8 intentionally preserves it while the task stays Closed
+/// so the parent epic can use it as a task-specific merge receipt.
 #[tokio::test]
 async fn test_reopened_task_does_not_reuse_stale_anchor_cas_cf64() {
     use std::process::Command;

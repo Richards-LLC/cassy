@@ -7,6 +7,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.33.0] - 2026-07-28
+
+### Fixed
+- **A busy Codex worker is no longer reported as stalled.** `worker_status` resolved a worker's transcript through a Claude-only path, so for Codex it always came back empty — the activity clock froze at the last CAS call and in-flight suppression never engaged. A worker running shell commands continuously read as dead, and the documented response to that is to kill it. `worker_status`, `worker_activity` and `cas factory is-wedged` now share one harness-aware resolution, and a read-only `codex exec` shell-out creating a second rollout in the same directory no longer makes that resolution ambiguous. Codex workers also report a context band again.
+- **Messages to workers actually arrive.** The prompt queue could re-select the same undeliverable batch indefinitely — 513 stranded rows, the oldest four months old, re-scanned roughly nine times a second — blocking every later message behind them. Undeliverable rows now become terminal under a bounded retry, one stuck target cannot hold up delivery to a live one, and retry budgets are measured from the first real attempt so a long wait before a worker registers no longer consumes them. Delivery to an idle worker, including urgent interrupts, is verified against the worker actually starting a turn rather than against a transport acknowledgement.
+- **Restarting a session no longer discards queued work.** The queue's cleanup pass ran on the daemon's first tick with an empty roster, irreversibly abandoning pending messages for workers that were about to be respawned — most likely to fire on exactly the restart that installs a new build. It now waits for a populated roster and counts registered agents, not only attached panes.
+- **Reusing a worker name after shutdown works.** A shutdown left a permanent tombstone on the name, so any later spawn reusing it was built and silently discarded, leaving the operator with a success message and no workers. Cancellation is now scoped to the specific in-flight spawn, logged at warning level, and cleans up the worktree it created.
+- **The merge check no longer passes work it cannot see.** It keyed on a branch derived from whoever was assigned, so a branch reused across two groups of work could strand an unrelated one; keying instead on each task's own recorded commit then treated "no record" as "verified", which silently passed anything lacking a receipt. It now falls back to inspecting the live branch when no record exists, records the commit that was actually created rather than whatever HEAD points at afterwards, and invalidates that record when work is reopened.
+- **Workers start from the right branch.** An isolated worker for a newly-created group of work branched from trunk instead of that group's branch, silently producing a worktree without the code the task referenced. It now branches correctly and reports loudly when a base mismatch is detected.
+- **Skill reference docs reach downstream projects.** Only skill bodies synced; their `references/*.md` never did, leaving projects on whatever reference docs they were first initialized with. A managed skill body now owns its references directory, with local edits preserved and reported rather than overwritten.
+- **Lease history records release reasons in their own field** instead of the transfer-attribution column, with existing rows still readable.
+- **Codex commit hooks are configured.** Codex supports `PostToolUse` hooks; CAS generated them only for Claude. Hook config is now written for Codex too, surfaced for the review Codex requires rather than bypassing its trust boundary.
+- **A family of parallel-run test flakes is gone.** Four separate environment-isolation helpers across two different locks were collapsed into one guard, and real-PTY tests serialize across test binaries via a file lock.
+
 ## [2.28.5] - 2026-07-22
 
 ### Fixed

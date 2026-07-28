@@ -565,9 +565,11 @@ impl FactoryDaemon {
                                 true,
                             )));
                 if pty_delivered && !self.app.mux.pane_ready_for_injection(pane_target) {
-                    // Don't ack. Schedule a bounded, persisted retry so a
-                    // permanently unready pane cannot spin every 100ms forever.
-                    let _ = queue.record_retry(
+                    // Readiness is a precondition, not a failed delivery
+                    // attempt: the daemon has not touched the transport yet.
+                    // Keep the forensic reason without consuming the bounded
+                    // retry budget or starting its age clock.
+                    let _ = queue.record_pending_reason(
                         queued.id,
                         cas_store::PendingReason::GatedNotReady,
                         Some("pane not ready for injection"),

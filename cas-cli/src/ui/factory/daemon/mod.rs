@@ -210,6 +210,9 @@ pub struct FactoryDaemon {
     notify_rx: Option<cas_factory::DaemonNotifier>,
     /// Workers that have been shut down or crashed — their queued messages are dropped.
     dead_workers: std::collections::HashSet<String>,
+    /// In-flight spawns cancelled by a shutdown that targeted that specific
+    /// generation. Entries are consumed when the matching spawn task finishes.
+    cancelled_spawns: std::collections::HashSet<String>,
     /// Tracks last idle-like message time per worker source for dedup.
     /// Prevents idle spam when workers send repeated "standing by" / "ready" messages.
     last_idle_message_times: HashMap<String, std::time::Instant>,

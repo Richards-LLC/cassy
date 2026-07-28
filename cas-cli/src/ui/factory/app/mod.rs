@@ -87,6 +87,9 @@ pub struct WorkerSpawnResult {
     pub cwd: PathBuf,
     pub cas_root: Option<PathBuf>,
     pub worktree: Option<Worktree>,
+    /// True only when this spawn invocation created the worktree on disk.
+    /// Cancellation cleanup must not delete a pre-existing reused worktree.
+    pub worktree_created: bool,
 }
 
 impl WorkerSpawnPrep {
@@ -167,6 +170,7 @@ impl WorkerSpawnPrep {
                     cwd: wt.worktree_path,
                     cas_root: Some(wt.cas_dir),
                     worktree: Some(worktree),
+                    worktree_created: false,
                 });
             }
 
@@ -212,6 +216,7 @@ impl WorkerSpawnPrep {
                 cwd: wt.worktree_path,
                 cas_root: Some(wt.cas_dir),
                 worktree: Some(worktree),
+                worktree_created: true,
             })
         } else {
             // Non-isolated worker: cwd is wherever the daemon process is running.
@@ -229,6 +234,7 @@ impl WorkerSpawnPrep {
                 cwd,
                 cas_root: None,
                 worktree: None,
+                worktree_created: false,
             })
         }
     }

@@ -269,55 +269,13 @@ pub fn check_and_warn(args: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TestEnvGuard;
     use std::fs;
-    use std::sync::Mutex;
     use std::time::{Duration, SystemTime};
-
-    /// Serialize all tests that mutate process-wide env vars. cargo test runs
-    /// tests in parallel by default; without this lock, env writes from one
-    /// test can leak into another and mask or fabricate failures (see
-    /// `bugfix_test_env_leak`).
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    /// Guard that clears the two gate env vars on drop so a test failure can't
-    /// leave residue for the next test in the same process.
-    struct EnvGuard {
-        _guard: std::sync::MutexGuard<'static, ()>,
-    }
-    impl EnvGuard {
-        fn new() -> Self {
-            let g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-            // SAFETY: serialized via ENV_LOCK — no other test mutates these
-            // while we hold the guard.
-            unsafe {
-                std::env::remove_var("CAS_WARN_DUPLICATES");
-                std::env::remove_var("CAS_SUPPRESS_DUPLICATE_WARNING");
-            }
-            EnvGuard { _guard: g }
-        }
-        fn set(&self, k: &str, v: &str) {
-            unsafe {
-                std::env::set_var(k, v);
-            }
-        }
-        fn unset(&self, k: &str) {
-            unsafe {
-                std::env::remove_var(k);
-            }
-        }
-    }
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                std::env::remove_var("CAS_WARN_DUPLICATES");
-                std::env::remove_var("CAS_SUPPRESS_DUPLICATE_WARNING");
-            }
-        }
-    }
 
     #[test]
     fn should_run_skips_hook_subcommand() {
-        let g = EnvGuard::new();
+        let mut g = TestEnvGuard::with_optional_vars(&[("CAS_WARN_DUPLICATES", None), ("CAS_SUPPRESS_DUPLICATE_WARNING", None)]);
         g.set("CAS_WARN_DUPLICATES", "1");
         let args = vec!["cas".to_string(), "hook".to_string(), "PreToolUse".to_string()];
         assert!(!should_run(&args));
@@ -325,7 +283,7 @@ mod tests {
 
     #[test]
     fn should_run_skips_serve_subcommand() {
-        let g = EnvGuard::new();
+        let mut g = TestEnvGuard::with_optional_vars(&[("CAS_WARN_DUPLICATES", None), ("CAS_SUPPRESS_DUPLICATE_WARNING", None)]);
         g.set("CAS_WARN_DUPLICATES", "1");
         let args = vec!["cas".to_string(), "serve".to_string()];
         assert!(!should_run(&args));
@@ -333,7 +291,7 @@ mod tests {
 
     #[test]
     fn should_run_skips_factory_subcommand() {
-        let g = EnvGuard::new();
+        let mut g = TestEnvGuard::with_optional_vars(&[("CAS_WARN_DUPLICATES", None), ("CAS_SUPPRESS_DUPLICATE_WARNING", None)]);
         g.set("CAS_WARN_DUPLICATES", "1");
         let args = vec!["cas".to_string(), "factory".to_string(), "--new".to_string()];
         assert!(!should_run(&args));
@@ -341,7 +299,7 @@ mod tests {
 
     #[test]
     fn should_run_skips_bridge_subcommand() {
-        let g = EnvGuard::new();
+        let mut g = TestEnvGuard::with_optional_vars(&[("CAS_WARN_DUPLICATES", None), ("CAS_SUPPRESS_DUPLICATE_WARNING", None)]);
         g.set("CAS_WARN_DUPLICATES", "1");
         let args = vec!["cas".to_string(), "bridge".to_string(), "serve".to_string()];
         assert!(!should_run(&args));
@@ -352,7 +310,7 @@ mod tests {
         // `cas --new -w4` gets rewritten to `cas factory --new -w4` in main.rs,
         // but the check fires on raw_args before that rewrite. The gate must
         // still suppress it.
-        let g = EnvGuard::new();
+        let mut g = TestEnvGuard::with_optional_vars(&[("CAS_WARN_DUPLICATES", None), ("CAS_SUPPRESS_DUPLICATE_WARNING", None)]);
         g.set("CAS_WARN_DUPLICATES", "1");
         let args = vec!["cas".to_string(), "--new".to_string(), "-w4".to_string()];
         assert!(!should_run(&args));
@@ -360,7 +318,7 @@ mod tests {
 
     #[test]
     fn should_run_force_on_with_warn_duplicates() {
-        let g = EnvGuard::new();
+        let mut g = TestEnvGuard::with_optional_vars(&[("CAS_WARN_DUPLICATES", None), ("CAS_SUPPRESS_DUPLICATE_WARNING", None)]);
         g.set("CAS_WARN_DUPLICATES", "1");
         let args = vec!["cas".to_string(), "memory".to_string(), "list".to_string()];
         assert!(should_run(&args));
@@ -368,7 +326,7 @@ mod tests {
 
     #[test]
     fn should_run_respects_suppress_env() {
-        let g = EnvGuard::new();
+        let mut g = TestEnvGuard::with_optional_vars(&[("CAS_WARN_DUPLICATES", None), ("CAS_SUPPRESS_DUPLICATE_WARNING", None)]);
         g.set("CAS_SUPPRESS_DUPLICATE_WARNING", "1");
         let args = vec!["cas".to_string(), "memory".to_string()];
         assert!(!should_run(&args));
@@ -376,7 +334,7 @@ mod tests {
 
     #[test]
     fn env_flag_ignores_zero_and_empty() {
-        let g = EnvGuard::new();
+        let mut g = TestEnvGuard::with_optional_vars(&[("CAS_WARN_DUPLICATES", None), ("CAS_SUPPRESS_DUPLICATE_WARNING", None)]);
         g.set("CAS_WARN_DUPLICATES", "0");
         assert!(!env_flag("CAS_WARN_DUPLICATES"));
         g.set("CAS_WARN_DUPLICATES", "");
@@ -385,7 +343,7 @@ mod tests {
         assert!(!env_flag("CAS_WARN_DUPLICATES"));
         g.set("CAS_WARN_DUPLICATES", "1");
         assert!(env_flag("CAS_WARN_DUPLICATES"));
-        g.unset("CAS_WARN_DUPLICATES");
+        g.remove("CAS_WARN_DUPLICATES");
         assert!(!env_flag("CAS_WARN_DUPLICATES"));
     }
 

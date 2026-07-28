@@ -280,7 +280,7 @@ pub fn generate_cas_skill(project_root: &Path) -> anyhow::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::with_temp_home;
+    use crate::test_support::TestEnvGuard;
     use std::fs;
 
     /// The managed block must document the ToolSearch bootstrap query so that
@@ -325,7 +325,7 @@ mod tests {
     /// No ancestor has the managed block → injection proceeds.
     #[test]
     fn test_no_ancestor_block_writes_block() {
-        with_temp_home(|home| {
+        TestEnvGuard::run_with_temp_home(|home| {
             let project = home.join("project");
             fs::create_dir_all(&project).unwrap();
 
@@ -340,7 +340,7 @@ mod tests {
     /// FAILING before fix: current code writes the block regardless of ancestors.
     #[test]
     fn test_ancestor_has_block_skips_injection() {
-        with_temp_home(|home| {
+        TestEnvGuard::run_with_temp_home(|home| {
             // Parent dir inside HOME gets the managed block.
             let parent = home.join("parent");
             fs::create_dir_all(&parent).unwrap();
@@ -365,7 +365,7 @@ mod tests {
     /// The user-global ($HOME-level) CLAUDE.md always receives the block (root of chain).
     #[test]
     fn test_home_level_always_injects() {
-        with_temp_home(|home| {
+        TestEnvGuard::run_with_temp_home(|home| {
             let result = update_claude_md(home).unwrap();
             assert!(result, "expected block to be written at HOME level");
             let content = fs::read_to_string(home.join("CLAUDE.md")).unwrap();
@@ -377,7 +377,7 @@ mod tests {
     /// The new logic must skip re-injection but NOT delete the existing block.
     #[test]
     fn test_existing_project_block_preserved_when_ancestor_has_block() {
-        with_temp_home(|home| {
+        TestEnvGuard::run_with_temp_home(|home| {
             // HOME-level CLAUDE.md has the managed block.
             fs::write(home.join("CLAUDE.md"), build_cas_section()).unwrap();
 
@@ -401,7 +401,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_symlink_ancestor_no_infinite_loop() {
-        with_temp_home(|home| {
+        TestEnvGuard::run_with_temp_home(|home| {
             let real_dir = home.join("real_project");
             fs::create_dir_all(&real_dir).unwrap();
 

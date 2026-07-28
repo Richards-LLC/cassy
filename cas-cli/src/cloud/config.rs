@@ -564,11 +564,6 @@ pub(crate) fn user_level_cloud_json_path() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".cas").join("cloud.json"))
 }
 
-/// Serialises all `CAS_CLOUD_ENDPOINT` mutations in tests.
-/// Defined outside `mod tests` so `auth.rs` tests can share the same mutex.
-#[cfg(test)]
-pub(crate) static CLOUD_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 impl Default for CloudConfig {
     fn default() -> Self {
         Self {
@@ -932,13 +927,12 @@ impl CloudConfig {
 #[cfg(test)]
 mod tests {
     use crate::cloud::config::*;
+    use crate::test_support::TestEnvGuard;
     use tempfile::TempDir;
 
     #[test]
     fn test_default_config() {
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         let config = CloudConfig::default();
         assert_eq!(config.endpoint, "https://petra-stella-cloud.vercel.app");
         assert!(config.token.is_none());
@@ -947,9 +941,7 @@ mod tests {
 
     #[test]
     fn test_save_and_load() {
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("cloud.json");
 
@@ -969,9 +961,7 @@ mod tests {
 
     #[test]
     fn test_logout() {
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         let mut config = CloudConfig {
             token: Some("test_token".to_string()),
             email: Some("test@example.com".to_string()),
@@ -989,9 +979,7 @@ mod tests {
 
     #[test]
     fn test_set_and_clear_team() {
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         let mut config = CloudConfig::default();
         assert!(!config.has_team());
         assert!(config.team_id.is_none());
@@ -1010,9 +998,7 @@ mod tests {
 
     #[test]
     fn test_active_team_id_returns_none_when_no_team_set() {
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         // Ensure no user-level config leaks in from ~/.cas/cloud.json.
         unsafe {
             std::env::set_var("CAS_USER_CLOUD_JSON", "/nonexistent/path/cloud.json");
@@ -1026,9 +1012,7 @@ mod tests {
 
     #[test]
     fn test_active_team_id_returns_team_when_team_id_explicitly_set() {
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         // team_id is explicitly set via `cas cloud team set` → Step 1 returns it
         // regardless of team_auto_promote value (Step 1 precedes Step 1.5 guard).
         unsafe {
@@ -1045,9 +1029,7 @@ mod tests {
 
     #[test]
     fn test_active_team_id_returns_team_when_auto_promote_is_true() {
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         unsafe {
             std::env::set_var("CAS_USER_CLOUD_JSON", "/nonexistent/path/cloud.json");
         }
@@ -1062,9 +1044,7 @@ mod tests {
 
     #[test]
     fn test_active_team_id_suppressed_by_auto_promote_false() {
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         // The coarse kill-switch from Decision 3 of filter-policy.md —
         // team_id still set, but dual-enqueue is disabled.
         unsafe {
@@ -1083,9 +1063,7 @@ mod tests {
 
     #[test]
     fn test_active_team_id_user_default_team_fallback_requires_opt_in() {
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         // cas-f8e3: a project WITHOUT team_id AND WITHOUT team_auto_promote=Some(true)
         // is personal — user-level default_team_id must NOT apply.
         let project_cfg = CloudConfig::default(); // no team_id, team_auto_promote=None
@@ -1102,9 +1080,7 @@ mod tests {
 
     #[test]
     fn test_active_team_id_user_default_team_fallback_with_explicit_opt_in() {
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         // team_auto_promote=Some(true) explicitly opts the project in to
         // inheriting the user-level default_team_id.
         let mut project_cfg = CloudConfig::default(); // no team_id
@@ -1122,9 +1098,7 @@ mod tests {
 
     #[test]
     fn test_active_team_id_single_team_auto_pick_requires_opt_in() {
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         // cas-f8e3: a project WITHOUT team_id AND WITHOUT team_auto_promote=Some(true)
         // is personal — single-team auto-pick must NOT apply.
         let project_cfg = CloudConfig::default();
@@ -1146,9 +1120,7 @@ mod tests {
 
     #[test]
     fn test_active_team_id_single_team_auto_pick_with_explicit_opt_in() {
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         // team_auto_promote=Some(true) opts the project in to single-team auto-pick.
         let mut project_cfg = CloudConfig::default();
         project_cfg.team_auto_promote = Some(true);
@@ -1170,9 +1142,7 @@ mod tests {
 
     #[test]
     fn personal_scope_notice_fires_once_for_single_team_user() {
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         let project = TempDir::new().unwrap();
         let user = TempDir::new().unwrap();
 
@@ -1211,9 +1181,7 @@ mod tests {
 
     #[test]
     fn personal_scope_notice_rechecks_fresh_config_before_marking() {
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         let project = TempDir::new().unwrap();
         let user = TempDir::new().unwrap();
 
@@ -1257,9 +1225,7 @@ mod tests {
 
     #[test]
     fn personal_scope_notice_suppressed_for_team_linked_project() {
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         let mut project_cfg = CloudConfig::default();
         project_cfg.team_auto_promote = Some(true);
         let mut user_cfg = CloudConfig::default();
@@ -1272,9 +1238,7 @@ mod tests {
 
     #[test]
     fn personal_scope_notice_suppressed_for_user_with_no_teams() {
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         let project_cfg = CloudConfig::default();
         let user_cfg = CloudConfig::default();
         assert!(personal_scope_notice_for_configs(&project_cfg, &user_cfg).is_none());
@@ -1282,9 +1246,7 @@ mod tests {
 
     #[test]
     fn test_active_team_id_multi_team_ambiguous_returns_none() {
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         // No project-level team_id → personal regardless of user team count.
         // Even with team_auto_promote=Some(true), ambiguous (2+ teams) returns None.
         let mut project_cfg = CloudConfig::default();
@@ -1313,9 +1275,7 @@ mod tests {
 
     #[test]
     fn test_active_team_id_project_override_beats_user_default() {
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         // Project-level team_id wins over user-level default_team_id.
         let mut project_cfg = CloudConfig::default();
         project_cfg.set_team("project-team", "proj");
@@ -1332,9 +1292,7 @@ mod tests {
 
     #[test]
     fn test_active_team_id_kill_switch_beats_user_config() {
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         // team_auto_promote=Some(false) short-circuits to None even when user
         // config would otherwise supply a team.
         let mut project_cfg = CloudConfig::default();
@@ -1350,9 +1308,7 @@ mod tests {
 
     #[test]
     fn test_active_team_id_no_user_config_no_project_team() {
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         // Neither project nor user config has team info → None.
         let project_cfg = CloudConfig::default();
         assert_eq!(project_cfg.active_team_id_with_user_config(None), None);
@@ -1360,9 +1316,7 @@ mod tests {
 
     #[test]
     fn test_team_sync_timestamps() {
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         let mut config = CloudConfig::default();
 
         // Initially no timestamps
@@ -1389,9 +1343,7 @@ mod tests {
 
     #[test]
     fn test_team_memory_sync_timestamps() {
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("cloud.json");
 
@@ -1661,9 +1613,7 @@ mod tests {
 
     #[test]
     fn test_team_sync_timestamps_persist() {
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("cloud.json");
 
@@ -1786,59 +1736,21 @@ mod tests {
 
     // ── default_endpoint env-var tests ──────────────────────────────────────
     // Rust's std::env::set_var is not thread-safe; serialise ALL mutations of
-    // CAS_CLOUD_ENDPOINT through CLOUD_ENV_LOCK (defined at module level so
-    // auth.rs tests can share the same mutex).
+    // CAS_CLOUD_ENDPOINT through the crate-wide test environment guard.
     //
     // Tests that construct CloudConfig::default() (or ..Default::default())
     // also acquire the lock because default_endpoint() now reads the env var.
 
-    struct EnvGuard {
-        _guard: std::sync::MutexGuard<'static, ()>,
-    }
-    impl EnvGuard {
-        fn new() -> Self {
-            let g = super::CLOUD_ENV_LOCK
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            // SAFETY: serialized via CLOUD_ENV_LOCK — no other test mutates
-            // CAS_CLOUD_ENDPOINT while we hold the guard.
-            unsafe {
-                std::env::remove_var("CAS_CLOUD_ENDPOINT");
-            }
-            EnvGuard { _guard: g }
-        }
-        fn set(&self, k: &str, v: &str) {
-            // SAFETY: serialized via CLOUD_ENV_LOCK.
-            unsafe {
-                std::env::set_var(k, v);
-            }
-        }
-        fn unset(&self, k: &str) {
-            // SAFETY: serialized via CLOUD_ENV_LOCK.
-            unsafe {
-                std::env::remove_var(k);
-            }
-        }
-    }
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            // SAFETY: serialized via CLOUD_ENV_LOCK.
-            unsafe {
-                std::env::remove_var("CAS_CLOUD_ENDPOINT");
-            }
-        }
-    }
-
     #[test]
     fn default_endpoint_uses_env_var_when_set() {
-        let g = EnvGuard::new();
+        let mut g = TestEnvGuard::with_optional_vars(&[("CAS_CLOUD_ENDPOINT", None)]);
         g.set("CAS_CLOUD_ENDPOINT", "https://env.example.com");
         assert_eq!(default_endpoint(), "https://env.example.com");
     }
 
     #[test]
     fn default_endpoint_falls_back_when_env_empty() {
-        let g = EnvGuard::new();
+        let mut g = TestEnvGuard::with_optional_vars(&[("CAS_CLOUD_ENDPOINT", None)]);
         g.set("CAS_CLOUD_ENDPOINT", "");
         assert_eq!(
             default_endpoint(),
@@ -1849,8 +1761,8 @@ mod tests {
 
     #[test]
     fn default_endpoint_hardcoded_fallback() {
-        let g = EnvGuard::new();
-        g.unset("CAS_CLOUD_ENDPOINT");
+        let mut g = TestEnvGuard::with_optional_vars(&[("CAS_CLOUD_ENDPOINT", None)]);
+        g.remove("CAS_CLOUD_ENDPOINT");
         assert_eq!(
             default_endpoint(),
             "https://petra-stella-cloud.vercel.app",
@@ -1860,7 +1772,7 @@ mod tests {
 
     #[test]
     fn default_endpoint_rejects_http_attacker() {
-        let g = EnvGuard::new();
+        let mut g = TestEnvGuard::with_optional_vars(&[("CAS_CLOUD_ENDPOINT", None)]);
         g.set("CAS_CLOUD_ENDPOINT", "http://attacker.com");
         assert_eq!(
             default_endpoint(),
@@ -1871,7 +1783,7 @@ mod tests {
 
     #[test]
     fn default_endpoint_accepts_http_localhost() {
-        let g = EnvGuard::new();
+        let mut g = TestEnvGuard::with_optional_vars(&[("CAS_CLOUD_ENDPOINT", None)]);
         g.set("CAS_CLOUD_ENDPOINT", "http://127.0.0.1:3000");
         assert_eq!(
             default_endpoint(),
@@ -1882,7 +1794,7 @@ mod tests {
 
     #[test]
     fn default_endpoint_rejects_file_scheme() {
-        let g = EnvGuard::new();
+        let mut g = TestEnvGuard::with_optional_vars(&[("CAS_CLOUD_ENDPOINT", None)]);
         g.set("CAS_CLOUD_ENDPOINT", "file:///etc/passwd");
         assert_eq!(
             default_endpoint(),
@@ -1893,7 +1805,7 @@ mod tests {
 
     #[test]
     fn default_endpoint_trims_whitespace_to_empty() {
-        let g = EnvGuard::new();
+        let mut g = TestEnvGuard::with_optional_vars(&[("CAS_CLOUD_ENDPOINT", None)]);
         g.set("CAS_CLOUD_ENDPOINT", "   ");
         assert_eq!(
             default_endpoint(),
@@ -1907,9 +1819,7 @@ mod tests {
     #[test]
     fn test_team_info_roundtrip() {
         // TeamInfo serialises and deserialises cleanly.
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         let team = TeamInfo {
             id: "tid-abc".to_string(),
             slug: "petra-stella".to_string(),
@@ -1925,9 +1835,7 @@ mod tests {
     fn test_teams_and_default_team_id_roundtrip() {
         // CloudConfig with populated teams[] and default_team_id survives
         // save/load without data loss.
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("cloud.json");
 
@@ -1969,9 +1877,7 @@ mod tests {
         // Backwards compat: a cloud.json written before cas-6462 (no `teams`
         // or `default_team_id` keys) must deserialise without error, yielding
         // an empty Vec and None respectively.
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("cloud.json");
 
@@ -1995,9 +1901,7 @@ mod tests {
     fn test_empty_teams_not_written_to_disk() {
         // When teams is empty and default_team_id is None, neither key should
         // appear in the serialised JSON — keeping legacy cloud.json files clean.
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         let config = CloudConfig {
             token: Some("tok".to_string()),
             ..Default::default()
@@ -2140,9 +2044,7 @@ mod tests {
 
     #[test]
     fn f8e3_personal_project_not_promoted_via_user_default_team_id() {
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         // Simulates: user has `default_team_id` in ~/.cas/cloud.json but the
         // project's .cas/cloud.json has no team_id and no team_auto_promote.
         // This was the exact path that caused openclaw/penguinz to be promoted.
@@ -2160,9 +2062,7 @@ mod tests {
 
     #[test]
     fn f8e3_personal_project_not_promoted_via_single_team_auto_pick() {
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         // Simulates: user is a member of exactly 1 team (auto-pick previously
         // fired) but the project is personal.
         let project_cfg = CloudConfig::default(); // no team_id, team_auto_promote=None
@@ -2184,9 +2084,7 @@ mod tests {
 
     #[test]
     fn f8e3_explicitly_linked_project_still_team_promoted() {
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         // Sanity: a project with `team_id` set (via `cas cloud team set`) still
         // works correctly — Step 1 fires before the Step 1.5 guard.
         unsafe {
@@ -2208,9 +2106,7 @@ mod tests {
 
     #[test]
     fn f8e3_team_auto_promote_true_enables_user_level_fallback() {
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         // Opt-in path: project sets team_auto_promote=Some(true) to explicitly
         // inherit the user-level team without running `cas cloud team set`.
         let mut project_cfg = CloudConfig::default(); // no team_id
@@ -2230,9 +2126,7 @@ mod tests {
 
     #[test]
     fn f8e3_clear_team_resets_opt_in_making_project_personal() {
-        let _guard = super::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = TestEnvGuard::new();
         // `cas cloud team clear` should leave the project in a state where
         // user-level auto-pick no longer fires.
         let mut cfg = CloudConfig::default();

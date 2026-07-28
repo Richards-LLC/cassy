@@ -1036,38 +1036,9 @@ mod epic_owner_transfer_auth_tests {
 #[cfg(test)]
 mod assignment_freshness_branch_tests {
     use super::*;
+    use crate::test_support::TestEnvGuard;
     use cas_types::{Dependency, DependencyType, Task, TaskType};
     use tempfile::TempDir;
-
-    struct FactorySessionEnv {
-        prior: Option<std::ffi::OsString>,
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl FactorySessionEnv {
-        fn set(value: Option<&str>) -> Self {
-            let lock = crate::hooks::test_env_lock();
-            let prior = std::env::var_os("CAS_FACTORY_SESSION");
-            unsafe {
-                match value {
-                    Some(value) => std::env::set_var("CAS_FACTORY_SESSION", value),
-                    None => std::env::remove_var("CAS_FACTORY_SESSION"),
-                }
-            }
-            Self { prior, _lock: lock }
-        }
-    }
-
-    impl Drop for FactorySessionEnv {
-        fn drop(&mut self) {
-            unsafe {
-                match self.prior.take() {
-                    Some(value) => std::env::set_var("CAS_FACTORY_SESSION", value),
-                    None => std::env::remove_var("CAS_FACTORY_SESSION"),
-                }
-            }
-        }
-    }
 
     fn open_store() -> (TempDir, std::sync::Arc<dyn cas_store::TaskStore>) {
         let temp = TempDir::new().unwrap();
@@ -1125,7 +1096,7 @@ mod assignment_freshness_branch_tests {
 
     #[test]
     fn standalone_task_without_focus_returns_none() {
-        let _env = FactorySessionEnv::set(None);
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_SESSION", None)]);
         let (_tmp, store) = open_store();
         let task = Task::new("cas-solo".into(), "Standalone".into());
         store.add(&task).unwrap();
@@ -1140,7 +1111,10 @@ mod assignment_freshness_branch_tests {
     #[test]
     fn falls_back_to_session_focus_pin_branch() {
         let session = format!("test-focus-{}", std::process::id());
-        let _env = FactorySessionEnv::set(Some(&session));
+        let _env = TestEnvGuard::with_optional_vars(&[(
+            "CAS_FACTORY_SESSION",
+            Some(session.as_str()),
+        )]);
         let (_tmp, store) = open_store();
 
         let mut epic_a = Task::new("cas-epinf".into(), "Focused Epic".into());

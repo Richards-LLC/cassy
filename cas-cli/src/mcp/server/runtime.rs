@@ -565,61 +565,8 @@ pub async fn write_proxy_catalog_cache(
 mod tests {
     use super::resolve_mcp_serve_root;
     use crate::store::init_cas_dir;
+    use crate::test_support::TestEnvGuard;
     use tempfile::TempDir;
-
-    /// Serialize tests that mutate environment variables.
-    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// RAII guard that restores CLAUDE_PROJECT_DIR and CAS_ROOT on drop,
-    /// even if the test closure panics.
-    struct EnvGuard {
-        orig_cpd: Option<String>,
-        orig_cr: Option<String>,
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.orig_cpd {
-                    Some(v) => std::env::set_var("CLAUDE_PROJECT_DIR", v),
-                    None => std::env::remove_var("CLAUDE_PROJECT_DIR"),
-                }
-                match &self.orig_cr {
-                    Some(v) => std::env::set_var("CAS_ROOT", v),
-                    None => std::env::remove_var("CAS_ROOT"),
-                }
-            }
-        }
-    }
-
-    // Helper: save + restore CLAUDE_PROJECT_DIR and CAS_ROOT around a closure.
-    // Panic-safe: EnvGuard restores env vars via Drop even if `f` unwinds.
-    // Mutex-poisoning-safe: uses unwrap_or_else so a prior test panic does not
-    // permanently block subsequent tests.
-    fn with_env<F: FnOnce()>(claude_project_dir: Option<&str>, cas_root_override: Option<&str>, f: F) {
-        let _mutex_guard = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
-
-        let orig_cpd = std::env::var("CLAUDE_PROJECT_DIR").ok();
-        let orig_cr = std::env::var("CAS_ROOT").ok();
-
-        unsafe {
-            match claude_project_dir {
-                Some(v) => std::env::set_var("CLAUDE_PROJECT_DIR", v),
-                None => std::env::remove_var("CLAUDE_PROJECT_DIR"),
-            }
-            match cas_root_override {
-                Some(v) => std::env::set_var("CAS_ROOT", v),
-                None => std::env::remove_var("CAS_ROOT"),
-            }
-        }
-
-        // EnvGuard is declared after _mutex_guard, so it is dropped first
-        // (Rust drops locals in reverse declaration order).  Env vars are
-        // restored before the mutex is released, keeping the two concerns
-        // properly ordered.
-        let _env_guard = EnvGuard { orig_cpd, orig_cr };
-        f();
-    }
 
     /// When CLAUDE_PROJECT_DIR is set to a directory that contains a `.cas/`,
     /// resolve_mcp_serve_root must return that `.cas/` path even if the process
@@ -630,18 +577,16 @@ mod tests {
         let tmp_path = tmp.path().canonicalize().unwrap();
         init_cas_dir(&tmp_path).unwrap();
 
-        with_env(
-            Some(tmp_path.to_str().unwrap()),
-            None, // clear CAS_ROOT so it cannot shadow the result
-            || {
-                let result = resolve_mcp_serve_root()
-                    .expect("should succeed when CLAUDE_PROJECT_DIR points to initialized project");
-                assert_eq!(
-                    result,
-                    tmp_path.join(".cas"),
-                    "should resolve from CLAUDE_PROJECT_DIR, not cwd"
-                );
-            },
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CLAUDE_PROJECT_DIR", Some(tmp_path.to_str().unwrap())),
+            ("CAS_ROOT", None),
+        ]);
+        let result = resolve_mcp_serve_root()
+            .expect("should succeed when CLAUDE_PROJECT_DIR points to initialized project");
+        assert_eq!(
+            result,
+            tmp_path.join(".cas"),
+            "should resolve from CLAUDE_PROJECT_DIR, not cwd"
         );
     }
 
@@ -654,18 +599,18 @@ mod tests {
         init_cas_dir(&tmp_path).unwrap();
         let cas_root_str = tmp_path.join(".cas").to_string_lossy().into_owned();
 
-        with_env(
-            Some("/nonexistent/path/that/definitely/does/not/exist"),
-            Some(&cas_root_str), // anchor fallback to our tmp project
-            || {
-                let result = resolve_mcp_serve_root()
-                    .expect("should succeed via CAS_ROOT fallback");
-                assert_eq!(
-                    result,
-                    tmp_path.join(".cas"),
-                    "should fall back to CAS_ROOT when CLAUDE_PROJECT_DIR is invalid"
-                );
-            },
+        let _env = TestEnvGuard::with_optional_vars(&[
+            (
+                "CLAUDE_PROJECT_DIR",
+                Some("/nonexistent/path/that/definitely/does/not/exist"),
+            ),
+            ("CAS_ROOT", Some(&cas_root_str)),
+        ]);
+        let result = resolve_mcp_serve_root().expect("should succeed via CAS_ROOT fallback");
+        assert_eq!(
+            result,
+            tmp_path.join(".cas"),
+            "should fall back to CAS_ROOT when CLAUDE_PROJECT_DIR is invalid"
         );
     }
 
@@ -679,19 +624,17 @@ mod tests {
         let tmp_path = tmp.path().canonicalize().unwrap();
         // Deliberately do NOT call init_cas_dir — no .cas/ exists here.
 
-        with_env(
-            Some(tmp_path.to_str().unwrap()),
-            None, // also clear CAS_ROOT so there is no accidental fallback
-            || {
-                let err = resolve_mcp_serve_root()
-                    .expect_err("should fail: CLAUDE_PROJECT_DIR has no .cas/");
-                let msg = err.to_string();
-                assert!(
-                    msg.contains("CLAUDE_PROJECT_DIR"),
-                    "error message should mention CLAUDE_PROJECT_DIR so the user knows which \
-                     path to run `cas init` in; got: {msg}"
-                );
-            },
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CLAUDE_PROJECT_DIR", Some(tmp_path.to_str().unwrap())),
+            ("CAS_ROOT", None),
+        ]);
+        let err =
+            resolve_mcp_serve_root().expect_err("should fail: CLAUDE_PROJECT_DIR has no .cas/");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("CLAUDE_PROJECT_DIR"),
+            "error message should mention CLAUDE_PROJECT_DIR so the user knows which \
+             path to run `cas init` in; got: {msg}"
         );
     }
 
@@ -704,18 +647,15 @@ mod tests {
         init_cas_dir(&tmp_path).unwrap();
         let cas_root_str = tmp_path.join(".cas").to_string_lossy().into_owned();
 
-        with_env(
-            None,              // no CLAUDE_PROJECT_DIR
-            Some(&cas_root_str), // use CAS_ROOT so we don't depend on cwd
-            || {
-                let result = resolve_mcp_serve_root()
-                    .expect("should succeed via CAS_ROOT fallback");
-                assert_eq!(
-                    result,
-                    tmp_path.join(".cas"),
-                    "should resolve via CAS_ROOT when CLAUDE_PROJECT_DIR absent"
-                );
-            },
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CLAUDE_PROJECT_DIR", None),
+            ("CAS_ROOT", Some(&cas_root_str)),
+        ]);
+        let result = resolve_mcp_serve_root().expect("should succeed via CAS_ROOT fallback");
+        assert_eq!(
+            result,
+            tmp_path.join(".cas"),
+            "should resolve via CAS_ROOT when CLAUDE_PROJECT_DIR absent"
         );
     }
 
@@ -743,18 +683,16 @@ mod tests {
         let worktree_path = tmp_path.join(".cas/worktrees/fox");
         std::fs::create_dir_all(&worktree_path).unwrap();
 
-        with_env(
-            Some(worktree_path.to_str().unwrap()), // CLAUDE_PROJECT_DIR = worktree root
-            None, // clear CAS_ROOT so only path-based detection is in play
-            || {
-                let result = resolve_mcp_serve_root()
-                    .expect("should succeed when CLAUDE_PROJECT_DIR is a CAS worktree path");
-                assert_eq!(
-                    result,
-                    tmp_path.join(".cas"),
-                    "worktree path must resolve to PARENT .cas/, not a nested .cas/ inside the worktree"
-                );
-            },
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CLAUDE_PROJECT_DIR", Some(worktree_path.to_str().unwrap())),
+            ("CAS_ROOT", None),
+        ]);
+        let result = resolve_mcp_serve_root()
+            .expect("should succeed when CLAUDE_PROJECT_DIR is a CAS worktree path");
+        assert_eq!(
+            result,
+            tmp_path.join(".cas"),
+            "worktree path must resolve to PARENT .cas/, not a nested .cas/ inside the worktree"
         );
     }
 
@@ -772,18 +710,16 @@ mod tests {
         let nested_path = tmp_path.join(".cas/worktrees/fox/src/deep/nested");
         std::fs::create_dir_all(&nested_path).unwrap();
 
-        with_env(
-            Some(nested_path.to_str().unwrap()),
-            None,
-            || {
-                let result = resolve_mcp_serve_root()
-                    .expect("should succeed from a nested path inside a CAS worktree");
-                assert_eq!(
-                    result,
-                    tmp_path.join(".cas"),
-                    "nested worktree path must resolve to parent .cas/"
-                );
-            },
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CLAUDE_PROJECT_DIR", Some(nested_path.to_str().unwrap())),
+            ("CAS_ROOT", None),
+        ]);
+        let result = resolve_mcp_serve_root()
+            .expect("should succeed from a nested path inside a CAS worktree");
+        assert_eq!(
+            result,
+            tmp_path.join(".cas"),
+            "nested worktree path must resolve to parent .cas/"
         );
     }
 }

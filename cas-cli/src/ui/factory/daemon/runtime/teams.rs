@@ -1354,6 +1354,7 @@ esac
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TestEnvGuard;
 
     /// Point the manager at a temp directory instead of `~/.claude/teams/...`
     /// so the test doesn't collide with real factory sessions. We keep the
@@ -1503,6 +1504,7 @@ mod tests {
     /// doesn't exist, and hung forever.
     #[test]
     fn build_configs_for_mux_sets_settings_path_on_every_worker() {
+        let _env = TestEnvGuard::new();
         // Use unique session name so parallel test runs don't race.
         let uniq = format!(
             "worker-allowlist-{}-{}",
@@ -1547,6 +1549,7 @@ mod tests {
     /// falls back to the stock allowlist, recreating the hang.
     #[test]
     fn build_configs_for_mux_writes_worker_settings_files_eagerly() {
+        let _env = TestEnvGuard::new();
         let uniq = format!(
             "worker-eager-{}-{}",
             std::process::id(),
@@ -1645,6 +1648,7 @@ mod tests {
 
     #[test]
     fn build_configs_for_mux_sets_supervisor_settings_path() {
+        let _env = TestEnvGuard::new();
         let uniq = format!(
             "routing-supervisor-{}-{}",
             std::process::id(),
@@ -1688,6 +1692,7 @@ mod tests {
     /// deadlock recurs.
     #[test]
     fn build_configs_for_mux_writes_settings_file_eagerly() {
+        let _env = TestEnvGuard::new();
         // Use a unique session name so parallel test runs don't race each
         // other on the same path in $HOME/.claude/teams/. The test cleans
         // up after itself at the end.

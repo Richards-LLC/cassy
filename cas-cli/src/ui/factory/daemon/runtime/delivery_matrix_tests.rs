@@ -532,17 +532,17 @@ mod supervisor_claude_delivery {
     }
 
     /// Run `f` with a real `TeamsManager` under an **isolated, serialized** temp
-    /// `HOME` (crate `HOME_MUTEX`, so it never races the other HOME-mutating lib
-    /// tests). When `create_inboxes` is true the inbox dir is created (a
-    /// successful `write_to_inbox` needs it to exist); leaving it false drives the
-    /// inbox-write-failure path deterministically (missing parent dir). `f`
-    /// receives the manager, the resolved inboxes dir, and the session name.
+    /// `HOME` (the crate-wide environment lock prevents races with other
+    /// HOME-mutating lib tests). When `create_inboxes` is true the inbox dir is
+    /// created (a successful `write_to_inbox` needs it to exist); leaving it false
+    /// drives the inbox-write-failure path deterministically (missing parent dir).
+    /// `f` receives the manager, the resolved inboxes dir, and the session name.
     fn with_team_session(
         label: &str,
         create_inboxes: bool,
         f: impl FnOnce(&TeamsManager, &Path, &str),
     ) {
-        crate::test_support::with_temp_home(|home| {
+        crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
             let session = format!("cas6257-{label}");
             // Constructed AFTER HOME is set so its inbox dir resolves under the
             // temp home (TeamsManager::new reads dirs::home_dir()).

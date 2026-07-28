@@ -255,33 +255,7 @@ mod tests {
         }
     }
 
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        // Use the shared crate-level env lock so we don't race with sibling
-        // test modules that also mutate CAS_AGENT_ROLE / CAS_FACTORY_MODE.
-        crate::hooks::test_env_lock()
-    }
-
-    struct EnvRoleGuard(Option<String>);
-    impl Drop for EnvRoleGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.0 {
-                    Some(v) => std::env::set_var("CAS_AGENT_ROLE", v),
-                    None => std::env::remove_var("CAS_AGENT_ROLE"),
-                }
-            }
-        }
-    }
-    fn set_env_role(role: Option<&str>) -> EnvRoleGuard {
-        let prev = std::env::var("CAS_AGENT_ROLE").ok();
-        unsafe {
-            match role {
-                Some(v) => std::env::set_var("CAS_AGENT_ROLE", v),
-                None => std::env::remove_var("CAS_AGENT_ROLE"),
-            }
-        }
-        EnvRoleGuard(prev)
-    }
+    use crate::test_support::TestEnvGuard;
 
     #[test]
     fn is_supervisor_reads_field() {
@@ -311,8 +285,7 @@ mod tests {
         // Empty/whitespace-only values were never valid roles — neither on the
         // field nor in the env. Needs env_lock because the blank-field path
         // falls through to env.
-        let _g = env_lock();
-        let _role = set_env_role(None);
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_AGENT_ROLE", None)]);
         assert!(!is_factory_agent(&input_with_role(Some(""))));
         assert!(!is_factory_agent(&input_with_role(Some("   "))));
         assert!(!is_factory_agent(&input_with_role(Some("\t"))));
@@ -322,16 +295,14 @@ mod tests {
     fn empty_field_falls_through_to_env() {
         // Regression guard for the P1 correctness fix in cas-18fe review:
         // Some("") must not suppress the env fallback.
-        let _g = env_lock();
-        let _role = set_env_role(Some("supervisor"));
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_AGENT_ROLE", Some("supervisor"))]);
         assert!(is_supervisor(&input_with_role(Some(""))));
         assert!(is_supervisor(&input_with_role(Some("  "))));
     }
 
     #[test]
     fn field_wins_over_env() {
-        let _g = env_lock();
-        let _role = set_env_role(Some("worker"));
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_AGENT_ROLE", Some("worker"))]);
         assert!(is_supervisor(&input_with_role(Some("supervisor"))));
         assert!(!is_worker(&input_with_role(Some("supervisor"))));
     }
@@ -339,8 +310,7 @@ mod tests {
     #[test]
     fn env_fallback_when_field_absent() {
         // agent_role: None → read CAS_AGENT_ROLE from env.
-        let _g = env_lock();
-        let _role = set_env_role(Some("worker"));
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_AGENT_ROLE", Some("worker"))]);
         assert!(is_worker(&input_with_role(None)));
         assert!(!is_supervisor(&input_with_role(None)));
         assert!(is_factory_agent(&input_with_role(None)));
@@ -348,15 +318,13 @@ mod tests {
 
     #[test]
     fn env_empty_is_not_factory_agent() {
-        let _g = env_lock();
-        let _role = set_env_role(Some(""));
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_AGENT_ROLE", Some(""))]);
         assert!(!is_factory_agent(&input_with_role(None)));
     }
 
     #[test]
     fn env_absent_is_solo_user() {
-        let _g = env_lock();
-        let _role = set_env_role(None);
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_AGENT_ROLE", None)]);
         let input = input_with_role(None);
         assert!(!is_supervisor(&input));
         assert!(!is_worker(&input));
@@ -399,54 +367,9 @@ mod tests {
     // cas-8aaf: MCP alias helpers
     // ----------------------------------------------------------------------
 
-    struct EnvWorkerCliGuard(Option<String>);
-    impl Drop for EnvWorkerCliGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.0 {
-                    Some(v) => std::env::set_var("CAS_FACTORY_WORKER_CLI", v),
-                    None => std::env::remove_var("CAS_FACTORY_WORKER_CLI"),
-                }
-            }
-        }
-    }
-    fn set_worker_cli(cli: Option<&str>) -> EnvWorkerCliGuard {
-        let prev = std::env::var("CAS_FACTORY_WORKER_CLI").ok();
-        unsafe {
-            match cli {
-                Some(v) => std::env::set_var("CAS_FACTORY_WORKER_CLI", v),
-                None => std::env::remove_var("CAS_FACTORY_WORKER_CLI"),
-            }
-        }
-        EnvWorkerCliGuard(prev)
-    }
-
-    struct EnvSupervisorCliGuard(Option<String>);
-    impl Drop for EnvSupervisorCliGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.0 {
-                    Some(v) => std::env::set_var("CAS_FACTORY_SUPERVISOR_CLI", v),
-                    None => std::env::remove_var("CAS_FACTORY_SUPERVISOR_CLI"),
-                }
-            }
-        }
-    }
-    fn set_supervisor_cli(cli: Option<&str>) -> EnvSupervisorCliGuard {
-        let prev = std::env::var("CAS_FACTORY_SUPERVISOR_CLI").ok();
-        unsafe {
-            match cli {
-                Some(v) => std::env::set_var("CAS_FACTORY_SUPERVISOR_CLI", v),
-                None => std::env::remove_var("CAS_FACTORY_SUPERVISOR_CLI"),
-            }
-        }
-        EnvSupervisorCliGuard(prev)
-    }
-
     #[test]
     fn worker_coordination_tool_defaults_to_cas_when_unset() {
-        let _g = env_lock();
-        let _c = set_worker_cli(None);
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_WORKER_CLI", None)]);
         assert_eq!(
             super::worker_coordination_tool(),
             "mcp__cas__coordination",
@@ -456,8 +379,7 @@ mod tests {
 
     #[test]
     fn worker_coordination_tool_returns_cas_for_claude_harness() {
-        let _g = env_lock();
-        let _c = set_worker_cli(Some("claude"));
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_WORKER_CLI", Some("claude"))]);
         assert_eq!(
             super::worker_coordination_tool(),
             "mcp__cas__coordination",
@@ -467,8 +389,7 @@ mod tests {
 
     #[test]
     fn worker_coordination_tool_returns_cs_for_codex_harness() {
-        let _g = env_lock();
-        let _c = set_worker_cli(Some("codex"));
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_WORKER_CLI", Some("codex"))]);
         assert_eq!(
             super::worker_coordination_tool(),
             "mcp__cs__coordination",
@@ -482,8 +403,7 @@ mod tests {
     /// namespaces tools as `cas__<tool>`.
     #[test]
     fn worker_coordination_tool_returns_cas_double_underscore_for_grok_harness() {
-        let _g = env_lock();
-        let _c = set_worker_cli(Some("grok"));
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_WORKER_CLI", Some("grok"))]);
         assert_eq!(
             super::worker_coordination_tool(),
             "cas__coordination",
@@ -493,12 +413,7 @@ mod tests {
 
     #[test]
     fn supervisor_verification_tool_returns_cas_when_supervisor_unset() {
-        let _g = env_lock();
-        // Explicitly clear CAS_FACTORY_SUPERVISOR_CLI so the test is isolated
-        // from any harness env the test runner inherits (e.g. a Codex supervisor
-        // factory session sets CAS_FACTORY_SUPERVISOR_CLI=codex which would make
-        // supervisor_harness_from_env() return Codex and flip the assertion).
-        let _s = set_supervisor_cli(None);
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_SUPERVISOR_CLI", None)]);
         assert_eq!(
             super::supervisor_verification_tool(),
             "mcp__cas__verification",
@@ -508,8 +423,7 @@ mod tests {
 
     #[test]
     fn supervisor_verification_tool_returns_cs_for_codex_supervisor() {
-        let _g = env_lock();
-        let _s = set_supervisor_cli(Some("codex"));
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_SUPERVISOR_CLI", Some("codex"))]);
         assert_eq!(
             super::supervisor_verification_tool(),
             "mcp__cs__verification",
@@ -521,8 +435,7 @@ mod tests {
     /// worker_coordination_tool_returns_cas_double_underscore_for_grok_harness.
     #[test]
     fn supervisor_verification_tool_returns_cas_double_underscore_for_grok_supervisor() {
-        let _g = env_lock();
-        let _s = set_supervisor_cli(Some("grok"));
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_SUPERVISOR_CLI", Some("grok"))]);
         assert_eq!(
             super::supervisor_verification_tool(),
             "cas__verification",
@@ -532,8 +445,7 @@ mod tests {
 
     #[test]
     fn supervisor_verification_tool_returns_cas_for_claude_supervisor() {
-        let _g = env_lock();
-        let _s = set_supervisor_cli(Some("claude"));
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_SUPERVISOR_CLI", Some("claude"))]);
         assert_eq!(
             super::supervisor_verification_tool(),
             "mcp__cas__verification",
@@ -547,10 +459,11 @@ mod tests {
 
     #[test]
     fn own_tool_prefix_defaults_to_claude_when_no_role_set() {
-        let _g = env_lock();
-        let _r = set_env_role(None);
-        let _w = set_worker_cli(None);
-        let _s = set_supervisor_cli(None);
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", None),
+            ("CAS_FACTORY_WORKER_CLI", None),
+            ("CAS_FACTORY_SUPERVISOR_CLI", None),
+        ]);
         assert_eq!(super::own_tool_prefix(), "mcp__cas__");
     }
 
@@ -559,10 +472,11 @@ mod tests {
         // A worker process's "own" harness comes from CAS_FACTORY_WORKER_CLI
         // (self-tagged by its own PtyConfig constructor), NOT from
         // CAS_FACTORY_SUPERVISOR_CLI (which describes a different agent).
-        let _g = env_lock();
-        let _r = set_env_role(Some("worker"));
-        let _w = set_worker_cli(Some("grok"));
-        let _s = set_supervisor_cli(Some("claude"));
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_FACTORY_WORKER_CLI", Some("grok")),
+            ("CAS_FACTORY_SUPERVISOR_CLI", Some("claude")),
+        ]);
         assert_eq!(
             super::own_tool_prefix(),
             "cas__",
@@ -575,10 +489,11 @@ mod tests {
         // A supervisor process's CAS_FACTORY_WORKER_CLI describes its WORKERS'
         // harness (a different semantic use of the same var — see cas-921f),
         // so "own" must come from CAS_FACTORY_SUPERVISOR_CLI instead.
-        let _g = env_lock();
-        let _r = set_env_role(Some("supervisor"));
-        let _w = set_worker_cli(Some("codex"));
-        let _s = set_supervisor_cli(Some("grok"));
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("supervisor")),
+            ("CAS_FACTORY_WORKER_CLI", Some("codex")),
+            ("CAS_FACTORY_SUPERVISOR_CLI", Some("grok")),
+        ]);
         assert_eq!(
             super::own_tool_prefix(),
             "cas__",
@@ -588,33 +503,35 @@ mod tests {
 
     #[test]
     fn own_tool_prefix_all_three_harnesses_as_worker() {
-        let _g = env_lock();
-        let _r = set_env_role(Some("worker"));
-        let _s = set_supervisor_cli(None);
+        let mut env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_FACTORY_SUPERVISOR_CLI", None),
+        ]);
 
-        let _w = set_worker_cli(Some("claude"));
+        env.set("CAS_FACTORY_WORKER_CLI", "claude");
         assert_eq!(super::own_tool_prefix(), "mcp__cas__");
 
-        let _w = set_worker_cli(Some("codex"));
+        env.set("CAS_FACTORY_WORKER_CLI", "codex");
         assert_eq!(super::own_tool_prefix(), "mcp__cs__");
 
-        let _w = set_worker_cli(Some("grok"));
+        env.set("CAS_FACTORY_WORKER_CLI", "grok");
         assert_eq!(super::own_tool_prefix(), "cas__");
     }
 
     #[test]
     fn own_tool_prefix_all_three_harnesses_as_supervisor() {
-        let _g = env_lock();
-        let _r = set_env_role(Some("supervisor"));
-        let _w = set_worker_cli(None);
+        let mut env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("supervisor")),
+            ("CAS_FACTORY_WORKER_CLI", None),
+        ]);
 
-        let _s = set_supervisor_cli(Some("claude"));
+        env.set("CAS_FACTORY_SUPERVISOR_CLI", "claude");
         assert_eq!(super::own_tool_prefix(), "mcp__cas__");
 
-        let _s = set_supervisor_cli(Some("codex"));
+        env.set("CAS_FACTORY_SUPERVISOR_CLI", "codex");
         assert_eq!(super::own_tool_prefix(), "mcp__cs__");
 
-        let _s = set_supervisor_cli(Some("grok"));
+        env.set("CAS_FACTORY_SUPERVISOR_CLI", "grok");
         assert_eq!(super::own_tool_prefix(), "cas__");
     }
 }

@@ -129,7 +129,7 @@ fn scan_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::with_temp_home;
+    use crate::test_support::TestEnvGuard;
     use tempfile::TempDir;
 
     // `$HOME` is process-global, so every test here goes through the
@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn no_symlinks_returns_empty() {
-        with_temp_home(|home| {
+        TestEnvGuard::run_with_temp_home(|home| {
             let worktree = TempDir::new().unwrap();
             std::fs::write(home.join(".gitconfig"), "[user]\n").unwrap();
 
@@ -151,7 +151,7 @@ mod tests {
 
     #[test]
     fn direct_home_symlink_into_worktree_is_detected() {
-        with_temp_home(|home| {
+        TestEnvGuard::run_with_temp_home(|home| {
             let worktree = TempDir::new().unwrap();
             let real_file = worktree.path().join("gitconfig");
             std::fs::write(&real_file, "[user]\nname = test\n").unwrap();
@@ -168,7 +168,7 @@ mod tests {
 
     #[test]
     fn nested_config_symlink_into_worktree_is_detected() {
-        with_temp_home(|home| {
+        TestEnvGuard::run_with_temp_home(|home| {
             let worktree = TempDir::new().unwrap();
             let real_dir = worktree.path().join("systemd-units");
             std::fs::create_dir_all(&real_dir).unwrap();
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn symlink_pointing_elsewhere_is_not_flagged() {
-        with_temp_home(|home| {
+        TestEnvGuard::run_with_temp_home(|home| {
             let worktree = TempDir::new().unwrap();
             let elsewhere = TempDir::new().unwrap();
             let real_file = elsewhere.path().join("unrelated.txt");
@@ -206,7 +206,7 @@ mod tests {
 
     #[test]
     fn dangling_symlink_is_not_flagged() {
-        with_temp_home(|home| {
+        TestEnvGuard::run_with_temp_home(|home| {
             let worktree = TempDir::new().unwrap();
 
             let link = home.join(".dangling");

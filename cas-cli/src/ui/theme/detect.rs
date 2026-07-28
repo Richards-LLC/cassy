@@ -380,26 +380,21 @@ mod tests {
     // detect_background_theme tests (require env mutation, serialized)
     // ========================================================================
 
-    /// Mutex to serialize tests that mutate COLORFGBG env var.
-    static ENV_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
-        std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
-
     #[test]
     fn test_detect_defaults_to_dark() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard =
+            crate::test_support::TestEnvGuard::with_optional_vars(&[("COLORFGBG", None)]);
         // In test environment (non-TTY, no COLORFGBG), should default to dark
-        unsafe { std::env::remove_var("COLORFGBG") };
         let mode = detect_background_theme();
         assert_eq!(mode, ThemeMode::Dark);
     }
 
     #[test]
     fn test_detect_uses_colorfgbg_when_available() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe { std::env::set_var("COLORFGBG", "0;7") };
+        let _guard =
+            crate::test_support::TestEnvGuard::with_vars(&[("COLORFGBG", "0;7")]);
         let mode = detect_background_theme();
         // In non-TTY test, OSC 11 won't work, so COLORFGBG should be used
         assert_eq!(mode, ThemeMode::Light);
-        unsafe { std::env::remove_var("COLORFGBG") };
     }
 }

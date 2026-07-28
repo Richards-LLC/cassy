@@ -1276,46 +1276,7 @@ fn auto_route_send_message(
 mod worker_commit_guard_tests {
     use super::*;
 
-    // ── Env-var locking for tests that set CAS_* vars ─────────────────────
-    // Delegates to the shared hooks-level lock so this module's env mutations
-    // don't race with tests in sibling modules (e.g. handlers_tests).
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        crate::hooks::test_env_lock()
-    }
-
-    struct EnvGuard {
-        vars: Vec<(String, Option<String>)>,
-    }
-    impl EnvGuard {
-        fn set(vars: &[(&str, Option<&str>)]) -> Self {
-            let saved: Vec<_> = vars
-                .iter()
-                .map(|(k, v)| {
-                    let prev = std::env::var(k).ok();
-                    unsafe {
-                        match v {
-                            Some(val) => std::env::set_var(k, val),
-                            None => std::env::remove_var(k),
-                        }
-                    }
-                    (k.to_string(), prev)
-                })
-                .collect();
-            EnvGuard { vars: saved }
-        }
-    }
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            for (k, v) in &self.vars {
-                unsafe {
-                    match v {
-                        Some(val) => std::env::set_var(k, val),
-                        None => std::env::remove_var(k),
-                    }
-                }
-            }
-        }
-    }
+    use crate::test_support::TestEnvGuard;
 
     // Helper: create a temp git repo with an initial commit on `main`.
     fn make_git_repo() -> tempfile::TempDir {
@@ -1445,10 +1406,9 @@ mod worker_commit_guard_tests {
         // Regression test for cas-ba04: a factory worker with no CAS_CLONE_PATH
         // (standalone task, no isolated worktree) must be blocked from committing
         // to protected branches just as isolated workers are.
-        let _lock = env_lock();
         let tmp = make_git_repo(); // creates a repo on `main`
         let p = tmp.path().to_string_lossy().to_string();
-        let _env = EnvGuard::set(&[("CAS_CLONE_PATH", None)]);
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_CLONE_PATH", None)]);
 
         let result = check_worker_git_commit_scope(&p);
         assert!(result.is_some(), "non-isolated worker on main must be denied (cas-ba04)");
@@ -1465,7 +1425,6 @@ mod worker_commit_guard_tests {
     fn non_isolated_worker_on_safe_branch_is_allowed() {
         // Non-isolated worker on a non-protected branch (e.g. their own feature
         // branch) must still be allowed to commit.
-        let _lock = env_lock();
         let tmp = make_git_repo();
         let p = tmp.path();
         std::process::Command::new("git")
@@ -1474,7 +1433,7 @@ mod worker_commit_guard_tests {
             .output()
             .unwrap();
         let ps = p.to_string_lossy().to_string();
-        let _env = EnvGuard::set(&[("CAS_CLONE_PATH", None)]);
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_CLONE_PATH", None)]);
 
         let result = check_worker_git_commit_scope(&ps);
         assert!(
@@ -1485,11 +1444,10 @@ mod worker_commit_guard_tests {
 
     #[test]
     fn cwd_outside_worktree_denied() {
-        let _lock = env_lock();
         let tmp = tempfile::tempdir().unwrap();
         let clone_path = tmp.path().join("worktree").to_string_lossy().to_string();
         let other_dir = tmp.path().join("other").to_string_lossy().to_string();
-        let _env = EnvGuard::set(&[("CAS_CLONE_PATH", Some(&clone_path))]);
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_CLONE_PATH", Some(&clone_path))]);
 
         let result = check_worker_git_commit_scope(&other_dir);
         assert!(result.is_some(), "expected deny when cwd outside worktree");
@@ -1501,10 +1459,9 @@ mod worker_commit_guard_tests {
     #[test]
     fn cwd_inside_worktree_on_main_branch_denied() {
         // main is a protected branch — must still be blocked after cas-7e7b.
-        let _lock = env_lock();
         let tmp = make_git_repo(); // on main
         let p = tmp.path().to_string_lossy().to_string();
-        let _env = EnvGuard::set(&[("CAS_CLONE_PATH", Some(&p))]);
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_CLONE_PATH", Some(&p))]);
 
         let result = check_worker_git_commit_scope(&p);
         assert!(result.is_some(), "expected deny on protected branch 'main'");
@@ -1518,7 +1475,6 @@ mod worker_commit_guard_tests {
     #[test]
     fn cwd_inside_worktree_on_epic_branch_allowed() {
         // cas-7e7b: epic/* branches are no longer blocked (denylist semantics)
-        let _lock = env_lock();
         let tmp = make_git_repo();
         let p = tmp.path();
 
@@ -1529,7 +1485,7 @@ mod worker_commit_guard_tests {
             .unwrap();
 
         let ps = p.to_string_lossy().to_string();
-        let _env = EnvGuard::set(&[("CAS_CLONE_PATH", Some(&ps))]);
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_CLONE_PATH", Some(&ps))]);
 
         let result = check_worker_git_commit_scope(&ps);
         assert!(result.is_none(), "epic/* branch must be allowed now, got: {result:?}");
@@ -1538,7 +1494,6 @@ mod worker_commit_guard_tests {
     #[test]
     fn cwd_inside_worktree_on_feature_branch_allowed() {
         // cas-7e7b: feature/* branches are allowed (denylist semantics)
-        let _lock = env_lock();
         let tmp = make_git_repo();
         let p = tmp.path();
 
@@ -1549,7 +1504,7 @@ mod worker_commit_guard_tests {
             .unwrap();
 
         let ps = p.to_string_lossy().to_string();
-        let _env = EnvGuard::set(&[("CAS_CLONE_PATH", Some(&ps))]);
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_CLONE_PATH", Some(&ps))]);
 
         let result = check_worker_git_commit_scope(&ps);
         assert!(result.is_none(), "feature/* branch must be allowed, got: {result:?}");
@@ -1557,7 +1512,6 @@ mod worker_commit_guard_tests {
 
     #[test]
     fn cwd_inside_worktree_detached_head_denied() {
-        let _lock = env_lock();
         let tmp = make_git_repo();
         let p = tmp.path();
 
@@ -1575,7 +1529,7 @@ mod worker_commit_guard_tests {
             .unwrap();
 
         let ps = p.to_string_lossy().to_string();
-        let _env = EnvGuard::set(&[("CAS_CLONE_PATH", Some(&ps))]);
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_CLONE_PATH", Some(&ps))]);
 
         let result = check_worker_git_commit_scope(&ps);
         assert!(result.is_some(), "detached HEAD must be denied, got: {result:?}");
@@ -1586,7 +1540,6 @@ mod worker_commit_guard_tests {
 
     #[test]
     fn cwd_inside_worktree_on_worker_branch_allowed() {
-        let _lock = env_lock();
         let tmp = make_git_repo();
         let p = tmp.path();
 
@@ -1598,7 +1551,7 @@ mod worker_commit_guard_tests {
             .unwrap();
 
         let ps = p.to_string_lossy().to_string();
-        let _env = EnvGuard::set(&[("CAS_CLONE_PATH", Some(&ps))]);
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_CLONE_PATH", Some(&ps))]);
 
         let result = check_worker_git_commit_scope(&ps);
         assert!(result.is_none(), "expected allow on factory/worker1 branch, got: {result:?}");
@@ -1608,10 +1561,9 @@ mod worker_commit_guard_tests {
 
     #[test]
     fn pre_tool_denies_git_commit_on_protected_branch() {
-        let _lock = env_lock();
         let tmp = make_git_repo(); // on main
         let p = tmp.path().to_string_lossy().to_string();
-        let _env = EnvGuard::set(&[
+        let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", Some("worker")),
             ("CAS_FACTORY_MODE", Some("1")),
             ("CAS_CLONE_PATH", Some(&p)),
@@ -1637,7 +1589,6 @@ mod worker_commit_guard_tests {
         // cas-7e7b: epic/* branches are now allowed (denylist semantics).
         // Previously these were denied; the over-broad allowlist caused worker
         // stalls in gabber-studio (true-wolf-20, 2026-06-26).
-        let _lock = env_lock();
         let tmp = make_git_repo();
         let p = tmp.path();
 
@@ -1648,7 +1599,7 @@ mod worker_commit_guard_tests {
             .unwrap();
 
         let ps = p.to_string_lossy().to_string();
-        let _env = EnvGuard::set(&[
+        let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", Some("worker")),
             ("CAS_FACTORY_MODE", Some("1")),
             ("CAS_CLONE_PATH", Some(&ps)),
@@ -1671,7 +1622,6 @@ mod worker_commit_guard_tests {
     #[test]
     fn pre_tool_allows_git_commit_on_feature_branch() {
         // cas-7e7b: feature/* branches are allowed (denylist semantics).
-        let _lock = env_lock();
         let tmp = make_git_repo();
         let p = tmp.path();
 
@@ -1682,7 +1632,7 @@ mod worker_commit_guard_tests {
             .unwrap();
 
         let ps = p.to_string_lossy().to_string();
-        let _env = EnvGuard::set(&[
+        let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", Some("worker")),
             ("CAS_FACTORY_MODE", Some("1")),
             ("CAS_CLONE_PATH", Some(&ps)),
@@ -1704,7 +1654,6 @@ mod worker_commit_guard_tests {
 
     #[test]
     fn pre_tool_allows_git_commit_on_worker_branch() {
-        let _lock = env_lock();
         let tmp = make_git_repo();
         let p = tmp.path();
 
@@ -1715,7 +1664,7 @@ mod worker_commit_guard_tests {
             .unwrap();
 
         let ps = p.to_string_lossy().to_string();
-        let _env = EnvGuard::set(&[
+        let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", Some("worker")),
             ("CAS_FACTORY_MODE", Some("1")),
             ("CAS_CLONE_PATH", Some(&ps)),
@@ -1739,8 +1688,7 @@ mod worker_commit_guard_tests {
     #[test]
     fn pre_tool_passes_through_for_non_worker() {
         // No CAS_AGENT_ROLE set → guard must not fire
-        let _lock = env_lock();
-        let _env = EnvGuard::set(&[
+        let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", None),
             ("CAS_FACTORY_MODE", None),
             ("CAS_CLONE_PATH", Some("/tmp/some-worktree")),
@@ -1765,10 +1713,9 @@ mod worker_commit_guard_tests {
         // Regression test for cas-ba04: a factory worker with no CAS_CLONE_PATH
         // (standalone task, no isolated worktree) must still be blocked from
         // committing to main via handle_pre_tool_use, not just check_worker_git_commit_scope.
-        let _lock = env_lock();
         let tmp = make_git_repo(); // starts on `main`
         let p = tmp.path().to_string_lossy().to_string();
-        let _env = EnvGuard::set(&[
+        let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", Some("worker")),
             ("CAS_FACTORY_MODE", Some("1")),
             ("CAS_CLONE_PATH", None), // no isolated worktree
@@ -1890,9 +1837,8 @@ mod worker_commit_guard_tests {
     /// wiring between `own_tool_prefix()`, the env, and the real handler.
     #[test]
     fn grok_supervisor_codemap_gate_wiring_reaches_matcher_without_false_deny() {
-        let _lock = env_lock();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let _env = EnvGuard::set(&[
+        let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", Some("supervisor")),
             ("CAS_FACTORY_MODE", Some("1")),
             ("CAS_FACTORY_SUPERVISOR_CLI", Some("grok")),

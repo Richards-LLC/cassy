@@ -881,12 +881,16 @@ impl CasService {
                 // same resolved path can also feed the in-flight-tool-call
                 // check below — one resolution, two consumers, instead of
                 // globbing/reading the transcript twice per worker.
-                let transcript_path_for_worker =
-                    transcript_path_fast(clone_path.as_deref(), session_uuid);
+                let worker_cli = worker_cli_from_agent(agent);
+                let transcript_path_for_worker = worker_status_transcript_path(
+                    clone_path.as_deref(),
+                    session_uuid,
+                    worker_cli,
+                );
                 let context_info = {
                     match transcript_path_for_worker
                         .as_deref()
-                        .and_then(read_context_usage_from_tail)
+                        .and_then(|path| read_context_usage_from_tail_for_cli(path, worker_cli))
                     {
                         Some(total) => {
                             let band = context_band(total);
@@ -945,7 +949,7 @@ impl CasService {
                 let last_activity = last_worker_activity_secs_with_transcript(
                     &activity_events,
                     &agent.id,
-                    worker_cli_from_agent(agent),
+                    worker_cli,
                     transcript_path_for_worker.as_deref(),
                 );
                 // cas-d165 (Finding 1): reuse the SAME liveness evidence as
@@ -968,7 +972,7 @@ impl CasService {
                     .is_some_and(|p| {
                         crate::cli::factory::wedged::transcript_has_in_flight_tool_call(
                             p,
-                            worker_cli_from_agent(agent),
+                            worker_cli,
                         )
                     });
                 let stalled = is_worker_stalled(
@@ -1108,7 +1112,9 @@ impl CasService {
         let visible_worker_names: std::collections::HashSet<String> =
             visible_workers.iter().map(|a| a.name.clone()).collect();
 
-        // Get recent worker activity events
+        // Get recent worker activity events. These are only the activity
+        // classes CAS hooks/MCP calls explicitly persist; ordinary Codex tool
+        // calls do not create rows here (cas-a568).
         let events = event_store.list_recent(50).map_err(|e| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
@@ -1141,9 +1147,44 @@ impl CasService {
             .take(20)
             .collect();
 
-        if worker_events.is_empty() {
+        // cas-a568: `worker_activity` is the supervisor's corroborating view
+        // for worker_status's STALLED verdict, so it must consume the same
+        // corrected signal. In particular, Codex tool calls update the rollout
+        // but usually do not emit a CAS event. Resolve the same concrete path
+        // as worker_status (including cas-fa69's Resolved-only Codex rule) and
+        // add a transcript-backed row only when it is fresher than that
+        // worker's event-store signal. This augments the event feed rather
+        // than introducing a second activity detector.
+        let transcript_activity: Vec<_> = visible_workers
+            .iter()
+            .filter_map(|agent| {
+                let cli = worker_cli_from_agent(agent);
+                let clone_path = agent.metadata.get("clone_path").map(String::as_str);
+                let session_id = agent.cc_session_id.as_deref().unwrap_or(&agent.id);
+                let transcript_path =
+                    worker_status_transcript_path(clone_path, session_id, cli)?;
+                let event_activity = last_worker_activity_secs(&worker_events, &agent.id);
+                let effective_activity = last_worker_activity_secs_with_transcript(
+                    &worker_events,
+                    &agent.id,
+                    cli,
+                    Some(&transcript_path),
+                )?;
+                if event_activity.is_some_and(|(event_age, _)| event_age <= effective_activity.0) {
+                    return None;
+                }
+                let in_flight =
+                    crate::cli::factory::wedged::transcript_has_in_flight_tool_call(
+                        &transcript_path,
+                        cli,
+                    );
+                Some((agent.name.clone(), effective_activity.0, in_flight))
+            })
+            .collect();
+
+        if worker_events.is_empty() && transcript_activity.is_empty() {
             return Ok(Self::success(
-                "No recent worker activity.\n\nWorker activity is tracked when workers edit files, run subagents, or commit code.",
+                "No recent worker activity.\n\nworker_activity combines CAS-recorded file-edit, commit, subagent, and verification events with resolved worker transcript/rollout freshness. Not every tool call creates a CAS event; transcript activity is unavailable when a worker's transcript cannot be resolved.",
             ));
         }
 
@@ -1158,6 +1199,16 @@ impl CasService {
             output.push_str(&format!(
                 "• {} - {} ({})\n",
                 session_short, event.summary, ago
+            ));
+        }
+        for (worker_name, age_secs, in_flight) in transcript_activity {
+            let activity = if in_flight {
+                "in-flight tool call"
+            } else {
+                "transcript/tool activity"
+            };
+            output.push_str(&format!(
+                "• {worker_name} - {activity} ({age_secs}s ago; transcript-backed)\n"
             ));
         }
 
@@ -1752,7 +1803,8 @@ impl CasService {
         use cas_types::{AgentRole, AgentStatus, WorktreeStatus};
         use std::path::Path;
 
-        let stale_after = req.older_than_secs.unwrap_or(120);
+        let prompt_expiry_age = req.older_than_secs;
+        let stale_after = prompt_expiry_age.unwrap_or(120);
         let agent_store = open_agent_store(&self.inner.cas_root).map_err(|e| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
@@ -1804,6 +1856,7 @@ impl CasService {
 
         // Clear prompt queue only when explicitly forced.
         let mut cleared_prompts = 0usize;
+        let mut expired_prompts = 0usize;
         if req.force.unwrap_or(false) {
             let prompt_queue = open_prompt_queue_store(&self.inner.cas_root).map_err(|e| {
                 Self::error(
@@ -1811,7 +1864,17 @@ impl CasService {
                     format!("Failed to open prompt queue: {e}"),
                 )
             })?;
-            cleared_prompts = prompt_queue.clear().unwrap_or(0);
+            if let Some(older_than_secs) = prompt_expiry_age {
+                // Targeted poison-queue remediation: preserve forensic rows
+                // and terminally abandon only pending entries older than the
+                // explicit cutoff. Omitting the cutoff retains the legacy
+                // force-clear behavior.
+                expired_prompts = prompt_queue
+                    .abandon_pending_older_than(older_than_secs)
+                    .unwrap_or(0);
+            } else {
+                cleared_prompts = prompt_queue.clear().unwrap_or(0);
+            }
         }
 
         const SKILL_MARKER_MAX_AGE: std::time::Duration =
@@ -1820,7 +1883,7 @@ impl CasService {
             cleanup_stale_skill_markers(&self.inner.cas_root, SKILL_MARKER_MAX_AGE);
 
         Ok(Self::success(format!(
-            "Factory GC cleanup complete.\n\nStale agents marked: {stale_marked}\nDead agent records purged: {dead_agent_records_purged}\nOrphan worktrees marked removed: {orphan_marked_removed}\nPrompt queue entries cleared: {cleared_prompts}\nStale skill markers removed: {stale_skill_markers_removed}"
+            "Factory GC cleanup complete.\n\nStale agents marked: {stale_marked}\nDead agent records purged: {dead_agent_records_purged}\nOrphan worktrees marked removed: {orphan_marked_removed}\nPrompt queue entries expired: {expired_prompts}\nPrompt queue entries cleared: {cleared_prompts}\nStale skill markers removed: {stale_skill_markers_removed}"
         )))
     }
 }
@@ -2547,21 +2610,88 @@ fn synthesized_unknown_codex_clone_path(session_id: &str) -> String {
     )
 }
 
+#[derive(Debug, Default)]
+struct CodexRolloutMetadata {
+    cwd: Option<String>,
+    originator: Option<String>,
+    source: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CodexRolloutKind {
+    InteractiveCli,
+    Exec,
+    Other,
+}
+
+impl CodexRolloutMetadata {
+    fn kind(&self) -> CodexRolloutKind {
+        // `source` is Codex's serialized SessionSource enum and is the
+        // strongest signal. `originator` covers older rollouts where source
+        // was absent and independently confirms today's cli/exec values.
+        match self.source.as_deref() {
+            Some(source) if source.eq_ignore_ascii_case("exec") => CodexRolloutKind::Exec,
+            Some(source) if source.eq_ignore_ascii_case("cli") => {
+                CodexRolloutKind::InteractiveCli
+            }
+            _ => match self.originator.as_deref() {
+                Some(originator)
+                    if originator.eq_ignore_ascii_case("codex_exec")
+                        || originator.eq_ignore_ascii_case("codex-exec") =>
+                {
+                    CodexRolloutKind::Exec
+                }
+                Some(originator)
+                    if originator.eq_ignore_ascii_case("codex-tui")
+                        || originator.eq_ignore_ascii_case("codex_cli")
+                        || originator.eq_ignore_ascii_case("codex-cli") =>
+                {
+                    CodexRolloutKind::InteractiveCli
+                }
+                _ => CodexRolloutKind::Other,
+            },
+        }
+    }
+}
+
+/// Read the first Codex JSONL line's session metadata. Returns defaults on
+/// parse/IO failure so callers can conservatively treat it as an unknown
+/// rollout rather than an exec child.
+fn codex_rollout_metadata(path: &std::path::Path) -> CodexRolloutMetadata {
+    let Ok(file) = std::fs::File::open(path) else {
+        return CodexRolloutMetadata::default();
+    };
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
+    if std::io::BufRead::read_line(&mut reader, &mut line).is_err() {
+        return CodexRolloutMetadata::default();
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+        return CodexRolloutMetadata::default();
+    };
+    // Be tolerant of missing/mismatched type — still try payload.cwd.
+    let payload = value.get("payload");
+    CodexRolloutMetadata {
+        cwd: payload
+            .and_then(|p| p.get("cwd"))
+            .and_then(|value| value.as_str())
+            .map(str::to_owned),
+        originator: payload
+            .and_then(|p| p.get("originator"))
+            .and_then(|value| value.as_str())
+            .map(str::to_owned),
+        source: payload
+            .and_then(|p| p.get("source"))
+            .and_then(|value| value.as_str())
+            .map(str::to_owned),
+    }
+}
+
 /// Read `payload.cwd` from the first JSONL line when it is a `session_meta`
 /// event. Returns `None` on any parse/IO failure — callers treat that as
 /// "this rollout does not match by cwd".
 pub(crate) fn codex_rollout_cwd(path: &std::path::Path) -> Option<String> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut reader = std::io::BufReader::new(file);
-    let mut line = String::new();
-    std::io::BufRead::read_line(&mut reader, &mut line).ok()?;
-    let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
-    // Be tolerant of missing/mismatched type — still try payload.cwd.
-    value
-        .get("payload")
-        .and_then(|p| p.get("cwd"))
-        .and_then(|c| c.as_str())
-        .map(|s| s.to_string())
+    codex_rollout_metadata(path).cwd
 }
 
 /// Scan budget for `**/rollout-*.jsonl` under the sessions root. Codex hosts
@@ -2577,18 +2707,31 @@ fn collect_codex_rollouts(sessions_dir: &std::path::Path) -> Vec<std::path::Path
         Ok(it) => it,
         Err(_) => return Vec::new(),
     };
-    let mut all: Vec<std::path::PathBuf> = iter.flatten().collect();
-    all.sort_by_key(|p| {
-        std::fs::metadata(p)
-            .and_then(|m| m.modified())
-            .ok()
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-    });
-    all.reverse(); // newest first
-    if all.len() > MAX_CODEX_ROLLOUT_SCAN {
-        all.truncate(MAX_CODEX_ROLLOUT_SCAN);
+    // Keep only the newest bounded working set while walking. The previous
+    // collect-all-then-truncate shape capped the returned vector but still
+    // allocated every historical rollout on each worker_status poll.
+    let mut newest = std::collections::BinaryHeap::with_capacity(MAX_CODEX_ROLLOUT_SCAN);
+    for path in iter.flatten() {
+        let modified = std::fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if newest.len() < MAX_CODEX_ROLLOUT_SCAN {
+            newest.push(std::cmp::Reverse((modified, path)));
+            continue;
+        }
+        if newest
+            .peek()
+            .is_some_and(|std::cmp::Reverse((oldest, _))| modified > *oldest)
+        {
+            newest.pop();
+            newest.push(std::cmp::Reverse((modified, path)));
+        }
     }
-    all
+    newest
+        .into_sorted_vec()
+        .into_iter()
+        .map(|std::cmp::Reverse((_, path))| path)
+        .collect()
 }
 
 /// Whether `path`'s filename contains `session_id` (rollout UUID match).
@@ -2613,31 +2756,170 @@ fn resolve_codex_transcript(
         return TranscriptResolution::Synthesized(synthesized);
     };
     let candidates = collect_codex_rollouts(dir);
-    let mut matches = Vec::new();
+    let mut id_matches = Vec::new();
+    let mut cli_matches = Vec::new();
+    let mut fallback_matches = Vec::new();
     let mut truncated = false;
     for path in candidates {
+        let metadata = codex_rollout_metadata(&path);
         let cwd_hit = clone_path
-            .map(|cwd| codex_rollout_cwd(&path).as_deref() == Some(cwd))
+            .map(|cwd| metadata.cwd.as_deref() == Some(cwd))
             .unwrap_or(false);
         let id_hit = codex_rollout_filename_matches_session(&path, session_id);
-        if !cwd_hit && !id_hit {
+        if id_hit {
+            if id_matches.len() >= MAX_TRANSCRIPT_CANDIDATES {
+                truncated = true;
+                continue;
+            }
+            id_matches.push(path);
             continue;
         }
-        if matches.len() >= MAX_TRANSCRIPT_CANDIDATES {
-            truncated = true;
-            break;
+        if !cwd_hit {
+            continue;
         }
-        matches.push(path);
+        let destination = match metadata.kind() {
+            CodexRolloutKind::InteractiveCli => &mut cli_matches,
+            CodexRolloutKind::Exec => continue,
+            CodexRolloutKind::Other => &mut fallback_matches,
+        };
+        if destination.len() >= MAX_TRANSCRIPT_CANDIDATES {
+            truncated = true;
+            continue;
+        }
+        destination.push(path);
     }
-    match matches.len() {
-        0 => TranscriptResolution::Synthesized(synthesized),
-        1 => TranscriptResolution::Resolved(matches.remove(0)),
-        _ => TranscriptResolution::Ambiguous {
-            matches,
-            synthesized,
-            truncated,
-        },
+
+    match id_matches.len() {
+        1 => return TranscriptResolution::Resolved(id_matches.remove(0)),
+        2.. => {
+            return TranscriptResolution::Ambiguous {
+                matches: id_matches,
+                synthesized,
+                truncated,
+            };
+        }
+        0 => {}
     }
+
+    // `collect_codex_rollouts` is newest-first. Choose freshness only after
+    // excluding exec children, never across the raw cwd match set.
+    if let Some(path) = cli_matches.into_iter().next() {
+        return TranscriptResolution::Resolved(path);
+    }
+    if let Some(path) = fallback_matches.into_iter().next() {
+        return TranscriptResolution::Resolved(path);
+    }
+    TranscriptResolution::Synthesized(synthesized)
+}
+
+fn worker_status_codex_path_from_resolution(
+    resolution: TranscriptResolution,
+) -> Option<std::path::PathBuf> {
+    match resolution {
+        TranscriptResolution::Resolved(path) => Some(path),
+        TranscriptResolution::Synthesized(_) | TranscriptResolution::Ambiguous { .. } => None,
+    }
+}
+
+/// Pick the concrete evidence path from a transcript resolution.
+///
+/// This preserves `cas factory is-wedged`'s historical ambiguity behavior.
+/// `worker_status` uses a stricter Resolved-only selector below. The Codex
+/// resolver now disambiguates normal cli+exec cwd collisions before either
+/// selector sees them, but exact-ID collisions can still be Ambiguous.
+pub(crate) fn transcript_path_from_resolution(
+    resolution: TranscriptResolution,
+) -> Option<std::path::PathBuf> {
+    match resolution {
+        TranscriptResolution::Resolved(path) => Some(path),
+        TranscriptResolution::Ambiguous { mut matches, .. } => {
+            matches.sort_by_key(|path| {
+                std::fs::metadata(path)
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+            });
+            matches.pop()
+        }
+        TranscriptResolution::Synthesized(_) => None,
+    }
+}
+
+/// Resolve a live worker's real transcript/rollout path using the same
+/// harness-aware resolver as `cas factory is-wedged`.
+pub(crate) fn resolve_worker_transcript_path(
+    clone_path: Option<&str>,
+    session_id: &str,
+    cli: cas_mux::SupervisorCli,
+) -> Option<std::path::PathBuf> {
+    let base_dir = match cli {
+        cas_mux::SupervisorCli::Grok => default_grok_sessions_dir(),
+        cas_mux::SupervisorCli::Codex => default_codex_sessions_dir(),
+        cas_mux::SupervisorCli::Claude => default_claude_projects_dir(),
+    };
+    resolve_worker_transcript_path_in(base_dir.as_deref(), clone_path, session_id, cli)
+}
+
+/// Resolve the activity/context path for `worker_status`.
+///
+/// Codex is the cas-fa69 fix: use the existing cli-aware resolver so a real
+/// rollout is reachable. Claude and Grok intentionally retain the historical
+/// single-stat fast path byte-for-byte (AC7); changing those harnesses belongs
+/// to a separately characterized change.
+fn worker_status_transcript_path(
+    clone_path: Option<&str>,
+    session_id: &str,
+    cli: cas_mux::SupervisorCli,
+) -> Option<std::path::PathBuf> {
+    match cli {
+        cas_mux::SupervisorCli::Codex => worker_status_codex_transcript_path(
+            clone_path,
+            session_id,
+        ),
+        cas_mux::SupervisorCli::Claude | cas_mux::SupervisorCli::Grok => {
+            transcript_path_fast(clone_path, session_id)
+        }
+    }
+}
+
+fn worker_status_codex_transcript_path(
+    clone_path: Option<&str>,
+    session_id: &str,
+) -> Option<std::path::PathBuf> {
+    let sessions_dir = default_codex_sessions_dir();
+    worker_status_codex_transcript_path_in(
+        sessions_dir.as_deref(),
+        clone_path,
+        session_id,
+    )
+}
+
+/// Codex worker_status accepts only a resolved real rollout. Synthesized paths
+/// are not evidence (cas-de95), and any residual Ambiguous result remains
+/// unresolved rather than inventing an activity age.
+fn worker_status_codex_transcript_path_in(
+    sessions_dir: Option<&std::path::Path>,
+    clone_path: Option<&str>,
+    session_id: &str,
+) -> Option<std::path::PathBuf> {
+    worker_status_codex_path_from_resolution(resolve_transcript(
+        sessions_dir,
+        clone_path,
+        session_id,
+        cas_mux::SupervisorCli::Codex,
+    ))
+}
+
+/// Injectable half of [`resolve_worker_transcript_path`] for deterministic
+/// path-resolution and latency tests.
+fn resolve_worker_transcript_path_in(
+    base_dir: Option<&std::path::Path>,
+    clone_path: Option<&str>,
+    session_id: &str,
+    cli: cas_mux::SupervisorCli,
+) -> Option<std::path::PathBuf> {
+    transcript_path_from_resolution(resolve_transcript(
+        base_dir, clone_path, session_id, cli,
+    ))
 }
 
 /// Render the transcript block for `worker_status` output. Always surfaces
@@ -2731,17 +3013,26 @@ pub(crate) fn context_band(total_input_tokens: u64) -> &'static str {
     }
 }
 
-/// Resolve the on-disk transcript path for a live worker without a glob walk.
+/// Historical live-worker path lookup used by Claude and Grok reporting.
 ///
-/// Reconstructs the synthesized path from `clone_path` + `session_id` and
-/// checks whether that file exists via a single `stat(2)`. Returns `None`
-/// when the home dir is unresolvable, `clone_path` is absent, or the file
-/// doesn't exist yet (worker just started).
-fn transcript_path_fast(clone_path: Option<&str>, session_id: &str) -> Option<std::path::PathBuf> {
+/// Reconstructs the Claude-layout path from `clone_path` + `session_id` and
+/// checks it with one `stat(2)`. Keeping this unchanged preserves the
+/// cas-573c latency and output contract for non-Codex harnesses.
+fn transcript_path_fast(
+    clone_path: Option<&str>,
+    session_id: &str,
+) -> Option<std::path::PathBuf> {
     let home = dirs::home_dir()?;
+    transcript_path_fast_in(&home, clone_path, session_id)
+}
+
+fn transcript_path_fast_in(
+    home: &std::path::Path,
+    clone_path: Option<&str>,
+    session_id: &str,
+) -> Option<std::path::PathBuf> {
     let clone = clone_path?;
     let synthesized = synthesized_transcript_path(clone, session_id);
-    // synthesized is "~/.claude/projects/<escaped>/<session_id>.jsonl"
     let relative = synthesized.strip_prefix("~/")?;
     let real = home.join(relative);
     if real.exists() { Some(real) } else { None }
@@ -2798,6 +3089,45 @@ pub(crate) fn read_context_usage_from_tail(path: &std::path::Path) -> Option<u64
             .and_then(|t| t.as_u64())
             .unwrap_or(0);
         return Some(input + cache_create + cache_read);
+    }
+    None
+}
+
+/// Harness-aware context usage reader. Claude retains its existing parser
+/// byte-for-byte; Codex reads the latest rollout `token_count` event's
+/// per-turn input total. Grok has no equivalent parser at this layer yet.
+fn read_context_usage_from_tail_for_cli(
+    path: &std::path::Path,
+    cli: cas_mux::SupervisorCli,
+) -> Option<u64> {
+    if cli != cas_mux::SupervisorCli::Codex {
+        return read_context_usage_from_tail(path);
+    }
+
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let file_len = file.metadata().ok()?.len();
+    const TAIL_BYTES: u64 = 8192;
+    file.seek(SeekFrom::Start(file_len.saturating_sub(TAIL_BYTES)))
+        .ok()?;
+    let mut buf = String::new();
+    file.read_to_string(&mut buf).ok()?;
+
+    for line in buf.lines().rev() {
+        if !line.contains("\"type\":\"token_count\"") {
+            continue;
+        }
+        let value: serde_json::Value = match serde_json::from_str(line) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if value.pointer("/payload/type").and_then(|v| v.as_str()) != Some("token_count") {
+            continue;
+        }
+        return value
+            .pointer("/payload/info/last_token_usage/input_tokens")
+            .and_then(|v| v.as_u64());
     }
     None
 }
@@ -2994,45 +3324,13 @@ pub(crate) fn format_worker_git_status(gs: &WorkerGitStatus) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TestEnvGuard;
     use cas_types::AgentRole;
 
     /// Session id used across the glob tests. Stable UUID shape, unique
     /// across fake projects so the glob doesn't collide with anything else
     /// the test happens to create.
     const TEST_SESSION: &str = "cas-900b-test-0000-0000-000000000000";
-
-    struct HomeGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        old_home: Option<String>,
-        _tmp: tempfile::TempDir,
-    }
-
-    impl HomeGuard {
-        fn isolated() -> Self {
-            let lock = crate::hooks::test_env_lock();
-            let old_home = std::env::var("HOME").ok();
-            let tmp = tempfile::tempdir().expect("temp HOME");
-            unsafe {
-                std::env::set_var("HOME", tmp.path());
-            }
-            Self {
-                _lock: lock,
-                old_home,
-                _tmp: tmp,
-            }
-        }
-    }
-
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.old_home {
-                    Some(home) => std::env::set_var("HOME", home),
-                    None => std::env::remove_var("HOME"),
-                }
-            }
-        }
-    }
 
     fn decoded_spawn_spec(json: &str) -> cas_mux::WorkerSpec {
         serde_json::from_str(json).expect("valid WorkerSpec JSON")
@@ -3072,7 +3370,7 @@ mod tests {
 
     #[test]
     fn spawn_spec_cli_claude_without_model_effort_uses_safe_floor() {
-        let _home = HomeGuard::isolated();
+        let _home = TestEnvGuard::temp_home();
         let json = build_spawn_spec_json(Some("claude"), None, None).unwrap();
         let spec = decoded_spawn_spec(&json);
 
@@ -3083,7 +3381,7 @@ mod tests {
 
     #[test]
     fn spawn_spec_explicit_model_and_effort_are_unchanged() {
-        let _home = HomeGuard::isolated();
+        let _home = TestEnvGuard::temp_home();
         let json = build_spawn_spec_json(Some("claude"), Some("opus"), Some("high")).unwrap();
         let spec = decoded_spawn_spec(&json);
 
@@ -3094,7 +3392,7 @@ mod tests {
 
     #[test]
     fn spawn_spec_omitted_cli_without_config_uses_stock_codex_defaults() {
-        let _home = HomeGuard::isolated();
+        let _home = TestEnvGuard::temp_home();
         let json = build_spawn_spec_json(None, None, None).unwrap();
         let spec = decoded_spawn_spec(&json);
 
@@ -3115,7 +3413,7 @@ mod tests {
 
     #[test]
     fn spawn_spec_omitted_cli_respects_project_factory_default() {
-        let _home = HomeGuard::isolated();
+        let _home = TestEnvGuard::temp_home();
         let tmp = tempfile::tempdir().expect("temp project config");
         let config = tmp.path().join("config.toml");
         std::fs::write(
@@ -3140,7 +3438,7 @@ effort = "high"
 
     #[test]
     fn spawn_spec_project_defaults_can_force_frontier_and_warning_nags() {
-        let _home = HomeGuard::isolated();
+        let _home = TestEnvGuard::temp_home();
         let tmp = tempfile::tempdir().expect("temp project config");
         let config = tmp.path().join("config.toml");
         std::fs::write(
@@ -3196,9 +3494,11 @@ effort = "high"
         )));
     }
 
-    /// End-to-end (still deterministic — `HomeGuard::isolated()` guarantees
-    /// no real `~/.codex/auth.json`, so the fallback always fires
-    /// regardless of the test machine's actual Codex install/login state):
+    /// End-to-end and hermetic: HOME and PATH are both isolated, so neither
+    /// the host's Codex install nor its real `~/.codex/auth.json` can affect
+    /// the verdict. The two iterations also prove that an auth file in the
+    /// isolated HOME does not alter the result when the controlled PATH has
+    /// no Codex binary.
     /// a spec that resolves to Codex, with Codex unavailable, must come
     /// back rewritten to Claude via `apply_codex_fallback` — the same path
     /// `factory_spawn_workers` drives. Exercises the resolver + fallback
@@ -3207,27 +3507,53 @@ effort = "high"
     /// test while still proving the two pieces compose correctly.
     #[test]
     fn resolved_codex_spec_falls_back_to_claude_when_codex_unavailable() {
-        let _home = HomeGuard::isolated();
-        let json = build_spawn_spec_json(None, None, None).unwrap();
-        let mut spec = decoded_spawn_spec(&json);
-        assert_eq!(
-            spec.cli,
-            cas_mux::SupervisorCli::Codex,
-            "precondition: stock default must resolve to codex"
-        );
+        let mut env = TestEnvGuard::temp_home();
+        let empty_path = env.home().join("empty-path");
+        std::fs::create_dir(&empty_path).expect("empty PATH directory");
+        env.set("PATH", empty_path);
+        for auth_present in [false, true] {
+            let auth_path = env.home().join(".codex/auth.json");
+            if auth_present {
+                std::fs::create_dir_all(auth_path.parent().unwrap()).unwrap();
+                std::fs::write(&auth_path, "{}").unwrap();
+            } else if auth_path.exists() {
+                std::fs::remove_file(&auth_path).unwrap();
+            }
 
-        let claude_default_model = default_worker_model_for_cli(cas_mux::SupervisorCli::Claude);
-        let notices = cas_factory::apply_codex_fallback(
-            std::slice::from_mut(&mut spec),
-            false,
-            Some(claude_default_model),
-        )
-        .unwrap();
+            let json = build_spawn_spec_json(None, None, None).unwrap();
+            let mut spec = decoded_spawn_spec(&json);
+            assert_eq!(
+                spec.cli,
+                cas_mux::SupervisorCli::Codex,
+                "precondition: stock default must resolve to codex"
+            );
 
-        assert_eq!(spec.cli, cas_mux::SupervisorCli::Claude);
-        assert_eq!(spec.model.as_deref(), Some(claude_default_model));
-        assert_eq!(notices.len(), 1);
-        assert!(notices[0].contains("codex unavailable"));
+            let claude_default_model =
+                default_worker_model_for_cli(cas_mux::SupervisorCli::Claude);
+            let notices = cas_factory::apply_codex_fallback(
+                std::slice::from_mut(&mut spec),
+                false,
+                Some(claude_default_model),
+            )
+            .unwrap();
+
+            assert_eq!(
+                spec.cli,
+                cas_mux::SupervisorCli::Claude,
+                "controlled missing binary must fall back with auth_present={auth_present}"
+            );
+            assert_eq!(spec.model.as_deref(), Some(claude_default_model));
+            assert_eq!(notices.len(), 1);
+            assert!(
+                notices[0].starts_with("worker slot 1: codex unavailable ("),
+                "real spawn-path wrapper must identify the unnamed resolved slot — got: {}",
+                notices[0]
+            );
+            assert!(
+                !notices[0].contains("worker worker"),
+                "unnamed spawn specs must never repeat the role as the identifier"
+            );
+        }
     }
 
     #[test]
@@ -3950,9 +4276,24 @@ effort = "high"
     fn fake_codex_sessions_dir(
         rollouts: &[(&str /* relative path under sessions */, &str /* cwd */)],
     ) -> (tempfile::TempDir, std::path::PathBuf) {
+        let rollouts = rollouts
+            .iter()
+            .map(|(rel, cwd)| (*rel, *cwd, "codex-tui", "cli"))
+            .collect::<Vec<_>>();
+        fake_codex_sessions_dir_with_metadata(&rollouts)
+    }
+
+    fn fake_codex_sessions_dir_with_metadata(
+        rollouts: &[(
+            &str, /* relative path under sessions */
+            &str, /* cwd */
+            &str, /* originator */
+            &str, /* source */
+        )],
+    ) -> (tempfile::TempDir, std::path::PathBuf) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let sessions = tmp.path().join("sessions");
-        for (rel, cwd) in rollouts {
+        for (rel, cwd, originator, source) in rollouts {
             let path = sessions.join(rel);
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).unwrap();
@@ -3963,7 +4304,8 @@ effort = "high"
                 "payload": {
                     "session_id": "019f84af-3121-7950-ba14-b01db2dad6c7",
                     "cwd": cwd,
-                    "originator": "codex-tui"
+                    "originator": originator,
+                    "source": source
                 }
             });
             std::fs::write(&path, format!("{meta}\n")).unwrap();
@@ -4006,6 +4348,313 @@ effort = "high"
         );
         let expected = sessions.join(rel);
         assert_eq!(got, TranscriptResolution::Resolved(expected));
+    }
+
+    /// Characterization for cas-fa69: worker_status resolves its live
+    /// activity/context/in-flight path through `transcript_path_fast`.
+    /// A real Codex rollout exists and is discoverable by the established
+    /// cwd-aware resolver, so that production path must return it too.
+    #[test]
+    fn worker_status_transcript_path_resolves_codex_rollout_by_cwd() {
+        let _lock = crate::hooks::test_env_lock();
+        let clone = "/home/pippenz/Petrastella/ozer/.cas/worktrees/worker-android";
+        let rel = "2026/07/21/rollout-2026-07-21T08-38-21-019f84af-3121-7950-ba14-b01db2dad6c7.jsonl";
+        let (tmp, sessions) = fake_codex_sessions_dir(&[(rel, clone)]);
+        let old = std::env::var("CODEX_HOME").ok();
+        unsafe {
+            std::env::set_var("CODEX_HOME", tmp.path());
+        }
+        let got = worker_status_transcript_path(
+            Some(clone),
+            "codex-worker-android-2f828ac6-deadbeefcafe",
+            cas_mux::SupervisorCli::Codex,
+        );
+        unsafe {
+            match old {
+                Some(value) => std::env::set_var("CODEX_HOME", value),
+                None => std::env::remove_var("CODEX_HOME"),
+            }
+        }
+        assert_eq!(got, Some(sessions.join(rel)));
+    }
+
+    #[test]
+    fn worker_status_transcript_path_rejects_synthesized_codex_path() {
+        let (_tmp, sessions) = fake_codex_sessions_dir(&[]);
+        let got = worker_status_codex_transcript_path_in(
+            Some(&sessions),
+            Some("/tmp/no-such-worker"),
+            "codex-worker-missing",
+        );
+        assert_eq!(
+            got, None,
+            "a synthesized rollout path is not evidence that the rollout exists"
+        );
+    }
+
+    #[test]
+    fn worker_status_transcript_path_rejects_ambiguous_codex_cwd_matches() {
+        let synthesized = "not-real".to_string();
+        assert_eq!(
+            worker_status_codex_path_from_resolution(TranscriptResolution::Ambiguous {
+                matches: vec!["worker.jsonl".into(), "exec.jsonl".into()],
+                synthesized,
+                truncated: false,
+            }),
+            None,
+            "worker_status must never invent a selection for Ambiguous resolution"
+        );
+    }
+
+    #[test]
+    fn resolve_codex_transcript_prefers_cli_rollout_over_exec_in_same_cwd() {
+        let clone = "/tmp/codex-worker-with-exec";
+        let worker_rel = "2026/07/28/rollout-2026-07-28T07-59-08-worker.jsonl";
+        let exec_rel = "2026/07/28/rollout-2026-07-28T08-03-58-codex-exec.jsonl";
+        let (_tmp, sessions) = fake_codex_sessions_dir_with_metadata(&[
+            (worker_rel, clone, "codex-tui", "cli"),
+            (exec_rel, clone, "codex_exec", "exec"),
+        ]);
+
+        assert_eq!(
+            resolve_codex_transcript(
+                Some(&sessions),
+                Some(clone),
+                "codex-worker-cas-session",
+            ),
+            TranscriptResolution::Resolved(sessions.join(worker_rel))
+        );
+    }
+
+    #[test]
+    fn resolve_codex_transcript_ignores_several_exec_rollouts() {
+        let clone = "/tmp/codex-worker-with-several-execs";
+        let worker_rel = "2026/07/28/rollout-2026-07-28T07-59-08-worker.jsonl";
+        let (_tmp, sessions) = fake_codex_sessions_dir_with_metadata(&[
+            (worker_rel, clone, "codex-tui", "cli"),
+            (
+                "2026/07/28/rollout-2026-07-28T08-03-58-exec-one.jsonl",
+                clone,
+                "codex_exec",
+                "exec",
+            ),
+            (
+                "2026/07/28/rollout-2026-07-28T08-05-12-exec-two.jsonl",
+                clone,
+                "codex_exec",
+                "exec",
+            ),
+            (
+                "2026/07/28/rollout-2026-07-28T08-08-44-exec-three.jsonl",
+                clone,
+                "codex_exec",
+                "exec",
+            ),
+        ]);
+
+        assert_eq!(
+            resolve_codex_transcript(
+                Some(&sessions),
+                Some(clone),
+                "codex-worker-cas-session",
+            ),
+            TranscriptResolution::Resolved(sessions.join(worker_rel))
+        );
+    }
+
+    #[test]
+    fn worker_status_activity_does_not_latch_onto_active_exec_rollout() {
+        use std::io::Write;
+
+        let _lock = crate::hooks::test_env_lock();
+        let clone = "/tmp/codex-worker-active-exec";
+        let worker_rel = "2026/07/28/rollout-2026-07-28T07-59-08-worker.jsonl";
+        let exec_rel = "2026/07/28/rollout-2026-07-28T08-03-58-active-exec.jsonl";
+        let (tmp, sessions) = fake_codex_sessions_dir_with_metadata(&[
+            (worker_rel, clone, "codex-tui", "cli"),
+            (exec_rel, clone, "codex_exec", "exec"),
+        ]);
+        let worker = sessions.join(worker_rel);
+        let exec = sessions.join(exec_rel);
+        let worker_mtime = filetime::FileTime::from_system_time(
+            std::time::SystemTime::now() - std::time::Duration::from_secs(2),
+        );
+        filetime::set_file_mtime(&worker, worker_mtime).unwrap();
+        let mut active_exec = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&exec)
+            .unwrap();
+        writeln!(
+            active_exec,
+            r#"{{"type":"response_item","payload":{{"type":"function_call","call_id":"exec-live","name":"shell"}}}}"#
+        )
+        .unwrap();
+
+        let old = std::env::var("CODEX_HOME").ok();
+        unsafe {
+            std::env::set_var("CODEX_HOME", tmp.path());
+        }
+        let path = worker_status_transcript_path(
+            Some(clone),
+            "codex-worker-cas-session",
+            cas_mux::SupervisorCli::Codex,
+        )
+        .expect("the worker rollout must resolve despite the active exec child");
+        unsafe {
+            match old {
+                Some(value) => std::env::set_var("CODEX_HOME", value),
+                None => std::env::remove_var("CODEX_HOME"),
+            }
+        }
+        assert_eq!(path, worker, "worker_status must not latch onto codex_exec");
+
+        let events = vec![make_event(
+            cas_types::EventType::WorkerGitCommit,
+            "codex-worker-cas-session",
+            10 * 60,
+        )];
+        let (age, _) = last_worker_activity_secs_with_transcript(
+            &events,
+            "codex-worker-cas-session",
+            cas_mux::SupervisorCli::Codex,
+            Some(&path),
+        )
+        .expect("the worker rollout mtime is activity evidence");
+        assert!(age <= 5, "activity must track the live worker rollout: {age}");
+        assert!(
+            !is_worker_stalled(true, Some(age), 300, false),
+            "a worker active seconds ago must not be labelled STALLED"
+        );
+    }
+
+    #[test]
+    fn codex_rollout_kind_uses_source_then_originator_fallback() {
+        assert_eq!(
+            CodexRolloutMetadata {
+                source: Some("cli".into()),
+                originator: Some("codex-tui".into()),
+                ..Default::default()
+            }
+            .kind(),
+            CodexRolloutKind::InteractiveCli
+        );
+        assert_eq!(
+            CodexRolloutMetadata {
+                source: Some("exec".into()),
+                originator: Some("codex_exec".into()),
+                ..Default::default()
+            }
+            .kind(),
+            CodexRolloutKind::Exec
+        );
+        assert_eq!(
+            CodexRolloutMetadata {
+                originator: Some("codex_exec".into()),
+                ..Default::default()
+            }
+            .kind(),
+            CodexRolloutKind::Exec,
+            "legacy rollouts without source must still exclude codex_exec"
+        );
+        assert_eq!(
+            CodexRolloutMetadata {
+                originator: Some("codex_cli".into()),
+                ..Default::default()
+            }
+            .kind(),
+            CodexRolloutKind::InteractiveCli,
+            "legacy codex_cli originator remains a worker candidate"
+        );
+    }
+
+    #[test]
+    fn worker_status_transcript_path_preserves_claude_resolution() {
+        let home = tempfile::tempdir().unwrap();
+        let clone = "/home/alice/project";
+        let relative = synthesized_transcript_path(clone, TEST_SESSION)
+            .strip_prefix("~/")
+            .unwrap()
+            .to_string();
+        let expected = home.path().join(relative);
+        std::fs::create_dir_all(expected.parent().unwrap()).unwrap();
+        std::fs::write(&expected, b"").unwrap();
+        let got = transcript_path_fast_in(home.path(), Some(clone), TEST_SESSION);
+        assert_eq!(got, Some(expected));
+    }
+
+    #[test]
+    fn worker_status_transcript_path_preserves_grok_fast_path_behavior() {
+        let session = "grok-session-0000-0000-000000000000";
+        let (_tmp, sessions) =
+            fake_grok_sessions_dir(&[("%2Fhome%2Falice%2Fworkspace", &[session])]);
+        let home = tempfile::tempdir().unwrap();
+        let got = transcript_path_fast_in(
+            home.path(),
+            Some("/home/alice/workspace"),
+            session,
+        );
+        assert_eq!(
+            got, None,
+            "the existing Grok worker_status fast path must remain unchanged"
+        );
+        assert!(
+            sessions
+                .join("%2Fhome%2Falice%2Fworkspace")
+                .join(session)
+                .join("updates.jsonl")
+                .exists(),
+            "the fixture must contain a real Grok transcript"
+        );
+    }
+
+    #[test]
+    fn worker_status_codex_rollout_drives_activity_and_in_flight_suppression() {
+        use std::io::Write;
+
+        let clone = "/tmp/codex-worker";
+        let rel = "2026/07/28/rollout-2026-07-28T12-00-00-live.jsonl";
+        let (_tmp, sessions) = fake_codex_sessions_dir(&[(rel, clone)]);
+        let rollout = sessions.join(rel);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"response_item","payload":{{"type":"function_call","call_id":"call-live","name":"apply_patch"}}}}"#
+        )
+        .unwrap();
+
+        let path = resolve_worker_transcript_path_in(
+            Some(&sessions),
+            Some(clone),
+            "codex-worker-live",
+            cas_mux::SupervisorCli::Codex,
+        )
+        .expect("worker_status must resolve the live rollout");
+        let events = vec![make_event(
+            cas_types::EventType::WorkerGitCommit,
+            "codex-worker-live",
+            10 * 60,
+        )];
+        let (age, _) = last_worker_activity_secs_with_transcript(
+            &events,
+            "codex-worker-live",
+            cas_mux::SupervisorCli::Codex,
+            Some(&path),
+        )
+        .expect("rollout mtime is activity evidence");
+        assert!(age <= 5, "fresh rollout must beat the stale CAS event: {age}");
+
+        let in_flight = crate::cli::factory::wedged::transcript_has_in_flight_tool_call(
+            &path,
+            cas_mux::SupervisorCli::Codex,
+        );
+        assert!(in_flight, "unanswered Codex function call must be detected");
+        assert!(
+            !is_worker_stalled(true, Some(10 * 60), 300, in_flight),
+            "in-flight rollout evidence must suppress the STALLED label"
+        );
     }
 
     #[test]
@@ -4081,6 +4730,35 @@ effort = "high"
         });
         std::fs::write(&path, format!("{meta}\n")).unwrap();
         assert_eq!(codex_rollout_cwd(&path).as_deref(), Some("/work/tree"));
+    }
+
+    #[test]
+    fn codex_rollout_collection_is_bounded_and_reports_poll_cost() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions = tmp.path().join("sessions");
+        let day = sessions.join("2026/07/28");
+        std::fs::create_dir_all(&day).unwrap();
+        let count = MAX_CODEX_ROLLOUT_SCAN + 25;
+        for index in 0..count {
+            let path = day.join(format!("rollout-{index:04}.jsonl"));
+            std::fs::write(
+                path,
+                format!(
+                    r#"{{"type":"session_meta","payload":{{"cwd":"/tmp/worker-{index}"}}}}"#
+                ),
+            )
+            .unwrap();
+        }
+
+        let started = std::time::Instant::now();
+        let candidates = collect_codex_rollouts(&sessions);
+        let elapsed = started.elapsed();
+        eprintln!(
+            "cas-fa69 resolver poll: {count} rollouts on disk, {} candidates retained, {}µs",
+            candidates.len(),
+            elapsed.as_micros()
+        );
+        assert_eq!(candidates.len(), MAX_CODEX_ROLLOUT_SCAN);
     }
 
     #[test]
@@ -4423,6 +5101,24 @@ effort = "high"
 
         let total = read_context_usage_from_tail(path).expect("should parse usage");
         assert_eq!(total, 8_000, "input+cache_create+cache_read = 8000");
+    }
+
+    #[test]
+    fn read_context_usage_from_codex_rollout_extracts_latest_turn_input() {
+        use std::io::Write;
+
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        writeln!(
+            tmp.as_file(),
+            r#"{{"type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":123456,"cached_input_tokens":100000}},"model_context_window":258400}}}}}}"#
+        )
+        .unwrap();
+
+        let total =
+            read_context_usage_from_tail_for_cli(tmp.path(), cas_mux::SupervisorCli::Codex)
+                .expect("Codex token_count event should produce a context reading");
+        assert_eq!(total, 123_456);
+        assert_eq!(context_band(total), "approaching");
     }
 
     /// When the tail has multiple assistant entries, the LAST one wins.

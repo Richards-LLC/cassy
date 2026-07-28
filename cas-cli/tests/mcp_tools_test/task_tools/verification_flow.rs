@@ -310,6 +310,79 @@ async fn test_task_start_not_blocked_by_merge_gated_sibling_cas_6a99() {
     );
 }
 
+/// cas-7aef: a normal successful close must record its lease release reason in
+/// the dedicated reason field and surface it through the lease-history MCP
+/// renderer.
+#[tokio::test]
+async fn test_normal_close_records_and_renders_lease_history_reason_cas_7aef() {
+    let (temp, service) = setup_cas();
+    let cas_dir = temp.path().join(".cas");
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        "[verification]\nenabled = false\n",
+    )
+    .expect("write config");
+
+    let id = extract_task_id(&extract_text(
+        service
+            .cas_task_create(Parameters(simple_task_req("Normal close reason")))
+            .await
+            .expect("create task"),
+    ))
+    .expect("task id")
+    .to_string();
+    service
+        .cas_task_start(Parameters(IdRequest { id: id.clone() }))
+        .await
+        .expect("start task");
+
+    let close_text = extract_text(
+        service
+            .cas_task_close(Parameters(TaskCloseRequest {
+                id: id.clone(),
+                reason: Some("implementation complete".to_string()),
+                bypass_code_review: None,
+                code_review_findings: None,
+                search_manifest: None,
+            }))
+            .await
+            .expect("close task"),
+    );
+    assert!(
+        close_text.contains("Closed task:"),
+        "normal close should succeed: {close_text}"
+    );
+
+    let agent_store = open_agent_store(&cas_dir).expect("open agent store");
+    let lease_history = agent_store
+        .get_lease_history(&id, Some(1))
+        .expect("lease history for normally closed task");
+    assert_eq!(lease_history[0].event_type, "released");
+    assert_eq!(lease_history[0].reason.as_deref(), Some("Task closed"));
+    assert_eq!(
+        lease_history[0].previous_agent_id, None,
+        "normal close reason must not be stored as a transfer agent ID"
+    );
+
+    let rendered = extract_text(
+        service
+            .cas_lease_history(Parameters(LeaseHistoryRequest {
+                task_id: id,
+                limit: Some(1),
+            }))
+            .await
+            .expect("render lease history"),
+    );
+    assert!(
+        rendered.contains("(reason: Task closed)"),
+        "renderer must surface the dedicated reason: {rendered}"
+    );
+    assert!(
+        !rendered.contains("(from Task closed)"),
+        "renderer must not present a reason as a transfer agent: {rendered}"
+    );
+}
+
 /// cas-8d5b: the close-time MERGE REQUIRED data-state guard must park the task
 /// in a non-worker-actionable state and release the worker lease. The worker can
 /// then start unrelated assigned work without a supervisor manually flipping the
@@ -465,10 +538,11 @@ async fn test_merge_required_close_parks_awaiting_merge_and_releases_gate_cas_8d
         .expect("lease history for parked task");
     assert_eq!(lease_history[0].event_type, "released");
     assert_eq!(
-        lease_history[0].previous_agent_id.as_deref(),
+        lease_history[0].reason.as_deref(),
         Some("MERGE REQUIRED: parked awaiting_merge"),
         "MERGE REQUIRED park path must not record the successful close reason"
     );
+    assert_eq!(lease_history[0].previous_agent_id, None);
 
     // cas-627f: the flagship close-rejected `WorkerIdle` notification is
     // built from `AgentSummary::active_lease`, which used to be resolved
@@ -543,9 +617,12 @@ async fn test_merge_required_close_parks_awaiting_merge_and_releases_gate_cas_8d
         close_after_merge.contains("Closed task:"),
         "awaiting_merge task must become closeable after merge guard passes: {close_after_merge}"
     );
-    assert_eq!(
-        task_store.get(&id_a).expect("A exists").status,
-        TaskStatus::Closed
+    let closed = task_store.get(&id_a).expect("A exists");
+    assert_eq!(closed.status, TaskStatus::Closed);
+    assert!(
+        closed.deliverables.factory_branch_anchor.is_some(),
+        "successful close must preserve the task-specific anchor as a durable \
+         receipt for the parent epic close guard"
     );
 }
 
@@ -1011,6 +1088,200 @@ async fn test_repeated_merge_required_close_does_not_duplicate_park_audit_cas_62
     );
 }
 
+/// cas-3d37: reproduces the live ordering exactly, end to end through
+/// PostToolUse and `cas_task_close`. The worker commits and pushes first,
+/// the supervisor merges without a prior close/park, and the worker's first
+/// close succeeds using the commit-time task anchor.
+#[tokio::test]
+async fn test_merge_before_first_close_uses_commit_hook_anchor_cas_3d37() {
+    use cas::hooks::{HookInput, handle_post_tool_use};
+    use std::process::Command;
+
+    let (temp, service) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    let agent_store = open_agent_store(&cas_dir).expect("open agent store");
+    let worker_id = {
+        let mut agent = agent_store
+            .list(None)
+            .expect("list agents")
+            .into_iter()
+            .find(|agent| agent.name == "test-agent")
+            .expect("test agent exists");
+        agent.role = AgentRole::Worker;
+        let id = agent.id.clone();
+        agent_store.update(&agent).expect("mark test agent worker");
+        id
+    };
+
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        "[verification]\nenabled = true\n",
+    )
+    .expect("write config");
+
+    let repo = temp.path();
+    let remote = TempDir::new().expect("remote tempdir");
+    let bare_ok = Command::new("git")
+        .args(["init", "--bare", "-q"])
+        .current_dir(remote.path())
+        .status()
+        .expect("init bare remote")
+        .success();
+    assert!(bare_ok, "bare remote init failed");
+    let git = |args: &[&str]| {
+        let ok = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .expect("git")
+            .success();
+        assert!(ok, "git {args:?} failed");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["remote", "add", "origin", &remote.path().display().to_string()]);
+    std::fs::write(repo.join("seed.txt"), "seed\n").unwrap();
+    git(&["add", "seed.txt"]);
+    git(&["commit", "-q", "-m", "seed"]);
+    git(&["checkout", "-q", "-b", "epic/cas-3d37"]);
+    git(&["push", "-q", "-u", "origin", "epic/cas-3d37"]);
+    git(&["checkout", "-q", "-b", "factory/test-agent"]);
+
+    let task_store = open_task_store(&cas_dir).expect("open task store");
+    let epic_id = extract_task_id(&extract_text(
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: "Merge-before-close epic".to_string(),
+                description: None,
+                priority: 2,
+                task_type: "epic".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: None,
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("create epic"),
+    ))
+    .expect("epic id")
+    .to_string();
+    {
+        let mut epic = task_store.get(&epic_id).expect("epic exists");
+        epic.branch = Some("epic/cas-3d37".to_string());
+        task_store.update(&epic).expect("update epic branch");
+    }
+
+    let task_id = extract_task_id(&extract_text(
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                epic: Some(epic_id),
+                ..simple_task_req("Merge before first close")
+            }))
+            .await
+            .expect("create task"),
+    ))
+    .expect("task id")
+    .to_string();
+    service
+        .cas_task_start(Parameters(IdRequest {
+            id: task_id.clone(),
+        }))
+        .await
+        .expect("start task");
+    {
+        let mut task = task_store.get(&task_id).expect("task exists after start");
+        task.assignee = Some("test-agent".to_string());
+        task_store.update(&task).expect("set task assignee");
+    }
+
+    // Worker commit + push, before any close attempt.
+    std::fs::write(repo.join("work.rs"), "fn merged_work() {}\n").unwrap();
+    git(&["add", "work.rs"]);
+    git(&["commit", "-q", "-m", "fix: merged task work"]);
+    handle_post_tool_use(
+        &HookInput {
+            session_id: worker_id,
+            cwd: repo.display().to_string(),
+            hook_event_name: "PostToolUse".to_string(),
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({
+                "command": "git commit -q -m 'fix: merged task work'"
+            })),
+            // Real Codex 0.145.0 PostToolUse shape: unified exec matches as
+            // Bash, while `tool_response` is the model-facing output string
+            // rather than Claude's `{exitCode, stdout}` object.
+            tool_response: Some(serde_json::json!("")),
+            agent_role: Some("worker".to_string()),
+            ..Default::default()
+        },
+        Some(&cas_dir),
+    )
+    .expect("post-tool hook");
+    let anchored = task_store.get(&task_id).expect("anchored task");
+    let anchor = anchored
+        .deliverables
+        .factory_branch_anchor
+        .clone()
+        .expect("commit hook recorded task anchor");
+    git(&["push", "-q", "-u", "origin", "factory/test-agent"]);
+
+    // Supervisor merges and pushes without any prior task close/park.
+    git(&["checkout", "-q", "epic/cas-3d37"]);
+    git(&["merge", "--no-ff", "-q", "origin/factory/test-agent"]);
+    git(&["push", "-q", "origin", "epic/cas-3d37"]);
+    git(&["checkout", "-q", "factory/test-agent"]);
+    let merged = Command::new("git")
+        .args(["merge-base", "--is-ancestor", &anchor, "epic/cas-3d37"])
+        .current_dir(repo)
+        .status()
+        .expect("ancestry check")
+        .success();
+    assert!(merged, "task anchor must be merged into the epic");
+
+    open_verification_store(&cas_dir)
+        .expect("open verification store")
+        .add(&Verification::approved(
+            "ver-cas-3d37".to_string(),
+            task_id.clone(),
+            "Approved literal merge-before-close regression".to_string(),
+        ))
+        .expect("record verification approval");
+
+    let close_text = extract_text(
+        service
+            .cas_task_close(Parameters(TaskCloseRequest {
+                id: task_id.clone(),
+                reason: Some("work was merged before first close".to_string()),
+                bypass_code_review: None,
+                code_review_findings: None,
+                search_manifest: None,
+            }))
+            .await
+            .expect("first close returns"),
+    );
+    assert!(
+        close_text.contains("Closed task:"),
+        "worker's first close after supervisor merge must succeed: {close_text}"
+    );
+    assert_eq!(
+        task_store.get(&task_id).expect("task exists").status,
+        TaskStatus::Closed
+    );
+}
+
 /// cas-4b3f (AC b): reproduces BUG-close-guard-branch-head-not-task-commits.md
 /// end to end through `cas_task_close`. Worker completes task A on
 /// `factory/test-agent`, gets MERGE REQUIRED (parked — this is where the
@@ -1402,9 +1673,10 @@ async fn test_stale_local_epic_ref_falls_back_to_origin_cas_38e2() {
 /// the tip at the first rejection) was NEVER cleared or updated once a
 /// task closed and was later reopened — so a second round of genuinely
 /// new, unmerged work would still check against the OLD (already-merged)
-/// anchor and false-Proceed. Post-fix, both `cas_task_reopen` and a
-/// successful close clear the anchor, so the reworked task's retry
-/// correctly re-evaluates from scratch.
+/// anchor and false-Proceed. `cas_task_reopen` clears the anchor before
+/// rework starts, so the reworked task's retry correctly re-evaluates from
+/// scratch; cas-eaf8 intentionally preserves it while the task stays Closed
+/// so the parent epic can use it as a task-specific merge receipt.
 #[tokio::test]
 async fn test_reopened_task_does_not_reuse_stale_anchor_cas_cf64() {
     use std::process::Command;

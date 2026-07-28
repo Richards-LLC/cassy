@@ -5,39 +5,8 @@
 //! it for both supervisors and workers with role-tailored guidance.
 
 use crate::hooks::handlers::handle_pre_tool_use;
+use crate::test_support::TestEnvGuard;
 use cas_core::hooks::types::{HookInput, HookOutput};
-
-// ============================================================================
-// Env helpers - serialize on the shared process-wide mutex in mod.rs so that
-// concurrent tests across sibling modules don't race on CAS_AGENT_ROLE.
-// ============================================================================
-
-struct EnvGuard {
-    key: &'static str,
-    prev: Option<String>,
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match &self.prev {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
-
-fn set_env(key: &'static str, value: Option<&str>) -> EnvGuard {
-    let prev = std::env::var(key).ok();
-    unsafe {
-        match value {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
-        }
-    }
-    EnvGuard { key, prev }
-}
 
 // ============================================================================
 // Input builder
@@ -76,9 +45,10 @@ fn deny_reason(out: &HookOutput) -> Option<String> {
 
 #[test]
 fn factory_supervisor_ask_user_question_is_denied_with_plain_text_guidance() {
-    let _g = super::env_lock();
-    let _role = set_env("CAS_AGENT_ROLE", Some("supervisor"));
-    let _cli = set_env("CAS_FACTORY_SUPERVISOR_CLI", Some("claude"));
+    let _env = TestEnvGuard::with_optional_vars(&[
+        ("CAS_AGENT_ROLE", Some("supervisor")),
+        ("CAS_FACTORY_SUPERVISOR_CLI", Some("claude")),
+    ]);
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let out =
@@ -105,9 +75,10 @@ fn factory_supervisor_ask_user_question_is_denied_with_plain_text_guidance() {
 
 #[test]
 fn factory_supervisor_ask_user_question_is_denied_from_hook_input_role() {
-    let _g = super::env_lock();
-    let _role = set_env("CAS_AGENT_ROLE", None);
-    let _cli = set_env("CAS_FACTORY_SUPERVISOR_CLI", Some("claude"));
+    let _env = TestEnvGuard::with_optional_vars(&[
+        ("CAS_AGENT_ROLE", None),
+        ("CAS_FACTORY_SUPERVISOR_CLI", Some("claude")),
+    ]);
 
     let mut input = hook_input("AskUserQuestion");
     input.agent_role = Some("supervisor".into());
@@ -123,9 +94,10 @@ fn factory_supervisor_ask_user_question_is_denied_from_hook_input_role() {
 
 #[test]
 fn grok_factory_supervisor_ask_user_question_uses_grok_prefix() {
-    let _g = super::env_lock();
-    let _role = set_env("CAS_AGENT_ROLE", Some("supervisor"));
-    let _cli = set_env("CAS_FACTORY_SUPERVISOR_CLI", Some("grok"));
+    let _env = TestEnvGuard::with_optional_vars(&[
+        ("CAS_AGENT_ROLE", Some("supervisor")),
+        ("CAS_FACTORY_SUPERVISOR_CLI", Some("grok")),
+    ]);
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let out =
@@ -144,9 +116,10 @@ fn grok_factory_supervisor_ask_user_question_uses_grok_prefix() {
 
 #[test]
 fn factory_worker_ask_user_question_is_denied_with_supervisor_message_guidance() {
-    let _g = super::env_lock();
-    let _role = set_env("CAS_AGENT_ROLE", Some("worker"));
-    let _cli = set_env("CAS_FACTORY_WORKER_CLI", Some("codex"));
+    let _env = TestEnvGuard::with_optional_vars(&[
+        ("CAS_AGENT_ROLE", Some("worker")),
+        ("CAS_FACTORY_WORKER_CLI", Some("codex")),
+    ]);
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let out =
@@ -169,8 +142,7 @@ fn factory_worker_ask_user_question_is_denied_with_supervisor_message_guidance()
 
 #[test]
 fn non_factory_agent_ask_user_question_is_untouched() {
-    let _g = super::env_lock();
-    let _role = set_env("CAS_AGENT_ROLE", None);
+    let _env = TestEnvGuard::with_optional_vars(&[("CAS_AGENT_ROLE", None)]);
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let out =
@@ -188,9 +160,10 @@ fn non_factory_agent_ask_user_question_is_untouched() {
 
 #[test]
 fn factory_supervisor_other_tool_is_untouched() {
-    let _g = super::env_lock();
-    let _role = set_env("CAS_AGENT_ROLE", Some("supervisor"));
-    let _cli = set_env("CAS_FACTORY_SUPERVISOR_CLI", Some("claude"));
+    let _env = TestEnvGuard::with_optional_vars(&[
+        ("CAS_AGENT_ROLE", Some("supervisor")),
+        ("CAS_FACTORY_SUPERVISOR_CLI", Some("claude")),
+    ]);
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = handle_pre_tool_use(&hook_input("AskFollowupQuestions"), Some(tmp.path()))
@@ -204,9 +177,10 @@ fn factory_supervisor_other_tool_is_untouched() {
 
 #[test]
 fn factory_supervisor_ask_user_question_is_denied_without_cas_root() {
-    let _g = super::env_lock();
-    let _role = set_env("CAS_AGENT_ROLE", Some("supervisor"));
-    let _cli = set_env("CAS_FACTORY_SUPERVISOR_CLI", Some("claude"));
+    let _env = TestEnvGuard::with_optional_vars(&[
+        ("CAS_AGENT_ROLE", Some("supervisor")),
+        ("CAS_FACTORY_SUPERVISOR_CLI", Some("claude")),
+    ]);
 
     let out = handle_pre_tool_use(&hook_input("AskUserQuestion"), None).expect("handler ok");
 

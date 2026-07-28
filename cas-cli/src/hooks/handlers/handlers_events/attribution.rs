@@ -189,24 +189,47 @@ pub fn detect_and_link_git_commit(cas_root: &std::path::Path, input: &HookInput)
         None => return,
     };
 
-    // Check for successful exit
-    let exit_code = tool_response
-        .get("exitCode")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(1);
-    if exit_code != 0 {
-        return; // Commit failed
+    // Claude reports a structured response with `exitCode` and `stdout`.
+    // Codex PostToolUse reports the real unified-exec response as a JSON
+    // string instead. The latter has no exit-code field, so commit-time
+    // validation is deferred to the active task lease below.
+    let codex_response = tool_response.is_string();
+    if !codex_response {
+        let exit_code = tool_response
+            .get("exitCode")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(1);
+        if exit_code != 0 {
+            return; // Commit failed
+        }
     }
 
-    // Extract commit hash from stdout
+    // Git's commit output identifies the object the invocation created even
+    // when a later command moves HEAD. Resolve that object to a full SHA.
+    // Quiet commits carry no hash, so HEAD remains the fallback proxy.
     let stdout = tool_response
         .get("stdout")
         .and_then(|v| v.as_str())
+        .or_else(|| tool_response.as_str())
         .unwrap_or("");
-    let commit_hash = match extract_commit_hash(stdout) {
+    let commit_hash = match extract_commit_hash(stdout)
+        .and_then(|hash| resolve_git_revision(input, &hash))
+        .or_else(|| resolve_commit_head(input))
+    {
         Some(hash) => hash,
         None => return, // Couldn't find commit hash
     };
+
+    // cas-3d37: snapshot the active factory task's latest committed tip at
+    // commit time, not only after MERGE REQUIRED rejects a close. This makes
+    // merge-before-first-close order-independent: once that SHA is an
+    // ancestor of the epic branch, the zero-commit gate can prove real work
+    // existed even though the live worker branch is now 0 commits ahead.
+    let anchored =
+        persist_active_task_factory_anchor(cas_root, input, &commit_hash, codex_response);
+    if codex_response && !anchored {
+        return;
+    }
 
     // Open stores
     let file_change_store = match open_file_change_store(cas_root) {
@@ -262,6 +285,121 @@ pub fn detect_and_link_git_commit(cas_root: &std::path::Path, input: &HookInput)
     let _ = file_change_store.link_to_commit(&change_ids, &commit_hash);
 }
 
+/// Resolve a revision to its full SHA in the tool invocation's working
+/// directory. `HookInput.cwd` is authoritative for PostToolUse. Empty legacy
+/// inputs fall back to the hook process cwd so existing harnesses keep working.
+fn resolve_git_revision(input: &HookInput, revision: &str) -> Option<String> {
+    let mut command = std::process::Command::new("git");
+    command.args(["rev-parse", revision]);
+    if !input.cwd.trim().is_empty() {
+        command.current_dir(&input.cwd);
+    }
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    if sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(sha)
+    } else {
+        None
+    }
+}
+
+fn resolve_commit_head(input: &HookInput) -> Option<String> {
+    resolve_git_revision(input, "HEAD")
+}
+
+/// Persist commit-time merge evidence on the one active task held by a
+/// factory worker. Best-effort by hook convention: missing agent/task stores,
+/// no active lease, non-worker callers, and non-factory branches are no-ops.
+fn persist_active_task_factory_anchor(
+    cas_root: &std::path::Path,
+    input: &HookInput,
+    commit_hash: &str,
+    require_commit_during_lease: bool,
+) -> bool {
+    let agent_store = match open_agent_store(cas_root) {
+        Ok(store) => store,
+        Err(_) => return false,
+    };
+    let agent_id = current_agent_id(input);
+    let agent = match agent_store.get(&agent_id) {
+        Ok(agent) if agent.role == AgentRole::Worker => agent,
+        _ => return false,
+    };
+    let task_store = match open_task_store(cas_root) {
+        Ok(store) => store,
+        Err(_) => return false,
+    };
+    let mut active_tasks = agent_store
+        .list_agent_leases(&agent.id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|lease| {
+            task_store
+                .get(&lease.task_id)
+                .ok()
+                .map(|task| (lease, task))
+        })
+        .filter(|(_, task)| task.status == TaskStatus::InProgress);
+    let Some((lease, mut task)) = active_tasks.next() else {
+        return false;
+    };
+    // One-task-at-a-time is a factory invariant. If corrupt state exposes
+    // multiple active tasks, do not guess which task owns this commit.
+    if active_tasks.next().is_some() {
+        return false;
+    }
+    if require_commit_during_lease
+        && task.deliverables.factory_branch_anchor.as_deref() != Some(commit_hash)
+        && !commit_is_from_active_lease(input, commit_hash, lease.acquired_at.timestamp())
+    {
+        return false;
+    }
+
+    let branch = git_branch_in(&input.cwd).or_else(get_current_branch);
+    let Some(branch) = branch.filter(|name| name.starts_with("factory/")) else {
+        return false;
+    };
+    task.deliverables.factory_branch_anchor = Some(commit_hash.to_string());
+    task.deliverables.parked_branch = Some(branch);
+    task.updated_at = chrono::Utc::now();
+    task_store.update(&task).is_ok()
+}
+
+/// Codex does not include a shell exit code in PostToolUse input. Require the
+/// resolved HEAD commit to have been created no earlier than the current task
+/// lease, with a one-second allowance for Git's whole-second timestamp.
+fn commit_is_from_active_lease(input: &HookInput, commit_hash: &str, lease_epoch: i64) -> bool {
+    let mut command = std::process::Command::new("git");
+    command.args(["show", "-s", "--format=%ct", commit_hash]);
+    if !input.cwd.trim().is_empty() {
+        command.current_dir(&input.cwd);
+    }
+    command
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|timestamp| timestamp.trim().parse::<i64>().ok())
+        .is_some_and(|commit_epoch| commit_epoch >= lease_epoch.saturating_sub(1))
+}
+
+fn git_branch_in(cwd: &str) -> Option<String> {
+    if cwd.trim().is_empty() {
+        return None;
+    }
+    std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(cwd)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|branch| branch.trim().to_string())
+}
+
 /// Check if a command is a git commit command
 pub fn is_git_commit_command(command: &str) -> bool {
     let cmd_lower = command.to_lowercase();
@@ -274,7 +412,14 @@ pub fn is_git_commit_command(command: &str) -> bool {
 /// Git commit output format: "[branch hash] message"
 /// Example: "[main abc1234] Add new feature"
 pub fn extract_commit_hash(stdout: &str) -> Option<String> {
-    // Look for pattern: [branch hash] or just a commit hash line
+    let mut bracket_hash = None;
+    let mut full_hash = None;
+
+    // Prefer the final `[branch hash]` commit-status line. Chained invocations
+    // may create more than one object (for example commit then amend), and the
+    // final object is the deliverable tip. Only use a bare full hash when no
+    // commit-status line exists, so a later `git rev-parse` cannot override
+    // the commit's own output.
     for line in stdout.lines() {
         let line = line.trim();
 
@@ -290,19 +435,19 @@ pub fn extract_commit_hash(stdout: &str) -> Option<String> {
                     if potential_hash.len() >= 7
                         && potential_hash.chars().all(|c| c.is_ascii_hexdigit())
                     {
-                        return Some(potential_hash.to_string());
+                        bracket_hash = Some(potential_hash.to_string());
                     }
                 }
             }
         }
 
-        // Also check for full 40-char hash
+        // Also support scripts that print only the full created commit hash.
         if line.len() == 40 && line.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Some(line.to_string());
+            full_hash = Some(line.to_string());
         }
     }
 
-    None
+    bracket_hash.or(full_hash)
 }
 
 /// Extract commit message from git commit command
@@ -381,4 +526,255 @@ pub fn get_git_author() -> Option<String> {
         .map(|s| s.trim().to_string())?;
 
     Some(format!("{name} <{email}>"))
+}
+
+#[cfg(test)]
+mod commit_anchor_tests {
+    use super::*;
+    use crate::store::init_cas_dir;
+    use std::process::Command;
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn git_output(dir: &std::path::Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("git");
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8(output.stdout).expect("git stdout")
+    }
+
+    fn worker_task_fixture() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        Agent,
+        Task,
+        std::sync::Arc<dyn crate::store::TaskStore>,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().to_path_buf();
+        let cas_root = init_cas_dir(&repo).expect("init cas");
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("seed.txt"), "seed\n").unwrap();
+        git(&repo, &["add", "seed.txt"]);
+        git(&repo, &["commit", "-q", "-m", "seed"]);
+        git(&repo, &["checkout", "-q", "-b", "factory/test-worker"]);
+
+        let agent_store = open_agent_store(&cas_root).expect("agent store");
+        let mut agent = Agent::new("session-worker".to_string(), "test-worker".to_string());
+        agent.role = AgentRole::Worker;
+        agent_store.register(&agent).expect("register worker");
+        let task_store = open_task_store(&cas_root).expect("task store");
+        let mut task = Task::new("cas-034e-test".to_string(), "commit anchor".to_string());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some("test-worker".to_string());
+        task_store.add(&task).expect("add task");
+        agent_store
+            .try_claim(&task.id, &agent.id, 600, None)
+            .expect("claim task");
+
+        (temp, cas_root, agent, task, task_store)
+    }
+
+    #[test]
+    fn commit_then_reset_records_created_commit_not_post_command_head() {
+        let (_temp, cas_root, agent, task, task_store) = worker_task_fixture();
+        let repo = cas_root.parent().expect("repo");
+        std::fs::write(repo.join("work.rs"), "fn work() {}\n").unwrap();
+        git(repo, &["add", "work.rs"]);
+
+        let output = Command::new("bash")
+            .args([
+                "-c",
+                "git commit -m 'fix: task work' && git reset --hard HEAD~1",
+            ])
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("commit then reset");
+        assert!(output.status.success(), "commit then reset failed");
+        let stdout = String::from_utf8(output.stdout).expect("command stdout");
+        let abbreviated = extract_commit_hash(&stdout).expect("created commit hash");
+        let expected = git_output(repo, &["rev-parse", &abbreviated])
+            .trim()
+            .to_string();
+        let post_command_head = git_output(repo, &["rev-parse", "HEAD"]).trim().to_string();
+        assert_ne!(expected, post_command_head, "fixture must move HEAD");
+
+        detect_and_link_git_commit(
+            &cas_root,
+            &HookInput {
+                session_id: agent.id,
+                cwd: repo.display().to_string(),
+                hook_event_name: "PostToolUse".to_string(),
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({
+                    "command": "git commit -m 'fix: task work' && git reset --hard HEAD~1"
+                })),
+                tool_response: Some(serde_json::json!({
+                    "exitCode": 0,
+                    "stdout": stdout
+                })),
+                agent_role: Some("worker".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let anchored = task_store.get(&task.id).expect("anchored task");
+        assert_eq!(
+            anchored.deliverables.factory_branch_anchor.as_deref(),
+            Some(expected.as_str())
+        );
+    }
+
+    #[test]
+    fn commit_then_amend_records_final_created_commit() {
+        let (_temp, cas_root, agent, task, task_store) = worker_task_fixture();
+        let repo = cas_root.parent().expect("repo");
+        std::fs::write(repo.join("work.rs"), "fn work() {}\n").unwrap();
+        git(repo, &["add", "work.rs"]);
+
+        let output = Command::new("bash")
+            .args([
+                "-c",
+                "git commit -m 'work v1' && printf '\\n// amended\\n' >> work.rs \
+                 && git add work.rs && git commit --amend -m 'work v2'",
+            ])
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("commit then amend");
+        assert!(output.status.success(), "commit then amend failed");
+        let stdout = String::from_utf8(output.stdout).expect("command stdout");
+        let expected = git_output(repo, &["rev-parse", "HEAD"]).trim().to_string();
+        let original = git_output(repo, &["rev-parse", "HEAD@{1}"])
+            .trim()
+            .to_string();
+        assert_ne!(
+            expected, original,
+            "fixture must replace the original commit"
+        );
+
+        detect_and_link_git_commit(
+            &cas_root,
+            &HookInput {
+                session_id: agent.id,
+                cwd: repo.display().to_string(),
+                hook_event_name: "PostToolUse".to_string(),
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({
+                    "command": "git commit -m 'work v1' && printf '\\n// amended\\n' >> work.rs \
+                                && git add work.rs && git commit --amend -m 'work v2'"
+                })),
+                tool_response: Some(serde_json::json!({
+                    "exitCode": 0,
+                    "stdout": stdout
+                })),
+                agent_role: Some("worker".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let anchored = task_store.get(&task.id).expect("anchored task");
+        assert_eq!(
+            anchored.deliverables.factory_branch_anchor.as_deref(),
+            Some(expected.as_str())
+        );
+    }
+
+    #[test]
+    fn successful_worker_commit_records_active_task_anchor_before_close() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        let cas_root = init_cas_dir(repo).expect("init cas");
+        git(repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("seed.txt"), "seed\n").unwrap();
+        git(repo, &["add", "seed.txt"]);
+        git(repo, &["commit", "-q", "-m", "seed"]);
+        git(repo, &["checkout", "-q", "-b", "factory/test-worker"]);
+
+        let agent_store = open_agent_store(&cas_root).expect("agent store");
+        let mut agent = Agent::new("session-worker".to_string(), "test-worker".to_string());
+        agent.role = AgentRole::Worker;
+        agent_store.register(&agent).expect("register worker");
+        let task_store = open_task_store(&cas_root).expect("task store");
+        let mut task = Task::new("cas-3d37-test".to_string(), "commit anchor".to_string());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some("test-worker".to_string());
+        task_store.add(&task).expect("add task");
+        agent_store
+            .try_claim(&task.id, &agent.id, 600, None)
+            .expect("claim task");
+
+        std::fs::write(repo.join("work.rs"), "fn work() {}\n").unwrap();
+        git(repo, &["add", "work.rs"]);
+        // Quiet commit intentionally has no stdout hash. The hook must resolve
+        // full HEAD directly instead of depending on human-oriented output.
+        git(repo, &["commit", "-q", "-m", "fix: task work"]);
+        let expected = resolve_commit_head(&HookInput {
+            cwd: repo.display().to_string(),
+            ..Default::default()
+        })
+        .expect("head sha");
+
+        detect_and_link_git_commit(
+            &cas_root,
+            &HookInput {
+                session_id: agent.id,
+                cwd: repo.display().to_string(),
+                hook_event_name: "PostToolUse".to_string(),
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({
+                    "command": "git commit -q -m 'fix: task work'"
+                })),
+                tool_response: Some(serde_json::json!({
+                    "exitCode": 0,
+                    "stdout": ""
+                })),
+                agent_role: Some("worker".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let anchored = task_store.get(&task.id).expect("anchored task");
+        assert_eq!(
+            anchored.deliverables.factory_branch_anchor.as_deref(),
+            Some(expected.as_str())
+        );
+        assert_eq!(
+            anchored.deliverables.parked_branch.as_deref(),
+            Some("factory/test-worker")
+        );
+    }
 }

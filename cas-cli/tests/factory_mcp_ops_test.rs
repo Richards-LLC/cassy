@@ -1690,6 +1690,71 @@ async fn test_worker_activity_includes_idle_workers() {
     );
 }
 
+#[tokio::test]
+async fn test_worker_activity_codex_tool_call_uses_worker_status_rollout_signal() {
+    use std::io::Write;
+
+    let codex_home = tempfile::tempdir().expect("codex home");
+    let clone_path = "/tmp/cas-a568-codex-worker";
+    let rollout = codex_home
+        .path()
+        .join("sessions/2026/07/28/rollout-2026-07-28T12-00-00-live.jsonl");
+    std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+    let mut file = std::fs::File::create(&rollout).unwrap();
+    writeln!(
+        file,
+        "{}",
+        serde_json::json!({
+            "type": "session_meta",
+            "payload": {
+                "session_id": "019fa8b8-activity-feed",
+                "cwd": clone_path,
+                "originator": "codex-tui",
+                "source": "cli"
+            }
+        })
+    )
+    .unwrap();
+    writeln!(
+        file,
+        r#"{{"type":"response_item","payload":{{"type":"function_call","call_id":"call-live","name":"apply_patch"}}}}"#
+    )
+    .unwrap();
+    drop(file);
+
+    let _guard = EnvGuard::set(&[(
+        "CODEX_HOME",
+        codex_home.path().to_str().expect("utf-8 temp path"),
+    )]);
+    let env = FactoryTestEnv::new();
+    let mut metadata = HashMap::new();
+    metadata.insert("worker_cli".to_string(), "codex".to_string());
+    metadata.insert("clone_path".to_string(), clone_path.to_string());
+    env.register_worker_with_metadata("codex-worker", metadata);
+
+    let mut req = factory_req("worker_activity");
+    req.target = Some("codex-worker".to_string());
+    let result = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect("worker_activity should consume the resolved Codex rollout");
+    let text = get_text(&result);
+
+    assert!(
+        text.contains("codex-worker - in-flight tool call"),
+        "the same rollout fixture that refutes worker_status STALLED must appear here: {text}"
+    );
+    assert!(
+        text.contains("transcript-backed"),
+        "the feed must distinguish rollout freshness from CAS event rows: {text}"
+    );
+    assert!(
+        !text.contains("No recent worker activity"),
+        "an active Codex tool call must not produce the empty feed: {text}"
+    );
+}
+
 // =============================================================================
 // clear_context tests
 // =============================================================================
@@ -1882,6 +1947,35 @@ async fn test_gc_cleanup_with_force() {
     );
 
     assert_eq!(pq.pending_count().expect("count"), 0);
+}
+
+#[tokio::test]
+async fn test_gc_cleanup_force_with_age_expires_without_deleting_prompt_rows() {
+    let env = FactoryTestEnv::new();
+    let pq = env.prompt_queue();
+    let id = pq.enqueue("src", "dead-worker", "poison").expect("enqueue");
+
+    let mut req = factory_req("gc_cleanup");
+    req.force = Some(true);
+    req.older_than_secs = Some(0);
+    let result = env.service.factory(Parameters(req)).await.unwrap();
+    let text = get_text(&result);
+
+    assert!(
+        text.contains("Prompt queue entries expired: 1"),
+        "targeted remediation must report terminalized rows: {text}"
+    );
+    assert!(
+        text.contains("Prompt queue entries cleared: 0"),
+        "age-targeted remediation must preserve history: {text}"
+    );
+    assert_eq!(pq.pending_count().unwrap(), 0);
+    let report = pq
+        .message_delivery_report(id)
+        .unwrap()
+        .expect("expired row remains queryable");
+    assert_eq!(report.stage, cas_store::DeliveryStage::Abandoned);
+    assert!(report.delivered_at.is_none());
 }
 
 #[tokio::test]
@@ -2276,6 +2370,50 @@ async fn test_coordination_message_non_urgent_does_not_claim_delivery() {
     assert!(
         text.contains("message_status"),
         "must point the sender at message_status to check the real state: {text}"
+    );
+}
+
+/// cas-0440: the send response must name the same parameter that
+/// `message_status` accepts. Drive the caller-visible two-call sequence:
+/// send a message, copy the returned notification_id verbatim, then query it.
+#[tokio::test]
+async fn test_coordination_message_returned_notification_id_drives_status_query() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "supervisor"),
+    ]);
+    let env = FactoryTestEnv::new();
+    env.register_worker("swift-fox");
+
+    let send_req = coord_msg("message", "swift-fox", "status update", None);
+    let send_result = env.service.coordination(Parameters(send_req)).await;
+    assert!(send_result.is_ok(), "message should succeed: {send_result:?}");
+    let send_text = get_text(&send_result.unwrap());
+
+    let notification_id = send_text
+        .lines()
+        .find_map(|line| line.strip_prefix("notification_id: "))
+        .expect("message response must label the returned prompt queue ID as notification_id")
+        .parse::<i64>()
+        .expect("returned notification_id must be an integer");
+    assert!(
+        send_text.contains(&format!(
+            "`message_status` with `notification_id={notification_id}`"
+        )),
+        "response must give the exact parameter spelling for the follow-up call: {send_text}"
+    );
+
+    let mut status_req = coord_msg("message_status", "swift-fox", "unused", None);
+    status_req.notification_id = Some(notification_id);
+    let status_result = env.service.coordination(Parameters(status_req)).await;
+    assert!(
+        status_result.is_ok(),
+        "message_status must accept the ID copied from the send response: {status_result:?}"
+    );
+    let status_text = get_text(&status_result.unwrap());
+    assert!(
+        status_text.contains(&format!("Message {notification_id} status:")),
+        "status response must describe the same returned ID: {status_text}"
     );
 }
 

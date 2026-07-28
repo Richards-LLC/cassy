@@ -28,6 +28,9 @@
 //! resuming" symptom this task investigated is therefore NOT an idle-gate
 //! problem — see the companion busy-injection note in the task record.
 
+#[path = "support/real_pty_serial.rs"]
+mod real_pty_serial;
+
 use cas_mux::{Pane, PaneKind, Pty, PtyConfig, SupervisorCli};
 use std::io::Read;
 use std::time::Duration;
@@ -35,6 +38,8 @@ use std::time::Duration;
 #[test]
 #[ignore = "spawns a real PTY child process — run explicitly, see module docs"]
 fn idle_pane_injection_auto_submits_real_pty() {
+    let _serial = real_pty_serial::lock();
+
     let tmp = std::env::temp_dir().join(format!(
         "cas-893c-idle-inject-{}-{}.log",
         std::process::id(),
@@ -131,5 +136,83 @@ fn idle_pane_injection_auto_submits_real_pty() {
         got.contains("hello-cas-893c-idle-nudge"),
         "an idle pane must auto-submit injected text (write + delayed CR) — \
          the child shell never executed the injected command line. Got: {got:?}"
+    );
+}
+
+/// A normal (non-urgent) PTY inject must queue behind an in-flight turn,
+/// never cancel it. The shell models a harness that is busy until its
+/// foreground command completes: injected input may be buffered, but must
+/// not execute until after the original turn writes its completion marker.
+#[test]
+#[ignore = "spawns a real PTY child process — run explicitly, see module docs"]
+fn non_urgent_injection_does_not_break_in_flight_turn() {
+    let _serial = real_pty_serial::lock();
+
+    let tmp = std::env::temp_dir().join(format!(
+        "cas-a5a7-nonurgent-{}-{}.log",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let _ = std::fs::remove_file(&tmp);
+
+    let config = PtyConfig {
+        command: "bash".to_string(),
+        args: vec![
+            "--norc".to_string(),
+            "--noprofile".to_string(),
+            "-i".to_string(),
+        ],
+        cwd: Some(std::env::temp_dir()),
+        env: vec![("PS1".to_string(), "casa5a7$ ".to_string())],
+        rows: 24,
+        cols: 80,
+    };
+    let pty = Pty::spawn("cas-a5a7-busy-test", config).expect("spawn real pty");
+    let mut pane = Pane::with_pty(
+        "cas-a5a7-busy-test",
+        PaneKind::Shell,
+        pty,
+        24,
+        80,
+        SupervisorCli::Claude,
+    )
+    .expect("wrap pty in pane");
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+    let startup_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < startup_deadline {
+        let _ = pane.drain_output();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let first = format!("sleep 2; echo FIRST-TURN-DONE >> {}", tmp.display());
+    rt.block_on(pane.inject_prompt(&first))
+        .expect("start in-flight turn");
+    std::thread::sleep(Duration::from_millis(750));
+
+    let followup = format!("echo NONURGENT-AFTER >> {}", tmp.display());
+    rt.block_on(pane.inject_prompt(&followup))
+        .expect("queue non-urgent input");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    let mut got = String::new();
+    while std::time::Instant::now() < deadline {
+        let _ = pane.drain_output();
+        got = std::fs::read_to_string(&tmp).unwrap_or_default();
+        if got.contains("NONURGENT-AFTER") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = std::fs::remove_file(&tmp);
+
+    let lines: Vec<&str> = got.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["FIRST-TURN-DONE", "NONURGENT-AFTER"],
+        "normal injection must wait behind the active turn rather than cancel it"
     );
 }

@@ -17,37 +17,7 @@
 use crate::hooks::handlers::handle_pre_tool_use;
 use cas_core::hooks::types::HookInput;
 
-struct EnvGuard {
-    vars: Vec<(&'static str, Option<String>)>,
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        for (key, prev) in &self.vars {
-            unsafe {
-                match prev {
-                    Some(v) => std::env::set_var(key, v),
-                    None => std::env::remove_var(key),
-                }
-            }
-        }
-    }
-}
-
-fn set_env(pairs: &[(&'static str, Option<&str>)]) -> EnvGuard {
-    let mut vars = Vec::with_capacity(pairs.len());
-    for (key, val) in pairs {
-        let prev = std::env::var(key).ok();
-        unsafe {
-            match val {
-                Some(v) => std::env::set_var(key, v),
-                None => std::env::remove_var(key),
-            }
-        }
-        vars.push((*key, prev));
-    }
-    EnvGuard { vars }
-}
+use crate::test_support::TestEnvGuard;
 
 fn send_message_input(tool_input: Option<serde_json::Value>) -> HookInput {
     HookInput {
@@ -98,8 +68,7 @@ fn additional_context(out: &cas_core::hooks::types::HookOutput) -> Option<String
 
 #[test]
 fn send_message_auto_routes_onto_prompt_queue() {
-    let _g = super::env_lock();
-    let _env = set_env(&[
+    let _env = TestEnvGuard::with_optional_vars(&[
         ("CAS_AGENT_ROLE", Some("worker")),
         ("CAS_AGENT_NAME", Some("test-worker-99")),
         ("CAS_FACTORY_SESSION", None),
@@ -158,8 +127,7 @@ fn send_message_auto_routes_onto_prompt_queue() {
 
 #[test]
 fn send_message_serializes_structured_payload() {
-    let _g = super::env_lock();
-    let _env = set_env(&[
+    let _env = TestEnvGuard::with_optional_vars(&[
         ("CAS_AGENT_ROLE", Some("worker")),
         ("CAS_AGENT_NAME", Some("test-worker-22")),
         ("CAS_FACTORY_SESSION", None),
@@ -207,8 +175,7 @@ fn send_message_serializes_structured_payload() {
 
 #[test]
 fn send_message_missing_target_falls_back_to_guidance() {
-    let _g = super::env_lock();
-    let _env = set_env(&[
+    let _env = TestEnvGuard::with_optional_vars(&[
         ("CAS_AGENT_ROLE", Some("worker")),
         ("CAS_AGENT_NAME", Some("test-worker-3")),
     ]);
@@ -232,8 +199,7 @@ fn send_message_missing_target_falls_back_to_guidance() {
 
 #[test]
 fn send_message_missing_body_falls_back_to_guidance() {
-    let _g = super::env_lock();
-    let _env = set_env(&[
+    let _env = TestEnvGuard::with_optional_vars(&[
         ("CAS_AGENT_ROLE", Some("worker")),
         ("CAS_AGENT_NAME", Some("test-worker-4")),
     ]);
@@ -253,8 +219,7 @@ fn send_message_missing_body_falls_back_to_guidance() {
 
 #[test]
 fn send_message_no_tool_input_falls_back_to_guidance() {
-    let _g = super::env_lock();
-    let _env = set_env(&[
+    let _env = TestEnvGuard::with_optional_vars(&[
         ("CAS_AGENT_ROLE", Some("supervisor")),
         ("CAS_AGENT_NAME", Some("test-super-1")),
     ]);
@@ -274,8 +239,7 @@ fn send_message_no_tool_input_falls_back_to_guidance() {
 
 #[test]
 fn send_message_outside_factory_falls_through() {
-    let _g = super::env_lock();
-    let _env = set_env(&[("CAS_AGENT_ROLE", None), ("CAS_AGENT_NAME", None)]);
+    let _env = TestEnvGuard::with_optional_vars(&[("CAS_AGENT_ROLE", None), ("CAS_AGENT_NAME", None)]);
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let input = send_message_input(Some(serde_json::json!({

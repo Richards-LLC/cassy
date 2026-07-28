@@ -971,44 +971,9 @@ fn build_mcp_tools_section(cas_root: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use crate::hooks::context::*;
+    use crate::test_support::TestEnvGuard;
     use cas_core::hooks::HookInput;
     use cas_types::{Entry, Scope};
-
-    struct EnvGuard {
-        saved: Vec<(String, Option<String>)>,
-    }
-
-    impl EnvGuard {
-        fn set(vars: &[(&str, Option<&str>)]) -> Self {
-            let saved = vars
-                .iter()
-                .map(|(key, value)| {
-                    let previous = std::env::var(key).ok();
-                    unsafe {
-                        match value {
-                            Some(value) => std::env::set_var(key, value),
-                            None => std::env::remove_var(key),
-                        }
-                    }
-                    ((*key).to_string(), previous)
-                })
-                .collect();
-            Self { saved }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            for (key, value) in &self.saved {
-                unsafe {
-                    match value {
-                        Some(value) => std::env::set_var(key, value),
-                        None => std::env::remove_var(key),
-                    }
-                }
-            }
-        }
-    }
 
     fn add_scoped_host_memory(
         cas_dir: &Path,
@@ -1162,7 +1127,6 @@ mod tests {
 
     #[test]
     fn host_constraint_memory_surfaces_cross_project_for_same_host() {
-        let _lock = crate::hooks::test_env_lock();
         let home = tempfile::tempdir().unwrap();
         let host_cas = home.path().join(".cas");
         let project_a = tempfile::tempdir().unwrap();
@@ -1180,7 +1144,7 @@ mod tests {
             &host_tag,
             "Do not stage large artifacts in tmpfs-backed /tmp on this host.",
         );
-        let _env = EnvGuard::set(&[
+        let _env = TestEnvGuard::with_optional_vars(&[
             ("HOME", Some(home.path().to_str().unwrap())),
             ("CAS_ROOT", None),
             ("CAS_AGENT_ROLE", None),
@@ -1211,7 +1175,6 @@ mod tests {
 
     #[test]
     fn host_constraint_memory_excludes_nonmatching_hostname() {
-        let _lock = crate::hooks::test_env_lock();
         let home = tempfile::tempdir().unwrap();
         let host_cas = home.path().join(".cas");
         let project = tempfile::tempdir().unwrap();
@@ -1224,7 +1187,8 @@ mod tests {
             "host:not-this-machine",
             "This constraint belongs to a different host.",
         );
-        let _env = EnvGuard::set(&[("HOME", Some(home.path().to_str().unwrap()))]);
+        let _env =
+            TestEnvGuard::with_optional_vars(&[("HOME", Some(home.path().to_str().unwrap()))]);
 
         let section =
             build_host_constraints_section_for_tag(&project_cas, "host:this-machine", 1200);
@@ -1260,7 +1224,6 @@ mod tests {
 
     #[test]
     fn host_constraint_memory_excludes_project_scoped_host_tag() {
-        let _lock = crate::hooks::test_env_lock();
         let home = tempfile::tempdir().unwrap();
         let host_cas = home.path().join(".cas");
         let project = tempfile::tempdir().unwrap();
@@ -1274,7 +1237,8 @@ mod tests {
             "host:this-machine",
             "Project-scoped host-tagged memory must not become a host constraint.",
         );
-        let _env = EnvGuard::set(&[("HOME", Some(home.path().to_str().unwrap()))]);
+        let _env =
+            TestEnvGuard::with_optional_vars(&[("HOME", Some(home.path().to_str().unwrap()))]);
 
         let section =
             build_host_constraints_section_for_tag(&project_cas, "host:this-machine", 1200);
@@ -1286,7 +1250,6 @@ mod tests {
 
     #[test]
     fn host_constraint_memory_section_is_size_capped() {
-        let _lock = crate::hooks::test_env_lock();
         let home = tempfile::tempdir().unwrap();
         let host_cas = home.path().join(".cas");
         let project = tempfile::tempdir().unwrap();
@@ -1305,7 +1268,8 @@ mod tests {
                 ),
             );
         }
-        let _env = EnvGuard::set(&[("HOME", Some(home.path().to_str().unwrap()))]);
+        let _env =
+            TestEnvGuard::with_optional_vars(&[("HOME", Some(home.path().to_str().unwrap()))]);
 
         let budget = 420;
         let section = build_host_constraints_section_for_tag(&project_cas, host_tag, budget);

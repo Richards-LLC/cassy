@@ -993,6 +993,7 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::MockVercelClient;
     use super::*;
+    use crate::test_support::TestEnvGuard;
     use tempfile::TempDir;
 
     fn proj(id: &str, name: &str, team: &str) -> ProjectSummary {
@@ -1821,51 +1822,6 @@ mod tests {
     // (see task notes); writing a minimal MCP server fixture is a
     // half-day of rmcp boilerplate that didn't fit the task's scope.
 
-    /// Run `f` with `HOME` and `XDG_CONFIG_HOME` redirected to a fresh
-    /// tempdir so cmcp_core::config::Config::load_merged cannot pick up
-    /// the developer's real `~/.config/code-mode-mcp/config.toml`. This
-    /// is a same-process env mutation and is not thread-safe across
-    /// parallel tests — but cargo test serializes per-binary by default
-    /// for tests that touch the same env var, and these are the only two
-    /// tests that flip HOME.
-    #[cfg(feature = "mcp-proxy")]
-    fn with_hermetic_home<F, T>(f: F) -> T
-    where
-        F: FnOnce() -> T,
-    {
-        let tmp = TempDir::new().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
-        // SAFETY: env mutation. See note above on parallelism.
-        unsafe {
-            std::env::set_var("HOME", tmp.path());
-            std::env::set_var("XDG_CONFIG_HOME", tmp.path().join(".config"));
-        }
-        struct Restore {
-            home: Option<std::ffi::OsString>,
-            xdg: Option<std::ffi::OsString>,
-        }
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                unsafe {
-                    match &self.home {
-                        Some(v) => std::env::set_var("HOME", v),
-                        None => std::env::remove_var("HOME"),
-                    }
-                    match &self.xdg {
-                        Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-                        None => std::env::remove_var("XDG_CONFIG_HOME"),
-                    }
-                }
-            }
-        }
-        let _g = Restore {
-            home: prev_home,
-            xdg: prev_xdg,
-        };
-        f()
-    }
-
     #[cfg(feature = "mcp-proxy")]
     #[test]
     fn proxy_vercel_client_new_does_not_construct_engine() {
@@ -1883,29 +1839,30 @@ mod tests {
     #[test]
     fn proxy_vercel_client_first_call_attempts_lazy_init() {
         use super::mcp_proxy_client::ProxyVercelClient;
-        with_hermetic_home(|| {
-            let client = ProxyVercelClient::new();
-            assert!(!client.engine_constructed());
+        let mut env = TestEnvGuard::temp_home();
+        let xdg = env.home().join(".config");
+        env.set("XDG_CONFIG_HOME", xdg);
+        let client = ProxyVercelClient::new();
+        assert!(!client.engine_constructed());
 
-            // First call: hermetic env → empty config → ensure!(servers
-            // non-empty) fires BEFORE the engine is installed into
-            // self.state. Therefore engine_constructed must remain false
-            // after this Err.
-            let result = client.list_projects();
-            assert!(result.is_err(), "empty config → expected Err");
-            assert!(
-                !client.engine_constructed(),
-                "ensure!(servers non-empty) fires before installing the engine; engine_constructed must remain false"
-            );
+        // First call: hermetic env → empty config → ensure!(servers
+        // non-empty) fires BEFORE the engine is installed into
+        // self.state. Therefore engine_constructed must remain false
+        // after this Err.
+        let result = client.list_projects();
+        assert!(result.is_err(), "empty config → expected Err");
+        assert!(
+            !client.engine_constructed(),
+            "ensure!(servers non-empty) fires before installing the engine; engine_constructed must remain false"
+        );
 
-            // Second call mirrors first — same Err shape; lazy-init never advances.
-            let result2 = client.list_projects();
-            assert!(result2.is_err());
-            assert!(!client.engine_constructed());
+        // Second call mirrors first — same Err shape; lazy-init never advances.
+        let result2 = client.list_projects();
+        assert!(result2.is_err());
+        assert!(!client.engine_constructed());
 
-            // Drop without an engine must not panic.
-            drop(client);
-        });
+        // Drop without an engine must not panic.
+        drop(client);
     }
 
     #[test]
@@ -1925,25 +1882,12 @@ mod tests {
     #[test]
     fn locate_repo_root_errors_outside_a_project() {
         // CWD is a fresh tmp dir with no markers. locate_repo_root() must
-        // refuse to fall back to it. We cd via std::env::set_current_dir;
-        // restore in a guard.
+        // refuse to fall back to it.
         let tmp = TempDir::new().unwrap();
-        let prev = std::env::current_dir().unwrap();
-        struct Guard(std::path::PathBuf);
-        impl Drop for Guard {
-            fn drop(&mut self) {
-                let _ = std::env::set_current_dir(&self.0);
-            }
-        }
-        let _g = Guard(prev);
-        std::env::set_current_dir(tmp.path()).unwrap();
-        // This test is racy across other tests that also set_current_dir;
-        // best-effort. If the helper happens to find a git repo above the
-        // tempdir, skip — only assert that absent any sentinel + no git
-        // repo, the fn errors. We can't easily induce that condition
-        // reliably across CI environments, so the test is best-effort
-        // and only fails if locate_repo_root returns the bare tmp path
-        // (i.e., the silent-fallback bug is present).
+        let mut env = TestEnvGuard::new();
+        env.set_current_dir(tmp.path());
+        // If the helper happens to find a git repo above the tempdir, skip —
+        // only assert that absent any sentinel + no git repo, the fn errors.
         if let Ok(p) = locate_repo_root() {
             // Acceptable only if the resolved path is NOT the bare tmp dir.
             assert_ne!(
@@ -1957,15 +1901,8 @@ mod tests {
     fn locate_repo_root_accepts_dir_with_cargo_toml_sentinel() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0.1\"\nedition=\"2024\"\n").unwrap();
-        let prev = std::env::current_dir().unwrap();
-        struct Guard(std::path::PathBuf);
-        impl Drop for Guard {
-            fn drop(&mut self) {
-                let _ = std::env::set_current_dir(&self.0);
-            }
-        }
-        let _g = Guard(prev);
-        std::env::set_current_dir(tmp.path()).unwrap();
+        let mut env = TestEnvGuard::new();
+        env.set_current_dir(tmp.path());
         // Either git toplevel returns a sane path or sentinel fallback
         // accepts the cwd. Both are valid; we just require Ok.
         let _ = locate_repo_root().unwrap();

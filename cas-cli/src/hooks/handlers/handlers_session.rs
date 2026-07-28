@@ -377,47 +377,8 @@ pub(crate) fn build_large_artifact_staging_banner(config: &Config) -> Option<Str
 }
 
 #[cfg(test)]
-mod session_test_env {
-    pub(super) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        crate::hooks::test_env_lock()
-    }
-
-    pub(super) struct EnvGuard(Vec<(String, Option<String>)>);
-    impl EnvGuard {
-        pub(super) fn set(vars: &[(&str, Option<&str>)]) -> Self {
-            let saved = vars
-                .iter()
-                .map(|(k, v)| {
-                    let prev = std::env::var(k).ok();
-                    unsafe {
-                        match v {
-                            Some(val) => std::env::set_var(k, val),
-                            None => std::env::remove_var(k),
-                        }
-                    }
-                    (k.to_string(), prev)
-                })
-                .collect();
-            EnvGuard(saved)
-        }
-    }
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            for (k, v) in &self.0 {
-                unsafe {
-                    match v {
-                        Some(val) => std::env::set_var(k, val),
-                        None => std::env::remove_var(k),
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[cfg(test)]
 mod large_artifact_staging_tests {
-    use super::session_test_env::{EnvGuard, env_lock};
+    use crate::test_support::TestEnvGuard;
     use super::*;
 
     fn session_input(cwd: &str) -> HookInput {
@@ -463,14 +424,13 @@ mod large_artifact_staging_tests {
 
     #[test]
     fn session_start_includes_staging_banner_for_supervisor() {
-        let _lock = env_lock();
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
             tmp.path().join("config.toml"),
             "[staging]\nlarge_artifact_dir = \"/mnt/datacube/staging\"\n",
         )
         .unwrap();
-        let _env = EnvGuard::set(&[
+        let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", Some("supervisor")),
             ("CAS_CLONE_PATH", None),
             ("CAS_AGENT_NAME", None),
@@ -486,14 +446,13 @@ mod large_artifact_staging_tests {
 
     #[test]
     fn session_start_includes_staging_banner_for_worker() {
-        let _lock = env_lock();
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
             tmp.path().join("config.toml"),
             "[staging]\nlarge_artifact_dir = \"/mnt/datacube/staging\"\n",
         )
         .unwrap();
-        let _env = EnvGuard::set(&[
+        let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", Some("worker")),
             ("CAS_CLONE_PATH", None),
             ("CAS_AGENT_NAME", None),
@@ -1450,7 +1409,7 @@ mod session_learn_tests {
 // ── Worker worktree assertion tests (cas-bea2, LAYER 3) ───────────────────
 #[cfg(test)]
 mod worker_worktree_assertion_tests {
-    use super::session_test_env::{EnvGuard, env_lock};
+    use crate::test_support::TestEnvGuard;
     use super::*;
 
     fn make_git_repo() -> tempfile::TempDir {
@@ -1481,8 +1440,7 @@ mod worker_worktree_assertion_tests {
     /// Non-worker role → pass-through (no banner)
     #[test]
     fn non_worker_passes_through() {
-        let _lock = env_lock();
-        let _env = EnvGuard::set(&[
+        let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", Some("supervisor")),
             ("CAS_CLONE_PATH", Some("/tmp/some-worktree")),
         ]);
@@ -1494,8 +1452,7 @@ mod worker_worktree_assertion_tests {
     /// Worker with no CAS_CLONE_PATH → pass-through (not isolated)
     #[test]
     fn no_clone_path_passes_through() {
-        let _lock = env_lock();
-        let _env = EnvGuard::set(&[("CAS_AGENT_ROLE", Some("worker")), ("CAS_CLONE_PATH", None)]);
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_AGENT_ROLE", Some("worker")), ("CAS_CLONE_PATH", None)]);
         let ctx = "some context".to_string();
         let result = build_worker_worktree_assertion("/tmp/foo", ctx.clone());
         assert_eq!(result, ctx);
@@ -1504,11 +1461,10 @@ mod worker_worktree_assertion_tests {
     /// CWD outside worktree → warning prepended
     #[test]
     fn cwd_outside_worktree_prepends_warning() {
-        let _lock = env_lock();
         let tmp = tempfile::tempdir().unwrap();
         let worktree = tmp.path().join("wt").to_string_lossy().to_string();
         let other = tmp.path().join("other").to_string_lossy().to_string();
-        let _env = EnvGuard::set(&[
+        let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", Some("worker")),
             ("CAS_CLONE_PATH", Some(&worktree)),
         ]);
@@ -1527,10 +1483,9 @@ mod worker_worktree_assertion_tests {
     /// CWD inside worktree on a non-factory branch (e.g. main) → branch warning prepended
     #[test]
     fn non_factory_branch_prepends_warning() {
-        let _lock = env_lock();
         let tmp = make_git_repo(); // on main
         let p = tmp.path().to_string_lossy().to_string();
-        let _env = EnvGuard::set(&[
+        let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", Some("worker")),
             ("CAS_CLONE_PATH", Some(&p)),
         ]);
@@ -1550,7 +1505,6 @@ mod worker_worktree_assertion_tests {
     /// (Regression guard: epic/* used to bypass the denylist.)
     #[test]
     fn epic_branch_prepends_warning() {
-        let _lock = env_lock();
         let tmp = make_git_repo();
         let p = tmp.path();
 
@@ -1561,7 +1515,7 @@ mod worker_worktree_assertion_tests {
             .unwrap();
 
         let ps = p.to_string_lossy().to_string();
-        let _env = EnvGuard::set(&[
+        let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", Some("worker")),
             ("CAS_CLONE_PATH", Some(&ps)),
         ]);
@@ -1580,7 +1534,6 @@ mod worker_worktree_assertion_tests {
     /// CWD inside worktree on detached HEAD → branch warning prepended (fail-closed)
     #[test]
     fn detached_head_prepends_warning() {
-        let _lock = env_lock();
         let tmp = make_git_repo();
         let p = tmp.path();
 
@@ -1598,7 +1551,7 @@ mod worker_worktree_assertion_tests {
             .unwrap();
 
         let ps = p.to_string_lossy().to_string();
-        let _env = EnvGuard::set(&[
+        let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", Some("worker")),
             ("CAS_CLONE_PATH", Some(&ps)),
         ]);
@@ -1613,7 +1566,6 @@ mod worker_worktree_assertion_tests {
     /// CWD inside worktree on factory branch → no warning
     #[test]
     fn factory_branch_is_clean() {
-        let _lock = env_lock();
         let tmp = make_git_repo();
         let p = tmp.path();
 
@@ -1624,7 +1576,7 @@ mod worker_worktree_assertion_tests {
             .unwrap();
 
         let ps = p.to_string_lossy().to_string();
-        let _env = EnvGuard::set(&[
+        let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", Some("worker")),
             ("CAS_CLONE_PATH", Some(&ps)),
         ]);
@@ -1640,10 +1592,9 @@ mod worker_worktree_assertion_tests {
     /// Existing context is preserved (warning is prepended, not replacing)
     #[test]
     fn warning_prepends_not_replaces_context() {
-        let _lock = env_lock();
         let tmp = make_git_repo(); // on main
         let p = tmp.path().to_string_lossy().to_string();
-        let _env = EnvGuard::set(&[
+        let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", Some("worker")),
             ("CAS_CLONE_PATH", Some(&p)),
         ]);
@@ -1663,13 +1614,12 @@ mod worker_worktree_assertion_tests {
     /// SessionStart bundle size must stay under 12KB after adding the assertion
     #[test]
     fn worker_session_start_with_assertion_stays_under_12kb() {
-        let _lock = env_lock();
         // Simulate the largest plausible warning: both cwd mismatch + wrong branch (non-factory)
         let tmp = make_git_repo();
         let p = tmp.path();
         let wt = "/some/very/long/absolute/path/to/worktrees/worker-name";
         let ps = p.to_string_lossy().to_string();
-        let _env = EnvGuard::set(&[
+        let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", Some("worker")),
             ("CAS_CLONE_PATH", Some(wt)),
             ("CAS_AGENT_NAME", Some("some-worker")),

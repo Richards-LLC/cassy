@@ -149,11 +149,11 @@ pub fn register_repo_strict(repo_path: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::with_temp_home;
+    use crate::test_support::TestEnvGuard;
 
     #[test]
     fn host_cas_dir_follows_home() {
-        with_temp_home(|home| {
+        TestEnvGuard::run_with_temp_home(|home| {
             let resolved = host_cas_dir();
             assert_eq!(resolved, home.join(".cas"));
         });
@@ -161,7 +161,7 @@ mod tests {
 
     #[test]
     fn register_repo_strict_creates_host_dir_and_inserts() {
-        with_temp_home(|home| {
+        TestEnvGuard::run_with_temp_home(|home| {
             let repo = home.join("myproject");
             std::fs::create_dir_all(&repo).unwrap();
 
@@ -181,7 +181,7 @@ mod tests {
     fn register_repo_is_non_fatal_on_missing_schema() {
         // Pre-schema: register_repo must NOT panic and must NOT abort;
         // the warn-and-swallow contract is what the hot boot path depends on.
-        with_temp_home(|home| {
+        TestEnvGuard::run_with_temp_home(|home| {
             let repo = home.join("pre-init-repo");
             std::fs::create_dir_all(&repo).unwrap();
             // Schema intentionally not installed.
@@ -191,7 +191,7 @@ mod tests {
 
     #[test]
     fn ensure_host_schema_records_migration_and_is_idempotent() {
-        with_temp_home(|home| {
+        TestEnvGuard::run_with_temp_home(|home| {
             ensure_host_schema().unwrap();
             // m199 row must be present.
             let db = home.join(".cas/cas.db");
@@ -222,7 +222,7 @@ mod tests {
     fn ensure_host_schema_backfills_when_table_preexists() {
         // Simulates a host that installed under the pre-fix code which
         // created the table via raw DDL without the migrations row.
-        with_temp_home(|home| {
+        TestEnvGuard::run_with_temp_home(|home| {
             let cas_dir = home.join(".cas");
             std::fs::create_dir_all(&cas_dir).unwrap();
             let db = cas_dir.join("cas.db");

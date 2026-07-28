@@ -50,6 +50,7 @@ default = []
 [dev-dependencies]
 tokio-test = "0.4"
 criterion = "0.6"
+fs2 = "0.4"
 
 [[bench]]
 name = "alt_screen_scan"

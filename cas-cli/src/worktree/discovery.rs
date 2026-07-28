@@ -232,18 +232,12 @@ fn walk(dir: &Path, depth: usize, max: usize, out: &mut Vec<PathBuf>) {
 mod tests {
     use super::*;
     use crate::store::known_repos::ensure_host_schema;
-    use crate::test_support::with_temp_home;
-
-    fn with_temp_home_bootstrapped<F: FnOnce(&Path)>(f: F) {
-        with_temp_home(|home| {
-            ensure_host_schema().unwrap();
-            f(home);
-        });
-    }
+    use crate::test_support::TestEnvGuard;
 
     #[test]
     fn list_tracked_flags_healthy_correctly() {
-        with_temp_home_bootstrapped(|home| {
+        TestEnvGuard::run_with_temp_home(|home| {
+            ensure_host_schema().unwrap();
             let healthy = home.join("healthy");
             let moved = home.join("moved");
             std::fs::create_dir_all(healthy.join(".cas")).unwrap();
@@ -264,7 +258,8 @@ mod tests {
 
     #[test]
     fn seed_skips_missing_cas_dir() {
-        with_temp_home_bootstrapped(|home| {
+        TestEnvGuard::run_with_temp_home(|home| {
+            ensure_host_schema().unwrap();
             // Seed source: a session JSON pointing at a real repo and a fake one.
             let sessions_dir = home.join(".cas/sessions");
             std::fs::create_dir_all(&sessions_dir).unwrap();
@@ -292,7 +287,8 @@ mod tests {
 
     #[test]
     fn seed_idempotent_second_run_has_no_new() {
-        with_temp_home_bootstrapped(|home| {
+        TestEnvGuard::run_with_temp_home(|home| {
+            ensure_host_schema().unwrap();
             let sessions_dir = home.join(".cas/sessions");
             std::fs::create_dir_all(&sessions_dir).unwrap();
             let repo = home.join("repo");
@@ -315,7 +311,8 @@ mod tests {
 
     #[test]
     fn list_empty_registry_returns_empty() {
-        with_temp_home_bootstrapped(|_| {
+        TestEnvGuard::run_with_temp_home(|_| {
+            ensure_host_schema().unwrap();
             let list = list_tracked_repos().unwrap();
             assert!(list.is_empty());
         });
@@ -323,7 +320,8 @@ mod tests {
 
     #[test]
     fn seed_ignores_corrupt_session_json() {
-        with_temp_home_bootstrapped(|home| {
+        TestEnvGuard::run_with_temp_home(|home| {
+            ensure_host_schema().unwrap();
             let sessions_dir = home.join(".cas/sessions");
             std::fs::create_dir_all(&sessions_dir).unwrap();
             std::fs::write(sessions_dir.join("good.json"), "{}").unwrap(); // no project_dir

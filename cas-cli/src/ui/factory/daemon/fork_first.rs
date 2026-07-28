@@ -197,7 +197,7 @@ impl DaemonInitPhase {
     pub fn run_with_progress(mut self) -> anyhow::Result<FactoryDaemon> {
         use crate::config::Config;
         use crate::store::find_cas_root;
-        use crate::ui::factory::app::{EpicState, epic_branch_name};
+        use crate::ui::factory::app::EpicState;
         use crate::ui::factory::director::DirectorData;
         use crate::worktree::{GitOperations, WorktreeConfig, WorktreeManager};
         use cas_mux::{Mux, MuxConfig};
@@ -272,8 +272,9 @@ impl DaemonInitPhase {
         let epic_state = resolve_epic_state_for_focus(&director_data, &preferred_epic_focus);
         let git_ops = GitOperations::new(self.factory_config.cwd.clone());
         let trunk = git_ops.detect_default_branch();
-        let epic_branch = if let EpicState::Active { epic_title, .. } = &epic_state {
-            let branch_name = epic_branch_name(epic_title);
+        let epic_branch = if let EpicState::Active { .. } = &epic_state {
+            let branch_name = epic_branch_for_state(&director_data, &epic_state)
+                .expect("active epic state must resolve a branch");
             if let (Ok(head_sha), Ok(trunk_sha)) =
                 (git_ops.ref_sha("HEAD"), git_ops.ref_sha(&trunk))
             {
@@ -550,7 +551,9 @@ impl DaemonInitPhase {
             teams,
             notify_rx,
             dead_workers: std::collections::HashSet::new(),
+            cancelled_spawns: std::collections::HashSet::new(),
             last_idle_message_times: HashMap::new(),
+            last_prompt_poison_sweep: Some(Instant::now()),
             resumed_epic_ids: std::collections::HashSet::new(),
         })
     }

@@ -7,42 +7,7 @@ use crate::store::SqliteStore;
 use crate::store::init_cas_dir;
 use cas_types::{Agent, AgentRole, Session};
 
-struct EnvVarGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
-    saved: Vec<(&'static str, Option<String>)>,
-}
-
-impl EnvVarGuard {
-    fn set(vars: &[(&'static str, Option<&str>)]) -> Self {
-        let lock = crate::hooks::test_env_lock();
-        let saved = vars
-            .iter()
-            .map(|(key, _)| (*key, std::env::var(key).ok()))
-            .collect();
-        for (key, value) in vars {
-            unsafe {
-                match value {
-                    Some(value) => std::env::set_var(key, value),
-                    None => std::env::remove_var(key),
-                }
-            }
-        }
-        Self { _lock: lock, saved }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        for (key, value) in &self.saved {
-            unsafe {
-                match value {
-                    Some(value) => std::env::set_var(key, value),
-                    None => std::env::remove_var(key),
-                }
-            }
-        }
-    }
-}
+use crate::test_support::TestEnvGuard;
 
 #[test]
 fn test_activity_tracker() {
@@ -69,7 +34,7 @@ fn test_daemon_config_conversion() {
 
 #[test]
 fn apply_factory_worker_metadata_records_worker_model_effort_and_clone_path() {
-    let _env = EnvVarGuard::set(&[
+    let _env = TestEnvGuard::with_optional_vars(&[
         ("CAS_AGENT_ROLE", Some("worker")),
         ("CAS_CLONE_PATH", Some("/tmp/cas-worker-clone")),
         ("CAS_FACTORY_WORKER_MODEL", Some("sonnet")),
@@ -103,7 +68,7 @@ fn apply_factory_worker_metadata_records_worker_model_effort_and_clone_path() {
 /// → `worker_cli_from_agent` → `SupervisorCli::Grok`.
 #[test]
 fn apply_factory_worker_metadata_real_env_persists_worker_cli_grok() {
-    let _env = EnvVarGuard::set(&[
+    let _env = TestEnvGuard::with_optional_vars(&[
         ("CAS_AGENT_ROLE", Some("worker")),
         ("CAS_FACTORY_WORKER_CLI", Some("grok")),
     ]);
@@ -125,7 +90,7 @@ fn apply_factory_worker_metadata_real_env_persists_worker_cli_grok() {
 
 #[test]
 fn apply_factory_worker_metadata_skips_model_effort_for_non_worker() {
-    let _env = EnvVarGuard::set(&[
+    let _env = TestEnvGuard::with_optional_vars(&[
         ("CAS_AGENT_ROLE", None),
         ("CAS_CLONE_PATH", None),
         ("CAS_FACTORY_WORKER_MODEL", Some("sonnet")),

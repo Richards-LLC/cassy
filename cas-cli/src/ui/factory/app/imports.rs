@@ -26,5 +26,6 @@ pub(super) use crate::ui::widgets::TreeItemType;
 pub(super) use crate::worktree::{WorktreeConfig, WorktreeManager};
 
 pub(super) use crate::ui::factory::app::{
-    EpicStateChange, FactoryApp, WorkerSpawnPrep, WorkerSpawnResult, WorktreePrep, epic_branch_name,
+    EpicStateChange, FactoryApp, WorkerSpawnPrep, WorkerSpawnResult, WorktreePrep,
+    epic_branch_for_state, epic_branch_name,
 };

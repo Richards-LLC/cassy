@@ -515,6 +515,14 @@ impl TaskStore for SqliteTaskStore {
                     |row| row.get(0),
                 )
                 .optional()?;
+            let mut persisted_deliverables = task.deliverables.clone();
+            if prev_status.as_deref() == Some("closed") && task.status != TaskStatus::Closed {
+                // cas-ed9a: a close-cycle anchor is evidence for that completed
+                // cycle only. Enforce invalidation at the persistence choke point
+                // so every Closed -> non-Closed path (MCP update, reopen, UI,
+                // recovery, and future callers) gets the same protection.
+                persisted_deliverables.factory_branch_anchor = None;
+            }
 
             let rows = conn.execute(
             "UPDATE tasks SET title = ?1, description = ?2, design = ?3,
@@ -547,7 +555,7 @@ impl TaskStore for SqliteTaskStore {
                 if task.pending_worktree_merge { 1 } else { 0 },
                 task.epic_verification_owner,
                 task.team_id,
-                Self::deliverables_to_string(&task.deliverables),
+                Self::deliverables_to_string(&persisted_deliverables),
                 task.demo_statement,
                 task.execution_note,
                 task.share.as_ref().map(|s| s.to_string()),

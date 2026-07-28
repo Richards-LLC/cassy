@@ -806,6 +806,95 @@ impl CasCore {
 }
 
 #[cfg(test)]
+mod status_transition_tests {
+    use super::*;
+    use crate::mcp::tools::core::task::lifecycle::close_ops::{
+        EpicCloseGateOutcome, run_epic_close_merge_gate,
+    };
+    use cas_types::{Task, TaskStatus, TaskType};
+    use tempfile::TempDir;
+
+    fn git(repo: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[tokio::test]
+    async fn task_update_closed_to_in_progress_clears_factory_branch_anchor() {
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        git(repo, &["config", "user.email", "cas@example.com"]);
+        git(repo, &["config", "user.name", "CAS Test"]);
+        std::fs::write(repo.join("base.rs"), "// base\n").unwrap();
+        git(repo, &["add", "base.rs"]);
+        git(repo, &["commit", "-q", "-m", "base"]);
+        git(repo, &["checkout", "-q", "-b", "factory/worker"]);
+        std::fs::write(repo.join("first.rs"), "// first close cycle\n").unwrap();
+        git(repo, &["add", "first.rs"]);
+        git(repo, &["commit", "-q", "-m", "first close cycle"]);
+        let already_merged_anchor = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["merge", "-q", "--no-ff", "factory/worker"]);
+
+        let cas_dir = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        let core = CasCore::with_daemon(cas_dir, None, None);
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+
+        let mut task = Task::new("cas-anchor".into(), "Anchored closed task".into());
+        task.status = TaskStatus::Closed;
+        task.assignee = Some("worker".into());
+        task.deliverables.factory_branch_anchor = Some(already_merged_anchor);
+        task.deliverables.parked_branch = Some("factory/worker".into());
+        store.add(&task).unwrap();
+
+        let req: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+            "id": task.id,
+            "status": "in_progress"
+        }))
+        .unwrap();
+        core.cas_task_update(Parameters(req)).await.unwrap();
+
+        let updated = store.get("cas-anchor").unwrap();
+        assert_eq!(updated.status, TaskStatus::InProgress);
+        assert!(
+            updated.deliverables.factory_branch_anchor.is_none(),
+            "a Closed -> non-Closed transition must invalidate the prior close cycle's anchor"
+        );
+
+        git(repo, &["checkout", "-q", "factory/worker"]);
+        std::fs::write(repo.join("rework.rs"), "// new unmerged work\n").unwrap();
+        git(repo, &["add", "rework.rs"]);
+        git(repo, &["commit", "-q", "-m", "new unmerged rework"]);
+
+        let mut epic = Task::new("cas-epic".into(), "Parent epic".into());
+        epic.task_type = TaskType::Epic;
+        let close_req: TaskCloseRequest = serde_json::from_value(serde_json::json!({
+            "id": epic.id
+        }))
+        .unwrap();
+        let gate = run_epic_close_merge_gate(&epic, &close_req, "main", repo, &[updated]);
+        assert!(
+            matches!(gate, EpicCloseGateOutcome::Reject(_)),
+            "after status-update rework, the epic gate must inspect the live branch and block; \
+             got {gate:?}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod epic_owner_transfer_auth_tests {
     use super::*;
     use cas_types::{Agent, AgentRole, AgentStatus};
@@ -1036,38 +1125,9 @@ mod epic_owner_transfer_auth_tests {
 #[cfg(test)]
 mod assignment_freshness_branch_tests {
     use super::*;
+    use crate::test_support::TestEnvGuard;
     use cas_types::{Dependency, DependencyType, Task, TaskType};
     use tempfile::TempDir;
-
-    struct FactorySessionEnv {
-        prior: Option<std::ffi::OsString>,
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl FactorySessionEnv {
-        fn set(value: Option<&str>) -> Self {
-            let lock = crate::hooks::test_env_lock();
-            let prior = std::env::var_os("CAS_FACTORY_SESSION");
-            unsafe {
-                match value {
-                    Some(value) => std::env::set_var("CAS_FACTORY_SESSION", value),
-                    None => std::env::remove_var("CAS_FACTORY_SESSION"),
-                }
-            }
-            Self { prior, _lock: lock }
-        }
-    }
-
-    impl Drop for FactorySessionEnv {
-        fn drop(&mut self) {
-            unsafe {
-                match self.prior.take() {
-                    Some(value) => std::env::set_var("CAS_FACTORY_SESSION", value),
-                    None => std::env::remove_var("CAS_FACTORY_SESSION"),
-                }
-            }
-        }
-    }
 
     fn open_store() -> (TempDir, std::sync::Arc<dyn cas_store::TaskStore>) {
         let temp = TempDir::new().unwrap();
@@ -1125,7 +1185,7 @@ mod assignment_freshness_branch_tests {
 
     #[test]
     fn standalone_task_without_focus_returns_none() {
-        let _env = FactorySessionEnv::set(None);
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_SESSION", None)]);
         let (_tmp, store) = open_store();
         let task = Task::new("cas-solo".into(), "Standalone".into());
         store.add(&task).unwrap();
@@ -1140,7 +1200,10 @@ mod assignment_freshness_branch_tests {
     #[test]
     fn falls_back_to_session_focus_pin_branch() {
         let session = format!("test-focus-{}", std::process::id());
-        let _env = FactorySessionEnv::set(Some(&session));
+        let _env = TestEnvGuard::with_optional_vars(&[(
+            "CAS_FACTORY_SESSION",
+            Some(session.as_str()),
+        )]);
         let (_tmp, store) = open_store();
 
         let mut epic_a = Task::new("cas-epinf".into(), "Focused Epic".into());

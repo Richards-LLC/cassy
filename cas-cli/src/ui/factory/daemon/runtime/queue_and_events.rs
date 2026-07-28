@@ -1,6 +1,40 @@
 use crate::ui::factory::daemon::imports::*;
 use crate::ui::factory::director::AgentSummary;
 
+const PROMPT_POISON_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
+fn prompt_poison_sweep_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_some_and(|last| now.saturating_duration_since(last) >= PROMPT_POISON_SWEEP_INTERVAL)
+}
+
+fn registered_prompt_sweep_agents(
+    agents: &[cas_types::Agent],
+    factory_session: &str,
+) -> Vec<String> {
+    agents
+        .iter()
+        .filter(|agent| agent.factory_session.as_deref() == Some(factory_session))
+        .map(|agent| agent.name.clone())
+        .collect()
+}
+
+fn prompt_poison_sweep_targets(
+    supervisor_name: &str,
+    worker_names: &[String],
+    registered_session_agents: &[String],
+) -> std::collections::HashSet<String> {
+    let mut targets = std::collections::HashSet::with_capacity(
+        worker_names.len() + registered_session_agents.len() + 4,
+    );
+    targets.insert(supervisor_name.to_string());
+    targets.insert("supervisor".to_string());
+    targets.insert("all_workers".to_string());
+    targets.insert(super::teams::DIRECTOR_AGENT_NAME.to_string());
+    targets.extend(worker_names.iter().cloned());
+    targets.extend(registered_session_agents.iter().cloned());
+    targets
+}
+
 /// Select the next control action without allowing a slow worker spawn to
 /// wedge shutdown. Ordinary actions remain FIFO and wait for the in-flight
 /// spawn; shutdown is allowed to jump that queue so it can cancel the spawn.
@@ -42,6 +76,50 @@ fn shutdown_targets(
         }
     }
     targets
+}
+
+/// Mark only the currently-running spawn generation as cancelled. Retired
+/// worker names in `dead_workers` are intentionally not consulted here:
+/// a later spawn that reuses the same name is a different generation.
+fn cancel_targeted_in_flight_spawn(
+    cancelled_spawns: &mut std::collections::HashSet<String>,
+    in_flight_worker: Option<&str>,
+    shutdown_targets: &[String],
+) {
+    if let Some(worker) = in_flight_worker {
+        if shutdown_targets.iter().any(|target| target == worker) {
+            cancelled_spawns.insert(worker.to_string());
+        }
+    }
+}
+
+fn take_spawn_cancellation(
+    cancelled_spawns: &mut std::collections::HashSet<String>,
+    worker_name: &str,
+) -> bool {
+    cancelled_spawns.remove(worker_name)
+}
+
+fn enqueue_spawn_cancelled_notice(
+    cas_dir: &std::path::Path,
+    supervisor_name: &str,
+    factory_session: &str,
+    worker_name: &str,
+    cleanup_status: &str,
+) -> anyhow::Result<i64> {
+    let queue = open_prompt_queue_store(cas_dir)?;
+    let summary = format!("Worker spawn cancelled: {worker_name}");
+    let message = format!(
+        "Factory spawn for worker '{worker_name}' was cancelled by a shutdown that arrived \
+         while it was still building. No worker pane was registered. {cleanup_status}"
+    );
+    Ok(queue.enqueue_with_summary(
+        "director",
+        supervisor_name,
+        &message,
+        Some(factory_session),
+        Some(&summary),
+    )?)
 }
 
 impl FactoryDaemon {
@@ -289,6 +367,26 @@ impl FactoryDaemon {
 
         let queue = open_prompt_queue_store(self.app.cas_dir())?;
 
+        // Native-extension agents consume their own queue rows. Excluding them
+        // from the daemon's target universe prevents this PTY/inbox processor
+        // from repeatedly selecting rows it deliberately cannot consume.
+        let registered_agents = open_agent_store(self.app.cas_dir())
+            .ok()
+            .and_then(|store| store.list(None).ok())
+            .unwrap_or_default();
+        let native_agents: std::collections::HashSet<String> = registered_agents
+            .iter()
+            .filter(|agent| {
+                agent
+                    .metadata
+                    .get("native_extension")
+                    .is_some_and(|value| value == "true")
+            })
+            .map(|agent| agent.name.clone())
+            .collect();
+        let registered_session_agents =
+            registered_prompt_sweep_agents(&registered_agents, &self.session_name);
+
         // Build target list: this session's supervisor + workers + "all_workers".
         // This prevents us from consuming messages meant for a different factory
         // session running in the same project directory.
@@ -299,13 +397,41 @@ impl FactoryDaemon {
         // inbound director → agent delivery. Without this, messages queued
         // to target=director sat forever while registration reported them
         // as "not yet registered".
-        let mut targets: Vec<&str> = Vec::with_capacity(worker_names.len() + 3);
-        targets.push(&supervisor_name);
-        targets.push("all_workers");
-        targets.push(super::teams::DIRECTOR_AGENT_NAME);
-        for w in &worker_names {
-            targets.push(w.as_str());
+        let valid_target_names = prompt_poison_sweep_targets(
+            &supervisor_name,
+            &worker_names,
+            &registered_session_agents,
+        );
+        let valid_targets: Vec<&str> = valid_target_names.iter().map(String::as_str).collect();
+
+        // Aged session-scoped rows for agents no longer in the roster are
+        // terminal poison, not work for another tick. Fresh unknown targets
+        // retain the registration grace promised by action=message. Constructors
+        // seed the timer so a restarted daemon cannot sweep before its first
+        // worker roster has had a full interval to populate.
+        let now = Instant::now();
+        if prompt_poison_sweep_due(self.last_prompt_poison_sweep, now) {
+            self.last_prompt_poison_sweep = Some(now);
+            if let Ok(expired) = queue.abandon_ineligible_session_targets(
+                &valid_targets,
+                &self.session_name,
+                cas_store::PROMPT_RETRY_MAX_AGE_SECS,
+            ) {
+                if expired > 0 {
+                    tracing::warn!(
+                        expired,
+                        factory_session = %self.session_name,
+                        "abandoned aged prompt_queue rows for targets outside the live session"
+                    );
+                }
+            }
         }
+
+        let targets: Vec<&str> = valid_targets
+            .iter()
+            .copied()
+            .filter(|target| !native_agents.contains(*target))
+            .collect();
 
         // Peek first, only ack after successful injection to provide at-least-once delivery.
         // Filter by targets AND session to prevent cross-session message theft.
@@ -341,26 +467,6 @@ impl FactoryDaemon {
 
         // Best-effort event recording (for external tooling acks, activity feed, playback).
         let event_store = SqliteEventStore::open(self.app.cas_dir()).ok();
-
-        // Build a set of agent names with native_extension=true.
-        // These agents handle message delivery via their own extension
-        // so we skip PTY text injection for them.
-        let native_agents: std::collections::HashSet<String> = open_agent_store(self.app.cas_dir())
-            .ok()
-            .and_then(|store| store.list(None).ok())
-            .map(|agents| {
-                agents
-                    .into_iter()
-                    .filter(|a| {
-                        a.metadata
-                            .get("native_extension")
-                            .map(|v| v == "true")
-                            .unwrap_or(false)
-                    })
-                    .map(|a| a.name)
-                    .collect()
-            })
-            .unwrap_or_default();
 
         for queued in prompts {
             let target = &queued.target;
@@ -459,8 +565,10 @@ impl FactoryDaemon {
                                 true,
                             )));
                 if pty_delivered && !self.app.mux.pane_ready_for_injection(pane_target) {
-                    // Don't ack — the prompt stays in the queue for the next tick.
-                    // cas-2c5f: durable pending reason for message_status.
+                    // Readiness is a precondition, not a failed delivery
+                    // attempt: the daemon has not touched the transport yet.
+                    // Keep the forensic reason without consuming the bounded
+                    // retry budget or starting its age clock.
                     let _ = queue.record_pending_reason(
                         queued.id,
                         cas_store::PendingReason::GatedNotReady,
@@ -547,6 +655,11 @@ impl FactoryDaemon {
                         0,
                         0,
                         Some("no non-native workers for all_workers broadcast"),
+                    );
+                    let _ = queue.record_retry(
+                        queued.id,
+                        cas_store::PendingReason::TargetUnavailable,
+                        Some("all_workers broadcast has no non-native recipients"),
                     );
                     continue;
                 }
@@ -643,6 +756,15 @@ impl FactoryDaemon {
                         "Failed to stamp broadcast outcome for prompt {}: {}",
                         queued.id,
                         e
+                    );
+                }
+                if succeeded == 0 {
+                    let _ = queue.record_retry(
+                        queued.id,
+                        cas_store::PendingReason::AdapterRetryable,
+                        detail
+                            .as_deref()
+                            .or(Some("all_workers broadcast reached zero recipients")),
                     );
                 }
                 // Do not fall through to mark_transport_delivered — outcome already stamped.
@@ -779,7 +901,7 @@ impl FactoryDaemon {
                                     // next tick.
                                     tracing::error!("Failed to inject to '{}': {}", pane_target, e);
                                     // cas-2c5f: adapter failure leaves row pending for retry.
-                                    let _ = queue.record_pending_reason(
+                                    let _ = queue.record_retry(
                                         queued.id,
                                         cas_store::PendingReason::AdapterRetryable,
                                         Some(&e.to_string()),
@@ -799,7 +921,7 @@ impl FactoryDaemon {
                                     // Pane missing but the target is still a current
                                     // session member (mid-spawn) — bare retry.
                                     // cas-2c5f: known target still spawning — retryable unavail.
-                                    let _ = queue.record_pending_reason(
+                                    let _ = queue.record_retry(
                                         queued.id,
                                         cas_store::PendingReason::TargetUnavailable,
                                         Some("pane missing; target is current session member"),
@@ -977,17 +1099,37 @@ impl FactoryDaemon {
                 self.spawn_task.take().unwrap();
             // Remove from pending workers (boot pane transitions to real pane or disappears)
             self.app.remove_pending_worker(&pending_name);
-            // cas-7a94: if this worker was cancelled via shutdown while the
-            // isolate worktree was still building, drop the result and release
-            // any early pre-assign so the task is not stuck on a never-started
-            // worker.
-            let cancelled = self.dead_workers.contains(&pending_name);
+            // cas-7a94 / cas-421c: cancellation is generation-scoped. A
+            // shutdown may cancel the currently-building spawn, but a retired
+            // name in dead_workers must not cancel a later independent spawn.
+            let cancelled = take_spawn_cancellation(&mut self.cancelled_spawns, &pending_name);
             match handle.await {
-                Ok(Ok(_result)) if cancelled => {
-                    tracing::info!(
-                        worker = %pending_name,
-                        "cas-7a94: spawn finished after shutdown cancel — discarding pane, releasing pre-assign"
+                Ok(Ok(mut result)) if cancelled => {
+                    crate::telemetry::track(
+                        "factory_worker_spawn_result",
+                        vec![("success", "false"), ("reason", "cancelled_by_shutdown")],
                     );
+                    let cleanup_status =
+                        match self.app.cleanup_cancelled_spawn_worktree(&mut result) {
+                            Ok(true) => "The newly-created worktree and branch were removed."
+                                .to_string(),
+                            Ok(false) => {
+                                "No worktree created by this spawn required cleanup.".to_string()
+                            }
+                            Err(e) => {
+                                format!("Worktree cleanup failed and needs operator attention: {e}")
+                            }
+                        };
+                    let visible_error = format!(
+                        "Spawn for worker '{pending_name}' was cancelled by shutdown before its \
+                         pane registered. {cleanup_status}"
+                    );
+                    tracing::warn!(
+                        worker = %pending_name,
+                        cleanup = %cleanup_status,
+                        "cas-7a94/cas-421c: in-flight spawn cancelled by shutdown — discarding pane and releasing pre-assign"
+                    );
+                    self.app.set_error(visible_error);
                     if let Some(ref task_id) = pending_task_id {
                         crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound(
                             self.app.cas_dir(),
@@ -999,8 +1141,19 @@ impl FactoryDaemon {
                         self.app.cas_dir(),
                         &pending_name,
                     );
-                    // Do not call finish_worker_spawn — the worktree (if any) is
-                    // left for the reaper; no PTY pane is registered.
+                    if let Err(e) = enqueue_spawn_cancelled_notice(
+                        self.app.cas_dir(),
+                        self.app.supervisor_name(),
+                        &self.session_name,
+                        &pending_name,
+                        &cleanup_status,
+                    ) {
+                        tracing::warn!(
+                            worker = %pending_name,
+                            error = %e,
+                            "failed to enqueue supervisor-visible spawn cancellation notice"
+                        );
+                    }
                 }
                 Ok(Ok(result)) => {
                     // Build per-worker Teams config before finish_worker_spawn adds to worker list
@@ -1225,6 +1378,13 @@ impl FactoryDaemon {
                     count,
                     &names,
                 );
+                cancel_targeted_in_flight_spawn(
+                    &mut self.cancelled_spawns,
+                    self.spawn_task
+                        .as_ref()
+                        .map(|(name, _, _, _)| name.as_str()),
+                    &workers_to_stop,
+                );
 
                 // cas-7a94: drop still-queued spawns for these names and release
                 // any early pre-assigns so "shutdown before boot finishes" cannot
@@ -1281,8 +1441,9 @@ impl FactoryDaemon {
                         let _ = self.app.stop_recording_for_pane(name).await;
                     }
                 }
-                // Track shut-down workers so their queued messages are dropped
-                // and any in-flight isolate spawn is discarded on completion.
+                // Track shut-down workers so their queued messages are dropped.
+                // In-flight spawn cancellation is separately generation-scoped
+                // in cancelled_spawns (cas-421c).
                 for name in &workers_to_stop {
                     self.dead_workers.insert(name.clone());
                     // Also release bindings for workers that never made it into
@@ -1735,13 +1896,124 @@ fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_exact_agent_name_match, matches_event_filter, reminder_matches_factory_session,
-        shutdown_targets, take_next_pending_spawn,
+        cancel_targeted_in_flight_spawn, enqueue_spawn_cancelled_notice,
+        is_exact_agent_name_match, matches_event_filter, prompt_poison_sweep_due,
+        prompt_poison_sweep_targets, registered_prompt_sweep_agents,
+        reminder_matches_factory_session, shutdown_targets, take_next_pending_spawn,
+        take_spawn_cancellation,
     };
+    use crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound;
     use crate::ui::factory::daemon::{FactoryDaemon, PendingSpawn};
     use crate::ui::factory::director::{AgentSummary, DirectorData, DirectorEvent};
-    use cas_types::AgentStatus;
-    use std::collections::{HashMap, VecDeque};
+    use cas_store::DeliveryStage;
+    use cas_types::{AgentStatus, Task, TaskStatus};
+    use std::collections::{HashMap, HashSet, VecDeque};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn first_prompt_queue_tick_with_empty_roster_does_not_abandon_pending_rows() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let row_id = queue
+            .enqueue_with_session(
+                "supervisor",
+                "not-yet-paneled",
+                "start assigned task",
+                "reused-session",
+            )
+            .unwrap();
+        let daemon_started_at = Instant::now();
+        let valid_target_names = prompt_poison_sweep_targets("lead", &[], &[]);
+        let valid_targets: Vec<&str> = valid_target_names.iter().map(String::as_str).collect();
+
+        if prompt_poison_sweep_due(Some(daemon_started_at), daemon_started_at) {
+            queue
+                .abandon_ineligible_session_targets(&valid_targets, "reused-session", -1)
+                .unwrap();
+        }
+
+        let report = queue.message_delivery_report(row_id).unwrap().unwrap();
+        assert_eq!(
+            report.stage,
+            DeliveryStage::Enqueued,
+            "the daemon's first tick must preserve a queued row while its roster is still empty"
+        );
+    }
+
+    #[test]
+    fn registered_but_not_paneled_agent_is_eligible_for_poison_sweep() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let agent_store = crate::store::open_agent_store(&cas_dir).unwrap();
+        let mut registered =
+            cas_types::Agent::new("agent-registered".into(), "registered-worker".into());
+        registered.factory_session = Some("factory-session".into());
+        agent_store.register(&registered).unwrap();
+        let mut foreign = cas_types::Agent::new("agent-foreign".into(), "foreign-worker".into());
+        foreign.factory_session = Some("other-session".into());
+        agent_store.register(&foreign).unwrap();
+
+        let agents = agent_store.list(None).unwrap();
+        let registered_names = registered_prompt_sweep_agents(&agents, "factory-session");
+        let valid = prompt_poison_sweep_targets("lead", &[], &registered_names);
+        let valid_targets: Vec<&str> = valid.iter().map(String::as_str).collect();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let row_id = queue
+            .enqueue_with_session(
+                "supervisor",
+                "registered-worker",
+                "wait for pane",
+                "factory-session",
+            )
+            .unwrap();
+
+        assert!(valid.contains("registered-worker"));
+        assert!(!valid.contains("foreign-worker"));
+        assert_eq!(
+            queue
+                .abandon_ineligible_session_targets(&valid_targets, "factory-session", -1)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            queue
+                .message_delivery_report(row_id)
+                .unwrap()
+                .unwrap()
+                .stage,
+            DeliveryStage::Enqueued
+        );
+    }
+
+    #[test]
+    fn genuinely_orphaned_prompt_is_reclaimed_after_sweep_interval() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let row_id = queue
+            .enqueue_with_session(
+                "supervisor",
+                "never-registered",
+                "orphaned work",
+                "factory-session",
+            )
+            .unwrap();
+        let now = Instant::now();
+        let last_sweep = now - Duration::from_secs(61);
+        let valid_target_names = prompt_poison_sweep_targets("lead", &[], &[]);
+        let valid_targets: Vec<&str> = valid_target_names.iter().map(String::as_str).collect();
+
+        assert!(prompt_poison_sweep_due(Some(last_sweep), now));
+        assert_eq!(
+            queue
+                .abandon_ineligible_session_targets(&valid_targets, "factory-session", -1)
+                .unwrap(),
+            1
+        );
+        let report = queue.message_delivery_report(row_id).unwrap().unwrap();
+        assert_eq!(report.stage, DeliveryStage::Abandoned);
+    }
 
     // -----------------------------------------------------------------------
     // cas-893c: idle-nudge eligibility (`FactoryDaemon::worker_looks_idle`)
@@ -1889,6 +2161,92 @@ mod tests {
             vec!["live-worker".to_string(), "booting-worker".to_string()],
             "shutdown-all must mark the in-flight worker dead so its late spawn result is discarded"
         );
+    }
+
+    /// cas-421c live repro: once worker N's first generation has completed,
+    /// shutdown-all must not leave a cancellation token that kills a later
+    /// independent spawn reusing N.
+    #[test]
+    fn spawn_shutdown_all_then_same_name_spawn_is_not_cancelled() {
+        let worker = "clock-fixer";
+        let mut cancelled = HashSet::new();
+
+        // First generation came up normally.
+        assert!(!take_spawn_cancellation(&mut cancelled, worker));
+
+        // Shutdown-all after completion has no in-flight generation to cancel.
+        cancel_targeted_in_flight_spawn(
+            &mut cancelled,
+            None,
+            &[worker.to_string()],
+        );
+
+        // A later spawn reusing the same name is allowed to finish and come up.
+        assert!(
+            !take_spawn_cancellation(&mut cancelled, worker),
+            "completed shutdown must not permanently tombstone a reusable worker name"
+        );
+    }
+
+    /// Preserve cas-7a94: shutdown that lands during worker N's current build
+    /// cancels exactly that generation, and consuming the token makes it
+    /// impossible for the cancellation to bleed into a later spawn.
+    #[test]
+    fn shutdown_during_build_cancels_only_that_spawn_generation() {
+        let worker = "booting-worker";
+        let task_id = "cas-preassigned";
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut task = Task::new(task_id.to_string(), "preassigned task".to_string());
+        task.assignee = Some(worker.to_string());
+        store.add(&task).unwrap();
+
+        let mut cancelled = HashSet::new();
+        cancel_targeted_in_flight_spawn(
+            &mut cancelled,
+            Some(worker),
+            &[worker.to_string()],
+        );
+
+        assert!(
+            take_spawn_cancellation(&mut cancelled, worker),
+            "shutdown must cancel the currently-building spawn"
+        );
+        release_preassign_if_bound(&cas_dir, task_id, worker);
+        let released = store.get(task_id).unwrap();
+        assert_eq!(released.status, TaskStatus::Open);
+        assert_eq!(
+            released.assignee, None,
+            "cancelled in-flight spawn must not leave its task pinned"
+        );
+        assert!(
+            !take_spawn_cancellation(&mut cancelled, worker),
+            "cancellation must be consumed so a later same-name spawn can proceed"
+        );
+    }
+
+    #[test]
+    fn cancelled_spawn_enqueues_supervisor_visible_notice() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        enqueue_spawn_cancelled_notice(
+            &cas_dir,
+            "keen-crane",
+            "factory-session",
+            "clock-fixer",
+            "The newly-created worktree and branch were removed.",
+        )
+        .unwrap();
+
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let prompts = queue.peek_all(10).unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].source, "director");
+        assert_eq!(prompts[0].target, "keen-crane");
+        assert_eq!(prompts[0].summary.as_deref(), Some("Worker spawn cancelled: clock-fixer"));
+        assert!(prompts[0].prompt.contains("No worker pane was registered"));
+        assert!(prompts[0].prompt.contains("worktree and branch were removed"));
     }
 
     // -----------------------------------------------------------------------

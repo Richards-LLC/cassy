@@ -48,6 +48,28 @@ fn worker_base_for_spawn(epic_branch: Option<&str>, manager: &WorktreeManager) -
     })
 }
 
+fn cleanup_cancelled_spawn_worktree_with_manager(
+    manager: Option<&mut WorktreeManager>,
+    result: &mut WorkerSpawnResult,
+) -> anyhow::Result<bool> {
+    if !result.worktree_created {
+        return Ok(false);
+    }
+    let Some(worktree) = result.worktree.take() else {
+        return Ok(false);
+    };
+    let Some(manager) = manager else {
+        anyhow::bail!(
+            "spawn created worktree '{}' but no worktree manager is available for cleanup",
+            worktree.path.display()
+        );
+    };
+
+    manager.register_worktree(&result.worker_name, worktree);
+    manager.remove_worker(&result.worker_name, false)?;
+    Ok(true)
+}
+
 /// Stamp `dirty_on_shutdown=true` (plus path + file count) onto the agent
 /// record so the daemon reaper (Unit 3) can later salvage and reclaim the
 /// orphaned worktree. Returns error only on store-level failures.
@@ -465,6 +487,16 @@ impl FactoryApp {
             }
         };
         self.finish_worker_spawn(result, None, None, None)
+    }
+
+    /// Remove a worktree created by a spawn generation that was cancelled
+    /// before its pane was registered. Reused worktrees predate this spawn and
+    /// are deliberately preserved.
+    pub(crate) fn cleanup_cancelled_spawn_worktree(
+        &mut self,
+        result: &mut WorkerSpawnResult,
+    ) -> anyhow::Result<bool> {
+        cleanup_cancelled_spawn_worktree_with_manager(self.worktree_manager.as_mut(), result)
     }
 
     /// Phase 1: Prepare spawn data (fast, runs on main thread).
@@ -1160,6 +1192,50 @@ mod spawn_base_tests {
             worker_base_for_spawn(None, &manager),
             "main",
             "without an active epic, dynamic isolated workers should branch from trunk, not supervisor HEAD"
+        );
+    }
+
+    #[test]
+    fn cancelled_spawn_removes_the_worktree_it_created() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+
+        let config = WorktreeConfig {
+            enabled: true,
+            base_path: repo
+                .join(".cas")
+                .join("worktrees")
+                .to_string_lossy()
+                .to_string(),
+            branch_prefix: "factory/".to_string(),
+            auto_merge: false,
+            cleanup_on_close: false,
+            promote_entries_on_merge: false,
+        };
+        let mut manager = WorktreeManager::new(&repo, config).unwrap();
+        let worktree = manager.create_for_worker("cancelled-worker").unwrap();
+        let worktree_path = worktree.path.clone();
+        let branch = worktree.branch.clone();
+        let mut result = WorkerSpawnResult {
+            worker_name: "cancelled-worker".to_string(),
+            cwd: worktree_path.clone(),
+            cas_root: None,
+            worktree: Some(worktree),
+            worktree_created: true,
+        };
+
+        assert!(
+            cleanup_cancelled_spawn_worktree_with_manager(Some(&mut manager), &mut result).unwrap()
+        );
+        assert!(
+            !worktree_path.exists(),
+            "discarded spawn must not leak its newly-created worktree"
+        );
+        assert!(
+            !manager.git().branch_exists(&branch).unwrap(),
+            "discarded spawn must not leak its worker branch"
         );
     }
 }

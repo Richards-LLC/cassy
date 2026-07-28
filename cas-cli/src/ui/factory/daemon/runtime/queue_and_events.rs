@@ -44,6 +44,50 @@ fn shutdown_targets(
     targets
 }
 
+/// Mark only the currently-running spawn generation as cancelled. Retired
+/// worker names in `dead_workers` are intentionally not consulted here:
+/// a later spawn that reuses the same name is a different generation.
+fn cancel_targeted_in_flight_spawn(
+    cancelled_spawns: &mut std::collections::HashSet<String>,
+    in_flight_worker: Option<&str>,
+    shutdown_targets: &[String],
+) {
+    if let Some(worker) = in_flight_worker {
+        if shutdown_targets.iter().any(|target| target == worker) {
+            cancelled_spawns.insert(worker.to_string());
+        }
+    }
+}
+
+fn take_spawn_cancellation(
+    cancelled_spawns: &mut std::collections::HashSet<String>,
+    worker_name: &str,
+) -> bool {
+    cancelled_spawns.remove(worker_name)
+}
+
+fn enqueue_spawn_cancelled_notice(
+    cas_dir: &std::path::Path,
+    supervisor_name: &str,
+    factory_session: &str,
+    worker_name: &str,
+    cleanup_status: &str,
+) -> anyhow::Result<i64> {
+    let queue = open_prompt_queue_store(cas_dir)?;
+    let summary = format!("Worker spawn cancelled: {worker_name}");
+    let message = format!(
+        "Factory spawn for worker '{worker_name}' was cancelled by a shutdown that arrived \
+         while it was still building. No worker pane was registered. {cleanup_status}"
+    );
+    Ok(queue.enqueue_with_summary(
+        "director",
+        supervisor_name,
+        &message,
+        Some(factory_session),
+        Some(&summary),
+    )?)
+}
+
 impl FactoryDaemon {
     pub(super) fn handle_mux_event(&mut self, event: cas_mux::MuxEvent) {
         match event {
@@ -977,17 +1021,37 @@ impl FactoryDaemon {
                 self.spawn_task.take().unwrap();
             // Remove from pending workers (boot pane transitions to real pane or disappears)
             self.app.remove_pending_worker(&pending_name);
-            // cas-7a94: if this worker was cancelled via shutdown while the
-            // isolate worktree was still building, drop the result and release
-            // any early pre-assign so the task is not stuck on a never-started
-            // worker.
-            let cancelled = self.dead_workers.contains(&pending_name);
+            // cas-7a94 / cas-421c: cancellation is generation-scoped. A
+            // shutdown may cancel the currently-building spawn, but a retired
+            // name in dead_workers must not cancel a later independent spawn.
+            let cancelled = take_spawn_cancellation(&mut self.cancelled_spawns, &pending_name);
             match handle.await {
-                Ok(Ok(_result)) if cancelled => {
-                    tracing::info!(
-                        worker = %pending_name,
-                        "cas-7a94: spawn finished after shutdown cancel — discarding pane, releasing pre-assign"
+                Ok(Ok(mut result)) if cancelled => {
+                    crate::telemetry::track(
+                        "factory_worker_spawn_result",
+                        vec![("success", "false"), ("reason", "cancelled_by_shutdown")],
                     );
+                    let cleanup_status =
+                        match self.app.cleanup_cancelled_spawn_worktree(&mut result) {
+                            Ok(true) => "The newly-created worktree and branch were removed."
+                                .to_string(),
+                            Ok(false) => {
+                                "No worktree created by this spawn required cleanup.".to_string()
+                            }
+                            Err(e) => {
+                                format!("Worktree cleanup failed and needs operator attention: {e}")
+                            }
+                        };
+                    let visible_error = format!(
+                        "Spawn for worker '{pending_name}' was cancelled by shutdown before its \
+                         pane registered. {cleanup_status}"
+                    );
+                    tracing::warn!(
+                        worker = %pending_name,
+                        cleanup = %cleanup_status,
+                        "cas-7a94/cas-421c: in-flight spawn cancelled by shutdown — discarding pane and releasing pre-assign"
+                    );
+                    self.app.set_error(visible_error);
                     if let Some(ref task_id) = pending_task_id {
                         crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound(
                             self.app.cas_dir(),
@@ -999,8 +1063,19 @@ impl FactoryDaemon {
                         self.app.cas_dir(),
                         &pending_name,
                     );
-                    // Do not call finish_worker_spawn — the worktree (if any) is
-                    // left for the reaper; no PTY pane is registered.
+                    if let Err(e) = enqueue_spawn_cancelled_notice(
+                        self.app.cas_dir(),
+                        self.app.supervisor_name(),
+                        &self.session_name,
+                        &pending_name,
+                        &cleanup_status,
+                    ) {
+                        tracing::warn!(
+                            worker = %pending_name,
+                            error = %e,
+                            "failed to enqueue supervisor-visible spawn cancellation notice"
+                        );
+                    }
                 }
                 Ok(Ok(result)) => {
                     // Build per-worker Teams config before finish_worker_spawn adds to worker list
@@ -1225,6 +1300,13 @@ impl FactoryDaemon {
                     count,
                     &names,
                 );
+                cancel_targeted_in_flight_spawn(
+                    &mut self.cancelled_spawns,
+                    self.spawn_task
+                        .as_ref()
+                        .map(|(name, _, _, _)| name.as_str()),
+                    &workers_to_stop,
+                );
 
                 // cas-7a94: drop still-queued spawns for these names and release
                 // any early pre-assigns so "shutdown before boot finishes" cannot
@@ -1281,8 +1363,9 @@ impl FactoryDaemon {
                         let _ = self.app.stop_recording_for_pane(name).await;
                     }
                 }
-                // Track shut-down workers so their queued messages are dropped
-                // and any in-flight isolate spawn is discarded on completion.
+                // Track shut-down workers so their queued messages are dropped.
+                // In-flight spawn cancellation is separately generation-scoped
+                // in cancelled_spawns (cas-421c).
                 for name in &workers_to_stop {
                     self.dead_workers.insert(name.clone());
                     // Also release bindings for workers that never made it into
@@ -1735,13 +1818,15 @@ fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
+        cancel_targeted_in_flight_spawn, enqueue_spawn_cancelled_notice,
         is_exact_agent_name_match, matches_event_filter, reminder_matches_factory_session,
-        shutdown_targets, take_next_pending_spawn,
+        shutdown_targets, take_next_pending_spawn, take_spawn_cancellation,
     };
+    use crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound;
     use crate::ui::factory::daemon::{FactoryDaemon, PendingSpawn};
     use crate::ui::factory::director::{AgentSummary, DirectorData, DirectorEvent};
-    use cas_types::AgentStatus;
-    use std::collections::{HashMap, VecDeque};
+    use cas_types::{AgentStatus, Task, TaskStatus};
+    use std::collections::{HashMap, HashSet, VecDeque};
 
     // -----------------------------------------------------------------------
     // cas-893c: idle-nudge eligibility (`FactoryDaemon::worker_looks_idle`)
@@ -1889,6 +1974,92 @@ mod tests {
             vec!["live-worker".to_string(), "booting-worker".to_string()],
             "shutdown-all must mark the in-flight worker dead so its late spawn result is discarded"
         );
+    }
+
+    /// cas-421c live repro: once worker N's first generation has completed,
+    /// shutdown-all must not leave a cancellation token that kills a later
+    /// independent spawn reusing N.
+    #[test]
+    fn spawn_shutdown_all_then_same_name_spawn_is_not_cancelled() {
+        let worker = "clock-fixer";
+        let mut cancelled = HashSet::new();
+
+        // First generation came up normally.
+        assert!(!take_spawn_cancellation(&mut cancelled, worker));
+
+        // Shutdown-all after completion has no in-flight generation to cancel.
+        cancel_targeted_in_flight_spawn(
+            &mut cancelled,
+            None,
+            &[worker.to_string()],
+        );
+
+        // A later spawn reusing the same name is allowed to finish and come up.
+        assert!(
+            !take_spawn_cancellation(&mut cancelled, worker),
+            "completed shutdown must not permanently tombstone a reusable worker name"
+        );
+    }
+
+    /// Preserve cas-7a94: shutdown that lands during worker N's current build
+    /// cancels exactly that generation, and consuming the token makes it
+    /// impossible for the cancellation to bleed into a later spawn.
+    #[test]
+    fn shutdown_during_build_cancels_only_that_spawn_generation() {
+        let worker = "booting-worker";
+        let task_id = "cas-preassigned";
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut task = Task::new(task_id.to_string(), "preassigned task".to_string());
+        task.assignee = Some(worker.to_string());
+        store.add(&task).unwrap();
+
+        let mut cancelled = HashSet::new();
+        cancel_targeted_in_flight_spawn(
+            &mut cancelled,
+            Some(worker),
+            &[worker.to_string()],
+        );
+
+        assert!(
+            take_spawn_cancellation(&mut cancelled, worker),
+            "shutdown must cancel the currently-building spawn"
+        );
+        release_preassign_if_bound(&cas_dir, task_id, worker);
+        let released = store.get(task_id).unwrap();
+        assert_eq!(released.status, TaskStatus::Open);
+        assert_eq!(
+            released.assignee, None,
+            "cancelled in-flight spawn must not leave its task pinned"
+        );
+        assert!(
+            !take_spawn_cancellation(&mut cancelled, worker),
+            "cancellation must be consumed so a later same-name spawn can proceed"
+        );
+    }
+
+    #[test]
+    fn cancelled_spawn_enqueues_supervisor_visible_notice() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        enqueue_spawn_cancelled_notice(
+            &cas_dir,
+            "keen-crane",
+            "factory-session",
+            "clock-fixer",
+            "The newly-created worktree and branch were removed.",
+        )
+        .unwrap();
+
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let prompts = queue.peek_all(10).unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].source, "director");
+        assert_eq!(prompts[0].target, "keen-crane");
+        assert_eq!(prompts[0].summary.as_deref(), Some("Worker spawn cancelled: clock-fixer"));
+        assert!(prompts[0].prompt.contains("No worker pane was registered"));
+        assert!(prompts[0].prompt.contains("worktree and branch were removed"));
     }
 
     // -----------------------------------------------------------------------

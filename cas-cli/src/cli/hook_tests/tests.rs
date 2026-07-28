@@ -260,6 +260,27 @@ fn test_configure_codex_creates_config() {
             env
         }))
     );
+
+    let hooks_path = temp.path().join(".codex/hooks.json");
+    assert!(hooks_path.exists());
+    let hooks: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(hooks_path).unwrap()).unwrap();
+    assert_eq!(
+        hooks.pointer("/hooks/PostToolUse/0/matcher"),
+        Some(&serde_json::json!("^Bash$"))
+    );
+    assert_eq!(
+        hooks.pointer("/hooks/PostToolUse/0/hooks/0/type"),
+        Some(&serde_json::json!("command"))
+    );
+    assert_eq!(
+        hooks.pointer("/hooks/PostToolUse/0/hooks/0/command"),
+        Some(&serde_json::json!("cas hook PostToolUse"))
+    );
+    assert_eq!(
+        hooks.pointer("/hooks/PostToolUse/0/hooks/0/timeout"),
+        Some(&serde_json::json!(3))
+    );
 }
 
 #[test]
@@ -311,6 +332,81 @@ env = { CAS_LOG = "debug" }
             );
             env
         }))
+    );
+}
+
+#[test]
+fn test_configure_codex_merges_hooks_and_is_idempotent() {
+    let temp = TempDir::new().unwrap();
+    let codex_dir = temp.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    let existing = serde_json::json!({
+        "description": "Keep this metadata",
+        "hooks": {
+            "PostToolUse": [
+                {
+                    "matcher": "^apply_patch$",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "custom post-tool hook"
+                    }]
+                },
+                {
+                    "matcher": ".*",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "cas hook PostToolUse",
+                        "timeout": 999
+                    }]
+                }
+            ],
+            "Stop": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": "custom stop hook"
+                }]
+            }]
+        }
+    });
+    std::fs::write(
+        codex_dir.join("hooks.json"),
+        serde_json::to_string_pretty(&existing).unwrap(),
+    )
+    .unwrap();
+
+    assert!(configure_codex_mcp_server(temp.path()).unwrap());
+    let hooks_path = codex_dir.join("hooks.json");
+    let hooks: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&hooks_path).unwrap()).unwrap();
+    assert_eq!(
+        hooks.get("description"),
+        Some(&serde_json::json!("Keep this metadata"))
+    );
+    assert_eq!(
+        hooks.pointer("/hooks/Stop/0/hooks/0/command"),
+        Some(&serde_json::json!("custom stop hook"))
+    );
+    let post_tool = hooks
+        .pointer("/hooks/PostToolUse")
+        .and_then(|value| value.as_array())
+        .expect("PostToolUse array missing");
+    assert_eq!(post_tool.len(), 2, "custom hook plus one CAS hook");
+    assert_eq!(
+        post_tool[0].pointer("/hooks/0/command"),
+        Some(&serde_json::json!("custom post-tool hook"))
+    );
+    assert_eq!(
+        post_tool[1].get("matcher"),
+        Some(&serde_json::json!("^Bash$"))
+    );
+    assert_eq!(
+        post_tool[1].pointer("/hooks/0/timeout"),
+        Some(&serde_json::json!(3))
+    );
+
+    assert!(
+        !configure_codex_mcp_server(temp.path()).unwrap(),
+        "second configuration pass should not rewrite either Codex file"
     );
 }
 

@@ -1220,10 +1220,10 @@ async fn test_merge_before_first_close_uses_commit_hook_anchor_cas_3d37() {
             tool_input: Some(serde_json::json!({
                 "command": "git commit -q -m 'fix: merged task work'"
             })),
-            tool_response: Some(serde_json::json!({
-                "exitCode": 0,
-                "stdout": ""
-            })),
+            // Real Codex 0.145.0 PostToolUse shape: unified exec matches as
+            // Bash, while `tool_response` is the model-facing output string
+            // rather than Claude's `{exitCode, stdout}` object.
+            tool_response: Some(serde_json::json!("")),
             agent_role: Some("worker".to_string()),
             ..Default::default()
         },

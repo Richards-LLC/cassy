@@ -1960,14 +1960,12 @@ impl CasCore {
         task.status = TaskStatus::Closed;
         task.closed_at = Some(now);
         task.updated_at = now;
-        // cas-cf64 (P2, anchor freshness — defense in depth): clear the
-        // merge-gate anchor on every successful close, not just on reopen.
-        // The anchor has no further purpose once a task is genuinely
-        // Closed, and clearing it here means a stale value can never
-        // survive into some future state transition that doesn't route
-        // through `cas_task_reopen` (belt-and-suspenders alongside the
-        // reopen-time clear).
-        task.deliverables.factory_branch_anchor = None;
+        // cas-eaf8: preserve the task-specific factory anchor after close.
+        // The epic close guard needs this durable receipt to distinguish
+        // this task's merged work from later, unrelated commits added when
+        // the same worker branch is reused for another epic. Reopen clears
+        // the anchor before any rework starts, preserving cas-cf64's stale-
+        // anchor protection across close/reopen cycles.
 
         // cas-778a: apply worker-owned verification fields to the now-mutable
         // `task` so the final task_store.update(&task) below carries them.
@@ -4543,17 +4541,16 @@ pub(crate) fn check_zero_commit_close(
 }
 
 /// Captures everything the supervisor needs to see at a glance: which
-/// child task this is, who owns it, whether their factory branch has
-/// stranded commits relative to the parent epic, and (for unmerged
-/// rows) when that branch was last touched.
+/// child task this is, who owns it, whether that task's recorded work has
+/// stranded commits relative to the parent epic, and (for unmerged rows)
+/// when that recorded work was last touched.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EpicChildBranchStatus {
     pub task_id: String,
     pub task_status: TaskStatus,
     pub assignee: Option<String>,
-    /// `factory/<assignee>` derived at scan time. `None` when the
-    /// child has no assignee (the gate / report skip these — there
-    /// is no factory branch convention to check).
+    /// The branch recorded when this task parked. `None` for legacy or
+    /// non-parked tasks without task-specific merge evidence.
     pub factory_branch: Option<String>,
     pub unmerged_count: u32,
     /// Unix epoch seconds of the most recent commit on
@@ -4562,18 +4559,25 @@ pub(crate) struct EpicChildBranchStatus {
     pub last_commit_unix: Option<i64>,
 }
 
-/// Walk an epic's children, derive `factory/<assignee>` for each
-/// child with an assignee, and report per-child unmerged-commit
-/// counts vs. `parent_branch`.
+/// Walk an epic's children and report whether each child task's own recorded
+/// work is merged into `parent_branch`.
+///
+/// A parked `factory_branch_anchor` is the authoritative commit-ish. It is
+/// task-specific and remains stable when a worker later reuses the same
+/// factory branch for another epic. `parked_branch` is the authoritative
+/// branch name for diagnostics and survives reassignment. Legacy/non-parked
+/// tasks without either recorded datum are left unknown rather than deriving
+/// the assignee's live branch and attributing unrelated later work to them.
 ///
 /// Used by both:
 /// - `factory_epic_status` (read-only diagnostic — renders all rows)
 /// - `run_epic_close_merge_gate` (close gate — filters to rows with
 ///   `unmerged_count > 0`)
 ///
-/// Children without an assignee are still represented in the output
-/// so the report is complete; the gate filters them out by checking
-/// `factory_branch.is_some() && unmerged_count > 0`.
+/// Children without any recorded branch or assignee are still represented in
+/// the output so the report is complete; the gate filters only on
+/// `unmerged_count > 0` so a valid anchor still blocks even if its branch-name
+/// receipt is missing.
 pub(crate) fn collect_epic_branch_statuses(
     subtasks: &[Task],
     parent_branch: &str,
@@ -4582,11 +4586,17 @@ pub(crate) fn collect_epic_branch_statuses(
     subtasks
         .iter()
         .map(|t| {
-            let factory_branch = t.assignee.as_ref().map(|a| format!("factory/{a}"));
-            let (unmerged_count, last_commit_unix) = match factory_branch.as_deref() {
-                Some(branch) => (
-                    count_unmerged_factory_commits(repo_path, branch, parent_branch),
-                    last_commit_unix(repo_path, branch),
+            let factory_branch = t.deliverables.parked_branch.clone();
+            let commit_ish = t
+                .deliverables
+                .factory_branch_anchor
+                .as_deref()
+                .filter(|anchor| git_ref_exists(repo_path, anchor))
+                .or(factory_branch.as_deref());
+            let (unmerged_count, last_commit_unix) = match commit_ish {
+                Some(commit) => (
+                    count_unmerged_factory_commits(repo_path, commit, parent_branch),
+                    last_commit_unix(repo_path, commit),
                 ),
                 None => (0, None),
             };
@@ -4726,12 +4736,12 @@ pub(crate) enum EpicCloseGateOutcome {
 }
 
 /// Per-epic close-time guard: reject Epic-task close when ANY child
-/// task carries unmerged commits on its `factory/<assignee>` branch.
+/// task's own recorded factory anchor is not merged into the epic branch.
 ///
 /// Runs IN ADDITION to (and AFTER) the existing
 /// [`check_unmerged_epic_branches`] which only validates the epic's
 /// own branch namespace. cas-8f8f extends the principle from "epic
-/// branch" to "every child task's factory branch".
+/// branch" to "every child task's factory work".
 ///
 /// Bypass-immune for the same reasons as cas-95ce
 /// [`run_factory_branch_merge_gate`]: this is a data-state guard,
@@ -4749,7 +4759,7 @@ pub(crate) fn run_epic_close_merge_gate(
     let statuses = collect_epic_branch_statuses(subtasks, parent_branch, repo_path);
     let stranded: Vec<&EpicChildBranchStatus> = statuses
         .iter()
-        .filter(|s| s.factory_branch.is_some() && s.unmerged_count > 0)
+        .filter(|s| s.unmerged_count > 0)
         .collect();
     if stranded.is_empty() {
         return EpicCloseGateOutcome::Proceed;
@@ -9851,6 +9861,21 @@ mod epic_status_gate_tests {
         assert!(status.success(), "git {args:?} failed");
     }
 
+    fn epic_git_stdout(dir: &std::path::Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("git");
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8(output.stdout)
+            .expect("git output must be utf-8")
+            .trim()
+            .to_string()
+    }
+
     /// Set up a tempdir git repo where `main` is the seed and each
     /// of `workers` has a `factory/<name>` branch with `commits_per`
     /// additive commits beyond `main`. Returns the tempdir handle.
@@ -9875,13 +9900,16 @@ mod epic_status_gate_tests {
     }
 
     fn child(id: &str, status: TaskStatus, assignee: Option<&str>) -> Task {
-        Task {
+        let parked_branch = assignee.map(|name| format!("factory/{name}"));
+        let mut task = Task {
             id: id.to_string(),
             title: format!("child {id}"),
             status,
             assignee: assignee.map(str::to_string),
             ..Default::default()
-        }
+        };
+        task.deliverables.parked_branch = parked_branch;
+        task
     }
 
     fn epic(id: &str) -> Task {
@@ -9981,9 +10009,9 @@ mod epic_status_gate_tests {
 
     #[test]
     fn factory_epic_status_includes_assigneeless_children() {
-        // Children without an assignee are reported with em-dash placeholders
-        // for branch / count so the report is complete; the gate filters
-        // them out separately.
+        // Children without recorded task work are reported with em-dash
+        // placeholders for branch / count so the report is complete; the
+        // gate filters them out separately.
         let dir = init_epic_repo(&[]);
         let subtasks = vec![child("cas-orphan", TaskStatus::InProgress, None)];
         let statuses = collect_epic_branch_statuses(&subtasks, "main", dir.path());
@@ -9997,6 +10025,26 @@ mod epic_status_gate_tests {
             report.contains("| — | — |"),
             "assigneeless rows must use em-dash for branch + unmerged columns: {report}"
         );
+    }
+
+    #[test]
+    fn epic_close_does_not_derive_live_branch_for_legacy_child() {
+        let dir = init_epic_repo(&[("worker", 1)]);
+        let legacy_child = Task {
+            id: "cas-legacy".to_string(),
+            title: "legacy child without task receipt".to_string(),
+            status: TaskStatus::Closed,
+            assignee: Some("worker".to_string()),
+            ..Default::default()
+        };
+        let statuses = collect_epic_branch_statuses(&[legacy_child], "main", dir.path());
+
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(
+            statuses[0].factory_branch, None,
+            "the assignee's current factory branch is not task-specific evidence"
+        );
+        assert_eq!(statuses[0].unmerged_count, 0);
     }
 
     // --- run_epic_close_merge_gate ------------------------------------------
@@ -10053,6 +10101,73 @@ mod epic_status_gate_tests {
             matches!(out, EpicCloseGateOutcome::Proceed),
             "all-merged epic must allow close, got {out:?}"
         );
+    }
+
+    /// cas-eaf8: a worker branch is a long-lived execution lane, not a
+    /// task receipt. Once task A's recorded anchor is merged into epic 1,
+    /// later task B work for epic 2 on the same live branch must not
+    /// re-strand epic 1.
+    #[test]
+    fn epic_close_uses_child_anchor_when_worker_branch_is_reused() {
+        let dir = init_epic_repo(&[("worker", 1)]);
+        let p = dir.path();
+        let task_a_anchor = epic_git_stdout(p, &["rev-parse", "factory/worker"]);
+
+        // Integrate task A into epic 1 (represented by main).
+        git(p, &["merge", "-q", "--no-ff", "factory/worker"]);
+
+        // Reuse the worker's one long-lived branch for task B on epic 2.
+        git(p, &["checkout", "-q", "factory/worker"]);
+        std::fs::write(p.join("task-b.rs"), "// unrelated epic 2 work\n").unwrap();
+        git(p, &["add", "task-b.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: task B on epic 2"]);
+
+        assert_eq!(
+            count_unmerged_factory_commits(p, "factory/worker", "main"),
+            1,
+            "precondition: the reused live branch carries epic 2 work"
+        );
+        assert!(
+            commit_is_merged_into_parent(p, &task_a_anchor, "main"),
+            "precondition: task A's own anchor is merged into epic 1"
+        );
+
+        let mut task_a = child("cas-task-a", TaskStatus::Closed, Some("worker"));
+        task_a.deliverables.factory_branch_anchor = Some(task_a_anchor);
+        task_a.deliverables.parked_branch = Some("factory/worker".to_string());
+        let task = epic("cas-epic-1");
+        let req = base_req(&task.id);
+
+        let out = run_epic_close_merge_gate(&task, &req, "main", p, &[task_a]);
+        assert!(
+            matches!(out, EpicCloseGateOutcome::Proceed),
+            "epic 1 must close based on task A's merged anchor, regardless of \
+             task B's later commit on the reused worker branch; got {out:?}"
+        );
+    }
+
+    /// cas-eaf8: task-specific anchoring must retain the guard's teeth.
+    /// A child's own recorded anchor that is not on the epic branch still
+    /// hard-blocks epic close.
+    #[test]
+    fn epic_close_rejects_genuinely_unmerged_child_anchor() {
+        let dir = init_epic_repo(&[("worker", 1)]);
+        let p = dir.path();
+        let unmerged_anchor = epic_git_stdout(p, &["rev-parse", "factory/worker"]);
+        let mut child = child("cas-unmerged", TaskStatus::Closed, Some("worker"));
+        child.deliverables.factory_branch_anchor = Some(unmerged_anchor);
+        child.deliverables.parked_branch = Some("factory/worker".to_string());
+        let task = epic("cas-epic-blocked");
+        let req = base_req(&task.id);
+
+        match run_epic_close_merge_gate(&task, &req, "main", p, &[child]) {
+            EpicCloseGateOutcome::Reject(msg) => {
+                assert!(msg.contains("MERGE REQUIRED"), "missing hard block: {msg}");
+                assert!(msg.contains("cas-unmerged"), "missing child id: {msg}");
+                assert!(msg.contains("factory/worker"), "missing parked branch: {msg}");
+            }
+            other => panic!("genuinely unmerged child anchor must Reject, got {other:?}"),
+        }
     }
 
     #[test]

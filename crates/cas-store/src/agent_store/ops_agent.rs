@@ -412,6 +412,7 @@ impl SqliteAgentStore {
                     *epoch as u64,
                     Some(r#"{"reason":"agent_stale"}"#),
                     None,
+                    Some("agent_stale"),
                 )?;
             }
 

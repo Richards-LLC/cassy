@@ -320,16 +320,21 @@ impl CasCore {
 
         for event in &history {
             output.push_str(&format!(
-                "[{}] {} by {} (epoch {}){}\n",
+                "[{}] {} by {} (epoch {}){}{}\n",
                 event.timestamp.format("%Y-%m-%d %H:%M:%S"),
                 event.event_type,
                 event.agent_id,
                 event.epoch,
-                event
-                    .previous_agent_id
-                    .as_ref()
+                (event.event_type == "transferred")
+                    .then(|| event.previous_agent_id.as_ref())
+                    .flatten()
                     .map(|p| format!(" (from {p})"))
-                    .unwrap_or_default()
+                    .unwrap_or_default(),
+                event
+                    .reason
+                    .as_ref()
+                    .map(|reason| format!(" (reason: {reason})"))
+                    .unwrap_or_default(),
             ));
         }
 

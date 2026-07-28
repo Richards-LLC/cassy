@@ -1113,13 +1113,11 @@ fn test_lease_release_for_task_atomically_decrements_active_tasks() {
         "active_tasks should decrement atomically on task-close release"
     );
 
-    // Verify release was logged with "Task closed" note
+    // Verify release was logged with a dedicated "Task closed" reason
     let history = store.get_lease_history("task-close", Some(1)).unwrap();
     assert_eq!(history[0].event_type, "released");
-    assert_eq!(
-        history[0].previous_agent_id.as_deref(),
-        Some("Task closed")
-    );
+    assert_eq!(history[0].reason.as_deref(), Some("Task closed"));
+    assert_eq!(history[0].previous_agent_id, None);
 
     // Release again — should return false (no active lease)
     let released = store
@@ -1147,13 +1145,44 @@ fn test_lease_release_for_task_records_awaiting_merge_park_reason() {
     let history = store.get_lease_history("task-park", Some(1)).unwrap();
     assert_eq!(history[0].event_type, "released");
     assert_eq!(
-        history[0].previous_agent_id.as_deref(),
+        history[0].reason.as_deref(),
         Some("MERGE REQUIRED: parked awaiting_merge")
     );
     assert_ne!(
-        history[0].previous_agent_id.as_deref(),
+        history[0].reason.as_deref(),
         Some("Task closed"),
         "parked MERGE REQUIRED close rejection must not look like a successful close"
+    );
+    assert_eq!(history[0].previous_agent_id, None);
+}
+
+#[test]
+fn test_lease_history_reads_legacy_release_reason_from_previous_agent_id() {
+    let (_temp, store) = create_test_store();
+    {
+        let conn = store.lock_conn().unwrap();
+        conn.execute(
+            "INSERT INTO task_lease_history
+             (task_id, agent_id, event_type, epoch, timestamp, details, previous_agent_id, reason)
+             VALUES (?, ?, 'released', 1, ?, NULL, ?, NULL)",
+            params![
+                "task-legacy-release",
+                "agent-legacy",
+                Utc::now().to_rfc3339(),
+                "Task closed"
+            ],
+        )
+        .unwrap();
+    }
+
+    let history = store
+        .get_lease_history("task-legacy-release", Some(1))
+        .unwrap();
+    assert_eq!(history[0].reason.as_deref(), Some("Task closed"));
+    assert_eq!(
+        history[0].previous_agent_id.as_deref(),
+        Some("Task closed"),
+        "raw legacy field remains available for serialized compatibility"
     );
 }
 

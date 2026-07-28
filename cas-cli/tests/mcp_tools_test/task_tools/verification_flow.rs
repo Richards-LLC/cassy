@@ -310,6 +310,79 @@ async fn test_task_start_not_blocked_by_merge_gated_sibling_cas_6a99() {
     );
 }
 
+/// cas-7aef: a normal successful close must record its lease release reason in
+/// the dedicated reason field and surface it through the lease-history MCP
+/// renderer.
+#[tokio::test]
+async fn test_normal_close_records_and_renders_lease_history_reason_cas_7aef() {
+    let (temp, service) = setup_cas();
+    let cas_dir = temp.path().join(".cas");
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        "[verification]\nenabled = false\n",
+    )
+    .expect("write config");
+
+    let id = extract_task_id(&extract_text(
+        service
+            .cas_task_create(Parameters(simple_task_req("Normal close reason")))
+            .await
+            .expect("create task"),
+    ))
+    .expect("task id")
+    .to_string();
+    service
+        .cas_task_start(Parameters(IdRequest { id: id.clone() }))
+        .await
+        .expect("start task");
+
+    let close_text = extract_text(
+        service
+            .cas_task_close(Parameters(TaskCloseRequest {
+                id: id.clone(),
+                reason: Some("implementation complete".to_string()),
+                bypass_code_review: None,
+                code_review_findings: None,
+                search_manifest: None,
+            }))
+            .await
+            .expect("close task"),
+    );
+    assert!(
+        close_text.contains("Closed task:"),
+        "normal close should succeed: {close_text}"
+    );
+
+    let agent_store = open_agent_store(&cas_dir).expect("open agent store");
+    let lease_history = agent_store
+        .get_lease_history(&id, Some(1))
+        .expect("lease history for normally closed task");
+    assert_eq!(lease_history[0].event_type, "released");
+    assert_eq!(lease_history[0].reason.as_deref(), Some("Task closed"));
+    assert_eq!(
+        lease_history[0].previous_agent_id, None,
+        "normal close reason must not be stored as a transfer agent ID"
+    );
+
+    let rendered = extract_text(
+        service
+            .cas_lease_history(Parameters(LeaseHistoryRequest {
+                task_id: id,
+                limit: Some(1),
+            }))
+            .await
+            .expect("render lease history"),
+    );
+    assert!(
+        rendered.contains("(reason: Task closed)"),
+        "renderer must surface the dedicated reason: {rendered}"
+    );
+    assert!(
+        !rendered.contains("(from Task closed)"),
+        "renderer must not present a reason as a transfer agent: {rendered}"
+    );
+}
+
 /// cas-8d5b: the close-time MERGE REQUIRED data-state guard must park the task
 /// in a non-worker-actionable state and release the worker lease. The worker can
 /// then start unrelated assigned work without a supervisor manually flipping the
@@ -465,10 +538,11 @@ async fn test_merge_required_close_parks_awaiting_merge_and_releases_gate_cas_8d
         .expect("lease history for parked task");
     assert_eq!(lease_history[0].event_type, "released");
     assert_eq!(
-        lease_history[0].previous_agent_id.as_deref(),
+        lease_history[0].reason.as_deref(),
         Some("MERGE REQUIRED: parked awaiting_merge"),
         "MERGE REQUIRED park path must not record the successful close reason"
     );
+    assert_eq!(lease_history[0].previous_agent_id, None);
 
     // cas-627f: the flagship close-rejected `WorkerIdle` notification is
     // built from `AgentSummary::active_lease`, which used to be resolved

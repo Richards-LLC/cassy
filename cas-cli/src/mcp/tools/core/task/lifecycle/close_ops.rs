@@ -10047,6 +10047,38 @@ mod epic_status_gate_tests {
         assert_eq!(statuses[0].unmerged_count, 0);
     }
 
+    /// cas-54ca: missing task-specific evidence must not turn UNKNOWN into
+    /// VERIFIED-MERGED. Codex workers do not currently receive the commit-time
+    /// PostToolUse hook, so this legacy/no-receipt shape occurs in practice.
+    #[test]
+    fn epic_close_rejects_unmerged_child_without_recorded_evidence() {
+        let dir = init_epic_repo(&[("worker", 1)]);
+        let child_without_receipt = Task {
+            id: "cas-no-receipt".to_string(),
+            title: "child with no commit-time receipt".to_string(),
+            status: TaskStatus::Closed,
+            assignee: Some("worker".to_string()),
+            ..Default::default()
+        };
+        assert!(child_without_receipt.deliverables.factory_branch_anchor.is_none());
+        assert!(child_without_receipt.deliverables.parked_branch.is_none());
+        let task = epic("cas-epic-no-receipt");
+        let req = base_req(&task.id);
+
+        let out = run_epic_close_merge_gate(
+            &task,
+            &req,
+            "main",
+            dir.path(),
+            &[child_without_receipt],
+        );
+        assert!(
+            matches!(out, EpicCloseGateOutcome::Reject(_)),
+            "an unmerged assignee branch with no recorded anchor or parked branch \
+             must fail closed; got {out:?}"
+        );
+    }
+
     // --- run_epic_close_merge_gate ------------------------------------------
 
     #[test]

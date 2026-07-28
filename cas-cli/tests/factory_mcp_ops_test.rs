@@ -2279,6 +2279,50 @@ async fn test_coordination_message_non_urgent_does_not_claim_delivery() {
     );
 }
 
+/// cas-0440: the send response must name the same parameter that
+/// `message_status` accepts. Drive the caller-visible two-call sequence:
+/// send a message, copy the returned notification_id verbatim, then query it.
+#[tokio::test]
+async fn test_coordination_message_returned_notification_id_drives_status_query() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "supervisor"),
+    ]);
+    let env = FactoryTestEnv::new();
+    env.register_worker("swift-fox");
+
+    let send_req = coord_msg("message", "swift-fox", "status update", None);
+    let send_result = env.service.coordination(Parameters(send_req)).await;
+    assert!(send_result.is_ok(), "message should succeed: {send_result:?}");
+    let send_text = get_text(&send_result.unwrap());
+
+    let notification_id = send_text
+        .lines()
+        .find_map(|line| line.strip_prefix("notification_id: "))
+        .expect("message response must label the returned prompt queue ID as notification_id")
+        .parse::<i64>()
+        .expect("returned notification_id must be an integer");
+    assert!(
+        send_text.contains(&format!(
+            "`message_status` with `notification_id={notification_id}`"
+        )),
+        "response must give the exact parameter spelling for the follow-up call: {send_text}"
+    );
+
+    let mut status_req = coord_msg("message_status", "swift-fox", "unused", None);
+    status_req.notification_id = Some(notification_id);
+    let status_result = env.service.coordination(Parameters(status_req)).await;
+    assert!(
+        status_result.is_ok(),
+        "message_status must accept the ID copied from the send response: {status_result:?}"
+    );
+    let status_text = get_text(&status_result.unwrap());
+    assert!(
+        status_text.contains(&format!("Message {notification_id} status:")),
+        "status response must describe the same returned ID: {status_text}"
+    );
+}
+
 /// cas-893c AC2: `message_status` must expose how long a message has been
 /// undelivered rather than only a bare stage string. A freshly enqueued,
 /// never-acked message must report a non-negative `undelivered_after_secs`

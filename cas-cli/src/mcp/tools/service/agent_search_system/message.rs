@@ -549,14 +549,18 @@ impl CasService {
         // stage reached.
         let delivery_status = if !target_is_registered {
             "Delivery: queued — target not yet registered, will deliver on registration\n"
+                .to_string()
         } else if urgent {
             "Delivery: interrupt-and-redirect (breaks the target's in-flight turn, then injects)\n"
+                .to_string()
         } else {
-            "Delivery: enqueued (target is registered) — not yet confirmed delivered. The \
-             daemon will attempt transport handoff on its next tick and nudge the recipient if \
-             it looks idle, but neither guarantees the recipient has read it. Check \
-             `message_status` (id above) if you need to know whether this landed before \
-             escalating.\n"
+            format!(
+                "Delivery: enqueued (target is registered) — not yet confirmed delivered. The \
+                 daemon will attempt transport handoff on its next tick and nudge the recipient if \
+                 it looks idle, but neither guarantees the recipient has read it. Check \
+                 `message_status` with `notification_id={message_id}` if you need to know whether \
+                 this landed before escalating.\n"
+            )
         };
 
         let message_id_text = message_id.to_string();
@@ -573,7 +577,7 @@ impl CasService {
         );
 
         Ok(Self::success(format!(
-            "{} queued\n\nID: {}\nFrom: {} ({})\nTo: {}\n{}Message: {}",
+            "{} queued\n\nnotification_id: {}\nFrom: {} ({})\nTo: {}\n{}Message: {}",
             if urgent { "URGENT message" } else { "Message" },
             message_id,
             display_name,

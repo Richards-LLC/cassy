@@ -189,13 +189,19 @@ pub fn detect_and_link_git_commit(cas_root: &std::path::Path, input: &HookInput)
         None => return,
     };
 
-    // Check for successful exit
-    let exit_code = tool_response
-        .get("exitCode")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(1);
-    if exit_code != 0 {
-        return; // Commit failed
+    // Claude reports a structured response with `exitCode` and `stdout`.
+    // Codex PostToolUse reports the real unified-exec response as a JSON
+    // string instead. The latter has no exit-code field, so commit-time
+    // validation is deferred to the active task lease below.
+    let codex_response = tool_response.is_string();
+    if !codex_response {
+        let exit_code = tool_response
+            .get("exitCode")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(1);
+        if exit_code != 0 {
+            return; // Commit failed
+        }
     }
 
     // Git's commit output identifies the object the invocation created even
@@ -204,6 +210,7 @@ pub fn detect_and_link_git_commit(cas_root: &std::path::Path, input: &HookInput)
     let stdout = tool_response
         .get("stdout")
         .and_then(|v| v.as_str())
+        .or_else(|| tool_response.as_str())
         .unwrap_or("");
     let commit_hash = match extract_commit_hash(stdout)
         .and_then(|hash| resolve_git_revision(input, &hash))
@@ -218,7 +225,11 @@ pub fn detect_and_link_git_commit(cas_root: &std::path::Path, input: &HookInput)
     // merge-before-first-close order-independent: once that SHA is an
     // ancestor of the epic branch, the zero-commit gate can prove real work
     // existed even though the live worker branch is now 0 commits ahead.
-    persist_active_task_factory_anchor(cas_root, input, &commit_hash);
+    let anchored =
+        persist_active_task_factory_anchor(cas_root, input, &commit_hash, codex_response);
+    if codex_response && !anchored {
+        return;
+    }
 
     // Open stores
     let file_change_store = match open_file_change_store(cas_root) {
@@ -306,43 +317,73 @@ fn persist_active_task_factory_anchor(
     cas_root: &std::path::Path,
     input: &HookInput,
     commit_hash: &str,
-) {
+    require_commit_during_lease: bool,
+) -> bool {
     let agent_store = match open_agent_store(cas_root) {
         Ok(store) => store,
-        Err(_) => return,
+        Err(_) => return false,
     };
     let agent_id = current_agent_id(input);
     let agent = match agent_store.get(&agent_id) {
         Ok(agent) if agent.role == AgentRole::Worker => agent,
-        _ => return,
+        _ => return false,
     };
     let task_store = match open_task_store(cas_root) {
         Ok(store) => store,
-        Err(_) => return,
+        Err(_) => return false,
     };
     let mut active_tasks = agent_store
         .list_agent_leases(&agent.id)
         .unwrap_or_default()
         .into_iter()
-        .filter_map(|lease| task_store.get(&lease.task_id).ok())
-        .filter(|task| task.status == TaskStatus::InProgress);
-    let Some(mut task) = active_tasks.next() else {
-        return;
+        .filter_map(|lease| {
+            task_store
+                .get(&lease.task_id)
+                .ok()
+                .map(|task| (lease, task))
+        })
+        .filter(|(_, task)| task.status == TaskStatus::InProgress);
+    let Some((lease, mut task)) = active_tasks.next() else {
+        return false;
     };
     // One-task-at-a-time is a factory invariant. If corrupt state exposes
     // multiple active tasks, do not guess which task owns this commit.
     if active_tasks.next().is_some() {
-        return;
+        return false;
+    }
+    if require_commit_during_lease
+        && task.deliverables.factory_branch_anchor.as_deref() != Some(commit_hash)
+        && !commit_is_from_active_lease(input, commit_hash, lease.acquired_at.timestamp())
+    {
+        return false;
     }
 
     let branch = git_branch_in(&input.cwd).or_else(get_current_branch);
     let Some(branch) = branch.filter(|name| name.starts_with("factory/")) else {
-        return;
+        return false;
     };
     task.deliverables.factory_branch_anchor = Some(commit_hash.to_string());
     task.deliverables.parked_branch = Some(branch);
     task.updated_at = chrono::Utc::now();
-    let _ = task_store.update(&task);
+    task_store.update(&task).is_ok()
+}
+
+/// Codex does not include a shell exit code in PostToolUse input. Require the
+/// resolved HEAD commit to have been created no earlier than the current task
+/// lease, with a one-second allowance for Git's whole-second timestamp.
+fn commit_is_from_active_lease(input: &HookInput, commit_hash: &str, lease_epoch: i64) -> bool {
+    let mut command = std::process::Command::new("git");
+    command.args(["show", "-s", "--format=%ct", commit_hash]);
+    if !input.cwd.trim().is_empty() {
+        command.current_dir(&input.cwd);
+    }
+    command
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|timestamp| timestamp.trim().parse::<i64>().ok())
+        .is_some_and(|commit_epoch| commit_epoch >= lease_epoch.saturating_sub(1))
 }
 
 fn git_branch_in(cwd: &str) -> Option<String> {

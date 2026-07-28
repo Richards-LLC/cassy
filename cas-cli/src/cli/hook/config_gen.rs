@@ -519,10 +519,15 @@ pub fn configure_mcp_server(project_root: &Path) -> anyhow::Result<bool> {
     Ok(true)
 }
 
-/// Configure CAS as an MCP server for Codex via .codex/config.toml
+/// Configure CAS for Codex via `.codex/config.toml` and `.codex/hooks.json`.
 ///
-/// Creates or updates .codex/config.toml in the project root to register CAS.
-/// Returns Ok(true) if file was modified, Ok(false) if no changes needed.
+/// Registers the MCP server and installs a native Codex `PostToolUse` hook for
+/// shell/unified-exec calls. Codex documents both shell commands and
+/// `exec_command` under the canonical `Bash` matcher:
+/// <https://developers.openai.com/codex/config-advanced#hooks>
+///
+/// Returns `Ok(true)` if either file was modified, `Ok(false)` if no changes
+/// were needed.
 pub fn configure_codex_mcp_server(project_root: &Path) -> anyhow::Result<bool> {
     let codex_dir = project_root.join(".codex");
     let config_path = codex_dir.join("config.toml");
@@ -625,15 +630,74 @@ pub fn configure_codex_mcp_server(project_root: &Path) -> anyhow::Result<bool> {
         }
     }
 
-    if !changed {
-        return Ok(false);
+    let hooks_changed = configure_codex_post_tool_use_hook(&codex_dir)?;
+
+    if changed {
+        let formatted = toml::to_string_pretty(&config)?;
+        if existing_content.as_ref() != Some(&formatted) {
+            std::fs::write(&config_path, formatted)?;
+        }
     }
 
-    let formatted = toml::to_string_pretty(&config)?;
+    Ok(changed || hooks_changed)
+}
+
+/// Install the task-anchor hook using Codex's native `hooks.json` schema.
+///
+/// The timeout is three seconds (Codex timeout units are seconds, unlike the
+/// millisecond values in Claude's settings). Existing non-CAS hook groups are
+/// preserved, while an older CAS PostToolUse entry is converged to this exact
+/// matcher and handler.
+fn configure_codex_post_tool_use_hook(codex_dir: &Path) -> anyhow::Result<bool> {
+    let hooks_path = codex_dir.join("hooks.json");
+    let existing_content = if hooks_path.exists() {
+        Some(std::fs::read_to_string(&hooks_path)?)
+    } else {
+        None
+    };
+    let mut config: serde_json::Value = match existing_content.as_ref() {
+        Some(content) => serde_json::from_str(content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse .codex/hooks.json: {e}"))?,
+        None => serde_json::json!({}),
+    };
+    let root = config
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("hooks.json is not an object"))?;
+    let hooks = root
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("hooks.json `hooks` is not an object"))?;
+    let post_tool_use = hooks
+        .entry("PostToolUse")
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .ok_or_else(|| anyhow::anyhow!("hooks.json `hooks.PostToolUse` is not an array"))?;
+
+    post_tool_use.retain(|group| {
+        !group
+            .get("hooks")
+            .and_then(|handlers| handlers.as_array())
+            .is_some_and(|handlers| {
+                handlers.iter().any(|handler| {
+                    handler.get("command").and_then(|value| value.as_str())
+                        == Some("cas hook PostToolUse")
+                })
+            })
+    });
+    post_tool_use.push(serde_json::json!({
+        "matcher": "^Bash$",
+        "hooks": [{
+            "type": "command",
+            "command": "cas hook PostToolUse",
+            "timeout": 3
+        }]
+    }));
+
+    let formatted = serde_json::to_string_pretty(&config)?;
     if existing_content.as_ref() == Some(&formatted) {
         return Ok(false);
     }
-
-    std::fs::write(&config_path, formatted)?;
+    std::fs::write(hooks_path, formatted)?;
     Ok(true)
 }

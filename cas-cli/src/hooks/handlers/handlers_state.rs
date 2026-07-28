@@ -93,6 +93,16 @@ pub fn get_session_files(cas_root: &std::path::Path) -> Vec<String> {
 /// Prefer the session_id (canonical agent ID) and fall back to PPID-based
 /// computation when the session_id is missing.
 pub(crate) fn current_agent_id(input: &HookInput) -> String {
+    // Codex's native hook `session_id` is its thread UUID, not CAS's
+    // registered factory-agent ID. Factory hook processes inherit the
+    // canonical CAS session ID from the worker environment.
+    if std::env::var("CAS_FACTORY_MODE").as_deref() == Ok("1") {
+        if let Ok(session_id) = std::env::var("CAS_SESSION_ID") {
+            if !session_id.is_empty() {
+                return session_id;
+            }
+        }
+    }
     if !input.session_id.is_empty() {
         input.session_id.clone()
     } else {

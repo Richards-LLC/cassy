@@ -16,7 +16,8 @@ pub(super) use crate::store::{
 };
 pub(super) use crate::ui::factory::app::{
     EpicStateChange, FactoryApp, FactoryConfig, ScrollAction, WorkerSpawnResult,
-    preferred_epic_focus_from_session_metadata, resolve_epic_state_for_focus,
+    epic_branch_for_state, preferred_epic_focus_from_session_metadata,
+    resolve_epic_state_for_focus,
 };
 pub(super) use crate::ui::factory::buffer_backend::BufferBackend;
 pub(super) use crate::ui::factory::director::with_response_instructions;

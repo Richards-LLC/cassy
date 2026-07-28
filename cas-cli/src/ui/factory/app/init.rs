@@ -9,9 +9,9 @@ use crate::config::Config;
 use crate::orchestration::names::generate_unique;
 use crate::store::find_cas_root;
 use crate::ui::factory::app::{
-    AutoPromptConfig, EpicFocusSource, EpicState, FactoryApp, FactoryConfig, epic_branch_name,
-    preferred_epic_focus_from_session_metadata, queue_codex_worker_intro_prompt,
-    queue_supervisor_intro_prompt, resolve_epic_state_for_focus,
+    AutoPromptConfig, EpicFocusSource, EpicState, FactoryApp, FactoryConfig,
+    epic_branch_for_state, preferred_epic_focus_from_session_metadata,
+    queue_codex_worker_intro_prompt, queue_supervisor_intro_prompt, resolve_epic_state_for_focus,
 };
 use crate::ui::factory::buffer_backend::new_hyperlink_map;
 use crate::ui::factory::director::DirectorStores;
@@ -63,8 +63,9 @@ impl FactoryApp {
         let git_ops = GitOperations::new(config.cwd.clone());
         let trunk = git_ops.detect_default_branch();
 
-        let epic_branch = if let EpicState::Active { epic_title, .. } = &epic_state {
-            let branch_name = epic_branch_name(epic_title);
+        let epic_branch = if let EpicState::Active { .. } = &epic_state {
+            let branch_name = epic_branch_for_state(&director_data, &epic_state)
+                .expect("active epic state must resolve a branch");
             // Warn when supervisor HEAD has drifted from trunk so operators know
             // the chosen base for the epic branch (AC: warn + surface base SHA).
             if let (Ok(head_sha), Ok(trunk_sha)) =
@@ -353,10 +354,7 @@ impl FactoryApp {
 
         let preferred_epic_focus = preferred_epic_focus_from_session_metadata();
         let epic_state = resolve_epic_state_for_focus(&director_data, &preferred_epic_focus);
-        let epic_branch = match &epic_state {
-            EpicState::Active { epic_title, .. } => Some(epic_branch_name(epic_title)),
-            _ => None,
-        };
+        let epic_branch = epic_branch_for_state(&director_data, &epic_state);
 
         let notifier = Notifier::new(notify_config);
 

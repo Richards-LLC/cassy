@@ -48,6 +48,44 @@ fn worker_base_for_spawn(epic_branch: Option<&str>, manager: &WorktreeManager) -
     })
 }
 
+/// Return a supervisor-visible warning when a resolved spawn base cannot be
+/// proven to contain the focused epic's current tip.
+fn worker_base_mismatch_notice(
+    manager: &WorktreeManager,
+    worker_base: &str,
+    epic_branch: &str,
+) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["merge-base", "--is-ancestor", epic_branch, worker_base])
+        .current_dir(manager.repo_root())
+        .output();
+
+    match output {
+        Ok(output) if output.status.success() => None,
+        Ok(_) => {
+            let epic_tip = manager
+                .git()
+                .ref_sha(epic_branch)
+                .unwrap_or_else(|_| "unknown".to_string());
+            let base_tip = manager
+                .git()
+                .ref_sha(worker_base)
+                .unwrap_or_else(|_| "unknown".to_string());
+            Some(format!(
+                "WORKER BASE MISMATCH: resolved base '{worker_base}' ({}) does not contain \
+                 focused epic branch '{epic_branch}' tip ({}). Worker spawn may be missing \
+                 epic changes.",
+                &base_tip[..base_tip.len().min(8)],
+                &epic_tip[..epic_tip.len().min(8)],
+            ))
+        }
+        Err(error) => Some(format!(
+            "WORKER BASE MISMATCH: could not verify resolved base '{worker_base}' contains \
+             focused epic branch '{epic_branch}': {error}. Worker spawn may be missing epic changes."
+        )),
+    }
+}
+
 fn cleanup_cancelled_spawn_worktree_with_manager(
     manager: Option<&mut WorktreeManager>,
     result: &mut WorkerSpawnResult,
@@ -511,6 +549,16 @@ impl FactoryApp {
         name: Option<&str>,
         isolate: bool,
     ) -> anyhow::Result<WorkerSpawnPrep> {
+        // focus_epic is persisted outside cas.db, so reconcile the task
+        // snapshot and session metadata synchronously at spawn time.
+        if let Err(error) = self.refresh_data() {
+            tracing::warn!(
+                error = %error,
+                "failed to refresh factory data before worker spawn; using cached task data"
+            );
+        }
+        self.apply_session_metadata_focus();
+
         let spawn_type = if name.is_some() { "named" } else { "anonymous" };
         crate::telemetry::track(
             "factory_worker_spawn_requested",
@@ -545,7 +593,7 @@ impl FactoryApp {
             anyhow::bail!("Worker '{worker_name}' already exists");
         }
 
-        let worktree_info = if isolate {
+        let (worktree_info, base_mismatch_notice) = if isolate {
             if let Some(manager) = &self.worktree_manager {
                 // Verify repo has commits before trying to create worktrees
                 if !manager.git().has_commits().unwrap_or(false) {
@@ -565,13 +613,19 @@ impl FactoryApp {
                 // cut from the active epic branch when present, otherwise from
                 // the detected trunk. Never use the supervisor's incidental HEAD.
                 let parent_branch = worker_base_for_spawn(self.epic_branch.as_deref(), manager);
-                Some(WorktreePrep {
-                    worktree_path,
-                    branch_name,
-                    parent_branch,
-                    repo_root,
-                    cas_dir: self.cas_dir.clone(),
-                })
+                let notice = self.epic_branch.as_deref().and_then(|epic_branch| {
+                    worker_base_mismatch_notice(manager, &parent_branch, epic_branch)
+                });
+                (
+                    Some(WorktreePrep {
+                        worktree_path,
+                        branch_name,
+                        parent_branch,
+                        repo_root,
+                        cas_dir: self.cas_dir.clone(),
+                    }),
+                    notice,
+                )
             } else {
                 anyhow::bail!(
                     "Worker isolation requested but worktrees are not enabled. \
@@ -579,8 +633,13 @@ impl FactoryApp {
                 );
             }
         } else {
-            None
+            (None, None)
         };
+
+        if let Some(notice) = base_mismatch_notice {
+            tracing::warn!("{notice}");
+            self.set_error(notice);
+        }
 
         crate::telemetry::track(
             "factory_worker_spawn_prepared",
@@ -1193,6 +1252,121 @@ mod spawn_base_tests {
             "main",
             "without an active epic, dynamic isolated workers should branch from trunk, not supervisor HEAD"
         );
+    }
+
+    #[test]
+    fn isolated_worker_spawn_contains_non_trunk_epic_tip() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+
+        Command::new("git")
+            .args(["checkout", "-q", "-b", "epic/stacked"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::fs::write(repo.join("stacked.txt"), "required epic content").unwrap();
+        Command::new("git")
+            .args(["add", "stacked.txt"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "stacked epic tip"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        let epic_tip = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        let epic_tip = String::from_utf8(epic_tip.stdout).unwrap();
+        Command::new("git")
+            .args(["checkout", "-q", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        let worktree_root = repo.join(".cas").join("worktrees");
+        let manager = WorktreeManager::new(
+            &repo,
+            WorktreeConfig {
+                enabled: true,
+                base_path: worktree_root.to_string_lossy().to_string(),
+                branch_prefix: "factory/".to_string(),
+                auto_merge: false,
+                cleanup_on_close: false,
+                promote_entries_on_merge: false,
+            },
+        )
+        .unwrap();
+        let worker_base = worker_base_for_spawn(Some("epic/stacked"), &manager);
+        assert!(worker_base_mismatch_notice(&manager, &worker_base, "epic/stacked").is_none());
+
+        let worker_path = worktree_root.join("stacked-worker");
+        let result = WorkerSpawnPrep {
+            worker_name: "stacked-worker".to_string(),
+            worktree_info: Some(WorktreePrep {
+                worktree_path: worker_path.clone(),
+                branch_name: "factory/stacked-worker".to_string(),
+                parent_branch: worker_base,
+                repo_root: repo.clone(),
+                cas_dir: repo.join(".cas"),
+            }),
+        }
+        .run()
+        .unwrap();
+
+        let contains_epic_tip = Command::new("git")
+            .args(["merge-base", "--is-ancestor", epic_tip.trim(), "HEAD"])
+            .current_dir(result.cwd)
+            .status()
+            .unwrap();
+        assert!(contains_epic_tip.success());
+        assert!(worker_path.join("stacked.txt").is_file());
+    }
+
+    #[test]
+    fn worker_base_mismatch_is_loud_when_trunk_misses_epic_tip() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        Command::new("git")
+            .args(["checkout", "-q", "-b", "epic/ahead"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::fs::write(repo.join("epic-only.txt"), "epic").unwrap();
+        Command::new("git")
+            .args(["add", "epic-only.txt"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "epic only"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        let manager = WorktreeManager::new(
+            &repo,
+            WorktreeConfig {
+                enabled: true,
+                base_path: repo.join(".cas/worktrees").to_string_lossy().to_string(),
+                branch_prefix: "factory/".to_string(),
+                auto_merge: false,
+                cleanup_on_close: false,
+                promote_entries_on_merge: false,
+            },
+        )
+        .unwrap();
+        let notice = worker_base_mismatch_notice(&manager, "main", "epic/ahead").unwrap();
+        assert!(notice.contains("WORKER BASE MISMATCH"));
+        assert!(notice.contains("does not contain"));
+        assert!(notice.contains("epic/ahead"));
     }
 
     #[test]

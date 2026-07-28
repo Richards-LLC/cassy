@@ -3466,9 +3466,7 @@ mod team_cmd_tests {
 
     #[test]
     fn team_auto_on_writes_true_and_resolves_effective_team() {
-        let _guard = crate::cloud::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = crate::test_support::TestEnvGuard::new();
         let project = TempDir::new().unwrap();
         let user = TempDir::new().unwrap();
 
@@ -3500,9 +3498,7 @@ mod team_cmd_tests {
 
     #[test]
     fn team_auto_off_writes_false_kill_switch() {
-        let _guard = crate::cloud::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = crate::test_support::TestEnvGuard::new();
         let project = TempDir::new().unwrap();
         let mut project_cfg = CloudConfig::default();
         project_cfg.set_team("team-1", "petra-stella");
@@ -3517,9 +3513,7 @@ mod team_cmd_tests {
 
     #[test]
     fn team_auto_clear_writes_none() {
-        let _guard = crate::cloud::CLOUD_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _guard = crate::test_support::TestEnvGuard::new();
         let project = TempDir::new().unwrap();
         let mut project_cfg = CloudConfig::default();
         project_cfg.team_auto_promote = Some(false);

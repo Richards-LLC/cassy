@@ -3324,68 +3324,13 @@ pub(crate) fn format_worker_git_status(gs: &WorkerGitStatus) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TestEnvGuard;
     use cas_types::AgentRole;
 
     /// Session id used across the glob tests. Stable UUID shape, unique
     /// across fake projects so the glob doesn't collide with anything else
     /// the test happens to create.
     const TEST_SESSION: &str = "cas-900b-test-0000-0000-000000000000";
-
-    struct HomeGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        old_home: Option<String>,
-        old_path: Option<Option<std::ffi::OsString>>,
-        _tmp: tempfile::TempDir,
-    }
-
-    impl HomeGuard {
-        fn isolated() -> Self {
-            let lock = crate::hooks::test_env_lock();
-            let old_home = std::env::var("HOME").ok();
-            let tmp = tempfile::tempdir().expect("temp HOME");
-            unsafe {
-                std::env::set_var("HOME", tmp.path());
-            }
-            Self {
-                _lock: lock,
-                old_home,
-                old_path: None,
-                _tmp: tmp,
-            }
-        }
-
-        fn isolated_without_host_binaries() -> Self {
-            let mut guard = Self::isolated();
-            let empty_path = guard._tmp.path().join("empty-path");
-            std::fs::create_dir(&empty_path).expect("empty PATH directory");
-            guard.old_path = Some(std::env::var_os("PATH"));
-            unsafe {
-                std::env::set_var("PATH", empty_path);
-            }
-            guard
-        }
-
-        fn home(&self) -> &std::path::Path {
-            self._tmp.path()
-        }
-    }
-
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.old_home {
-                    Some(home) => std::env::set_var("HOME", home),
-                    None => std::env::remove_var("HOME"),
-                }
-                if let Some(old_path) = &self.old_path {
-                    match old_path {
-                        Some(path) => std::env::set_var("PATH", path),
-                        None => std::env::remove_var("PATH"),
-                    }
-                }
-            }
-        }
-    }
 
     fn decoded_spawn_spec(json: &str) -> cas_mux::WorkerSpec {
         serde_json::from_str(json).expect("valid WorkerSpec JSON")
@@ -3425,7 +3370,7 @@ mod tests {
 
     #[test]
     fn spawn_spec_cli_claude_without_model_effort_uses_safe_floor() {
-        let _home = HomeGuard::isolated();
+        let _home = TestEnvGuard::temp_home();
         let json = build_spawn_spec_json(Some("claude"), None, None).unwrap();
         let spec = decoded_spawn_spec(&json);
 
@@ -3436,7 +3381,7 @@ mod tests {
 
     #[test]
     fn spawn_spec_explicit_model_and_effort_are_unchanged() {
-        let _home = HomeGuard::isolated();
+        let _home = TestEnvGuard::temp_home();
         let json = build_spawn_spec_json(Some("claude"), Some("opus"), Some("high")).unwrap();
         let spec = decoded_spawn_spec(&json);
 
@@ -3447,7 +3392,7 @@ mod tests {
 
     #[test]
     fn spawn_spec_omitted_cli_without_config_uses_stock_codex_defaults() {
-        let _home = HomeGuard::isolated();
+        let _home = TestEnvGuard::temp_home();
         let json = build_spawn_spec_json(None, None, None).unwrap();
         let spec = decoded_spawn_spec(&json);
 
@@ -3468,7 +3413,7 @@ mod tests {
 
     #[test]
     fn spawn_spec_omitted_cli_respects_project_factory_default() {
-        let _home = HomeGuard::isolated();
+        let _home = TestEnvGuard::temp_home();
         let tmp = tempfile::tempdir().expect("temp project config");
         let config = tmp.path().join("config.toml");
         std::fs::write(
@@ -3493,7 +3438,7 @@ effort = "high"
 
     #[test]
     fn spawn_spec_project_defaults_can_force_frontier_and_warning_nags() {
-        let _home = HomeGuard::isolated();
+        let _home = TestEnvGuard::temp_home();
         let tmp = tempfile::tempdir().expect("temp project config");
         let config = tmp.path().join("config.toml");
         std::fs::write(
@@ -3562,9 +3507,12 @@ effort = "high"
     /// test while still proving the two pieces compose correctly.
     #[test]
     fn resolved_codex_spec_falls_back_to_claude_when_codex_unavailable() {
-        let home = HomeGuard::isolated_without_host_binaries();
+        let mut env = TestEnvGuard::temp_home();
+        let empty_path = env.home().join("empty-path");
+        std::fs::create_dir(&empty_path).expect("empty PATH directory");
+        env.set("PATH", empty_path);
         for auth_present in [false, true] {
-            let auth_path = home.home().join(".codex/auth.json");
+            let auth_path = env.home().join(".codex/auth.json");
             if auth_present {
                 std::fs::create_dir_all(auth_path.parent().unwrap()).unwrap();
                 std::fs::write(&auth_path, "{}").unwrap();

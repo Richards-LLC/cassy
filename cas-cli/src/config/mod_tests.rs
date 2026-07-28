@@ -1,32 +1,7 @@
 use crate::config::*;
+use crate::test_support::TestEnvGuard;
 use crate::ui::theme::{ThemeConfig, ThemeMode, ThemeVariant};
 use tempfile::TempDir;
-
-struct EnvGuard {
-    key: &'static str,
-    old: Option<String>,
-}
-
-impl EnvGuard {
-    fn set(key: &'static str, value: &std::path::Path) -> Self {
-        let old = std::env::var(key).ok();
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, old }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match &self.old {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
 
 #[test]
 fn test_config_defaults() {
@@ -66,7 +41,6 @@ fn test_merge_missing_fills_none_fields() {
 
 #[test]
 fn load_with_host_staging_defaults_uses_host_staging_when_project_unset() {
-    let _lock = crate::hooks::test_env_lock();
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
     let host_cas = home.path().join(".cas");
@@ -77,7 +51,8 @@ fn load_with_host_staging_defaults_uses_host_staging_when_project_unset() {
     )
     .unwrap();
 
-    let _home = EnvGuard::set("HOME", home.path());
+    let mut env = TestEnvGuard::new();
+    env.set("HOME", home.path());
     let loaded = Config::load_with_host_staging_defaults(project.path()).unwrap();
 
     assert_eq!(
@@ -91,7 +66,6 @@ fn load_with_host_staging_defaults_uses_host_staging_when_project_unset() {
 
 #[test]
 fn load_with_host_staging_defaults_project_staging_overrides_host_staging() {
-    let _lock = crate::hooks::test_env_lock();
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
     let host_cas = home.path().join(".cas");
@@ -107,7 +81,8 @@ fn load_with_host_staging_defaults_project_staging_overrides_host_staging() {
     )
     .unwrap();
 
-    let _home = EnvGuard::set("HOME", home.path());
+    let mut env = TestEnvGuard::new();
+    env.set("HOME", home.path());
     let loaded = Config::load_with_host_staging_defaults(project.path()).unwrap();
 
     assert_eq!(
@@ -121,7 +96,6 @@ fn load_with_host_staging_defaults_project_staging_overrides_host_staging() {
 
 #[test]
 fn load_with_host_staging_defaults_does_not_leak_other_host_sections() {
-    let _lock = crate::hooks::test_env_lock();
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
     let host_cas = home.path().join(".cas");
@@ -132,7 +106,8 @@ fn load_with_host_staging_defaults_does_not_leak_other_host_sections() {
     )
     .unwrap();
 
-    let _home = EnvGuard::set("HOME", home.path());
+    let mut env = TestEnvGuard::new();
+    env.set("HOME", home.path());
     let loaded = Config::load_with_host_staging_defaults(project.path()).unwrap();
 
     assert_eq!(

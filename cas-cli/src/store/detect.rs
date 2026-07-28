@@ -648,6 +648,7 @@ pub fn init_cas_dir(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use crate::store::detect::*;
+    use crate::test_support::TestEnvGuard;
     use tempfile::TempDir;
 
     #[test]
@@ -663,9 +664,7 @@ mod tests {
 
     #[test]
     fn test_find_cas_root() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        let original_cas_root = std::env::var("CAS_ROOT").ok();
-        unsafe { std::env::remove_var("CAS_ROOT") };
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_ROOT", None)]);
 
         let temp = TempDir::new().unwrap();
         init_cas_dir(temp.path()).unwrap();
@@ -677,11 +676,6 @@ mod tests {
         // Should find .cas from subdirectory
         let found = find_cas_root_from(&subdir).unwrap();
         assert_eq!(found, temp.path().join(".cas"));
-
-        match original_cas_root {
-            Some(val) => unsafe { std::env::set_var("CAS_ROOT", val) },
-            None => unsafe { std::env::remove_var("CAS_ROOT") },
-        }
     }
 
     #[test]
@@ -702,14 +696,10 @@ mod tests {
         assert_eq!(detect_store_type(&cas_dir), StoreType::Sqlite);
     }
 
-    // Mutex for tests that modify global state (env vars, CWD).
-    // These tests are #[ignore]d by default - run with: cargo test -- --ignored
-    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     #[ignore] // Uses global state (CWD, env vars) - run with: cargo test -- --ignored
     fn test_has_project_cas() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let mut env = TestEnvGuard::with_optional_vars(&[("CAS_ROOT", None)]);
 
         let temp = TempDir::new().unwrap();
         // Canonicalize to handle macOS /var -> /private/var symlinks
@@ -718,13 +708,7 @@ mod tests {
             .canonicalize()
             .expect("Failed to canonicalize temp path");
 
-        // Save original env var and CWD
-        let original_cas_root = std::env::var("CAS_ROOT").ok();
-        let original_cwd = std::env::current_dir().ok();
-
-        // Clear CAS_ROOT so find_cas_root uses CWD-based detection
-        unsafe { std::env::remove_var("CAS_ROOT") };
-        std::env::set_current_dir(&temp_path).expect("Failed to change to temp dir");
+        env.set_current_dir(&temp_path);
 
         // In temp dir with no .cas, should return false
         assert!(!has_project_cas(), "Expected no .cas in empty temp dir");
@@ -733,21 +717,11 @@ mod tests {
         init_cas_dir(&temp_path).unwrap();
         assert!(has_project_cas(), "Expected .cas to be found after init");
 
-        // Restore original state
-        if let Some(cwd) = original_cwd {
-            let _ = std::env::set_current_dir(cwd);
-        }
-        match original_cas_root {
-            Some(val) => unsafe { std::env::set_var("CAS_ROOT", val) },
-            None => unsafe { std::env::remove_var("CAS_ROOT") },
-        }
     }
 
     #[test]
     fn test_find_cas_root_from_worktree() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        let original_cas_root = std::env::var("CAS_ROOT").ok();
-        unsafe { std::env::remove_var("CAS_ROOT") };
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_ROOT", None)]);
 
         // Simulate a git worktree structure:
         // /main_repo/.cas/       <- CAS directory
@@ -782,11 +756,6 @@ mod tests {
         std::fs::create_dir_all(&worktree_subdir).unwrap();
         let found = find_cas_root_from(&worktree_subdir).unwrap();
         assert_eq!(found, main_repo.join(".cas"));
-
-        match original_cas_root {
-            Some(val) => unsafe { std::env::set_var("CAS_ROOT", val) },
-            None => unsafe { std::env::remove_var("CAS_ROOT") },
-        }
     }
 
     #[test]
@@ -825,9 +794,7 @@ mod tests {
 
     #[test]
     fn test_find_cas_root_from_cas_worktree() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        let original_cas_root = std::env::var("CAS_ROOT").ok();
-        unsafe { std::env::remove_var("CAS_ROOT") };
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_ROOT", None)]);
 
         // Simulate a CAS factory worktree structure:
         // /project/.cas/          <- CAS directory with cas.db
@@ -857,11 +824,6 @@ mod tests {
         // Should return None for non-worktree paths
         let found = find_cas_root_from_cas_worktree(&project);
         assert!(found.is_none());
-
-        match original_cas_root {
-            Some(val) => unsafe { std::env::set_var("CAS_ROOT", val) },
-            None => unsafe { std::env::remove_var("CAS_ROOT") },
-        }
     }
 
     #[test]
@@ -893,34 +855,21 @@ mod tests {
     #[test]
     #[ignore] // Uses global state (CAS_ROOT env var) - run with: cargo test -- --ignored
     fn test_cas_root_env_var() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-
         let temp = TempDir::new().unwrap();
         let cas_dir = temp.path().join(".cas");
         std::fs::create_dir_all(&cas_dir).unwrap();
-
-        // Save original env var
-        let original = std::env::var("CAS_ROOT").ok();
-
-        // Set CAS_ROOT to temp cas dir
-        unsafe { std::env::set_var("CAS_ROOT", &cas_dir) };
+        let _env =
+            TestEnvGuard::with_optional_vars(&[("CAS_ROOT", Some(cas_dir.to_str().unwrap()))]);
 
         // find_cas_root should use CAS_ROOT
         let found = find_cas_root().unwrap();
         assert_eq!(found, cas_dir);
 
-        // Restore original
-        match original {
-            Some(val) => unsafe { std::env::set_var("CAS_ROOT", val) },
-            None => unsafe { std::env::remove_var("CAS_ROOT") },
-        }
     }
 
     #[test]
     #[ignore] // Uses global state (CAS_ROOT env var, CWD) - run with: cargo test -- --ignored
     fn test_cas_root_env_var_invalid_path() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-
         let temp = TempDir::new().unwrap();
         // Canonicalize to handle macOS /var -> /private/var symlinks
         let temp_path = temp
@@ -931,25 +880,15 @@ mod tests {
         // Create a real .cas dir to fall back to
         init_cas_dir(&temp_path).unwrap();
 
-        // Save original env var and cwd
-        let original_cas_root = std::env::var("CAS_ROOT").ok();
-        let original_cwd = std::env::current_dir().ok();
-
-        // Set CAS_ROOT to non-existent path
-        unsafe { std::env::set_var("CAS_ROOT", "/nonexistent/path/that/does/not/exist") };
-        std::env::set_current_dir(&temp_path).expect("Failed to change to temp dir");
+        let mut env = TestEnvGuard::with_optional_vars(&[(
+            "CAS_ROOT",
+            Some("/nonexistent/path/that/does/not/exist"),
+        )]);
+        env.set_current_dir(&temp_path);
 
         // Should fall back to directory walk and find the real .cas
         let found = find_cas_root().unwrap();
         assert_eq!(found, temp_path.join(".cas"));
 
-        // Restore original state
-        if let Some(cwd) = original_cwd {
-            let _ = std::env::set_current_dir(cwd);
-        }
-        match original_cas_root {
-            Some(val) => unsafe { std::env::set_var("CAS_ROOT", val) },
-            None => unsafe { std::env::remove_var("CAS_ROOT") },
-        }
     }
 }

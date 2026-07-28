@@ -76,35 +76,12 @@ fn parse_endpoint(s: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cloud::CLOUD_ENV_LOCK;
-
-    /// Serialises CAS_CLOUD_ENDPOINT mutations in auth.rs tests via the same
-    /// module-level mutex used by cloud::config tests — prevents cross-module races.
-    struct EnvGuard {
-        _guard: std::sync::MutexGuard<'static, ()>,
-    }
-    impl EnvGuard {
-        fn new() -> Self {
-            let g = CLOUD_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-            // SAFETY: serialized via CLOUD_ENV_LOCK.
-            unsafe { std::env::remove_var("CAS_CLOUD_ENDPOINT"); }
-            EnvGuard { _guard: g }
-        }
-        fn set(&self, k: &str, v: &str) {
-            // SAFETY: serialized via CLOUD_ENV_LOCK.
-            unsafe { std::env::set_var(k, v); }
-        }
-    }
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            // SAFETY: serialized via CLOUD_ENV_LOCK.
-            unsafe { std::env::remove_var("CAS_CLOUD_ENDPOINT"); }
-        }
-    }
+    use crate::test_support::TestEnvGuard;
 
     #[test]
     fn login_args_default_uses_default_endpoint() {
-        let g = EnvGuard::new();
+        let mut g =
+            TestEnvGuard::with_optional_vars(&[("CAS_CLOUD_ENDPOINT", None)]);
         g.set("CAS_CLOUD_ENDPOINT", "https://staging.example.com");
         let args = LoginArgs::default();
         assert_eq!(

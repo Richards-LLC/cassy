@@ -573,7 +573,7 @@ mod tests {
         // writes to `$HOME/.cas/`. Without `with_temp_home`, concurrent sweep
         // tests (`worktree::sweep::*`) see the registration and fail. Wrap so
         // the host registry is isolated to this test's temp HOME.
-        crate::test_support::with_temp_home(|home| {
+        crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
             let temp = home.join("proj");
             std::fs::create_dir_all(&temp).unwrap();
 
@@ -894,7 +894,7 @@ mod tests {
         // `init_cas_dir` writes to — otherwise this test pollutes the shared
         // process-level $HOME and races with other tests (e.g.
         // `worktree::sweep::tests::sweep_all_known_iterates_registry_and_flags_unhealthy`).
-        crate::test_support::with_temp_home(|home| {
+        crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
             let temp = home.join("proj");
             std::fs::create_dir_all(&temp).unwrap();
             // Properly initialize CAS (runs every store init).

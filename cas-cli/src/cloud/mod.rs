@@ -37,8 +37,6 @@ pub(crate) use config::{default_endpoint, is_acceptable_endpoint, user_level_clo
 // T2: /api/me fetch helpers — `pub` so integration tests can call them directly.
 pub use me::{FetchTeamsOutcome, fetch_and_cache_teams, fetch_and_cache_teams_inner,
     teams_cache_stale};
-#[cfg(test)]
-pub(crate) use config::CLOUD_ENV_LOCK;
 pub use coordinator::CloudCoordinator;
 pub use device::DeviceConfig;
 pub use sync_queue::{EntityType, QueuedSync, SyncOperation, SyncQueue};

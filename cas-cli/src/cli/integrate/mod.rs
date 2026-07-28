@@ -143,6 +143,7 @@ fn render_outcome(outcome: &IntegrationOutcome) {
 mod tests {
     use super::*;
     use crate::cli::integrate::types::IntegrationStatus;
+    use crate::test_support::TestEnvGuard;
     use clap::Parser;
 
     /// Minimal clap harness so we can drive the subcommand parser without
@@ -180,7 +181,8 @@ mod tests {
         // `not detected` Skipped path and returns Ok — i.e. the subcommand
         // is wired through to the real handler, not the old stub.
         let tmp = tempfile::TempDir::new().unwrap();
-        let cwd_guard = scoped_chdir(tmp.path());
+        let mut env = TestEnvGuard::new();
+        env.set_current_dir(tmp.path());
         let cmd = parse(&["vercel", "init"]);
         let result = dispatch(&cmd);
         // Either Ok(Skipped) (no vercel.json + default no-mcp-proxy client
@@ -201,21 +203,6 @@ mod tests {
                 );
             }
         }
-        drop(cwd_guard);
-    }
-
-    /// Best-effort cwd guard for tests that exercise the vercel handler's
-    /// `locate_repo_root`. Only used here; not exposed.
-    struct CwdGuard(std::path::PathBuf);
-    impl Drop for CwdGuard {
-        fn drop(&mut self) {
-            let _ = std::env::set_current_dir(&self.0);
-        }
-    }
-    fn scoped_chdir(p: &std::path::Path) -> CwdGuard {
-        let prev = std::env::current_dir().unwrap();
-        std::env::set_current_dir(p).unwrap();
-        CwdGuard(prev)
     }
 
     #[test]

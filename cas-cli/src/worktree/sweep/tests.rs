@@ -330,7 +330,7 @@ fn symlink_worktree_path_is_refused_not_followed() {
 
 #[test]
 fn sweep_all_known_iterates_registry_and_flags_unhealthy() {
-    crate::test_support::with_temp_home(|home| {
+    crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
         crate::store::known_repos::ensure_host_schema().unwrap();
         let a = bootstrap_repo_in(home, "a");
         add_worktree(&a, "w1");

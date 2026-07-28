@@ -1915,6 +1915,7 @@ mod tests {
 
     use cas_factory::{EpicState, FileChangeInfo, GitFileStatus, SourceChangesInfo, TaskSummary};
     use cas_types::{Priority, TaskStatus, TaskType};
+    use crate::test_support::TestEnvGuard;
 
     use super::{
         DirectorData, DirectorEvent, merge_director_data_preserving_git, non_closed_task_ids,
@@ -2096,60 +2097,6 @@ mod tests {
         epic_verification_owner: None,
         }
         }
-
-    // Process-global environment mutation must use the same crate-wide lock
-    // as HOME-changing fixtures in other modules. Independent per-module
-    // mutexes do not serialize parallel lib tests.
-    struct EnvGuard {
-        saved: Vec<(String, Option<String>)>,
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl EnvGuard {
-        fn set(vars: &[(&str, &str)]) -> Self {
-            let lock = crate::hooks::test_env_lock();
-            let mut saved = Vec::with_capacity(vars.len());
-            for (key, value) in vars {
-                let key = (*key).to_string();
-                let prev = std::env::var(&key).ok();
-                unsafe { std::env::set_var(&key, value) };
-                saved.push((key, prev));
-            }
-            Self {
-                saved,
-                _lock: lock,
-            }
-        }
-
-        fn set_optional(vars: &[(&str, Option<&str>)]) -> Self {
-            let lock = crate::hooks::test_env_lock();
-            let mut saved = Vec::with_capacity(vars.len());
-            for (key, value) in vars {
-                let key = (*key).to_string();
-                let prev = std::env::var(&key).ok();
-                match value {
-                    Some(value) => unsafe { std::env::set_var(&key, value) },
-                    None => unsafe { std::env::remove_var(&key) },
-                }
-                saved.push((key, prev));
-            }
-            Self {
-                saved,
-                _lock: lock,
-            }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            for (key, prev) in self.saved.drain(..) {
-                match prev {
-                    Some(value) => unsafe { std::env::set_var(&key, value) },
-                    None => unsafe { std::env::remove_var(&key) },
-                }
-            }
-        }
-    }
 
     // ── task_belongs_to_current_session (cas-889d / cas-9eae) ────────────────
     //
@@ -2711,9 +2658,8 @@ mod tests {
     /// (not a hand-written JSON literal) so this test can't drift from the
     /// struct's actual required-field shape as fields are added.
     ///
-    /// Uses `EnvGuard` to override `HOME`; both it and
-    /// `test_support::with_temp_home` now share the crate-wide environment
-    /// lock, so parallel tests cannot interleave their process-global writes.
+    /// Uses the canonical `TestEnvGuard` to override `HOME`, so parallel tests
+    /// cannot interleave process-global environment writes.
     #[test]
     fn set_factory_session_handles_missing_malformed_and_valid_created_at() {
         use crate::ui::factory::protocol::{AgentInfo, SessionMetadata};
@@ -2746,7 +2692,7 @@ mod tests {
         }
 
         let home = tempfile::tempdir().unwrap();
-        let _guard = EnvGuard::set(&[("HOME", home.path().to_str().unwrap())]);
+        let _guard = TestEnvGuard::with_vars(&[("HOME", home.path().to_str().unwrap())]);
         let sessions_dir = home.path().join(".cas").join("sessions");
         std::fs::create_dir_all(&sessions_dir).unwrap();
 
@@ -3392,7 +3338,7 @@ mod tests {
     #[test]
     fn preferred_epic_id_from_session_metadata_named_filters_empty_missing_and_malformed() {
         let home = tempfile::tempdir().unwrap();
-        let _guard = EnvGuard::set(&[("HOME", home.path().to_str().unwrap())]);
+        let _guard = TestEnvGuard::with_vars(&[("HOME", home.path().to_str().unwrap())]);
 
         assert_eq!(
             super::preferred_epic_id_from_session_metadata_named("missing-session"),
@@ -3541,7 +3487,7 @@ mod tests {
     #[test]
     fn epic_completed_clears_current_and_session_default_without_clearing_pin() {
         let home = tempfile::tempdir().unwrap();
-        let _guard = EnvGuard::set(&[
+        let _guard = TestEnvGuard::with_vars(&[
             ("HOME", home.path().to_str().unwrap()),
             ("CAS_FACTORY_SESSION", "session-complete-clear"),
         ]);
@@ -3593,7 +3539,7 @@ mod tests {
     #[test]
     fn reset_epic_state_clears_current_and_session_default_without_clearing_pin() {
         let home = tempfile::tempdir().unwrap();
-        let _guard = EnvGuard::set(&[
+        let _guard = TestEnvGuard::with_vars(&[
             ("HOME", home.path().to_str().unwrap()),
             ("CAS_FACTORY_SESSION", "session-reset-clear"),
         ]);
@@ -3728,7 +3674,7 @@ mod tests {
     #[test]
     fn apply_session_metadata_focus_updates_current_id_and_epic_state() {
         let home = tempfile::tempdir().unwrap();
-        let _guard = EnvGuard::set(&[
+        let _guard = TestEnvGuard::with_vars(&[
             ("HOME", home.path().to_str().unwrap()),
             ("CAS_FACTORY_SESSION", "session-apply-pin"),
         ]);
@@ -3784,7 +3730,7 @@ mod tests {
     #[test]
     fn apply_session_metadata_focus_short_circuits_when_metadata_matches_current() {
         let home = tempfile::tempdir().unwrap();
-        let _guard = EnvGuard::set(&[
+        let _guard = TestEnvGuard::with_vars(&[
             ("HOME", home.path().to_str().unwrap()),
             ("CAS_FACTORY_SESSION", "session-apply-same"),
         ]);
@@ -3851,7 +3797,7 @@ mod tests {
     /// that two-tick sequence and asserts the later tick still adopts.
     #[test]
     fn apply_session_metadata_focus_retries_inference_once_assignee_lands_on_a_later_tick() {
-        let _guard = EnvGuard::set_optional(&[("CAS_FACTORY_SESSION", None)]);
+        let _guard = TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_SESSION", None)]);
         let epic_id = "cas-late-assignee";
         let mut app = super::FactoryApp::for_test();
 
@@ -3906,7 +3852,7 @@ mod tests {
     #[test]
     fn detector_driven_adoption_without_metadata_keeps_inference_source() {
         let home = tempfile::tempdir().unwrap();
-        let _guard = EnvGuard::set(&[
+        let _guard = TestEnvGuard::with_vars(&[
             ("HOME", home.path().to_str().unwrap()),
             ("CAS_FACTORY_SESSION", "session-without-metadata"),
         ]);
@@ -3949,7 +3895,7 @@ mod tests {
 
     #[test]
     fn refresh_then_handle_same_foreign_epic_started_event_does_not_adopt_focus() {
-        let _guard = EnvGuard::set_optional(&[("CAS_FACTORY_SESSION", None)]);
+        let _guard = TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_SESSION", None)]);
         let epic_id = "cas-foreign";
         let mut app = super::FactoryApp::for_test();
         app.director_data = DirectorData {

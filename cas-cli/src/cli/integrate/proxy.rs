@@ -212,6 +212,7 @@ impl Drop for ProxyClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TestEnvGuard;
     use serde_json::json;
 
     // --- unwrap_envelope --------------------------------------------------
@@ -310,38 +311,9 @@ mod tests {
         // an empty servers map → ensure! fires BEFORE the engine is
         // installed into self.state. engine_constructed must remain
         // false so a follow-on retry hits the same code path.
-        let _env_guard = crate::hooks::test_env_lock();
-        let tmp = tempfile::TempDir::new().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
-        // SAFETY: test_env_lock serializes every cooperating env writer;
-        // the Restore guard restores both variables on drop.
-        unsafe {
-            std::env::set_var("HOME", tmp.path());
-            std::env::set_var("XDG_CONFIG_HOME", tmp.path().join(".config"));
-        }
-        struct Restore {
-            home: Option<std::ffi::OsString>,
-            xdg: Option<std::ffi::OsString>,
-        }
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                unsafe {
-                    match &self.home {
-                        Some(v) => std::env::set_var("HOME", v),
-                        None => std::env::remove_var("HOME"),
-                    }
-                    match &self.xdg {
-                        Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-                        None => std::env::remove_var("XDG_CONFIG_HOME"),
-                    }
-                }
-            }
-        }
-        let _g = Restore {
-            home: prev_home,
-            xdg: prev_xdg,
-        };
+        let mut env = TestEnvGuard::temp_home();
+        let xdg = env.home().join(".config");
+        env.set("XDG_CONFIG_HOME", xdg);
 
         let client = ProxyClient::new("vercel");
         assert!(!client.engine_constructed());

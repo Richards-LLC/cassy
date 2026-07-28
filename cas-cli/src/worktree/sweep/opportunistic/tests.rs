@@ -8,7 +8,7 @@ use std::time::Duration;
 use crate::config::WorktreesConfig;
 use crate::store::KnownRepoStore;
 use crate::store::known_repos::{ensure_host_schema, open_host_known_repo_store};
-use crate::test_support::with_temp_home;
+use crate::test_support::TestEnvGuard;
 use crate::worktree::sweep::opportunistic::{
     OpportunisticOutcome, debounce_file, is_due, log_file, run_forced, run_if_due,
 };
@@ -83,7 +83,7 @@ fn ttl_zero() -> WorktreesConfig {
 
 #[test]
 fn reclaims_old_clean_worktree() {
-    with_temp_home(|home| {
+    TestEnvGuard::run_with_temp_home(|home| {
         ensure_host_schema().unwrap();
         let repo = bootstrap_repo(home, "repo");
         let wt = add_worktree_aged(&repo, "old-clean", Duration::from_secs(48 * 3600));
@@ -99,7 +99,7 @@ fn reclaims_old_clean_worktree() {
 
 #[test]
 fn salvages_old_dirty_worktree() {
-    with_temp_home(|home| {
+    TestEnvGuard::run_with_temp_home(|home| {
         ensure_host_schema().unwrap();
         let repo = bootstrap_repo(home, "repo");
         let wt = add_worktree_aged(&repo, "old-dirty", Duration::from_secs(48 * 3600));
@@ -122,7 +122,7 @@ fn salvages_old_dirty_worktree() {
 
 #[test]
 fn preserves_young_worktree() {
-    with_temp_home(|home| {
+    TestEnvGuard::run_with_temp_home(|home| {
         ensure_host_schema().unwrap();
         let repo = bootstrap_repo(home, "repo");
         let wt = add_worktree_aged(&repo, "fresh", Duration::from_secs(10));
@@ -141,7 +141,7 @@ fn preserves_young_worktree() {
 
 #[test]
 fn claude_agent_dirs_feature_flag_respected() {
-    with_temp_home(|home| {
+    TestEnvGuard::run_with_temp_home(|home| {
         ensure_host_schema().unwrap();
         let repo = bootstrap_repo(home, "repo");
         // Simulated .claude worktree: a real git worktree with agent- prefix.
@@ -179,7 +179,7 @@ fn claude_agent_dirs_feature_flag_respected() {
 
 #[test]
 fn non_agent_prefix_in_claude_dir_is_ignored() {
-    with_temp_home(|home| {
+    TestEnvGuard::run_with_temp_home(|home| {
         ensure_host_schema().unwrap();
         let repo = bootstrap_repo(home, "repo");
         // A random dir that isn't an agent-* worktree — must not be touched.
@@ -197,7 +197,7 @@ fn non_agent_prefix_in_claude_dir_is_ignored() {
 
 #[test]
 fn cross_repo_iteration_continues_on_failure() {
-    with_temp_home(|home| {
+    TestEnvGuard::run_with_temp_home(|home| {
         ensure_host_schema().unwrap();
         let a = bootstrap_repo(home, "a");
         let wt_a = add_worktree_aged(&a, "w1", Duration::from_secs(48 * 3600));
@@ -222,7 +222,7 @@ fn cross_repo_iteration_continues_on_failure() {
 
 #[test]
 fn debounce_gates_run_if_due() {
-    with_temp_home(|home| {
+    TestEnvGuard::run_with_temp_home(|home| {
         ensure_host_schema().unwrap();
         let _ = bootstrap_repo(home, "repo");
         register(&home.join("repo"));
@@ -245,7 +245,7 @@ fn debounce_gates_run_if_due() {
 
 #[test]
 fn writes_summary_line_to_global_sweep_log() {
-    with_temp_home(|home| {
+    TestEnvGuard::run_with_temp_home(|home| {
         ensure_host_schema().unwrap();
         let repo = bootstrap_repo(home, "repo");
         let _wt = add_worktree_aged(&repo, "old", Duration::from_secs(48 * 3600));
@@ -269,7 +269,7 @@ fn writes_summary_line_to_global_sweep_log() {
 fn symlink_worktree_is_refused() {
     use std::os::unix::fs::symlink;
 
-    with_temp_home(|home| {
+    TestEnvGuard::run_with_temp_home(|home| {
         ensure_host_schema().unwrap();
         let repo = bootstrap_repo(home, "repo");
         let real = add_worktree_aged(&repo, "real", Duration::from_secs(48 * 3600));

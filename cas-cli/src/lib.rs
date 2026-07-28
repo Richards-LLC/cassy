@@ -56,43 +56,150 @@ pub mod worktree;
 /// would race against the other's.
 #[cfg(test)]
 pub(crate) mod test_support {
+    use std::ffi::{OsStr, OsString};
     use std::path::Path;
     use tempfile::TempDir;
 
-    /// Run `f` with `HOME` pointed at a fresh `TempDir`, serialized against
-    /// every other HOME-mutating test in the crate. Restores the previous
-    /// `HOME` value on return, **including when `f` panics**. Shared by
-    /// tests in multiple modules so a future change to the HOME-isolation
-    /// protocol lives in one place.
-    pub fn with_temp_home<F: FnOnce(&Path)>(f: F) {
-        let _guard = crate::hooks::test_env_lock();
-        let temp = TempDir::new().unwrap();
-        let prev = std::env::var_os("HOME");
+    /// Canonical process-wide environment fixture for lib tests.
+    ///
+    /// The guard owns the one shared lock, captures every variable before its
+    /// first mutation, restores all values on drop (including during unwind),
+    /// and retains any temporary HOME for the full mutation lifetime. Tests
+    /// should never call `set_var`/`remove_var` directly.
+    pub struct TestEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(OsString, Option<OsString>)>,
+        temp_home: Option<TempDir>,
+        saved_cwd: Option<std::path::PathBuf>,
+    }
 
-        // RAII guard: restores HOME on drop so panics inside `f` cannot
-        // leave the process env in a broken state and poison later tests.
-        struct HomeGuard(Option<std::ffi::OsString>);
-        impl Drop for HomeGuard {
-            fn drop(&mut self) {
-                // SAFETY: test_env_lock is held by the enclosing scope (not
-                // dropped until after this guard); no concurrent writer can
-                // race with this restoration.
+    impl TestEnvGuard {
+        pub fn new() -> Self {
+            Self {
+                _lock: crate::hooks::test_env_lock(),
+                saved: Vec::new(),
+                temp_home: None,
+                saved_cwd: None,
+            }
+        }
+
+        pub fn temp_home() -> Self {
+            let mut guard = Self::new();
+            let temp = TempDir::new().expect("temp HOME");
+            let path = temp.path().to_path_buf();
+            guard.temp_home = Some(temp);
+            guard.set("HOME", path);
+            guard
+        }
+
+        pub fn with_vars(vars: &[(&str, &str)]) -> Self {
+            let mut guard = Self::new();
+            for (key, value) in vars {
+                guard.set(*key, *value);
+            }
+            guard
+        }
+
+        pub fn with_optional_vars(vars: &[(&str, Option<&str>)]) -> Self {
+            let mut guard = Self::new();
+            for (key, value) in vars {
+                match value {
+                    Some(value) => guard.set(*key, *value),
+                    None => guard.remove(*key),
+                }
+            }
+            guard
+        }
+
+        pub fn run_with_temp_home<T>(f: impl FnOnce(&Path) -> T) -> T {
+            let guard = Self::temp_home();
+            f(guard.home())
+        }
+
+        pub fn home(&self) -> &Path {
+            self.temp_home
+                .as_ref()
+                .expect("TestEnvGuard has no temp HOME")
+                .path()
+        }
+
+        pub fn set(&mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) {
+            let key = key.as_ref();
+            self.capture(key);
+            // SAFETY: the guard holds the process-wide test environment lock
+            // until after Drop restores every captured variable.
+            unsafe { std::env::set_var(key, value) };
+        }
+
+        pub fn remove(&mut self, key: impl AsRef<OsStr>) {
+            let key = key.as_ref();
+            self.capture(key);
+            // SAFETY: see `set`.
+            unsafe { std::env::remove_var(key) };
+        }
+
+        pub fn set_current_dir(&mut self, path: impl AsRef<Path>) {
+            if self.saved_cwd.is_none() {
+                self.saved_cwd = Some(std::env::current_dir().expect("current test directory"));
+            }
+            std::env::set_current_dir(path).expect("set test current directory");
+        }
+
+        fn capture(&mut self, key: &OsStr) {
+            if !self.saved.iter().any(|(saved, _)| saved == key) {
+                self.saved
+                    .push((key.to_os_string(), std::env::var_os(key)));
+            }
+        }
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            // Restore in reverse mutation order while `_lock` is still held.
+            for (key, value) in self.saved.iter().rev() {
                 unsafe {
-                    match &self.0 {
-                        Some(v) => std::env::set_var("HOME", v),
-                        None => std::env::remove_var("HOME"),
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+            if let Some(cwd) = &self.saved_cwd {
+                let _ = std::env::set_current_dir(cwd);
+            }
+        }
+    }
+
+    #[test]
+    fn home_path_env_mutation_is_centralized_in_test_env_guard() {
+        fn visit(dir: &Path, hits: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).expect("read source directory") {
+                let path = entry.expect("source entry").path();
+                if path.is_dir() {
+                    visit(&path, hits);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    let source = std::fs::read_to_string(&path).expect("read Rust source");
+                    for (line_index, line) in source.lines().enumerate() {
+                        let mutates_sensitive_var = ["HOME", "XDG_CONFIG_HOME", "PATH"]
+                            .iter()
+                            .any(|key| {
+                                line.contains(&format!("std::env::set_var(\"{key}\""))
+                                    || line.contains(&format!("std::env::remove_var(\"{key}\""))
+                            });
+                        if mutates_sensitive_var {
+                            hits.push(format!("{}:{}", path.display(), line_index + 1));
+                        }
                     }
                 }
             }
         }
-        let _home_guard = HomeGuard(prev);
 
-        // SAFETY: test_env_lock serializes concurrent writers within this
-        // test binary; the HomeGuard above guarantees restoration on drop.
-        unsafe {
-            std::env::set_var("HOME", temp.path());
-        }
-        f(temp.path());
+        let mut hits = Vec::new();
+        visit(Path::new(env!("CARGO_MANIFEST_DIR")).join("src").as_path(), &mut hits);
+        assert!(
+            hits.is_empty(),
+            "HOME/XDG_CONFIG_HOME/PATH mutations must go through TestEnvGuard: {hits:?}"
+        );
     }
 }
 

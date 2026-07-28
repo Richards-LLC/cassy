@@ -1259,7 +1259,7 @@ fn remove_worker_external_symlink_blocks_and_survives() {
     let real_file = path.join("dotfile-target.txt");
     std::fs::write(&real_file, "live config").unwrap();
 
-    crate::test_support::with_temp_home(|home| {
+    crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
         let link = home.join(".dotfile-link");
         #[cfg(unix)]
         std::os::unix::fs::symlink(&real_file, &link).unwrap();
@@ -1298,7 +1298,7 @@ fn attempt_remove_worker_external_symlink_blocks_and_survives() {
     let real_file = path.join("dotfile-target.txt");
     std::fs::write(&real_file, "live config").unwrap();
 
-    crate::test_support::with_temp_home(|home| {
+    crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
         let link = home.join(".dotfile-link");
         #[cfg(unix)]
         std::os::unix::fs::symlink(&real_file, &link).unwrap();
@@ -1339,7 +1339,7 @@ fn cleanup_workers_external_symlink_blocks_even_with_force() {
     let real_file = path.join("dotfile-target.txt");
     std::fs::write(&real_file, "live config").unwrap();
 
-    crate::test_support::with_temp_home(|home| {
+    crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
         let link = home.join(".dotfile-link");
         #[cfg(unix)]
         std::os::unix::fs::symlink(&real_file, &link).unwrap();

@@ -542,7 +542,7 @@ mod supervisor_claude_delivery {
         create_inboxes: bool,
         f: impl FnOnce(&TeamsManager, &Path, &str),
     ) {
-        crate::test_support::with_temp_home(|home| {
+        crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
             let session = format!("cas6257-{label}");
             // Constructed AFTER HOME is set so its inbox dir resolves under the
             // temp home (TeamsManager::new reads dirs::home_dir()).

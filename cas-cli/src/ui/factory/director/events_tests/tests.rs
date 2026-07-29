@@ -1,6 +1,7 @@
-use crate::ui::factory::director::data::{ActiveLeaseSummary, AgentSummary};
+use crate::ui::factory::director::data::{ActiveLeaseSummary, AgentSummary, DirectorStores};
 use crate::ui::factory::director::events::*;
-use cas_types::{AgentStatus, TaskType};
+use cas_store::{AgentStore, EventStore, PendingReason, PromptQueueStore, TaskStore};
+use cas_types::{Agent, AgentRole, AgentStatus, TaskType};
 
 fn make_task(id: &str, title: &str, status: TaskStatus, assignee: Option<&str>) -> TaskSummary {
     TaskSummary {
@@ -1290,6 +1291,88 @@ fn test_no_worker_idle_while_pending_messages_in_queue() {
         )),
         "WorkerIdle must fire once pending messages are gone and idle threshold is met"
     );
+}
+
+#[test]
+fn long_backoff_supervisor_message_does_not_permanently_suppress_worker_idle() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let stores = DirectorStores::open(temp_dir.path()).unwrap();
+    stores.task_store.init().unwrap();
+    stores.agent_store.init().unwrap();
+    stores.event_store.init().unwrap();
+    let prompt_queue = stores.prompt_queue_store.as_ref().unwrap();
+    prompt_queue.init().unwrap();
+
+    let supervisor = Agent::new_with_role(
+        "supervisor-session".to_string(),
+        "supervisor".to_string(),
+        AgentRole::Supervisor,
+    );
+    stores.agent_store.register(&supervisor).unwrap();
+    let worker = Agent::new_with_role(
+        "worker-session".to_string(),
+        "backed-off-worker".to_string(),
+        AgentRole::Worker,
+    );
+    stores.agent_store.register(&worker).unwrap();
+
+    let prompt_id = prompt_queue
+        .enqueue("supervisor", "backed-off-worker", "assigned work")
+        .unwrap();
+    let mut retry_at = chrono::Utc::now();
+    for _ in 0..6 {
+        let disposition = prompt_queue
+            .record_retry(
+                prompt_id,
+                PendingReason::TargetUnavailable,
+                Some("pane unavailable"),
+            )
+            .unwrap();
+        let cas_store::PromptRetryDisposition::Scheduled {
+            retry_at: scheduled_at,
+            ..
+        } = disposition
+        else {
+            panic!("six failed deliveries must remain retryable");
+        };
+        retry_at = scheduled_at;
+    }
+    assert!(
+        retry_at > chrono::Utc::now() + chrono::Duration::seconds(4),
+        "fixture must reach the 5s retry ceiling"
+    );
+
+    let data = DirectorData::load_with_stores(temp_dir.path(), None, false, Some(&stores)).unwrap();
+    let worker_summary = data
+        .agents
+        .iter()
+        .find(|agent| agent.id == "worker-session")
+        .expect("worker is present in director data");
+    assert_eq!(
+        worker_summary.pending_messages, 0,
+        "a row beyond the idle horizon must not look immediately deliverable"
+    );
+    assert_eq!(worker_summary.pending_supervisor_messages, 0);
+
+    let mut detector = DirectorEventDetector::new(
+        vec!["backed-off-worker".to_string()],
+        "supervisor".to_string(),
+    );
+    detector.initialize(&data);
+    let clock = Instant::now();
+    let utc = chrono::Utc::now() + chrono::Duration::seconds(1);
+
+    let tick_1 = detector.detect_changes_at(&data, None, clock, utc);
+    assert!(
+        !tick_1
+            .iter()
+            .any(|event| matches!(event, DirectorEvent::WorkerIdle { .. }))
+    );
+    let tick_2 = detector.detect_changes_at(&data, None, clock + Duration::from_secs(2), utc);
+    assert!(tick_2.iter().any(|event| matches!(
+        event,
+        DirectorEvent::WorkerIdle { worker, .. } if worker == "backed-off-worker"
+    )));
 }
 
 #[test]

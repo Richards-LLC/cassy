@@ -5002,6 +5002,36 @@ effort = "high"
     }
 
     #[test]
+    fn resolve_codex_transcript_uses_freshest_cli_rollout_for_reused_cwd() {
+        let clone = "/tmp/reused-codex-worker";
+        let old_rel = "2026/07/27/rollout-2026-07-27T07-59-08-old-cli.jsonl";
+        let current_rel = "2026/07/28/rollout-2026-07-28T08-03-58-current-cli.jsonl";
+        let (_tmp, sessions) = fake_codex_sessions_dir_with_metadata(&[
+            (old_rel, clone, "codex-tui", "cli"),
+            (current_rel, clone, "codex-tui", "cli"),
+        ]);
+        let old_rollout = sessions.join(old_rel);
+        let current_rollout = sessions.join(current_rel);
+        filetime::set_file_mtime(
+            &old_rollout,
+            filetime::FileTime::from_system_time(
+                std::time::SystemTime::now() - std::time::Duration::from_secs(60),
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_codex_transcript(
+                Some(&sessions),
+                Some(clone),
+                "codex-worker-cas-session",
+            ),
+            TranscriptResolution::Resolved(current_rollout),
+            "worktree reuse leaves old CLI rollouts at the same cwd; the current worker is the freshest CLI session"
+        );
+    }
+
+    #[test]
     fn worker_status_activity_does_not_latch_onto_active_exec_rollout() {
         use std::io::Write;
 

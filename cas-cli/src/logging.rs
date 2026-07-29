@@ -6,8 +6,11 @@
 //! - EnvFilter: respects RUST_LOG env var
 
 use std::fs::{self, File};
-use std::io;
-use std::path::Path;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
+use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -46,12 +49,13 @@ pub fn init(cas_root: Option<&Path>, verbose: bool, config: &LoggingConfig) -> i
             let log_dir = root.join(&config.log_dir);
             fs::create_dir_all(&log_dir)?;
 
-            // Create daily rotating log file
-            let log_file = create_log_file(&log_dir)?;
+            // Re-evaluate the local date for every write so a daemon that
+            // survives midnight moves to the new day's file without restart.
+            let log_writer = DailyLogWriter::new(&log_dir)?;
 
             Some(
                 fmt::layer()
-                    .with_writer(log_file)
+                    .with_writer(log_writer)
                     .with_ansi(false)
                     .with_target(true)
                     .with_level(true)
@@ -75,35 +79,126 @@ pub fn init(cas_root: Option<&Path>, verbose: bool, config: &LoggingConfig) -> i
     Ok(())
 }
 
-/// Create a log file with today's date
-fn create_log_file(log_dir: &Path) -> io::Result<File> {
-    let today = chrono::Local::now().format("%Y-%m-%d");
-    let log_path = log_dir.join(format!("cas-{today}.log"));
+#[derive(Clone)]
+struct DailyLogWriter {
+    state: Arc<Mutex<DailyLogState>>,
+    local_date: Arc<dyn Fn() -> chrono::NaiveDate + Send + Sync>,
+}
 
+struct DailyLogState {
+    log_dir: PathBuf,
+    date: chrono::NaiveDate,
+    file: File,
+}
+
+impl DailyLogWriter {
+    fn new(log_dir: &Path) -> io::Result<Self> {
+        Self::new_with_clock(log_dir, || chrono::Local::now().date_naive())
+    }
+
+    fn new_with_clock<F>(log_dir: &Path, local_date: F) -> io::Result<Self>
+    where
+        F: Fn() -> chrono::NaiveDate + Send + Sync + 'static,
+    {
+        let local_date = Arc::new(local_date);
+        let date = local_date();
+        let file = open_log_file(log_dir, date)?;
+        Ok(Self {
+            state: Arc::new(Mutex::new(DailyLogState {
+                log_dir: log_dir.to_path_buf(),
+                date,
+                file,
+            })),
+            local_date,
+        })
+    }
+}
+
+impl<'a> MakeWriter<'a> for DailyLogWriter {
+    type Writer = DailyLogGuard;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        DailyLogGuard {
+            state: Arc::clone(&self.state),
+            local_date: Arc::clone(&self.local_date),
+        }
+    }
+}
+
+struct DailyLogGuard {
+    state: Arc<Mutex<DailyLogState>>,
+    local_date: Arc<dyn Fn() -> chrono::NaiveDate + Send + Sync>,
+}
+
+impl DailyLogGuard {
+    fn with_current_file<T>(
+        &self,
+        operation: impl FnOnce(&mut File) -> io::Result<T>,
+    ) -> io::Result<T> {
+        let date = (self.local_date)();
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| io::Error::other("daily log writer lock poisoned"))?;
+        if state.date != date {
+            let file = open_log_file(&state.log_dir, date)?;
+            state.date = date;
+            state.file = file;
+        }
+        operation(&mut state.file)
+    }
+}
+
+impl Write for DailyLogGuard {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.with_current_file(|file| file.write(buf))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.with_current_file(File::flush)
+    }
+}
+
+fn open_log_file(log_dir: &Path, date: chrono::NaiveDate) -> io::Result<File> {
+    let log_path = log_path_for_date(log_dir, date);
     File::options().create(true).append(true).open(log_path)
+}
+
+fn log_path_for_date(log_dir: &Path, date: chrono::NaiveDate) -> PathBuf {
+    log_dir.join(format!("cas-{}.log", date.format("%Y-%m-%d")))
 }
 
 /// Clean up old log files based on retention policy
 pub fn cleanup_old_logs(log_dir: &Path, retention_days: u32) -> io::Result<usize> {
     let mut removed = 0;
-    let cutoff = chrono::Local::now() - chrono::Duration::days(retention_days as i64);
+    let now = SystemTime::now();
+    let cutoff = now
+        .checked_sub(Duration::from_secs(u64::from(retention_days) * 86_400))
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let active_path = log_path_for_date(log_dir, chrono::Local::now().date_naive());
 
     for entry in fs::read_dir(log_dir)? {
         let entry = entry?;
         let path = entry.path();
+        if path == active_path {
+            continue;
+        }
 
         // Only consider cas-YYYY-MM-DD.log files
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if name.starts_with("cas-") && name.ends_with(".log") {
-                // Parse date from filename
-                let date_str = &name[4..14]; // "YYYY-MM-DD"
-                if let Ok(file_date) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
-                    let file_datetime = file_date.and_hms_opt(0, 0, 0).unwrap();
-                    if file_datetime < cutoff.naive_local() {
-                        fs::remove_file(&path)?;
-                        removed += 1;
-                    }
-                }
+            let Some(date_str) = name
+                .strip_prefix("cas-")
+                .and_then(|name| name.strip_suffix(".log"))
+            else {
+                continue;
+            };
+            if chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d").is_err() {
+                continue;
+            }
+            let modified = entry.metadata()?.modified()?;
+            if modified < cutoff {
+                fs::remove_file(&path)?;
+                removed += 1;
             }
         }
     }
@@ -161,6 +256,8 @@ impl Default for LoggingConfig {
 #[cfg(test)]
 mod tests {
     use crate::logging::*;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
 
     #[test]
@@ -173,41 +270,95 @@ mod tests {
     }
 
     #[test]
-    fn test_create_log_file() {
+    fn daily_log_writer_creates_current_date_file() {
         let dir = tempdir().unwrap();
-        let file = create_log_file(dir.path()).unwrap();
-        drop(file);
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 7, 29).unwrap();
+        let writer = DailyLogWriter::new_with_clock(dir.path(), move || date).unwrap();
+        let mut guard = writer.make_writer();
+        guard.write_all(b"current\n").unwrap();
+        guard.flush().unwrap();
 
-        // Verify file was created
-        let entries: Vec<_> = fs::read_dir(dir.path()).unwrap().collect();
-        assert_eq!(entries.len(), 1);
-
-        let entry = entries[0].as_ref().unwrap();
-        let name = entry.file_name().to_string_lossy().to_string();
-        assert!(name.starts_with("cas-"));
-        assert!(name.ends_with(".log"));
+        assert_eq!(
+            fs::read_to_string(log_path_for_date(dir.path(), date)).unwrap(),
+            "current\n"
+        );
     }
 
     #[test]
-    fn test_cleanup_old_logs() {
+    fn daily_log_writer_reopens_when_local_date_changes() {
         let dir = tempdir().unwrap();
+        let first_date = chrono::NaiveDate::from_ymd_opt(2026, 7, 28).unwrap();
+        let second_date = chrono::NaiveDate::from_ymd_opt(2026, 7, 29).unwrap();
+        let clock = Arc::new(Mutex::new(first_date));
+        let writer_clock = Arc::clone(&clock);
+        let writer = DailyLogWriter::new_with_clock(dir.path(), move || {
+            *writer_clock.lock().unwrap()
+        })
+        .unwrap();
+        let mut guard = writer.make_writer();
 
-        // Create some old log files
-        let old_date = chrono::Local::now() - chrono::Duration::days(10);
-        let old_name = format!("cas-{}.log", old_date.format("%Y-%m-%d"));
-        fs::write(dir.path().join(&old_name), "old log").unwrap();
+        guard.write_all(b"before midnight\n").unwrap();
+        *clock.lock().unwrap() = second_date;
+        guard.write_all(b"after midnight\n").unwrap();
+        guard.flush().unwrap();
 
-        // Create a recent log file
-        let recent_date = chrono::Local::now();
-        let recent_name = format!("cas-{}.log", recent_date.format("%Y-%m-%d"));
-        fs::write(dir.path().join(&recent_name), "recent log").unwrap();
+        assert_eq!(
+            fs::read_to_string(log_path_for_date(dir.path(), first_date)).unwrap(),
+            "before midnight\n"
+        );
+        assert_eq!(
+            fs::read_to_string(log_path_for_date(dir.path(), second_date)).unwrap(),
+            "after midnight\n"
+        );
+    }
 
-        // Clean up with 7-day retention
+    #[test]
+    fn cleanup_old_logs_uses_mtime_and_preserves_active_file() {
+        let dir = tempdir().unwrap();
+        let now = SystemTime::now();
+
+        let stale_path = dir.path().join("cas-2026-01-01.log");
+        fs::write(&stale_path, "stale log").unwrap();
+        filetime::set_file_mtime(
+            &stale_path,
+            filetime::FileTime::from_system_time(
+                now - Duration::from_secs(10 * 86_400),
+            ),
+        )
+        .unwrap();
+
+        // A daemon can still have an old-dated path open during rollout. A
+        // recent mtime proves it is hot even though its filename is ancient.
+        let hot_old_date = chrono::NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
+        let hot_old_path = log_path_for_date(dir.path(), hot_old_date);
+        let hot_writer =
+            DailyLogWriter::new_with_clock(dir.path(), move || hot_old_date).unwrap();
+        let mut hot_guard = hot_writer.make_writer();
+        hot_guard.write_all(b"actively written log\n").unwrap();
+        hot_guard.flush().unwrap();
+
+        // The current date is the active destination and must be retained even
+        // with an artificially stale mtime (including retention_days = 0).
+        let active_path = log_path_for_date(dir.path(), chrono::Local::now().date_naive());
+        fs::write(&active_path, "active log").unwrap();
+        filetime::set_file_mtime(
+            &active_path,
+            filetime::FileTime::from_system_time(
+                now - Duration::from_secs(30 * 86_400),
+            ),
+        )
+        .unwrap();
+
         let removed = cleanup_old_logs(dir.path(), 7).unwrap();
         assert_eq!(removed, 1);
-
-        // Verify only recent file remains
-        let entries: Vec<_> = fs::read_dir(dir.path()).unwrap().collect();
-        assert_eq!(entries.len(), 1);
+        assert!(!stale_path.exists());
+        assert!(hot_old_path.exists());
+        assert!(active_path.exists());
+        hot_guard.write_all(b"still active\n").unwrap();
+        hot_guard.flush().unwrap();
+        assert_eq!(
+            fs::read_to_string(hot_old_path).unwrap(),
+            "actively written log\nstill active\n"
+        );
     }
 }

@@ -21,7 +21,7 @@
 //     task_id,             // optional CAS task ID
 //   }})
 //
-// Returns: { residual, pre_existing, dropped, activation, stats }
+// Returns: { status, residual, pre_existing, dropped, activation, stats }
 
 export const meta = {
   name: 'cas-code-review',
@@ -43,6 +43,7 @@ const CODEX_PERSONA_EFFORT = 'medium'
 const CODEX_PERSONA_TIMEOUT_SECONDS = 600
 const CODEX_SCHEMA_RETRIES = 2
 const CODEX_TIMEOUT_RETRIES = 1
+const CODEX_MAX_CONCURRENCY = 4
 const CLAUDE_DIVERSITY_PERSONA = 'security'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -51,7 +52,7 @@ const CLAUDE_DIVERSITY_PERSONA = 'security'
 
 const FINDING_SCHEMA = {
   type: 'object',
-  required: ['title','severity','file','line','why_it_matters','autofix_class','owner','confidence','evidence','pre_existing'],
+  required: ['title','severity','file','line','why_it_matters','autofix_class','owner','confidence','evidence','pre_existing','suggested_fix','requires_verification'],
   additionalProperties: false,
   properties: {
     title:                { type: 'string', maxLength: 100 },
@@ -64,21 +65,21 @@ const FINDING_SCHEMA = {
     confidence:           { type: 'number', minimum: 0.0, maximum: 1.0 },
     evidence:             { type: 'array', items: { type: 'string' }, minItems: 1 },
     pre_existing:         { type: 'boolean' },
-    suggested_fix:        { type: 'string' },
-    requires_verification:{ type: 'boolean' },
+    suggested_fix:        { type: ['string', 'null'] },
+    requires_verification:{ type: ['boolean', 'null'] },
   },
 }
 
 const REVIEWER_OUTPUT_SCHEMA = {
   type: 'object',
-  required: ['reviewer', 'findings'],
+  required: ['reviewer', 'findings', 'residual_risks', 'testing_gaps', 'skipped_reason'],
   additionalProperties: false,
   properties: {
     reviewer:       { type: 'string' },
     findings:       { type: 'array', items: FINDING_SCHEMA },
-    residual_risks: { type: 'array', items: { type: 'string' } },
-    testing_gaps:   { type: 'array', items: { type: 'string' } },
-    skipped_reason: { type: 'string' },
+    residual_risks: { type: ['array', 'null'], items: { type: 'string' } },
+    testing_gaps:   { type: ['array', 'null'], items: { type: 'string' } },
+    skipped_reason: { type: ['string', 'null'] },
   },
 }
 
@@ -421,14 +422,36 @@ Transport contract:
 
 Procedure:
 1. Create a private temporary directory. Write the reviewer prompt and the exact REVIEWER_OUTPUT_SCHEMA below to separate files. Never splice the prompt or diff into a shell command.
-2. Run this command, with the prompt file supplied on stdin:
-   /usr/bin/timeout ${CODEX_PERSONA_TIMEOUT_SECONDS} codex exec -s read-only -m gpt-5.6-sol -c model_reasoning_effort=medium --output-schema "$SCHEMA_FILE" --output-last-message "$OUTPUT_FILE" --color never -C "$PWD" - < "$PROMPT_FILE"
-3. Parse OUTPUT_FILE as one JSON object and validate it against REVIEWER_OUTPUT_SCHEMA. The codex --output-schema boundary is required, but you must still parse the saved final message before returning it.
-4. On a parse or schema mismatch, retry at most ${CODEX_SCHEMA_RETRIES} times and append the concrete validation errors to the retry prompt. Schema mismatch retries do not consume the timeout retry budget.
-5. On timeout (exit 124, 137, or 143), retry at most ${CODEX_TIMEOUT_RETRIES} time. Timeout retries do not consume the schema-mismatch retry budget.
-6. On missing codex, authentication failure, another execution error, or exhausted retries, return:
+2. Require \`codex\` and the portable shell primitives with \`command -v codex\`, \`command -v sleep\`, \`command -v kill\`, and \`command -v wait\`. If any are unavailable, do not run an unbounded process; return the skipped envelope from step 7 with the missing command or primitive named.
+3. Run Codex with this exact portable shell-watchdog shape (the surrounding adapter may choose its own variable names, but must preserve the lifecycle):
+   \`\`\`sh
+   TIMEOUT_MARKER="$TMP_DIR/timed-out"
+   codex exec -s read-only -m ${CODEX_PERSONA_MODEL} -c model_reasoning_effort=${CODEX_PERSONA_EFFORT} --output-schema "$SCHEMA_FILE" --output-last-message "$OUTPUT_FILE" --color never -C "$PWD" - < "$PROMPT_FILE" &
+   CODEX_PID=$!
+   (
+     sleep ${CODEX_PERSONA_TIMEOUT_SECONDS}
+     if kill -0 "$CODEX_PID" 2>/dev/null; then
+       : > "$TIMEOUT_MARKER"
+       kill -TERM "$CODEX_PID" 2>/dev/null || true
+       sleep 5
+       kill -KILL "$CODEX_PID" 2>/dev/null || true
+     fi
+   ) &
+   WATCHDOG_PID=$!
+   CODEX_EXIT=0
+   wait "$CODEX_PID" || CODEX_EXIT=$?
+   if kill -0 "$WATCHDOG_PID" 2>/dev/null; then
+     kill "$WATCHDOG_PID" 2>/dev/null || true
+   fi
+   wait "$WATCHDOG_PID" 2>/dev/null || true
+   \`\`\`
+   Classify timeout from the existence of TIMEOUT_MARKER, not only the process exit code. This shell watchdog is the timeout mechanism; do not call GNU \`timeout\` or assume a platform-specific path.
+4. Parse OUTPUT_FILE as one JSON object and validate it against REVIEWER_OUTPUT_SCHEMA. The codex --output-schema boundary is required, but you must still parse the saved final message before returning it.
+5. On a parse or schema mismatch, retry at most ${CODEX_SCHEMA_RETRIES} times and append the concrete validation errors to the retry prompt. Schema mismatch retries do not consume the timeout retry budget.
+6. When TIMEOUT_MARKER records a timeout, retry at most ${CODEX_TIMEOUT_RETRIES} time. Timeout retries do not consume the schema-mismatch retry budget.
+7. On a missing timeout primitive, missing codex, authentication failure, another execution error, or exhausted retries, return:
    {"reviewer":"${name}","findings":[],"skipped_reason":"<specific transport failure>","residual_risks":[],"testing_gaps":[]}
-7. Always remove the temporary directory. Return only the parsed ReviewerOutput object through the schema tool; do not add commentary or independently review the diff.
+8. Always remove the temporary directory. Return only the parsed ReviewerOutput object through the schema tool; do not add commentary or independently review the diff.
 
 REVIEWER_OUTPUT_SCHEMA:
 \`\`\`json
@@ -486,16 +509,45 @@ function gpt55ShouldRun(args = {}, fileCount, changeLines) {
   return gpt55Explicit || gpt55BroadDiff
 }
 
-function gpt55SkippedPersonas(gpt55Result) {
-  if (!gpt55Result?.skipped_reason) return []
-  return [{
-    reviewer: 'gpt-5.6-sol:independent',
-    reason: gpt55Result.skipped_reason,
-  }]
+function stripNullValues(value) {
+  if (Array.isArray(value)) return value.map(stripNullValues)
+  if (!value || typeof value !== 'object') return value
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([, nested]) => nested !== null)
+      .map(([key, nested]) => [key, stripNullValues(nested)])
+  )
 }
 
-function personasRunCount(personasToDispatchCount, fallowRuns, gpt55Runs, gpt55Skipped) {
-  return personasToDispatchCount + (fallowRuns ? 1 : 0) + (gpt55Runs && !gpt55Skipped ? 1 : 0)
+function skippedPersonaResults(outputs = []) {
+  return outputs.flatMap(output => {
+    if (typeof output?.skipped_reason !== 'string' || !output.skipped_reason.trim()) return []
+    return [{
+      reviewer: output.reviewer,
+      reason: output.skipped_reason,
+    }]
+  })
+}
+
+function personasRunCount(outputs = []) {
+  return outputs.filter(output => !output?.skipped_reason).length
+}
+
+function incompleteAlwaysOnPersonas(skippedPersonas = []) {
+  return [...new Set(
+    skippedPersonas
+      .map(skipped => skipped.reviewer)
+      .filter(reviewer => ALWAYS_ON_PERSONAS.includes(reviewer))
+  )]
+}
+
+async function pipelineWithConcurrency(items, worker, maxConcurrency = CODEX_MAX_CONCURRENCY) {
+  const results = []
+  for (let offset = 0; offset < items.length; offset += maxConcurrency) {
+    const batch = items.slice(offset, offset + maxConcurrency)
+    results.push(...await pipeline(batch, worker))
+  }
+  return results
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -844,9 +896,8 @@ if (shardPlan.enabled) {
 phase('Review')
 
 let personaResults = []
-let dispatchedReviewCount = personasToDispatch.length
 if (!shardPlan.enabled) {
-  personaResults = await pipeline(
+  personaResults = await pipelineWithConcurrency(
     personasToDispatch,
     (name) => dispatchReviewPersona(
       name,
@@ -858,9 +909,8 @@ if (!shardPlan.enabled) {
   const shardJobs = shardPlan.shards.flatMap(shard =>
     shard.personas.map(name => ({ name, shard }))
   )
-  dispatchedReviewCount = shardJobs.length
   log(`Large diff dispatch: ${shardJobs.length} shard/persona runs (${shardPlan.shards.map(s => `${s.id}:${s.personas.join('+')}`).join('; ')})`)
-  personaResults = await pipeline(
+  personaResults = await pipelineWithConcurrency(
     shardJobs,
     ({ name, shard }) => {
       const shardIntent = `${intentSummary}
@@ -903,10 +953,23 @@ if (gpt55Runs) {
   )
 }
 
-const allOutputs = [...personaResults, fallowResult, gpt55Result].filter(Boolean)
-const gpt55Skipped = !!gpt55Result?.skipped_reason
-const skippedPersonas = gpt55SkippedPersonas(gpt55Result)
-const personasRun = personasRunCount(dispatchedReviewCount, fallowRuns, gpt55Runs, gpt55Skipped)
+const allOutputs = [...personaResults, fallowResult, gpt55Result]
+  .filter(Boolean)
+  .map(stripNullValues)
+const skippedPersonas = skippedPersonaResults(allOutputs)
+const personasRun = personasRunCount(allOutputs)
+const incompletePersonas = incompleteAlwaysOnPersonas(skippedPersonas)
+const reviewStatus = incompletePersonas.length ? 'incomplete' : 'complete'
+const gpt55Skipped = skippedPersonas.some(
+  skipped => skipped.reviewer === 'gpt-5.6-sol:independent'
+)
+
+for (const skipped of skippedPersonas) {
+  log(`Skipped persona ${skipped.reviewer}: ${skipped.reason}`)
+}
+if (incompletePersonas.length) {
+  log(`ERROR: review incomplete; always-on personas skipped: ${incompletePersonas.join(', ')}`)
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PHASE 3: DETERMINISTIC MERGE (Step 4 — pure JS, Phase A validated)
@@ -932,6 +995,7 @@ for (const item of dropped) {
 log(`Merged: ${residual.length} new (P0:${p0}, P1:${p1}, P2:${p2}, P3:${p3}), ${pre_existing.length} pre-existing, ${dropped.length} dropped/unmergeable`)
 
 return {
+  status: reviewStatus,
   residual,
   pre_existing,
   dropped,
@@ -948,6 +1012,8 @@ return {
     gpt56_independent_skipped: gpt55Skipped,
     gpt56_independent_skip_reason: gpt55Result?.skipped_reason ?? null,
     skipped_personas: skippedPersonas,
+    degraded: incompletePersonas.length > 0,
+    incomplete_personas: incompletePersonas,
     personas_run: personasRun,
     ...(shardPlan.enabled ? { sharding: shardPlanSummary } : {}),
   },

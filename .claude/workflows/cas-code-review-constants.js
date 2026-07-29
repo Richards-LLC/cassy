@@ -40,7 +40,7 @@ export const CONDITIONAL_PERSONAS = Object.freeze(
 
 const FINDING_SCHEMA = {
   type: 'object',
-  required: ['title','severity','file','line','why_it_matters','autofix_class','owner','confidence','evidence','pre_existing'],
+  required: ['title','severity','file','line','why_it_matters','autofix_class','owner','confidence','evidence','pre_existing','suggested_fix','requires_verification'],
   additionalProperties: false,
   properties: {
     title:                { type: 'string', maxLength: 100 },
@@ -53,21 +53,21 @@ const FINDING_SCHEMA = {
     confidence:           { type: 'number', minimum: 0.0, maximum: 1.0 },
     evidence:             { type: 'array', items: { type: 'string' }, minItems: 1 },
     pre_existing:         { type: 'boolean' },
-    suggested_fix:        { type: 'string' },
-    requires_verification:{ type: 'boolean' },
+    suggested_fix:        { type: ['string', 'null'] },
+    requires_verification:{ type: ['boolean', 'null'] },
   },
 }
 
 export const REVIEWER_OUTPUT_SCHEMA = Object.freeze({
   type: 'object',
-  required: ['reviewer', 'findings'],
+  required: ['reviewer', 'findings', 'residual_risks', 'testing_gaps', 'skipped_reason'],
   additionalProperties: false,
   properties: {
     reviewer:       { type: 'string' },
     findings:       { type: 'array', items: FINDING_SCHEMA },
-    residual_risks: { type: 'array', items: { type: 'string' } },
-    testing_gaps:   { type: 'array', items: { type: 'string' } },
-    skipped_reason: { type: 'string' },
+    residual_risks: { type: ['array', 'null'], items: { type: 'string' } },
+    testing_gaps:   { type: ['array', 'null'], items: { type: 'string' } },
+    skipped_reason: { type: ['string', 'null'] },
   },
 })
 
@@ -103,16 +103,36 @@ function gpt55ShouldRun(args = {}, fileCount, changeLines) {
   return gpt55Explicit || gpt55BroadDiff
 }
 
-function gpt55SkippedPersonas(gpt55Result) {
-  if (!gpt55Result?.skipped_reason) return []
-  return [{
-    reviewer: 'gpt-5.6-sol:independent',
-    reason: gpt55Result.skipped_reason,
-  }]
+function stripNullValues(value) {
+  if (Array.isArray(value)) return value.map(stripNullValues)
+  if (!value || typeof value !== 'object') return value
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([, nested]) => nested !== null)
+      .map(([key, nested]) => [key, stripNullValues(nested)])
+  )
 }
 
-function personasRunCount(personasToDispatchCount, fallowRuns, gpt55Runs, gpt55Skipped) {
-  return personasToDispatchCount + (fallowRuns ? 1 : 0) + (gpt55Runs && !gpt55Skipped ? 1 : 0)
+function skippedPersonaResults(outputs = []) {
+  return outputs.flatMap(output => {
+    if (typeof output?.skipped_reason !== 'string' || !output.skipped_reason.trim()) return []
+    return [{
+      reviewer: output.reviewer,
+      reason: output.skipped_reason,
+    }]
+  })
+}
+
+function personasRunCount(outputs = []) {
+  return outputs.filter(output => !output?.skipped_reason).length
+}
+
+function incompleteAlwaysOnPersonas(skippedPersonas = []) {
+  return [...new Set(
+    skippedPersonas
+      .map(skipped => skipped.reviewer)
+      .filter(reviewer => ALWAYS_ON_PERSONAS.includes(reviewer))
+  )]
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -337,8 +357,10 @@ export {
   planReviewShards,
   summarizeShardPlan,
   gpt55ShouldRun,
-  gpt55SkippedPersonas,
+  stripNullValues,
+  skippedPersonaResults,
   personasRunCount,
+  incompleteAlwaysOnPersonas,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

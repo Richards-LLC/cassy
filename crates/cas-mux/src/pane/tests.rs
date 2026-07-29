@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod cases {
+    use crate::harness::SupervisorCli;
     use crate::pane::{Pane, PaneKind};
 
     #[test]
@@ -388,6 +389,31 @@ mod cases {
         assert!(Pane::key_stream_is_submit(b"\r"));
         assert!(!Pane::key_stream_is_submit(paste));
         assert!(Pane::key_stream_is_submit(b"\x1b[200~a\nb\x1b[201~\r"));
+    }
+
+    /// cas-1afe: Claude/Codex do not expose an authoritative normal-completion
+    /// event to the mux. Their tracked bit is intentionally sticky after submit
+    /// and must never be consumed as a busy/idle signal.
+    #[test]
+    fn claude_codex_turn_flag_is_not_a_normal_completion_signal_cas_1afe() {
+        for harness in [SupervisorCli::Claude, SupervisorCli::Codex] {
+            let mut pane =
+                Pane::director(format!("{harness:?}-turn-state"), 10, 40).expect("create pane");
+            pane.set_harness(harness);
+
+            pane.mark_turn_in_flight();
+            pane.refresh_harness_turn_state();
+            assert!(
+                pane.is_turn_in_flight(),
+                "{harness:?} refresh must not invent normal completion"
+            );
+
+            pane.mark_turn_completed();
+            assert!(
+                !pane.is_turn_in_flight(),
+                "an explicit authoritative completion may still clear the tracker"
+            );
+        }
     }
 
     /// cas-1a4d: attached-client input leaves a pane dirty until the operator

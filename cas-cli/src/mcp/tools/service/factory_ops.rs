@@ -3204,9 +3204,11 @@ pub(crate) fn resolve_worker_transcript_path(
 /// Resolve the activity/context path for `worker_status`.
 ///
 /// Codex is the cas-fa69 fix: use the existing cli-aware resolver so a real
-/// rollout is reachable. Claude and Grok intentionally retain the historical
-/// single-stat fast path byte-for-byte (AC7); changing those harnesses belongs
-/// to a separately characterized change.
+/// rollout is reachable. Grok is the cas-a9ea follow-up: its
+/// directory-per-session layout must use the same harness-aware resolver as
+/// `cas factory is-wedged`, otherwise this function stats a synthesized Claude
+/// path and returns `None` while the wedged classifier finds `updates.jsonl`.
+/// Claude alone retains the historical single-stat fast path.
 fn worker_status_transcript_path(
     clone_path: Option<&str>,
     session_id: &str,
@@ -3217,9 +3219,8 @@ fn worker_status_transcript_path(
             clone_path,
             session_id,
         ),
-        cas_mux::SupervisorCli::Claude | cas_mux::SupervisorCli::Grok => {
-            transcript_path_fast(clone_path, session_id)
-        }
+        cas_mux::SupervisorCli::Grok => resolve_worker_transcript_path(clone_path, session_id, cli),
+        cas_mux::SupervisorCli::Claude => transcript_path_fast(clone_path, session_id),
     }
 }
 
@@ -3355,11 +3356,11 @@ pub(crate) fn context_band(total_input_tokens: u64) -> &'static str {
     }
 }
 
-/// Historical live-worker path lookup used by Claude and Grok reporting.
+/// Historical live-worker path lookup used by Claude reporting.
 ///
 /// Reconstructs the Claude-layout path from `clone_path` + `session_id` and
-/// checks it with one `stat(2)`. Keeping this unchanged preserves the
-/// cas-573c latency and output contract for non-Codex harnesses.
+/// checks it with one `stat(2)`. Grok cannot use this path because its
+/// transcript is `~/.grok/sessions/<encoded-cwd>/<session>/updates.jsonl`.
 fn transcript_path_fast(
     clone_path: Option<&str>,
     session_id: &str,
@@ -5122,26 +5123,55 @@ effort = "high"
 
     #[test]
     fn worker_status_transcript_path_preserves_grok_fast_path_behavior() {
+        let _lock = crate::hooks::test_env_lock();
         let session = "grok-session-0000-0000-000000000000";
-        let (_tmp, sessions) =
+        let (tmp, sessions) =
             fake_grok_sessions_dir(&[("%2Fhome%2Falice%2Fworkspace", &[session])]);
-        let home = tempfile::tempdir().unwrap();
-        let got = transcript_path_fast_in(
-            home.path(),
+        let expected = sessions
+            .join("%2Fhome%2Falice%2Fworkspace")
+            .join(session)
+            .join("updates.jsonl");
+        let old = std::env::var("GROK_HOME").ok();
+        unsafe {
+            std::env::set_var("GROK_HOME", tmp.path());
+        }
+
+        // This test name is retained from cas-fa69, where AC7 deliberately
+        // pinned Grok's then-unreviewed fast-path behavior to `None`.
+        // cas-a9ea characterized the real on-disk layout and found that pin
+        // preserved a defect: worker_status used a Claude path while
+        // is-wedged resolved this Grok updates.jsonl. The legitimate new
+        // contract is agreement through the shared harness-aware resolver.
+        let worker_status_path = worker_status_transcript_path(
             Some("/home/alice/workspace"),
             session,
+            cas_mux::SupervisorCli::Grok,
+        );
+        let wedged_path = resolve_worker_transcript_path(
+            Some("/home/alice/workspace"),
+            session,
+            cas_mux::SupervisorCli::Grok,
+        );
+        unsafe {
+            match old {
+                Some(value) => std::env::set_var("GROK_HOME", value),
+                None => std::env::remove_var("GROK_HOME"),
+            }
+        }
+
+        assert_eq!(
+            worker_status_path,
+            Some(expected.clone()),
+            "worker_status must resolve the real Grok updates.jsonl"
         );
         assert_eq!(
-            got, None,
-            "the existing Grok worker_status fast path must remain unchanged"
+            worker_status_path, wedged_path,
+            "worker_status and is-wedged must use the same Grok evidence path"
         );
         assert!(
-            sessions
-                .join("%2Fhome%2Falice%2Fworkspace")
-                .join(session)
-                .join("updates.jsonl")
-                .exists(),
-            "the fixture must contain a real Grok transcript"
+            expected.with_file_name("signals.json").exists(),
+            "the resolved updates.jsonl must retain its sibling signals.json \
+             for harness-aware activity age"
         );
     }
 

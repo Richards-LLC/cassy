@@ -3319,9 +3319,11 @@ pub(crate) fn run_factory_branch_merge_gate(
             "Remediation:\n\
              1. Before escalating, run `mcp__cas__coordination action=inbox_poll` \
              to pull unread supervisor messages. This marks them seen for inbox \
-             polling without consuming daemon transport delivery. If one says this \
-             branch was merged or requests more changes, follow it and do not send \
-             a stale merge request.\n\
+             polling without consuming daemon transport delivery. The polling claim \
+             is at-most-once: if its MCP response is lost, those rows are not replayed \
+             by another poll, so also re-read any just-delivered supervisor messages \
+             in your conversation. If one says this branch was merged or requests \
+             more changes, follow it and do not send a stale merge request.\n\
              2. {parent_branch} is a local-only epic branch (not pushed to origin) \
              — do NOT run `gh pr create --base {parent_branch}`, it has no \
              matching ref on origin and the PR will fail.\n\
@@ -3342,7 +3344,9 @@ pub(crate) fn run_factory_branch_merge_gate(
         format!(
             "Remediation:\n\
              1. Run `mcp__cas__coordination action=inbox_poll` before continuing \
-             and follow any unread merge or review instruction it returns.\n\
+             and follow any unread merge or review instruction it returns. The \
+             polling claim is at-most-once, so also re-read just-delivered supervisor \
+             messages in case the MCP response was lost after claiming rows.\n\
              2. Push {factory_branch} to its remote\n\
              3. Open a PR targeting {parent_branch}\n\
              4. Merge the PR (or `git fetch --prune` if it was already merged \
@@ -8446,7 +8450,8 @@ mod merge_state_gate_tests {
                 );
                 assert!(
                     msg.contains("`mcp__cas__coordination action=inbox_poll`")
-                        && msg.contains("unread merge or review instruction"),
+                        && msg.contains("unread merge or review instruction")
+                        && msg.contains("polling claim is at-most-once"),
                     "plain (non-epic) remediation must use the worker inbox API: {msg}"
                 );
             }
@@ -8503,7 +8508,8 @@ mod merge_state_gate_tests {
                 );
                 assert!(
                     msg.contains("`mcp__cas__coordination action=inbox_poll`")
-                        && msg.contains("without consuming daemon transport delivery"),
+                        && msg.contains("without consuming daemon transport delivery")
+                        && msg.contains("polling claim is at-most-once"),
                     "must use the worker inbox API before escalation: {msg}"
                 );
                 assert!(

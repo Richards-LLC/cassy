@@ -710,6 +710,11 @@ impl CasService {
                 format!("Failed to open prompt queue: {error}"),
             )
         })?;
+        // This is an at-most-once claim for the polling API: the store records
+        // recipient-seen state in the same transaction that selects the rows,
+        // before this MCP response is handed back. That prevents concurrent
+        // duplicate delivery, but a response lost after this point is not
+        // replayed by a later poll. Daemon transport state remains independent.
         let messages = queue
             .poll_unseen_for_recipient(&recipient, factory_session.as_deref(), limit)
             .map_err(|error| {
@@ -717,7 +722,7 @@ impl CasService {
                     ErrorCode::INTERNAL_ERROR,
                     format!("Failed to poll recipient inbox: {error}"),
                 )
-            })?;
+        })?;
 
         if messages.is_empty() {
             return Ok(Self::success(format!(
@@ -726,7 +731,9 @@ impl CasService {
         }
 
         let mut output = format!(
-            "Pulled {} unread message(s) for {recipient} (marked seen for inbox polling; daemon transport delivery is unchanged):\n\n",
+            "Pulled {} unread message(s) for {recipient} (at-most-once inbox claim: \
+             marked seen before this response is delivered; daemon transport delivery is \
+             unchanged):\n\n",
             messages.len()
         );
         for message in &messages {

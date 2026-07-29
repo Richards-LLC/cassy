@@ -61,6 +61,15 @@ pub enum GitError {
     )]
     MergeInProgress(String),
 
+    /// cas-09f2: tracked changes already present in the shared target
+    /// checkout. This is distinct from source-worktree dirt and cannot be
+    /// bypassed with `force`; attempting a merge on top would either fail
+    /// opaquely or risk mixing unrelated staged work into the merge.
+    #[error(
+        "The shared target checkout has pre-existing tracked changes and was not touched: {0}"
+    )]
+    MergeCheckoutDirty(String),
+
     #[error("Uncommitted changes in worktree")]
     UncommittedChanges,
 

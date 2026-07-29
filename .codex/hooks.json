@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "cas hook PostToolUse",
+            "timeout": 3,
+            "type": "command"
+          }
+        ],
+        "matcher": "^Bash$"
+      }
+    ]
+  }
+}

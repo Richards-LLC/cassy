@@ -454,6 +454,13 @@ pub fn revalidate_event_for_delivery_with_context(
                         .iter()
                         .filter(|task| task.status == TaskStatus::Open),
                 )
+                // cas-ef0a3: `in_progress_tasks` is a visibility bucket that
+                // also contains PendingSupervisorReview and AwaitingMerge.
+                // Neither state is worker-actionable, so a stale stall event
+                // must not survive a detect→park race and re-nudge the worker.
+                .filter(|task| {
+                    matches!(task.status, TaskStatus::Open | TaskStatus::InProgress)
+                })
                 .any(|task| {
                     task.id == *task_id && task_assigned_to_worker(unfiltered_data, task, worker)
                 });
@@ -516,6 +523,11 @@ pub fn revalidate_event_for_delivery_with_context(
                     .iter()
                     .filter(|task| task.status == TaskStatus::Open),
             )
+            // cas-ef0a3: this bucket also carries supervisor-owned
+            // PendingSupervisorReview/AwaitingMerge tasks. Re-check the actual
+            // status so a stale assignment event cannot redispatch completed
+            // worker work after the merge gate parks it.
+            .filter(|task| matches!(task.status, TaskStatus::Open | TaskStatus::InProgress))
             .find(|task| task.id == *task_id)
             .filter(|task| task_assigned_to_worker(unfiltered_data, task, worker))
             .map(|task| DirectorEvent::TaskAssigned {
@@ -1623,6 +1635,17 @@ mod tests {
         }
     }
 
+    fn task_with_status(
+        id: &str,
+        assignee: Option<&str>,
+        status: TaskStatus,
+    ) -> TaskSummary {
+        TaskSummary {
+            status,
+            ..open_task(id, assignee)
+        }
+    }
+
     fn default_config() -> AutoPromptConfig {
         AutoPromptConfig::default()
     }
@@ -1789,6 +1812,69 @@ mod tests {
         assert!(
             revalidate_event_for_delivery(&event, &data, "supervisor").is_none(),
             "TaskAssigned must be dropped when delivery sees the task is no longer active"
+        );
+    }
+
+    /// Regression for cas-ef0a3: `AwaitingMerge` shares the director's
+    /// visibility-oriented `in_progress_tasks` bucket, but worker work is done.
+    /// A stale assignment event must be dropped even when a different, genuinely
+    /// Open task remains available for dispatch.
+    #[test]
+    fn test_delivery_recheck_drops_task_assigned_after_awaiting_merge_park() {
+        let event = DirectorEvent::TaskAssigned {
+            task_id: "cas-merge".to_string(),
+            task_title: "Already finished".to_string(),
+            worker: "swift-fox".to_string(),
+        };
+        let mut data = make_data(0);
+        data.in_progress_tasks = vec![task_with_status(
+            "cas-merge",
+            Some("swift-fox"),
+            TaskStatus::AwaitingMerge,
+        )];
+        data.ready_tasks = vec![open_task("cas-next", None)];
+
+        assert!(
+            revalidate_event_for_delivery(&event, &data, "supervisor").is_none(),
+            "AwaitingMerge is supervisor-owned merge work, never a worker assignment"
+        );
+
+        let open_event = DirectorEvent::TaskAssigned {
+            task_id: "cas-next".to_string(),
+            task_title: "Genuinely ready".to_string(),
+            worker: "swift-fox".to_string(),
+        };
+        data.ready_tasks[0].assignee = Some("swift-fox".to_string());
+        assert!(
+            matches!(
+                revalidate_event_for_delivery(&open_event, &data, "supervisor"),
+                Some(DirectorEvent::TaskAssigned { .. })
+            ),
+            "a genuinely Open assignment must remain dispatchable"
+        );
+    }
+
+    /// The same detect-to-deliver status race applies to the director's
+    /// worker-directed stalled/rescue nudge. Once close parks the task
+    /// AwaitingMerge, only the supervisor merge prompt is valid.
+    #[test]
+    fn test_delivery_recheck_drops_worker_stalled_after_awaiting_merge_park() {
+        let event = DirectorEvent::WorkerStalled {
+            worker: "swift-fox".to_string(),
+            task_id: "cas-merge".to_string(),
+            elapsed_secs: 600,
+            escalate: false,
+        };
+        let mut data = make_data(0);
+        data.in_progress_tasks = vec![task_with_status(
+            "cas-merge",
+            Some("swift-fox"),
+            TaskStatus::AwaitingMerge,
+        )];
+
+        assert!(
+            revalidate_event_for_delivery(&event, &data, "supervisor").is_none(),
+            "AwaitingMerge must never receive a worker-directed rescue nudge"
         );
     }
 

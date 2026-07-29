@@ -482,6 +482,11 @@ impl Mux {
         self.panes.get_mut(id)
     }
 
+    /// Return the tracked process group for a pane.
+    pub fn pane_process_group_id(&self, id: &str) -> Option<u32> {
+        self.panes.get(id).and_then(Pane::process_group_id)
+    }
+
     /// Get the focused pane
     pub fn focused(&self) -> Option<&Pane> {
         self.focused.as_ref().and_then(|id| self.panes.get(id))
@@ -772,7 +777,7 @@ impl Mux {
     /// Codex, where a node → codex child tree survives a bare SIGHUP.
     ///
     /// * `force = true`  → SIGKILL to the process group (cannot be ignored)
-    /// * `force = false` → SIGTERM to the process group (graceful shutdown)
+    /// * `force = false` → SIGTERM with SIGKILL escalation for the process group
     ///
     /// After the signal, `remove_pane` still drops the PTY master, which sends
     /// a redundant SIGHUP as belt-and-suspenders.
@@ -1407,10 +1412,11 @@ impl Mux {
 
     /// Kill all panes (terminate all PTY processes)
     ///
-    /// This should be called during shutdown to ensure all child processes are terminated.
+    /// This should be called during shutdown to ensure all descendant process
+    /// groups, not only the direct interactive children, are terminated.
     pub fn kill_all(&mut self) {
         for pane in self.panes.values_mut() {
-            pane.kill();
+            pane.kill_tree(true);
         }
     }
 }

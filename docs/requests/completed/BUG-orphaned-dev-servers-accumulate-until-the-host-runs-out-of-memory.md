@@ -63,3 +63,21 @@ Circumstantial but consistent:
 - `BUG-stall-detector-false-positive-ignores-worker-tool-calls.md`
 - `BUG-stock-worker-defaults-contradict-shipped-model-routing-policy.md`
 - `FEATURE-code-review-personas-off-claude-only-model-enum.md`
+
+## Resolution (2026-07-29)
+
+Factory worker panes already started as `setsid(2)` session/process-group
+leaders, but CAS did not persist those PGIDs and factory exit killed only the
+direct pane children. CAS now records each worker's PGID, factory session, and
+Linux process-start fingerprint under `.cas/factory-process-groups/` at spawn
+and respawn. Worker shutdown, crash/rotation, factory exit, and worker-lane
+worktree cleanup reap the whole fingerprint-validated group. Factory exit now
+uses tree kill for every PTY rather than direct-child kill.
+
+`gc_report` surfaces aged, still-live process groups whose factory session or
+worker lane is dead. `gc_cleanup force=true` revalidates the process-start
+fingerprint immediately before `killpg(2)` and reclaims only matching groups;
+dead or recycled records are removed without signaling the recycled process.
+Regression tests use synthetic shell children, including a long-lived child
+whose original process-group leader has already exited. No real dev server is
+started by the test suite.

@@ -1311,6 +1311,14 @@ impl Pty {
         let _ = self.child.kill();
     }
 
+    /// Process-group identifier owned by this PTY.
+    ///
+    /// `portable_pty` makes the child a session leader with `setsid()`, so the
+    /// direct child's PID is also the PGID inherited by its descendants.
+    pub fn process_group_id(&self) -> Option<u32> {
+        self.child.process_id()
+    }
+
     /// Kill the child and its entire process group (cas-8c5a).
     ///
     /// `portable_pty` calls `setsid()` in the child before exec, making the
@@ -1319,20 +1327,28 @@ impl Pty {
     /// inherits that PGID, so `killpg(pgid, sig)` terminates the whole tree.
     ///
     /// * `force = true`  → SIGKILL  (immediate, cannot be caught)
-    /// * `force = false` → SIGTERM  (polite; give the process a chance to clean up)
+    /// * `force = false` → SIGTERM followed by SIGKILL escalation for the group
     ///
     /// Falls back to `child.kill()` (SIGKILL on the direct child) when no PID
     /// is available (non-unix builds, already-reaped process, etc.).
     pub fn kill_tree(&mut self, force: bool) {
         #[cfg(unix)]
         {
-            if let Some(pid) = self.child.process_id() {
+            if let Some(pid) = self.process_group_id() {
                 let sig = if force { libc::SIGKILL } else { libc::SIGTERM };
                 // SAFETY: standard POSIX call; pid is a valid u32 just returned
                 // by portable_pty — casting to pid_t is always safe on all
                 // Unix targets where pid_t is i32/i64.
                 unsafe {
                     libc::killpg(pid as libc::pid_t, sig);
+                    // The old implementation immediately called child.kill()
+                    // after SIGTERM, so it never provided a real grace period
+                    // and could leave SIGTERM-ignoring descendants alive.
+                    // Escalate the same group before touching the direct-child
+                    // handle so teardown is complete and deterministic.
+                    if !force {
+                        libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+                    }
                 }
             }
         }

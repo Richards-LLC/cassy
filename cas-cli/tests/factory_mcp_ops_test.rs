@@ -1850,6 +1850,10 @@ async fn test_gc_report_empty() {
         text.contains("Pending prompts: 0"),
         "Should show 0 prompts: {text}"
     );
+    assert!(
+        text.contains("Orphan worker process groups: 0"),
+        "Should expose the process-group GC surface: {text}"
+    );
 }
 
 #[tokio::test]
@@ -1892,6 +1896,10 @@ async fn test_gc_cleanup_without_force() {
     assert!(
         text.contains("Prompt queue entries cleared: 0"),
         "Should NOT clear prompts without force: {text}"
+    );
+    assert!(
+        text.contains("Orphan worker process groups reaped: 0"),
+        "Should report process-group cleanup outcome: {text}"
     );
 
     // Prompts should still be pending

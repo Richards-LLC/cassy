@@ -1525,6 +1525,9 @@ impl CasService {
             )
         })?;
         let stale_agents = agent_store.list_stale(stale_after).unwrap_or_default();
+        let active_workers = active_factory_workers(agent_store.as_ref());
+        let (orphan_process_groups, stale_process_group_records) =
+            orphan_process_groups(&self.inner.cas_root, stale_after, &active_workers);
 
         let prompt_queue = open_prompt_queue_store(&self.inner.cas_root).map_err(|e| {
             Self::error(
@@ -1550,12 +1553,14 @@ impl CasService {
 
         let mut out = String::from("Factory GC Report\n=================\n");
         out.push_str(&format!(
-            "\nStale agent threshold: {}s\nStale agents: {}\nPending prompts: {}\nActive worktrees: {}\nOrphan worktrees: {}\n",
+            "\nStale agent threshold: {}s\nStale agents: {}\nPending prompts: {}\nActive worktrees: {}\nOrphan worktrees: {}\nOrphan worker process groups: {}\nStale process-group records: {}\n",
             stale_after,
             stale_agents.len(),
             pending_prompts,
             active_worktrees.len(),
-            orphan_worktrees.len()
+            orphan_worktrees.len(),
+            orphan_process_groups.len(),
+            stale_process_group_records,
         ));
 
         if !stale_agents.is_empty() {
@@ -1569,6 +1574,21 @@ impl CasService {
             for wt in orphan_worktrees {
                 out.push_str(&format!("  - {} ({})\n", wt.id, wt.path.display()));
             }
+        }
+        if !orphan_process_groups.is_empty() {
+            out.push_str("\nOrphan worker process groups:\n");
+            for record in &orphan_process_groups {
+                out.push_str(&format!(
+                    "  - {} (session {}, PGID {}, age {}s)\n",
+                    record.worker_name,
+                    record.factory_session,
+                    record.pgid,
+                    crate::ui::factory::process_groups::age(record).as_secs(),
+                ));
+            }
+            out.push_str(
+                "\nReclaim with gc_cleanup force=true after reviewing these fingerprinted groups.\n",
+            );
         }
 
         // Task cas-a9ab: surface uncommitted files in the main worktree as
@@ -1811,6 +1831,45 @@ impl CasService {
                 format!("Failed to open agent store: {e}"),
             )
         })?;
+        let active_workers = active_factory_workers(agent_store.as_ref());
+        let (orphan_process_groups, _) =
+            orphan_process_groups(&self.inner.cas_root, stale_after, &active_workers);
+        let mut orphan_process_groups_reaped = 0usize;
+        let mut stale_process_group_records_removed = 0usize;
+        let mut process_group_errors = Vec::new();
+
+        // Dead/recycled records are safe to discard. Live groups are reaped
+        // only through gc_cleanup's existing explicit force gate.
+        for record in crate::ui::factory::process_groups::list(&self.inner.cas_root)
+            .unwrap_or_default()
+        {
+            if !crate::ui::factory::process_groups::is_live(&record)
+                && crate::ui::factory::process_groups::untrack(
+                    &self.inner.cas_root,
+                    record.pgid,
+                )
+                .is_ok()
+            {
+                stale_process_group_records_removed += 1;
+            }
+        }
+        if req.force.unwrap_or(false) {
+            for record in &orphan_process_groups {
+                match crate::ui::factory::process_groups::reap(
+                    &self.inner.cas_root,
+                    record,
+                ) {
+                    Ok(crate::ui::factory::process_groups::ReapOutcome::Reaped) => {
+                        orphan_process_groups_reaped += 1;
+                    }
+                    Ok(_) => stale_process_group_records_removed += 1,
+                    Err(error) => process_group_errors.push(format!(
+                        "{} (PGID {}): {error}",
+                        record.worker_name, record.pgid
+                    )),
+                }
+            }
+        }
         let stale_agents = agent_store.list_stale(stale_after).unwrap_or_default();
         let mut stale_marked = 0usize;
         for agent in stale_agents {
@@ -1882,10 +1941,78 @@ impl CasService {
         let stale_skill_markers_removed =
             cleanup_stale_skill_markers(&self.inner.cas_root, SKILL_MARKER_MAX_AGE);
 
-        Ok(Self::success(format!(
-            "Factory GC cleanup complete.\n\nStale agents marked: {stale_marked}\nDead agent records purged: {dead_agent_records_purged}\nOrphan worktrees marked removed: {orphan_marked_removed}\nPrompt queue entries expired: {expired_prompts}\nPrompt queue entries cleared: {cleared_prompts}\nStale skill markers removed: {stale_skill_markers_removed}"
-        )))
+        let mut output = format!(
+            "Factory GC cleanup complete.\n\nStale agents marked: {stale_marked}\nDead agent records purged: {dead_agent_records_purged}\nOrphan worktrees marked removed: {orphan_marked_removed}\nOrphan worker process groups reaped: {orphan_process_groups_reaped}\nStale process-group records removed: {stale_process_group_records_removed}\nPrompt queue entries expired: {expired_prompts}\nPrompt queue entries cleared: {cleared_prompts}\nStale skill markers removed: {stale_skill_markers_removed}"
+        );
+        if !req.force.unwrap_or(false) && !orphan_process_groups.is_empty() {
+            output.push_str(&format!(
+                "\nLive orphan process groups preserved: {} (rerun with force=true to reap)",
+                orphan_process_groups.len()
+            ));
+        }
+        if !process_group_errors.is_empty() {
+            output.push_str("\n\nProcess-group cleanup errors:");
+            for error in process_group_errors {
+                output.push_str(&format!("\n  - {error}"));
+            }
+        }
+
+        Ok(Self::success(output))
     }
+}
+
+fn active_factory_workers(
+    agent_store: &dyn cas_store::AgentStore,
+) -> std::collections::HashSet<(String, String)> {
+    use cas_types::{AgentRole, AgentStatus};
+
+    agent_store
+        .list(Some(AgentStatus::Active))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|agent| agent.role == AgentRole::Worker)
+        .filter_map(|agent| {
+            agent
+                .factory_session
+                .map(|session| (agent.name, session))
+        })
+        .collect()
+}
+
+fn orphan_process_groups(
+    cas_root: &std::path::Path,
+    stale_after_secs: i64,
+    active_workers: &std::collections::HashSet<(String, String)>,
+) -> (
+    Vec<crate::ui::factory::process_groups::TrackedProcessGroup>,
+    usize,
+) {
+    let live_sessions: std::collections::HashSet<String> =
+        crate::ui::factory::SessionManager::new()
+            .list_sessions()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|session| session.is_running)
+            .map(|session| session.name)
+            .collect();
+    let records = crate::ui::factory::process_groups::list(cas_root).unwrap_or_default();
+    let stale_records = records
+        .iter()
+        .filter(|record| !crate::ui::factory::process_groups::is_live(record))
+        .count();
+    let minimum_age = std::time::Duration::from_secs(stale_after_secs.max(0) as u64);
+    let mut orphans: Vec<_> = records
+        .into_iter()
+        .filter(crate::ui::factory::process_groups::is_live)
+        .filter(|record| crate::ui::factory::process_groups::age(record) >= minimum_age)
+        .filter(|record| {
+            !live_sessions.contains(&record.factory_session)
+                || !active_workers
+                    .contains(&(record.worker_name.clone(), record.factory_session.clone()))
+        })
+        .collect();
+    orphans.sort_by_key(|record| record.pgid);
+    (orphans, stale_records)
 }
 
 fn cleanup_stale_skill_markers(cas_root: &std::path::Path, max_age: std::time::Duration) -> usize {

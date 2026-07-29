@@ -675,6 +675,75 @@ fn cat_pane(name: &str) -> Option<Pane> {
     Pane::shell(name, PathBuf::from("/tmp"), Some("cat"), 24, 80).ok()
 }
 
+#[cfg(target_os = "linux")]
+fn proc_state_and_group(pid: u32) -> Option<(char, u32)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after_comm = stat.rsplit_once(')')?.1.trim_start();
+    let mut fields = after_comm.split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    fields.next()?;
+    let pgid = fields.next()?.parse().ok()?;
+    Some((state, pgid))
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn kill_all_terminates_a_synthetic_long_lived_child_group() {
+    let config = crate::pty::PtyConfig {
+        command: "sh".to_string(),
+        args: vec!["-c".to_string(), "sleep 300 & wait".to_string()],
+        cwd: Some(PathBuf::from("/tmp")),
+        env: vec![],
+        rows: 24,
+        cols: 80,
+    };
+    let Ok(pty) = crate::pty::Pty::spawn("synthetic-worker", config) else {
+        return;
+    };
+    let pane = Pane::with_pty(
+        "synthetic-worker",
+        PaneKind::Worker,
+        pty,
+        24,
+        80,
+        SupervisorCli::Claude,
+    )
+    .unwrap();
+    let mut mux = Mux::new(24, 80);
+    mux.add_pane(pane);
+    let pgid = mux
+        .pane_process_group_id("synthetic-worker")
+        .expect("PTY worker must expose its process group");
+
+    let mut long_lived_child = None;
+    for _ in 0..40 {
+        long_lived_child = std::fs::read_dir("/proc").ok().and_then(|entries| {
+            entries.flatten().find_map(|entry| {
+                let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
+                (pid != pgid
+                    && proc_state_and_group(pid)
+                        .is_some_and(|(state, group)| state != 'Z' && group == pgid))
+                .then_some(pid)
+            })
+        });
+        if long_lived_child.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    let child_pid = long_lived_child.expect("synthetic shell must spawn its long-lived child");
+
+    mux.kill_all();
+
+    for _ in 0..40 {
+        if proc_state_and_group(child_pid).is_none_or(|(state, _)| state == 'Z') {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!("factory-exit kill_all left synthetic child {child_pid} alive");
+}
+
 #[tokio::test]
 async fn break_turn_targets_pane_by_name_independent_of_focus() {
     let mut mux = Mux::new(24, 80);

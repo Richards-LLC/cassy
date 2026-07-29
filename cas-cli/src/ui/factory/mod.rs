@@ -63,6 +63,7 @@ mod director;
 mod input;
 mod layout;
 mod notification;
+pub(crate) mod process_groups;
 pub(crate) mod phoenix;
 mod protocol;
 pub mod renderer;

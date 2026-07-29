@@ -705,6 +705,57 @@ fn load_validated_focused_epic(
     })
 }
 
+/// A worker-lane worktree must not disappear while a tracked descendant still
+/// has it as its cwd. Reap only the record bound to the worktree owner's
+/// factory session; when legacy worktree metadata has no owner, restrict the
+/// fallback to sessions whose daemon is already dead.
+fn reap_worker_group_before_worktree_cleanup(
+    cas_root: &Path,
+    worktree: &crate::types::Worktree,
+    agent_store: &dyn cas_store::AgentStore,
+) -> Result<(), String> {
+    let owner = worktree
+        .created_by_agent
+        .as_deref()
+        .and_then(|agent_id| agent_store.get(agent_id).ok());
+    let worker_name = owner
+        .as_ref()
+        .map(|agent| agent.name.as_str())
+        .or_else(|| worktree.branch.strip_prefix("factory/"));
+    let Some(worker_name) = worker_name else {
+        return Ok(());
+    };
+    let owner_session = owner
+        .as_ref()
+        .and_then(|agent| agent.factory_session.as_deref());
+    let running_sessions: HashSet<String> = crate::ui::factory::SessionManager::new()
+        .list_sessions()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|session| session.is_running)
+        .map(|session| session.name)
+        .collect();
+
+    for record in crate::ui::factory::process_groups::list(cas_root).unwrap_or_default() {
+        if record.worker_name != worker_name {
+            continue;
+        }
+        let belongs_to_lane = owner_session
+            .is_some_and(|session| record.factory_session == session)
+            || (owner_session.is_none() && !running_sessions.contains(&record.factory_session));
+        if !belongs_to_lane {
+            continue;
+        }
+        crate::ui::factory::process_groups::reap(cas_root, &record).map_err(|error| {
+            format!(
+                "worker process group {} could not be reaped before worktree removal: {error}",
+                record.pgid
+            )
+        })?;
+    }
+    Ok(())
+}
+
 impl CasCore {
     pub async fn worktree_create(&self, epic_id: &str) -> Result<CallToolResult, McpError> {
         use crate::config::Config;
@@ -1089,6 +1140,12 @@ impl CasCore {
         let mut errors = Vec::new();
 
         for mut wt in orphans {
+            if let Err(error) =
+                reap_worker_group_before_worktree_cleanup(&cas_root, &wt, agent_store.as_ref())
+            {
+                errors.push(format!("{} ({error})", wt.id));
+                continue;
+            }
             if wt.path.exists() {
                 if let Ok(manager) = WorktreeManager::new(&cwd, manager_config.clone()) {
                     if manager.abandon(&mut wt, force).is_ok() {

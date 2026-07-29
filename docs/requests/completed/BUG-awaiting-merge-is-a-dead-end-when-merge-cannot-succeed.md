@@ -51,3 +51,12 @@ A state that means "finished" and a state that means "stuck with unfinished work
 - b) Distinguish the cases. `awaiting_merge` should mean "mergeable, queued for supervisor". Introduce a distinct state (or flag) for "merge attempted and conflicted" that is visibly NOT complete and is assignable. `merge-tree` can determine which at close time.
 - c) At minimum, name the alternative in the refusal. The error tells the worker the supervisor must merge; it should also say what to do when that merge fails.
 - d) Record the branch on the task at close time. When a worker is lost, the commits become orphaned with nothing linking them to the task — recovery today depends on a supervisor remembering.
+
+## Resolution (cas-5054, 2026-07-29)
+
+Resolved by making conflict rework an explicit, narrow exit from `awaiting_merge`.
+An assigned worker may restart a parked task only when CAS has recorded a genuine
+merge conflict; cleanly mergeable tasks remain parked with guidance to wait for
+the supervisor. Restarting records a conflict-rework decision and atomically
+clears the prior factory anchor, parked branch, and conflict flag so the next
+close evaluates the resolved work as a fresh close cycle.

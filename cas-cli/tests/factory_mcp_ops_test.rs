@@ -3144,12 +3144,9 @@ async fn test_062d_lifecycle_close_pushes_closed() {
 // cas-a844: awaiting_merge is a dead end when the merge cannot succeed
 // =============================================================================
 
-/// AC1: a worker CAN start an `awaiting_merge` task now — it transitions back
-/// to `in_progress` instead of being refused. This is the core fix: before,
-/// `task start` on an `awaiting_merge` task was unconditionally rejected with
-/// "the worker work is already complete", which was a dead end whenever the
-/// parked branch actually conflicted (supervisor can't merge, worker can't
-/// start — nothing transitions the task).
+/// AC1: a worker CAN start a conflicted `awaiting_merge` task — it transitions
+/// back to `in_progress`, records the rework decision, and invalidates all
+/// close-cycle merge state so the eventual re-close evaluates fresh work.
 #[tokio::test]
 async fn test_a844_worker_can_start_awaiting_merge_task() {
     let _guard = EnvGuard::set_optional(&[
@@ -3164,6 +3161,14 @@ async fn test_a844_worker_can_start_awaiting_merge_task() {
         store.register(&worker).expect("register worker");
     }
     let task_id = env.create_awaiting_merge_task("parked work", "swift-fox");
+    {
+        let store = env.task_store();
+        let mut task = store.get(&task_id).expect("task");
+        task.deliverables.merge_conflicted = true;
+        task.deliverables.factory_branch_anchor = Some("parked-anchor".to_string());
+        task.deliverables.parked_branch = Some("factory/swift-fox".to_string());
+        store.update(&task).expect("mark task conflicted");
+    }
 
     let result = env
         .service
@@ -3184,10 +3189,62 @@ async fn test_a844_worker_can_start_awaiting_merge_task() {
         "awaiting_merge -> start must transition to in_progress, not stay parked"
     );
     assert!(
-        after.notes.to_lowercase().contains("awaiting_merge"),
-        "resume note should mention the prior awaiting_merge state: {}",
+        after.notes.to_lowercase().contains("merge conflict"),
+        "resume decision note should name the merge conflict: {}",
         after.notes
     );
+    assert!(
+        after.deliverables.factory_branch_anchor.is_none(),
+        "conflict rework must invalidate the parked anchor"
+    );
+    assert!(
+        after.deliverables.parked_branch.is_none(),
+        "conflict rework must clear the parked branch receipt"
+    );
+    assert!(
+        !after.deliverables.merge_conflicted,
+        "conflict rework must clear the prior close cycle's conflict flag"
+    );
+}
+
+/// AC1 negative control: a cleanly mergeable `awaiting_merge` task is still
+/// complete from the worker's perspective. Starting it must keep steering the
+/// worker to wait for the supervisor merge while naming the conflict escape.
+#[tokio::test]
+async fn test_5054_clean_awaiting_merge_still_refuses_start() {
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_AGENT_ROLE", Some("worker")),
+        ("CAS_FACTORY_MODE", Some("1")),
+    ]);
+    let env = FactoryTestEnv::with_agent_id("swift-fox");
+    {
+        let store = env.agent_store();
+        let mut worker = Agent::new("swift-fox".to_string(), "swift-fox".to_string());
+        worker.role = AgentRole::Worker;
+        store.register(&worker).expect("register worker");
+    }
+    let task_id = env.create_awaiting_merge_task("clean parked work", "swift-fox");
+
+    let result = env
+        .service
+        .inner
+        .cas_task_start(Parameters(cas::mcp::tools::IdRequest {
+            id: task_id.clone(),
+        }))
+        .await
+        .expect_err("clean awaiting_merge task must remain parked");
+    let text = result.to_string();
+    assert!(
+        text.contains("wait for the supervisor"),
+        "refusal must preserve the normal merge guidance: {text}"
+    );
+    assert!(
+        text.to_lowercase().contains("conflict"),
+        "refusal must name the conflict rework path: {text}"
+    );
+
+    let after = env.task_store().get(&task_id).expect("task");
+    assert_eq!(after.status, TaskStatus::AwaitingMerge);
 }
 
 /// AC1 (self-dispatch guard preserved): starting an `awaiting_merge` task must

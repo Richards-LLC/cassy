@@ -774,6 +774,30 @@ async fn test_a844_merge_conflict_flags_task_and_names_alternative() {
         parked.deliverables.parked_branch.as_deref(),
         Some("factory/test-agent")
     );
+
+    service
+        .cas_task_start(Parameters(IdRequest { id: id_a.clone() }))
+        .await
+        .expect("assigned worker can resume conflicted park");
+    let resumed = task_store.get(&id_a).expect("A exists after resume");
+    assert_eq!(resumed.status, TaskStatus::InProgress);
+    assert!(
+        resumed.deliverables.factory_branch_anchor.is_none(),
+        "conflict rework must invalidate the anchor captured by MERGE REQUIRED"
+    );
+    assert!(
+        resumed.deliverables.parked_branch.is_none(),
+        "conflict rework must clear the parked branch receipt"
+    );
+    assert!(
+        !resumed.deliverables.merge_conflicted,
+        "conflict rework must clear the prior close cycle's conflict flag"
+    );
+    assert!(
+        resumed.notes.to_lowercase().contains("merge conflict"),
+        "resume must record a decision note naming the conflict: {}",
+        resumed.notes
+    );
 }
 
 /// cas-a844 negative control: unmerged-but-cleanly-mergeable commits must

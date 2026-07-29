@@ -4060,6 +4060,51 @@ mod tests {
         assert_eq!(r.pending_reason, Some(PendingReason::AwaitingAck));
     }
 
+    /// cas-c061: historical delivered rows must not permanently reserve an
+    /// exact message body. Once the recipient confirmed the first send, an
+    /// intentional identical resend is a new queue event with a fresh ID.
+    #[test]
+    fn test_confirmed_worker_message_does_not_swallow_identical_resend() {
+        let (_temp, store) = create_test_store();
+        let first = store
+            .enqueue_with_session("worker", "supervisor", "same report", "factory-a")
+            .unwrap();
+        store.mark_transport_delivered(first).unwrap();
+        store.ack(first).unwrap();
+
+        let second = store
+            .enqueue_with_session("worker", "supervisor", "same report", "factory-a")
+            .unwrap();
+
+        assert_ne!(
+            first, second,
+            "a confirmed historical row must not impersonate a fresh enqueue"
+        );
+    }
+
+    /// cas-c061: the enqueue-dedup and reciprocal-confirm predicates are hot
+    /// on every coordination send. Their indexes must be installed only after
+    /// the lifecycle columns have been migrated onto legacy prompt_queue DBs.
+    #[test]
+    fn test_message_send_hot_path_indexes_are_migrated() {
+        let (_temp, store) = create_test_store();
+        let conn = store.conn.lock().unwrap();
+        for index in [
+            "idx_prompt_queue_recent_unacked_dedupe",
+            "idx_prompt_queue_ack_counterparty",
+        ] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'index' AND name = ?",
+                    params![index],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 1, "missing migrated hot-path index {index}");
+        }
+    }
+
     #[test]
     fn test_message_delivery_report_no_false_queue_head() {
         // Lower-id peer must not invent behind_queue_head (removed inaccurate heuristic).

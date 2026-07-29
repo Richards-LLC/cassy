@@ -658,6 +658,19 @@ pub trait PromptQueueStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>>;
 
+    /// Return every outstanding prompt for specific targets.
+    ///
+    /// This is an observability query, not a delivery-selection query:
+    /// scheduled retries remain outstanding and are therefore included even
+    /// while `next_attempt_at` is in the future. Session isolation matches
+    /// `peek_for_targets`: a supplied session sees its tagged rows plus
+    /// legacy NULL-session rows; without a session only legacy rows are seen.
+    fn outstanding_for_targets(
+        &self,
+        targets: &[&str],
+        factory_session: Option<&str>,
+    ) -> Result<Vec<QueuedPrompt>>;
+
     /// Most recent message timestamp for each target from any of `sources`.
     ///
     /// Unlike the pending-message APIs, this includes processed rows. The
@@ -1668,6 +1681,51 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         };
 
         Ok(Self::merge_two_lane_peeks(session_lane, legacy_lane, limit))
+    }
+
+    fn outstanding_for_targets(
+        &self,
+        targets: &[&str],
+        factory_session: Option<&str>,
+    ) -> Result<Vec<QueuedPrompt>> {
+        if targets.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = std::iter::repeat_n("?", targets.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let session_clause = if factory_session.is_some() {
+            "AND (factory_session = ? OR factory_session IS NULL)"
+        } else {
+            "AND factory_session IS NULL"
+        };
+        let sql = format!(
+            "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session
+             FROM prompt_queue
+             WHERE processed_at IS NULL
+               AND target IN ({placeholders})
+               {session_clause}
+             ORDER BY priority ASC, id ASC"
+        );
+
+        let mut query_params: Vec<Box<dyn rusqlite::ToSql>> = targets
+            .iter()
+            .map(|target| Box::new((*target).to_string()) as Box<dyn rusqlite::ToSql>)
+            .collect();
+        if let Some(session) = factory_session {
+            query_params.push(Box::new(session.to_string()));
+        }
+
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&sql)?;
+        let prompts = stmt
+            .query_map(
+                rusqlite::params_from_iter(query_params.iter().map(|p| p.as_ref())),
+                Self::prompt_from_row,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(prompts)
     }
 
     fn latest_created_at_for_targets_from_sources(
@@ -3053,6 +3111,38 @@ mod tests {
         assert_eq!(
             report.pending_reason,
             Some(PendingReason::AbandonedUnknownTarget)
+        );
+    }
+
+    #[test]
+    fn outstanding_for_targets_includes_rows_waiting_for_retry() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_with_session("supervisor", "worker", "deliver me", "factory-a")
+            .unwrap();
+
+        assert!(matches!(
+            store
+                .record_retry(id, PendingReason::TargetUnavailable, Some("pane missing"))
+                .unwrap(),
+            PromptRetryDisposition::Scheduled { attempts: 1, .. }
+        ));
+        assert!(
+            store
+                .peek_for_targets(&["worker"], Some("factory-a"), 10)
+                .unwrap()
+                .is_empty(),
+            "delivery selection must honor retry backoff"
+        );
+        assert_eq!(
+            store
+                .outstanding_for_targets(&["worker"], Some("factory-a"))
+                .unwrap()
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![id],
+            "observability must still see a queued row while delivery is backed off"
         );
     }
 

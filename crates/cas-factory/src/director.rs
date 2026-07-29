@@ -412,13 +412,13 @@ impl DirectorData {
             .collect();
         let pending_msgs: Vec<QueuedPrompt> =
             if let Some(pq) = stores.and_then(|s| s.prompt_queue_store.as_ref()) {
-                pq.peek_for_targets(&agent_names_for_pq, factory_session.as_deref(), 500)
+                pq.outstanding_for_targets(&agent_names_for_pq, factory_session.as_deref())
                     .unwrap_or_default()
             } else {
                 SqlitePromptQueueStore::open(cas_dir)
                     .ok()
                     .and_then(|pq| {
-                        pq.peek_for_targets(&agent_names_for_pq, factory_session.as_deref(), 500)
+                        pq.outstanding_for_targets(&agent_names_for_pq, factory_session.as_deref())
                             .ok()
                     })
                     .unwrap_or_default()
@@ -932,7 +932,7 @@ fn parse_diff_numstat(output: &str, line_counts: &mut HashMap<String, (usize, us
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cas_store::TaskStore;
+    use cas_store::{PendingReason, TaskStore};
     use cas_types::{Agent, EventEntityType};
     use chrono::{Duration, Utc};
 
@@ -1003,6 +1003,65 @@ mod tests {
         assert!(
             activity_age < crate::config::DEFAULT_STALL_THRESHOLD_SECS as i64,
             "recent task-note activity must keep the stall predicate below threshold"
+        );
+    }
+
+    #[test]
+    fn backed_off_prompt_still_suppresses_worker_idle() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let stores = DirectorStores::open(temp_dir.path()).unwrap();
+        stores.task_store.init().unwrap();
+        stores.agent_store.init().unwrap();
+        stores.event_store.init().unwrap();
+        let prompt_queue = stores.prompt_queue_store.as_ref().unwrap();
+        prompt_queue.init().unwrap();
+
+        let supervisor = Agent::new_with_role(
+            "supervisor-session".to_string(),
+            "supervisor".to_string(),
+            AgentRole::Supervisor,
+        );
+        stores.agent_store.register(&supervisor).unwrap();
+        let worker = Agent::new_with_role(
+            "worker-session".to_string(),
+            "backed-off-worker".to_string(),
+            AgentRole::Worker,
+        );
+        stores.agent_store.register(&worker).unwrap();
+
+        let prompt_id = prompt_queue
+            .enqueue("supervisor", "backed-off-worker", "assigned work")
+            .unwrap();
+        prompt_queue
+            .record_retry(
+                prompt_id,
+                PendingReason::TargetUnavailable,
+                Some("pane unavailable"),
+            )
+            .unwrap();
+        assert!(
+            prompt_queue
+                .peek_for_targets(&["backed-off-worker"], None, 10)
+                .unwrap()
+                .is_empty(),
+            "delivery selection must not immediately retry the row"
+        );
+
+        let data =
+            DirectorData::load_with_stores(temp_dir.path(), None, false, Some(&stores)).unwrap();
+        let worker_summary = data
+            .agents
+            .iter()
+            .find(|agent| agent.id == "worker-session")
+            .expect("worker is present in director data");
+
+        assert_eq!(
+            worker_summary.pending_messages, 1,
+            "the idle detector gates WorkerIdle on this outstanding count"
+        );
+        assert_eq!(
+            worker_summary.pending_supervisor_messages, 1,
+            "a backed-off supervisor message must still mark the idle transition handled"
         );
     }
 }

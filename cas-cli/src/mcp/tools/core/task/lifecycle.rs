@@ -428,9 +428,10 @@ impl CasCore {
                 .as_deref()
                 .unwrap_or("the parked factory branch");
             let audit = format!(
-                "[{timestamp}] Decision: resume from awaiting_merge for merge conflict \
-                 rework. {parked_branch} cannot be merged cleanly, so the task is back \
-                 in_progress for the assigned worker to resolve directly."
+                "[{timestamp}] Decision: resume from awaiting_merge for merge recovery. \
+                 {parked_branch} was flagged with a merge conflict or its conflict \
+                 preflight could not be evaluated, so the task is back in_progress for \
+                 the assigned worker to inspect and resolve directly."
             );
             task.notes = if task.notes.is_empty() {
                 audit

@@ -32,9 +32,10 @@ impl CasCore {
         if task.status == TaskStatus::AwaitingMerge {
             if task.deliverables.merge_conflicted {
                 output.push_str(
-                    "⚠️  MERGE CONFLICT — this task is NOT complete. The parked branch \
-                     failed to merge cleanly; the assigned worker can `task start` it \
-                     to resolve the conflict directly.\n",
+                    "⚠️  MERGE CONFLICT / REWORK REQUIRED — this task is NOT complete. \
+                     The parked branch is conflicted or its conflict preflight could \
+                     not be evaluated; the assigned worker can `task start` it to \
+                     inspect and resolve the branch directly.\n",
                 );
             } else {
                 output.push_str(
@@ -429,7 +430,7 @@ impl CasCore {
             // clean one right in the list view, not just on `show`.
             let conflict_marker =
                 if task.status == TaskStatus::AwaitingMerge && task.deliverables.merge_conflicted {
-                    " [MERGE CONFLICT]"
+                    " [MERGE CONFLICT/REWORK]"
                 } else {
                     ""
                 };

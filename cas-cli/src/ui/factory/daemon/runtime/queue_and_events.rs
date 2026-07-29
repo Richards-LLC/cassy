@@ -318,6 +318,15 @@ impl FactoryDaemon {
         !(has_fresh_heartbeat && has_recent_activity)
     }
 
+    fn target_looks_like_idle_worker(
+        data: &crate::ui::factory::director::DirectorData,
+        pane_target: &str,
+        supervisor_name: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> bool {
+        pane_target != supervisor_name && Self::worker_looks_idle(data, pane_target, now)
+    }
+
     /// Minimum settle floor between an urgent turn-break (Esc) and the
     /// follow-up inject (cas-c931 / cas-4208).
     ///
@@ -820,12 +829,12 @@ impl FactoryDaemon {
                     // supervisor) and looks genuinely idle right now, also
                     // PTY-nudge the teams-inbox write so it isn't left
                     // sitting in a file nobody is polling.
-                    let worker_is_idle = target != "supervisor"
-                        && Self::worker_looks_idle(
-                            self.app.director_data(),
-                            target.as_str(),
-                            chrono::Utc::now(),
-                        );
+                    let worker_is_idle = Self::target_looks_like_idle_worker(
+                        self.app.director_data(),
+                        &pane_target,
+                        self.app.supervisor_name(),
+                        chrono::Utc::now(),
+                    );
                     self.deliver_to_worker_with_idle_nudge(
                         target,
                         &inbox_source,
@@ -2124,6 +2133,35 @@ mod tests {
             !FactoryDaemon::worker_looks_idle(&data, "ghost-worker", now),
             "an agent absent from DirectorData (e.g. mid-spawn) must not be \
              guessed idle — fall back to the plain inbox write"
+        );
+    }
+
+    #[test]
+    fn idle_nudge_excludes_supervisor_display_name_but_keeps_idle_worker() {
+        let now = chrono::Utc::now();
+        let data = director_data_with(vec![
+            agent_summary("cosmic-bear-43", None, None, None),
+            agent_summary("swift-fox", None, None, None),
+        ]);
+
+        assert!(
+            !FactoryDaemon::target_looks_like_idle_worker(
+                &data,
+                "cosmic-bear-43",
+                "cosmic-bear-43",
+                now,
+            ),
+            "a supervisor addressed by display name must receive only the inbox write, never a \
+             second PTY delivery"
+        );
+        assert!(
+            FactoryDaemon::target_looks_like_idle_worker(
+                &data,
+                "swift-fox",
+                "cosmic-bear-43",
+                now,
+            ),
+            "an idle worker target must remain eligible for the PTY nudge"
         );
     }
 

@@ -3683,7 +3683,10 @@ fn commit_tip_tree_reachable_from(
 ///   a ref name.
 const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-fn fetch_parent_branch_best_effort(repo_path: &std::path::Path, parent_branch: &str) {
+pub(crate) fn fetch_parent_branch_best_effort(
+    repo_path: &std::path::Path,
+    parent_branch: &str,
+) {
     use std::process::{Command, Stdio};
     use std::time::Instant;
 
@@ -3691,8 +3694,14 @@ fn fetch_parent_branch_best_effort(repo_path: &std::path::Path, parent_branch: &
         return;
     }
 
+    // Force-update the exact remote-tracking ref. The leading `+` is
+    // intentional: a remote epic may have been rebased/force-pushed, and the
+    // caller needs the authoritative remote state rather than a fetch rejected
+    // as non-fast-forward.
+    let refspec =
+        format!("+refs/heads/{parent_branch}:refs/remotes/origin/{parent_branch}");
     let mut child = match Command::new("git")
-        .args(["fetch", "--quiet", "origin", parent_branch])
+        .args(["fetch", "--quiet", "origin", &refspec])
         .current_dir(repo_path)
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
@@ -5203,6 +5212,35 @@ pub(crate) fn resolve_branch_short_sha(repo_path: &std::path::Path, branch: &str
 
     let out = Command::new("git")
         .args(["rev-parse", "--short", branch])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if sha.is_empty() { None } else { Some(sha) }
+}
+
+/// Immutable commit ID currently named by `reference`, or `None` when the ref
+/// is unsafe, missing, or does not resolve to a commit.
+///
+/// Director merge-alert classification resolves all movable refs through this
+/// helper once, then performs every merge-base/count operation against these
+/// immutable IDs so concurrent ref updates cannot produce a mixed snapshot.
+pub(crate) fn resolve_ref_commit_sha(
+    repo_path: &std::path::Path,
+    reference: &str,
+) -> Option<String> {
+    use std::process::Command;
+
+    if !is_safe_git_refname(reference) {
+        return None;
+    }
+
+    let commit = format!("{reference}^{{commit}}");
+    let out = Command::new("git")
+        .args(["rev-parse", "--verify", &commit])
         .current_dir(repo_path)
         .output()
         .ok()?;

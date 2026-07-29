@@ -894,7 +894,7 @@ mod commit_anchor_tests {
 
     #[test]
     fn reassigned_worker_commit_preserves_prior_parked_branch() {
-        let (_temp, cas_root, alice, task, task_store) = worker_task_fixture();
+        let (_env, _temp, cas_root, alice, task, task_store) = worker_task_fixture();
         let repo = cas_root.parent().expect("repo");
         git(repo, &["branch", "-m", "factory/alice"]);
         std::fs::write(repo.join("alice.rs"), "fn alice_work() {}\n").unwrap();

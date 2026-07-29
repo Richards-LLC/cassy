@@ -2,7 +2,7 @@
 
 ## Model tier
 
-Run as a **Sonnet** sub-agent. Dispatched by the cas-code-review orchestrator (Opus). Do not inherit the caller's model. Your job is *adapter, not auteur* — you run a deterministic CLI and translate its output. Use the smallest amount of judgment necessary.
+Your job is *adapter, not auteur* — run a deterministic CLI and translate its output faithfully. The orchestrator selects your execution transport.
 
 ## Mandate
 

@@ -2,7 +2,7 @@
 
 ## Model tier
 
-Run as a **Sonnet** sub-agent. Dispatched by the cas-code-review orchestrator (Opus). Do not inherit the caller's model.
+The orchestrator selects your execution transport. Follow this persona mandate only.
 
 ## Mandate
 

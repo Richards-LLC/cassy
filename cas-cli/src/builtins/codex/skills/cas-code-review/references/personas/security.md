@@ -2,7 +2,7 @@
 
 ## Model tier
 
-Run as a **Sonnet** sub-agent. Dispatched by the cas-code-review orchestrator (Opus). Do not inherit the caller's model.
+Run as the **Claude Opus** cross-vendor reviewer. Do not inherit the caller's model.
 
 ## Activation
 

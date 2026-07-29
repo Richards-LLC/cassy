@@ -1904,6 +1904,82 @@ fn stalled_data_for(agent: AgentSummary) -> DirectorData {
     }
 }
 
+fn assigned_unstarted_data(
+    base_utc: chrono::DateTime<chrono::Utc>,
+    assigned_ago_secs: i64,
+) -> DirectorData {
+    let mut agent =
+        make_agent_working_stalled("agent-1", "lively-crow", "cas-unstarted", 5, None, base_utc);
+    agent.current_task = None;
+    let mut task = make_task(
+        "cas-unstarted",
+        "Assigned but unstarted",
+        TaskStatus::Open,
+        Some("lively-crow"),
+    );
+    task.updated_at = Some(base_utc - chrono::Duration::seconds(assigned_ago_secs));
+    DirectorData {
+        ready_tasks: vec![task],
+        in_progress_tasks: vec![],
+        epic_tasks: vec![],
+        agents: vec![agent],
+        activity: vec![],
+        agent_id_to_name: [("agent-1".to_string(), "lively-crow".to_string())]
+            .into_iter()
+            .collect(),
+        changes: vec![],
+        git_loaded: true,
+        reminders: vec![],
+        epic_closed_counts: HashMap::new(),
+    }
+}
+
+#[test]
+fn test_78bf_assigned_open_past_threshold_escalates_to_supervisor() {
+    let base_utc = chrono::Utc::now();
+    let t0 = std::time::Instant::now();
+    let data = assigned_unstarted_data(base_utc, 310);
+    let mut detector =
+        DirectorEventDetector::new(vec!["lively-crow".to_string()], "supervisor".to_string());
+    detector.set_stall_threshold_secs(300);
+    detector.initialize(&data);
+
+    let events = detector.detect_changes_at(&data, None, t0, base_utc);
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            DirectorEvent::WorkerStalled {
+                worker,
+                task_id,
+                elapsed_secs: 310,
+                escalate: true,
+            } if worker == "lively-crow" && task_id == "cas-unstarted"
+        )),
+        "a live worker holding assigned Open work past the threshold must escalate: {events:?}"
+    );
+}
+
+#[test]
+fn test_78bf_assigned_open_within_threshold_keeps_dbbb_grace_window() {
+    let base_utc = chrono::Utc::now();
+    let t0 = std::time::Instant::now();
+    let data = assigned_unstarted_data(base_utc, 299);
+    let mut detector =
+        DirectorEventDetector::new(vec!["lively-crow".to_string()], "supervisor".to_string());
+    detector.set_stall_threshold_secs(300);
+    detector.initialize(&data);
+
+    let events = detector.detect_changes_at(&data, None, t0, base_utc);
+
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, DirectorEvent::WorkerStalled { .. })),
+        "the normal just-assigned window must remain suppressed by cas-dbbb: {events:?}"
+    );
+}
+
 /// A worker with a fresh heartbeat, an in-progress task, and activity older
 /// than the stall threshold must fire a non-escalating `WorkerStalled`
 /// (auto-nudge) on first detection, per the cas-9829 bug report: heartbeat

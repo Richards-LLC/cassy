@@ -41,6 +41,13 @@ pub(crate) fn worker_cli_from_agent(agent: &cas_types::Agent) -> cas_mux::Superv
         .unwrap_or(cas_mux::SupervisorCli::Claude)
 }
 
+fn worker_effort_from_agent(agent: &cas_types::Agent) -> Option<cas_mux::Effort> {
+    agent
+        .metadata
+        .get("worker_effort")
+        .and_then(|effort| effort.parse::<cas_mux::Effort>().ok())
+}
+
 fn parse_spawn_cli(cli: Option<&str>) -> Result<Option<cas_mux::SupervisorCli>, String> {
     cli.map(|s| {
         s.parse::<cas_mux::SupervisorCli>()
@@ -763,6 +770,20 @@ impl CasService {
                 .filter_map(|t| t.assignee)
                 .collect()
         };
+        // cas-78bf: retain assigned Open tasks (including their assignment
+        // timestamp) so worker_status can distinguish the normal dispatch
+        // grace window from a worker that has held work without ever
+        // starting it past the configured stall threshold.
+        let assigned_open_tasks: Vec<cas_types::Task> = {
+            use crate::store::open_task_store;
+            open_task_store(&self.inner.cas_root)
+                .ok()
+                .and_then(|ts| ts.list(Some(cas_types::TaskStatus::Open)).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|task| task.assignee.is_some())
+                .collect()
+        };
 
         let workers: Vec<_> = agents
             .iter()
@@ -975,13 +996,42 @@ impl CasService {
                             worker_cli,
                         )
                     });
+                let assigned_open_task = assigned_open_tasks.iter().find(|task| {
+                    task.assignee.as_deref() == Some(agent.name.as_str())
+                        || task.assignee.as_deref() == Some(agent.id.as_str())
+                });
+                let assigned_unstarted_elapsed = assigned_open_task.and_then(|task| {
+                    let effective_threshold =
+                        crate::ui::factory::effective_stall_threshold_secs(
+                            stall_threshold_secs as u64,
+                            worker_effort_from_agent(agent),
+                        ) as i64;
+                    assigned_unstarted_elapsed_secs(
+                        task.updated_at,
+                        last_activity.map(|(secs, _)| secs),
+                        effective_threshold,
+                        in_flight_tool_call,
+                        chrono::Utc::now(),
+                    )
+                });
                 let stalled = is_worker_stalled(
                     has_in_progress_task,
                     last_activity.map(|(secs, _)| secs),
                     stall_threshold_secs,
                     in_flight_tool_call,
                 );
-                let activity_info = if !has_in_progress_task {
+                let activity_info = if let (Some(task), Some(elapsed)) =
+                    (assigned_open_task, assigned_unstarted_elapsed)
+                {
+                    format_assigned_unstarted_status(
+                        &task.id,
+                        elapsed,
+                        crate::ui::factory::effective_stall_threshold_secs(
+                            stall_threshold_secs as u64,
+                            worker_effort_from_agent(agent),
+                        ) as i64,
+                    )
+                } else if !has_in_progress_task {
                     match last_activity {
                         Some((secs, phase)) => {
                             format!("\n    last activity: {secs}s ago ({phase})")
@@ -2252,6 +2302,41 @@ pub(crate) fn last_worker_activity_secs_with_transcript(
         Some((secs, phase)) if secs <= transcript_secs => Some((secs, phase)),
         _ => Some((transcript_secs, "activity")),
     }
+}
+
+/// cas-78bf: elapsed time for the sustained assigned-but-unstarted state.
+///
+/// Assignment and the most recent harness-aware activity are both valid
+/// baselines; whichever is newer starts (or resets) the quiet window. An
+/// in-flight tool call is direct busy evidence and suppresses escalation.
+fn assigned_unstarted_elapsed_secs(
+    assigned_at: chrono::DateTime<chrono::Utc>,
+    last_activity_secs_ago: Option<i64>,
+    threshold_secs: i64,
+    in_flight_tool_call: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<i64> {
+    if in_flight_tool_call {
+        return None;
+    }
+    let assigned_elapsed = (now - assigned_at).num_seconds();
+    if assigned_elapsed < 0 {
+        return None;
+    }
+    let quiet_elapsed = last_activity_secs_ago
+        .map(|activity_elapsed| assigned_elapsed.min(activity_elapsed))
+        .unwrap_or(assigned_elapsed);
+    (quiet_elapsed >= threshold_secs).then_some(assigned_elapsed)
+}
+
+fn format_assigned_unstarted_status(
+    task_id: &str,
+    elapsed_secs: i64,
+    threshold_secs: i64,
+) -> String {
+    format!(
+        "\n    ⚠ ASSIGNED BUT UNSTARTED: {task_id} was assigned {elapsed_secs}s ago and remains unstarted with no recent activity (threshold: {threshold_secs}s)"
+    )
 }
 
 /// cas-9829: whether a `worker_status` row should render the `⚠ STALLED`
@@ -3638,6 +3723,57 @@ effort = "high"
         // that's the pre-existing "may be investigating or idle" case.
         assert!(!is_worker_stalled(false, None, 300, false));
         assert!(!is_worker_stalled(false, Some(1_000), 300, false));
+    }
+
+    #[test]
+    fn test_78bf_assigned_unstarted_elapsed_crosses_threshold_and_reports_elapsed() {
+        let now = chrono::Utc::now();
+        assert_eq!(
+            assigned_unstarted_elapsed_secs(
+                now - chrono::Duration::seconds(310),
+                None,
+                300,
+                false,
+                now,
+            ),
+            Some(310)
+        );
+        assert_eq!(
+            assigned_unstarted_elapsed_secs(
+                now - chrono::Duration::seconds(299),
+                None,
+                300,
+                false,
+                now,
+            ),
+            None,
+            "the existing just-assigned grace window must remain unchanged"
+        );
+    }
+
+    #[test]
+    fn test_78bf_assigned_unstarted_elapsed_resets_for_activity_and_in_flight_work() {
+        let now = chrono::Utc::now();
+        let assigned_at = now - chrono::Duration::seconds(600);
+        assert_eq!(
+            assigned_unstarted_elapsed_secs(assigned_at, Some(10), 300, false, now),
+            None,
+            "recent harness-aware activity must suppress escalation"
+        );
+        assert_eq!(
+            assigned_unstarted_elapsed_secs(assigned_at, Some(600), 300, true, now),
+            None,
+            "an in-flight tool call is direct evidence that the worker is busy"
+        );
+    }
+
+    #[test]
+    fn test_78bf_worker_status_names_assigned_unstarted_state_and_elapsed() {
+        let rendered = format_assigned_unstarted_status("cas-unstarted", 310, 300);
+        assert!(rendered.contains("ASSIGNED BUT UNSTARTED"));
+        assert!(rendered.contains("cas-unstarted was assigned 310s ago"));
+        assert!(rendered.contains("remains unstarted with no recent activity"));
+        assert!(rendered.contains("threshold: 300s"));
     }
 
     #[test]

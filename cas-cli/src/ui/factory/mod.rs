@@ -60,6 +60,7 @@ mod buffer_backend;
 mod client;
 pub(crate) mod daemon;
 mod director;
+pub(crate) use director::effective_stall_threshold_secs;
 mod input;
 mod layout;
 mod notification;

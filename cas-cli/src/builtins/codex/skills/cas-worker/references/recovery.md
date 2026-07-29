@@ -5,12 +5,12 @@
 The most common close rejection: your `factory/<name>` branch has commits not yet on the task's parent branch. This is a **data-state guard** — nobody can bypass it; `bypass_code_review=true` does not apply.
 
 1. **Read the guard text** — it names the parent branch and the unmerged commit count, and includes the correct remediation for your case.
-2. **Before any escalation, re-read any just-delivered supervisor messages in your conversation.** Supervisor replies arrive as injected messages; `queue_poll` does not expose them. If a delivered message says the branch was merged or requests more changes, follow it and do not send a stale merge request.
+2. **Before any escalation, run `mcp__cs__coordination action=inbox_poll`.** This pulls unread supervisor messages and marks them seen for inbox polling without consuming daemon transport delivery. If a message says the branch was merged or requests more changes, follow it and do not send a stale merge request.
 3. **Parent is `epic/<slug>`**: run `git rev-parse factory/<name>` to capture the current tip, `git push origin factory/<name>`, then message the supervisor to merge your branch into the epic:
    ```
    mcp__cs__coordination action=message target=supervisor \
      summary="factory/<name> pushed, needs epic merge before close" \
-     message="Fresh after re-reading delivered messages: <task-id> factory/<name> tip <sha>. Please re-check reachability, then merge into epic/<slug> if still needed so close can pass."
+     message="Fresh after polling unread inbox messages: <task-id> factory/<name> tip <sha>. Please re-check reachability, then merge into epic/<slug> if still needed so close can pass."
    ```
    Do **NOT** `gh pr create --base epic/...` — epic branches are supervisor-local; the ref doesn't exist on origin and the call always fails.
 4. **Parent is `main`/`master`/`staging`**: push and complete the project's PR/merge flow, then retry close.

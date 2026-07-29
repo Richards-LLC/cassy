@@ -477,7 +477,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Coordination operations combining agent, factory, and worktree management. Agent actions: register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, message, message_ack, message_status. Factory actions: spawn_workers, shutdown_workers, worker_status, worker_activity, clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, epic_status (per-child branch merge state for an epic), focus_epic, remind, remind_list, remind_cancel. Worktree actions: worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status. Only available in factory mode. For shutdown_workers, supervisor should verify worktree cleanliness/policy before issuing shutdown."
+        description = "Coordination operations combining agent, factory, and worktree management. Agent actions: register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message, message_ack, message_status. Factory actions: spawn_workers, shutdown_workers, worker_status, worker_activity, clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, epic_status (per-child branch merge state for an epic), focus_epic, remind, remind_list, remind_cancel. Worktree actions: worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status. Only available in factory mode. For shutdown_workers, supervisor should verify worktree cleanliness/policy before issuing shutdown."
     )]
     pub async fn coordination(
         &self,
@@ -494,7 +494,7 @@ impl CasService {
                 "register" | "unregister" | "whoami" | "heartbeat" | "session_start"
                 | "session_end" | "loop_start" | "loop_cancel" | "loop_status"
                 | "lease_history" | "queue_notify" | "queue_poll" | "queue_peek"
-                | "queue_ack" | "message" | "interrupt" | "message_ack"
+                | "queue_ack" | "inbox_poll" | "message" | "interrupt" | "message_ack"
                 | "message_status" => {
                     // `interrupt` is sugar for `message` with urgent=true.
                     let agent_req = if action == "interrupt" {
@@ -519,6 +519,7 @@ impl CasService {
                         "queue_poll" => this.queue_poll(agent_req).await,
                         "queue_peek" => this.queue_peek(agent_req).await,
                         "queue_ack" => this.queue_ack(agent_req).await,
+                        "inbox_poll" => this.inbox_poll(agent_req).await,
                         "message" | "interrupt" => this.message_send(agent_req).await,
                         "message_ack" => this.message_ack(agent_req).await,
                         "message_status" => this.message_status_query(agent_req).await,
@@ -643,7 +644,7 @@ impl CasService {
                     ErrorCode::INVALID_PARAMS,
                     format!(
                         "Unknown coordination action: '{action}'. Valid actions:\n\
-                         Agent: register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, message, message_ack, message_status\n\
+                         Agent: register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message, message_ack, message_status\n\
                          Factory: spawn_workers, shutdown_workers, worker_status, worker_activity, clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, epic_status, focus_epic, remind, remind_list, remind_cancel\n\
                          Worktree: worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status"
                     ),

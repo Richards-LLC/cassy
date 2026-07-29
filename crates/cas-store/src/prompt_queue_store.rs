@@ -87,6 +87,24 @@ CREATE TABLE IF NOT EXISTS prompt_queue (
 CREATE INDEX IF NOT EXISTS idx_prompt_queue_pending ON prompt_queue(target) WHERE processed_at IS NULL;
 "#;
 
+/// Per-recipient read state for the worker-side inbox API.
+///
+/// This is deliberately separate from `processed_at` (daemon transport) and
+/// `acked_at` (delivery confirmation). A broadcast has one prompt_queue row
+/// but many recipients, so read state cannot live on that row without one
+/// worker hiding the message from every other worker.
+const PROMPT_QUEUE_RECIPIENT_SEEN_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS prompt_queue_recipient_seen (
+    prompt_id INTEGER NOT NULL,
+    recipient TEXT NOT NULL,
+    seen_at TEXT NOT NULL,
+    PRIMARY KEY (prompt_id, recipient)
+);
+
+CREATE INDEX IF NOT EXISTS idx_prompt_queue_recipient_seen_recipient
+    ON prompt_queue_recipient_seen(recipient, prompt_id);
+"#;
+
 /// Add factory_session column for multi-session isolation.
 /// Uses IF NOT EXISTS via a safe column-add pattern.
 const PROMPT_QUEUE_SESSION_MIGRATION: &str = r#"
@@ -615,6 +633,19 @@ pub trait PromptQueueStore: Send + Sync {
     fn poll_for_target_with_session(
         &self,
         target: &str,
+        factory_session: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<QueuedPrompt>>;
+
+    /// Pull unread messages for one recipient without consuming daemon
+    /// transport delivery.
+    ///
+    /// Only unacknowledged rows that this recipient has not previously pulled
+    /// are returned. Direct and `all_workers` messages are both eligible, and
+    /// each returned row is atomically marked seen for this recipient only.
+    fn poll_unseen_for_recipient(
+        &self,
+        recipient: &str,
         factory_session: Option<&str>,
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>>;
@@ -1272,6 +1303,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             conn.execute_batch(PROMPT_QUEUE_TWO_LANE_INDEXES)?;
             conn.execute_batch(PROMPT_QUEUE_DEDUPE_KEY_INDEX)?;
             conn.execute_batch(PROMPT_QUEUE_MESSAGE_HOT_PATH_INDEXES_MIGRATION)?;
+            conn.execute_batch(PROMPT_QUEUE_RECIPIENT_SEEN_SCHEMA)?;
             Ok(())
         })
     }
@@ -1482,6 +1514,95 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
             Ok(prompts)
         }) // with_write_retry
+    }
+
+    fn poll_unseen_for_recipient(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<QueuedPrompt>> {
+        if recipient.trim().is_empty() {
+            return Err(StoreError::Other(
+                "poll_unseen_for_recipient requires a recipient".to_string(),
+            ));
+        }
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        crate::shared_db::with_write_retry(|| {
+            let conn = self.conn.lock().unwrap();
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+
+            let (sql, query_params): (&str, Vec<Box<dyn rusqlite::ToSql>>) =
+                if let Some(session) = factory_session {
+                    (
+                        "SELECT q.id, q.source, q.target, q.prompt, q.created_at,
+                                q.processed_at, q.summary, q.priority, q.acked_at,
+                                q.urgent, q.factory_session
+                         FROM prompt_queue q
+                         LEFT JOIN prompt_queue_recipient_seen seen
+                           ON seen.prompt_id = q.id AND seen.recipient = ?
+                         WHERE q.acked_at IS NULL
+                           AND seen.prompt_id IS NULL
+                           AND (q.target = ? OR q.target = 'all_workers')
+                           AND (q.factory_session = ? OR q.factory_session IS NULL)
+                         ORDER BY q.priority ASC, q.id ASC
+                         LIMIT ?",
+                        vec![
+                            Box::new(recipient.to_string()),
+                            Box::new(recipient.to_string()),
+                            Box::new(session.to_string()),
+                            Box::new(limit as i64),
+                        ],
+                    )
+                } else {
+                    (
+                        "SELECT q.id, q.source, q.target, q.prompt, q.created_at,
+                                q.processed_at, q.summary, q.priority, q.acked_at,
+                                q.urgent, q.factory_session
+                         FROM prompt_queue q
+                         LEFT JOIN prompt_queue_recipient_seen seen
+                           ON seen.prompt_id = q.id AND seen.recipient = ?
+                         WHERE q.acked_at IS NULL
+                           AND seen.prompt_id IS NULL
+                           AND (q.target = ? OR q.target = 'all_workers')
+                           AND q.factory_session IS NULL
+                         ORDER BY q.priority ASC, q.id ASC
+                         LIMIT ?",
+                        vec![
+                            Box::new(recipient.to_string()),
+                            Box::new(recipient.to_string()),
+                            Box::new(limit as i64),
+                        ],
+                    )
+                };
+
+            let prompts: Vec<QueuedPrompt> = {
+                let mut stmt = tx.prepare_cached(sql)?;
+                stmt.query_map(
+                    rusqlite::params_from_iter(query_params.iter().map(|p| p.as_ref())),
+                    Self::prompt_from_row,
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+            };
+
+            if !prompts.is_empty() {
+                let seen_at = Utc::now().to_rfc3339();
+                let mut stmt = tx.prepare_cached(
+                    "INSERT OR IGNORE INTO prompt_queue_recipient_seen
+                         (prompt_id, recipient, seen_at)
+                     VALUES (?, ?, ?)",
+                )?;
+                for prompt in &prompts {
+                    stmt.execute(params![prompt.id, recipient, seen_at])?;
+                }
+            }
+
+            tx.commit()?;
+            Ok(prompts)
+        })
     }
 
     fn poll_all(&self, limit: usize) -> Result<Vec<QueuedPrompt>> {
@@ -4742,5 +4863,64 @@ mod tests {
         }
         // legacy + one lifecycle row
         assert_eq!(store.pending_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn inbox_poll_marks_seen_per_recipient_without_consuming_transport() {
+        let temp = TempDir::new().unwrap();
+        let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+
+        let direct = store
+            .enqueue_with_session("supervisor", "worker-a", "direct", "session-a")
+            .unwrap();
+        store
+            .enqueue_with_session("supervisor", "worker-b", "other worker", "session-a")
+            .unwrap();
+        let broadcast = store
+            .enqueue_with_session("supervisor", "all_workers", "broadcast", "session-a")
+            .unwrap();
+        let legacy = store
+            .enqueue("supervisor", "worker-a", "legacy direct")
+            .unwrap();
+        store
+            .enqueue_with_session("supervisor", "worker-a", "other session", "session-b")
+            .unwrap();
+        let acknowledged = store
+            .enqueue_with_session("supervisor", "worker-a", "already read", "session-a")
+            .unwrap();
+        store.ack(acknowledged).unwrap();
+
+        let first = store
+            .poll_unseen_for_recipient("worker-a", Some("session-a"), 10)
+            .unwrap();
+        let first_ids: Vec<i64> = first.iter().map(|prompt| prompt.id).collect();
+        assert_eq!(first_ids, vec![direct, broadcast, legacy]);
+
+        assert!(
+            store
+                .poll_unseen_for_recipient("worker-a", Some("session-a"), 10)
+                .unwrap()
+                .is_empty(),
+            "the same recipient must not receive a second inbox-poll copy"
+        );
+        assert_eq!(
+            store.message_status(direct).unwrap(),
+            Some(MessageStatus::Pending),
+            "inbox polling must not consume daemon transport delivery"
+        );
+        assert_eq!(
+            store.message_status(broadcast).unwrap(),
+            Some(MessageStatus::Pending),
+            "broadcast transport must remain pending after one recipient polls"
+        );
+
+        let peer = store
+            .poll_unseen_for_recipient("worker-b", Some("session-a"), 10)
+            .unwrap();
+        assert!(
+            peer.iter().any(|prompt| prompt.id == broadcast),
+            "one recipient seeing a broadcast must not hide it from peers"
+        );
     }
 }

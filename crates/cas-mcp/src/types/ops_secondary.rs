@@ -494,7 +494,8 @@ pub struct FactoryRequest {
 ///
 /// Agent actions: register, unregister, whoami, heartbeat, agent_list, agent_cleanup,
 ///   session_start, session_end, loop_start, loop_cancel, loop_status, lease_history,
-///   queue_notify, queue_poll, queue_peek, queue_ack, message, message_ack, message_status.
+///   queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message,
+///   message_ack, message_status.
 /// Factory actions: spawn_workers, shutdown_workers, worker_status, worker_activity,
 ///   clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, focus_epic,
 ///   remind, remind_list, remind_cancel.
@@ -504,7 +505,7 @@ pub struct FactoryRequest {
 pub struct CoordinationRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: agent ops (register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, message, interrupt, message_ack, message_status), factory ops (spawn_workers, shutdown_workers, worker_status, worker_activity, clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, focus_epic, remind, remind_list, remind_cancel), worktree ops (worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status). Only available in factory mode. 'interrupt' is shorthand for 'message' with urgent=true (breaks the target's in-flight turn, then injects). For shutdown_workers, supervisor should verify worktree cleanliness/policy before issuing shutdown."
+        description = "Action: agent ops (register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message, interrupt, message_ack, message_status), factory ops (spawn_workers, shutdown_workers, worker_status, worker_activity, clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, focus_epic, remind, remind_list, remind_cancel), worktree ops (worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status). Only available in factory mode. 'interrupt' is shorthand for 'message' with urgent=true (breaks the target's in-flight turn, then injects). For shutdown_workers, supervisor should verify worktree cleanliness/policy before issuing shutdown."
     )]
     pub action: String,
 

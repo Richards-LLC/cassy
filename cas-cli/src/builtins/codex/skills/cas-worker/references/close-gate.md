@@ -16,7 +16,7 @@ If the task you're closing is `depth=light` (check the `Depth:` line in `task sh
 
 Close runs a merge-state guard before anything else: every commit on your `factory/<name>` branch must already be on the task's parent branch, or close rejects with `⚠️ MERGE REQUIRED`. This is a **data-state guard** — `bypass_code_review=true` does not skip it, and neither can the supervisor. Get merged *before* attempting close:
 
-- **Parent is `epic/<slug>`** — epic branches are supervisor-local by convention. Re-read any just-delivered supervisor messages in your conversation (supervisor replies arrive as injected messages; `queue_poll` does not expose them), capture the current tip with `git rev-parse factory/<name>`, then push and send a freshness-qualified merge request only if one is still needed. **Never `gh pr create --base epic/...`** — that ref doesn't exist on origin; the call always fails.
+- **Parent is `epic/<slug>`** — epic branches are supervisor-local by convention. Run `mcp__cs__coordination action=inbox_poll` to pull unread supervisor messages, capture the current tip with `git rev-parse factory/<name>`, then push and send a freshness-qualified merge request only if one is still needed. **Never `gh pr create --base epic/...`** — that ref doesn't exist on origin; the call always fails.
 - **Parent is `main`/`master`/`staging`** — push and complete the project's PR/merge flow (or the merge flow the supervisor stated at assignment), then close.
 - **Guard still fires after a confirmed merge?** Squash-merges rewrite SHAs, so the guard can count already-merged commits as missing. Send the supervisor the exact guard text — they fix the stale branch ref. Do not retry-loop.
 

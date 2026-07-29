@@ -671,6 +671,78 @@ impl CasService {
         )))
     }
 
+    pub(in crate::mcp::tools::service) async fn inbox_poll(
+        &self,
+        req: AgentRequest,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::store::{open_agent_store, open_prompt_queue_store};
+
+        let agent_id = self.inner.get_agent_id().ok();
+        let registered_agent = agent_id.as_deref().and_then(|id| {
+            open_agent_store(&self.inner.cas_root)
+                .ok()
+                .and_then(|store| store.get(id).ok())
+        });
+        let recipient = registered_agent
+            .as_ref()
+            .map(|agent| agent.name.clone())
+            .or_else(|| std::env::var("CAS_AGENT_NAME").ok())
+            .filter(|name| !name.trim().is_empty())
+            .ok_or_else(|| {
+                Self::error(
+                    ErrorCode::INVALID_REQUEST,
+                    "inbox_poll requires a registered agent identity",
+                )
+            })?;
+        let factory_session = std::env::var("CAS_FACTORY_SESSION")
+            .ok()
+            .filter(|session| !session.trim().is_empty())
+            .or_else(|| {
+                registered_agent
+                    .as_ref()
+                    .and_then(|agent| agent.factory_session.clone())
+            });
+        let limit = req.limit.unwrap_or(10).min(100);
+
+        let queue = open_prompt_queue_store(&self.inner.cas_root).map_err(|error| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to open prompt queue: {error}"),
+            )
+        })?;
+        let messages = queue
+            .poll_unseen_for_recipient(&recipient, factory_session.as_deref(), limit)
+            .map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Failed to poll recipient inbox: {error}"),
+                )
+            })?;
+
+        if messages.is_empty() {
+            return Ok(Self::success(format!(
+                "No unread messages for {recipient}"
+            )));
+        }
+
+        let mut output = format!(
+            "Pulled {} unread message(s) for {recipient} (marked seen for inbox polling; daemon transport delivery is unchanged):\n\n",
+            messages.len()
+        );
+        for message in &messages {
+            output.push_str(&format!(
+                "**[{}] From: {}**\nSummary: {}\nCreated: {}\nMessage: {}\n\n",
+                message.id,
+                message.source,
+                message.summary.as_deref().unwrap_or("(no summary)"),
+                message.created_at.to_rfc3339(),
+                message.prompt,
+            ));
+        }
+
+        Ok(Self::success(output))
+    }
+
     pub(in crate::mcp::tools::service) async fn message_ack(
         &self,
         req: AgentRequest,

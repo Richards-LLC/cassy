@@ -3768,8 +3768,8 @@ This is the body content."#;
                     "MERGE REQUIRED",
                     "gh pr create",
                     "status=closed",
-                    "injected messages",
-                    "`queue_poll` does not expose them",
+                    "inbox_poll",
+                    "unread supervisor messages",
                     "git rev-parse factory/<name>",
                 ] {
                     assert!(
@@ -3791,6 +3791,12 @@ This is the body content."#;
                 .contains("mcp__cs__coordination action=message target=supervisor"),
             "codex recovery.md MERGE REQUIRED section must use the mcp__cs__ alias"
         );
+        assert!(
+            codex_recovery
+                .content
+                .contains("mcp__cs__coordination action=inbox_poll"),
+            "codex recovery.md inbox remediation must use the mcp__cs__ alias"
+        );
         // The SessionStart-injected body must surface the MERGE REQUIRED close
         // outcome and the literal-`supervisor` messaging target on both surfaces.
         for (label, guide) in [
@@ -3807,8 +3813,8 @@ This is the body content."#;
             for required in [
                 "MERGE REQUIRED",
                 "literal string `supervisor`",
-                "injected messages",
-                "`queue_poll` does not expose them",
+                "inbox_poll",
+                "unread supervisor messages",
                 "current factory-branch tip SHA",
             ] {
                 assert!(

@@ -80,4 +80,4 @@ Sending `message` alone without `summary` is rejected. `summary` is the one-line
 
 **`ready` and `available` are read-only backlog visibility — not self-dispatch.** They exist for supervisors planning work and for you to sanity-check task state after an explicit assignment. Seeing a task there is never grounds to `start` it yourself; see "Never self-dispatch" in the main skill.
 
-**Valid `cas__coordination` actions for workers**: `message`, `message_ack`, `message_status`, `whoami`, `heartbeat`, `queue_poll`, `queue_ack`. Factory/worktree/spawn actions are supervisor-only.
+**Valid `cas__coordination` actions for workers**: `message`, `message_ack`, `message_status`, `inbox_poll`, `whoami`, `heartbeat`, `queue_poll`, `queue_ack`. Factory/worktree/spawn actions are supervisor-only.

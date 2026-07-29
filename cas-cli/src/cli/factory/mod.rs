@@ -1371,18 +1371,9 @@ fn is_claude_installed() -> bool {
         .is_ok()
 }
 
-fn is_codex_installed() -> bool {
-    std::process::Command::new("codex")
-        .arg("--version")
-        .output()
-        .is_ok()
-}
-
-/// EPIC cas-8888 (cas-9a31, Phase 1): mirrors is_claude_installed/
-/// is_codex_installed. Grok isn't yet a stock/default CLI (no auto-upgrade
-/// or Claude<->Codex-style fallback swap targets it — see
-/// resolve_cli_choice below), but an explicit `--cli grok`/`--worker-cli
-/// grok` request needs a real, non-placeholder installed check.
+/// EPIC cas-8888 (cas-9a31, Phase 1): Grok isn't yet a stock/default CLI
+/// (no auto-upgrade or fallback targets it), but an explicit `--cli grok` /
+/// `--worker-cli grok` request needs a real installed check.
 fn is_grok_installed() -> bool {
     std::process::Command::new("grok")
         .arg("--version")
@@ -1407,65 +1398,24 @@ struct FactoryPreflight {
 fn resolve_cli_choice(
     role: &str,
     requested: &str,
-    allow_default_fallback: bool,
     claude_installed: bool,
-    codex_installed: bool,
     grok_installed: bool,
-    notices: &mut Vec<String>,
 ) -> Result<cas_mux::SupervisorCli> {
     let parsed = parse_supervisor_cli(requested)?;
 
-    // Check if the requested CLI binary is available on PATH
-    let is_installed = |cli: cas_mux::SupervisorCli| -> bool {
-        match cli {
-            cas_mux::SupervisorCli::Claude => claude_installed,
-            cas_mux::SupervisorCli::Codex => codex_installed,
-            cas_mux::SupervisorCli::Grok => grok_installed,
-        }
-    };
-
-    if is_installed(parsed) {
-        return Ok(parsed);
-    }
-
-    // Fallback logic (cas-8888 / cas-9a31, narrowed by cas-7199 / cas-a487):
-    //
-    // Codex -> Claude fallback stays here, unchanged: it's the SAME
-    // direction `cas_factory::apply_codex_fallback` applies later at the
-    // post-cascade checkpoint (cli/factory/mod.rs's execute_launch, below),
-    // just with a coarser binary-only check (no `~/.codex/auth.json`) —
-    // agreeing early doesn't create a conflict, it just means the finer
-    // check downstream rarely has anything left to do.
-    //
-    // Claude -> Codex fallback is DELIBERATELY NOT offered (removed by
-    // cas-7199): the cas-e9e9 decision recorded in cas-a487 is "no reverse
-    // fallback — claude is canonical, a missing claude is always a setup
-    // error." This function used to swap a missing `claude` to `codex`
-    // when `codex_installed` (binary-presence only, no auth check) — that
-    // directly contradicted cas-e9e9 and ran BEFORE `apply_codex_fallback`
-    // ever saw the request, so it was reachable via any top-level
-    // `--worker-cli`/`--supervisor-cli claude` default whose claude
-    // install was missing. `resolve_cli_choice_grok_missing_does_not_silently_fall_back`
-    // already pinned the equivalent behavior for Grok; there was no
-    // Claude-side test locking in the swap this removes.
-    //
-    // Grok stays a clean bail (unrelated to this conflict; EPIC cas-8888 /
-    // cas-9a31): it isn't a stock/default CLI yet, so an explicit `--cli
-    // grok` request that isn't installed just bails with a clear message
-    // rather than silently swapping to a harness the caller didn't ask for.
+    // cas-1c3a: Codex deliberately bypasses this binary-only preflight.
+    // `apply_codex_fallback` is the single post-cascade authority for Codex
+    // availability and requires BOTH a runnable binary and
+    // `~/.codex/auth.json`; it also owns codex -> claude and strict-mode
+    // policy. An early binary-only verdict here used to duplicate that policy
+    // with weaker evidence.
     match parsed {
-        cas_mux::SupervisorCli::Codex if allow_default_fallback && claude_installed => {
-            notices.push(format!(
-                "{role} defaulted from 'codex' to 'claude' because Codex CLI is not installed."
-            ));
-            Ok(cas_mux::SupervisorCli::Claude)
-        }
+        cas_mux::SupervisorCli::Codex => Ok(parsed),
+        cas_mux::SupervisorCli::Claude if claude_installed => Ok(parsed),
         cas_mux::SupervisorCli::Claude => bail!(
             "{role} 'claude' is not installed. Install with: npm install -g @anthropic-ai/claude-cli"
         ),
-        cas_mux::SupervisorCli::Codex => bail!(
-            "{role} 'codex' is not installed. Install from https://developers.openai.com/codex"
-        ),
+        cas_mux::SupervisorCli::Grok if grok_installed => Ok(parsed),
         cas_mux::SupervisorCli::Grok => bail!(
             "{role} 'grok' is not installed. Install the xAI Grok Build CLI: \
              curl -fsSL https://x.ai/cli/install.sh | bash"
@@ -1496,24 +1446,13 @@ fn preflight_factory_launch(
     };
 
     let claude_installed = is_claude_installed();
-    let codex_installed = is_codex_installed();
     let grok_installed = is_grok_installed();
 
-    // cas-7f2c: `allow_default_fallback` controls whether an absent CLI binary
-    // is silently swapped for the other one (e.g. claude→codex).  We allow
-    // fallback only when the provider was NOT explicitly chosen by the user
-    // (`supervisor_cli_explicit = false`).  Using the old string-equals-"claude"
-    // heuristic here was fine while the bug in execute was latent, but now that
-    // we trust `supervisor_cli_explicit` as the authoritative signal we should
-    // be consistent.
     let supervisor_cli = match resolve_cli_choice(
         "Supervisor CLI",
         &args.supervisor_cli,
-        !args.supervisor_cli_explicit,
         claude_installed,
-        codex_installed,
         grok_installed,
-        &mut notices,
     ) {
         Ok(cli) => Some(cli),
         Err(e) => {
@@ -1525,11 +1464,8 @@ fn preflight_factory_launch(
         match resolve_cli_choice(
             "Worker CLI",
             &args.worker_cli,
-            args.worker_cli == "claude",
             claude_installed,
-            codex_installed,
             grok_installed,
-            &mut notices,
         ) {
             Ok(cli) => Some(cli),
             Err(e) => {
@@ -1541,11 +1477,8 @@ fn preflight_factory_launch(
         resolve_cli_choice(
             "Worker CLI",
             &args.worker_cli,
-            args.worker_cli == "claude",
             claude_installed,
-            codex_installed,
             grok_installed,
-            &mut notices,
         )
         .ok()
         .or(supervisor_cli)
@@ -1719,33 +1652,13 @@ mod tests {
     // EPIC cas-8888 (cas-964a, Phase 3): resolve_cli_choice's Grok arm.
     #[test]
     fn resolve_cli_choice_grok_installed_passes_through() {
-        let mut notices = Vec::new();
-        let result = resolve_cli_choice(
-            "supervisor",
-            "grok",
-            true,  // allow_default_fallback
-            true,  // claude_installed
-            true,  // codex_installed
-            true,  // grok_installed
-            &mut notices,
-        );
+        let result = resolve_cli_choice("supervisor", "grok", true, true);
         assert_eq!(result.unwrap(), cas_mux::SupervisorCli::Grok);
-        assert!(notices.is_empty(), "no fallback notice expected: {notices:?}");
     }
 
     #[test]
     fn resolve_cli_choice_grok_missing_bails_with_installer_command() {
-        let mut notices = Vec::new();
-        let err = resolve_cli_choice(
-            "supervisor",
-            "grok",
-            true, // allow_default_fallback — irrelevant: Grok has no 3-way fallback dance
-            true, // claude_installed
-            true, // codex_installed
-            false, // grok_installed
-            &mut notices,
-        )
-        .unwrap_err();
+        let err = resolve_cli_choice("supervisor", "grok", true, false).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("'grok' is not installed"), "got: {msg}");
         assert!(
@@ -1757,62 +1670,34 @@ mod tests {
     #[test]
     fn resolve_cli_choice_grok_missing_does_not_silently_fall_back() {
         // An explicit `--cli grok` request that's not installed must bail
-        // rather than silently swap to whatever else is on PATH — even with
-        // allow_default_fallback=true and both Claude and Codex installed.
-        let mut notices = Vec::new();
-        let result = resolve_cli_choice(
-            "supervisor", "grok", true, true, true, false, &mut notices,
-        );
+        // rather than silently swap to Claude.
+        let result = resolve_cli_choice("supervisor", "grok", true, false);
         assert!(result.is_err());
-        assert!(notices.is_empty(), "grok must not push a fallback notice: {notices:?}");
     }
 
     /// cas-7199 / cas-a487 (cas-e9e9 decision): missing `claude` must ALWAYS
-    /// bail, never silently swap to `codex` — even with
-    /// allow_default_fallback=true and codex installed. This used to swap;
-    /// removed as part of resolving the conflict between this preflight and
-    /// `cas_factory::apply_codex_fallback`'s "no reverse fallback" policy —
-    /// see the doc comment on `resolve_cli_choice`'s match block.
+    /// bail, never silently swap to `codex`. `apply_codex_fallback` is
+    /// deliberately one-way and never touches Claude specs.
     #[test]
     fn resolve_cli_choice_claude_missing_never_falls_back_to_codex() {
-        let mut notices = Vec::new();
-        let err = resolve_cli_choice(
-            "supervisor",
-            "claude",
-            true, // allow_default_fallback
-            false, // claude_installed
-            true,  // codex_installed
-            true,  // grok_installed
-            &mut notices,
-        )
-        .unwrap_err();
+        let err = resolve_cli_choice("supervisor", "claude", false, true).unwrap_err();
         assert!(
             err.to_string().contains("'claude' is not installed"),
             "got: {err}"
         );
-        assert!(
-            notices.is_empty(),
-            "claude must not silently swap to codex: {notices:?}"
-        );
     }
 
-    /// Codex -> Claude fallback is unchanged (same direction
-    /// `apply_codex_fallback` applies later, just a coarser check).
+    /// cas-1c3a: preflight must not classify Codex from binary presence or
+    /// rewrite it. The post-cascade resolver owns the binary+auth probe,
+    /// codex -> claude fallback, and strict-mode error.
     #[test]
-    fn resolve_cli_choice_codex_missing_still_falls_back_to_claude() {
-        let mut notices = Vec::new();
-        let result = resolve_cli_choice(
-            "supervisor",
-            "codex",
-            true, // allow_default_fallback
-            true, // claude_installed
-            false, // codex_installed
-            true,  // grok_installed
-            &mut notices,
+    fn resolve_cli_choice_codex_defers_to_post_cascade_authority() {
+        let result = resolve_cli_choice("supervisor", "codex", false, false);
+        assert_eq!(
+            result.unwrap(),
+            cas_mux::SupervisorCli::Codex,
+            "preflight must preserve Codex for apply_codex_fallback to probe"
         );
-        assert_eq!(result.unwrap(), cas_mux::SupervisorCli::Claude);
-        assert_eq!(notices.len(), 1);
-        assert!(notices[0].contains("codex' to 'claude'"), "{notices:?}");
     }
 
     #[test]

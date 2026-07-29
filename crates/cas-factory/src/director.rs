@@ -116,11 +116,13 @@ pub struct AgentSummary {
     pub latest_activity: Option<(String, chrono::DateTime<chrono::Utc>)>,
     /// Last heartbeat timestamp
     pub last_heartbeat: Option<chrono::DateTime<chrono::Utc>>,
-    /// Number of pending (unprocessed) prompt-queue messages addressed to
-    /// this agent. Used by the idle detector to suppress `WorkerIdle` when
-    /// the worker has unread messages (spawn race mitigation, cas-afb7).
+    /// Number of currently delivery-eligible prompt-queue messages addressed
+    /// to this agent. Used by the idle detector to suppress `WorkerIdle` when
+    /// the worker has unread work it can poll now (spawn race mitigation,
+    /// cas-afb7). Rows in a future retry window are excluded.
     pub pending_messages: u32,
-    /// Pending subset authored by a live supervisor in this factory session.
+    /// Delivery-eligible subset authored by a live supervisor in this factory
+    /// session.
     pub pending_supervisor_messages: u32,
     /// Most recent prompt-queue message from this factory session's
     /// supervisor(s), including already-processed rows.
@@ -400,10 +402,13 @@ impl DirectorData {
             .filter(|a| a.visible_to_factory_session(factory_session.as_deref()))
             .collect();
 
-        // Compute per-agent pending message counts (best-effort, non-fatal).
+        // Compute per-agent delivery-eligible message counts (best-effort,
+        // non-fatal).
         // These are used by the idle detector to suppress `WorkerIdle` when a
         // freshly spawned worker has unread messages waiting in the queue before
-        // it has had a chance to poll them (spawn race fix, cas-afb7).
+        // it has had a chance to poll them (spawn race fix, cas-afb7). A row in
+        // a future retry window does not suppress idle: repeated delivery
+        // failures are themselves evidence that the worker needs attention.
         let agent_names_for_pq: Vec<&str> = agents_list.iter().map(|a| a.name.as_str()).collect();
         let supervisor_sources: Vec<&str> = agents_list
             .iter()
@@ -412,13 +417,13 @@ impl DirectorData {
             .collect();
         let pending_msgs: Vec<QueuedPrompt> =
             if let Some(pq) = stores.and_then(|s| s.prompt_queue_store.as_ref()) {
-                pq.outstanding_for_targets(&agent_names_for_pq, factory_session.as_deref())
+                pq.peek_for_targets(&agent_names_for_pq, factory_session.as_deref(), 500)
                     .unwrap_or_default()
             } else {
                 SqlitePromptQueueStore::open(cas_dir)
                     .ok()
                     .and_then(|pq| {
-                        pq.outstanding_for_targets(&agent_names_for_pq, factory_session.as_deref())
+                        pq.peek_for_targets(&agent_names_for_pq, factory_session.as_deref(), 500)
                             .ok()
                     })
                     .unwrap_or_default()
@@ -1007,7 +1012,7 @@ mod tests {
     }
 
     #[test]
-    fn backed_off_prompt_still_suppresses_worker_idle() {
+    fn backed_off_prompt_is_not_counted_as_immediately_deliverable() {
         let temp_dir = tempfile::tempdir().unwrap();
         let stores = DirectorStores::open(temp_dir.path()).unwrap();
         stores.task_store.init().unwrap();
@@ -1032,13 +1037,15 @@ mod tests {
         let prompt_id = prompt_queue
             .enqueue("supervisor", "backed-off-worker", "assigned work")
             .unwrap();
-        prompt_queue
-            .record_retry(
-                prompt_id,
-                PendingReason::TargetUnavailable,
-                Some("pane unavailable"),
-            )
-            .unwrap();
+        for _ in 0..6 {
+            prompt_queue
+                .record_retry(
+                    prompt_id,
+                    PendingReason::TargetUnavailable,
+                    Some("pane unavailable"),
+                )
+                .unwrap();
+        }
         assert!(
             prompt_queue
                 .peek_for_targets(&["backed-off-worker"], None, 10)
@@ -1056,12 +1063,12 @@ mod tests {
             .expect("worker is present in director data");
 
         assert_eq!(
-            worker_summary.pending_messages, 1,
-            "the idle detector gates WorkerIdle on this outstanding count"
+            worker_summary.pending_messages, 0,
+            "the idle detector must not treat a 5s retry as immediately deliverable"
         );
         assert_eq!(
-            worker_summary.pending_supervisor_messages, 1,
-            "a backed-off supervisor message must still mark the idle transition handled"
+            worker_summary.pending_supervisor_messages, 0,
+            "a backed-off supervisor row must not permanently latch the idle transition"
         );
     }
 }

@@ -605,12 +605,8 @@ pub struct TelemetryConfig {
 /// who want a different worker model add an explicit `[llm.worker] model
 /// = "..."` to their `.cas/config.toml`.
 ///
-/// Convention: no date suffix (mirrors `claude-opus-4-7` already used at
-/// `cas-cli/src/ui/factory/daemon/runtime/teams.rs:402,526` for the
-/// supervisor default).
-///
 /// See cas-05e3, cas-fbac.
-pub const STOCK_WORKER_MODEL: &str = "gpt-5.5";
+pub const STOCK_WORKER_MODEL: &str = "gpt-5.6-sol";
 
 /// Stock worker reasoning effort used as the final fallback for
 /// `[llm.worker.reasoning_effort]`. Same chain rules as
@@ -622,12 +618,12 @@ pub const STOCK_WORKER_REASONING_EFFORT: &str = "medium";
 /// Same chain rules as [`STOCK_WORKER_MODEL`]: applied only when both the
 /// role override and the top-level `[llm] harness` are unset.
 ///
-/// Added in cas-fbac alongside the GPT-5.5 model flip. The model constant
+/// Added in cas-fbac alongside the Codex stock-model flip. The model constant
 /// alone cannot flip the harness — [`harness_for_role`][LlmConfig::harness_for_role]
 /// used to resolve unconditionally to `"claude"` for every role (the
 /// top-level `harness` field was a plain `String`, never `None`), so a
 /// worker with no explicit config would have come up as the **Claude**
-/// harness attempting to run the Codex model string `"gpt-5.5"` — broken.
+/// harness attempting to run a Codex model string — broken.
 /// This constant plus the `Option<String>` top-level `harness` field give
 /// the worker role its own stock floor, exactly mirroring the model/effort
 /// treatment, while the supervisor and any other role keep resolving to the
@@ -1383,10 +1379,9 @@ harness = "codex"
             Some(STOCK_WORKER_REASONING_EFFORT),
             "empty config must resolve worker reasoning_effort to the stock default"
         );
-        // Sanity-check the constant values match the spec (cas-fbac: Codex
-        // GPT-5.5 @ medium, replacing the v2.26.0 Claude Sonnet 5 @ xhigh default).
+        // Sanity-check the constant values match the shipped routing policy.
         assert_eq!(STOCK_WORKER_HARNESS, "codex");
-        assert_eq!(STOCK_WORKER_MODEL, "gpt-5.5");
+        assert_eq!(STOCK_WORKER_MODEL, "gpt-5.6-sol");
         assert_eq!(STOCK_WORKER_REASONING_EFFORT, "medium");
     }
 

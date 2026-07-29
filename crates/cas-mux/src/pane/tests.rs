@@ -440,6 +440,55 @@ mod cases {
         assert!(pane.is_turn_in_flight(), "Enter still starts a turn");
     }
 
+    /// cas-0b64: CSI/SS3 cursor navigation is control input, not draft text.
+    /// A navigation key must also preserve an existing draft, while standalone
+    /// Esc retains its explicit-clear behavior.
+    #[test]
+    fn composer_navigation_keys_do_not_create_a_draft_cas_0b64() {
+        use crate::pane::UserInputKind;
+
+        let pane = Pane::director("composer-navigation", 10, 40).expect("create pane");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        rt.block_on(async {
+            for navigation in [
+                b"\x1b[A".as_slice(),
+                b"\x1b[B".as_slice(),
+                b"\x1b[C".as_slice(),
+                b"\x1b[D".as_slice(),
+                b"\x1bOA".as_slice(),
+            ] {
+                let _ = pane
+                    .deliver_user_input(navigation, UserInputKind::KeyStream)
+                    .await;
+                assert!(
+                    !pane.is_composer_dirty(),
+                    "navigation sequence {navigation:?} must not create a draft"
+                );
+            }
+
+            let _ = pane
+                .deliver_user_input(b"draft", UserInputKind::KeyStream)
+                .await;
+            let _ = pane
+                .deliver_user_input(b"\x1b[A", UserInputKind::KeyStream)
+                .await;
+        });
+        assert!(
+            pane.is_composer_dirty(),
+            "navigation must not clear an existing draft"
+        );
+        rt.block_on(async {
+            let _ = pane
+                .deliver_user_input(b"\x1b", UserInputKind::KeyStream)
+                .await;
+        });
+        assert!(!pane.is_composer_dirty(), "standalone Esc still clears");
+    }
+
     /// Regression (cas-ebc1 final review): the OSC 8 feed-time gate must detect
     /// a hyperlink introducer split across 3+ tiny feed chunks. The old carry
     /// logic kept the tail of the NEW chunk only, dropping earlier carried

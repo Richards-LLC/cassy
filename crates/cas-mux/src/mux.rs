@@ -9,17 +9,23 @@ use crate::pty::{PtyConfig, PtyEvent, TeamsSpawnConfig};
 use crate::spec::WorkerSpec;
 use cas_factory_protocol::ServerMessage;
 use indexmap::IndexMap;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 
 const COMPOSER_DEFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-#[derive(Debug)]
-struct DeferredInjection {
-    pane_id: PaneId,
-    prompt: String,
-    deferred_at: std::time::Instant,
+/// Result of a non-urgent PTY injection attempt.
+///
+/// `Delivered` means the payload was written to the pane. A dirty-composer
+/// deferral is deliberately distinct so durable queue owners do not advance
+/// their transport-delivery state before any write occurred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InjectOutcome {
+    /// The payload was written to the pane.
+    Delivered,
+    /// No write occurred because the attached operator has an active draft.
+    DeferredComposerDirty,
 }
 
 /// Configuration for the multiplexer
@@ -143,11 +149,6 @@ pub struct Mux {
     supervisor_cli: SupervisorCli,
     /// Factory session propagated into dynamically spawned agents.
     factory_session: Option<String>,
-    /// Non-urgent injections waiting for an attached operator's composer to
-    /// become clean (cas-1a4d). Interior mutability lets the existing
-    /// recipient-routing helpers retain their shared Mux reference; the daemon
-    /// flushes this queue between client-input and prompt-queue polls.
-    deferred_injections: std::sync::Mutex<VecDeque<DeferredInjection>>,
 }
 
 impl Mux {
@@ -165,7 +166,6 @@ impl Mux {
             worker_specs: HashMap::new(),
             supervisor_cli: SupervisorCli::Claude,
             factory_session: None,
-            deferred_injections: std::sync::Mutex::new(VecDeque::new()),
         }
     }
 
@@ -839,119 +839,51 @@ impl Mux {
     }
 
     /// Inject a prompt into a specific pane
-    pub async fn inject(&self, pane_id: &str, prompt: &str) -> Result<()> {
+    pub async fn inject(&self, pane_id: &str, prompt: &str) -> Result<InjectOutcome> {
+        self.inject_with_timeout(pane_id, prompt, COMPOSER_DEFER_TIMEOUT)
+            .await
+    }
+
+    async fn inject_with_timeout(
+        &self,
+        pane_id: &str,
+        prompt: &str,
+        timeout: std::time::Duration,
+    ) -> Result<InjectOutcome> {
         let pane = self
             .panes
             .get(pane_id)
             .ok_or_else(|| Error::pane_not_found(pane_id))?;
         if pane.is_composer_dirty() {
-            let deferred = DeferredInjection {
-                pane_id: pane_id.to_string(),
-                prompt: prompt.to_string(),
-                deferred_at: std::time::Instant::now(),
-            };
-            match self.deferred_injections.lock() {
-                Ok(mut pending) => pending.push_back(deferred),
-                Err(poisoned) => poisoned.into_inner().push_back(deferred),
-            }
-            tracing::info!(
-                target: "cas::coordination",
-                stage = "composer_inject_deferred",
-                target_agent = %pane_id,
-                "non-urgent PTY inject deferred while attached operator composer is dirty"
-            );
-            return Ok(());
-        }
-        pane.inject_prompt(prompt).await
-    }
-
-    /// Retry non-urgent injections retained by [`Mux::inject`] after an
-    /// attached operator typed into the target pane.
-    ///
-    /// Called once per daemon loop after every attached-client input surface
-    /// has been processed. This is intentionally not a sleep loop inside
-    /// `inject`: blocking there would prevent the same daemon loop from
-    /// observing the Enter/Esc/Ctrl+C/Ctrl+U that makes the composer clean.
-    pub async fn flush_deferred_injections(&self) {
-        self.flush_deferred_injections_with_timeout(COMPOSER_DEFER_TIMEOUT)
-            .await;
-    }
-
-    async fn flush_deferred_injections_with_timeout(&self, timeout: std::time::Duration) {
-        let mut pending = match self.deferred_injections.lock() {
-            Ok(mut queue) => std::mem::take(&mut *queue),
-            Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
-        };
-        let mut retained = VecDeque::new();
-
-        while let Some(injection) = pending.pop_front() {
-            let Some(pane) = self.panes.get(&injection.pane_id) else {
-                // Preserve delivery across a transient pane removal/respawn.
-                retained.push_back(injection);
-                continue;
-            };
-            let elapsed = injection.deferred_at.elapsed();
-            let timed_out = elapsed >= timeout;
-            if pane.is_composer_dirty() && !timed_out {
-                retained.push_back(injection);
-                continue;
-            }
-            if timed_out && pane.is_composer_dirty() {
-                tracing::warn!(
+            let dirty_for = pane.composer_dirty_elapsed().unwrap_or_default();
+            if dirty_for < timeout {
+                tracing::info!(
                     target: "cas::coordination",
-                    stage = "composer_inject_timeout",
-                    target_agent = %injection.pane_id,
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    "operator composer stayed dirty through bounded deferral; delivering non-urgent inject anyway"
+                    stage = "composer_inject_deferred",
+                    target_agent = %pane_id,
+                    dirty_ms = dirty_for.as_millis() as u64,
+                    "non-urgent PTY inject deferred to its durable owner while attached operator composer is dirty"
                 );
+                return Ok(InjectOutcome::DeferredComposerDirty);
             }
 
-            match pane.inject_prompt(&injection.prompt).await {
-                Ok(()) => {
-                    tracing::info!(
-                        target: "cas::coordination",
-                        stage = "composer_inject_delivered",
-                        target_agent = %injection.pane_id,
-                        elapsed_ms = elapsed.as_millis() as u64,
-                        timed_out,
-                        "delivered retained non-urgent PTY inject"
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        target: "cas::coordination",
-                        stage = "composer_inject_retry",
-                        target_agent = %injection.pane_id,
-                        error = %error,
-                        "retained non-urgent PTY inject failed; keeping it for retry"
-                    );
-                    retained.push_back(injection);
-                }
-            }
+            tracing::warn!(
+                target: "cas::coordination",
+                stage = "composer_inject_timeout",
+                target_agent = %pane_id,
+                dirty_ms = dirty_for.as_millis() as u64,
+                "operator composer stayed dirty through bounded deferral; attempting non-urgent inject"
+            );
         }
-
-        // Preserve items enqueued while async writes above were in flight,
-        // behind older retained items.
-        match self.deferred_injections.lock() {
-            Ok(mut queue) => {
-                retained.append(&mut *queue);
-                *queue = retained;
-            }
-            Err(poisoned) => {
-                let mut queue = poisoned.into_inner();
-                retained.append(&mut *queue);
-                *queue = retained;
-            }
-        }
+        pane.inject_prompt(prompt).await?;
+        Ok(InjectOutcome::Delivered)
     }
 
-    #[cfg(test)]
-    fn pending_injection_count(&self) -> usize {
-        match self.deferred_injections.lock() {
-            Ok(queue) => queue.len(),
-            Err(poisoned) => poisoned.into_inner().len(),
-        }
-    }
+    /// Compatibility no-op retained for callers from cas-1a4d.
+    ///
+    /// Deferred payloads now stay with their durable queue owner; the mux
+    /// intentionally has nothing to flush or carry across pane generations.
+    pub async fn flush_deferred_injections(&self) {}
 
     /// Total bytes of PTY output observed for a pane by name.
     ///

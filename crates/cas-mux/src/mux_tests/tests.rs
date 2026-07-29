@@ -892,11 +892,6 @@ async fn interrupt_and_inject_breaks_then_injects_by_name() {
         )
         .await;
     assert!(res.is_ok(), "urgent redirect to a live pane must succeed");
-    assert_eq!(
-        mux.pending_injection_count(),
-        0,
-        "urgent redirect must never enter the non-urgent deferral queue"
-    );
     assert!(
         !mux.panes
             .get("w1")
@@ -923,10 +918,11 @@ async fn nonurgent_inject_defers_until_composer_clears_cas_1a4d() {
     )
     .await
     .expect("type draft");
-    mux.inject("operator-pane", "non-urgent report")
+    let outcome = mux
+        .inject("operator-pane", "non-urgent report")
         .await
-        .expect("dirty inject should be retained for retry");
-    assert_eq!(mux.pending_injection_count(), 1);
+        .expect("dirty inject should be deferred");
+    assert_eq!(outcome, InjectOutcome::DeferredComposerDirty);
     assert!(
         !mux.panes
             .get("operator-pane")
@@ -938,10 +934,12 @@ async fn nonurgent_inject_defers_until_composer_clears_cas_1a4d() {
     mux.send_input_to("operator-pane", b"\x1b")
         .await
         .expect("standalone Esc clears draft");
-    mux.flush_deferred_injections_with_timeout(std::time::Duration::from_secs(30))
-        .await;
+    let outcome = mux.inject("operator-pane", "non-urgent report").await;
 
-    assert_eq!(mux.pending_injection_count(), 0);
+    assert_eq!(
+        outcome.expect("durable queue retry after clear"),
+        InjectOutcome::Delivered
+    );
     assert!(
         mux.panes
             .get("operator-pane")
@@ -962,16 +960,15 @@ async fn nonurgent_inject_delivers_on_bounded_dirty_timeout_cas_1a4d() {
     mux.deliver_user_input_to("timeout-pane", b"draft", UserInputKind::KeyStream)
         .await
         .expect("type draft");
-    mux.inject("timeout-pane", "eventual report")
+    let outcome = mux
+        .inject_with_timeout("timeout-pane", "eventual report", std::time::Duration::ZERO)
         .await
-        .expect("dirty inject should be retained");
-    mux.flush_deferred_injections_with_timeout(std::time::Duration::ZERO)
-        .await;
+        .expect("bounded fallback performs a real write");
 
     assert_eq!(
-        mux.pending_injection_count(),
-        0,
-        "bounded fallback must not lose or permanently retain the report"
+        outcome,
+        InjectOutcome::Delivered,
+        "bounded fallback reports delivery only after the real write"
     );
     assert!(
         mux.panes
@@ -983,7 +980,7 @@ async fn nonurgent_inject_delivers_on_bounded_dirty_timeout_cas_1a4d() {
 }
 
 #[tokio::test]
-async fn failed_deferred_delivery_stays_retained_cas_1a4d() {
+async fn expired_dirty_inject_surfaces_write_failure_cas_0b64() {
     let mut mux = Mux::new(24, 80);
     mux.add_pane(Pane::director("no-backend", 24, 80).expect("director pane"));
 
@@ -995,16 +992,17 @@ async fn failed_deferred_delivery_stays_retained_cas_1a4d() {
             .await
             .is_err()
     );
-    mux.inject("no-backend", "must not be lost")
-        .await
-        .expect("dirty inject is retained before any write");
-    mux.flush_deferred_injections_with_timeout(std::time::Duration::ZERO)
-        .await;
-
     assert_eq!(
-        mux.pending_injection_count(),
-        1,
-        "a failed fallback write remains queued for a later retry"
+        mux.inject("no-backend", "must stay durable")
+            .await
+            .expect("dirty target returns a deferred outcome"),
+        InjectOutcome::DeferredComposerDirty
+    );
+    assert!(
+        mux.inject_with_timeout("no-backend", "must stay durable", std::time::Duration::ZERO)
+            .await
+            .is_err(),
+        "an expired deferral must surface the failed real write so the durable queue retries"
     );
 }
 
@@ -1016,17 +1014,52 @@ async fn pane_without_client_input_injects_immediately_cas_1a4d() {
     };
     mux.add_pane(pane);
 
-    mux.inject("worker-pane", "ordinary worker message")
+    let outcome = mux
+        .inject("worker-pane", "ordinary worker message")
         .await
         .expect("clean worker inject");
 
-    assert_eq!(mux.pending_injection_count(), 0);
+    assert_eq!(outcome, InjectOutcome::Delivered);
     assert!(
         mux.panes
             .get("worker-pane")
             .expect("pane exists")
             .is_turn_in_flight(),
         "a pane with no attached-client input keeps immediate delivery"
+    );
+}
+
+#[tokio::test]
+async fn deferred_payload_is_not_retained_across_teardown_or_respawn_cas_0b64() {
+    let mut mux = Mux::new(24, 80);
+    let Some(old_pane) = cat_pane("reused-name") else {
+        return;
+    };
+    mux.add_pane(old_pane);
+    mux.deliver_user_input_to("reused-name", b"operator draft", UserInputKind::KeyStream)
+        .await
+        .expect("mark old pane dirty");
+
+    assert_eq!(
+        mux.inject("reused-name", "old process payload")
+            .await
+            .expect("defer to durable queue"),
+        InjectOutcome::DeferredComposerDirty
+    );
+    mux.remove_pane("reused-name");
+
+    let Some(new_pane) = cat_pane("reused-name") else {
+        return;
+    };
+    mux.add_pane(new_pane);
+    mux.flush_deferred_injections().await;
+
+    assert!(
+        !mux.panes
+            .get("reused-name")
+            .expect("respawned pane exists")
+            .is_turn_in_flight(),
+        "old deferred payload must never be flushed into a same-name respawn"
     );
 }
 

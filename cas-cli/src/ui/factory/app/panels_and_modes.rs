@@ -908,17 +908,34 @@ impl FactoryApp {
         };
         let message_len = text.chars().count().to_string();
 
-        // Inject the prompt
-        if let Err(e) = self.mux.inject(&target, &text).await {
-            crate::telemetry::track(
-                "factory_inject_result",
-                vec![
-                    ("success", "false"),
-                    ("target_kind", target_kind),
-                    ("message_len", &message_len),
-                ],
-            );
-            return Err(e.into());
+        // Inject the prompt. Keep the buffer intact when a dirty composer
+        // defers the write so the operator can clear the target and retry.
+        match self.mux.inject(&target, &text).await {
+            Ok(cas_mux::InjectOutcome::Delivered) => {}
+            Ok(cas_mux::InjectOutcome::DeferredComposerDirty) => {
+                crate::telemetry::track(
+                    "factory_inject_result",
+                    vec![
+                        ("success", "false"),
+                        ("target_kind", target_kind),
+                        ("message_len", &message_len),
+                    ],
+                );
+                return Err(anyhow::anyhow!(
+                    "target composer has unsubmitted input; clear it and retry"
+                ));
+            }
+            Err(e) => {
+                crate::telemetry::track(
+                    "factory_inject_result",
+                    vec![
+                        ("success", "false"),
+                        ("target_kind", target_kind),
+                        ("message_len", &message_len),
+                    ],
+                );
+                return Err(e.into());
+            }
         }
 
         self.cancel_inject_mode();

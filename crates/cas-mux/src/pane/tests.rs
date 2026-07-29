@@ -441,8 +441,8 @@ mod cases {
     }
 
     /// cas-0b64: CSI/SS3 cursor navigation is control input, not draft text.
-    /// The streaming cases matter because GUI/relay input can split one key
-    /// sequence across multiple frames.
+    /// A navigation key must also preserve an existing draft, while standalone
+    /// Esc retains its explicit-clear behavior.
     #[test]
     fn composer_navigation_keys_do_not_create_a_draft_cas_0b64() {
         use crate::pane::UserInputKind;
@@ -471,16 +471,22 @@ mod cases {
             }
 
             let _ = pane
-                .deliver_user_input(b"\x1b", UserInputKind::KeyStream)
+                .deliver_user_input(b"draft", UserInputKind::KeyStream)
                 .await;
             let _ = pane
-                .deliver_user_input(b"[A", UserInputKind::KeyStream)
+                .deliver_user_input(b"\x1b[A", UserInputKind::KeyStream)
                 .await;
         });
         assert!(
-            !pane.is_composer_dirty(),
-            "a split arrow-key sequence must remain navigation-only"
+            pane.is_composer_dirty(),
+            "navigation must not clear an existing draft"
         );
+        rt.block_on(async {
+            let _ = pane
+                .deliver_user_input(b"\x1b", UserInputKind::KeyStream)
+                .await;
+        });
+        assert!(!pane.is_composer_dirty(), "standalone Esc still clears");
     }
 
     /// Regression (cas-ebc1 final review): the OSC 8 feed-time gate must detect

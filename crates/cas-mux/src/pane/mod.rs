@@ -73,6 +73,14 @@ pub enum PaneBackend {
     Pty(Pty),
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum ComposerEscapeState {
+    #[default]
+    Normal,
+    Escape,
+    ControlSequence,
+}
+
 /// A pane in the multiplexer
 pub struct Pane {
     /// Unique identifier (usually agent name)
@@ -170,6 +178,9 @@ pub struct Pane {
     /// clear/cancel. Panes that never receive attached-client input remain
     /// clean, preserving immediate worker-to-worker injection.
     composer_dirty: std::sync::atomic::AtomicBool,
+    /// When the current dirty-composer interval began. This lets the mux
+    /// enforce bounded deferral without retaining the payload itself.
+    composer_dirty_since: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 impl Pane {
@@ -221,6 +232,7 @@ impl Pane {
                 crate::input_stream::BracketedPasteTracker::new(),
             ),
             composer_dirty: std::sync::atomic::AtomicBool::new(false),
+            composer_dirty_since: std::sync::Mutex::new(None),
         })
     }
 
@@ -1303,13 +1315,34 @@ impl Pane {
     }
 
     fn mark_composer_dirty(&self) {
-        self.composer_dirty
-            .store(true, std::sync::atomic::Ordering::Release);
+        if !self
+            .composer_dirty
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            match self.composer_dirty_since.lock() {
+                Ok(mut since) => *since = Some(std::time::Instant::now()),
+                Err(poisoned) => {
+                    *poisoned.into_inner() = Some(std::time::Instant::now());
+                }
+            }
+        }
     }
 
     fn clear_composer_dirty(&self) {
         self.composer_dirty
             .store(false, std::sync::atomic::Ordering::Release);
+        match self.composer_dirty_since.lock() {
+            Ok(mut since) => *since = None,
+            Err(poisoned) => *poisoned.into_inner() = None,
+        }
+    }
+
+    pub(crate) fn composer_dirty_elapsed(&self) -> Option<std::time::Duration> {
+        let since = match self.composer_dirty_since.lock() {
+            Ok(since) => *since,
+            Err(poisoned) => *poisoned.into_inner(),
+        };
+        since.map(|started| started.elapsed())
     }
 
     /// Track the final composer state after one attached-client keystream
@@ -1322,20 +1355,53 @@ impl Pane {
             Ok(tracker) => tracker,
             Err(poisoned) => poisoned.into_inner(),
         };
+        let mut escape_state = ComposerEscapeState::Normal;
 
         for &byte in data {
             let class = tracker.feed_byte(byte);
             if class == crate::input_stream::StreamByteClass::Paste {
                 dirty = true;
+                escape_state = ComposerEscapeState::Normal;
                 continue;
             }
+
+            match escape_state {
+                ComposerEscapeState::Escape => match byte {
+                    b'[' | b'O' => {
+                        escape_state = ComposerEscapeState::ControlSequence;
+                        continue;
+                    }
+                    0x1b => {
+                        dirty = false;
+                        continue;
+                    }
+                    _ => {
+                        // The preceding Esc was standalone. Apply its clear
+                        // before classifying the current non-sequence byte.
+                        dirty = false;
+                        escape_state = ComposerEscapeState::Normal;
+                    }
+                },
+                ComposerEscapeState::ControlSequence => {
+                    if (0x40..=0x7e).contains(&byte) {
+                        escape_state = ComposerEscapeState::Normal;
+                    }
+                    continue;
+                }
+                ComposerEscapeState::Normal => {}
+            }
+
             match byte {
                 b'\r' | b'\n' => {
                     dirty = false;
                     marks_submit = true;
                 }
-                // Standalone Esc and the two common line-clear/cancel controls.
-                0x1b | 0x03 | 0x15 => dirty = false,
+                // Defer deciding whether Esc is standalone until the next
+                // byte so a complete CSI/SS3 sequence does not clear or dirty
+                // the composer.
+                0x1b => escape_state = ComposerEscapeState::Escape,
+                // The two common line-clear/cancel controls.
+                0x03 | 0x15 => dirty = false,
                 // Printable input plus editing keys that can create/modify an
                 // unsubmitted draft. Backspace stays conservatively sticky:
                 // without the inner composer's buffer we cannot know whether
@@ -1344,8 +1410,14 @@ impl Pane {
                 _ => {}
             }
         }
-        self.composer_dirty
-            .store(dirty, std::sync::atomic::Ordering::Release);
+        if escape_state == ComposerEscapeState::Escape {
+            dirty = false;
+        }
+        if dirty {
+            self.mark_composer_dirty();
+        } else {
+            self.clear_composer_dirty();
+        }
         marks_submit
     }
 

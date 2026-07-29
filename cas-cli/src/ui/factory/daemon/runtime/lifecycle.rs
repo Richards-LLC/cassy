@@ -520,7 +520,7 @@ impl FactoryDaemon {
                         let inject_ms = inject_started.elapsed().as_secs_f64() * 1000.0;
                         let total_ms = refresh_started.elapsed().as_secs_f64() * 1000.0;
                         match inject_result {
-                            Ok(()) => tracing::info!(
+                            Ok(cas_mux::InjectOutcome::Delivered) => tracing::info!(
                                 target: "cas::coordination",
                                 stage = "delivered",
                                 channel = "director_events",
@@ -528,6 +528,14 @@ impl FactoryDaemon {
                                 inject_ms,
                                 refresh_to_deliver_ms = total_ms,
                                 "director prompt delivered to inbox"
+                            ),
+                            Ok(cas_mux::InjectOutcome::DeferredComposerDirty) => tracing::info!(
+                                target: "cas::coordination",
+                                stage = "composer_inject_deferred",
+                                channel = "director_events",
+                                target_agent = %prompt.target,
+                                inject_ms,
+                                "director prompt deferred before any PTY write because the operator composer is dirty"
                             ),
                             Err(e) => tracing::warn!(
                                 target: "cas::coordination",

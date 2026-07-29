@@ -3,6 +3,10 @@ use crate::ui::factory::director::AgentSummary;
 
 const PROMPT_POISON_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
+fn delivery_was_written(outcome: cas_mux::InjectOutcome) -> bool {
+    outcome == cas_mux::InjectOutcome::Delivered
+}
+
 fn prompt_poison_sweep_due(last: Option<Instant>, now: Instant) -> bool {
     last.is_some_and(|last| now.saturating_duration_since(last) >= PROMPT_POISON_SWEEP_INTERVAL)
 }
@@ -683,7 +687,7 @@ impl FactoryDaemon {
                         fail_notes.push(format!("{name}: pane not ready"));
                         continue;
                     }
-                    let inject_result: anyhow::Result<()> = if queued.urgent {
+                    let inject_result: anyhow::Result<cas_mux::InjectOutcome> = if queued.urgent {
                         // cas-ab80: urgent Codex recipients still need the shared
                         // `Message from <sender>:` framing (same contract as
                         // normal `deliver_to_worker`); Claude/Grok stay bare.
@@ -698,6 +702,7 @@ impl FactoryDaemon {
                             .mux
                             .interrupt_and_inject(name, &payload, settle)
                             .await
+                            .map(|()| cas_mux::InjectOutcome::Delivered)
                             .map_err(Into::into)
                     } else {
                         // Recipient-aware routing (cas-b68a): each worker may run a
@@ -716,7 +721,7 @@ impl FactoryDaemon {
                         .await
                     };
                     match inject_result {
-                        Ok(_) => {
+                        Ok(outcome) if delivery_was_written(outcome) => {
                             succeeded += 1;
                             tracing::info!("Injected to worker '{}'", name);
                             if let Some(ref store) = event_store {
@@ -730,6 +735,33 @@ impl FactoryDaemon {
                                     None,
                                 );
                             }
+                        }
+                        Ok(cas_mux::InjectOutcome::DeferredComposerDirty) => {
+                            failed += 1;
+                            fail_notes.push(format!("{name}: operator composer is dirty"));
+                            tracing::info!(
+                                target: "cas::coordination",
+                                stage = "composer_inject_deferred",
+                                message_id = queued.id,
+                                target_agent = %name,
+                                "broadcast recipient deferred before any PTY write"
+                            );
+                            if let Some(ref store) = event_store {
+                                record_injection(
+                                    store,
+                                    queued.id,
+                                    &queued.source,
+                                    &queued.target,
+                                    name,
+                                    "deferred",
+                                    Some("operator composer is dirty".to_string()),
+                                );
+                            }
+                        }
+                        Ok(outcome) => {
+                            unreachable!(
+                                "delivery_was_written disagreed with inject outcome {outcome:?}"
+                            );
                         }
                         Err(e) => {
                             failed += 1;
@@ -792,7 +824,7 @@ impl FactoryDaemon {
                 } else {
                     target.clone()
                 };
-                let inject_result: anyhow::Result<()> = if queued.urgent {
+                let inject_result: anyhow::Result<cas_mux::InjectOutcome> = if queued.urgent {
                     // Urgent: interrupt-and-redirect by name via the PTY,
                     // bypassing the inbox even in teams mode. Break the turn
                     // (Esc), wait the bounded settle window for the turn to
@@ -818,6 +850,7 @@ impl FactoryDaemon {
                         .mux
                         .interrupt_and_inject(&pane_target, &payload, settle)
                         .await
+                        .map(|()| cas_mux::InjectOutcome::Delivered)
                         .map_err(Into::into)
                 } else {
                     // Recipient-aware routing (cas-b68a): delivery channel +
@@ -846,7 +879,7 @@ impl FactoryDaemon {
                     .await
                 };
                 match inject_result {
-                    Ok(_) => {
+                    Ok(outcome) if delivery_was_written(outcome) => {
                         success = true;
                         // cas-f9e8 telemetry: end-to-end delivery latency
                         // measured from the sender-assigned `created_at` to
@@ -875,6 +908,36 @@ impl FactoryDaemon {
                                 None,
                             );
                         }
+                    }
+                    Ok(cas_mux::InjectOutcome::DeferredComposerDirty) => {
+                        tracing::info!(
+                            target: "cas::coordination",
+                            stage = "composer_inject_deferred",
+                            message_id = queued.id,
+                            target_agent = %pane_target,
+                            "prompt_queue message remains durable pending a clean composer"
+                        );
+                        let _ = queue.record_retry(
+                            queued.id,
+                            cas_store::PendingReason::GatedNotReady,
+                            Some("operator composer is dirty"),
+                        );
+                        if let Some(ref store) = event_store {
+                            record_injection(
+                                store,
+                                queued.id,
+                                &queued.source,
+                                &queued.target,
+                                &pane_target,
+                                "deferred",
+                                Some("operator composer is dirty".to_string()),
+                            );
+                        }
+                    }
+                    Ok(outcome) => {
+                        unreachable!(
+                            "delivery_was_written disagreed with inject outcome {outcome:?}"
+                        );
                     }
                     Err(e) => {
                         // cas-6257 + cas-2c5f: centralised bookkeeping via

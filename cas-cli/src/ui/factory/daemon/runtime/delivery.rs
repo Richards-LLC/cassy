@@ -16,7 +16,7 @@
 //! only viable channel — was never taken. This module centralises the routing
 //! decision so it can no longer drift per call site.
 
-use cas_mux::SupervisorCli;
+use cas_mux::{InjectOutcome, SupervisorCli};
 
 use super::super::FactoryDaemon;
 
@@ -216,7 +216,9 @@ impl FactoryDaemon {
     /// practice (callers pass at most one `Some`); both `None` for every
     /// other prompt kind. Ignored entirely on the `Pty` channel.
     ///
-    /// Returns `Ok(())` on a successful write to the chosen channel.
+    /// Returns `Delivered` only after a successful write to the chosen
+    /// channel. A composer-dirty PTY target returns `DeferredComposerDirty`
+    /// so the durable prompt queue can leave its row pending.
     pub(crate) async fn deliver_to_worker(
         &self,
         target: &str,
@@ -226,7 +228,7 @@ impl FactoryDaemon {
         color: Option<&str>,
         retract_worker: Option<&str>,
         retract_task: Option<&str>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<InjectOutcome> {
         // Normalise the target into the two name forms the two channels expect:
         //   - `pane_target`  : the real pane id `Mux::inject` routes on
         //   - `inbox_target` : the logical team member name `write_to_inbox` expects
@@ -272,6 +274,7 @@ impl FactoryDaemon {
                         teams.write_to_inbox(inbox_target, source, text, summary, color)
                     }
                 }
+                .map(|()| InjectOutcome::Delivered)
             }
             DeliveryChannel::Pty => {
                 // Frame based on the RECIPIENT's harness, not teams mode: a Codex
@@ -327,12 +330,13 @@ impl FactoryDaemon {
         summary: Option<&str>,
         color: Option<&str>,
         worker_is_idle: bool,
-    ) -> anyhow::Result<()> {
-        self.deliver_to_worker(target, source, text, summary, color, None, None)
+    ) -> anyhow::Result<InjectOutcome> {
+        let primary_outcome = self
+            .deliver_to_worker(target, source, text, summary, color, None, None)
             .await?;
 
-        if !worker_is_idle {
-            return Ok(());
+        if primary_outcome != InjectOutcome::Delivered || !worker_is_idle {
+            return Ok(primary_outcome);
         }
 
         let pane_target = if target == "supervisor" {
@@ -344,17 +348,25 @@ impl FactoryDaemon {
         let harness = self.app.harness_for(pane_target);
         if !idle_nudge_applies(choose_channel(harness, teams_active)) {
             // Already PTY-delivered by the primary call above.
-            return Ok(());
+            return Ok(InjectOutcome::Delivered);
         }
 
         let payload = frame_pty_payload(harness, source, text);
         match self.app.mux.inject(pane_target, &payload).await {
-            Ok(()) => {
+            Ok(InjectOutcome::Delivered) => {
                 tracing::info!(
                     target: "cas::coordination",
                     stage = "idle_nudge",
                     target_agent = %pane_target,
                     "cas-893c: nudged idle worker via PTY in addition to teams-inbox write"
+                );
+            }
+            Ok(InjectOutcome::DeferredComposerDirty) => {
+                tracing::info!(
+                    target: "cas::coordination",
+                    stage = "idle_nudge_deferred",
+                    target_agent = %pane_target,
+                    "cas-893c: skipped idle PTY nudge because the operator composer is dirty; inbox write already succeeded"
                 );
             }
             Err(e) => {
@@ -368,7 +380,7 @@ impl FactoryDaemon {
                 );
             }
         }
-        Ok(())
+        Ok(InjectOutcome::Delivered)
     }
 }
 

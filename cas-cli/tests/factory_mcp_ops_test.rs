@@ -2181,28 +2181,34 @@ async fn inbox_poll_uses_registered_identity_and_session_and_claims_processed_un
 }
 
 #[tokio::test]
-async fn inbox_poll_sessionless_env_fallback_only_reads_legacy_rows() {
+async fn inbox_poll_sessionless_registered_agent_only_reads_legacy_rows() {
     let _guard = EnvGuard::set_optional(&[
-        ("CAS_AGENT_NAME", Some("env-worker")),
+        ("CAS_AGENT_NAME", Some("wrong-env-name")),
         ("CAS_SESSION_ID", None),
         ("CAS_FACTORY_SESSION", None),
     ]);
-    let env = FactoryTestEnv::without_agent_id();
+    let env = FactoryTestEnv::with_agent_id("sessionless-worker-id");
+    env.register_worker_with_id("sessionless-worker-id", "sessionless-worker", None);
     let queue = env.prompt_queue();
     queue
-        .enqueue("supervisor", "env-worker", "legacy visible")
+        .enqueue("supervisor", "sessionless-worker", "legacy visible")
         .unwrap();
     queue
-        .enqueue_with_session("supervisor", "env-worker", "session hidden", "session-a")
+        .enqueue_with_session(
+            "supervisor",
+            "sessionless-worker",
+            "session hidden",
+            "session-a",
+        )
         .unwrap();
 
     let result = env
         .service
         .coordination(Parameters(coord_req("inbox_poll")))
         .await
-        .expect("sessionless env-fallback inbox poll");
+        .expect("sessionless registered inbox poll");
     let text = get_text(&result);
-    assert!(text.contains("for env-worker"), "{text}");
+    assert!(text.contains("for sessionless-worker"), "{text}");
     assert!(text.contains("legacy visible"), "{text}");
     assert!(!text.contains("session hidden"), "{text}");
 }

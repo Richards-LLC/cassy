@@ -1,5 +1,14 @@
 use crate::mcp::tools::service::imports::*;
 
+fn resolve_inbox_recipient(
+    registered_name: Option<String>,
+    environment_name: Option<String>,
+) -> Option<String> {
+    registered_name
+        .or(environment_name)
+        .filter(|name| !name.trim().is_empty())
+}
+
 impl CasService {
     pub(in crate::mcp::tools::service) async fn message_send(
         &self,
@@ -683,12 +692,11 @@ impl CasService {
                 .ok()
                 .and_then(|store| store.get(id).ok())
         });
-        let recipient = registered_agent
-            .as_ref()
-            .map(|agent| agent.name.clone())
-            .or_else(|| std::env::var("CAS_AGENT_NAME").ok())
-            .filter(|name| !name.trim().is_empty())
-            .ok_or_else(|| {
+        let recipient = resolve_inbox_recipient(
+            registered_agent.as_ref().map(|agent| agent.name.clone()),
+            std::env::var("CAS_AGENT_NAME").ok(),
+        )
+        .ok_or_else(|| {
                 Self::error(
                     ErrorCode::INVALID_REQUEST,
                     "inbox_poll requires a registered agent identity",
@@ -882,5 +890,30 @@ impl CasService {
                 "Message {notification_id} not found"
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod inbox_poll_identity_tests {
+    use super::resolve_inbox_recipient;
+
+    #[test]
+    fn registered_identity_precedes_environment_fallback() {
+        assert_eq!(
+            resolve_inbox_recipient(
+                Some("registered-worker".to_string()),
+                Some("env-worker".to_string()),
+            ),
+            Some("registered-worker".to_string())
+        );
+    }
+
+    #[test]
+    fn environment_identity_is_used_when_registration_is_unavailable() {
+        assert_eq!(
+            resolve_inbox_recipient(None, Some("env-worker".to_string())),
+            Some("env-worker".to_string())
+        );
+        assert_eq!(resolve_inbox_recipient(None, Some("  ".to_string())), None);
     }
 }

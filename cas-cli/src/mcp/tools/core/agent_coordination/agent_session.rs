@@ -105,6 +105,7 @@ impl CasCore {
         let input = HookInput {
             session_id: session_id.clone(),
             cwd,
+            workspace_root: None,
             hook_event_name: "SessionStart".to_string(),
             transcript_path: None,
             permission_mode: req.permission_mode,
@@ -112,6 +113,7 @@ impl CasCore {
             tool_input: None,
             tool_response: None,
             tool_use_id: None,
+            tool_input_truncated: None,
             user_prompt: None,
             source: Some("codex".to_string()),
             reason: None,
@@ -298,6 +300,7 @@ impl CasCore {
         let input = HookInput {
             session_id: session_id.clone(),
             cwd,
+            workspace_root: None,
             hook_event_name: "SessionEnd".to_string(),
             transcript_path: None,
             permission_mode: None,
@@ -305,6 +308,7 @@ impl CasCore {
             tool_input: None,
             tool_response: None,
             tool_use_id: None,
+            tool_input_truncated: None,
             user_prompt: None,
             source: Some("codex".to_string()),
             reason: req.reason,

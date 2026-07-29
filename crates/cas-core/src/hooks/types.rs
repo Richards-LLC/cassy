@@ -19,6 +19,12 @@ pub struct HookInput {
     #[serde(default)]
     pub cwd: String,
 
+    /// Grok Build workspace root. Claude/Codex payloads do not currently
+    /// include this field; retaining it lets hook handlers recognize a Grok
+    /// envelope even outside factory mode, where no harness env vars exist.
+    #[serde(default, rename = "workspaceRoot")]
+    pub workspace_root: Option<String>,
+
     /// Permission mode (default, plan, acceptEdits, bypassPermissions)
     #[serde(default, alias = "permissionMode")]
     pub permission_mode: Option<String>,
@@ -42,6 +48,12 @@ pub struct HookInput {
     /// Tool use ID (PostToolUse)
     #[serde(default, alias = "toolUseId")]
     pub tool_use_id: Option<String>,
+
+    /// Whether Grok Build truncated `toolInput` before dispatching the hook.
+    /// Presence (including `false`) is a payload-shape marker; the value is
+    /// otherwise informational for CAS today.
+    #[serde(default, rename = "toolInputTruncated")]
+    pub tool_input_truncated: Option<bool>,
 
     /// User prompt text (UserPromptSubmit)
     #[serde(default, alias = "userPrompt")]
@@ -523,6 +535,7 @@ mod tests {
         let input: HookInput = serde_json::from_str(json).unwrap();
         assert_eq!(input.session_id, "grok-session-123");
         assert_eq!(input.hook_event_name, "post_tool_use");
+        assert_eq!(input.workspace_root.as_deref(), Some("/test/dir"));
         assert_eq!(input.permission_mode.as_deref(), Some("default"));
         assert_eq!(input.tool_name.as_deref(), Some("run_terminal_command"));
         assert_eq!(
@@ -542,6 +555,7 @@ mod tests {
             Some(0)
         );
         assert_eq!(input.tool_use_id.as_deref(), Some("tool-use-456"));
+        assert_eq!(input.tool_input_truncated, Some(false));
     }
 
     #[test]

@@ -2373,6 +2373,55 @@ async fn test_coordination_message_non_urgent_does_not_claim_delivery() {
     );
 }
 
+/// cas-6ad2: a worker's response proves it consumed the supervisor message
+/// that prompted the work. Factory prompts never issued explicit message_ack,
+/// so the response path must advance the prior delivered row to Confirmed.
+#[tokio::test]
+async fn test_worker_response_confirms_consumed_supervisor_message() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "worker"),
+        ("CAS_AGENT_NAME", "swift-fox"),
+        ("CAS_SUPERVISOR_NAME", "cosmic-bear-43"),
+    ]);
+    let env = FactoryTestEnv::new();
+    env.register_supervisor("cosmic-bear-43");
+    let instruction = env
+        .prompt_queue()
+        .enqueue_urgent(
+            "supervisor",
+            "swift-fox",
+            "start cas-6ad2",
+            None,
+            Some("assignment"),
+            None,
+            false,
+        )
+        .expect("enqueue supervisor instruction");
+    env.prompt_queue()
+        .mark_transport_delivered(instruction)
+        .expect("deliver supervisor instruction");
+
+    let reply = coord_msg(
+        "message",
+        "supervisor",
+        "cas-6ad2 characterization reproduced",
+        None,
+    );
+    let result = env.service.coordination(Parameters(reply)).await;
+    assert!(result.is_ok(), "worker response should succeed: {result:?}");
+
+    let report = env
+        .prompt_queue()
+        .message_delivery_report(instruction)
+        .expect("delivery report")
+        .expect("instruction exists");
+    assert_eq!(
+        report.stage,
+        cas_store::DeliveryStage::Confirmed,
+        "the recipient's response must confirm its consumed instruction"
+    );
+}
+
 /// cas-0440: the send response must name the same parameter that
 /// `message_status` accepts. Drive the caller-visible two-call sequence:
 /// send a message, copy the returned notification_id verbatim, then query it.
@@ -2537,18 +2586,20 @@ async fn test_coordination_message_to_unregistered_target_reports_queued_pending
     assert_eq!(prompts[0].target, "not-born-yet");
 }
 
-/// cas-6913 AC1: "queue-before-register -> register -> poll sees it".
+/// cas-6ad2: "queue-before-register -> register consumes it exactly once".
 /// A message queued to a worker name before that worker exists in the
 /// agent store must be delivered into the worker's OWN prompt loop at
 /// registration time (surfaced directly in the register response text —
-/// no PTY-injection timing dependency), and must remain pollable
-/// afterward (at-least-once, matching this queue's existing philosophy).
+/// no PTY-injection timing dependency). Once the registration response has
+/// carried that message into the recipient's context, the queue row must be
+/// terminally confirmed instead of remaining eligible for daemon redelivery.
 #[tokio::test]
 async fn test_agent_register_surfaces_pending_prompt_queue_mail() {
     let env = FactoryTestEnv::new();
 
     // Step 1: queue-before-register.
-    env.prompt_queue()
+    let message_id = env
+        .prompt_queue()
         .enqueue_urgent(
             "supervisor",
             "not-born-yet",
@@ -2576,16 +2627,25 @@ async fn test_agent_register_surfaces_pending_prompt_queue_mail() {
         "response should explain why the message appears: {text}"
     );
 
-    // Step 3: poll sees it — surfacing in the register response must not
-    // consume the message. The daemon's normal poll loop still delivers it.
+    // Step 3: the registration response is the delivery. The daemon must not
+    // inject the same message as another fresh turn afterward.
     let still_pending = env
         .prompt_queue()
         .poll_for_target("not-born-yet", 10)
         .expect("poll");
+    assert!(
+        still_pending.is_empty(),
+        "message consumed by registration must not remain pollable: {still_pending:?}"
+    );
+    let report = env
+        .prompt_queue()
+        .message_delivery_report(message_id)
+        .expect("delivery report")
+        .expect("message exists");
     assert_eq!(
-        still_pending.len(),
-        1,
-        "message must remain pollable after being surfaced at registration"
+        report.stage,
+        cas_store::DeliveryStage::Confirmed,
+        "recipient consumption must advance message_status to confirmed"
     );
 }
 

@@ -485,6 +485,45 @@ impl CasService {
             }
         };
 
+        // cas-6ad2: sending a response is an authoritative recipient-side
+        // consumption signal for prior messages from that counterparty. The
+        // old explicit message_ack API was never invoked by factory prompts,
+        // leaving every acted-on message stuck at Delivered/AwaitingAck.
+        //
+        // Supervisors have two queue identities: outbound source
+        // `"supervisor"` and their generated pane/display name as an inbound
+        // target. Workers use their display name both ways. Include both alias
+        // shapes and advance only already transport-delivered rows.
+        let mut recipient_aliases = vec![display_name.as_str()];
+        if let Some(name) = env_agent_name.as_deref()
+            && !recipient_aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(name))
+        {
+            recipient_aliases.push(name);
+        }
+        let mut counterparty_aliases = vec![resolved_target.as_str()];
+        if role == "worker"
+            && !counterparty_aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case("supervisor"))
+        {
+            counterparty_aliases.push("supervisor");
+        }
+        if let Err(error) = queue.ack_delivered_for_recipient(
+            &recipient_aliases,
+            &counterparty_aliases,
+            factory_session.as_deref(),
+        ) {
+            tracing::warn!(
+                message_id,
+                source = %display_name,
+                target_agent = %resolved_target,
+                error = %error,
+                "failed to confirm prior delivered messages after recipient response"
+            );
+        }
+
         let persist_latency_ms = enqueue_started.elapsed().as_secs_f64() * 1000.0;
         tracing::debug!(
             target: "cas::coordination",

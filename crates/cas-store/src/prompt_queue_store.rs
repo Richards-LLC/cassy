@@ -601,6 +601,20 @@ pub trait PromptQueueStore: Send + Sync {
     /// Acknowledge receipt of a prompt (target agent confirms delivery)
     fn ack(&self, prompt_id: i64) -> Result<()>;
 
+    /// Confirm delivered messages that the current recipient demonstrably
+    /// consumed by sending a response back to one of `sender_aliases`.
+    ///
+    /// Factory supervisors have both a display name and the logical
+    /// `"supervisor"` alias, so both sides are expressed as alias slices.
+    /// Only transport-delivered, still-unacked rows in the observing factory
+    /// session are advanced.
+    fn ack_delivered_for_recipient(
+        &self,
+        recipient_aliases: &[&str],
+        sender_aliases: &[&str],
+        factory_session: Option<&str>,
+    ) -> Result<usize>;
+
     /// Get messages that were processed but not acked within the timeout
     fn unacked(&self, timeout_secs: i64, limit: usize) -> Result<Vec<QueuedPrompt>>;
 
@@ -1208,17 +1222,52 @@ impl PromptQueueStore for SqlitePromptQueueStore {
     ) -> Result<i64> {
         crate::shared_db::with_write_retry(|| {
             let conn = self.conn.lock().unwrap();
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let now = Utc::now().to_rfc3339();
             let prio: i32 = priority.unwrap_or(NotificationPriority::Normal).into();
             let urgent_flag: i64 = if urgent { 1 } else { 0 };
 
-            conn.execute(
+            // cas-6ad2: a worker can re-send an unchanged completion report
+            // while the supervisor's acknowledgement is still in flight. The
+            // prior report has already reached transport delivery, so inserting
+            // another row would make the same text eligible for a second fresh
+            // injected turn. Match the Teams inbox boundary's exact-content
+            // dedupe contract: while the delivered row is retained, reuse its
+            // ID. Supervisors are exempt because repeating an instruction can
+            // be intentional; urgent sends are always intentional redelivery.
+            // A worker can likewise force an intentional repeat by changing the
+            // body (for example, prefixing `[redelivery]`).
+            if !urgent && source != "supervisor" {
+                let delivered_duplicate = tx
+                    .query_row(
+                        "SELECT id
+                         FROM prompt_queue
+                         WHERE source = ?
+                           AND target = ?
+                           AND prompt = ?
+                           AND factory_session IS ?
+                           AND urgent = 0
+                           AND transport_delivered_at IS NOT NULL
+                         ORDER BY id DESC
+                         LIMIT 1",
+                        params![source, target, prompt, factory_session],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()?;
+                if let Some(existing_id) = delivered_duplicate {
+                    tx.commit()?;
+                    return Ok(existing_id);
+                }
+            }
+
+            tx.execute(
             "INSERT INTO prompt_queue (source, target, prompt, created_at, factory_session, summary, priority, urgent) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             params![source, target, prompt, now, factory_session, summary, prio, urgent_flag],
         )?;
 
-            let id = conn.last_insert_rowid();
-            let _ = capture_message_event(&conn, source, target);
+            let id = tx.last_insert_rowid();
+            let _ = capture_message_event(&tx, source, target);
+            tx.commit()?;
             Ok(id)
         }) // with_write_retry
     }
@@ -1636,6 +1685,67 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             // rows_affected == 0 means either not found or already acked — both idempotent
             Ok(())
         }) // with_write_retry
+    }
+
+    fn ack_delivered_for_recipient(
+        &self,
+        recipient_aliases: &[&str],
+        sender_aliases: &[&str],
+        factory_session: Option<&str>,
+    ) -> Result<usize> {
+        if recipient_aliases.is_empty() || sender_aliases.is_empty() {
+            return Ok(0);
+        }
+
+        crate::shared_db::with_write_retry(|| {
+            let conn = self.conn.lock().unwrap();
+            let now = Utc::now().to_rfc3339();
+            let recipient_placeholders =
+                std::iter::repeat_n("?", recipient_aliases.len()).collect::<Vec<_>>();
+            let sender_placeholders =
+                std::iter::repeat_n("?", sender_aliases.len()).collect::<Vec<_>>();
+            let session_clause = if factory_session.is_some() {
+                "AND (factory_session = ? OR factory_session IS NULL)"
+            } else {
+                "AND factory_session IS NULL"
+            };
+            let sql = format!(
+                "UPDATE prompt_queue
+                 SET acked_at = ?,
+                     highest_stage = 'confirmed',
+                     last_pending_reason = NULL,
+                     last_pending_detail = NULL
+                 WHERE acked_at IS NULL
+                   AND transport_delivered_at IS NOT NULL
+                   AND target IN ({})
+                   AND source IN ({})
+                   {session_clause}",
+                recipient_placeholders.join(", "),
+                sender_placeholders.join(", "),
+            );
+
+            let mut query_params: Vec<Box<dyn rusqlite::ToSql>> =
+                Vec::with_capacity(1 + recipient_aliases.len() + sender_aliases.len() + 1);
+            query_params.push(Box::new(now));
+            query_params.extend(
+                recipient_aliases
+                    .iter()
+                    .map(|value| Box::new((*value).to_string()) as Box<dyn rusqlite::ToSql>),
+            );
+            query_params.extend(
+                sender_aliases
+                    .iter()
+                    .map(|value| Box::new((*value).to_string()) as Box<dyn rusqlite::ToSql>),
+            );
+            if let Some(session) = factory_session {
+                query_params.push(Box::new(session.to_string()));
+            }
+
+            Ok(conn.execute(
+                &sql,
+                rusqlite::params_from_iter(query_params.iter().map(|value| value.as_ref())),
+            )?)
+        })
     }
 
     fn unacked(&self, timeout_secs: i64, limit: usize) -> Result<Vec<QueuedPrompt>> {
@@ -2290,6 +2400,109 @@ mod tests {
         // Simulate successful retry path by explicitly acknowledging it.
         store.mark_processed(prompt_id).unwrap();
         assert_eq!(store.pending_count().unwrap(), 0);
+    }
+
+    /// cas-6ad2: an exact worker report that already reached the supervisor
+    /// must not become a fresh injectable turn merely because the worker
+    /// re-enqueued the same stale report while waiting for an acknowledgement.
+    #[test]
+    fn delivered_worker_report_is_not_selected_again() {
+        let (_temp, store) = create_test_store();
+        let first = store
+            .enqueue_with_session(
+                "worker-1",
+                "supervisor",
+                "cas-b769 complete; MERGE NEEDED",
+                "factory-session",
+            )
+            .unwrap();
+        store.mark_transport_delivered(first).unwrap();
+
+        let duplicate = store
+            .enqueue_with_session(
+                "worker-1",
+                "supervisor",
+                "cas-b769 complete; MERGE NEEDED",
+                "factory-session",
+            )
+            .unwrap();
+        assert_eq!(
+            duplicate, first,
+            "an exact delivered report should reuse the terminal message id"
+        );
+
+        let selected = store
+            .peek_for_targets(&["supervisor"], Some("factory-session"), 10)
+            .unwrap();
+        assert!(
+            selected.is_empty(),
+            "an already-delivered exact report must be terminal, not selected again: {selected:?}"
+        );
+    }
+
+    #[test]
+    fn recipient_response_confirms_only_delivered_counterparty_messages() {
+        let (_temp, store) = create_test_store();
+        let consumed = store
+            .enqueue_with_session(
+                "supervisor",
+                "worker-1",
+                "start cas-6ad2",
+                "factory-session",
+            )
+            .unwrap();
+        let still_pending = store
+            .enqueue_with_session(
+                "supervisor",
+                "worker-1",
+                "later instruction",
+                "factory-session",
+            )
+            .unwrap();
+        let other_worker = store
+            .enqueue_with_session(
+                "supervisor",
+                "worker-2",
+                "unrelated instruction",
+                "factory-session",
+            )
+            .unwrap();
+        store.mark_transport_delivered(consumed).unwrap();
+
+        let confirmed = store
+            .ack_delivered_for_recipient(
+                &["worker-1"],
+                &["supervisor", "display-supervisor"],
+                Some("factory-session"),
+            )
+            .unwrap();
+        assert_eq!(confirmed, 1);
+        assert_eq!(
+            store
+                .message_delivery_report(consumed)
+                .unwrap()
+                .unwrap()
+                .stage,
+            DeliveryStage::Confirmed
+        );
+        assert_eq!(
+            store
+                .message_delivery_report(still_pending)
+                .unwrap()
+                .unwrap()
+                .stage,
+            DeliveryStage::Enqueued,
+            "a response must not confirm a message that never reached transport delivery"
+        );
+        assert_eq!(
+            store
+                .message_delivery_report(other_worker)
+                .unwrap()
+                .unwrap()
+                .stage,
+            DeliveryStage::Enqueued,
+            "recipient aliases must prevent confirming another worker's mail"
+        );
     }
 
     #[test]

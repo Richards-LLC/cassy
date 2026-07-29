@@ -3521,8 +3521,16 @@ fn read_context_usage_from_tail_for_cli(
     const TAIL_BYTES: u64 = 8192;
     file.seek(SeekFrom::Start(file_len.saturating_sub(TAIL_BYTES)))
         .ok()?;
-    let mut buf = String::new();
-    file.read_to_string(&mut buf).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    // A bounded seek can land on one of the at most three continuation
+    // bytes of a UTF-8 code point. Drop only that incomplete leading scalar;
+    // invalid UTF-8 anywhere else still fails closed as a malformed rollout.
+    let buf = (0..=3).find_map(|offset| {
+        bytes
+            .get(offset..)
+            .and_then(|tail| std::str::from_utf8(tail).ok())
+    })?;
 
     for line in buf.lines().rev() {
         if !line.contains("\"type\":\"token_count\"") {
@@ -5913,6 +5921,37 @@ effort = "high"
                 .expect("Codex token_count event should produce a context reading");
         assert_eq!(total, 123_456);
         assert_eq!(context_band(total), "approaching");
+    }
+
+    #[test]
+    fn read_context_usage_from_codex_rollout_recovers_split_utf8_tail_boundary() {
+        use std::io::Write;
+
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let token_count = r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":123456}}}}"#;
+        let filler_len = 8190usize
+            .checked_sub(2 + token_count.len())
+            .expect("token fixture fits in the tail window");
+
+        tmp.write_all(b"prefix").unwrap();
+        tmp.write_all("✓".as_bytes()).unwrap();
+        tmp.write_all(b"\n").unwrap();
+        tmp.write_all(&vec![b'x'; filler_len]).unwrap();
+        tmp.write_all(b"\n").unwrap();
+        tmp.write_all(token_count.as_bytes()).unwrap();
+
+        let bytes = std::fs::read(tmp.path()).unwrap();
+        let tail_start = bytes.len() - 8192;
+        assert_eq!(tail_start, b"prefix".len() + 1);
+        assert!(
+            std::str::from_utf8(&bytes[tail_start..]).is_err(),
+            "fixture must make the old read_to_string path fail at a continuation byte"
+        );
+
+        let total =
+            read_context_usage_from_tail_for_cli(tmp.path(), cas_mux::SupervisorCli::Codex)
+                .expect("a split UTF-8 code point at the seek boundary must not hide usage");
+        assert_eq!(total, 123_456);
     }
 
     /// When the tail has multiple assistant entries, the LAST one wins.

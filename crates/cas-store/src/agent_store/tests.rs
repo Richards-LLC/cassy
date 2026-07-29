@@ -656,8 +656,42 @@ fn test_lease_history_revoked() {
     let history = store.get_lease_history("task-revoke-hist", None).unwrap();
     assert_eq!(history.len(), 2);
     assert_eq!(history[0].event_type, "revoked");
-    assert!(history[0].details.as_ref().unwrap().contains("agent_stale"));
+    assert_eq!(history[0].reason.as_deref(), Some("agent_stale"));
+    assert_eq!(
+        history[0].details, None,
+        "the canonical reason column must not be duplicated in details JSON"
+    );
     assert_eq!(history[1].event_type, "claimed");
+}
+
+#[test]
+fn test_graceful_shutdown_records_reason_only_in_canonical_column() {
+    let (_temp, store) = create_test_store();
+    let agent = Agent::new(
+        "agent-graceful-history".to_string(),
+        "Graceful History".to_string(),
+    );
+    store.register(&agent).unwrap();
+    store
+        .try_claim(
+            "task-graceful-history",
+            "agent-graceful-history",
+            600,
+            None,
+        )
+        .unwrap();
+
+    store.graceful_shutdown("agent-graceful-history").unwrap();
+
+    let history = store
+        .get_lease_history("task-graceful-history", Some(1))
+        .unwrap();
+    assert_eq!(history[0].event_type, "released");
+    assert_eq!(history[0].reason.as_deref(), Some("graceful_shutdown"));
+    assert_eq!(
+        history[0].details, None,
+        "the canonical reason column must not be duplicated in details JSON"
+    );
 }
 
 #[test]

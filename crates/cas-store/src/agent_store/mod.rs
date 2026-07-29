@@ -31,11 +31,14 @@ pub struct LeaseHistoryEntry {
     pub epoch: u64,
     /// When the event occurred
     pub timestamp: DateTime<Utc>,
-    /// Optional JSON details about the event
+    /// Optional structured JSON details about the event.
+    ///
+    /// Human-readable event reasons belong in [`Self::reason`]. Historical
+    /// rows may still carry a `reason` key here.
     pub details: Option<String>,
     /// For transfers, the previous agent that held the lease
     pub previous_agent_id: Option<String>,
-    /// Human-readable reason for the event
+    /// Canonical human-readable reason for the event
     pub reason: Option<String>,
 }
 

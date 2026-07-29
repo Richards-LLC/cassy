@@ -415,9 +415,10 @@ impl CasCore {
         //
         // cas-60393 (AwaitingMerge) + cas-3894 (widened to InProgress): a
         // pre-existing halt armed by an EARLIER, unrelated urgent stop must
-        // not deadlock re-close of the caller's OWN task. AwaitingMerge has
-        // no in-band way to `start` and clear the halt; InProgress can hit an
-        // even worse *mutual* deadlock, because the documented escape
+        // not obstruct re-close of the caller's OWN task. cas-a844 now lets
+        // AwaitingMerge restart and clear the halt, but forcing that redundant
+        // state transition complicates the merge hand-off. InProgress can hit
+        // a genuine *mutual* deadlock, because the documented escape
         // ("start a new task") is itself refused by the verification jail
         // until this very task is closed. The exemption only skips *this*
         // check; the merge/verification/review gates below remain fully
@@ -3312,14 +3313,19 @@ pub(crate) fn run_factory_branch_merge_gate(
     let parent_is_local_epic_branch = parent_branch.starts_with("epic/");
     let branch_tip = resolve_branch_sha(repo_path, &factory_branch)
         .unwrap_or_else(|| "unresolved at close rejection".to_string());
+    let coord = worker_coordination_tool();
 
     let remediation = if parent_is_local_epic_branch {
         format!(
             "Remediation:\n\
-             1. Before escalating, re-read any just-delivered supervisor messages \
-             in your conversation. Supervisor replies arrive as injected messages; \
-             `queue_poll` does not expose them. If one says this branch was merged \
-             or requests more changes, follow it and do not send a stale merge \
+             1. Before escalating, repeatedly run `{coord} action=inbox_poll` \
+             until it returns `No unread messages`. A default poll returns at most \
+             10 rows, so one poll is not a complete freshness check. Polling marks \
+             messages seen without consuming daemon transport delivery. The polling \
+             claim is at-most-once: if its MCP response is lost, those rows are not \
+             replayed by another poll, so also re-read any just-delivered supervisor \
+             messages in your conversation. If one says this branch was merged or \
+             requests more changes, follow it and do not send a stale merge \
              request.\n\
              2. {parent_branch} is a local-only epic branch (not pushed to origin) \
              — do NOT run `gh pr create --base {parent_branch}`, it has no \
@@ -3329,10 +3335,11 @@ pub(crate) fn run_factory_branch_merge_gate(
              4. If a merge is still needed, message your supervisor to merge \
              {factory_branch} into {parent_branch}, including the current tip \
              and freshness qualifier (e.g. \
-             `mcp__cas__coordination action=message \
+             `{coord} action=message \
              target=supervisor summary=\"ready to merge\" message=\"Fresh after \
-             re-reading delivered messages: {factory_branch} tip {branch_tip}; please re-check \
-             reachability, then merge into {parent_branch} if still needed\"`). \
+             draining unread inbox messages until No unread messages: \
+             {factory_branch} tip {branch_tip}; please re-check reachability, then \
+             merge into {parent_branch} if still needed\"`). \
              They merge with \
              `git merge --no-ff {factory_branch}` on the epic branch.\n\
              5. Once merged, retry mcp__cas__task action=close",
@@ -3340,10 +3347,12 @@ pub(crate) fn run_factory_branch_merge_gate(
     } else {
         format!(
             "Remediation:\n\
-             1. Re-read any just-delivered supervisor messages in your conversation \
-             before continuing. Supervisor replies arrive as injected messages; \
-             `queue_poll` does not expose them. Follow any delivered merge or review \
-             instruction before continuing.\n\
+             1. Repeatedly run `{coord} action=inbox_poll` until it returns \
+             `No unread messages` before continuing. A default poll returns at \
+             most 10 rows, so one poll is not a complete freshness check. Follow \
+             every unread merge or review instruction it returns. The polling \
+             claim is at-most-once, so also re-read just-delivered supervisor \
+             messages in case the MCP response was lost after claiming rows.\n\
              2. Push {factory_branch} to its remote\n\
              3. Open a PR targeting {parent_branch}\n\
              4. Merge the PR (or `git fetch --prune` if it was already merged \
@@ -3441,7 +3450,7 @@ pub(crate) fn count_unmerged_factory_commits(
 /// for the primary ancestry path), this tri-state never maps unknown state
 /// to zero. Callers that authorize close must match on [`KnownZero`] only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KnownUnmergedCount {
+pub(crate) enum KnownUnmergedCount {
     /// Refs resolved, merge-base computed, rev-list succeeded with count 0.
     KnownZero,
     /// Refs resolved and rev-list reported a positive stranded count.
@@ -3548,7 +3557,7 @@ fn commit_patches_cherry_equivalent_on_parent(
 ///   (or the cas-cf64 unsafe-refname fail-closed `u32::MAX` case).
 /// - [`KnownUnmergedCount::Unknown`] on any resolution/computation failure —
 ///   never treats "couldn't tell" as "zero ahead".
-fn known_unmerged_factory_commits(
+pub(crate) fn known_unmerged_factory_commits(
     repo_path: &std::path::Path,
     factory_branch: &str,
     parent_branch: &str,
@@ -3684,7 +3693,10 @@ fn commit_tip_tree_reachable_from(
 ///   a ref name.
 const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-fn fetch_parent_branch_best_effort(repo_path: &std::path::Path, parent_branch: &str) {
+pub(crate) fn fetch_parent_branch_best_effort(
+    repo_path: &std::path::Path,
+    parent_branch: &str,
+) {
     use std::process::{Command, Stdio};
     use std::time::Instant;
 
@@ -3692,8 +3704,14 @@ fn fetch_parent_branch_best_effort(repo_path: &std::path::Path, parent_branch: &
         return;
     }
 
+    // Force-update the exact remote-tracking ref. The leading `+` is
+    // intentional: a remote epic may have been rebased/force-pushed, and the
+    // caller needs the authoritative remote state rather than a fetch rejected
+    // as non-fast-forward.
+    let refspec =
+        format!("+refs/heads/{parent_branch}:refs/remotes/origin/{parent_branch}");
     let mut child = match Command::new("git")
-        .args(["fetch", "--quiet", "origin", parent_branch])
+        .args(["fetch", "--quiet", "origin", &refspec])
         .current_dir(repo_path)
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
@@ -5204,6 +5222,35 @@ pub(crate) fn resolve_branch_short_sha(repo_path: &std::path::Path, branch: &str
 
     let out = Command::new("git")
         .args(["rev-parse", "--short", branch])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if sha.is_empty() { None } else { Some(sha) }
+}
+
+/// Immutable commit ID currently named by `reference`, or `None` when the ref
+/// is unsafe, missing, or does not resolve to a commit.
+///
+/// Director merge-alert classification resolves all movable refs through this
+/// helper once, then performs every merge-base/count operation against these
+/// immutable IDs so concurrent ref updates cannot produce a mixed snapshot.
+pub(crate) fn resolve_ref_commit_sha(
+    repo_path: &std::path::Path,
+    reference: &str,
+) -> Option<String> {
+    use std::process::Command;
+
+    if !is_safe_git_refname(reference) {
+        return None;
+    }
+
+    let commit = format!("{reference}^{{commit}}");
+    let out = Command::new("git")
+        .args(["rev-parse", "--verify", &commit])
         .current_dir(repo_path)
         .output()
         .ok()?;
@@ -8333,6 +8380,7 @@ mod merge_state_gate_tests {
     //!
     //! Test layout mirrors `code_review_gate_tests` above.
     use super::*;
+    use crate::test_support::TestEnvGuard;
     use std::process::Command;
     use tempfile::TempDir;
 
@@ -8421,38 +8469,58 @@ mod merge_state_gate_tests {
 
         let task = worker_task("worker");
         let req = base_req(&task.id);
-        let out = run_factory_branch_merge_gate(&task, &req, "main", dir.path());
+        let mut env =
+            TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_WORKER_CLI", Some("claude"))]);
 
-        match out {
-            MergeStateGateOutcome::Reject(msg) => {
-                assert!(msg.contains("MERGE REQUIRED"), "missing header: {msg}");
-                assert!(
-                    msg.contains("factory/worker"),
-                    "missing factory branch name: {msg}"
-                );
-                assert!(msg.contains("main"), "missing parent branch name: {msg}");
-                assert!(
-                    msg.contains("2 commit"),
-                    "expected stranded count of 2 in message (anchored to 'commit' \
-                     to avoid weak digit-anywhere match): {msg}"
-                );
-                assert!(
-                    msg.contains("bypass_code_review=true"),
-                    "remediation must call out bypass-immunity: {msg}"
-                );
-                assert!(
-                    msg.contains("Open a PR targeting main"),
-                    "plain (non-epic) parent branch must keep the PR-based \
-                     remediation unchanged: {msg}"
-                );
-                assert!(
-                    msg.contains("just-delivered supervisor messages")
-                        && msg.contains("Supervisor replies arrive as injected messages")
-                        && msg.contains("`queue_poll` does not expose them"),
-                    "plain (non-epic) remediation must describe the real supervisor-reply mechanism: {msg}"
-                );
+        for (harness, coord) in [
+            ("claude", "mcp__cas__coordination"),
+            ("codex", "mcp__cs__coordination"),
+            ("grok", "cas__coordination"),
+        ] {
+            env.set("CAS_FACTORY_WORKER_CLI", harness);
+            let out = run_factory_branch_merge_gate(&task, &req, "main", dir.path());
+
+            match out {
+                MergeStateGateOutcome::Reject(msg) => {
+                    assert!(msg.contains("MERGE REQUIRED"), "missing header: {msg}");
+                    assert!(
+                        msg.contains("factory/worker"),
+                        "missing factory branch name: {msg}"
+                    );
+                    assert!(msg.contains("main"), "missing parent branch name: {msg}");
+                    assert!(
+                        msg.contains("2 commit"),
+                        "expected stranded count of 2 in message (anchored to 'commit' \
+                         to avoid weak digit-anywhere match): {msg}"
+                    );
+                    assert!(
+                        msg.contains("bypass_code_review=true"),
+                        "remediation must call out bypass-immunity: {msg}"
+                    );
+                    assert!(
+                        msg.contains("Open a PR targeting main"),
+                        "plain (non-epic) parent branch must keep the PR-based \
+                         remediation unchanged: {msg}"
+                    );
+                    assert!(
+                        msg.contains(&format!("`{coord} action=inbox_poll`"))
+                            && msg.contains("`No unread messages`")
+                            && msg.contains("at most 10 rows")
+                            && msg.contains("polling claim is at-most-once"),
+                        "{harness} remediation must use its harness-resolved inbox API, \
+                         require drain-until-empty polling, and disclose at-most-once \
+                         claim semantics: {msg}"
+                    );
+                    let poll = msg.find("action=inbox_poll").expect("poll step");
+                    let push = msg.find("Push factory/worker").expect("push step");
+                    let pr = msg.find("Open a PR targeting main").expect("PR step");
+                    assert!(
+                        poll < push && poll < pr,
+                        "polling must precede push/escalation steps for {harness}: {msg}"
+                    );
+                }
+                other => panic!("expected Reject for stranded factory branch, got {other:?}"),
             }
-            other => panic!("expected Reject for stranded factory branch, got {other:?}"),
         }
     }
 
@@ -8475,51 +8543,74 @@ mod merge_state_gate_tests {
 
         let task = worker_task("worker");
         let req = base_req(&task.id);
-        let out = run_factory_branch_merge_gate(&task, &req, parent, dir.path());
+        let mut env =
+            TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_WORKER_CLI", Some("claude"))]);
 
-        match out {
-            MergeStateGateOutcome::Reject(msg) => {
-                assert!(msg.contains("MERGE REQUIRED"), "missing header: {msg}");
-                assert!(
-                    msg.contains("factory/worker"),
-                    "missing factory branch name: {msg}"
-                );
-                assert!(msg.contains(parent), "missing parent branch name: {msg}");
-                assert!(
-                    msg.contains("bypass_code_review=true"),
-                    "remediation must still call out bypass-immunity: {msg}"
-                );
-                assert!(
-                    !msg.contains("Open a PR targeting"),
-                    "must NOT tell the worker to open a PR against a local-only \
-                     epic branch: {msg}"
-                );
-                assert!(
-                    msg.contains("do NOT run `gh pr create"),
-                    "must explicitly warn against gh pr create on the missing \
-                     origin ref: {msg}"
-                );
-                assert!(
-                    msg.contains("supervisor to merge"),
-                    "must hand the worker a supervisor-merge-request handoff: {msg}"
-                );
-                assert!(
-                    msg.contains("just-delivered supervisor messages")
-                        && msg.contains("Supervisor replies arrive as injected messages")
-                        && msg.contains("`queue_poll` does not expose them"),
-                    "must describe the real supervisor-reply mechanism before escalation: {msg}"
-                );
-                assert!(
-                    msg.contains(&expected_tip),
-                    "escalation template must include the current branch tip {expected_tip}: {msg}"
-                );
-                assert!(
-                    msg.contains("Fresh after re-reading delivered messages")
-                        && msg.contains("re-check reachability"),
-                    "escalation must identify its freshness window and ask the supervisor to re-check: {msg}"
-                );
+        for (harness, coord) in [
+            ("claude", "mcp__cas__coordination"),
+            ("codex", "mcp__cs__coordination"),
+            ("grok", "cas__coordination"),
+        ] {
+            env.set("CAS_FACTORY_WORKER_CLI", harness);
+            let out = run_factory_branch_merge_gate(&task, &req, parent, dir.path());
+
+            match out {
+                MergeStateGateOutcome::Reject(msg) => {
+                    assert!(msg.contains("MERGE REQUIRED"), "missing header: {msg}");
+                    assert!(
+                        msg.contains("factory/worker"),
+                        "missing factory branch name: {msg}"
+                    );
+                    assert!(msg.contains(parent), "missing parent branch name: {msg}");
+                    assert!(
+                        msg.contains("bypass_code_review=true"),
+                        "remediation must still call out bypass-immunity: {msg}"
+                    );
+                    assert!(
+                        !msg.contains("Open a PR targeting"),
+                        "must NOT tell the worker to open a PR against a local-only \
+                         epic branch: {msg}"
+                    );
+                    assert!(
+                        msg.contains("do NOT run `gh pr create"),
+                        "must explicitly warn against gh pr create on the missing \
+                         origin ref: {msg}"
+                    );
+                    assert!(
+                        msg.contains("supervisor to merge"),
+                        "must hand the worker a supervisor-merge-request handoff: {msg}"
+                    );
+                    assert!(
+                        msg.contains(&format!("`{coord} action=inbox_poll`"))
+                            && msg.contains(&format!("`{coord} action=message"))
+                            && msg.contains("`No unread messages`")
+                            && msg.contains("at most 10 rows")
+                            && msg.contains("without consuming daemon transport delivery")
+                            && msg.contains("polling claim is at-most-once"),
+                        "{harness} remediation must use its harness-resolved inbox and \
+                         message APIs, require drain-until-empty polling, and disclose \
+                         at-most-once claim semantics: {msg}"
+                    );
+                    assert!(
+                        msg.contains(&expected_tip),
+                        "escalation template must include the current branch tip {expected_tip}: {msg}"
+                    );
+                    assert!(
+                        msg.contains(
+                            "Fresh after draining unread inbox messages until No unread messages"
+                        ) && msg.contains("re-check reachability"),
+                        "escalation must identify its freshness window and ask the supervisor to re-check: {msg}"
+                    );
+                    let poll = msg.find("action=inbox_poll").expect("poll step");
+                    let push = msg.find("Push factory/worker").expect("push step");
+                    let escalation = msg.find("action=message").expect("escalation step");
+                    assert!(
+                        poll < push && poll < escalation,
+                        "polling must precede push/escalation steps for {harness}: {msg}"
+                    );
+                }
+                other => panic!("expected Reject for stranded factory branch, got {other:?}"),
             }
-            other => panic!("expected Reject for stranded factory branch, got {other:?}"),
         }
     }
 

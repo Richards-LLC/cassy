@@ -1,5 +1,14 @@
 use crate::mcp::tools::service::imports::*;
 
+fn resolve_inbox_recipient(
+    registered_name: Option<String>,
+    environment_name: Option<String>,
+) -> Option<String> {
+    registered_name
+        .or(environment_name)
+        .filter(|name| !name.trim().is_empty())
+}
+
 impl CasService {
     pub(in crate::mcp::tools::service) async fn message_send(
         &self,
@@ -671,6 +680,84 @@ impl CasService {
         )))
     }
 
+    pub(in crate::mcp::tools::service) async fn inbox_poll(
+        &self,
+        req: AgentRequest,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::store::{open_agent_store, open_prompt_queue_store};
+
+        let agent_id = self.inner.get_agent_id().ok();
+        let registered_agent = agent_id.as_deref().and_then(|id| {
+            open_agent_store(&self.inner.cas_root)
+                .ok()
+                .and_then(|store| store.get(id).ok())
+        });
+        let recipient = resolve_inbox_recipient(
+            registered_agent.as_ref().map(|agent| agent.name.clone()),
+            std::env::var("CAS_AGENT_NAME").ok(),
+        )
+        .ok_or_else(|| {
+                Self::error(
+                    ErrorCode::INVALID_REQUEST,
+                    "inbox_poll requires a registered agent identity",
+                )
+            })?;
+        let factory_session = std::env::var("CAS_FACTORY_SESSION")
+            .ok()
+            .filter(|session| !session.trim().is_empty())
+            .or_else(|| {
+                registered_agent
+                    .as_ref()
+                    .and_then(|agent| agent.factory_session.clone())
+            });
+        let limit = req.limit.unwrap_or(10).min(100);
+
+        let queue = open_prompt_queue_store(&self.inner.cas_root).map_err(|error| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to open prompt queue: {error}"),
+            )
+        })?;
+        // This is an at-most-once claim for the polling API: the store records
+        // recipient-seen state in the same transaction that selects the rows,
+        // before this MCP response is handed back. That prevents concurrent
+        // duplicate delivery, but a response lost after this point is not
+        // replayed by a later poll. Daemon transport state remains independent.
+        let messages = queue
+            .poll_unseen_for_recipient(&recipient, factory_session.as_deref(), limit)
+            .map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Failed to poll recipient inbox: {error}"),
+                )
+        })?;
+
+        if messages.is_empty() {
+            return Ok(Self::success(format!(
+                "No unread messages for {recipient}"
+            )));
+        }
+
+        let mut output = format!(
+            "Pulled {} unread message(s) for {recipient} (at-most-once inbox claim: \
+             marked seen before this response is delivered; daemon transport delivery is \
+             unchanged):\n\n",
+            messages.len()
+        );
+        for message in &messages {
+            output.push_str(&format!(
+                "**[{}] From: {}**\nSummary: {}\nCreated: {}\nMessage: {}\n\n",
+                message.id,
+                message.source,
+                message.summary.as_deref().unwrap_or("(no summary)"),
+                message.created_at.to_rfc3339(),
+                message.prompt,
+            ));
+        }
+
+        Ok(Self::success(output))
+    }
+
     pub(in crate::mcp::tools::service) async fn message_ack(
         &self,
         req: AgentRequest,
@@ -803,5 +890,30 @@ impl CasService {
                 "Message {notification_id} not found"
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod inbox_poll_identity_tests {
+    use super::resolve_inbox_recipient;
+
+    #[test]
+    fn registered_identity_precedes_environment_fallback() {
+        assert_eq!(
+            resolve_inbox_recipient(
+                Some("registered-worker".to_string()),
+                Some("env-worker".to_string()),
+            ),
+            Some("registered-worker".to_string())
+        );
+    }
+
+    #[test]
+    fn environment_identity_is_used_when_registration_is_unavailable() {
+        assert_eq!(
+            resolve_inbox_recipient(None, Some("env-worker".to_string())),
+            Some("env-worker".to_string())
+        );
+        assert_eq!(resolve_inbox_recipient(None, Some("  ".to_string())), None);
     }
 }

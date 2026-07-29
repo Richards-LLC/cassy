@@ -61,6 +61,18 @@ impl FactoryTestEnv {
         }
     }
 
+    fn without_agent_id() -> Self {
+        let temp = TempDir::new().expect("Failed to create temp dir");
+        let cas_root = init_cas_dir(temp.path()).expect("Failed to init CAS dir");
+        let core = CasCore::with_daemon(cas_root.clone(), None, None);
+        let service = CasService::new(core, None);
+        Self {
+            _temp: temp,
+            cas_root,
+            service,
+        }
+    }
+
     fn create_epic(&self, title: &str) -> String {
         let store = self.task_store();
         let id = store.generate_id().expect("generate_id");
@@ -104,6 +116,16 @@ impl FactoryTestEnv {
         agent.role = AgentRole::Worker;
         store.register(&agent).expect("register worker");
         id
+    }
+
+    fn register_worker_with_id(&self, id: &str, name: &str, factory_session: Option<&str>) {
+        let store = self.agent_store();
+        let mut agent = Agent::new(id.to_string(), name.to_string());
+        agent.role = AgentRole::Worker;
+        agent.factory_session = factory_session.map(str::to_string);
+        store
+            .register(&agent)
+            .expect("register worker with fixed id");
     }
 
     fn register_worker_in_session(&self, name: &str, factory_session: &str) -> String {
@@ -2093,6 +2115,152 @@ async fn test_unknown_action() {
         err.message.contains("Unknown factory action"),
         "Should report unknown action: {}",
         err.message
+    );
+}
+
+// =============================================================================
+// cas-337e: worker-side inbox polling handler
+// =============================================================================
+
+#[tokio::test]
+async fn inbox_poll_uses_registered_identity_and_session_and_claims_processed_unacked_rows() {
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_AGENT_NAME", Some("wrong-env-name")),
+        ("CAS_SESSION_ID", None),
+        ("CAS_FACTORY_SESSION", None),
+    ]);
+    let env = FactoryTestEnv::with_agent_id("registered-worker-id");
+    env.register_worker_with_id(
+        "registered-worker-id",
+        "registered-worker",
+        Some("session-a"),
+    );
+    let queue = env.prompt_queue();
+    let processed = queue
+        .enqueue_with_session(
+            "supervisor",
+            "registered-worker",
+            "processed but unacked",
+            "session-a",
+        )
+        .unwrap();
+    queue.mark_processed(processed).unwrap();
+    queue
+        .enqueue_with_session(
+            "supervisor",
+            "registered-worker",
+            "wrong session",
+            "session-b",
+        )
+        .unwrap();
+    queue
+        .enqueue("supervisor", "registered-worker", "legacy message")
+        .unwrap();
+
+    let first = env
+        .service
+        .coordination(Parameters(coord_req("inbox_poll")))
+        .await
+        .expect("registered inbox poll");
+    let text = get_text(&first);
+    assert!(text.contains("for registered-worker"), "{text}");
+    assert!(text.contains("processed but unacked"), "{text}");
+    assert!(text.contains("legacy message"), "{text}");
+    assert!(!text.contains("wrong session"), "{text}");
+    assert!(text.contains("at-most-once inbox claim"), "{text}");
+
+    let second = env
+        .service
+        .coordination(Parameters(coord_req("inbox_poll")))
+        .await
+        .expect("second registered inbox poll");
+    assert_eq!(
+        get_text(&second),
+        "No unread messages for registered-worker"
+    );
+}
+
+#[tokio::test]
+async fn inbox_poll_sessionless_registered_agent_only_reads_legacy_rows() {
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_AGENT_NAME", Some("wrong-env-name")),
+        ("CAS_SESSION_ID", None),
+        ("CAS_FACTORY_SESSION", None),
+    ]);
+    let env = FactoryTestEnv::with_agent_id("sessionless-worker-id");
+    env.register_worker_with_id("sessionless-worker-id", "sessionless-worker", None);
+    let queue = env.prompt_queue();
+    queue
+        .enqueue("supervisor", "sessionless-worker", "legacy visible")
+        .unwrap();
+    queue
+        .enqueue_with_session(
+            "supervisor",
+            "sessionless-worker",
+            "session hidden",
+            "session-a",
+        )
+        .unwrap();
+
+    let result = env
+        .service
+        .coordination(Parameters(coord_req("inbox_poll")))
+        .await
+        .expect("sessionless registered inbox poll");
+    let text = get_text(&result);
+    assert!(text.contains("for sessionless-worker"), "{text}");
+    assert!(text.contains("legacy visible"), "{text}");
+    assert!(!text.contains("session hidden"), "{text}");
+}
+
+#[tokio::test]
+async fn inbox_poll_applies_default_limit_and_hard_cap() {
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_AGENT_NAME", Some("env-worker")),
+        ("CAS_SESSION_ID", None),
+        ("CAS_FACTORY_SESSION", None),
+    ]);
+    let env = FactoryTestEnv::without_agent_id();
+    let queue = env.prompt_queue();
+    for index in 0..115 {
+        queue
+            .enqueue("supervisor", "env-worker", &format!("message-{index:03}"))
+            .unwrap();
+    }
+
+    let default_result = env
+        .service
+        .coordination(Parameters(coord_req("inbox_poll")))
+        .await
+        .expect("default-limit inbox poll");
+    assert!(
+        get_text(&default_result).starts_with("Pulled 10 unread message(s)"),
+        "{}",
+        get_text(&default_result)
+    );
+
+    let mut capped_req = coord_req("inbox_poll");
+    capped_req.limit = Some(usize::MAX);
+    let capped_result = env
+        .service
+        .coordination(Parameters(capped_req))
+        .await
+        .expect("capped inbox poll");
+    assert!(
+        get_text(&capped_result).starts_with("Pulled 100 unread message(s)"),
+        "{}",
+        get_text(&capped_result)
+    );
+
+    let final_result = env
+        .service
+        .coordination(Parameters(coord_req("inbox_poll")))
+        .await
+        .expect("remaining inbox poll");
+    assert!(
+        get_text(&final_result).starts_with("Pulled 5 unread message(s)"),
+        "{}",
+        get_text(&final_result)
     );
 }
 

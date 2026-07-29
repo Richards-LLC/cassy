@@ -677,7 +677,7 @@ pub struct SpecRequest {
 pub struct AgentRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'register', 'unregister', 'whoami', 'heartbeat', 'list', 'cleanup', 'session_start', 'session_end', 'loop_start', 'loop_cancel', 'loop_status', 'lease_history', 'queue_notify', 'queue_poll', 'queue_peek', 'queue_ack', 'message'"
+        description = "Action: 'register', 'unregister', 'whoami', 'heartbeat', 'list', 'cleanup', 'session_start', 'session_end', 'loop_start', 'loop_cancel', 'loop_status', 'lease_history', 'queue_notify', 'queue_poll', 'queue_peek', 'queue_ack', 'inbox_poll', 'message'"
     )]
     pub action: String,
 

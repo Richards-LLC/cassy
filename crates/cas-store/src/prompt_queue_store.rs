@@ -85,6 +85,20 @@ CREATE TABLE IF NOT EXISTS prompt_queue (
 );
 
 CREATE INDEX IF NOT EXISTS idx_prompt_queue_pending ON prompt_queue(target) WHERE processed_at IS NULL;
+
+-- Per-recipient read state is deliberately separate from processed_at
+-- (daemon transport) and acked_at (delivery confirmation). A broadcast has
+-- one prompt_queue row but many recipients, so its read state cannot live on
+-- that row without one worker hiding the message from every other worker.
+CREATE TABLE IF NOT EXISTS prompt_queue_recipient_seen (
+    prompt_id INTEGER NOT NULL,
+    recipient TEXT NOT NULL,
+    seen_at TEXT NOT NULL,
+    PRIMARY KEY (prompt_id, recipient)
+);
+
+CREATE INDEX IF NOT EXISTS idx_prompt_queue_recipient_seen_recipient
+    ON prompt_queue_recipient_seen(recipient, prompt_id);
 "#;
 
 /// Add factory_session column for multi-session isolation.
@@ -615,6 +629,20 @@ pub trait PromptQueueStore: Send + Sync {
     fn poll_for_target_with_session(
         &self,
         target: &str,
+        factory_session: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<QueuedPrompt>>;
+
+    /// Pull unread messages for one recipient without consuming daemon
+    /// transport delivery.
+    ///
+    /// Direct rows must be unacknowledged. Broadcast acknowledgment remains
+    /// recipient-scoped: row-level `acked_at` never hides an `all_workers` row
+    /// from peers that have not seen it. Each returned row is atomically
+    /// marked seen for this recipient only.
+    fn poll_unseen_for_recipient(
+        &self,
+        recipient: &str,
         factory_session: Option<&str>,
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>>;
@@ -1484,6 +1512,96 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         }) // with_write_retry
     }
 
+    fn poll_unseen_for_recipient(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<QueuedPrompt>> {
+        if recipient.trim().is_empty() {
+            return Err(StoreError::Other(
+                "poll_unseen_for_recipient requires a recipient".to_string(),
+            ));
+        }
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let sql_limit = i64::try_from(limit).unwrap_or(i64::MAX);
+
+        crate::shared_db::with_write_retry(|| {
+            let conn = self.conn.lock().unwrap();
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+
+            let (sql, query_params): (&str, Vec<Box<dyn rusqlite::ToSql>>) =
+                if let Some(session) = factory_session {
+                    (
+                        "SELECT q.id, q.source, q.target, q.prompt, q.created_at,
+                                q.processed_at, q.summary, q.priority, q.acked_at,
+                                q.urgent, q.factory_session
+                         FROM prompt_queue q
+                         LEFT JOIN prompt_queue_recipient_seen seen
+                           ON seen.prompt_id = q.id AND seen.recipient = ?
+                         WHERE (q.target = 'all_workers' OR q.acked_at IS NULL)
+                           AND seen.prompt_id IS NULL
+                           AND (q.target = ? OR q.target = 'all_workers')
+                           AND (q.factory_session = ? OR q.factory_session IS NULL)
+                         ORDER BY q.priority ASC, q.id ASC
+                         LIMIT ?",
+                        vec![
+                            Box::new(recipient.to_string()),
+                            Box::new(recipient.to_string()),
+                            Box::new(session.to_string()),
+                            Box::new(sql_limit),
+                        ],
+                    )
+                } else {
+                    (
+                        "SELECT q.id, q.source, q.target, q.prompt, q.created_at,
+                                q.processed_at, q.summary, q.priority, q.acked_at,
+                                q.urgent, q.factory_session
+                         FROM prompt_queue q
+                         LEFT JOIN prompt_queue_recipient_seen seen
+                           ON seen.prompt_id = q.id AND seen.recipient = ?
+                         WHERE (q.target = 'all_workers' OR q.acked_at IS NULL)
+                           AND seen.prompt_id IS NULL
+                           AND (q.target = ? OR q.target = 'all_workers')
+                           AND q.factory_session IS NULL
+                         ORDER BY q.priority ASC, q.id ASC
+                         LIMIT ?",
+                        vec![
+                            Box::new(recipient.to_string()),
+                            Box::new(recipient.to_string()),
+                            Box::new(sql_limit),
+                        ],
+                    )
+                };
+
+            let prompts: Vec<QueuedPrompt> = {
+                let mut stmt = tx.prepare_cached(sql)?;
+                stmt.query_map(
+                    rusqlite::params_from_iter(query_params.iter().map(|p| p.as_ref())),
+                    Self::prompt_from_row,
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+            };
+
+            if !prompts.is_empty() {
+                let seen_at = Utc::now().to_rfc3339();
+                let mut stmt = tx.prepare_cached(
+                    "INSERT OR IGNORE INTO prompt_queue_recipient_seen
+                         (prompt_id, recipient, seen_at)
+                     VALUES (?, ?, ?)",
+                )?;
+                for prompt in &prompts {
+                    stmt.execute(params![prompt.id, recipient, seen_at])?;
+                }
+            }
+
+            tx.commit()?;
+            Ok(prompts)
+        })
+    }
+
     fn poll_all(&self, limit: usize) -> Result<Vec<QueuedPrompt>> {
         crate::shared_db::with_write_retry(|| {
             let conn = self.conn.lock().unwrap();
@@ -2317,7 +2435,10 @@ impl PromptQueueStore for SqlitePromptQueueStore {
     fn clear(&self) -> Result<usize> {
         crate::shared_db::with_write_retry(|| {
             let conn = self.conn.lock().unwrap();
-            let rows = conn.execute("DELETE FROM prompt_queue", [])?;
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            let rows = tx.execute("DELETE FROM prompt_queue", [])?;
+            tx.execute("DELETE FROM prompt_queue_recipient_seen", [])?;
+            tx.commit()?;
             Ok(rows)
         }) // with_write_retry
     }
@@ -2326,12 +2447,20 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         crate::shared_db::with_write_retry(|| {
             let conn = self.conn.lock().unwrap();
             let cutoff = (Utc::now() - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
-
-            let rows = conn.execute(
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            let rows = tx.execute(
                 "DELETE FROM prompt_queue WHERE processed_at IS NOT NULL AND processed_at < ?",
                 params![cutoff],
             )?;
-
+            tx.execute(
+                "DELETE FROM prompt_queue_recipient_seen
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM prompt_queue
+                     WHERE prompt_queue.id = prompt_queue_recipient_seen.prompt_id
+                 )",
+                [],
+            )?;
+            tx.commit()?;
             Ok(rows)
         }) // with_write_retry
     }
@@ -4742,5 +4871,194 @@ mod tests {
         }
         // legacy + one lifecycle row
         assert_eq!(store.pending_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn inbox_poll_marks_seen_per_recipient_without_consuming_transport() {
+        let temp = TempDir::new().unwrap();
+        let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+
+        let direct = store
+            .enqueue_with_session("supervisor", "worker-a", "direct", "session-a")
+            .unwrap();
+        store
+            .enqueue_with_session("supervisor", "worker-b", "other worker", "session-a")
+            .unwrap();
+        let broadcast = store
+            .enqueue_with_session("supervisor", "all_workers", "broadcast", "session-a")
+            .unwrap();
+        let legacy = store
+            .enqueue("supervisor", "worker-a", "legacy direct")
+            .unwrap();
+        store
+            .enqueue_with_session("supervisor", "worker-a", "other session", "session-b")
+            .unwrap();
+        let acknowledged = store
+            .enqueue_with_session("supervisor", "worker-a", "already read", "session-a")
+            .unwrap();
+        store.ack(acknowledged).unwrap();
+
+        let first = store
+            .poll_unseen_for_recipient("worker-a", Some("session-a"), 10)
+            .unwrap();
+        let first_ids: Vec<i64> = first.iter().map(|prompt| prompt.id).collect();
+        assert_eq!(first_ids, vec![direct, broadcast, legacy]);
+
+        assert!(
+            store
+                .poll_unseen_for_recipient("worker-a", Some("session-a"), 10)
+                .unwrap()
+                .is_empty(),
+            "the same recipient must not receive a second inbox-poll copy"
+        );
+        assert_eq!(
+            store.message_status(direct).unwrap(),
+            Some(MessageStatus::Pending),
+            "inbox polling must not consume daemon transport delivery"
+        );
+        assert_eq!(
+            store.message_status(broadcast).unwrap(),
+            Some(MessageStatus::Pending),
+            "broadcast transport must remain pending after one recipient polls"
+        );
+
+        store.ack(broadcast).unwrap();
+        let peer = store
+            .poll_unseen_for_recipient("worker-b", Some("session-a"), 10)
+            .unwrap();
+        assert!(
+            peer.iter().any(|prompt| prompt.id == broadcast),
+            "worker A polling and acknowledging a broadcast must not hide it from worker B"
+        );
+    }
+
+    #[test]
+    fn inbox_poll_cleanup_removes_matching_and_preexisting_orphan_seen_rows() {
+        let (_temp, store) = create_test_store();
+        let old = store.enqueue("supervisor", "worker-a", "old").unwrap();
+        store
+            .poll_unseen_for_recipient("worker-a", None, 10)
+            .unwrap();
+
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE prompt_queue
+                 SET processed_at = '2000-01-01T00:00:00Z'
+                 WHERE id = ?",
+                [old],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO prompt_queue_recipient_seen (prompt_id, recipient, seen_at)
+                 VALUES (999999, 'orphan-worker', '2000-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+
+        assert_eq!(store.cleanup_old(0).unwrap(), 1);
+        let seen_count: i64 = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM prompt_queue_recipient_seen",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            seen_count, 0,
+            "cleanup_old must remove both deleted-row state and prior orphans"
+        );
+    }
+
+    #[test]
+    fn inbox_poll_clear_removes_all_seen_rows_including_orphans() {
+        let (_temp, store) = create_test_store();
+        store.enqueue("supervisor", "worker-a", "message").unwrap();
+        store
+            .poll_unseen_for_recipient("worker-a", None, 10)
+            .unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO prompt_queue_recipient_seen (prompt_id, recipient, seen_at)
+                 VALUES (999999, 'orphan-worker', '2000-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+
+        assert_eq!(store.clear().unwrap(), 1);
+        let conn = store.conn.lock().unwrap();
+        let prompt_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM prompt_queue", [], |row| row.get(0))
+            .unwrap();
+        let seen_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM prompt_queue_recipient_seen",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!((prompt_count, seen_count), (0, 0));
+    }
+
+    #[test]
+    fn concurrent_same_recipient_polls_on_two_connections_do_not_duplicate_delivery() {
+        use std::sync::{Arc, Barrier, Mutex};
+        use std::time::Duration;
+
+        fn independent_store(path: &Path) -> SqlitePromptQueueStore {
+            let conn = Connection::open(path.join("cas.db")).unwrap();
+            conn.busy_timeout(Duration::from_secs(5)).unwrap();
+            conn.execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 PRAGMA synchronous=NORMAL;
+                 PRAGMA foreign_keys=ON;",
+            )
+            .unwrap();
+            SqlitePromptQueueStore {
+                conn: Arc::new(Mutex::new(conn)),
+            }
+        }
+
+        let temp = TempDir::new().unwrap();
+        let first_store = independent_store(temp.path());
+        first_store.init().unwrap();
+        first_store
+            .enqueue("supervisor", "worker-a", "only once")
+            .unwrap();
+        let second_store = independent_store(temp.path());
+        second_store.init().unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+
+        let (first, second) = std::thread::scope(|scope| {
+            let first_barrier = Arc::clone(&barrier);
+            let first = scope.spawn(move || {
+                first_barrier.wait();
+                first_store
+                    .poll_unseen_for_recipient("worker-a", None, 10)
+                    .unwrap()
+            });
+            let second_barrier = Arc::clone(&barrier);
+            let second = scope.spawn(move || {
+                second_barrier.wait();
+                second_store
+                    .poll_unseen_for_recipient("worker-a", None, 10)
+                    .unwrap()
+            });
+            (first.join().unwrap(), second.join().unwrap())
+        });
+
+        assert_eq!(
+            first.len() + second.len(),
+            1,
+            "the IMMEDIATE claim transaction must deliver a row to only one connection"
+        );
     }
 }

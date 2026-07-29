@@ -44,8 +44,10 @@ import {
   planReviewShards,
   summarizeShardPlan,
   gpt55ShouldRun,
-  gpt55SkippedPersonas,
+  stripNullValues,
+  skippedPersonaResults,
   personasRunCount,
+  incompleteAlwaysOnPersonas,
 } from './cas-code-review-constants.js'
 
 import { mergeFindings, findingValidationErrors } from './merge-findings.js'
@@ -68,9 +70,11 @@ function loadEmbeddedMergeApi() {
 async function runWorkflowDryRun(args, setupOverride = {}, agentOverrides = {}) {
   const source = WORKFLOW_SOURCE.replace('export const meta =', 'const meta =')
   const labels = []
+  const calls = []
   const logs = []
-  async function agent(_prompt, options = {}) {
+  async function agent(prompt, options = {}) {
     labels.push(options.label)
+    calls.push({ prompt, options })
     if (options.label === 'setup') {
       return {
         intent_summary: 'Goal: exercise workflow dry-run.\nScope: synthetic diff.',
@@ -82,7 +86,12 @@ async function runWorkflowDryRun(args, setupOverride = {}, agentOverrides = {}) 
       }
     }
     if (Object.hasOwn(agentOverrides, options.label)) {
-      return agentOverrides[options.label]
+      const override = agentOverrides[options.label]
+      return typeof override === 'function' ? override({ prompt, options }) : override
+    }
+    if (Object.hasOwn(agentOverrides, '*')) {
+      const override = agentOverrides['*']
+      return typeof override === 'function' ? override({ prompt, options }) : override
     }
     return {
       reviewer: options.label,
@@ -103,7 +112,7 @@ async function runWorkflowDryRun(args, setupOverride = {}, agentOverrides = {}) 
 
   const workflow = new AsyncFunction('args', 'agent', 'pipeline', 'phase', 'log', source)
   const result = await workflow(args, agent, pipeline, phase, log)
-  return { result, labels, logs }
+  return { result, labels, calls, logs }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -184,7 +193,7 @@ describe('merge implementation parity', () => {
         findings: [{ ...validFinding, line: 13, owner: 'human', confidence: 0.7 }],
       },
       {
-        reviewer: 'gpt-5.5:independent',
+        reviewer: 'gpt-5.6-sol:independent',
         findings: [{ ...validFinding, title: 'Low confidence', confidence: 0.55 }],
       },
       { reviewer: 'maintainability', findings: [{ title: 'Under-filled' }] },
@@ -289,6 +298,29 @@ describe('CONDITIONAL_PERSONAS', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('REVIEWER_OUTPUT_SCHEMA', () => {
+  function assertStrictObjectSchema(schema, path = '$') {
+    if (Array.isArray(schema.type) && schema.type.includes('object')) {
+      assert.fail(`${path}: nullable object schemas are not expected here`)
+    }
+    if (schema.type === 'object') {
+      assert.equal(schema.additionalProperties, false, `${path}: object must reject extra keys`)
+      assert.deepEqual(
+        [...schema.required].sort(),
+        Object.keys(schema.properties).sort(),
+        `${path}: strict structured output requires every property key`,
+      )
+      for (const [key, propertySchema] of Object.entries(schema.properties)) {
+        assertStrictObjectSchema(propertySchema, `${path}.${key}`)
+      }
+    }
+    if (
+      schema.type === 'array'
+      || (Array.isArray(schema.type) && schema.type.includes('array'))
+    ) {
+      assertStrictObjectSchema(schema.items, `${path}[]`)
+    }
+  }
+
   test('is a JSON Schema object', () => {
     assert.equal(REVIEWER_OUTPUT_SCHEMA.type, 'object')
   })
@@ -304,19 +336,19 @@ describe('REVIEWER_OUTPUT_SCHEMA', () => {
 
   test('findings items have correct severity enum', () => {
     const findingSchema = REVIEWER_OUTPUT_SCHEMA.properties.findings.items
-    const severityEnum = findingSchema.properties.severity.enum
+    const severityEnum = [...findingSchema.properties.severity.enum]
     assert.deepEqual(severityEnum.sort(), ['P0', 'P1', 'P2', 'P3'])
   })
 
   test('findings items have correct owner enum', () => {
     const findingSchema = REVIEWER_OUTPUT_SCHEMA.properties.findings.items
-    const ownerEnum = findingSchema.properties.owner.enum
+    const ownerEnum = [...findingSchema.properties.owner.enum]
     assert.deepEqual(ownerEnum.sort(), ['downstream-resolver', 'human', 'review-fixer'])
   })
 
   test('findings items have correct autofix_class enum', () => {
     const findingSchema = REVIEWER_OUTPUT_SCHEMA.properties.findings.items
-    const autofixEnum = findingSchema.properties.autofix_class.enum
+    const autofixEnum = [...findingSchema.properties.autofix_class.enum]
     assert.deepEqual(autofixEnum.sort(), ['advisory', 'gated_auto', 'manual', 'safe_auto'])
   })
 
@@ -335,25 +367,111 @@ describe('REVIEWER_OUTPUT_SCHEMA', () => {
   })
 
   test('allows skipped_reason for skipped reviewer envelopes', () => {
-    assert.equal(REVIEWER_OUTPUT_SCHEMA.properties.skipped_reason.type, 'string')
+    assert.deepEqual(REVIEWER_OUTPUT_SCHEMA.properties.skipped_reason.type, ['string', 'null'])
+  })
+
+  test('is accepted by strict structured-output required-property rules', () => {
+    assertStrictObjectSchema(REVIEWER_OUTPUT_SCHEMA)
+  })
+
+  test('represents domain-optional fields as required nullable properties', () => {
+    const findingSchema = REVIEWER_OUTPUT_SCHEMA.properties.findings.items
+    assert.deepEqual(findingSchema.properties.suggested_fix.type, ['string', 'null'])
+    assert.deepEqual(findingSchema.properties.requires_verification.type, ['boolean', 'null'])
+    assert.deepEqual(REVIEWER_OUTPUT_SCHEMA.properties.residual_risks.type, ['array', 'null'])
+    assert.deepEqual(REVIEWER_OUTPUT_SCHEMA.properties.testing_gaps.type, ['array', 'null'])
+    assert.deepEqual(REVIEWER_OUTPUT_SCHEMA.properties.skipped_reason.type, ['string', 'null'])
   })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GPT-5.5 INDEPENDENT PERSONA HELPERS
+// CODEX PERSONA TRANSPORT + INDEPENDENT PERSONA HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe('gpt-5.5 independent activation helpers', () => {
-  test('wrapper prompt requires every schema field and tells the adapter to fill omissions', () => {
+describe('Codex reviewer transport', () => {
+  test('shared shim pins model, effort, schema, timeout, and distinct retry budgets', () => {
     const source = readFileSync(new URL('./cas-code-review.js', import.meta.url), 'utf8')
-    const promptStart = source.indexOf('function buildGpt55IndependentPrompt')
+    const shimStart = source.indexOf('function buildCodexReviewerShimPrompt')
+    const shimEnd = source.indexOf('\nasync function dispatchReviewPersona', shimStart)
+    const shim = source.slice(shimStart, shimEnd)
+
+    assert.notEqual(shimStart, -1, 'shared Codex reviewer shim must exist')
+    assert.match(shim, /-m \$\{CODEX_PERSONA_MODEL\}/)
+    assert.match(shim, /model_reasoning_effort=\$\{CODEX_PERSONA_EFFORT\}/)
+    assert.match(shim, /--output-schema/)
+    assert.match(shim, /CODEX_PERSONA_TIMEOUT_SECONDS/)
+    assert.match(shim, /CODEX_SCHEMA_RETRIES/)
+    assert.match(shim, /CODEX_TIMEOUT_RETRIES/)
+    assert.match(shim, /schema mismatch retries do not consume the timeout retry budget/i)
+  })
+
+  test('uses a portable shell watchdog instead of a platform-specific timeout binary', async () => {
+    const { calls } = await runWorkflowDryRun({
+      diff_text: 'diff --git a/lib.rs b/lib.rs\n-old\n+new',
+      file_list: 'lib.rs',
+      base_sha: 'abc123',
+      commit_log: 'synthetic',
+    })
+    const correctness = calls.find(call => call.options.label === 'review:correctness')
+
+    assert.doesNotMatch(correctness.prompt, /\/usr\/bin\/timeout/)
+    assert.match(correctness.prompt, /command -v sleep/)
+    assert.match(correctness.prompt, /sleep 600/)
+    assert.match(correctness.prompt, /TIMEOUT_MARKER/)
+  })
+
+  test('normal reviewers use Codex while security stays on Claude Opus', async () => {
+    const { calls } = await runWorkflowDryRun({
+      diff_text: 'diff --git a/auth.rs b/auth.rs\n-old\n+new',
+      file_list: 'auth.rs',
+      base_sha: 'abc123',
+      commit_log: 'synthetic',
+    }, {
+      activate_security: true,
+    })
+
+    const correctness = calls.find(call => call.options.label === 'review:correctness')
+    assert.match(correctness.prompt, /codex exec -s read-only -m gpt-5\.6-sol/)
+    assert.equal(correctness.options.model, 'haiku')
+    for (const field of REVIEWER_OUTPUT_SCHEMA.properties.findings.items.required) {
+      assert.ok(correctness.prompt.includes(field), `Codex shim must embed schema field: ${field}`)
+    }
+
+    const security = calls.find(call => call.options.label === 'review:security')
+    assert.doesNotMatch(security.prompt, /codex exec/)
+    assert.equal(security.options.model, 'opus')
+    assert.deepEqual(security.options.schema, REVIEWER_OUTPUT_SCHEMA)
+  })
+
+  test('fallow and independent reviewer share the Codex shim', async () => {
+    const { calls } = await runWorkflowDryRun({
+      diff_text: 'diff --git a/app.js b/app.js\n-old\n+new',
+      file_list: 'app.js',
+      base_sha: 'abc123',
+      commit_log: 'synthetic',
+      gpt55_independent: true,
+    }, {
+      fallow_skip_reason: null,
+    })
+
+    for (const label of ['review:fallow', 'review:gpt-5.6-sol:independent']) {
+      const call = calls.find(candidate => candidate.options.label === label)
+      assert.ok(call, `${label} must dispatch`)
+      assert.match(call.prompt, /codex exec -s read-only -m gpt-5\.6-sol/)
+    }
+  })
+})
+
+describe('gpt-5.6-sol independent activation helpers', () => {
+  test('independent prompt is a direct reviewer prompt, not a nested transport adapter', () => {
+    const source = readFileSync(new URL('./cas-code-review.js', import.meta.url), 'utf8')
+    const promptStart = source.indexOf('function buildIndependentPrompt')
     const promptEnd = source.indexOf('\nfunction gpt55ShouldRun', promptStart)
     const prompt = source.slice(promptStart, promptEnd)
 
-    for (const field of REVIEWER_OUTPUT_SCHEMA.properties.findings.items.required) {
-      assert.ok(prompt.includes(field), `gpt-5.5 wrapper prompt must name required field: ${field}`)
-    }
-    assert.match(prompt, /infer conservative values for any metadata Codex omits/i)
+    assert.notEqual(promptStart, -1)
+    assert.match(prompt, /# Persona: gpt-5\.6-sol:independent/)
+    assert.doesNotMatch(prompt, /thin Sonnet-low wrapper/)
   })
 
   test('activates at broad file-count boundary', () => {
@@ -368,6 +486,10 @@ describe('gpt-5.5 independent activation helpers', () => {
 
   test('activates for every explicit arg variant', () => {
     for (const args of [
+      { gpt56_independent: true },
+      { gpt56_independent: 'true' },
+      { enable_gpt56_independent: true },
+      { enable_gpt56_independent: 'true' },
       { gpt55_independent: true },
       { gpt55_independent: 'true' },
       { enable_gpt55_independent: true },
@@ -375,24 +497,41 @@ describe('gpt-5.5 independent activation helpers', () => {
       { independent_review: 'gpt-5.5' },
       { independent_review: 'gpt55' },
       { independent_review: 'gpt-5.5:independent' },
+      { independent_review: 'gpt-5.6-sol' },
+      { independent_review: 'gpt-5.6-sol:independent' },
     ]) {
       assert.equal(gpt55ShouldRun(args, 0, 0), true, JSON.stringify(args))
     }
   })
 
-  test('skipped persona accounting preserves reason and excludes skipped run', () => {
-    const skipped = gpt55SkippedPersonas({ skipped_reason: 'codex CLI not installed' })
+  test('shared skipped persona accounting preserves reason and excludes skipped runs', () => {
+    const outputs = [
+      { reviewer: 'correctness', findings: [] },
+      {
+        reviewer: 'gpt-5.6-sol:independent',
+        findings: [],
+        skipped_reason: 'codex CLI not installed',
+      },
+    ]
+    const skipped = skippedPersonaResults(outputs)
     assert.deepEqual(skipped, [{
-      reviewer: 'gpt-5.5:independent',
+      reviewer: 'gpt-5.6-sol:independent',
       reason: 'codex CLI not installed',
     }])
-    assert.equal(personasRunCount(4, true, true, true), 5)
-    assert.equal(personasRunCount(4, true, true, false), 6)
+    assert.equal(personasRunCount(outputs), 1)
+    assert.deepEqual(incompleteAlwaysOnPersonas(skipped), [])
   })
 
-  test('non-skipped gpt55 result has no skipped persona entry', () => {
-    assert.deepEqual(gpt55SkippedPersonas({ findings: [] }), [])
-    assert.deepEqual(gpt55SkippedPersonas(null), [])
+  test('null stripping removes strict-schema sentinels recursively', () => {
+    assert.deepEqual(stripNullValues({
+      reviewer: 'correctness',
+      skipped_reason: null,
+      findings: [{ suggested_fix: null, requires_verification: true }],
+    }), {
+      reviewer: 'correctness',
+      findings: [{ requires_verification: true }],
+    })
+    assert.deepEqual(skippedPersonaResults([]), [])
   })
 
   test('workflow surfaces and logs confidence-gated independent findings', async () => {
@@ -415,8 +554,8 @@ describe('gpt-5.5 independent activation helpers', () => {
       base_sha: 'abc123',
       gpt55_independent: true,
     }, {}, {
-      'review:gpt-5.5:independent': {
-        reviewer: 'gpt-5.5:independent',
+      'review:gpt-5.6-sol:independent': {
+        reviewer: 'gpt-5.6-sol:independent',
         findings: [independentFinding],
         residual_risks: [],
         testing_gaps: [],
@@ -426,11 +565,99 @@ describe('gpt-5.5 independent activation helpers', () => {
     assert.deepEqual(result.residual, [])
     assert.equal(result.dropped.length, 1)
     assert.equal(result.dropped[0].reason, 'confidence_below_threshold')
-    assert.equal(result.dropped[0].reviewer, 'gpt-5.5:independent')
+    assert.equal(result.dropped[0].reviewer, 'gpt-5.6-sol:independent')
     assert.equal(result.stats.dropped_findings, 1)
+    assert.equal(result.activation.gpt56_independent, true)
+    assert.equal(result.activation.gpt56_independent_skipped, false)
     assert.ok(logs.some(line => line.includes(
-      'Dropped/unmergeable finding from gpt-5.5:independent'
+      'Dropped/unmergeable finding from gpt-5.6-sol:independent'
     )))
+  })
+})
+
+describe('skipped-lane accounting', () => {
+  const baseArgs = {
+    diff_text: 'diff --git a/lib.rs b/lib.rs\n-old\n+new',
+    file_list: 'lib.rs',
+    base_sha: 'abc123',
+    commit_log: 'synthetic',
+  }
+
+  test('always-on transport failures are surfaced, excluded, and mark the review incomplete', async () => {
+    const skipped = reviewer => ({
+      reviewer,
+      findings: [],
+      residual_risks: [],
+      testing_gaps: [],
+      skipped_reason: `${reviewer} transport failed`,
+    })
+    const { result } = await runWorkflowDryRun(baseArgs, {}, {
+      'review:correctness': skipped('correctness'),
+      'review:testing': skipped('testing'),
+    })
+
+    assert.equal(result.status, 'incomplete')
+    assert.equal(result.activation.degraded, true)
+    assert.deepEqual(result.activation.incomplete_personas, ['correctness', 'testing'])
+    assert.deepEqual(result.activation.skipped_personas, [
+      { reviewer: 'correctness', reason: 'correctness transport failed' },
+      { reviewer: 'testing', reason: 'testing transport failed' },
+    ])
+    assert.equal(result.activation.personas_run, 2)
+    assert.equal(result.stats.personas_run, 2)
+  })
+
+  test('conditional skipped lanes are surfaced and excluded without making always-on coverage incomplete', async () => {
+    const { result } = await runWorkflowDryRun(baseArgs, {
+      activate_performance: true,
+    }, {
+      'review:performance': {
+        reviewer: 'performance',
+        findings: [],
+        residual_risks: [],
+        testing_gaps: [],
+        skipped_reason: 'codex auth unavailable',
+      },
+    })
+
+    assert.equal(result.status, 'complete')
+    assert.equal(result.activation.degraded, false)
+    assert.deepEqual(result.activation.incomplete_personas, [])
+    assert.deepEqual(result.activation.skipped_personas, [
+      { reviewer: 'performance', reason: 'codex auth unavailable' },
+    ])
+    assert.equal(result.stats.personas_run, 4)
+  })
+
+  test('strict-schema null sentinels are stripped before deterministic merge', async () => {
+    const finding = {
+      title: 'Null stripping reaches merge',
+      severity: 'P2',
+      file: 'lib.rs',
+      line: 1,
+      why_it_matters: 'Domain consumers expect absent optional values, not null sentinels.',
+      autofix_class: 'manual',
+      owner: 'human',
+      confidence: 0.9,
+      evidence: ['synthetic strict-schema envelope'],
+      pre_existing: false,
+      suggested_fix: null,
+      requires_verification: null,
+    }
+    const { result } = await runWorkflowDryRun(baseArgs, {}, {
+      'review:correctness': {
+        reviewer: 'correctness',
+        findings: [finding],
+        residual_risks: null,
+        testing_gaps: null,
+        skipped_reason: null,
+      },
+    })
+
+    assert.equal(result.residual.length, 1)
+    assert.equal(Object.hasOwn(result.residual[0], 'suggested_fix'), false)
+    assert.equal(Object.hasOwn(result.residual[0], 'requires_verification'), false)
+    assert.equal(result.activation.skipped_personas.length, 0)
   })
 })
 
@@ -588,6 +815,37 @@ describe('large-diff Workflow dry-run dispatch', () => {
     assert.ok(labels.includes('review:correctness:interface-integrator'))
     assert.ok(labels.includes('review:maintainability:interface-integrator'))
     assert.ok(labels.includes('review:adversarial:interface-integrator'))
+  })
+
+  test('bounds concurrent persona transports during Cartesian shard fan-out', async () => {
+    let active = 0
+    let maxActive = 0
+    const { labels } = await runWorkflowDryRun({
+      diff_text: LARGE_DIFF,
+      file_list: fileList,
+      base_sha: 'abc123',
+      commit_log: 'synthetic',
+      large_diff_token_threshold: 1,
+    }, {
+      activate_adversarial: true,
+      activate_performance: true,
+    }, {
+      '*': async ({ options }) => {
+        active += 1
+        maxActive = Math.max(maxActive, active)
+        await new Promise(resolve => setTimeout(resolve, 5))
+        active -= 1
+        return {
+          reviewer: options.label.replace(/^review:/, '').split(':')[0],
+          findings: [],
+          residual_risks: [],
+          testing_gaps: [],
+        }
+      },
+    })
+
+    assert.ok(labels.filter(label => label.startsWith('review:')).length > 4)
+    assert.ok(maxActive <= 4, `expected at most 4 concurrent transports, saw ${maxActive}`)
   })
 })
 

@@ -296,9 +296,9 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-code-review/references/personas/adversarial.md",
         content: include_str!("builtins/skills/cas-code-review/references/personas/adversarial.md"),
     },
-    // fallow persona — 5th always-on reviewer. Thin Sonnet wrapper around
-    // `fallow audit` that translates deterministic findings into the
-    // ReviewerOutput envelope and self-skips on non-JS/TS repos / diffs.
+    // fallow persona — deterministic CLI adapter routed through the shared
+    // Codex reviewer transport. It translates `fallow audit` findings into
+    // ReviewerOutput and self-skips on non-JS/TS repos / diffs.
     BuiltinFile {
         path: "skills/cas-code-review/references/personas/fallow.md",
         content: include_str!("builtins/skills/cas-code-review/references/personas/fallow.md"),
@@ -2754,24 +2754,31 @@ This is the body content."#;
     }
 
     #[test]
-    fn test_cas_code_review_documents_gpt55_independent_persona() {
+    fn test_cas_code_review_documents_codex_transport_and_independent_persona() {
         for (label, skills) in [("claude", BUILTIN_SKILLS), ("codex", CODEX_BUILTIN_SKILLS)] {
             let entry = skills
                 .iter()
                 .find(|b| b.path == "skills/cas-code-review/SKILL.md")
                 .unwrap_or_else(|| panic!("{label}: skills/cas-code-review/SKILL.md missing"));
             for required in [
-                "gpt-5.5:independent",
-                "Sonnet-low wrapper",
-                "codex exec -s read-only -m gpt-5.5",
+                "gpt-5.6-sol:independent",
+                "one shared schema shim",
+                "codex exec -s read-only -m gpt-5.6-sol -c model_reasoning_effort=medium",
+                "`--output-schema`",
+                "two bounded schema-mismatch retries",
+                "one separately-budgeted timeout retry",
+                "600 seconds",
+                "Security deliberately stays on Claude Opus",
                 "5+ changed files",
                 "300+ changed lines",
+                "gpt56_independent: true",
+                "legacy `gpt55_independent: true` remains accepted",
                 "skipped_reason",
                 "distinct from a successful zero-finding review",
             ] {
                 assert!(
                     entry.content.contains(required),
-                    "{label}: cas-code-review SKILL.md missing gpt-5.5 independent persona marker: {required:?}"
+                    "{label}: cas-code-review SKILL.md missing Codex transport/independent persona marker: {required:?}"
                 );
             }
         }
@@ -2885,23 +2892,64 @@ This is the body content."#;
             "workflow script must define the reviewer output schema"
         );
         for required in [
-            "gpt-5.5:independent",
+            "gpt-5.6-sol:independent",
+            "gpt56_independent",
             "gpt55_independent",
             "gpt55ShouldRun",
-            "codex exec -s read-only -m gpt-5.5",
+            "function buildCodexReviewerShimPrompt",
+            "async function dispatchReviewPersona",
+            "codex exec -s read-only -m ${CODEX_PERSONA_MODEL} -c model_reasoning_effort=${CODEX_PERSONA_EFFORT}",
+            "--output-schema",
+            "CODEX_PERSONA_TIMEOUT_SECONDS = 600",
+            "CODEX_SCHEMA_RETRIES = 2",
+            "CODEX_TIMEOUT_RETRIES = 1",
+            "CODEX_MAX_CONCURRENCY = 4",
+            "Schema mismatch retries do not consume the timeout retry budget",
+            "required: ['reviewer', 'findings', 'residual_risks', 'testing_gaps', 'skipped_reason']",
+            "required: ['title','severity','file','line','why_it_matters','autofix_class','owner','confidence','evidence','pre_existing','suggested_fix','requires_verification']",
+            "function stripNullValues",
+            "function skippedPersonaResults",
+            "function incompleteAlwaysOnPersonas",
+            "async function pipelineWithConcurrency",
+            "command -v sleep",
+            "TIMEOUT_MARKER",
+            "CLAUDE_DIVERSITY_PERSONA = 'security'",
+            "model: 'opus'",
             "skipped_reason",
             "gpt55_independent_skipped",
             "skipped_personas",
-            "effort: 'low'",
+            "status: reviewStatus",
+            "degraded: incompletePersonas.length > 0",
         ] {
             assert!(
                 workflow_content.contains(required),
-                "workflow script missing gpt-5.5 independent persona marker: {required:?}"
+                "workflow script missing shared Codex transport marker: {required:?}"
             );
         }
+        assert_eq!(
+            workflow_content
+                .matches("codex exec -s read-only -m ${CODEX_PERSONA_MODEL} -c model_reasoning_effort=${CODEX_PERSONA_EFFORT}")
+                .count(),
+            1,
+            "the Codex command must live once in the shared reviewer shim"
+        );
+        assert!(
+            !workflow_content.contains("/usr/bin/timeout"),
+            "cas-code-review must use the portable shell watchdog, not GNU timeout"
+        );
+        assert!(
+            !workflow_content.contains("model: 'sonnet'"),
+            "retired Sonnet model dispatch must not remain in cas-code-review"
+        );
         let constants_content =
             include_str!("../../.claude/workflows/cas-code-review-constants.js");
-        for helper in ["gpt55ShouldRun", "gpt55SkippedPersonas", "personasRunCount"] {
+        for helper in [
+            "gpt55ShouldRun",
+            "stripNullValues",
+            "skippedPersonaResults",
+            "personasRunCount",
+            "incompleteAlwaysOnPersonas",
+        ] {
             assert_eq!(
                 extract_js_function(&workflow_content, helper),
                 extract_js_function(constants_content, helper),
@@ -3768,8 +3816,8 @@ This is the body content."#;
                     "MERGE REQUIRED",
                     "gh pr create",
                     "status=closed",
-                    "injected messages",
-                    "`queue_poll` does not expose them",
+                    "inbox_poll",
+                    "unread supervisor messages",
                     "git rev-parse factory/<name>",
                 ] {
                     assert!(
@@ -3791,6 +3839,12 @@ This is the body content."#;
                 .contains("mcp__cs__coordination action=message target=supervisor"),
             "codex recovery.md MERGE REQUIRED section must use the mcp__cs__ alias"
         );
+        assert!(
+            codex_recovery
+                .content
+                .contains("mcp__cs__coordination action=inbox_poll"),
+            "codex recovery.md inbox remediation must use the mcp__cs__ alias"
+        );
         // The SessionStart-injected body must surface the MERGE REQUIRED close
         // outcome and the literal-`supervisor` messaging target on both surfaces.
         for (label, guide) in [
@@ -3807,8 +3861,8 @@ This is the body content."#;
             for required in [
                 "MERGE REQUIRED",
                 "literal string `supervisor`",
-                "injected messages",
-                "`queue_poll` does not expose them",
+                "inbox_poll",
+                "unread supervisor messages",
                 "current factory-branch tip SHA",
             ] {
                 assert!(

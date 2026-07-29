@@ -122,12 +122,17 @@ pub struct Pane {
     total_bytes_received: u64,
     /// When this pane was created (for startup grace period)
     created_at: std::time::Instant,
-    /// Authoritative in-flight turn flag (cas-7f6f).
+    /// Grok-authoritative in-flight turn flag (cas-7f6f).
     ///
     /// Set at control points that start a turn (true prompt submit / inject via
     /// [`UserInputKind::KeyStream`]); cleared on cancel (`break_turn` /
     /// `interrupt`) or authoritative harness completion
     /// ([`Self::mark_turn_completed`] from Grok `events.jsonl` `turn_ended`).
+    ///
+    /// Claude and Codex expose no normal-completion event to the mux. For those
+    /// harnesses this remains set after a normally completed turn, so it only
+    /// means "a submit occurred since the last explicit clear" and MUST NOT be
+    /// used as a busy/idle signal. Production reads are scoped to Grok.
     /// Not set by output redraws, paste/drop, or generic SGR clicks.
     /// Not cleared by PTY quiet timers (long tool waits stay in-flight).
     turn_in_flight: std::sync::atomic::AtomicBool,
@@ -1122,7 +1127,12 @@ impl Pane {
         self.total_bytes_received
     }
 
-    /// Whether a turn is currently in-flight on this pane (cas-7f6f).
+    /// Whether the pane's tracked turn is still in-flight (cas-7f6f).
+    ///
+    /// This is authoritative across normal completion only for Grok, whose
+    /// `events.jsonl` supplies `turn_ended`. For Claude and Codex, `true`
+    /// persists after normal completion until an explicit cancel/clear, and
+    /// therefore MUST NOT be interpreted as "the harness is currently busy."
     pub fn is_turn_in_flight(&self) -> bool {
         self.turn_in_flight
             .load(std::sync::atomic::Ordering::Acquire)
@@ -1153,7 +1163,8 @@ impl Pane {
     /// Mark that a turn has started (true prompt submit or inject).
     ///
     /// Snapshots the harness events file length so only later `turn_ended`
-    /// events can complete this turn.
+    /// events can complete this turn. Only Grok currently supplies that
+    /// normal-completion signal; Claude/Codex remain set until explicit clear.
     pub fn mark_turn_in_flight(&self) {
         self.turn_in_flight
             .store(true, std::sync::atomic::Ordering::Release);
@@ -1163,7 +1174,10 @@ impl Pane {
         }
     }
 
-    /// Mark that the in-flight turn has ended (cancel issued or explicit idle).
+    /// Explicitly clear the tracked turn (cancel or caller-known completion).
+    ///
+    /// Do not infer Claude/Codex completion from PTY quiet; long tool calls can
+    /// be silent. No automatic normal-completion path exists for those harnesses.
     pub fn clear_turn_in_flight(&self) {
         self.turn_in_flight
             .store(false, std::sync::atomic::Ordering::Release);
@@ -1172,7 +1186,10 @@ impl Pane {
         }
     }
 
-    /// Authoritative normal completion (turn finished without cancel).
+    /// Record normal completion reported by an authoritative external signal.
+    ///
+    /// The built-in caller is Grok `events.jsonl`. Claude/Codex currently have
+    /// no such caller or signal.
     pub fn mark_turn_completed(&self) {
         self.clear_turn_in_flight();
     }
@@ -1181,13 +1198,16 @@ impl Pane {
     ///
     /// For Grok: reads `events.jsonl` after the offset captured at submit and
     /// clears on any `turn_ended` (outcomes completed|error|cancelled).
+    /// Claude/Codex are deliberately unchanged: their tracked boolean is not a
+    /// normal-completion/busy signal.
     /// Quiet PTY output alone never clears — long MCP/tool waits stay active.
     pub fn refresh_harness_turn_state(&self) {
         if !self.is_turn_in_flight() {
             return;
         }
         // Only Grok has an on-disk turn_ended signal we consume here.
-        // Claude/Codex clear via break_turn/interrupt or explicit completion.
+        // Claude/Codex clear only on cancel or a caller-provided authoritative
+        // completion; no such normal-completion caller currently exists.
         if self.harness != SupervisorCli::Grok
             && self
                 .harness_events_path_override

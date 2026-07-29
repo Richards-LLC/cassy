@@ -21,14 +21,14 @@
 //     task_id,             // optional CAS task ID
 //   }})
 //
-// Returns: { residual, pre_existing, dropped, activation, stats }
+// Returns: { status, residual, pre_existing, dropped, activation, stats }
 
 export const meta = {
   name: 'cas-code-review',
   description: 'cas-code-review Steps 1-4: intent extraction, persona selection, sharded dispatch, deterministic merge',
   phases: [
     { title: 'Resolve', detail: 'validate args + fallow pre-check' },
-    { title: 'Review', detail: 'parallel persona dispatch, sharded for large diffs (schema-validated, Sonnet)' },
+    { title: 'Review', detail: 'parallel persona dispatch, sharded for large diffs (Codex + Claude diversity lane)' },
     { title: 'Merge', detail: 'deterministic 7-step merge (pure JS, no LLM)' },
   ],
 }
@@ -38,6 +38,13 @@ export const meta = {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const ALWAYS_ON_PERSONAS = ['correctness', 'testing', 'maintainability', 'project-standards']
+const CODEX_PERSONA_MODEL = 'gpt-5.6-sol'
+const CODEX_PERSONA_EFFORT = 'medium'
+const CODEX_PERSONA_TIMEOUT_SECONDS = 600
+const CODEX_SCHEMA_RETRIES = 2
+const CODEX_TIMEOUT_RETRIES = 1
+const CODEX_MAX_CONCURRENCY = 4
+const CLAUDE_DIVERSITY_PERSONA = 'security'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SCHEMA — mirrors ReviewerOutput + Finding from crates/cas-types/src/code_review.rs
@@ -45,7 +52,7 @@ const ALWAYS_ON_PERSONAS = ['correctness', 'testing', 'maintainability', 'projec
 
 const FINDING_SCHEMA = {
   type: 'object',
-  required: ['title','severity','file','line','why_it_matters','autofix_class','owner','confidence','evidence','pre_existing'],
+  required: ['title','severity','file','line','why_it_matters','autofix_class','owner','confidence','evidence','pre_existing','suggested_fix','requires_verification'],
   additionalProperties: false,
   properties: {
     title:                { type: 'string', maxLength: 100 },
@@ -58,21 +65,21 @@ const FINDING_SCHEMA = {
     confidence:           { type: 'number', minimum: 0.0, maximum: 1.0 },
     evidence:             { type: 'array', items: { type: 'string' }, minItems: 1 },
     pre_existing:         { type: 'boolean' },
-    suggested_fix:        { type: 'string' },
-    requires_verification:{ type: 'boolean' },
+    suggested_fix:        { type: ['string', 'null'] },
+    requires_verification:{ type: ['boolean', 'null'] },
   },
 }
 
 const REVIEWER_OUTPUT_SCHEMA = {
   type: 'object',
-  required: ['reviewer', 'findings'],
+  required: ['reviewer', 'findings', 'residual_risks', 'testing_gaps', 'skipped_reason'],
   additionalProperties: false,
   properties: {
     reviewer:       { type: 'string' },
     findings:       { type: 'array', items: FINDING_SCHEMA },
-    residual_risks: { type: 'array', items: { type: 'string' } },
-    testing_gaps:   { type: 'array', items: { type: 'string' } },
-    skipped_reason: { type: 'string' },
+    residual_risks: { type: ['array', 'null'], items: { type: 'string' } },
+    testing_gaps:   { type: ['array', 'null'], items: { type: 'string' } },
+    skipped_reason: { type: ['string', 'null'] },
   },
 }
 
@@ -84,7 +91,7 @@ const REVIEWER_OUTPUT_SCHEMA = {
 const PERSONA_PROMPTS = {
 
 correctness: `# Persona: correctness
-Run as a Sonnet sub-agent. Do not inherit caller model.
+The orchestrator selects your execution transport. Follow this persona mandate only.
 
 Hunt for defects that make the changed code wrong — logic errors, broken execution paths, failure modes the author did not consider. Trace the full execution path: inputs, branches, early returns, error propagation, invariants. If you cannot construct a concrete input that triggers the bug, confidence must reflect that.
 
@@ -96,7 +103,7 @@ Output ONLY: {"reviewer":"correctness","findings":[...],"residual_risks":[...],"
 confidence ≥ 0.80: reproducible from code alone. 0.60–0.79: sound, inference gap stated. <0.60: use residual_risks. P0 threshold: ≥ 0.50. No prose outside the JSON envelope.`,
 
 testing: `# Persona: testing
-Run as a Sonnet sub-agent. Do not inherit caller model.
+The orchestrator selects your execution transport. Follow this persona mandate only.
 
 Hunt for gaps and weaknesses in test coverage of the changed code. Answer: if this diff broke, would a test fail? For every new/modified non-test symbol, verify a test would catch a plausible regression.
 
@@ -108,7 +115,7 @@ Output ONLY: {"reviewer":"testing","findings":[...],"residual_risks":[...],"test
 file/line point at the production symbol with missing coverage. Most: manual, review-fixer or downstream-resolver. confidence 0.80+: confirmed absence by reading test files. No prose outside JSON.`,
 
 maintainability: `# Persona: maintainability
-Run as a Sonnet sub-agent. Do not inherit caller model.
+The orchestrator selects your execution transport. Follow this persona mandate only.
 
 Hunt for changes that make the codebase harder to read, reason about, or extend six months from now.
 
@@ -120,7 +127,7 @@ Output ONLY: {"reviewer":"maintainability","findings":[...],"residual_risks":[..
 Most: P2/P3, advisory or manual. P0/P1 rare. No prose outside JSON.`,
 
 'project-standards': `# Persona: project-standards
-Run as a Sonnet sub-agent. Do not inherit caller model.
+The orchestrator selects your execution transport. Follow this persona mandate only.
 
 Hunt for violations of the project's explicit, enforceable standards — CAS rules from mcp__cas__rule plus CLAUDE.md/AGENTS.md conventions. Enforce what this project has decided. Do not invent rules.
 
@@ -132,7 +139,7 @@ Output ONLY: {"reviewer":"project-standards","findings":[...],"residual_risks":[
 Rule ID in title prefix (e.g., "rule-1234: ..."). confidence 0.80+: explicit rule + clear violation. <0.60: suppress. No prose outside JSON.`,
 
 security: `# Persona: security
-Run as a Sonnet sub-agent. Do not inherit caller model.
+Run as the Claude Opus cross-vendor reviewer. Do not inherit caller model.
 ACTIVATION: Confirmed by caller — diff touches auth boundaries, user input parsing/deserialization, or permission surfaces.
 
 Hunt for exploitable defects — where malicious/malformed input, stolen credential, or authorization misuse lets an attacker read, write, or execute something they should not. Think in threat models: attacker input → boundary → target. Evidence-grounded, reproducible-from-code reasoning required.
@@ -145,7 +152,7 @@ Output ONLY: {"reviewer":"security","findings":[...],"residual_risks":[...],"tes
 Default P0/P1, owner:human, manual autofix. confidence 0.80+: trace attacker input to sink. <0.60: suppress. No prose outside JSON.`,
 
 performance: `# Persona: performance
-Run as a Sonnet sub-agent. Do not inherit caller model.
+The orchestrator selects your execution transport. Follow this persona mandate only.
 ACTIVATION: Confirmed by caller — diff touches DB queries, data transforms on large inputs, caching, or async code paths.
 
 Hunt for code that will be slower, more wasteful, or less scalable than a reasonable alternative. Care about asymptotic complexity, unbounded work, async pitfalls. Every finding must point at a concrete cost scenario.
@@ -158,7 +165,7 @@ Output ONLY: {"reviewer":"performance","findings":[...],"residual_risks":[...],"
 Most: P1/P2, manual or gated_auto. confidence 0.80+: traced data flow + concrete cost scenario. <0.60: suppress. No prose outside JSON.`,
 
 adversarial: `# Persona: adversarial
-Run as a Sonnet sub-agent. Do not inherit caller model.
+The orchestrator selects your execution transport. Follow this persona mandate only.
 ACTIVATION: Confirmed by caller — 50+ changed non-test lines AND touches CAS high-stakes modules (close_ops, verify_ops, factory coordination, SQLite stores, hook system, MCP dispatch). Skip for diffs under 20 non-test lines.
 
 Red-team reader. Ask: what is the worst this change could plausibly do, and how would we know? Surface risks the other personas miss because they are in-lane. Reason about blast radius, reversibility, multi-component interactions, failures that appear only under concurrent factory sessions or production state.
@@ -171,7 +178,7 @@ Output ONLY: {"reviewer":"adversarial","findings":[...],"residual_risks":[...],"
 Almost always manual, owner:human or downstream-resolver. Severity = blast radius, not likelihood. confidence 0.80+: specific invariant broken + historical incident class. <0.60: suppress. No prose outside JSON.`,
 
 fallow: `# Persona: fallow
-Run as a Sonnet sub-agent. Do not inherit caller model. Adapter, not auteur — run the CLI and translate output.
+Adapter, not auteur — run the CLI and translate output. The orchestrator selects your execution transport.
 ACTIVATION: JS/TS repo with JS/TS files in diff (pre-checked by caller).
 
 Skip rules — return clean envelope with residual_risks entry:
@@ -375,27 +382,8 @@ evidence (array ≥1 code-grounded string), pre_existing (bool).
 Do NOT emit any prose outside the JSON envelope.`
 }
 
-function buildGpt55IndependentPrompt(diffText, fileList, intentSummary, baseSha) {
-  return `# Persona: gpt-5.5:independent
-Run as a thin Sonnet-low wrapper around codex exec. Your job is adapter, not reviewer.
-
-Steps:
-1. Compose a self-contained, direct codex prompt. It must embed the intent summary, base SHA, changed file list, and literal diff below. Do not rely on conversation context.
-2. End the codex prompt with: "If you find nothing, say so explicitly and name the review target you inspected."
-3. Run codex with an explicit Bash timeout and read-only sandbox, for example:
-   /usr/bin/timeout 600 codex exec -s read-only -m gpt-5.5 -C "$PWD" "<prompt>"
-4. If codex is absent, auth is expired, or the command cannot run, return:
-   {"reviewer":"gpt-5.5:independent","findings":[],"skipped_reason":"<specific reason>","residual_risks":[],"testing_gaps":[]}
-5. If codex runs and reports no issues, return findings: [] with no skipped_reason.
-6. If codex reports issues, map only concrete, diff-grounded issues into Finding objects.
-
-Finding mapping contract: every mapped finding MUST contain all of these fields:
-title, severity, file, line, why_it_matters, autofix_class, owner, confidence,
-evidence, pre_existing. Optional fields are suggested_fix and requires_verification.
-Use the same enum values and constraints as the JSON schema supplied to this agent.
-As the adapter, infer conservative values for any metadata Codex omits; never emit
-an under-filled Finding object.
-
+function buildIndependentPrompt(diffText, fileList, intentSummary, baseSha) {
+  return `# Persona: gpt-5.6-sol:independent
 Review focus: independent broad read. Look for important correctness, testing, maintainability, security, performance, or integration issues missed by lane-specific reviewers. Avoid nitpicks.
 
 ## Review target
@@ -415,37 +403,151 @@ ${diffText}
 \`\`\`
 
 Output ONLY a JSON object matching:
-{"reviewer":"gpt-5.5:independent","findings":[...],"residual_risks":[...],"testing_gaps":[...],"skipped_reason":"optional"}
-Use skipped_reason only when codex did not run. No prose outside JSON.`
+{"reviewer":"gpt-5.6-sol:independent","findings":[...],"residual_risks":[...],"testing_gaps":[...]}
+If you find nothing, return an empty findings array and name the review target you inspected in residual_risks. No prose outside JSON.`
+}
+
+function buildCodexReviewerShimPrompt(name, reviewerPrompt) {
+  const schemaJson = JSON.stringify(REVIEWER_OUTPUT_SCHEMA, null, 2)
+  return `# Codex reviewer transport shim
+You are a thin transport adapter, not a reviewer. Execute the supplied reviewer prompt with Codex, validate its final JSON, and return the parsed object unchanged.
+
+Transport contract:
+- Model: ${CODEX_PERSONA_MODEL}
+- Reasoning effort: ${CODEX_PERSONA_EFFORT}
+- Sandbox: read-only
+- Per-process timeout: ${CODEX_PERSONA_TIMEOUT_SECONDS} seconds
+- Schema-mismatch retry budget: ${CODEX_SCHEMA_RETRIES}
+- Timeout retry budget: ${CODEX_TIMEOUT_RETRIES}
+
+Procedure:
+1. Create a private temporary directory. Write the reviewer prompt and the exact REVIEWER_OUTPUT_SCHEMA below to separate files. Never splice the prompt or diff into a shell command.
+2. Require \`codex\` and the portable shell primitives with \`command -v codex\`, \`command -v sleep\`, \`command -v kill\`, and \`command -v wait\`. If any are unavailable, do not run an unbounded process; return the skipped envelope from step 7 with the missing command or primitive named.
+3. Run Codex with this exact portable shell-watchdog shape (the surrounding adapter may choose its own variable names, but must preserve the lifecycle):
+   \`\`\`sh
+   TIMEOUT_MARKER="$TMP_DIR/timed-out"
+   codex exec -s read-only -m ${CODEX_PERSONA_MODEL} -c model_reasoning_effort=${CODEX_PERSONA_EFFORT} --output-schema "$SCHEMA_FILE" --output-last-message "$OUTPUT_FILE" --color never -C "$PWD" - < "$PROMPT_FILE" &
+   CODEX_PID=$!
+   (
+     sleep ${CODEX_PERSONA_TIMEOUT_SECONDS}
+     if kill -0 "$CODEX_PID" 2>/dev/null; then
+       : > "$TIMEOUT_MARKER"
+       kill -TERM "$CODEX_PID" 2>/dev/null || true
+       sleep 5
+       kill -KILL "$CODEX_PID" 2>/dev/null || true
+     fi
+   ) &
+   WATCHDOG_PID=$!
+   CODEX_EXIT=0
+   wait "$CODEX_PID" || CODEX_EXIT=$?
+   if kill -0 "$WATCHDOG_PID" 2>/dev/null; then
+     kill "$WATCHDOG_PID" 2>/dev/null || true
+   fi
+   wait "$WATCHDOG_PID" 2>/dev/null || true
+   \`\`\`
+   Classify timeout from the existence of TIMEOUT_MARKER, not only the process exit code. This shell watchdog is the timeout mechanism; do not call GNU \`timeout\` or assume a platform-specific path.
+4. Parse OUTPUT_FILE as one JSON object and validate it against REVIEWER_OUTPUT_SCHEMA. The codex --output-schema boundary is required, but you must still parse the saved final message before returning it.
+5. On a parse or schema mismatch, retry at most ${CODEX_SCHEMA_RETRIES} times and append the concrete validation errors to the retry prompt. Schema mismatch retries do not consume the timeout retry budget.
+6. When TIMEOUT_MARKER records a timeout, retry at most ${CODEX_TIMEOUT_RETRIES} time. Timeout retries do not consume the schema-mismatch retry budget.
+7. On a missing timeout primitive, missing codex, authentication failure, another execution error, or exhausted retries, return:
+   {"reviewer":"${name}","findings":[],"skipped_reason":"<specific transport failure>","residual_risks":[],"testing_gaps":[]}
+8. Always remove the temporary directory. Return only the parsed ReviewerOutput object through the schema tool; do not add commentary or independently review the diff.
+
+REVIEWER_OUTPUT_SCHEMA:
+\`\`\`json
+${schemaJson}
+\`\`\`
+
+REVIEWER PROMPT:
+\`\`\`text
+${reviewerPrompt}
+\`\`\``
+}
+
+async function dispatchReviewPersona(name, reviewerPrompt, label) {
+  if (name === CLAUDE_DIVERSITY_PERSONA) {
+    return agent(reviewerPrompt, {
+      label,
+      phase: 'Review',
+      schema: REVIEWER_OUTPUT_SCHEMA,
+      model: 'opus',
+      effort: 'medium',
+    })
+  }
+
+  return agent(buildCodexReviewerShimPrompt(name, reviewerPrompt), {
+    label,
+    phase: 'Review',
+    schema: REVIEWER_OUTPUT_SCHEMA,
+    // Haiku performs transport-only Bash/parse work; Codex performs the review.
+    model: 'haiku',
+  })
 }
 
 function gpt55ShouldRun(args = {}, fileCount, changeLines) {
   const {
+    gpt56_independent: gpt56IndependentArg,
+    enable_gpt56_independent: enableGpt56IndependentArg,
     gpt55_independent: gpt55IndependentArg,
     enable_gpt55_independent: enableGpt55IndependentArg,
     independent_review: independentReviewArg,
   } = args ?? {}
-  const gpt55Explicit = gpt55IndependentArg === true
+  const gpt55Explicit = gpt56IndependentArg === true
+    || gpt56IndependentArg === 'true'
+    || enableGpt56IndependentArg === true
+    || enableGpt56IndependentArg === 'true'
+    || gpt55IndependentArg === true
     || gpt55IndependentArg === 'true'
     || enableGpt55IndependentArg === true
     || enableGpt55IndependentArg === 'true'
     || independentReviewArg === 'gpt-5.5'
     || independentReviewArg === 'gpt55'
     || independentReviewArg === 'gpt-5.5:independent'
+    || independentReviewArg === 'gpt-5.6-sol'
+    || independentReviewArg === 'gpt-5.6-sol:independent'
   const gpt55BroadDiff = fileCount >= 5 || changeLines >= 300
   return gpt55Explicit || gpt55BroadDiff
 }
 
-function gpt55SkippedPersonas(gpt55Result) {
-  if (!gpt55Result?.skipped_reason) return []
-  return [{
-    reviewer: 'gpt-5.5:independent',
-    reason: gpt55Result.skipped_reason,
-  }]
+function stripNullValues(value) {
+  if (Array.isArray(value)) return value.map(stripNullValues)
+  if (!value || typeof value !== 'object') return value
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([, nested]) => nested !== null)
+      .map(([key, nested]) => [key, stripNullValues(nested)])
+  )
 }
 
-function personasRunCount(personasToDispatchCount, fallowRuns, gpt55Runs, gpt55Skipped) {
-  return personasToDispatchCount + (fallowRuns ? 1 : 0) + (gpt55Runs && !gpt55Skipped ? 1 : 0)
+function skippedPersonaResults(outputs = []) {
+  return outputs.flatMap(output => {
+    if (typeof output?.skipped_reason !== 'string' || !output.skipped_reason.trim()) return []
+    return [{
+      reviewer: output.reviewer,
+      reason: output.skipped_reason,
+    }]
+  })
+}
+
+function personasRunCount(outputs = []) {
+  return outputs.filter(output => !output?.skipped_reason).length
+}
+
+function incompleteAlwaysOnPersonas(skippedPersonas = []) {
+  return [...new Set(
+    skippedPersonas
+      .map(skipped => skipped.reviewer)
+      .filter(reviewer => ALWAYS_ON_PERSONAS.includes(reviewer))
+  )]
+}
+
+async function pipelineWithConcurrency(items, worker, maxConcurrency = CODEX_MAX_CONCURRENCY) {
+  const results = []
+  for (let offset = 0; offset < items.length; offset += maxConcurrency) {
+    const batch = items.slice(offset, offset + maxConcurrency)
+    results.push(...await pipeline(batch, worker))
+  }
+  return results
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -680,7 +782,8 @@ const SETUP_SCHEMA = {
 //
 // Skill wrapper passes: diff_text, file_list, base_sha, commit_log,
 //   task_context (optional), mode, task_id (optional),
-//   gpt55_independent / enable_gpt55_independent / independent_review (optional)
+//   gpt56_independent / enable_gpt56_independent / independent_review (optional)
+//   gpt55_independent / enable_gpt55_independent (legacy aliases)
 // Workflow handles: intent extraction, persona selection, dispatch, merge
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -744,7 +847,7 @@ Return a single JSON object matching this schema exactly. No prose outside the J
     label: 'setup',
     phase: 'Resolve',
     schema: SETUP_SCHEMA,
-    model: 'sonnet',
+    model: 'haiku',
   }
 )
 
@@ -759,9 +862,9 @@ if (setup?.activate_security) toRun.push('security')
 if (setup?.activate_performance) toRun.push('performance')
 if (setup?.activate_adversarial) toRun.push('adversarial')
 if (fallowRuns) toRun.push('fallow')
-if (gpt55Runs) toRun.push('gpt-5.5:independent')
+if (gpt55Runs) toRun.push('gpt-5.6-sol:independent')
 
-const personasToDispatch = toRun.filter(name => name !== 'fallow' && name !== 'gpt-5.5:independent')
+const personasToDispatch = toRun.filter(name => name !== 'fallow' && name !== 'gpt-5.6-sol:independent')
 
 log(`Intent: ${intentSummary.split('\n')[0]}`)
 log(`Active personas: ${toRun.join(', ')}`)
@@ -793,22 +896,21 @@ if (shardPlan.enabled) {
 phase('Review')
 
 let personaResults = []
-let dispatchedReviewCount = personasToDispatch.length
 if (!shardPlan.enabled) {
-  personaResults = await pipeline(
+  personaResults = await pipelineWithConcurrency(
     personasToDispatch,
-    (name) => agent(
+    (name) => dispatchReviewPersona(
+      name,
       buildPersonaPrompt(name, diffText, fileList ?? '', intentSummary, baseSha),
-      { label: `review:${name}`, phase: 'Review', schema: REVIEWER_OUTPUT_SCHEMA, model: 'sonnet' }
+      `review:${name}`
     )
   )
 } else {
   const shardJobs = shardPlan.shards.flatMap(shard =>
     shard.personas.map(name => ({ name, shard }))
   )
-  dispatchedReviewCount = shardJobs.length
   log(`Large diff dispatch: ${shardJobs.length} shard/persona runs (${shardPlan.shards.map(s => `${s.id}:${s.personas.join('+')}`).join('; ')})`)
-  personaResults = await pipeline(
+  personaResults = await pipelineWithConcurrency(
     shardJobs,
     ({ name, shard }) => {
       const shardIntent = `${intentSummary}
@@ -824,14 +926,10 @@ ${shard.kind === 'interface'
       const shardDiff = shard.diff_text?.trim()
         ? shard.diff_text
         : `# No signature-like interface diff lines detected for ${shard.id}; review the changed file list and cross-shard contract risk only.`
-      return agent(
+      return dispatchReviewPersona(
+        name,
         buildPersonaPrompt(name, shardDiff, shard.files.join('\n'), shardIntent, baseSha),
-        {
-          label: `review:${name}:${shard.id}`,
-          phase: 'Review',
-          schema: REVIEWER_OUTPUT_SCHEMA,
-          model: 'sonnet',
-        }
+        `review:${name}:${shard.id}`
       )
     }
   )
@@ -839,30 +937,39 @@ ${shard.kind === 'interface'
 
 let fallowResult = null
 if (fallowRuns) {
-  fallowResult = await agent(
+  fallowResult = await dispatchReviewPersona(
+    'fallow',
     buildPersonaPrompt('fallow', diffText, fileList ?? '', intentSummary, baseSha),
-    { label: 'review:fallow', phase: 'Review', schema: REVIEWER_OUTPUT_SCHEMA, model: 'sonnet' }
+    'review:fallow'
   )
 }
 
 let gpt55Result = null
 if (gpt55Runs) {
-  gpt55Result = await agent(
-    buildGpt55IndependentPrompt(diffText, fileList ?? '', intentSummary, baseSha),
-    {
-      label: 'review:gpt-5.5:independent',
-      phase: 'Review',
-      schema: REVIEWER_OUTPUT_SCHEMA,
-      model: 'sonnet',
-      effort: 'low',
-    }
+  gpt55Result = await dispatchReviewPersona(
+    'gpt-5.6-sol:independent',
+    buildIndependentPrompt(diffText, fileList ?? '', intentSummary, baseSha),
+    'review:gpt-5.6-sol:independent'
   )
 }
 
-const allOutputs = [...personaResults, fallowResult, gpt55Result].filter(Boolean)
-const gpt55Skipped = !!gpt55Result?.skipped_reason
-const skippedPersonas = gpt55SkippedPersonas(gpt55Result)
-const personasRun = personasRunCount(dispatchedReviewCount, fallowRuns, gpt55Runs, gpt55Skipped)
+const allOutputs = [...personaResults, fallowResult, gpt55Result]
+  .filter(Boolean)
+  .map(stripNullValues)
+const skippedPersonas = skippedPersonaResults(allOutputs)
+const personasRun = personasRunCount(allOutputs)
+const incompletePersonas = incompleteAlwaysOnPersonas(skippedPersonas)
+const reviewStatus = incompletePersonas.length ? 'incomplete' : 'complete'
+const gpt55Skipped = skippedPersonas.some(
+  skipped => skipped.reviewer === 'gpt-5.6-sol:independent'
+)
+
+for (const skipped of skippedPersonas) {
+  log(`Skipped persona ${skipped.reviewer}: ${skipped.reason}`)
+}
+if (incompletePersonas.length) {
+  log(`ERROR: review incomplete; always-on personas skipped: ${incompletePersonas.join(', ')}`)
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PHASE 3: DETERMINISTIC MERGE (Step 4 — pure JS, Phase A validated)
@@ -888,6 +995,7 @@ for (const item of dropped) {
 log(`Merged: ${residual.length} new (P0:${p0}, P1:${p1}, P2:${p2}, P3:${p3}), ${pre_existing.length} pre-existing, ${dropped.length} dropped/unmergeable`)
 
 return {
+  status: reviewStatus,
   residual,
   pre_existing,
   dropped,
@@ -900,7 +1008,12 @@ return {
     gpt55_independent: gpt55Runs,
     gpt55_independent_skipped: gpt55Skipped,
     gpt55_independent_skip_reason: gpt55Result?.skipped_reason ?? null,
+    gpt56_independent: gpt55Runs,
+    gpt56_independent_skipped: gpt55Skipped,
+    gpt56_independent_skip_reason: gpt55Result?.skipped_reason ?? null,
     skipped_personas: skippedPersonas,
+    degraded: incompletePersonas.length > 0,
+    incomplete_personas: incompletePersonas,
     personas_run: personasRun,
     ...(shardPlan.enabled ? { sharding: shardPlanSummary } : {}),
   },

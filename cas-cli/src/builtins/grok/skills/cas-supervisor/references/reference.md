@@ -5,7 +5,7 @@ Wrong field names and invalid actions waste dispatch cycles. This section covers
 **Valid `cas__task` actions** (do not invent others): `create`, `show`, `update`, `start`, `close`, `reopen`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `transfer`, `available`, `mine`.
 
 **Valid `cas__coordination` actions** (do not invent others):
-- *Agent*: `register`, `unregister`, `whoami`, `heartbeat`, `agent_list`, `agent_cleanup`, `session_start`, `session_end`, `loop_start`, `loop_cancel`, `loop_status`, `lease_history`, `queue_notify`, `queue_poll`, `queue_peek`, `queue_ack`, `message`, `message_ack`, `message_status`
+- *Agent*: `register`, `unregister`, `whoami`, `heartbeat`, `agent_list`, `agent_cleanup`, `session_start`, `session_end`, `loop_start`, `loop_cancel`, `loop_status`, `lease_history`, `queue_notify`, `queue_poll`, `queue_peek`, `queue_ack`, `inbox_poll`, `message`, `message_ack`, `message_status`
 - *Factory*: `spawn_workers`, `shutdown_workers`, `worker_status`, `worker_activity`, `clear_context`, `my_context`, `sync_all_workers`, `gc_report`, `gc_cleanup`, `epic_status`, `focus_epic`, `remind`, `remind_list`, `remind_cancel`
 - *Worktree*: `worktree_create`, `worktree_list`, `worktree_show`, `worktree_cleanup`, `worktree_merge`, `worktree_status`
 

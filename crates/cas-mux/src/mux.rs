@@ -1137,16 +1137,21 @@ impl Mux {
         }
     }
 
-    /// Record normal turn completion on a pane (not cancel — cancel clears
-    /// via [`Pane::break_turn`] / [`Pane::interrupt`]). Prefer harness
-    /// `turn_ended` via [`Pane::refresh_harness_turn_state`] for Grok.
+    /// Record normal turn completion supplied by an authoritative caller.
+    ///
+    /// Cancel clears via [`Pane::break_turn`] / [`Pane::interrupt`]. Grok
+    /// supplies normal completion through `turn_ended` in
+    /// [`Pane::refresh_harness_turn_state`]; Claude/Codex currently supply no
+    /// equivalent signal, so callers must not infer completion from PTY quiet.
     pub fn note_turn_completed(&self, pane_id: &str) {
         if let Some(pane) = self.panes.get(pane_id) {
             pane.mark_turn_completed();
         }
     }
 
-    /// Record normal turn completion on the focused pane.
+    /// Record caller-known normal completion on the focused pane.
+    ///
+    /// See [`Mux::note_turn_completed`] for harness limitations.
     pub fn note_turn_completed_focused(&self) {
         if let Some(pane) = self.focused() {
             pane.mark_turn_completed();

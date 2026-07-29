@@ -111,8 +111,9 @@ pub enum GrokEscAction {
 
 /// Pure decision for Grok Esc routing (unit-tested active-vs-idle).
 ///
-/// `turn_in_flight` is the authoritative pane flag (set on submit/inject,
-/// cleared on cancel) — not inferred from output timing.
+/// `turn_in_flight` is authoritative here because this decision is Grok-only:
+/// Grok supplies `turn_ended` on normal completion. The underlying pane flag
+/// is not a busy/idle signal for Claude or Codex.
 pub fn grok_esc_action(turn_in_flight: bool) -> GrokEscAction {
     if turn_in_flight {
         GrokEscAction::CancelTurn
@@ -459,11 +460,13 @@ impl FactoryApp {
         }
     }
 
-    /// Whether the focused pane has an authoritative in-flight turn.
+    /// Whether the focused Grok pane has an authoritative in-flight turn.
     ///
     /// Refreshes from harness events (Grok `turn_ended`) before reading so
     /// Esc routing never uses a stale in-flight flag after normal completion.
-    pub fn focused_turn_in_flight(&self) -> bool {
+    /// This helper must stay Grok-scoped: Claude/Codex have no equivalent
+    /// normal-completion signal.
+    pub fn focused_grok_turn_in_flight(&self) -> bool {
         let Some(id) = self.mux.focused_id() else {
             return false;
         };
@@ -475,7 +478,7 @@ impl FactoryApp {
 
     /// Esc routing for the focused pane when the harness is Grok.
     pub fn focused_grok_esc_action(&self) -> GrokEscAction {
-        grok_esc_action(self.focused_turn_in_flight())
+        grok_esc_action(self.focused_grok_turn_in_flight())
     }
 
     /// Focus the next PTY pane (cycles through supervisor + worker panes only)
@@ -1650,7 +1653,7 @@ mod tests {
             .unwrap()
             .feed(b"\x1b[2Jidle-redraw")
             .unwrap();
-        assert!(!app.focused_turn_in_flight());
+        assert!(!app.focused_grok_turn_in_flight());
         assert_eq!(app.focused_grok_esc_action(), GrokEscAction::ForwardRaw);
 
         // Submit starts in-flight.
@@ -1660,7 +1663,7 @@ mod tests {
             b"\x1b[200~line1\nline2\r\x1b[201~"
         ));
         app.mux.get("g").unwrap().mark_turn_in_flight();
-        assert!(app.focused_turn_in_flight());
+        assert!(app.focused_grok_turn_in_flight());
         assert_eq!(app.focused_grok_esc_action(), GrokEscAction::CancelTurn);
 
         // Quiet active for >8s (long MCP/tool wait) must stay cancelable —
@@ -1673,7 +1676,7 @@ mod tests {
         // No events.jsonl → refresh must not clear.
         app.mux.get("g").unwrap().refresh_harness_turn_state();
         assert!(
-            app.focused_turn_in_flight(),
+            app.focused_grok_turn_in_flight(),
             "quiet >8s without turn_ended must stay in-flight"
         );
         assert_eq!(
@@ -1697,7 +1700,7 @@ mod tests {
             .set_harness_events_path_for_test(&events);
         // Re-mark so offset captures empty file, then append turn_ended.
         app.mux.get("g").unwrap().mark_turn_in_flight();
-        assert!(app.focused_turn_in_flight());
+        assert!(app.focused_grok_turn_in_flight());
         std::fs::write(
             &events,
             b"{\"ts\":\"2026-07-11T00:00:00Z\",\"type\":\"turn_ended\",\"outcome\":\"completed\"}\n",
@@ -1705,7 +1708,7 @@ mod tests {
         .unwrap();
         app.mux.get("g").unwrap().refresh_harness_turn_state();
         assert!(
-            !app.focused_turn_in_flight(),
+            !app.focused_grok_turn_in_flight(),
             "turn_ended must clear in-flight"
         );
         assert_eq!(app.focused_grok_esc_action(), GrokEscAction::ForwardRaw);
@@ -1739,7 +1742,7 @@ mod tests {
         app.supervisor_cli = cas_mux::SupervisorCli::Grok;
 
         app.mux.get("g").unwrap().mark_turn_in_flight();
-        assert!(app.focused_turn_in_flight());
+        assert!(app.focused_grok_turn_in_flight());
         // Simulate raw SGR forward (no note_turn_completed) — state preserved.
         let payload = sgr_left_click_bytes(5, 10);
         // send_input is the non-submit path used for SGR; does not clear.
@@ -1751,7 +1754,7 @@ mod tests {
             let _ = app.mux.send_input_to("g", &payload).await;
         });
         assert!(
-            app.focused_turn_in_flight(),
+            app.focused_grok_turn_in_flight(),
             "generic SGR must not clear in-flight; only turn_ended/break_turn do"
         );
     }
@@ -1776,11 +1779,11 @@ mod tests {
 
         // Explicit mark only on KeyStream submit path.
         app.mux.get("g").unwrap().mark_turn_in_flight();
-        assert!(app.focused_turn_in_flight());
+        assert!(app.focused_grok_turn_in_flight());
         app.mux.get("g").unwrap().mark_turn_completed();
-        assert!(!app.focused_turn_in_flight());
+        assert!(!app.focused_grok_turn_in_flight());
         // Paste does not auto-mark (no call to mark for StructuredPaste).
-        assert!(!app.focused_turn_in_flight());
+        assert!(!app.focused_grok_turn_in_flight());
     }
 
     /// Drop hit-testing is mode-aware so compact and full coexist.

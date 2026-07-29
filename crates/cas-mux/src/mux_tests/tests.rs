@@ -1,5 +1,6 @@
 use crate::harness::SupervisorCli;
 use crate::mux::*;
+use crate::pane::UserInputKind;
 use crate::spec::{Effort, WorkerSpec};
 use std::path::PathBuf;
 
@@ -712,9 +713,19 @@ async fn interrupt_and_inject_breaks_then_injects_by_name() {
     };
     mux.add_pane(w1);
 
+    mux.deliver_user_input_to("w1", b"operator draft", UserInputKind::KeyStream)
+        .await
+        .expect("mark dirty through attached-client input");
+    assert!(
+        mux.panes
+            .get("w1")
+            .expect("pane exists")
+            .is_composer_dirty()
+    );
+
     // Zero settle keeps the test fast; the ordering (Esc then inject) is
-    // enforced by interrupt_and_inject internally. Just assert the by-name
-    // delivery completes Ok against a live PTY-backed pane.
+    // enforced by interrupt_and_inject internally. The urgent path must bypass
+    // non-urgent composer deferral and its Esc must clear the stale draft.
     let res = mux
         .interrupt_and_inject(
             "w1",
@@ -723,6 +734,142 @@ async fn interrupt_and_inject_breaks_then_injects_by_name() {
         )
         .await;
     assert!(res.is_ok(), "urgent redirect to a live pane must succeed");
+    assert_eq!(
+        mux.pending_injection_count(),
+        0,
+        "urgent redirect must never enter the non-urgent deferral queue"
+    );
+    assert!(
+        !mux.panes
+            .get("w1")
+            .expect("pane exists")
+            .is_composer_dirty(),
+        "urgent break-turn Esc clears the composer before redirect"
+    );
+}
+
+// ── cas-1a4d: non-urgent injects defer around operator drafts ───────────────
+
+#[tokio::test]
+async fn nonurgent_inject_defers_until_composer_clears_cas_1a4d() {
+    let mut mux = Mux::new(24, 80);
+    let Some(pane) = cat_pane("operator-pane") else {
+        return;
+    };
+    mux.add_pane(pane);
+
+    mux.deliver_user_input_to(
+        "operator-pane",
+        b"half-written thought",
+        UserInputKind::KeyStream,
+    )
+    .await
+    .expect("type draft");
+    mux.inject("operator-pane", "non-urgent report")
+        .await
+        .expect("dirty inject should be retained for retry");
+    assert_eq!(mux.pending_injection_count(), 1);
+    assert!(
+        !mux.panes
+            .get("operator-pane")
+            .expect("pane exists")
+            .is_turn_in_flight(),
+        "deferred report must not submit into the dirty composer"
+    );
+
+    mux.send_input_to("operator-pane", b"\x1b")
+        .await
+        .expect("standalone Esc clears draft");
+    mux.flush_deferred_injections_with_timeout(std::time::Duration::from_secs(30))
+        .await;
+
+    assert_eq!(mux.pending_injection_count(), 0);
+    assert!(
+        mux.panes
+            .get("operator-pane")
+            .expect("pane exists")
+            .is_turn_in_flight(),
+        "retained report delivers as soon as the composer becomes clean"
+    );
+}
+
+#[tokio::test]
+async fn nonurgent_inject_delivers_on_bounded_dirty_timeout_cas_1a4d() {
+    let mut mux = Mux::new(24, 80);
+    let Some(pane) = cat_pane("timeout-pane") else {
+        return;
+    };
+    mux.add_pane(pane);
+
+    mux.deliver_user_input_to("timeout-pane", b"draft", UserInputKind::KeyStream)
+        .await
+        .expect("type draft");
+    mux.inject("timeout-pane", "eventual report")
+        .await
+        .expect("dirty inject should be retained");
+    mux.flush_deferred_injections_with_timeout(std::time::Duration::ZERO)
+        .await;
+
+    assert_eq!(
+        mux.pending_injection_count(),
+        0,
+        "bounded fallback must not lose or permanently retain the report"
+    );
+    assert!(
+        mux.panes
+            .get("timeout-pane")
+            .expect("pane exists")
+            .is_turn_in_flight(),
+        "timeout fallback delivers even while the pane remains dirty"
+    );
+}
+
+#[tokio::test]
+async fn failed_deferred_delivery_stays_retained_cas_1a4d() {
+    let mut mux = Mux::new(24, 80);
+    mux.add_pane(Pane::director("no-backend", 24, 80).expect("director pane"));
+
+    // Pane::director has no writable PTY. State tracking happens before the
+    // expected write error so this gives us a deterministic dirty target and
+    // a deterministic deferred-delivery failure.
+    assert!(
+        mux.deliver_user_input_to("no-backend", b"draft", UserInputKind::KeyStream)
+            .await
+            .is_err()
+    );
+    mux.inject("no-backend", "must not be lost")
+        .await
+        .expect("dirty inject is retained before any write");
+    mux.flush_deferred_injections_with_timeout(std::time::Duration::ZERO)
+        .await;
+
+    assert_eq!(
+        mux.pending_injection_count(),
+        1,
+        "a failed fallback write remains queued for a later retry"
+    );
+}
+
+#[tokio::test]
+async fn pane_without_client_input_injects_immediately_cas_1a4d() {
+    let mut mux = Mux::new(24, 80);
+    let Some(pane) = cat_pane("worker-pane") else {
+        return;
+    };
+    mux.add_pane(pane);
+
+    mux.inject("worker-pane", "ordinary worker message")
+        .await
+        .expect("clean worker inject");
+
+    assert_eq!(mux.pending_injection_count(), 0);
+    assert!(
+        mux.panes
+            .get("worker-pane")
+            .expect("pane exists")
+            .is_turn_in_flight(),
+        "a pane with no attached-client input keeps immediate delivery"
+    );
 }
 
 // ── cas-4208: post-break settle must observe real quiescence, not a blind

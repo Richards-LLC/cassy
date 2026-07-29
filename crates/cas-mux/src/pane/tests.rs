@@ -390,6 +390,56 @@ mod cases {
         assert!(Pane::key_stream_is_submit(b"\x1b[200~a\nb\x1b[201~\r"));
     }
 
+    /// cas-1a4d: attached-client input leaves a pane dirty until the operator
+    /// submits or explicitly clears the composer. Structured paste is draft
+    /// content even though it must not mark a turn in flight.
+    #[test]
+    fn composer_dirty_tracks_draft_submit_and_clear_cas_1a4d() {
+        use crate::pane::UserInputKind;
+
+        let pane = Pane::director("composer-state", 10, 40).expect("create pane");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        assert!(!pane.is_composer_dirty());
+        rt.block_on(async {
+            let _ = pane
+                .deliver_user_input(b"draft", UserInputKind::KeyStream)
+                .await;
+        });
+        assert!(pane.is_composer_dirty(), "printable input creates a draft");
+
+        rt.block_on(async {
+            let _ = pane
+                .deliver_user_input(b"\x15", UserInputKind::KeyStream)
+                .await;
+        });
+        assert!(!pane.is_composer_dirty(), "Ctrl+U clears the composer");
+
+        rt.block_on(async {
+            let _ = pane
+                .deliver_user_input(b"pasted text", UserInputKind::StructuredPaste)
+                .await;
+        });
+        assert!(
+            pane.is_composer_dirty(),
+            "structured paste is unsubmitted composer content"
+        );
+
+        rt.block_on(async {
+            let _ = pane
+                .deliver_user_input(b"\r", UserInputKind::KeyStream)
+                .await;
+        });
+        assert!(
+            !pane.is_composer_dirty(),
+            "Enter submits and clears the draft"
+        );
+        assert!(pane.is_turn_in_flight(), "Enter still starts a turn");
+    }
+
     /// Regression (cas-ebc1 final review): the OSC 8 feed-time gate must detect
     /// a hyperlink introducer split across 3+ tiny feed chunks. The old carry
     /// logic kept the tail of the NEW chunk only, dropping earlier carried

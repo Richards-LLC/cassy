@@ -303,6 +303,12 @@ impl FactoryDaemon {
             // Process relay events from cloud (remote terminal attach/input/detach)
             self.process_relay_events().await;
 
+            // cas-1a4d: retry non-urgent PTY injects only after every attached
+            // client surface had a chance to submit or clear its composer.
+            // This stays outside process_prompt_queue so a deferred inject
+            // never blocks the input loop that can make its target clean.
+            self.app.mux.flush_deferred_injections().await;
+
             // Poll prompt queue (on notification or timer)
             if prompt_notified || last_prompt_poll.elapsed() >= poll_interval {
                 if prompt_notified {

@@ -17,6 +17,23 @@ use crate::hybrid_search::{
 };
 use crate::types::Entry;
 
+/// Turn whitespace-delimited overlap terms into literal query-parser phrases.
+///
+/// Overlap queries are generated from memory symbols and title words, not
+/// authored search syntax. Quoting each term prevents punctuation such as a
+/// trailing `:` or `/` from being interpreted as Tantivy operators.
+fn literal_dedup_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .filter(|term| term.chars().any(char::is_alphanumeric))
+        .map(|term| {
+            let escaped = term.replace('\\', "\\\\").replace('"', "\\\"");
+            format!("\"{escaped}\"")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 impl SearchIndex {
     /// Get or create a cached IndexReader.
     /// The reader uses `ReloadPolicy::OnCommitWithDelay` so it automatically
@@ -536,14 +553,23 @@ impl SearchIndexTrait for SearchIndex {
         limit: usize,
         entries: &[Entry],
     ) -> Result<Vec<SearchHit>, CoreError> {
-        let opts = SearchOptions {
+        let mut opts = SearchOptions {
             query: query.to_string(),
             limit,
             ..Default::default()
         };
-        let results = self
-            .search(&opts, entries)
-            .map_err(|e| CoreError::Other(e.to_string()))?;
+        let results = match self.search(&opts, entries) {
+            Ok(results) => results,
+            Err(MemError::Parse(_)) => {
+                opts.query = literal_dedup_query(query);
+                if opts.query.is_empty() {
+                    return Ok(Vec::new());
+                }
+                self.search(&opts, entries)
+                    .map_err(|e| CoreError::Other(e.to_string()))?
+            }
+            Err(error) => return Err(CoreError::Other(error.to_string())),
+        };
 
         Ok(results
             .into_iter()
@@ -562,5 +588,87 @@ impl SearchIndexTrait for SearchIndex {
     ) -> Result<Vec<SearchHit>, CoreError> {
         self.search_module_candidates(query, module, limit)
             .map_err(|e| CoreError::Other(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod dedup_query_tests {
+    use super::*;
+
+    fn entry(id: &str, content: &str) -> Entry {
+        Entry {
+            id: id.to_string(),
+            content: content.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn search_for_dedup_accepts_logged_punctuation_heavy_overlap_queries() {
+        let index = SearchIndex::in_memory().unwrap();
+        let entries = vec![
+            entry(
+                "penguinz",
+                "Linux sysmem fallback supports Windows app-level version 6.1.24",
+            ),
+            entry(
+                "gabber",
+                "Gabber worktrees require reset restore discipline before committing work",
+            ),
+        ];
+        for candidate in &entries {
+            index.index_entry(candidate).unwrap();
+        }
+
+        let cases = [
+            (
+                "6.1.24 8.9 app-level 1-3. cas-e-series windows sysmem fallback linux:",
+                "penguinz",
+            ),
+            (
+                "committing. work. reset/restore skills/docs .cas/worktrees/ git hazards gabber worktrees:",
+                "gabber",
+            ),
+        ];
+        for (query, expected_id) in cases {
+            let hits = index
+                .search_for_dedup(query, 5, &entries)
+                .unwrap_or_else(|error| panic!("logged overlap query must parse: {error}"));
+            assert!(
+                hits.iter().any(|hit| hit.id == expected_id),
+                "expected {expected_id} candidate for {query:?}, got {hits:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_for_dedup_preserves_clean_query_results() {
+        let index = SearchIndex::in_memory().unwrap();
+        let entries = vec![
+            entry("matching", "windows sysmem fallback"),
+            entry("other", "unrelated memory"),
+        ];
+        for candidate in &entries {
+            index.index_entry(candidate).unwrap();
+        }
+
+        let query = "windows sysmem";
+        let direct = index
+            .search(
+                &SearchOptions {
+                    query: query.to_string(),
+                    limit: 5,
+                    ..Default::default()
+                },
+                &entries,
+            )
+            .unwrap();
+        let dedup = index.search_for_dedup(query, 5, &entries).unwrap();
+
+        assert_eq!(
+            dedup.iter().map(|hit| &hit.id).collect::<Vec<_>>(),
+            direct.iter().map(|hit| &hit.id).collect::<Vec<_>>()
+        );
+        assert_eq!(dedup[0].bm25_score, direct[0].bm25_score);
     }
 }

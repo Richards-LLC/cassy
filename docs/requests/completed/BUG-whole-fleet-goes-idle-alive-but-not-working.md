@@ -2,10 +2,42 @@
 from: ozer factory — session ozer-warm-owl-12, supervisor lively-dolphin-39
 date: 2026-07-27
 priority: P0
-cas_task: (none)
+cas_task: cas-5706
 ---
 
 # Whole worker fleet goes "alive but not working" — heartbeating, zero activity, assigned tasks never started
+
+## Resolution (v2.33.0 verification)
+
+Resolved as triaged by `cas-5706`.
+
+- **Assigned tasks never started:** shipped prompt-queue isolation prevents one
+  target's undeliverable backlog from excluding fresh worker briefings
+  (`crates/cas-store/src/prompt_queue_store.rs:1458-1504`), while bounded retry
+  and terminal abandonment prevent failed rows from remaining permanent poison
+  (`crates/cas-store/src/prompt_queue_store.rs:744-831`). Startup cleanup now
+  waits for the roster to populate before abandoning stale targets
+  (`cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs:407-428`).
+- **Interrupts queued but unconsumed:** urgent sends enter the same durable queue
+  at Critical priority
+  (`cas-cli/src/mcp/tools/service/agent_search_system/message.rs:283-297`,
+  `:450-465`), receive the per-target isolation above, and then use the
+  interrupt-and-inject path
+  (`cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs:786-812`).
+  Codex delivery now waits for real post-Esc output quiescence before submitting
+  the redirect (`crates/cas-mux/src/mux.rs:871-889`, `:938-987`), preventing the
+  swallowed-submit/permanent-deafness failure.
+- **No escalation for assigned-but-unstarted workers:** still reproducible in
+  v2.33.0. `worker_status` only marks workers stalled when they have an active
+  lease or an `InProgress` task; an assigned `Open` task still renders
+  `none in last 10m (may be investigating or idle)`
+  (`cas-cli/src/mcp/tools/service/factory_ops.rs:936-990`,
+  `:2257-2291`). The fix is tracked by `cas-78bf`.
+
+The historical incident did not retain prompt-queue row telemetry, so the exact
+causal identity cannot be proven after the fact. The shipped changes do map to
+and prevent the reported delivery signatures; the remaining observability gap
+is explicitly tracked rather than silently treated as fixed.
 
 Single most expensive failure of the session. Happened **twice** in about ninety minutes, to two independently spawned fleets, and no alert fires for it.
 

@@ -1980,6 +1980,54 @@ fn test_78bf_assigned_open_within_threshold_keeps_dbbb_grace_window() {
     );
 }
 
+#[test]
+fn test_c14e4_stalled_in_progress_wins_over_assigned_open_escalation() {
+    let base_utc = chrono::Utc::now();
+    let t0 = std::time::Instant::now();
+    let mut data = stalled_data_for(make_agent_working_stalled(
+        "agent-1",
+        "lively-crow",
+        "cas-active",
+        5,
+        Some(310),
+        base_utc,
+    ));
+    let mut assigned_open = make_task(
+        "cas-unstarted",
+        "Second assigned task",
+        TaskStatus::Open,
+        Some("lively-crow"),
+    );
+    assigned_open.updated_at = Some(base_utc - chrono::Duration::seconds(310));
+    data.ready_tasks.push(assigned_open);
+
+    let mut detector =
+        DirectorEventDetector::new(vec!["lively-crow".to_string()], "supervisor".to_string());
+    detector.set_stall_threshold_secs(300);
+    detector.initialize(&data);
+
+    let events = detector.detect_changes_at(&data, None, t0, base_utc);
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            DirectorEvent::WorkerStalled {
+                task_id,
+                escalate: false,
+                ..
+            } if task_id == "cas-active"
+        )),
+        "the genuine InProgress stall must retain its first-stage nudge: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            DirectorEvent::WorkerStalled { task_id, .. } if task_id == "cas-unstarted"
+        )),
+        "the lower-priority assigned-Open signal must not shadow the active-task stall: {events:?}"
+    );
+}
+
 /// A worker with a fresh heartbeat, an in-progress task, and activity older
 /// than the stall threshold must fire a non-escalating `WorkerStalled`
 /// (auto-nudge) on first detection, per the cas-9829 bug report: heartbeat

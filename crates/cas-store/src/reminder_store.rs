@@ -9,7 +9,8 @@ use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
+use std::time::Duration;
 
 use crate::Result;
 use crate::error::StoreError;
@@ -57,6 +58,15 @@ pub enum ReminderStatus {
     Cancelled,
     /// TTL exceeded without firing
     Expired,
+}
+
+/// Result of a daemon-budgeted stale-reminder expiry attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReminderExpiryOutcome {
+    /// Expiry acquired the database within budget and updated this many rows.
+    Expired(usize),
+    /// The database was busy; the daemon should retry on its next tick.
+    DeferredBusy,
 }
 
 impl std::fmt::Display for ReminderStatus {
@@ -328,6 +338,51 @@ impl SqliteReminderStore {
     const SELECT_COLUMNS: &str = "id, supervisor_id, message, trigger_type, trigger_at, trigger_event, trigger_filter, status, ttl_secs, created_at, fired_at, cancelled_at, target_id, fired_event, session_id";
 }
 
+fn expire_stale_with_conn(conn: &Connection) -> Result<usize> {
+    // Expire pending reminders where created_at + ttl_secs < now.
+    // Use datetime('now') on the RHS so both sides of the comparison use
+    // SQLite's canonical 'YYYY-MM-DD HH:MM:SS' format. Previously the RHS
+    // was RFC 3339, whose 'T' separator made every reminder compare stale.
+    let rows = conn.execute(
+        "UPDATE reminders SET status = 'expired'
+         WHERE status = 'pending'
+         AND datetime(created_at, '+' || ttl_secs || ' seconds') < datetime('now')",
+        [],
+    )?;
+
+    Ok(rows)
+}
+
+/// Expire stale reminders without letting database contention stall a daemon tick.
+///
+/// In-process connection contention defers immediately. External SQLite write
+/// contention waits at most `busy_budget`; a busy result is returned as
+/// [`ReminderExpiryOutcome::DeferredBusy`] so the daemon can retry next tick.
+/// The shared connection's normal busy timeout is restored before returning.
+pub fn expire_stale_bounded(
+    cas_dir: &Path,
+    busy_budget: Duration,
+) -> Result<ReminderExpiryOutcome> {
+    let conn = crate::shared_db::shared_connection(&cas_dir.join("cas.db"))?;
+    let conn = match conn.try_lock() {
+        Ok(conn) => conn,
+        Err(TryLockError::WouldBlock) => return Ok(ReminderExpiryOutcome::DeferredBusy),
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+    };
+
+    conn.busy_timeout(busy_budget)?;
+    let expiry_result = expire_stale_with_conn(&conn);
+    conn.busy_timeout(crate::SQLITE_BUSY_TIMEOUT)?;
+
+    match expiry_result {
+        Ok(expired) => Ok(ReminderExpiryOutcome::Expired(expired)),
+        Err(StoreError::Database(ref error)) if crate::shared_db::is_busy_error(error) => {
+            Ok(ReminderExpiryOutcome::DeferredBusy)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 impl ReminderStore for SqliteReminderStore {
     fn init(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap();
@@ -509,21 +564,7 @@ impl ReminderStore for SqliteReminderStore {
 
     fn expire_stale(&self) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
-
-        // Expire pending reminders where created_at + ttl_secs < now.
-        // Use datetime('now') on the RHS so both sides of the comparison use
-        // SQLite's canonical 'YYYY-MM-DD HH:MM:SS' format.  Previously the RHS
-        // was an RFC 3339 string ('…T…+00:00') whose 'T' separator sorts after
-        // the space that datetime() emits, making the condition always true and
-        // expiring every reminder on the first tick.
-        let rows = conn.execute(
-            "UPDATE reminders SET status = 'expired'
-             WHERE status = 'pending'
-             AND datetime(created_at, '+' || ttl_secs || ' seconds') < datetime('now')",
-            [],
-        )?;
-
-        Ok(rows)
+        expire_stale_with_conn(&conn)
     }
 
     fn prune(&self, older_than_days: i64) -> Result<usize> {
@@ -850,6 +891,54 @@ mod tests {
         let pending = store.list_pending("supervisor-1").unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].message, "Will not expire");
+    }
+
+    #[test]
+    fn bounded_expiry_defers_busy_within_budget_and_restores_default_timeout() {
+        let (temp, store) = create_test_store();
+
+        let local_guard = store.conn.lock().unwrap();
+        let local_started = std::time::Instant::now();
+        assert_eq!(
+            expire_stale_bounded(temp.path(), Duration::from_millis(50)).unwrap(),
+            ReminderExpiryOutcome::DeferredBusy
+        );
+        assert!(
+            local_started.elapsed() < Duration::from_millis(100),
+            "in-process connection contention must defer without waiting"
+        );
+        drop(local_guard);
+
+        let blocker = Connection::open(temp.path().join("cas.db")).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let busy_budget = Duration::from_millis(50);
+        let started = std::time::Instant::now();
+        let outcome = expire_stale_bounded(temp.path(), busy_budget).unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(outcome, ReminderExpiryOutcome::DeferredBusy);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "50ms SQLite budget must not inherit the shared 5s timeout; elapsed={elapsed:?}"
+        );
+
+        blocker.execute_batch("ROLLBACK").unwrap();
+        assert!(matches!(
+            expire_stale_bounded(temp.path(), busy_budget).unwrap(),
+            ReminderExpiryOutcome::Expired(_)
+        ));
+
+        let restored_timeout_ms: i64 = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            restored_timeout_ms,
+            crate::SQLITE_BUSY_TIMEOUT.as_millis() as i64
+        );
     }
 
     #[test]

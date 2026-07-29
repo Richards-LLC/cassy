@@ -3321,9 +3321,12 @@ pub(crate) fn run_factory_branch_merge_gate(
              1. Before escalating, repeatedly run `{coord} action=inbox_poll` \
              until it returns `No unread messages`. A default poll returns at most \
              10 rows, so one poll is not a complete freshness check. Polling marks \
-             messages seen without consuming daemon transport delivery. If one says \
-             this branch was merged or requests more changes, follow it and do not \
-             send a stale merge request.\n\
+             messages seen without consuming daemon transport delivery. The polling \
+             claim is at-most-once: if its MCP response is lost, those rows are not \
+             replayed by another poll, so also re-read any just-delivered supervisor \
+             messages in your conversation. If one says this branch was merged or \
+             requests more changes, follow it and do not send a stale merge \
+             request.\n\
              2. {parent_branch} is a local-only epic branch (not pushed to origin) \
              — do NOT run `gh pr create --base {parent_branch}`, it has no \
              matching ref on origin and the PR will fail.\n\
@@ -3347,7 +3350,9 @@ pub(crate) fn run_factory_branch_merge_gate(
              1. Repeatedly run `{coord} action=inbox_poll` until it returns \
              `No unread messages` before continuing. A default poll returns at \
              most 10 rows, so one poll is not a complete freshness check. Follow \
-             every unread merge or review instruction it returns.\n\
+             every unread merge or review instruction it returns. The polling \
+             claim is at-most-once, so also re-read just-delivered supervisor \
+             messages in case the MCP response was lost after claiming rows.\n\
              2. Push {factory_branch} to its remote\n\
              3. Open a PR targeting {parent_branch}\n\
              4. Merge the PR (or `git fetch --prune` if it was already merged \
@@ -8500,9 +8505,11 @@ mod merge_state_gate_tests {
                     assert!(
                         msg.contains(&format!("`{coord} action=inbox_poll`"))
                             && msg.contains("`No unread messages`")
-                            && msg.contains("at most 10 rows"),
-                        "{harness} remediation must use its harness-resolved inbox API \
-                         and require drain-until-empty polling: {msg}"
+                            && msg.contains("at most 10 rows")
+                            && msg.contains("polling claim is at-most-once"),
+                        "{harness} remediation must use its harness-resolved inbox API, \
+                         require drain-until-empty polling, and disclose at-most-once \
+                         claim semantics: {msg}"
                     );
                     let poll = msg.find("action=inbox_poll").expect("poll step");
                     let push = msg.find("Push factory/worker").expect("push step");
@@ -8578,9 +8585,11 @@ mod merge_state_gate_tests {
                             && msg.contains(&format!("`{coord} action=message"))
                             && msg.contains("`No unread messages`")
                             && msg.contains("at most 10 rows")
-                            && msg.contains("without consuming daemon transport delivery"),
+                            && msg.contains("without consuming daemon transport delivery")
+                            && msg.contains("polling claim is at-most-once"),
                         "{harness} remediation must use its harness-resolved inbox and \
-                         message APIs and require drain-until-empty polling: {msg}"
+                         message APIs, require drain-until-empty polling, and disclose \
+                         at-most-once claim semantics: {msg}"
                     );
                     assert!(
                         msg.contains(&expected_tip),

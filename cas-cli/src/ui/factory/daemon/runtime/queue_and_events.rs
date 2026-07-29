@@ -7,6 +7,13 @@ fn prompt_poison_sweep_due(last: Option<Instant>, now: Instant) -> bool {
     last.is_some_and(|last| now.saturating_duration_since(last) >= PROMPT_POISON_SWEEP_INTERVAL)
 }
 
+fn expire_stale_reminders_with_retry<F>(expire_stale: F) -> cas_store::Result<usize>
+where
+    F: Fn() -> cas_store::Result<usize>,
+{
+    cas_store::shared_db::with_write_retry(expire_stale)
+}
+
 fn registered_prompt_sweep_agents(
     agents: &[cas_types::Agent],
     factory_session: &str,
@@ -1634,7 +1641,7 @@ impl FactoryDaemon {
         };
 
         // Expire stale reminders
-        if let Err(e) = reminder_store.expire_stale() {
+        if let Err(e) = expire_stale_reminders_with_retry(|| reminder_store.expire_stale()) {
             tracing::error!("Failed to expire stale reminders: {}", e);
         }
 
@@ -1961,10 +1968,11 @@ fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        cancel_targeted_in_flight_spawn, enqueue_spawn_cancelled_notice, is_exact_agent_name_match,
-        matches_event_filter, prompt_poison_sweep_due, prompt_poison_sweep_targets,
-        registered_prompt_sweep_agents, reminder_matches_factory_session, shutdown_targets,
-        take_next_pending_spawn, take_spawn_cancellation,
+        cancel_targeted_in_flight_spawn, enqueue_spawn_cancelled_notice,
+        expire_stale_reminders_with_retry, is_exact_agent_name_match, matches_event_filter,
+        prompt_poison_sweep_due, prompt_poison_sweep_targets, registered_prompt_sweep_agents,
+        reminder_matches_factory_session, shutdown_targets, take_next_pending_spawn,
+        take_spawn_cancellation,
     };
     use crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound;
     use crate::ui::factory::daemon::{FactoryDaemon, PendingSpawn};
@@ -1972,7 +1980,63 @@ mod tests {
     use cas_store::DeliveryStage;
     use cas_types::{AgentStatus, Task, TaskStatus};
     use std::collections::{HashMap, HashSet, VecDeque};
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
+
+    #[derive(Clone)]
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogBuffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn reminder_expiry_retries_transient_busy_at_warn() {
+        let attempts = std::cell::Cell::new(0);
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let writer_logs = Arc::clone(&logs);
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || LogBuffer(Arc::clone(&writer_logs)))
+            .finish();
+
+        let expired = tracing::subscriber::with_default(subscriber, || {
+            expire_stale_reminders_with_retry(|| {
+                attempts.set(attempts.get() + 1);
+                if attempts.get() == 1 {
+                    Err(cas_store::StoreError::Database(
+                        rusqlite::Error::SqliteFailure(
+                            rusqlite::ffi::Error {
+                                code: rusqlite::ffi::ErrorCode::DatabaseBusy,
+                                extended_code: 5,
+                            },
+                            Some("database is locked".to_string()),
+                        ),
+                    ))
+                } else {
+                    Ok(3)
+                }
+            })
+        })
+        .unwrap();
+
+        let output = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+        assert_eq!(expired, 3);
+        assert_eq!(attempts.get(), 2);
+        assert!(output.contains(" WARN "));
+        assert!(output.contains("SQLite busy, retrying after backoff with jitter"));
+        assert!(!output.contains(" ERROR "));
+    }
 
     #[test]
     fn composer_deferred_delivery_stays_durable_across_restart_cas_0b64() {

@@ -559,6 +559,9 @@ impl CasCore {
                 &subtasks,
             ) {
                 EpicCloseGateOutcome::Proceed => {}
+                EpicCloseGateOutcome::ProceedWithNote(note) => {
+                    append_close_decision_note(task_store.as_ref(), &mut task, &note);
+                }
                 EpicCloseGateOutcome::Reject(msg) => {
                     return Ok(Self::tool_error(msg));
                 }
@@ -1559,7 +1562,7 @@ impl CasCore {
                         }
                         CommitClaimGateOutcome::Proceed => {}
                         CommitClaimGateOutcome::ProceedWithReceipt(note) => {
-                            append_commit_receipt_decision_note(
+                            append_close_decision_note(
                                 task_store.as_ref(),
                                 &mut task,
                                 &note,
@@ -1932,7 +1935,7 @@ impl CasCore {
                         }
                         ZeroCommitCloseOutcome::Proceed => {}
                         ZeroCommitCloseOutcome::ProceedWithReceipt(note) => {
-                            append_commit_receipt_decision_note(
+                            append_close_decision_note(
                                 task_store.as_ref(),
                                 &mut task,
                                 &note,
@@ -4625,7 +4628,7 @@ pub(crate) fn validate_task_commit_receipt(
     ))
 }
 
-fn append_commit_receipt_decision_note(
+fn append_close_decision_note(
     task_store: &dyn cas_store::TaskStore,
     task: &mut Task,
     note: &str,
@@ -4645,7 +4648,7 @@ fn append_commit_receipt_decision_note(
         tracing::warn!(
             task_id = %task.id,
             error = %error,
-            "failed to persist accepted commit receipt decision note"
+            "failed to persist close decision note"
         );
     }
 }
@@ -4864,6 +4867,9 @@ pub(crate) struct EpicChildBranchStatus {
     /// Unix epoch seconds of the most recent commit across the checked
     /// commit-ish values. `None` when none resolve or `git log` fails.
     pub last_commit_unix: Option<i64>,
+    /// Audit note emitted when a stranded recorded anchor is superseded by
+    /// live branch tips that are all known merged into the parent.
+    pub merge_evidence_note: Option<String>,
 }
 
 impl EpicChildBranchStatus {
@@ -4881,6 +4887,54 @@ impl EpicChildBranchStatus {
             branches
         }
     }
+}
+
+/// Resolve every distinct live tip for `branch` (local and `origin/`) and
+/// classify its merge state without mapping Git failures to zero.
+///
+/// `None` means neither ref exists. When both refs resolve to the same commit,
+/// evaluate that tip once but retain both ref names in the audit summary.
+fn live_branch_merge_evidence(
+    repo_path: &std::path::Path,
+    branch: &str,
+    parent_branch: &str,
+) -> Option<(KnownUnmergedCount, Vec<String>)> {
+    let refnames = [branch.to_string(), format!("origin/{branch}")];
+    let mut tips: Vec<(String, String)> = Vec::new();
+    for refname in refnames {
+        let Some(tip) = resolve_branch_sha(repo_path, &refname) else {
+            continue;
+        };
+        if let Some((names, _)) = tips.iter_mut().find(|(_, known_tip)| *known_tip == tip) {
+            names.push_str(&format!(", {refname}"));
+        } else {
+            tips.push((refname, tip));
+        }
+    }
+    if tips.is_empty() {
+        return None;
+    }
+
+    let mut max_positive = 0;
+    let mut summaries = Vec::new();
+    for (refnames, tip) in tips {
+        match known_unmerged_factory_commits(repo_path, &tip, parent_branch) {
+            KnownUnmergedCount::KnownZero => {}
+            KnownUnmergedCount::KnownPositive(count) => {
+                max_positive = max_positive.max(count);
+            }
+            KnownUnmergedCount::Unknown => {
+                return Some((KnownUnmergedCount::Unknown, summaries));
+            }
+        }
+        summaries.push(format!("{refnames} tip {tip}"));
+    }
+    let state = if max_positive == 0 {
+        KnownUnmergedCount::KnownZero
+    } else {
+        KnownUnmergedCount::KnownPositive(max_positive)
+    };
+    Some((state, summaries))
 }
 
 /// Walk an epic's children and report whether each child task's own recorded
@@ -4917,35 +4971,35 @@ pub(crate) fn collect_epic_branch_statuses(
                 .assignee
                 .as_ref()
                 .map(|assignee| format!("factory/{assignee}"));
-            let resolved_anchor = t
+            let recorded_anchor = t
                 .deliverables
                 .factory_branch_anchor
-                .as_deref()
-                .filter(|anchor| git_ref_exists(repo_path, anchor));
+                .as_deref();
+            let resolved_anchor =
+                recorded_anchor.filter(|anchor| git_ref_exists(repo_path, anchor));
 
             let mut fallback_branches = Vec::new();
-            if resolved_anchor.is_none() {
-                if let Some(branch) = parked_branch.as_ref() {
-                    fallback_branches.push(branch.clone());
-                }
-                if let Some(branch) = live_factory_branch.as_ref()
-                    && !fallback_branches.contains(branch)
-                {
-                    fallback_branches.push(branch.clone());
-                }
+            if let Some(branch) = parked_branch.as_ref() {
+                fallback_branches.push(branch.clone());
+            }
+            if let Some(branch) = live_factory_branch.as_ref()
+                && !fallback_branches.contains(branch)
+            {
+                fallback_branches.push(branch.clone());
             }
             let factory_branch = fallback_branches.first().cloned().or(parked_branch);
             let additional_factory_branches: Vec<String> =
                 fallback_branches.into_iter().skip(1).collect();
 
+            let fallback_branches = factory_branch
+                .iter()
+                .chain(additional_factory_branches.iter())
+                .cloned()
+                .collect::<Vec<_>>();
             let checked_refs = if let Some(anchor) = resolved_anchor {
                 vec![anchor]
             } else {
-                factory_branch
-                    .as_deref()
-                    .into_iter()
-                    .chain(additional_factory_branches.iter().map(String::as_str))
-                    .collect()
+                fallback_branches.iter().map(String::as_str).collect()
             };
             let mut unmerged_count = 0;
             let mut latest_commit_unix = None;
@@ -4958,6 +5012,54 @@ pub(crate) fn collect_epic_branch_statuses(
                 latest_commit_unix =
                     latest_commit_unix.max(last_commit_unix(repo_path, commit));
             }
+            let mut merge_evidence_note = None;
+            if let Some(anchor) = resolved_anchor
+                && unmerged_count > 0
+            {
+                let required_live_branch = live_factory_branch
+                    .as_ref()
+                    .or(factory_branch.as_ref());
+                let mut required_branch_is_known = false;
+                let mut live_state_is_known = true;
+                let mut live_unmerged_count = 0;
+                let mut live_summaries = Vec::new();
+                for branch in &fallback_branches {
+                    match live_branch_merge_evidence(repo_path, branch, parent_branch) {
+                        Some((KnownUnmergedCount::KnownZero, summaries)) => {
+                            required_branch_is_known |=
+                                required_live_branch == Some(branch);
+                            live_summaries.extend(summaries);
+                        }
+                        Some((KnownUnmergedCount::KnownPositive(count), summaries)) => {
+                            required_branch_is_known |=
+                                required_live_branch == Some(branch);
+                            live_unmerged_count = live_unmerged_count.max(count);
+                            live_summaries.extend(summaries);
+                        }
+                        Some((KnownUnmergedCount::Unknown, _)) => {
+                            live_state_is_known = false;
+                        }
+                        None if required_live_branch == Some(branch) => {
+                            live_state_is_known = false;
+                        }
+                        None => {}
+                    }
+                }
+                if required_branch_is_known
+                    && live_state_is_known
+                    && live_unmerged_count == 0
+                {
+                    unmerged_count = 0;
+                    merge_evidence_note = Some(format!(
+                        "decision: recorded factory_branch_anchor `{anchor}` for child task `{}` \
+                         is not merged into `{parent_branch}`, but the current live branch \
+                         evidence is fully merged ({}). Treated the recorded anchor as \
+                         superseded rather than requiring history pollution.",
+                        t.id,
+                        live_summaries.join("; "),
+                    ));
+                }
+            }
             EpicChildBranchStatus {
                 task_id: t.id.clone(),
                 task_status: t.status,
@@ -4966,6 +5068,7 @@ pub(crate) fn collect_epic_branch_statuses(
                 additional_factory_branches,
                 unmerged_count,
                 last_commit_unix: latest_commit_unix,
+                merge_evidence_note,
             }
         })
         .collect()
@@ -5016,6 +5119,16 @@ pub(crate) fn render_epic_status_report(
             unmerged = unmerged,
             last = last_commit,
         ));
+    }
+    let reconciled = statuses
+        .iter()
+        .filter_map(|s| s.merge_evidence_note.as_deref())
+        .collect::<Vec<_>>();
+    if !reconciled.is_empty() {
+        out.push_str("\nℹ️  Recorded/live merge-evidence reconciliation:\n");
+        for note in reconciled {
+            out.push_str(&format!("- {note}\n"));
+        }
     }
     let stranded = statuses.iter().filter(|s| s.unmerged_count > 0).count();
     if stranded > 0 {
@@ -5091,6 +5204,7 @@ pub(crate) fn resolve_branch_short_sha(repo_path: &std::path::Path, branch: &str
 #[derive(Debug)]
 pub(crate) enum EpicCloseGateOutcome {
     Proceed,
+    ProceedWithNote(String),
     Reject(String),
 }
 
@@ -5121,9 +5235,17 @@ pub(crate) fn run_epic_close_merge_gate(
         .filter(|s| s.unmerged_count > 0)
         .collect();
     if stranded.is_empty() {
+        let notes = statuses
+            .iter()
+            .filter_map(|s| s.merge_evidence_note.as_deref())
+            .collect::<Vec<_>>();
+        if !notes.is_empty() {
+            return EpicCloseGateOutcome::ProceedWithNote(notes.join("\n"));
+        }
         return EpicCloseGateOutcome::Proceed;
     }
     let mut detail = String::new();
+    let mut cleaned_worktree_guidance = String::new();
     for s in &stranded {
         // Round-1 cas-code-review autofix: use idiomatic `writeln!`
         // rather than the explicit `Write::write_fmt(format_args!(...))`
@@ -5138,6 +5260,19 @@ pub(crate) fn run_epic_close_merge_gate(
             n = s.unmerged_count,
             parent = parent_branch,
         );
+        for branch in s
+            .factory_branch
+            .iter()
+            .chain(s.additional_factory_branches.iter())
+        {
+            let _ = writeln!(
+                cleaned_worktree_guidance,
+                "  - {task}: `git fetch origin {branch}:refs/remotes/origin/{branch}` then \
+                 `git merge --no-ff {branch}` (or `origin/{branch}` when only the \
+                 remote-tracking ref remains)",
+                task = s.task_id,
+            );
+        }
     }
     EpicCloseGateOutcome::Reject(format!(
         "⚠️ MERGE REQUIRED\n\n\
@@ -5147,11 +5282,18 @@ pub(crate) fn run_epic_close_merge_gate(
          epic can close. This guard cannot be bypassed (use of \
          bypass_code_review=true does not skip merge-state checks — it is a \
          data-state guard, not a review gate).\n\n\
+         Remediation when the worker worktree still exists:\n\
+         - `mcp__cas__coordination action=worktree_merge id=<factory-branch> \
+           task_id=<child-task-id>`\n\n\
+         If cleanup already removed the worktree, merge the surviving branch \
+         directly from the epic checkout (the branch, not the stale recorded SHA):\n\
+         {cleaned_worktree_guidance}\n\
          Diagnostic: run `mcp__cas__coordination action=epic_status id={epic_id}` \
          for a per-child report.",
         epic_id = task.id,
         n = stranded.len(),
         detail = detail,
+        cleaned_worktree_guidance = cleaned_worktree_guidance,
         parent = parent_branch,
     ))
 }
@@ -10533,9 +10675,7 @@ mod epic_status_gate_tests {
                     "Bob's stranded commit must be visible: {message}"
                 );
             }
-            EpicCloseGateOutcome::Proceed => {
-                panic!("Bob's live stranded work must block epic close")
-            }
+            other => panic!("Bob's live stranded work must block epic close; got {other:?}"),
         }
     }
 
@@ -10604,6 +10744,12 @@ mod epic_status_gate_tests {
                     msg.contains("epic_status"),
                     "rejection must point at the diagnostic action: {msg}"
                 );
+                assert!(
+                    msg.contains("If cleanup already removed the worktree")
+                        && msg.contains("git merge --no-ff factory/bravo")
+                        && msg.contains("origin/factory/bravo"),
+                    "rejection must provide a branch-based remediation after worktree cleanup: {msg}"
+                );
             }
             other => panic!("expected Reject for stranded child branch, got {other:?}"),
         }
@@ -10668,6 +10814,77 @@ mod epic_status_gate_tests {
             "epic 1 must close based on task A's merged anchor, regardless of \
              task B's later commit on the reused worker branch; got {out:?}"
         );
+    }
+
+    #[test]
+    fn epic_close_accepts_merged_live_tip_when_recorded_anchor_was_superseded() {
+        let dir = init_epic_repo(&[("worker", 1)]);
+        let p = dir.path();
+        let recorded_anchor = epic_git_stdout(p, &["rev-parse", "factory/worker"]);
+
+        git(p, &["checkout", "-q", "factory/worker"]);
+        std::fs::write(p.join("worker-0.rs"), "// amended worker commit\n").unwrap();
+        git(p, &["add", "worker-0.rs"]);
+        git(p, &["commit", "-q", "--amend", "--no-edit"]);
+        let live_tip = epic_git_stdout(p, &["rev-parse", "HEAD"]);
+        assert_ne!(recorded_anchor, live_tip);
+        assert!(
+            git_ref_exists(p, &recorded_anchor),
+            "the superseded commit object must remain resolvable"
+        );
+
+        let remote = tempfile::tempdir().unwrap();
+        git(remote.path(), &["init", "-q", "--bare"]);
+        git(
+            p,
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        git(p, &["push", "-q", "-u", "origin", "factory/worker"]);
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &["merge", "-q", "--no-ff", "-m", "merge amended tip", "factory/worker"],
+        );
+
+        assert_eq!(
+            count_unmerged_factory_commits(p, &recorded_anchor, "main"),
+            1,
+            "precondition: the superseded recorded commit is not an ancestor of main"
+        );
+        assert!(matches!(
+            known_unmerged_factory_commits(p, "factory/worker", "main"),
+            KnownUnmergedCount::KnownZero
+        ));
+        assert!(matches!(
+            known_unmerged_factory_commits(p, "origin/factory/worker", "main"),
+            KnownUnmergedCount::KnownZero
+        ));
+
+        let mut child = child("cas-superseded-anchor", TaskStatus::Closed, Some("worker"));
+        child.deliverables.factory_branch_anchor = Some(recorded_anchor.clone());
+        child.deliverables.parked_branch = Some("factory/worker".to_string());
+        let task = epic("cas-epic-superseded-anchor");
+        let req = base_req(&task.id);
+
+        match run_epic_close_merge_gate(&task, &req, "main", p, &[child.clone()]) {
+            EpicCloseGateOutcome::ProceedWithNote(note) => {
+                assert!(note.contains(&recorded_anchor), "{note}");
+                assert!(note.contains(&live_tip), "{note}");
+                assert!(note.contains("factory/worker"), "{note}");
+                assert!(note.contains("origin/factory/worker"), "{note}");
+                assert!(note.contains("superseded"), "{note}");
+            }
+            other => panic!("merged live tip must clear a superseded anchor; got {other:?}"),
+        }
+
+        let statuses = collect_epic_branch_statuses(&[child], "main", p);
+        let report = render_epic_status_report(&task.id, "main", &statuses);
+        assert!(
+            report.contains("Recorded/live merge-evidence reconciliation"),
+            "{report}"
+        );
+        assert!(report.contains(&recorded_anchor), "{report}");
+        assert!(report.contains(&live_tip), "{report}");
     }
 
     /// cas-eaf8: task-specific anchoring must retain the guard's teeth.
@@ -10749,6 +10966,7 @@ mod epic_status_gate_tests {
                 additional_factory_branches: Vec::new(),
                 unmerged_count: 0,
                 last_commit_unix: Some(1735689600), // 2025-01-01 00:00 UTC
+                merge_evidence_note: None,
             },
             EpicChildBranchStatus {
                 task_id: "cas-bbbb".to_string(),
@@ -10758,6 +10976,7 @@ mod epic_status_gate_tests {
                 additional_factory_branches: Vec::new(),
                 unmerged_count: 2,
                 last_commit_unix: Some(1735776000), // 2025-01-02 00:00 UTC
+                merge_evidence_note: None,
             },
             EpicChildBranchStatus {
                 task_id: "cas-cccc".to_string(),
@@ -10767,6 +10986,7 @@ mod epic_status_gate_tests {
                 additional_factory_branches: Vec::new(),
                 unmerged_count: 0,
                 last_commit_unix: None,
+                merge_evidence_note: None,
             },
         ];
         let report = render_epic_status_report("cas-754b", "epic/foo", &statuses);
@@ -12155,8 +12375,8 @@ mod zero_change_close_tests {
         let store = crate::store::mock::MockTaskStore::with_tasks(vec![task.clone()]);
         let note = "decision: accepted commit_receipt `abc` using latest task lease claim/transfer";
 
-        append_commit_receipt_decision_note(&store, &mut task, note);
-        append_commit_receipt_decision_note(&store, &mut task, note);
+        append_close_decision_note(&store, &mut task, note);
+        append_close_decision_note(&store, &mut task, note);
 
         let persisted = cas_store::TaskStore::get(&store, "cas-5626").unwrap();
         assert!(persisted.notes.contains(note), "{}", persisted.notes);

@@ -516,12 +516,25 @@ impl TaskStore for SqliteTaskStore {
                 )
                 .optional()?;
             let mut persisted_deliverables = task.deliverables.clone();
-            if prev_status.as_deref() == Some("closed") && task.status != TaskStatus::Closed {
+            let reopening_closed =
+                prev_status.as_deref() == Some("closed") && task.status != TaskStatus::Closed;
+            let resuming_merge_conflict = prev_status.as_deref() == Some("awaiting_merge")
+                && task.status == TaskStatus::InProgress;
+            if reopening_closed || resuming_merge_conflict {
                 // cas-ed9a: a close-cycle anchor is evidence for that completed
                 // cycle only. Enforce invalidation at the persistence choke point
                 // so every Closed -> non-Closed path (MCP update, reopen, UI,
                 // recovery, and future callers) gets the same protection.
+                // cas-5054 extends that invariant to conflict rework: the parked
+                // anchor must not satisfy or false-reject the eventual re-close.
                 persisted_deliverables.factory_branch_anchor = None;
+            }
+            if resuming_merge_conflict {
+                // The decision note written by the lifecycle layer preserves the
+                // diagnostic branch identity. These fields describe the prior
+                // park cycle and must be rebuilt from the resolved branch on close.
+                persisted_deliverables.parked_branch = None;
+                persisted_deliverables.merge_conflicted = false;
             }
 
             let rows = conn.execute(

@@ -101,6 +101,29 @@ fn closed_to_non_closed_update_clears_only_the_factory_branch_anchor() {
 }
 
 #[test]
+fn awaiting_merge_conflict_rework_clears_all_parked_merge_state() {
+    let (_temp, store) = create_test_store();
+    let mut task = Task::new(
+        store.generate_id().unwrap(),
+        "Conflicted parked task".to_string(),
+    );
+    task.status = TaskStatus::AwaitingMerge;
+    task.deliverables.factory_branch_anchor = Some("conflicted-sha".to_string());
+    task.deliverables.parked_branch = Some("factory/worker".to_string());
+    task.deliverables.merge_conflicted = true;
+    store.add(&task).unwrap();
+
+    task.status = TaskStatus::InProgress;
+    store.update(&task).unwrap();
+
+    let resumed = store.get(&task.id).unwrap();
+    assert_eq!(resumed.status, TaskStatus::InProgress);
+    assert!(resumed.deliverables.factory_branch_anchor.is_none());
+    assert!(resumed.deliverables.parked_branch.is_none());
+    assert!(!resumed.deliverables.merge_conflicted);
+}
+
+#[test]
 fn test_dependencies() {
     let (_temp, store) = create_test_store();
 

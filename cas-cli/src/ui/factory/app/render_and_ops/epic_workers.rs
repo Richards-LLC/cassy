@@ -1442,6 +1442,115 @@ mod spawn_base_tests {
             "discarded spawn must not leak its worker branch"
         );
     }
+
+    #[test]
+    fn cancelled_spawn_preserves_a_reused_worktree() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+
+        let mut manager = WorktreeManager::new(
+            &repo,
+            WorktreeConfig {
+                enabled: true,
+                base_path: repo
+                    .join(".cas")
+                    .join("worktrees")
+                    .to_string_lossy()
+                    .to_string(),
+                branch_prefix: "factory/".to_string(),
+                auto_merge: false,
+                cleanup_on_close: false,
+                promote_entries_on_merge: false,
+            },
+        )
+        .unwrap();
+        let worktree = manager.create_for_worker("reused-worker").unwrap();
+        let worktree_path = worktree.path.clone();
+        let branch = worktree.branch.clone();
+        let mut result = WorkerSpawnResult {
+            worker_name: "reused-worker".to_string(),
+            cwd: worktree_path.clone(),
+            cas_root: None,
+            worktree: Some(worktree),
+            worktree_created: false,
+        };
+
+        assert!(
+            !cleanup_cancelled_spawn_worktree_with_manager(Some(&mut manager), &mut result).unwrap()
+        );
+        assert!(
+            result.worktree.is_some(),
+            "the reused worktree receipt must remain available to the caller"
+        );
+        assert!(
+            worktree_path.exists(),
+            "cancelling a spawn must preserve a reused worker's directory"
+        );
+        assert!(
+            manager.git().branch_exists(&branch).unwrap(),
+            "cancelling a spawn must preserve a reused worker's branch"
+        );
+    }
+
+    #[test]
+    fn cancelled_spawn_without_a_worktree_receipt_is_a_no_op() {
+        let mut result = WorkerSpawnResult {
+            worker_name: "receiptless-worker".to_string(),
+            cwd: std::path::PathBuf::from("/unused"),
+            cas_root: None,
+            worktree: None,
+            worktree_created: true,
+        };
+
+        assert!(
+            !cleanup_cancelled_spawn_worktree_with_manager(None, &mut result).unwrap(),
+            "a missing worktree receipt leaves nothing to clean up"
+        );
+    }
+
+    #[test]
+    fn cancelled_created_worktree_without_manager_returns_an_error() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+
+        let mut manager = WorktreeManager::new(
+            &repo,
+            WorktreeConfig {
+                enabled: true,
+                base_path: repo
+                    .join(".cas")
+                    .join("worktrees")
+                    .to_string_lossy()
+                    .to_string(),
+                branch_prefix: "factory/".to_string(),
+                auto_merge: false,
+                cleanup_on_close: false,
+                promote_entries_on_merge: false,
+            },
+        )
+        .unwrap();
+        let worktree = manager.create_for_worker("managerless-worker").unwrap();
+        let worktree_path = worktree.path.clone();
+        let mut result = WorkerSpawnResult {
+            worker_name: "managerless-worker".to_string(),
+            cwd: worktree_path.clone(),
+            cas_root: None,
+            worktree: Some(worktree),
+            worktree_created: true,
+        };
+
+        let error = cleanup_cancelled_spawn_worktree_with_manager(None, &mut result)
+            .expect_err("a created worktree requires a manager for cleanup");
+        assert!(error.to_string().contains("no worktree manager"));
+        assert!(
+            worktree_path.exists(),
+            "the error path must not delete the worktree behind the caller's back"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -61,7 +61,7 @@ fn parse_spawn_effort(effort: Option<&str>) -> Result<Option<cas_mux::Effort>, S
 
 fn default_worker_model_for_cli(cli: cas_mux::SupervisorCli) -> &'static str {
     match cli {
-        cas_mux::SupervisorCli::Claude => "sonnet",
+        cas_mux::SupervisorCli::Claude => "opus",
         cas_mux::SupervisorCli::Codex => crate::config::STOCK_WORKER_MODEL,
         // EPIC cas-8888 (cas-9a31, Phase 1): grok 0.2.93 default model.
         cas_mux::SupervisorCli::Grok => "grok-4.5",
@@ -184,10 +184,34 @@ fn spawn_spec_summary(spec_json: &str) -> String {
 fn spawn_spec_warning(model_explicit: bool, effort_explicit: bool, spec_json: &str) -> String {
     let mut warnings = Vec::new();
     if !model_explicit || !effort_explicit {
-        warnings.push(
-            "Warning: spawn_workers should include explicit model= and effort=; omitted fields were resolved to safe worker defaults for this request."
-                .to_string(),
-        );
+        let omitted = match (model_explicit, effort_explicit) {
+            (false, false) => "model=/effort=",
+            (false, true) => "model=",
+            (true, false) => "effort=",
+            (true, true) => unreachable!("warning requires at least one omitted field"),
+        };
+        match serde_json::from_str::<cas_mux::WorkerSpec>(spec_json) {
+            Ok(spec) => {
+                let model_uses_policy = model_explicit
+                    || spec.model.as_deref() == Some(default_worker_model_for_cli(spec.cli));
+                let effort_uses_policy = effort_explicit
+                    || spec.effort == Some(default_worker_effort_for_cli(spec.cli));
+                let fallback = if model_uses_policy && effort_uses_policy {
+                    "policy default"
+                } else {
+                    "configured fallback"
+                };
+                warnings.push(format!(
+                    "Warning: spawn_workers omitted {omitted}; resolved to {fallback} {}/{}/{} — pass model=/effort= explicitly to tier the spawn.",
+                    spec.cli.as_str(),
+                    spec.model.as_deref().unwrap_or("(backend default)"),
+                    format_effort(spec.effort)
+                ));
+            }
+            Err(_) => warnings.push(format!(
+                "Warning: spawn_workers omitted {omitted}; pass model=/effort= explicitly to tier the spawn."
+            )),
+        }
     }
     if !model_explicit {
         if let Ok(spec) = serde_json::from_str::<cas_mux::WorkerSpec>(spec_json) {
@@ -3502,7 +3526,7 @@ mod tests {
         let spec = decoded_spawn_spec(&json);
 
         assert_eq!(spec.cli, cas_mux::SupervisorCli::Claude);
-        assert_eq!(spec.model.as_deref(), Some("sonnet"));
+        assert_eq!(spec.model.as_deref(), Some("opus"));
         assert_eq!(spec.effort, Some(cas_mux::Effort::Medium));
     }
 
@@ -3539,6 +3563,55 @@ mod tests {
     }
 
     #[test]
+    fn spawn_policy_fallback_models_are_allowed_by_shipped_routing_doc() {
+        // Isolate HOME so no user or project-level worker override can mask
+        // the stock fallback this regression is intended to guard.
+        let _home = TestEnvGuard::temp_home();
+        let routing_doc = include_str!(
+            "../../../builtins/skills/cas-supervisor/references/model-selection.md"
+        );
+
+        for (cli, spec) in [
+            (
+                cas_mux::SupervisorCli::Codex,
+                decoded_spawn_spec(&build_spawn_spec_json(None, None, None).unwrap()),
+            ),
+            (
+                cas_mux::SupervisorCli::Claude,
+                decoded_spawn_spec(
+                    &build_spawn_spec_json(Some("claude"), None, None).unwrap(),
+                ),
+            ),
+        ] {
+            assert_eq!(spec.cli, cli);
+            let model = spec.model.as_deref().expect("fallback model");
+            let allowed_route = format!("cli={} model={model}", cli.as_str());
+            assert!(
+                routing_doc
+                    .lines()
+                    .any(|line| line.contains(&allowed_route)),
+                "runtime fallback {allowed_route} must be an allowed route in model-selection.md"
+            );
+        }
+    }
+
+    #[test]
+    fn omitted_fields_warning_names_resolved_policy_default_spec() {
+        let _home = TestEnvGuard::temp_home();
+        let json = build_spawn_spec_json(None, None, None).unwrap();
+        let warning = spawn_spec_warning(false, false, &json);
+
+        assert!(
+            warning.contains("policy default codex/gpt-5.6-sol/medium"),
+            "{warning}"
+        );
+        assert!(
+            warning.contains("pass model=/effort= explicitly to tier the spawn"),
+            "{warning}"
+        );
+    }
+
+    #[test]
     fn spawn_spec_omitted_cli_respects_project_factory_default() {
         let _home = TestEnvGuard::temp_home();
         let tmp = tempfile::tempdir().expect("temp project config");
@@ -3557,10 +3630,15 @@ effort = "high"
         let json =
             build_spawn_spec_json_with_project_config(None, None, None, Some(config)).unwrap();
         let spec = decoded_spawn_spec(&json);
+        let warning = spawn_spec_warning(false, false, &json);
 
         assert_eq!(spec.cli, cas_mux::SupervisorCli::Claude);
         assert_eq!(spec.model.as_deref(), Some("sonnet"));
         assert_eq!(spec.effort, Some(cas_mux::Effort::High));
+        assert!(
+            warning.contains("configured fallback claude/sonnet/high"),
+            "{warning}"
+        );
     }
 
     #[test]

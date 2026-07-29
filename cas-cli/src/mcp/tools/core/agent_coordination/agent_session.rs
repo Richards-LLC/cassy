@@ -225,12 +225,13 @@ impl CasCore {
     /// the agent's own registration call receives delivers it into the
     /// agent's context immediately, with no PTY timing dependency.
     ///
-    /// Deliberately does NOT mark messages processed/acked — the daemon's
-    /// normal poll loop still delivers them too, matching the at-least-once
-    /// philosophy already used elsewhere in this queue (see
-    /// `process_prompt_queue`'s "peek first, ack after injection" comment).
-    /// Best-effort: any store error degrades to an empty string rather than
-    /// failing registration itself.
+    /// A direct message rendered here is consumed by the recipient through the
+    /// registration tool result itself. Mark it transport-delivered and acked
+    /// before returning so the daemon cannot inject the same row as a second
+    /// fresh turn. `all_workers` is left to the daemon because one registering
+    /// worker cannot confirm a multi-recipient broadcast on everyone else's
+    /// behalf. Best-effort: any store error degrades to an empty string rather
+    /// than failing registration itself.
     fn pending_mail_for_registration(&self, agent_name: &str) -> String {
         use crate::store::open_prompt_queue_store;
 
@@ -268,6 +269,11 @@ impl CasCore {
                 "\n\n**From {}**{summary}\n{}",
                 msg.source, msg.prompt
             ));
+            if msg.target.eq_ignore_ascii_case(agent_name)
+                && queue.mark_transport_delivered(msg.id).is_ok()
+            {
+                let _ = queue.ack(msg.id);
+            }
         }
         out
     }

@@ -2373,6 +2373,55 @@ async fn test_coordination_message_non_urgent_does_not_claim_delivery() {
     );
 }
 
+/// cas-6ad2: a worker's response proves it consumed the supervisor message
+/// that prompted the work. Factory prompts never issued explicit message_ack,
+/// so the response path must advance the prior delivered row to Confirmed.
+#[tokio::test]
+async fn test_worker_response_confirms_consumed_supervisor_message() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "worker"),
+        ("CAS_AGENT_NAME", "swift-fox"),
+        ("CAS_SUPERVISOR_NAME", "cosmic-bear-43"),
+    ]);
+    let env = FactoryTestEnv::new();
+    env.register_supervisor("cosmic-bear-43");
+    let instruction = env
+        .prompt_queue()
+        .enqueue_urgent(
+            "supervisor",
+            "swift-fox",
+            "start cas-6ad2",
+            None,
+            Some("assignment"),
+            None,
+            false,
+        )
+        .expect("enqueue supervisor instruction");
+    env.prompt_queue()
+        .mark_transport_delivered(instruction)
+        .expect("deliver supervisor instruction");
+
+    let reply = coord_msg(
+        "message",
+        "supervisor",
+        "cas-6ad2 characterization reproduced",
+        None,
+    );
+    let result = env.service.coordination(Parameters(reply)).await;
+    assert!(result.is_ok(), "worker response should succeed: {result:?}");
+
+    let report = env
+        .prompt_queue()
+        .message_delivery_report(instruction)
+        .expect("delivery report")
+        .expect("instruction exists");
+    assert_eq!(
+        report.stage,
+        cas_store::DeliveryStage::Confirmed,
+        "the recipient's response must confirm its consumed instruction"
+    );
+}
+
 /// cas-0440: the send response must name the same parameter that
 /// `message_status` accepts. Drive the caller-visible two-call sequence:
 /// send a message, copy the returned notification_id verbatim, then query it.

@@ -2,9 +2,25 @@ use crate::ui::factory::daemon::imports::*;
 use crate::ui::factory::director::AgentSummary;
 
 const PROMPT_POISON_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+/// Stale expiry self-heals on the next 2-second tick, so never spend the
+/// shared store's 5-second busy timeout (plus blocking retries) on this path.
+const REMINDER_EXPIRY_BUSY_BUDGET: Duration = Duration::from_millis(100);
 
 fn prompt_poison_sweep_due(last: Option<Instant>, now: Instant) -> bool {
     last.is_some_and(|last| now.saturating_duration_since(last) >= PROMPT_POISON_SWEEP_INTERVAL)
+}
+
+fn report_stale_reminder_expiry(result: cas_store::Result<cas_store::ReminderExpiryOutcome>) {
+    match result {
+        Ok(cas_store::ReminderExpiryOutcome::Expired(_)) => {}
+        Ok(cas_store::ReminderExpiryOutcome::DeferredBusy) => {
+            tracing::warn!(
+                budget_ms = REMINDER_EXPIRY_BUSY_BUDGET.as_millis(),
+                "SQLite busy; deferring stale reminder expiry to the next daemon tick"
+            );
+        }
+        Err(error) => tracing::error!("Failed to expire stale reminders: {}", error),
+    }
 }
 
 fn registered_prompt_sweep_agents(
@@ -1633,10 +1649,12 @@ impl FactoryDaemon {
             }
         };
 
-        // Expire stale reminders
-        if let Err(e) = reminder_store.expire_stale() {
-            tracing::error!("Failed to expire stale reminders: {}", e);
-        }
+        // Expire stale reminders within a small hot-path budget. Busy is
+        // expected to self-heal on the next tick; other failures are terminal.
+        report_stale_reminder_expiry(cas_store::expire_stale_bounded(
+            self.app.cas_dir(),
+            REMINDER_EXPIRY_BUSY_BUDGET,
+        ));
 
         // Check time-based reminders
         let due_reminders = match reminder_store.get_due_time_reminders() {
@@ -1963,8 +1981,9 @@ mod tests {
     use super::{
         cancel_targeted_in_flight_spawn, enqueue_spawn_cancelled_notice, is_exact_agent_name_match,
         matches_event_filter, prompt_poison_sweep_due, prompt_poison_sweep_targets,
-        registered_prompt_sweep_agents, reminder_matches_factory_session, shutdown_targets,
-        take_next_pending_spawn, take_spawn_cancellation,
+        registered_prompt_sweep_agents, reminder_matches_factory_session,
+        report_stale_reminder_expiry, shutdown_targets, take_next_pending_spawn,
+        take_spawn_cancellation,
     };
     use crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound;
     use crate::ui::factory::daemon::{FactoryDaemon, PendingSpawn};
@@ -1972,7 +1991,66 @@ mod tests {
     use cas_store::DeliveryStage;
     use cas_types::{AgentStatus, Task, TaskStatus};
     use std::collections::{HashMap, HashSet, VecDeque};
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
+
+    #[derive(Clone)]
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogBuffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn reminder_expiry_defers_transient_busy_at_warn() {
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let writer_logs = Arc::clone(&logs);
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || LogBuffer(Arc::clone(&writer_logs)))
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            report_stale_reminder_expiry(Ok(cas_store::ReminderExpiryOutcome::DeferredBusy));
+        });
+
+        let output = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("WARN "));
+        assert!(output.contains("deferring stale reminder expiry"));
+        assert!(!output.contains("ERROR "));
+    }
+
+    #[test]
+    fn reminder_expiry_logs_terminal_failure_at_error() {
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let writer_logs = Arc::clone(&logs);
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || LogBuffer(Arc::clone(&writer_logs)))
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            report_stale_reminder_expiry(Err(cas_store::StoreError::NotFound(
+                "reminder table missing".to_string(),
+            )));
+        });
+
+        let output = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("ERROR "));
+        assert!(output.contains("Failed to expire stale reminders"));
+    }
 
     #[test]
     fn composer_deferred_delivery_stays_durable_across_restart_cas_0b64() {

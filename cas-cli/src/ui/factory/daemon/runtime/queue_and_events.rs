@@ -1905,7 +1905,7 @@ fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        cancel_targeted_in_flight_spawn, enqueue_spawn_cancelled_notice,
+        cancel_targeted_in_flight_spawn, delivery_was_written, enqueue_spawn_cancelled_notice,
         is_exact_agent_name_match, matches_event_filter, prompt_poison_sweep_due,
         prompt_poison_sweep_targets, registered_prompt_sweep_agents,
         reminder_matches_factory_session, shutdown_targets, take_next_pending_spawn,
@@ -1918,6 +1918,44 @@ mod tests {
     use cas_types::{AgentStatus, Task, TaskStatus};
     use std::collections::{HashMap, HashSet, VecDeque};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn composer_deferred_delivery_stays_durable_across_restart_cas_0b64() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let row_id = queue
+            .enqueue_with_session("supervisor", "worker-1", "report", "factory-session")
+            .unwrap();
+
+        let outcome = cas_mux::InjectOutcome::DeferredComposerDirty;
+        if delivery_was_written(outcome) {
+            queue.mark_transport_delivered(row_id).unwrap();
+        } else {
+            queue
+                .record_retry(
+                    row_id,
+                    cas_store::PendingReason::GatedNotReady,
+                    Some("operator composer is dirty"),
+                )
+                .unwrap();
+        }
+        drop(queue);
+
+        let reopened = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let report = reopened.message_delivery_report(row_id).unwrap().unwrap();
+        assert_eq!(report.legacy_status, cas_store::MessageStatus::Pending);
+        assert_eq!(report.delivered_at, None);
+        assert_eq!(reopened.pending_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn deferred_recipient_is_not_counted_as_broadcast_delivery_cas_0b64() {
+        assert!(!delivery_was_written(
+            cas_mux::InjectOutcome::DeferredComposerDirty
+        ));
+        assert!(delivery_was_written(cas_mux::InjectOutcome::Delivered));
+    }
 
     #[test]
     fn first_prompt_queue_tick_with_empty_roster_does_not_abandon_pending_rows() {

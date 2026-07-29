@@ -2898,17 +2898,28 @@ This is the body content."#;
             "gpt55ShouldRun",
             "function buildCodexReviewerShimPrompt",
             "async function dispatchReviewPersona",
-            "codex exec -s read-only -m gpt-5.6-sol -c model_reasoning_effort=medium",
+            "codex exec -s read-only -m ${CODEX_PERSONA_MODEL} -c model_reasoning_effort=${CODEX_PERSONA_EFFORT}",
             "--output-schema",
             "CODEX_PERSONA_TIMEOUT_SECONDS = 600",
             "CODEX_SCHEMA_RETRIES = 2",
             "CODEX_TIMEOUT_RETRIES = 1",
+            "CODEX_MAX_CONCURRENCY = 4",
             "Schema mismatch retries do not consume the timeout retry budget",
+            "required: ['reviewer', 'findings', 'residual_risks', 'testing_gaps', 'skipped_reason']",
+            "required: ['title','severity','file','line','why_it_matters','autofix_class','owner','confidence','evidence','pre_existing','suggested_fix','requires_verification']",
+            "function stripNullValues",
+            "function skippedPersonaResults",
+            "function incompleteAlwaysOnPersonas",
+            "async function pipelineWithConcurrency",
+            "command -v sleep",
+            "TIMEOUT_MARKER",
             "CLAUDE_DIVERSITY_PERSONA = 'security'",
             "model: 'opus'",
             "skipped_reason",
             "gpt55_independent_skipped",
             "skipped_personas",
+            "status: reviewStatus",
+            "degraded: incompletePersonas.length > 0",
         ] {
             assert!(
                 workflow_content.contains(required),
@@ -2917,10 +2928,14 @@ This is the body content."#;
         }
         assert_eq!(
             workflow_content
-                .matches("codex exec -s read-only -m gpt-5.6-sol -c model_reasoning_effort=medium")
+                .matches("codex exec -s read-only -m ${CODEX_PERSONA_MODEL} -c model_reasoning_effort=${CODEX_PERSONA_EFFORT}")
                 .count(),
             1,
             "the Codex command must live once in the shared reviewer shim"
+        );
+        assert!(
+            !workflow_content.contains("/usr/bin/timeout"),
+            "cas-code-review must use the portable shell watchdog, not GNU timeout"
         );
         assert!(
             !workflow_content.contains("model: 'sonnet'"),
@@ -2928,7 +2943,13 @@ This is the body content."#;
         );
         let constants_content =
             include_str!("../../.claude/workflows/cas-code-review-constants.js");
-        for helper in ["gpt55ShouldRun", "gpt55SkippedPersonas", "personasRunCount"] {
+        for helper in [
+            "gpt55ShouldRun",
+            "stripNullValues",
+            "skippedPersonaResults",
+            "personasRunCount",
+            "incompleteAlwaysOnPersonas",
+        ] {
             assert_eq!(
                 extract_js_function(&workflow_content, helper),
                 extract_js_function(constants_content, helper),

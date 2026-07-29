@@ -706,6 +706,7 @@ impl FactoryApp {
             );
             return Err(e.into());
         }
+        self.track_worker_process_group(&worker_name);
 
         // STEP 3 (cas-5232): Post-spawn branch assertion.
         // PTY is now running. Verify the worker's cwd resolves to the expected
@@ -781,7 +782,7 @@ impl FactoryApp {
     /// # Arguments
     /// * `name`  - Worker name to shutdown
     /// * `force` - `true` → SIGKILL the process group immediately;
-    ///             `false` → SIGTERM (graceful) then drop the PTY
+    ///             `false` → SIGTERM with group-wide SIGKILL escalation
     pub fn shutdown_worker(&mut self, name: &str, force: bool) -> anyhow::Result<()> {
         // Check if worker exists
         if !self.worker_names.contains(&name.to_string()) {
@@ -849,7 +850,11 @@ impl FactoryApp {
         // kill_worker signals the entire process group (SIGKILL when force=true,
         // SIGTERM when false), ensuring the full node→codex tree is terminated,
         // not just the direct PTY child that SIGHUP-on-drop would reach.
+        let process_group = self.mux.pane_process_group_id(name);
         self.mux.kill_worker(name, force)?;
+        if let Some(pgid) = process_group {
+            self.untrack_worker_process_group_if_gone(pgid);
+        }
 
         // Remove from tracking
         self.worker_names.retain(|n| n != name);
@@ -956,6 +961,30 @@ impl FactoryApp {
     /// AND the tree is clean — in that case we reclaim it the same way graceful
     /// shutdown would. Dirty trees are always preserved and flagged for salvage.
     pub fn mark_worker_crashed(&mut self, name: &str) {
+        // The interactive leader may have exited while a long-lived child
+        // remains in its process group. Reap the durable group before making
+        // this lane eligible for respawn.
+        if let Some(record) = crate::ui::factory::process_groups::list(self.cas_dir())
+            .unwrap_or_default()
+            .into_iter()
+            .find(|record| {
+                record.worker_name == name
+                    && self
+                        .factory_session()
+                        .is_none_or(|session| record.factory_session == session)
+            })
+        {
+            match crate::ui::factory::process_groups::reap(self.cas_dir(), &record) {
+                Ok(_) => {}
+                Err(error) => tracing::warn!(
+                    worker = %name,
+                    pgid = record.pgid,
+                    error = %error,
+                    "crashed worker process group survived reap; retaining GC record"
+                ),
+            }
+        }
+
         // Remove from worker tracking
         self.worker_names.retain(|n| n != name);
 
@@ -1055,6 +1084,7 @@ impl FactoryApp {
             );
             return Err(e.into());
         }
+        self.track_worker_process_group(name);
 
         // Track the worker name
         self.worker_names.push(name.to_string());

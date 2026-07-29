@@ -1333,6 +1333,70 @@ impl FactoryApp {
                     .map(|dt| dt.with_timezone(&Utc))
             });
         self.factory_session = Some(name);
+        for worker in self.worker_names.clone() {
+            self.track_worker_process_group(&worker);
+        }
+    }
+
+    /// Persist the process-group boundary created by the worker pane spawn.
+    pub(crate) fn track_worker_process_group(&self, worker_name: &str) {
+        let Some(factory_session) = self.factory_session.as_deref() else {
+            return;
+        };
+        let Some(pgid) = self.mux.pane_process_group_id(worker_name) else {
+            tracing::warn!(
+                worker = %worker_name,
+                "worker pane has no process group id to track"
+            );
+            return;
+        };
+        if let Err(error) = crate::ui::factory::process_groups::track(
+            self.cas_dir(),
+            worker_name,
+            factory_session,
+            pgid,
+        ) {
+            tracing::warn!(
+                worker = %worker_name,
+                pgid,
+                error = %error,
+                "failed to persist worker process-group ownership"
+            );
+        }
+    }
+
+    /// Drop a process-group record only after the group is confirmed gone.
+    ///
+    /// A survivor intentionally remains registered for `gc_report` rather
+    /// than being silently forgotten.
+    pub(crate) fn untrack_worker_process_group_if_gone(&self, pgid: u32) {
+        let record = crate::ui::factory::process_groups::list(self.cas_dir())
+            .unwrap_or_default()
+            .into_iter()
+            .find(|record| record.pgid == pgid);
+        let Some(record) = record else {
+            return;
+        };
+        for _ in 0..20 {
+            if !crate::ui::factory::process_groups::is_live(&record) {
+                if let Err(error) =
+                    crate::ui::factory::process_groups::untrack(self.cas_dir(), pgid)
+                {
+                    tracing::warn!(
+                        pgid,
+                        error = %error,
+                        "failed to remove terminated worker process-group record"
+                    );
+                }
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        tracing::warn!(
+            pgid,
+            worker = %record.worker_name,
+            "worker process group survived teardown; retaining record for gc_report"
+        );
     }
 
     /// Get the worktree manager (if worktrees are enabled)

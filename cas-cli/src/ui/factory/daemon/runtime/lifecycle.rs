@@ -816,8 +816,19 @@ impl FactoryDaemon {
         // Disconnect cloud phone-home client
         self.disconnect_cloud();
 
-        // Kill all PTY processes (Claude instances)
+        // Kill all PTY process groups. Snapshot worker PGIDs first so their
+        // durable ownership records can be removed only after death is
+        // confirmed; any survivor stays visible to gc_report.
+        let worker_process_groups: Vec<u32> = self
+            .app
+            .worker_names()
+            .iter()
+            .filter_map(|name| self.app.mux.pane_process_group_id(name))
+            .collect();
         self.app.mux.kill_all();
+        for pgid in worker_process_groups {
+            self.app.untrack_worker_process_group_if_gone(pgid);
+        }
 
         // Unregister all factory agents (supervisor + workers)
         if let Ok(agent_store) = open_agent_store(self.app.cas_dir()) {

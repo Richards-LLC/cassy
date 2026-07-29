@@ -1395,6 +1395,14 @@ impl Pane {
         }
     }
 
+    /// Process group owned by this pane's PTY child.
+    pub fn process_group_id(&self) -> Option<u32> {
+        match &self.backend {
+            PaneBackend::Pty(pty) => pty.process_group_id(),
+            PaneBackend::None => None,
+        }
+    }
+
     /// Kill the pane's process tree (cas-8c5a).
     ///
     /// Delegates to `Pty::kill_tree(force)` which sends SIGKILL (`force=true`)

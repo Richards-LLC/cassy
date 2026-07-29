@@ -8,11 +8,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct HookInput {
     /// Unique session identifier
-    #[serde(default)]
+    #[serde(default, alias = "sessionId")]
     pub session_id: String,
 
     /// Path to the transcript file
-    #[serde(default)]
+    #[serde(default, alias = "transcriptPath")]
     pub transcript_path: Option<String>,
 
     /// Current working directory
@@ -20,31 +20,31 @@ pub struct HookInput {
     pub cwd: String,
 
     /// Permission mode (default, plan, acceptEdits, bypassPermissions)
-    #[serde(default)]
+    #[serde(default, alias = "permissionMode")]
     pub permission_mode: Option<String>,
 
     /// Hook event name
-    #[serde(default)]
+    #[serde(default, alias = "hookEventName")]
     pub hook_event_name: String,
 
     /// Tool name (PostToolUse)
-    #[serde(default)]
+    #[serde(default, alias = "toolName")]
     pub tool_name: Option<String>,
 
     /// Tool input parameters (PostToolUse)
-    #[serde(default)]
+    #[serde(default, alias = "toolInput")]
     pub tool_input: Option<serde_json::Value>,
 
     /// Tool response (PostToolUse)
-    #[serde(default)]
+    #[serde(default, alias = "toolResult")]
     pub tool_response: Option<serde_json::Value>,
 
     /// Tool use ID (PostToolUse)
-    #[serde(default)]
+    #[serde(default, alias = "toolUseId")]
     pub tool_use_id: Option<String>,
 
     /// User prompt text (UserPromptSubmit)
-    #[serde(default)]
+    #[serde(default, alias = "userPrompt")]
     pub user_prompt: Option<String>,
 
     /// Session start source (SessionStart)
@@ -56,11 +56,11 @@ pub struct HookInput {
     pub reason: Option<String>,
 
     /// Subagent type (SubagentStart/SubagentStop)
-    #[serde(default)]
+    #[serde(default, alias = "subagentType")]
     pub subagent_type: Option<String>,
 
     /// Subagent prompt (SubagentStart)
-    #[serde(default)]
+    #[serde(default, alias = "subagentPrompt")]
     pub subagent_prompt: Option<String>,
 
     /// CAS agent role for this hook invocation ("supervisor" / "worker") —
@@ -499,6 +499,49 @@ mod tests {
         let input: HookInput = serde_json::from_str(json).unwrap();
         assert_eq!(input.tool_name, Some("Write".to_string()));
         assert!(input.tool_input.is_some());
+    }
+
+    #[test]
+    fn test_parse_grok_post_tool_use_input() {
+        // Exact Grok Build command-hook envelope shape from the official
+        // hooks guide: common and tool fields are camelCase, terminal calls
+        // use run_terminal_command, and PostToolUse output is toolResult.
+        let json = r#"{
+            "hookEventName": "post_tool_use",
+            "sessionId": "grok-session-123",
+            "cwd": "/test/dir",
+            "workspaceRoot": "/test/dir",
+            "permissionMode": "default",
+            "toolName": "run_terminal_command",
+            "toolInput": {"command": "git commit -m 'grok work'"},
+            "toolResult": {"exitCode": 0, "stdout": "[factory/grok abc1234] grok work"},
+            "toolUseId": "tool-use-456",
+            "toolInputTruncated": false,
+            "timestamp": "2026-04-14T12:00:00Z"
+        }"#;
+
+        let input: HookInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.session_id, "grok-session-123");
+        assert_eq!(input.hook_event_name, "post_tool_use");
+        assert_eq!(input.permission_mode.as_deref(), Some("default"));
+        assert_eq!(input.tool_name.as_deref(), Some("run_terminal_command"));
+        assert_eq!(
+            input
+                .tool_input
+                .as_ref()
+                .and_then(|value| value.get("command"))
+                .and_then(|value| value.as_str()),
+            Some("git commit -m 'grok work'")
+        );
+        assert_eq!(
+            input
+                .tool_response
+                .as_ref()
+                .and_then(|value| value.get("exitCode"))
+                .and_then(|value| value.as_i64()),
+            Some(0)
+        );
+        assert_eq!(input.tool_use_id.as_deref(), Some("tool-use-456"));
     }
 
     #[test]

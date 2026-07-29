@@ -620,6 +620,7 @@ pub fn get_git_author() -> Option<String> {
 mod commit_anchor_tests {
     use super::*;
     use crate::store::init_cas_dir;
+    use crate::test_support::TestEnvGuard;
     use std::process::Command;
 
     fn git(dir: &std::path::Path, args: &[&str]) {
@@ -946,5 +947,94 @@ mod commit_anchor_tests {
             anchored.deliverables.parked_branch.as_deref(),
             Some("factory/test-worker")
         );
+    }
+
+    #[test]
+    fn grok_camel_case_terminal_hook_records_anchor_and_attribution() {
+        let (_temp, cas_root, agent, task, task_store) = worker_task_fixture();
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_FACTORY_WORKER_CLI", Some("grok")),
+            ("CAS_FACTORY_MODE", None),
+            ("CAS_SESSION_ID", None),
+        ]);
+        let repo = cas_root.parent().expect("repo");
+        let work_path = repo.join("work.rs");
+        std::fs::write(&work_path, "fn grok_work() {}\n").unwrap();
+        git(repo, &["add", "work.rs"]);
+
+        // Seed the uncommitted file-change record that commit attribution
+        // links. The Grok terminal fixture below must turn this into a
+        // committed attribution record as well as anchoring the active task.
+        capture_file_change_for_attribution(
+            &cas_root,
+            &HookInput {
+                session_id: agent.id.clone(),
+                cwd: repo.display().to_string(),
+                tool_input: Some(serde_json::json!({
+                    "file_path": work_path,
+                    "content": "fn grok_work() {}\n"
+                })),
+                ..Default::default()
+            },
+            "Write",
+        );
+
+        let output = Command::new("git")
+            .args(["commit", "-m", "fix: grok hook work"])
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("grok fixture commit");
+        assert!(output.status.success(), "grok fixture commit failed");
+        let stdout = String::from_utf8(output.stdout).expect("commit stdout");
+        let expected = git_output(repo, &["rev-parse", "HEAD"]).trim().to_string();
+
+        // Exact Grok Build command-hook envelope: camelCase common/tool
+        // fields, real terminal tool name, and toolResult (not
+        // Claude's tool_response).
+        let fixture = serde_json::json!({
+            "hookEventName": "post_tool_use",
+            "sessionId": agent.id,
+            "cwd": repo,
+            "workspaceRoot": repo,
+            "permissionMode": "default",
+            "toolName": "run_terminal_command",
+            "toolInput": {"command": "git commit -m 'fix: grok hook work'"},
+            "toolResult": {"exitCode": 0, "stdout": stdout},
+            "toolUseId": "grok-tool-use-1",
+            "toolInputTruncated": false,
+            "timestamp": "2026-04-14T12:00:00Z"
+        });
+        let input: HookInput = serde_json::from_value(fixture).expect("Grok hook fixture");
+
+        crate::hooks::handle_post_tool_use(&input, Some(&cas_root)).expect("Grok PostToolUse hook");
+
+        let anchored = task_store.get(&task.id).expect("anchored task");
+        assert_eq!(
+            anchored.deliverables.factory_branch_anchor.as_deref(),
+            Some(expected.as_str()),
+            "Grok run_terminal_command must use Bash-equivalent anchoring"
+        );
+
+        let commit_link = open_commit_link_store(&cas_root)
+            .expect("commit link store")
+            .get(&expected)
+            .expect("commit link lookup")
+            .expect("Grok commit attribution");
+        assert_eq!(commit_link.session_id, input.session_id);
+        assert_eq!(commit_link.files_changed, vec!["work.rs"]);
+
+        let committed_changes = open_file_change_store(&cas_root)
+            .expect("file change store")
+            .list_by_commit(&expected)
+            .expect("committed attribution records");
+        assert_eq!(committed_changes.len(), 1);
+        assert_eq!(committed_changes[0].session_id, input.session_id);
     }
 }

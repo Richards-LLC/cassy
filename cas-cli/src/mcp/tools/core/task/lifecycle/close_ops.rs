@@ -415,9 +415,10 @@ impl CasCore {
         //
         // cas-60393 (AwaitingMerge) + cas-3894 (widened to InProgress): a
         // pre-existing halt armed by an EARLIER, unrelated urgent stop must
-        // not deadlock re-close of the caller's OWN task. AwaitingMerge has
-        // no in-band way to `start` and clear the halt; InProgress can hit an
-        // even worse *mutual* deadlock, because the documented escape
+        // not obstruct re-close of the caller's OWN task. cas-a844 now lets
+        // AwaitingMerge restart and clear the halt, but forcing that redundant
+        // state transition complicates the merge hand-off. InProgress can hit
+        // a genuine *mutual* deadlock, because the documented escape
         // ("start a new task") is itself refused by the verification jail
         // until this very task is closed. The exemption only skips *this*
         // check; the merge/verification/review gates below remain fully

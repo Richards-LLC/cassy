@@ -870,6 +870,13 @@ impl CasService {
                 let clone_info = worktree_status.clone_info;
                 // cas-844bf: git introspection — branch/HEAD/ahead-behind/dirty/PR
                 let git_info = worktree_status.git_info;
+                let session_uuid = agent.cc_session_id.as_deref().unwrap_or(&agent.id);
+                let worker_cli = worker_cli_from_agent(agent);
+                // cas-7182: Codex resolution is a bounded-TTL lookup after the
+                // first scan for this worker. Reuse it for context, activity,
+                // in-flight detection, and hard-dead transcript surfacing.
+                let transcript_path_for_worker =
+                    worker_status_transcript_path(clone_path.as_deref(), session_uuid, worker_cli);
                 // Surface transcript path only for hard-dead workers so the
                 // supervisor can salvage whatever was in-flight when the CC
                 // client died (cas-2749 AC: transcript-path-surfacing on
@@ -892,12 +899,23 @@ impl CasService {
                 // but for now `id` is the right key and has been correct
                 // since cas-2749.
                 let transcript_info = if elapsed >= WORKER_DEAD_SECS {
-                    let session_id = agent.cc_session_id.as_deref().unwrap_or(&agent.id);
-                    format_transcript_block(
-                        clone_path.as_deref(),
-                        session_id,
-                        worker_cli_from_agent(agent),
-                    )
+                    if worker_cli == cas_mux::SupervisorCli::Codex {
+                        transcript_path_for_worker.as_ref().map_or_else(
+                            || {
+                                format!(
+                                    "\n    Transcript: unresolved Codex rollout\n    Session: {session_uuid}"
+                                )
+                            },
+                            |path| {
+                                format!(
+                                    "\n    Transcript: {}\n    Session: {session_uuid}",
+                                    path.display()
+                                )
+                            },
+                        )
+                    } else {
+                        format_transcript_block(clone_path.as_deref(), session_uuid, worker_cli)
+                    }
                 } else {
                     String::new()
                 };
@@ -905,7 +923,6 @@ impl CasService {
                 // supervisor can cross-reference task-ownership errors
                 // ("owned by worker-backfill (0a7f2802-...)") without manual
                 // table-lookup. cas-85bf.
-                let session_uuid = agent.cc_session_id.as_deref().unwrap_or(&agent.id);
                 let model_info = match (
                     agent.metadata.get("worker_model"),
                     agent.metadata.get("worker_effort"),
@@ -926,12 +943,6 @@ impl CasService {
                 // same resolved path can also feed the in-flight-tool-call
                 // check below — one resolution, two consumers, instead of
                 // globbing/reading the transcript twice per worker.
-                let worker_cli = worker_cli_from_agent(agent);
-                let transcript_path_for_worker = worker_status_transcript_path(
-                    clone_path.as_deref(),
-                    session_uuid,
-                    worker_cli,
-                );
                 let context_info = {
                     match transcript_path_for_worker
                         .as_deref()
@@ -3042,6 +3053,33 @@ pub(crate) fn codex_rollout_cwd(path: &std::path::Path) -> Option<String> {
 /// spirit).
 const MAX_CODEX_ROLLOUT_SCAN: usize = 200;
 
+const CODEX_TRANSCRIPT_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+const MAX_CODEX_TRANSCRIPT_CACHE_ENTRIES: usize = 512;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CodexTranscriptCacheKey {
+    sessions_dir: std::path::PathBuf,
+    clone_path: Option<String>,
+    session_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct CodexTranscriptCacheEntry {
+    resolved_at: std::time::Instant,
+    path: Option<std::path::PathBuf>,
+}
+
+fn codex_transcript_cache() -> &'static std::sync::Mutex<
+    std::collections::HashMap<CodexTranscriptCacheKey, CodexTranscriptCacheEntry>,
+> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::HashMap<CodexTranscriptCacheKey, CodexTranscriptCacheEntry>,
+        >,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 /// Collect recent rollout paths under `sessions_dir`, newest mtime first.
 fn collect_codex_rollouts(sessions_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     let pattern = format!("{}/**/rollout-*.jsonl", sessions_dir.to_string_lossy());
@@ -3244,12 +3282,41 @@ fn worker_status_codex_transcript_path_in(
     clone_path: Option<&str>,
     session_id: &str,
 ) -> Option<std::path::PathBuf> {
-    worker_status_codex_path_from_resolution(resolve_transcript(
-        sessions_dir,
+    let Some(sessions_dir) = sessions_dir else {
+        return None;
+    };
+    let key = CodexTranscriptCacheKey {
+        sessions_dir: sessions_dir.to_path_buf(),
+        clone_path: clone_path.map(str::to_owned),
+        session_id: session_id.to_owned(),
+    };
+    if let Ok(cache) = codex_transcript_cache().lock()
+        && let Some(entry) = cache.get(&key)
+        && entry.resolved_at.elapsed() < CODEX_TRANSCRIPT_CACHE_TTL
+    {
+        return entry.path.clone();
+    }
+
+    let path = worker_status_codex_path_from_resolution(resolve_transcript(
+        Some(sessions_dir),
         clone_path,
         session_id,
         cas_mux::SupervisorCli::Codex,
-    ))
+    ));
+    if let Ok(mut cache) = codex_transcript_cache().lock() {
+        cache.retain(|_, entry| entry.resolved_at.elapsed() < CODEX_TRANSCRIPT_CACHE_TTL);
+        if cache.len() >= MAX_CODEX_TRANSCRIPT_CACHE_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(
+            key,
+            CodexTranscriptCacheEntry {
+                resolved_at: std::time::Instant::now(),
+                path: path.clone(),
+            },
+        );
+    }
+    path
 }
 
 /// Injectable half of [`resolve_worker_transcript_path`] for deterministic
@@ -5357,6 +5424,135 @@ effort = "high"
             elapsed.as_micros()
         );
         assert_eq!(candidates.len(), MAX_CODEX_ROLLOUT_SCAN);
+    }
+
+    #[test]
+    fn codex_worker_status_cache_amortizes_small_and_large_session_trees() {
+        fn measure(count: usize) -> (u128, u128) {
+            let tmp = tempfile::tempdir().unwrap();
+            let sessions = tmp.path().join("sessions");
+            let day = sessions.join("2026/07/28");
+            std::fs::create_dir_all(&day).unwrap();
+            let historical_mtime = filetime::FileTime::from_system_time(
+                std::time::SystemTime::now() - std::time::Duration::from_secs(60),
+            );
+            for index in 0..count {
+                let path = day.join(format!("rollout-history-{index:05}.jsonl"));
+                std::fs::write(
+                    &path,
+                    format!(
+                        r#"{{"type":"session_meta","payload":{{"cwd":"/tmp/history-{index}","originator":"codex-tui","source":"cli"}}}}"#
+                    ),
+                )
+                .unwrap();
+                filetime::set_file_mtime(&path, historical_mtime).unwrap();
+            }
+            let clone = format!("/tmp/live-worker-{count}");
+            let session_id = format!("codex-live-session-{count}");
+            let live = day.join(format!("rollout-live-{count}.jsonl"));
+            std::fs::write(
+                &live,
+                format!(
+                    r#"{{"type":"session_meta","payload":{{"cwd":"{clone}","originator":"codex-tui","source":"cli"}}}}"#
+                ),
+            )
+            .unwrap();
+
+            let cold_started = std::time::Instant::now();
+            let resolved =
+                worker_status_codex_transcript_path_in(Some(&sessions), Some(&clone), &session_id);
+            let cold_micros = cold_started.elapsed().as_micros();
+            assert_eq!(resolved, Some(live));
+
+            let key = CodexTranscriptCacheKey {
+                sessions_dir: sessions.clone(),
+                clone_path: Some(clone.clone()),
+                session_id: session_id.clone(),
+            };
+            let cached_at = codex_transcript_cache()
+                .lock()
+                .unwrap()
+                .get(&key)
+                .expect("cold lookup must populate cache")
+                .resolved_at;
+            let warm_started = std::time::Instant::now();
+            for _ in 0..100 {
+                assert!(
+                    worker_status_codex_transcript_path_in(
+                        Some(&sessions),
+                        Some(&clone),
+                        &session_id,
+                    )
+                    .is_some()
+                );
+            }
+            let warm_avg_nanos = warm_started.elapsed().as_nanos() / 100;
+            let still_cached_at = codex_transcript_cache()
+                .lock()
+                .unwrap()
+                .get(&key)
+                .expect("warm lookup must retain cache entry")
+                .resolved_at;
+            assert_eq!(
+                cached_at, still_cached_at,
+                "warm worker_status/activity polls must not rerun resolution"
+            );
+            (cold_micros, warm_avg_nanos)
+        }
+
+        let (small_cold, small_warm) = measure(25);
+        let (large_cold, large_warm) = measure(1_000);
+        eprintln!(
+            "cas-7182 resolver: small tree cold={small_cold}µs warm_avg={small_warm}ns; \
+             large tree cold={large_cold}µs warm_avg={large_warm}ns"
+        );
+    }
+
+    #[test]
+    fn codex_worker_status_cache_refreshes_after_ttl() {
+        let clone = "/tmp/codex-cache-refresh";
+        let session_id = "codex-cache-refresh-session";
+        let first_rel = "2026/07/28/rollout-first.jsonl";
+        let (_tmp, sessions) = fake_codex_sessions_dir(&[(first_rel, clone)]);
+        let first = sessions.join(first_rel);
+        assert_eq!(
+            worker_status_codex_transcript_path_in(Some(&sessions), Some(clone), session_id),
+            Some(first.clone())
+        );
+
+        let second = sessions.join("2026/07/28/rollout-second.jsonl");
+        std::fs::write(
+            &second,
+            format!(
+                r#"{{"type":"session_meta","payload":{{"cwd":"{clone}","originator":"codex-tui","source":"cli"}}}}"#
+            ),
+        )
+        .unwrap();
+        filetime::set_file_mtime(
+            &first,
+            filetime::FileTime::from_system_time(
+                std::time::SystemTime::now() - std::time::Duration::from_secs(60),
+            ),
+        )
+        .unwrap();
+
+        let key = CodexTranscriptCacheKey {
+            sessions_dir: sessions.clone(),
+            clone_path: Some(clone.to_string()),
+            session_id: session_id.to_string(),
+        };
+        codex_transcript_cache()
+            .lock()
+            .unwrap()
+            .get_mut(&key)
+            .expect("cache entry")
+            .resolved_at = std::time::Instant::now() - CODEX_TRANSCRIPT_CACHE_TTL;
+
+        assert_eq!(
+            worker_status_codex_transcript_path_in(Some(&sessions), Some(clone), session_id),
+            Some(second),
+            "expired cache entries must discover a newer live rollout"
+        );
     }
 
     #[test]

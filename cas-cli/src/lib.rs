@@ -56,9 +56,34 @@ pub mod worktree;
 /// would race against the other's.
 #[cfg(test)]
 pub(crate) mod test_support {
+    use std::cell::Cell;
     use std::ffi::{OsStr, OsString};
     use std::path::Path;
     use tempfile::TempDir;
+
+    thread_local! {
+        static TEST_ENV_GUARD_ACTIVE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    struct TestEnvGuardNesting;
+
+    impl TestEnvGuardNesting {
+        fn enter() -> Self {
+            TEST_ENV_GUARD_ACTIVE.with(|active| {
+                assert!(
+                    !active.replace(true),
+                    "nested TestEnvGuard on the same thread; reuse the existing guard instead"
+                );
+            });
+            Self
+        }
+    }
+
+    impl Drop for TestEnvGuardNesting {
+        fn drop(&mut self) {
+            TEST_ENV_GUARD_ACTIVE.with(|active| active.set(false));
+        }
+    }
 
     /// Canonical process-wide environment fixture for lib tests.
     ///
@@ -68,6 +93,7 @@ pub(crate) mod test_support {
     /// should never call `set_var`/`remove_var` directly.
     pub struct TestEnvGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
+        _nesting: TestEnvGuardNesting,
         saved: Vec<(OsString, Option<OsString>)>,
         temp_home: Option<TempDir>,
         saved_cwd: Option<std::path::PathBuf>,
@@ -75,8 +101,13 @@ pub(crate) mod test_support {
 
     impl TestEnvGuard {
         pub fn new() -> Self {
+            // Mark this thread before taking the process-wide lock. A nested
+            // constructor can then fail immediately instead of blocking
+            // forever on the non-reentrant mutex already held by this thread.
+            let nesting = TestEnvGuardNesting::enter();
             Self {
                 _lock: crate::hooks::test_env_lock(),
+                _nesting: nesting,
                 saved: Vec::new(),
                 temp_home: None,
                 saved_cwd: None,
@@ -168,6 +199,51 @@ pub(crate) mod test_support {
                 let _ = std::env::set_current_dir(cwd);
             }
         }
+    }
+
+    #[test]
+    fn nested_test_env_guard_panics_instead_of_deadlocking() {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        let mut child = Command::new(std::env::current_exe().expect("current test binary"))
+            .args([
+                "--exact",
+                "test_support::nested_test_env_guard_panics_with_clear_message",
+                "--ignored",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn nested TestEnvGuard regression test");
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("poll nested guard test") {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("nested TestEnvGuard hung instead of failing loudly");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        assert!(
+            status.success(),
+            "nested TestEnvGuard did not panic with the expected diagnostic"
+        );
+    }
+
+    #[test]
+    #[ignore = "subprocess helper for nested_test_env_guard_panics_instead_of_deadlocking"]
+    #[should_panic(
+        expected = "nested TestEnvGuard on the same thread; reuse the existing guard instead"
+    )]
+    fn nested_test_env_guard_panics_with_clear_message() {
+        let _outer = TestEnvGuard::new();
+        let _inner = TestEnvGuard::new();
     }
 
     #[test]

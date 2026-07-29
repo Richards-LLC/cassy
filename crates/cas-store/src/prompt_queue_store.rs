@@ -2292,6 +2292,40 @@ mod tests {
         assert_eq!(store.pending_count().unwrap(), 0);
     }
 
+    /// cas-6ad2: an exact worker report that already reached the supervisor
+    /// must not become a fresh injectable turn merely because the worker
+    /// re-enqueued the same stale report while waiting for an acknowledgement.
+    #[test]
+    fn delivered_worker_report_is_not_selected_again() {
+        let (_temp, store) = create_test_store();
+        let first = store
+            .enqueue_with_session(
+                "worker-1",
+                "supervisor",
+                "cas-b769 complete; MERGE NEEDED",
+                "factory-session",
+            )
+            .unwrap();
+        store.mark_transport_delivered(first).unwrap();
+
+        store
+            .enqueue_with_session(
+                "worker-1",
+                "supervisor",
+                "cas-b769 complete; MERGE NEEDED",
+                "factory-session",
+            )
+            .unwrap();
+
+        let selected = store
+            .peek_for_targets(&["supervisor"], Some("factory-session"), 10)
+            .unwrap();
+        assert!(
+            selected.is_empty(),
+            "an already-delivered exact report must be terminal, not selected again: {selected:?}"
+        );
+    }
+
     #[test]
     fn test_session_isolation_peek_for_targets() {
         let (_temp, store) = create_test_store();

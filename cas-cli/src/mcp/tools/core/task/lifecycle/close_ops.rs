@@ -3842,16 +3842,17 @@ pub(crate) fn check_factory_branch_merge_reality(
     ))
 }
 
-/// Return `true` if `refname` can be resolved in the git repository at
-/// `repo_path` (equivalent to `git rev-parse --verify <refname>` exiting 0).
+/// Return `true` if `refname` resolves to an existing commit object in the
+/// git repository at `repo_path`.
 ///
-/// Used by [`check_factory_branch_merge_reality`] to test both local branch
-/// existence (`factory/<name>`) and remote tracking ref existence
-/// (`origin/factory/<name>`).
+/// `rev-parse --verify` alone accepts a syntactically valid full object ID even
+/// when that object is absent. Every caller feeds the result to a commit-history
+/// operation, so verify both object existence and commit shape with
+/// `git cat-file -e <refname>^{commit}`.
 fn git_ref_exists(repo_path: &std::path::Path, refname: &str) -> bool {
     use std::process::Command;
     Command::new("git")
-        .args(["rev-parse", "--verify", refname])
+        .args(["cat-file", "-e", "--", &format!("{refname}^{{commit}}")])
         .current_dir(repo_path)
         .output()
         .map(|o| o.status.success())
@@ -10394,6 +10395,61 @@ mod epic_status_gate_tests {
         assert_eq!(
             statuses[0].unmerged_count, 1,
             "the legacy/no-receipt fallback must expose the stranded commit"
+        );
+    }
+
+    #[test]
+    fn dangling_anchor_falls_back_to_parked_branch_for_epic_close() {
+        let dir = init_epic_repo(&[("worker", 1)]);
+        let mut child = child("cas-dangling-anchor", TaskStatus::Closed, Some("worker"));
+        child.deliverables.factory_branch_anchor = Some("0".repeat(40));
+        assert!(git_ref_exists(dir.path(), "main"));
+        assert!(
+            !git_ref_exists(
+                dir.path(),
+                child
+                    .deliverables
+                    .factory_branch_anchor
+                    .as_deref()
+                    .unwrap()
+            ),
+            "syntactically valid but absent object IDs must not count as existing refs"
+        );
+
+        let unmerged =
+            collect_epic_branch_statuses(std::slice::from_ref(&child), "main", dir.path());
+        assert_eq!(
+            unmerged[0].unmerged_count, 1,
+            "an unresolvable anchor must fall back to the parked branch and expose stranded work"
+        );
+        assert!(
+            unmerged[0].last_commit_unix.is_some(),
+            "the fallback must inspect the parked branch rather than treating the child as evidence-free"
+        );
+
+        git(
+            dir.path(),
+            &["merge", "--no-ff", "-m", "merge worker", "factory/worker"],
+        );
+        let merged =
+            collect_epic_branch_statuses(std::slice::from_ref(&child), "main", dir.path());
+        assert_eq!(merged[0].unmerged_count, 0);
+        assert!(merged[0].last_commit_unix.is_some());
+
+        let task = epic("cas-epic-dangling-anchor");
+        let req = base_req(&task.id);
+        assert!(
+            matches!(
+                run_epic_close_merge_gate(
+                    &task,
+                    &req,
+                    "main",
+                    dir.path(),
+                    std::slice::from_ref(&child),
+                ),
+                EpicCloseGateOutcome::Proceed
+            ),
+            "a dangling anchor must not block close once its parked branch is legitimately merged"
         );
     }
 

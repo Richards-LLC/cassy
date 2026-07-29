@@ -442,6 +442,13 @@ impl FactoryDaemon {
             .filter(|target| !native_agents.contains(*target))
             .collect();
 
+        // An all-native session has no rows for the PTY/inbox delivery path.
+        // Keep that intentional no-op at the caller boundary: the store rejects
+        // an empty target universe so accidental session-wide peeks fail loudly.
+        if targets.is_empty() {
+            return Ok(());
+        }
+
         // Peek first, only ack after successful injection to provide at-least-once delivery.
         // Filter by targets AND session to prevent cross-session message theft.
         let prompts = queue.peek_for_targets(&targets, Some(&self.session_name), 10)?;

@@ -640,8 +640,16 @@ async fn test_spawn_workers_isolate_flag() {
     req.count = Some(2);
     req.isolate = Some(true);
 
-    let result = env.service.factory(Parameters(req)).await;
-    assert!(result.is_ok());
+    let result = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect("stock spawn should succeed");
+    let text = get_text(&result);
+    assert!(
+        text.contains("policy default codex/gpt-5.6-sol/medium"),
+        "caller-facing response must name the resolved policy fallback: {text}"
+    );
 
     let entries = env.spawn_queue().peek(10).expect("peek");
     assert_eq!(entries.len(), 1);
@@ -900,7 +908,10 @@ async fn test_spawn_workers_no_cli_override_queues_safe_worker_spec() {
         .expect("no cli/model/effort should still queue a resolved worker_spec");
     let spec: cas_mux::WorkerSpec = serde_json::from_str(spec_json).expect("valid WorkerSpec");
     assert_eq!(spec.cli, cas_mux::SupervisorCli::Codex);
-    assert_eq!(spec.model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(
+        spec.model.as_deref(),
+        Some(cas::config::STOCK_WORKER_MODEL)
+    );
     assert_eq!(spec.effort, Some(cas_mux::Effort::Medium));
 }
 
@@ -1850,6 +1861,10 @@ async fn test_gc_report_empty() {
         text.contains("Pending prompts: 0"),
         "Should show 0 prompts: {text}"
     );
+    assert!(
+        text.contains("Orphan worker process groups: 0"),
+        "Should expose the process-group GC surface: {text}"
+    );
 }
 
 #[tokio::test]
@@ -1892,6 +1907,10 @@ async fn test_gc_cleanup_without_force() {
     assert!(
         text.contains("Prompt queue entries cleared: 0"),
         "Should NOT clear prompts without force: {text}"
+    );
+    assert!(
+        text.contains("Orphan worker process groups reaped: 0"),
+        "Should report process-group cleanup outcome: {text}"
     );
 
     // Prompts should still be pending
@@ -2373,6 +2392,148 @@ async fn test_coordination_message_non_urgent_does_not_claim_delivery() {
     );
 }
 
+/// cas-6ad2: a worker's response proves it consumed the supervisor message
+/// that prompted the work. Factory prompts never issued explicit message_ack,
+/// so the response path must advance the prior delivered row to Confirmed.
+#[tokio::test]
+async fn test_worker_response_confirms_consumed_supervisor_message() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "worker"),
+        ("CAS_AGENT_NAME", "swift-fox"),
+        ("CAS_SUPERVISOR_NAME", "cosmic-bear-43"),
+    ]);
+    let env = FactoryTestEnv::new();
+    env.register_supervisor("cosmic-bear-43");
+    let instruction = env
+        .prompt_queue()
+        .enqueue_urgent(
+            "supervisor",
+            "swift-fox",
+            "start cas-6ad2",
+            None,
+            Some("assignment"),
+            None,
+            false,
+        )
+        .expect("enqueue supervisor instruction");
+    env.prompt_queue()
+        .mark_transport_delivered(instruction)
+        .expect("deliver supervisor instruction");
+
+    let reply = coord_msg(
+        "message",
+        "supervisor",
+        "cas-6ad2 characterization reproduced",
+        None,
+    );
+    let result = env.service.coordination(Parameters(reply)).await;
+    assert!(result.is_ok(), "worker response should succeed: {result:?}");
+
+    let report = env
+        .prompt_queue()
+        .message_delivery_report(instruction)
+        .expect("delivery report")
+        .expect("instruction exists");
+    assert_eq!(
+        report.stage,
+        cas_store::DeliveryStage::Confirmed,
+        "the recipient's response must confirm its consumed instruction"
+    );
+}
+
+/// cas-c061: exact-content dedup is an observable send outcome. Reusing the
+/// existing row ID must not be reported as a newly queued message.
+#[tokio::test]
+async fn test_worker_duplicate_send_reports_suppression() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "worker"),
+        ("CAS_AGENT_NAME", "swift-fox"),
+        ("CAS_SUPERVISOR_NAME", "cosmic-bear-43"),
+    ]);
+    let env = FactoryTestEnv::new();
+    env.register_supervisor("cosmic-bear-43");
+
+    let first = coord_msg("message", "supervisor", "same completion report", None);
+    let first_result = env
+        .service
+        .coordination(Parameters(first))
+        .await
+        .expect("first send");
+    let first_text = get_text(&first_result);
+    let first_id = first_text
+        .lines()
+        .find_map(|line| line.strip_prefix("notification_id: "))
+        .expect("first response notification id")
+        .parse::<i64>()
+        .expect("numeric notification id");
+    env.prompt_queue()
+        .mark_transport_delivered(first_id)
+        .expect("deliver first report");
+
+    let duplicate = coord_msg("message", "supervisor", "same completion report", None);
+    let duplicate_result = env
+        .service
+        .coordination(Parameters(duplicate))
+        .await
+        .expect("duplicate send");
+    let duplicate_text = get_text(&duplicate_result);
+
+    assert!(
+        duplicate_text.to_lowercase().contains("suppressed"),
+        "dedup must be visible instead of claiming a fresh enqueue: {duplicate_text}"
+    );
+    assert!(
+        !duplicate_text.starts_with("Message queued"),
+        "a suppressed duplicate must not impersonate a fresh queue insert: {duplicate_text}"
+    );
+}
+
+/// cas-c061: responding to a peer proves consumption only of messages from
+/// that peer. A display-name route must not broaden the counterparty to the
+/// logical `supervisor` alias and confirm unrelated supervisor instructions.
+#[tokio::test]
+async fn test_worker_peer_message_does_not_confirm_supervisor_instruction() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "worker"),
+        ("CAS_AGENT_NAME", "swift-fox"),
+        ("CAS_SUPERVISOR_NAME", "peer-worker"),
+    ]);
+    let env = FactoryTestEnv::new();
+    env.register_worker("peer-worker");
+    let instruction = env
+        .prompt_queue()
+        .enqueue_urgent(
+            "supervisor",
+            "swift-fox",
+            "unread supervisor instruction",
+            None,
+            Some("assignment"),
+            None,
+            false,
+        )
+        .expect("enqueue supervisor instruction");
+    env.prompt_queue()
+        .mark_transport_delivered(instruction)
+        .expect("deliver supervisor instruction");
+
+    let peer_message = coord_msg("message", "peer-worker", "peer status", None);
+    env.service
+        .coordination(Parameters(peer_message))
+        .await
+        .expect("peer display-name route should send");
+
+    let report = env
+        .prompt_queue()
+        .message_delivery_report(instruction)
+        .expect("delivery report")
+        .expect("instruction exists");
+    assert_eq!(
+        report.stage,
+        cas_store::DeliveryStage::Delivered,
+        "peer messaging must not confirm an unrelated supervisor instruction"
+    );
+}
+
 /// cas-0440: the send response must name the same parameter that
 /// `message_status` accepts. Drive the caller-visible two-call sequence:
 /// send a message, copy the returned notification_id verbatim, then query it.
@@ -2537,18 +2698,20 @@ async fn test_coordination_message_to_unregistered_target_reports_queued_pending
     assert_eq!(prompts[0].target, "not-born-yet");
 }
 
-/// cas-6913 AC1: "queue-before-register -> register -> poll sees it".
+/// cas-6ad2: "queue-before-register -> register consumes it exactly once".
 /// A message queued to a worker name before that worker exists in the
 /// agent store must be delivered into the worker's OWN prompt loop at
 /// registration time (surfaced directly in the register response text —
-/// no PTY-injection timing dependency), and must remain pollable
-/// afterward (at-least-once, matching this queue's existing philosophy).
+/// no PTY-injection timing dependency). Once the registration response has
+/// carried that message into the recipient's context, the queue row must be
+/// terminally confirmed instead of remaining eligible for daemon redelivery.
 #[tokio::test]
 async fn test_agent_register_surfaces_pending_prompt_queue_mail() {
     let env = FactoryTestEnv::new();
 
     // Step 1: queue-before-register.
-    env.prompt_queue()
+    let message_id = env
+        .prompt_queue()
         .enqueue_urgent(
             "supervisor",
             "not-born-yet",
@@ -2576,16 +2739,25 @@ async fn test_agent_register_surfaces_pending_prompt_queue_mail() {
         "response should explain why the message appears: {text}"
     );
 
-    // Step 3: poll sees it — surfacing in the register response must not
-    // consume the message. The daemon's normal poll loop still delivers it.
+    // Step 3: the registration response is the delivery. The daemon must not
+    // inject the same message as another fresh turn afterward.
     let still_pending = env
         .prompt_queue()
         .poll_for_target("not-born-yet", 10)
         .expect("poll");
+    assert!(
+        still_pending.is_empty(),
+        "message consumed by registration must not remain pollable: {still_pending:?}"
+    );
+    let report = env
+        .prompt_queue()
+        .message_delivery_report(message_id)
+        .expect("delivery report")
+        .expect("message exists");
     assert_eq!(
-        still_pending.len(),
-        1,
-        "message must remain pollable after being surfaced at registration"
+        report.stage,
+        cas_store::DeliveryStage::Confirmed,
+        "recipient consumption must advance message_status to confirmed"
     );
 }
 
@@ -2778,7 +2950,10 @@ async fn test_efc4_heterogeneous_codex_then_claude_spawn_queued_correctly() {
         .expect("cas-23dc: omitted overrides must still queue a resolved worker_spec");
     let spec: cas_mux::WorkerSpec = serde_json::from_str(spec_json).expect("valid WorkerSpec");
     assert_eq!(spec.cli, cas_mux::SupervisorCli::Codex);
-    assert_eq!(spec.model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(
+        spec.model.as_deref(),
+        Some(cas::config::STOCK_WORKER_MODEL)
+    );
     assert_eq!(spec.effort, Some(cas_mux::Effort::Medium));
 }
 
@@ -3116,6 +3291,7 @@ async fn test_062d_lifecycle_close_pushes_closed() {
             code_review_findings: None,
             bypass_code_review: Some(true),
             search_manifest: None,
+            commit_receipt: None,
         }))
         .await
         .expect("close should succeed");
@@ -3144,12 +3320,9 @@ async fn test_062d_lifecycle_close_pushes_closed() {
 // cas-a844: awaiting_merge is a dead end when the merge cannot succeed
 // =============================================================================
 
-/// AC1: a worker CAN start an `awaiting_merge` task now — it transitions back
-/// to `in_progress` instead of being refused. This is the core fix: before,
-/// `task start` on an `awaiting_merge` task was unconditionally rejected with
-/// "the worker work is already complete", which was a dead end whenever the
-/// parked branch actually conflicted (supervisor can't merge, worker can't
-/// start — nothing transitions the task).
+/// AC1: a worker CAN start a conflicted `awaiting_merge` task — it transitions
+/// back to `in_progress`, records the rework decision, and invalidates all
+/// close-cycle merge state so the eventual re-close evaluates fresh work.
 #[tokio::test]
 async fn test_a844_worker_can_start_awaiting_merge_task() {
     let _guard = EnvGuard::set_optional(&[
@@ -3164,6 +3337,14 @@ async fn test_a844_worker_can_start_awaiting_merge_task() {
         store.register(&worker).expect("register worker");
     }
     let task_id = env.create_awaiting_merge_task("parked work", "swift-fox");
+    {
+        let store = env.task_store();
+        let mut task = store.get(&task_id).expect("task");
+        task.deliverables.merge_conflicted = true;
+        task.deliverables.factory_branch_anchor = Some("parked-anchor".to_string());
+        task.deliverables.parked_branch = Some("factory/swift-fox".to_string());
+        store.update(&task).expect("mark task conflicted");
+    }
 
     let result = env
         .service
@@ -3184,10 +3365,62 @@ async fn test_a844_worker_can_start_awaiting_merge_task() {
         "awaiting_merge -> start must transition to in_progress, not stay parked"
     );
     assert!(
-        after.notes.to_lowercase().contains("awaiting_merge"),
-        "resume note should mention the prior awaiting_merge state: {}",
+        after.notes.to_lowercase().contains("merge conflict"),
+        "resume decision note should name the merge conflict: {}",
         after.notes
     );
+    assert!(
+        after.deliverables.factory_branch_anchor.is_none(),
+        "conflict rework must invalidate the parked anchor"
+    );
+    assert!(
+        after.deliverables.parked_branch.is_none(),
+        "conflict rework must clear the parked branch receipt"
+    );
+    assert!(
+        !after.deliverables.merge_conflicted,
+        "conflict rework must clear the prior close cycle's conflict flag"
+    );
+}
+
+/// AC1 negative control: a cleanly mergeable `awaiting_merge` task is still
+/// complete from the worker's perspective. Starting it must keep steering the
+/// worker to wait for the supervisor merge while naming the conflict escape.
+#[tokio::test]
+async fn test_5054_clean_awaiting_merge_still_refuses_start() {
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_AGENT_ROLE", Some("worker")),
+        ("CAS_FACTORY_MODE", Some("1")),
+    ]);
+    let env = FactoryTestEnv::with_agent_id("swift-fox");
+    {
+        let store = env.agent_store();
+        let mut worker = Agent::new("swift-fox".to_string(), "swift-fox".to_string());
+        worker.role = AgentRole::Worker;
+        store.register(&worker).expect("register worker");
+    }
+    let task_id = env.create_awaiting_merge_task("clean parked work", "swift-fox");
+
+    let result = env
+        .service
+        .inner
+        .cas_task_start(Parameters(cas::mcp::tools::IdRequest {
+            id: task_id.clone(),
+        }))
+        .await
+        .expect_err("clean awaiting_merge task must remain parked");
+    let text = result.to_string();
+    assert!(
+        text.contains("wait for the supervisor"),
+        "refusal must preserve the normal merge guidance: {text}"
+    );
+    assert!(
+        text.to_lowercase().contains("conflict"),
+        "refusal must name the conflict rework path: {text}"
+    );
+
+    let after = env.task_store().get(&task_id).expect("task");
+    assert_eq!(after.status, TaskStatus::AwaitingMerge);
 }
 
 /// AC1 (self-dispatch guard preserved): starting an `awaiting_merge` task must

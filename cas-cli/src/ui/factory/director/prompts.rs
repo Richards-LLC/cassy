@@ -445,9 +445,18 @@ pub fn revalidate_event_for_delivery_with_context(
                 return None;
             }
 
-            let still_stalled_task = unfiltered_data.in_progress_tasks.iter().any(|task| {
-                task.id == *task_id && task_assigned_to_worker(unfiltered_data, task, worker)
-            });
+            let still_stalled_task = unfiltered_data
+                .in_progress_tasks
+                .iter()
+                .chain(
+                    unfiltered_data
+                        .ready_tasks
+                        .iter()
+                        .filter(|task| task.status == TaskStatus::Open),
+                )
+                .any(|task| {
+                    task.id == *task_id && task_assigned_to_worker(unfiltered_data, task, worker)
+                });
 
             still_stalled_task.then(|| DirectorEvent::WorkerStalled {
                 worker: worker.clone(),
@@ -1203,6 +1212,29 @@ pub fn generate_prompt(
             }
 
             let elapsed_mins = elapsed_secs / 60;
+            let assigned_but_unstarted = data.ready_tasks.iter().any(|task| {
+                task.id == *task_id
+                    && task.status == TaskStatus::Open
+                    && task_assigned_to_worker(data, task, worker)
+            });
+
+            if assigned_but_unstarted {
+                let text = format!(
+                    "Worker {worker} has remained assigned-but-unstarted and inactive on task \
+                     {task_id} for about {elapsed_mins}m — the worker is alive, but there is no \
+                     recent transcript or task activity.\n\n\
+                     Check the worker pane and delivery state, then either ask the worker to run \
+                     `{worker_prefix}task action=start id={task_id}` or recover the worker if it \
+                     is wedged. The normal just-assigned grace window has already elapsed."
+                );
+
+                return Some(Prompt {
+                    target: supervisor_name.to_string(),
+                    text: with_response_instructions(&text, worker, supervisor_cli),
+                    retract_worker: None,
+                    retract_task: None,
+                });
+            }
 
             if !escalate {
                 // First detection: auto-nudge the worker directly — a
@@ -3945,6 +3977,41 @@ mod tests {
         assert_eq!(prompt.target, "supervisor");
         assert!(prompt.text.contains("swift-fox"));
         assert!(prompt.text.contains("cas-0b7d"));
+    }
+
+    #[test]
+    fn test_78bf_assigned_unstarted_escalation_names_state_and_start_action() {
+        let event = DirectorEvent::WorkerStalled {
+            worker: "swift-fox".to_string(),
+            task_id: "cas-unstarted".to_string(),
+            elapsed_secs: 310,
+            escalate: true,
+        };
+        let mut data = make_data(0);
+        data.ready_tasks
+            .push(open_task("cas-unstarted", Some("swift-fox")));
+        let config = default_config();
+
+        let prompt = generate_prompt(
+            &event,
+            &data,
+            &data,
+            "supervisor",
+            &config,
+            codex(),
+            codex(),
+            &HashSet::new(),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(prompt.target, "supervisor");
+        assert!(prompt.text.contains("assigned-but-unstarted and inactive"));
+        assert!(prompt.text.contains("task action=start id=cas-unstarted"));
+        assert!(
+            revalidate_event_for_delivery(&event, &data, "supervisor").is_some(),
+            "the escalation must survive delivery revalidation while the task remains Open and assigned"
+        );
     }
 
     /// cas-728b: the escalation advice used to say "consider shutdown +

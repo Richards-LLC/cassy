@@ -13,6 +13,21 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 
+const COMPOSER_DEFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Result of a non-urgent PTY injection attempt.
+///
+/// `Delivered` means the payload was written to the pane. A dirty-composer
+/// deferral is deliberately distinct so durable queue owners do not advance
+/// their transport-delivery state before any write occurred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InjectOutcome {
+    /// The payload was written to the pane.
+    Delivered,
+    /// No write occurred because the attached operator has an active draft.
+    DeferredComposerDirty,
+}
+
 /// Configuration for the multiplexer
 #[derive(Debug, Clone)]
 pub struct MuxConfig {
@@ -482,6 +497,11 @@ impl Mux {
         self.panes.get_mut(id)
     }
 
+    /// Return the tracked process group for a pane.
+    pub fn pane_process_group_id(&self, id: &str) -> Option<u32> {
+        self.panes.get(id).and_then(Pane::process_group_id)
+    }
+
     /// Get the focused pane
     pub fn focused(&self) -> Option<&Pane> {
         self.focused.as_ref().and_then(|id| self.panes.get(id))
@@ -772,11 +792,11 @@ impl Mux {
     /// Codex, where a node → codex child tree survives a bare SIGHUP.
     ///
     /// * `force = true`  → SIGKILL to the process group (cannot be ignored)
-    /// * `force = false` → SIGTERM to the process group (graceful shutdown)
+    /// * `force = false` → SIGTERM with SIGKILL escalation for the process group
     ///
     /// After the signal, `remove_pane` still drops the PTY master, which sends
     /// a redundant SIGHUP as belt-and-suspenders.
-    pub fn kill_worker(&mut self, name: &str, force: bool) -> Result<()> {
+    pub async fn kill_worker(&mut self, name: &str, force: bool) -> Result<()> {
         // Verify it's a worker pane
         if let Some(pane) = self.panes.get(name) {
             if *pane.kind() != PaneKind::Worker {
@@ -792,7 +812,7 @@ impl Mux {
 
         // Kill the process group before removing the pane
         if let Some(pane) = self.panes.get_mut(name) {
-            pane.kill_tree(force);
+            pane.kill_tree(force).await;
         }
 
         // Remove the pane (drops the PTY master, sends residual SIGHUP)
@@ -819,13 +839,51 @@ impl Mux {
     }
 
     /// Inject a prompt into a specific pane
-    pub async fn inject(&self, pane_id: &str, prompt: &str) -> Result<()> {
+    pub async fn inject(&self, pane_id: &str, prompt: &str) -> Result<InjectOutcome> {
+        self.inject_with_timeout(pane_id, prompt, COMPOSER_DEFER_TIMEOUT)
+            .await
+    }
+
+    async fn inject_with_timeout(
+        &self,
+        pane_id: &str,
+        prompt: &str,
+        timeout: std::time::Duration,
+    ) -> Result<InjectOutcome> {
         let pane = self
             .panes
             .get(pane_id)
             .ok_or_else(|| Error::pane_not_found(pane_id))?;
-        pane.inject_prompt(prompt).await
+        if pane.is_composer_dirty() {
+            let dirty_for = pane.composer_dirty_elapsed().unwrap_or_default();
+            if dirty_for < timeout {
+                tracing::info!(
+                    target: "cas::coordination",
+                    stage = "composer_inject_deferred",
+                    target_agent = %pane_id,
+                    dirty_ms = dirty_for.as_millis() as u64,
+                    "non-urgent PTY inject deferred to its durable owner while attached operator composer is dirty"
+                );
+                return Ok(InjectOutcome::DeferredComposerDirty);
+            }
+
+            tracing::warn!(
+                target: "cas::coordination",
+                stage = "composer_inject_timeout",
+                target_agent = %pane_id,
+                dirty_ms = dirty_for.as_millis() as u64,
+                "operator composer stayed dirty through bounded deferral; attempting non-urgent inject"
+            );
+        }
+        pane.inject_prompt(prompt).await?;
+        Ok(InjectOutcome::Delivered)
     }
+
+    /// Compatibility no-op retained for callers from cas-1a4d.
+    ///
+    /// Deferred payloads now stay with their durable queue owner; the mux
+    /// intentionally has nothing to flush or carry across pane generations.
+    pub async fn flush_deferred_injections(&self) {}
 
     /// Total bytes of PTY output observed for a pane by name.
     ///
@@ -1019,7 +1077,9 @@ impl Mux {
         let pane = self
             .focused()
             .ok_or_else(|| Error::pty("No focused pane"))?;
-        pane.write(data).await
+        pane.write(data).await?;
+        pane.observe_raw_client_input(data);
+        Ok(())
     }
 
     /// Raw write to a specific pane (no turn-in-flight side effects).
@@ -1028,7 +1088,9 @@ impl Mux {
             .panes
             .get(pane_id)
             .ok_or_else(|| Error::pane_not_found(pane_id))?;
-        pane.write(data).await
+        pane.write(data).await?;
+        pane.observe_raw_client_input(data);
+        Ok(())
     }
 
     /// Deliver user input to the focused pane with explicit submit kind.
@@ -1407,10 +1469,11 @@ impl Mux {
 
     /// Kill all panes (terminate all PTY processes)
     ///
-    /// This should be called during shutdown to ensure all child processes are terminated.
+    /// This should be called during shutdown to ensure all descendant process
+    /// groups, not only the direct interactive children, are terminated.
     pub fn kill_all(&mut self) {
         for pane in self.panes.values_mut() {
-            pane.kill();
+            pane.kill_tree_force();
         }
     }
 }

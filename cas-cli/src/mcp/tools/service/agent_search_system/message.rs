@@ -70,6 +70,7 @@ impl CasService {
                 })
         };
 
+        let addressed_logical_supervisor = target.eq_ignore_ascii_case("supervisor");
         let resolved_target = if role == "worker" {
             if target == "supervisor" {
                 resolve_supervisor_name().ok_or_else(|| {
@@ -454,7 +455,7 @@ impl CasService {
         // at debug so normal sessions stay quiet; enable via
         // `RUST_LOG=cas::coordination=debug`.
         let enqueue_started = std::time::Instant::now();
-        let message_id = match queue.enqueue_urgent(
+        let enqueue_outcome = match queue.enqueue_urgent_with_outcome(
             &display_name,
             &resolved_target,
             &message,
@@ -484,6 +485,65 @@ impl CasService {
                 ));
             }
         };
+        let message_id = enqueue_outcome.id();
+        let duplicate_suppressed = matches!(
+            enqueue_outcome,
+            cas_store::EnqueueOutcome::SuppressedDuplicate(_)
+        );
+
+        // cas-6ad2: sending a response is an authoritative recipient-side
+        // consumption signal for prior messages from that counterparty. The
+        // old explicit message_ack API was never invoked by factory prompts,
+        // leaving every acted-on message stuck at Delivered/AwaitingAck.
+        //
+        // Supervisors have two queue identities: outbound source
+        // `"supervisor"` and their generated pane/display name as an inbound
+        // target. Workers use their display name both ways. Include both alias
+        // shapes and advance only already transport-delivered rows.
+        let mut recipient_aliases = vec![display_name.as_str()];
+        if let Some(name) = env_agent_name.as_deref()
+            && !recipient_aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(name))
+        {
+            recipient_aliases.push(name);
+        }
+        let resolved_target_role = {
+            use crate::store::open_agent_store;
+            open_agent_store(&self.inner.cas_root)
+                .ok()
+                .and_then(|store| store.list(None).ok())
+                .and_then(|agents| {
+                    agents
+                        .into_iter()
+                        .find(|agent| agent.name.eq_ignore_ascii_case(&resolved_target))
+                        .map(|agent| agent.role)
+                })
+        };
+        let target_is_supervisor = addressed_logical_supervisor
+            || resolved_target_role == Some(cas_types::AgentRole::Supervisor);
+        let mut counterparty_aliases = vec![resolved_target.as_str()];
+        if role == "worker"
+            && target_is_supervisor
+            && !counterparty_aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case("supervisor"))
+        {
+            counterparty_aliases.push("supervisor");
+        }
+        if let Err(error) = queue.ack_delivered_for_recipient(
+            &recipient_aliases,
+            &counterparty_aliases,
+            factory_session.as_deref(),
+        ) {
+            tracing::warn!(
+                message_id,
+                source = %display_name,
+                target_agent = %resolved_target,
+                error = %error,
+                "failed to confirm prior delivered messages after recipient response"
+            );
+        }
 
         let persist_latency_ms = enqueue_started.elapsed().as_secs_f64() * 1000.0;
         tracing::debug!(
@@ -494,37 +554,40 @@ impl CasService {
             source = %display_name,
             target_agent = %resolved_target,
             priority = ?priority,
+            duplicate_suppressed,
             persist_ms = persist_latency_ms,
-            "prompt_queue message enqueued"
+            "prompt_queue enqueue resolved"
         );
 
         // Notify daemon that prompt queue has new data (best-effort)
-        let notify_started = std::time::Instant::now();
-        let notify_outcome = cas_factory::notify_daemon(&self.inner.cas_root);
-        let notify_latency_ms = notify_started.elapsed().as_secs_f64() * 1000.0;
-        match notify_outcome {
-            Ok(()) => {
-                tracing::debug!(
-                    target: "cas::coordination",
-                    stage = "notify",
-                    channel = "prompt_queue",
-                    message_id,
-                    notify_ms = notify_latency_ms,
-                    "daemon wakeup signal sent"
-                );
-            }
-            Err(ref e) => {
-                // Kept as debug because this is expected when the daemon is
-                // not running (e.g. `cas serve` standalone sessions).
-                tracing::debug!(
-                    target: "cas::coordination",
-                    stage = "notify",
-                    channel = "prompt_queue",
-                    message_id,
-                    notify_ms = notify_latency_ms,
-                    error = %e,
-                    "daemon wakeup signal failed (daemon may not be running)"
-                );
+        if !duplicate_suppressed {
+            let notify_started = std::time::Instant::now();
+            let notify_outcome = cas_factory::notify_daemon(&self.inner.cas_root);
+            let notify_latency_ms = notify_started.elapsed().as_secs_f64() * 1000.0;
+            match notify_outcome {
+                Ok(()) => {
+                    tracing::debug!(
+                        target: "cas::coordination",
+                        stage = "notify",
+                        channel = "prompt_queue",
+                        message_id,
+                        notify_ms = notify_latency_ms,
+                        "daemon wakeup signal sent"
+                    );
+                }
+                Err(ref e) => {
+                    // Kept as debug because this is expected when the daemon is
+                    // not running (e.g. `cas serve` standalone sessions).
+                    tracing::debug!(
+                        target: "cas::coordination",
+                        stage = "notify",
+                        channel = "prompt_queue",
+                        message_id,
+                        notify_ms = notify_latency_ms,
+                        error = %e,
+                        "daemon wakeup signal failed (daemon may not be running)"
+                    );
+                }
             }
         }
 
@@ -564,6 +627,11 @@ impl CasService {
         };
 
         let message_id_text = message_id.to_string();
+        let enqueue_result = if duplicate_suppressed {
+            "suppressed_duplicate"
+        } else {
+            "created"
+        };
         let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(
             &self.inner.cas_root,
             "coordination_message",
@@ -573,8 +641,23 @@ impl CasService {
                 ("target", &resolved_target),
                 ("summary", &summary),
                 ("urgent", if urgent { "true" } else { "false" }),
+                ("enqueue_result", enqueue_result),
             ],
         );
+
+        if duplicate_suppressed {
+            return Ok(Self::success(format!(
+                "Duplicate message suppressed\n\nnotification_id: {}\nFrom: {} ({})\nTo: {}\n\
+                 Delivery: no new queue row — an identical message was delivered recently and \
+                 still awaits confirmation. Check `message_status` with \
+                 `notification_id={message_id}` before retrying.\nMessage: {}",
+                message_id,
+                display_name,
+                role,
+                resolved_target,
+                truncate_str(&message, 100)
+            )));
+        }
 
         Ok(Self::success(format!(
             "{} queued\n\nnotification_id: {}\nFrom: {} ({})\nTo: {}\n{}Message: {}",

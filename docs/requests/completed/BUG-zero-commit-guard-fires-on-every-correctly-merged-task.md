@@ -6,6 +6,40 @@ priority: P2
 
 # ZERO-COMMIT guard rejects the close of every task that was merged before closing
 
+## Resolution (CAS v2.33.0)
+
+The reported merge-before-close path is fixed when CAS captured the task's
+commit anchor before the merge:
+
+- `cas-cli/src/hooks/handlers/handlers_events/attribution.rs:207-230` resolves
+  the created commit SHA during the `PostToolUse` commit hook, and
+  `:313-369` records it on the worker's one active task.
+- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs:4477-4516` accepts
+  a zero-ahead worker branch when that recorded anchor is reachable from the
+  epic branch. The regression test at `:11079-11144`,
+  `cas127f_post_merge_ancestor_anchor_proceeds` covers the report's exact
+  ancestry shape: the task commit is on the epic, the synchronized worker
+  branch is zero commits ahead, and close proceeds.
+
+For an existing repository, upgrade to CAS v2.33.0 and run `cas update`.
+Claude users should ensure the generated/global `PostToolUse` hook is active.
+Codex users must also review the installed hook with `/hooks`, then add and
+commit `.codex/hooks.json` before spawning worker worktrees so each worktree
+receives the commit-attribution hook.
+
+There is one residual case: already-merged work with no captured task anchor
+still produces the ZERO-COMMIT rejection. Branch-tip ancestry alone cannot
+safely distinguish that state from a task that produced no commit, so CAS
+does not guess. The task-attributed commit-receipt fix is tracked as
+`cas-26bb`. Until it lands, a supervisor should audit the task commit's
+reachability from both the local and origin target branch before using the
+documented override.
+
+The three gabber-studio occurrences in this report predate v2.33.0's anchor
+path. The report is therefore resolved as triaged: the anchored reproduction
+is fixed, upgrade/install guidance is documented above, and the no-anchor
+residual has an owned follow-up.
+
 ## Summary
 
 The ZERO-COMMIT close guard counts commits present on the worker's factory branch but **not** on the epic branch, and rejects the close when that count is 0. After a successful `git merge --no-ff factory/<worker>` into the epic branch, that count is **necessarily 0** — the merge is exactly what makes it 0.

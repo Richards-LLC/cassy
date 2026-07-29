@@ -75,7 +75,8 @@ async fn test_task_close_blocked_without_verification() {
         reason: Some("Completed".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -175,7 +176,8 @@ require_merge_on_epic_close = true
         reason: Some("Done".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -344,6 +346,7 @@ async fn test_normal_close_records_and_renders_lease_history_reason_cas_7aef() {
                 bypass_code_review: None,
                 code_review_findings: None,
                 search_manifest: None,
+                commit_receipt: None,
             }))
             .await
             .expect("close task"),
@@ -498,7 +501,8 @@ async fn test_merge_required_close_parks_awaiting_merge_and_releases_gate_cas_8d
                 reason: Some("ready for merge".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,            }))
+            search_manifest: None,
+            commit_receipt: None,            }))
             .await
             .expect("close A returns"),
     );
@@ -609,7 +613,8 @@ async fn test_merge_required_close_parks_awaiting_merge_and_releases_gate_cas_8d
                 reason: Some("merged and ready to close".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,            }))
+            search_manifest: None,
+            commit_receipt: None,            }))
             .await
             .expect("close A after merge returns"),
     );
@@ -743,7 +748,8 @@ async fn test_a844_merge_conflict_flags_task_and_names_alternative() {
                 reason: Some("ready for merge".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,            }))
+            search_manifest: None,
+            commit_receipt: None,            }))
             .await
             .expect("close A returns"),
     );
@@ -773,6 +779,30 @@ async fn test_a844_merge_conflict_flags_task_and_names_alternative() {
     assert_eq!(
         parked.deliverables.parked_branch.as_deref(),
         Some("factory/test-agent")
+    );
+
+    service
+        .cas_task_start(Parameters(IdRequest { id: id_a.clone() }))
+        .await
+        .expect("assigned worker can resume conflicted park");
+    let resumed = task_store.get(&id_a).expect("A exists after resume");
+    assert_eq!(resumed.status, TaskStatus::InProgress);
+    assert!(
+        resumed.deliverables.factory_branch_anchor.is_none(),
+        "conflict rework must invalidate the anchor captured by MERGE REQUIRED"
+    );
+    assert!(
+        resumed.deliverables.parked_branch.is_none(),
+        "conflict rework must clear the parked branch receipt"
+    );
+    assert!(
+        !resumed.deliverables.merge_conflicted,
+        "conflict rework must clear the prior close cycle's conflict flag"
+    );
+    assert!(
+        resumed.notes.to_lowercase().contains("merge conflict"),
+        "resume must record a decision note naming the conflict: {}",
+        resumed.notes
     );
 }
 
@@ -883,7 +913,8 @@ async fn test_a844_clean_divergence_not_flagged_as_conflict() {
                 reason: Some("ready for merge".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,            }))
+            search_manifest: None,
+            commit_receipt: None,            }))
             .await
             .expect("close A returns"),
     );
@@ -1016,7 +1047,8 @@ async fn test_repeated_merge_required_close_does_not_duplicate_park_audit_cas_62
         reason: Some("ready for merge".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
 
     let first_close = extract_text(
         service
@@ -1268,6 +1300,7 @@ async fn test_merge_before_first_close_uses_commit_hook_anchor_cas_3d37() {
                 bypass_code_review: None,
                 code_review_findings: None,
                 search_manifest: None,
+                commit_receipt: None,
             }))
             .await
             .expect("first close returns"),
@@ -1406,7 +1439,8 @@ async fn test_serial_second_task_on_same_branch_does_not_restrand_first_close_ca
                 reason: Some("ready for merge".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,            }))
+            search_manifest: None,
+            commit_receipt: None,            }))
             .await
             .expect("first close returns"),
     );
@@ -1474,7 +1508,8 @@ async fn test_serial_second_task_on_same_branch_does_not_restrand_first_close_ca
                 reason: Some("merged and ready to close".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,            }))
+            search_manifest: None,
+            commit_receipt: None,            }))
             .await
             .expect("second close returns"),
     );
@@ -1651,7 +1686,8 @@ async fn test_stale_local_epic_ref_falls_back_to_origin_cas_38e2() {
                 reason: Some("merged and pushed to origin".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,            }))
+            search_manifest: None,
+            commit_receipt: None,            }))
             .await
             .expect("close returns"),
     );
@@ -1789,7 +1825,8 @@ async fn test_reopened_task_does_not_reuse_stale_anchor_cas_cf64() {
                 reason: Some("ready for merge".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,            }))
+            search_manifest: None,
+            commit_receipt: None,            }))
             .await
             .expect("first close returns"),
     );
@@ -1824,7 +1861,8 @@ async fn test_reopened_task_does_not_reuse_stale_anchor_cas_cf64() {
                 reason: Some("merged, closing".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,            }))
+            search_manifest: None,
+            commit_receipt: None,            }))
             .await
             .expect("second close returns"),
     );
@@ -1885,7 +1923,8 @@ async fn test_reopened_task_does_not_reuse_stale_anchor_cas_cf64() {
                 reason: Some("reworked, claiming done".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,            }))
+            search_manifest: None,
+            commit_receipt: None,            }))
             .await
             .expect("third close returns"),
     );
@@ -1992,7 +2031,8 @@ async fn test_nonepic_task_resolves_default_branch_and_proceeds_when_merged_cas_
         reason: Some("done, merged onto main".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let resp = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -2094,7 +2134,8 @@ async fn test_nonepic_task_with_unmerged_code_is_rejected_not_skipped_cas_cf64()
         reason: Some("claiming done but never merged".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let resp = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -2198,7 +2239,8 @@ async fn test_chore_type_task_with_unmerged_code_is_no_longer_exempt_cas_cf64() 
         reason: Some("claiming done but never merged".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let resp = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -2273,7 +2315,8 @@ async fn test_chore_type_task_with_zero_commits_still_closes_on_notes_cas_cf64()
         reason: Some("resolved via notes, no code needed".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let resp = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -2404,7 +2447,8 @@ enabled = false
         reason: Some("claims to be done".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let resp = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -2435,7 +2479,8 @@ enabled = false
         reason: Some("claims to be done".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let resp = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -2459,7 +2504,8 @@ enabled = false
         reason: Some("Committed and ready".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let resp = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -2585,7 +2631,8 @@ async fn test_task_close_blocks_on_uncommitted_system_b_worker_worktree_cas_4b3f
         reason: Some("done".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let resp = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -2617,7 +2664,8 @@ async fn test_task_close_blocks_on_uncommitted_system_b_worker_worktree_cas_4b3f
         reason: Some("actually done now".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let resp = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -2772,7 +2820,8 @@ enabled = false
                 reason: Some("committed and additive".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,            }))
+            search_manifest: None,
+            commit_receipt: None,            }))
             .await
             .expect("close returns"),
     );
@@ -2816,7 +2865,8 @@ enabled = false
                 reason: Some("claims to be additive".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,            }))
+            search_manifest: None,
+            commit_receipt: None,            }))
             .await
             .expect("close returns"),
     );
@@ -2961,7 +3011,8 @@ enabled = false
         reason: Some("non-isolated direct CLI flow".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let resp = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -3027,7 +3078,8 @@ enabled = false
         reason: Some("additive-only non-isolated".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let resp = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -3104,7 +3156,8 @@ enabled = false
         reason: Some("done, no files touched".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let resp = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -3204,7 +3257,8 @@ enabled = false
         reason: Some("done, no files touched".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let resp = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -3267,7 +3321,8 @@ enabled = false
         reason: Some("trying to close someone else's task".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     // The halt gate rejects via `Err(McpError)`, not an `Ok` tool-error
     // response — unlike the exempt path, which returns `Ok`. Accept either
     // shape so this test asserts the message content regardless of which
@@ -3330,7 +3385,8 @@ async fn test_epic_close_requires_epic_verification_type() {
         reason: Some("Completed".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -3354,7 +3410,8 @@ async fn test_epic_close_requires_epic_verification_type() {
         reason: Some("Completed".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -3379,7 +3436,8 @@ async fn test_epic_close_requires_epic_verification_type() {
         reason: Some("Completed".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -3451,7 +3509,8 @@ async fn test_task_lifecycle_with_verification() {
         reason: Some("Completed successfully".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -3533,7 +3592,8 @@ async fn test_task_close_blocked_with_rejected_verification() {
         reason: Some("Completed".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -3602,7 +3662,8 @@ async fn test_task_close_runs_verifier_or_skips_cleanly() {
         reason: Some("Completed all acceptance criteria. Deployed to prod.".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -3791,7 +3852,8 @@ async fn test_close_supervisor_owned_epic_uses_owner_closed_wording() {
                 reason: Some("all child tasks complete".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,            }))
+            search_manifest: None,
+            commit_receipt: None,            }))
             .await
             .expect("owner should close epic"),
     );
@@ -3885,7 +3947,8 @@ async fn test_close_supervisor_bypass_orphaned_task() {
         reason: Some("verification skipped — assignee inactive".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -3995,7 +4058,8 @@ async fn test_close_supervisor_bypass_ghost_assignee() {
         reason: Some("verification skipped — assignee inactive (ghost agent)".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let response_text = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -4113,7 +4177,8 @@ async fn test_close_supervisor_active_worker_assignee_by_name() {
         reason: Some("worker finished, asking supervisor to close".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let response_text = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -4146,7 +4211,8 @@ async fn test_close_supervisor_active_worker_assignee_by_name() {
         reason: Some("supervisor forced close after alignment".to_string()),
         bypass_code_review: Some(true),
         code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let response_text = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -4259,7 +4325,8 @@ async fn test_close_supervisor_no_bypass_when_assignee_alive() {
         reason: Some("verification skipped — assignee inactive".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let response_text = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -4900,7 +4967,8 @@ async fn test_close_auto_escalates_stale_verification_dispatch() {
             reason: Some("Completed".to_string()),
             bypass_code_review: None,
             code_review_findings: None,
-            search_manifest: None,        }))
+            search_manifest: None,
+            commit_receipt: None,        }))
         .await
         .expect("first close returns a result");
 
@@ -4929,7 +4997,8 @@ async fn test_close_auto_escalates_stale_verification_dispatch() {
             reason: Some("Completed".to_string()),
             bypass_code_review: None,
             code_review_findings: None,
-            search_manifest: None,        }))
+            search_manifest: None,
+            commit_receipt: None,        }))
         .await
         .expect("second close returns a result");
     let text = extract_text(result);
@@ -5061,7 +5130,8 @@ async fn test_close_forwards_persisted_review_envelope_after_jail() {
                 reason: Some("worker ran review, retrying close".to_string()),
                 bypass_code_review: None,
                 code_review_findings: Some(clean_envelope.clone()),
-            search_manifest: None,            }))
+            search_manifest: None,
+            commit_receipt: None,            }))
             .await
             .expect("close returns"),
     );
@@ -5100,7 +5170,8 @@ async fn test_close_forwards_persisted_review_envelope_after_jail() {
                 reason: Some("closing on worker's behalf; review already passed".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,            }))
+            search_manifest: None,
+            commit_receipt: None,            }))
             .await
             .expect("supervisor close returns"),
     );
@@ -5464,7 +5535,8 @@ owner = "worker"
         ),
         bypass_code_review: None,
         code_review_findings: Some(CLEAN_ENVELOPE.to_string()),
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -5580,7 +5652,8 @@ owner = "worker"
         reason: Some("Done (hiding P0 via pre_existing=true forgery)".to_string()),
         bypass_code_review: None,
         code_review_findings: Some(P0_RESIDUAL_PRE_EXISTING_TRUE_ENVELOPE.to_string()),
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -5667,7 +5740,8 @@ owner = "worker"
         reason: Some("Done (but has P0 issue)".to_string()),
         bypass_code_review: None,
         code_review_findings: Some(P0_RESIDUAL_ENVELOPE.to_string()),
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -5752,7 +5826,8 @@ owner = "worker"
         reason: Some("Done (but envelope is garbage)".to_string()),
         bypass_code_review: None,
         code_review_findings: Some("{not valid json at all".to_string()),
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -5852,7 +5927,8 @@ owner = "worker"
             reason: Some("Done".to_string()),
             bypass_code_review: None,
             code_review_findings: None,
-            search_manifest: None,        }))
+            search_manifest: None,
+            commit_receipt: None,        }))
         .await
         .expect("first close should return a result");
 
@@ -5893,7 +5969,8 @@ owner = "worker"
             reason: Some("All criteria met — clean review envelope.".to_string()),
             bypass_code_review: None,
             code_review_findings: Some(CLEAN_ENVELOPE.to_string()),
-            search_manifest: None,        }))
+            search_manifest: None,
+            commit_receipt: None,        }))
         .await
         .expect("second close should return a result");
     let text = extract_text(result);
@@ -6034,7 +6111,8 @@ async fn test_worker_close_succeeds_when_skipped_row_write_fails_option_b() {
             reason: Some("All criteria met — clean review envelope.".to_string()),
             bypass_code_review: None,
             code_review_findings: Some(CLEAN_ENVELOPE.to_string()),
-            search_manifest: None,        }))
+            search_manifest: None,
+            commit_receipt: None,        }))
         .await
         .expect("task_close should return a result");
     let text = extract_text(result);
@@ -6950,7 +7028,8 @@ async fn supervisor_self_assignee_close_guidance(supervisor_cli: Option<&str>) -
                 reason: Some("Self-implemented; ready to self-verify".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,            }))
+            search_manifest: None,
+            commit_receipt: None,            }))
             .await
             .expect("close returns a result"),
     );
@@ -7042,7 +7121,8 @@ async fn test_timeout_escalation_uses_codex_supervisor_verification_alias_cas_79
             reason: Some("Completed".to_string()),
             bypass_code_review: None,
             code_review_findings: None,
-            search_manifest: None,        }))
+            search_manifest: None,
+            commit_receipt: None,        }))
         .await
         .expect("first close returns a result");
 
@@ -7066,7 +7146,8 @@ async fn test_timeout_escalation_uses_codex_supervisor_verification_alias_cas_79
                 reason: Some("Completed".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,            }))
+            search_manifest: None,
+            commit_receipt: None,            }))
             .await
             .expect("second close returns a result"),
     );
@@ -7145,7 +7226,8 @@ async fn test_062d_close_lifecycle_push_to_owning_supervisor() {
                 reason: Some("062d close proof".to_string()),
                 bypass_code_review: Some(true),
                 code_review_findings: None,
-            search_manifest: None,            }))
+            search_manifest: None,
+            commit_receipt: None,            }))
             .await
             .expect("close"),
     );
@@ -7290,7 +7372,8 @@ async fn test_60393_owned_awaiting_merge_recloses_despite_preexisting_halt() {
                 reason: Some("ready for merge".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,            }))
+            search_manifest: None,
+            commit_receipt: None,            }))
             .await
             .expect("close A returns"),
     );
@@ -7342,7 +7425,8 @@ async fn test_60393_owned_awaiting_merge_recloses_despite_preexisting_halt() {
                 reason: Some("merged and ready to close".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,            }))
+            search_manifest: None,
+            commit_receipt: None,            }))
             .await
             .expect("close A after merge returns"),
     );
@@ -7478,7 +7562,8 @@ async fn test_60393_unmerged_awaiting_merge_still_bounces_merge_required_under_h
                 reason: Some("ready for merge".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,            }))
+            search_manifest: None,
+            commit_receipt: None,            }))
             .await
             .expect("close A returns"),
     );
@@ -7506,7 +7591,8 @@ async fn test_60393_unmerged_awaiting_merge_still_bounces_merge_required_under_h
                 reason: Some("retry before merge".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,            }))
+            search_manifest: None,
+            commit_receipt: None,            }))
             .await
             .expect("retry close A returns"),
     );
@@ -7611,7 +7697,8 @@ async fn test_3894_halt_no_longer_blocks_close_of_own_inprogress_task() {
             reason: Some("done".to_string()),
             bypass_code_review: None,
             code_review_findings: None,
-            search_manifest: None,        }))
+            search_manifest: None,
+            commit_receipt: None,        }))
         .await
         .expect("halted worker must be able to close its OWN InProgress task (cas-3894)");
     let text = extract_text(close_result);

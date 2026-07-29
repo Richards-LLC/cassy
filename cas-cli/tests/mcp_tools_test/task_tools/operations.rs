@@ -1047,7 +1047,8 @@ async fn test_close_auto_unblocks_blocked_dependents() {
             reason: Some("done".to_string()),
             bypass_code_review: None,
 code_review_findings: None,
-            search_manifest: None,        }))
+            search_manifest: None,
+            commit_receipt: None,        }))
         .await
         .expect("task close should succeed");
     let close_text = extract_text(close);

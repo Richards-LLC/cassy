@@ -54,3 +54,14 @@ Supervisor now verifies live state (`git merge-base --is-ancestor`, `task show`,
 - `BUG-stall-detector-false-positive-ignores-worker-tool-calls.md` — same family: factory status signals reporting a state the worker is not in.
 - `BUG-stock-worker-defaults-contradict-shipped-model-routing-policy.md`
 - `FEATURE-code-review-personas-off-claude-only-model-enum.md`
+
+## Resolution
+
+Resolved on 2026-07-29 in `cas-6ad2`.
+
+- Direct messages surfaced in an agent's registration/session-start response are now marked transport-delivered and acknowledged before that response returns. They no longer remain pending for a second daemon injection.
+- A factory recipient's response now confirms already-delivered messages from that counterparty. Supervisor logical/display-name aliases are handled explicitly, so `message_status` advances from `delivered / awaiting_ack` to `confirmed` when the recipient responds.
+- Re-enqueuing an exact, already-delivered non-urgent worker report now reuses the terminal message ID instead of creating another injectable row. Supervisor instructions and urgent messages remain repeatable; intentional worker redelivery can change the body or add a `[redelivery]` marker.
+- Characterization tests first reproduced both the unconfirmed registration delivery and the re-selectable duplicate report, then became regression coverage for the fixes.
+
+A separate display-name routing defect could also produce Teams-inbox plus PTY double delivery. That path is tracked independently as `cas-dab2` and was intentionally not changed by this resolution.

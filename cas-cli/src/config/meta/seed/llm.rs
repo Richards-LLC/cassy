@@ -126,7 +126,7 @@ pub(super) fn register_llm(registry: &mut ConfigRegistry) {
         key: "llm.worker.model",
         section: "llm",
         name: "Worker Model",
-        description: "Override model for worker agents. Fallback chain: [llm.worker.model] → [llm.model] → stock worker default (gpt-5.5).",
+        description: "Override model for worker agents. Fallback chain: [llm.worker.model] → [llm.model] → stock worker default (gpt-5.6-sol).",
         value_type: ConfigType::String,
         default: "(inherit)",
         constraint: Constraint::None,
@@ -135,7 +135,7 @@ pub(super) fn register_llm(registry: &mut ConfigRegistry) {
         keywords: &["llm", "worker", "model", "override"],
         use_cases: &[
             "Use a cost-effective model for workers",
-            "Use Sonnet for workers, Opus for supervisor",
+            "Use a custom model for workers while preserving the supervisor model",
         ],
     });
 

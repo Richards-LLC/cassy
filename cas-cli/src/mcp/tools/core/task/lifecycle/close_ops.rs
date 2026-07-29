@@ -239,11 +239,11 @@ impl CasCore {
         let mut parked = task.clone();
         let now = chrono::Utc::now();
         parked.status = TaskStatus::AwaitingMerge;
-        // cas-a844: snapshot whether THIS park is a genuine git conflict
-        // (vs. simply "not merged yet") so status output can tell the two
-        // apart. This only fires once per task (same guard as the anchor
-        // below); a later preflight re-check on retry (see call site) can
-        // still flip it true if the situation changes after park.
+        // cas-a844/cas-7308a: snapshot whether THIS park needs worker merge
+        // rework: either a genuine conflict, or a preflight error that means
+        // CAS cannot prove it clean. This only fires once per task (same
+        // guard as the anchor below); a later preflight re-check on retry
+        // (see call site) can still flip it true if the situation changes.
         parked.deliverables.merge_conflicted = merge_conflicted;
         // cas-4b3f/cas-3d37: retain the commit-time task anchor when present;
         // otherwise snapshot the factory tip the FIRST time this task parks.
@@ -388,7 +388,7 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         let task_store = self.open_task_store()?;
 
-        let task = task_store.get(&req.id).map_err(|e| McpError {
+        let mut task = task_store.get(&req.id).map_err(|e| McpError {
             code: ErrorCode::INVALID_PARAMS,
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
@@ -631,6 +631,23 @@ impl CasCore {
             epic_parent_branch,
             close_project_root,
         );
+        // cas-5626: a worker-supplied receipt is attributable only to the
+        // current task work cycle. The latest claim/transfer survives the
+        // AwaitingMerge park path, while a reopened task gets a newer claim.
+        // Fall back to task creation when lease history is unavailable.
+        let commit_receipt_window = if req.commit_receipt.is_some() {
+            let lease_history = self
+                .open_agent_store()
+                .ok()
+                .and_then(|store| store.get_lease_history(&req.id, None).ok())
+                .unwrap_or_default();
+            Some(resolve_task_commit_receipt_window(
+                task.created_at,
+                &lease_history,
+            ))
+        } else {
+            None
+        };
         if task.task_type != TaskType::Epic && task.assignee.is_some() {
             match run_factory_branch_merge_gate(
                 &task,
@@ -649,7 +666,7 @@ impl CasCore {
                     // the working tree nor the index) so the parked state and
                     // this refusal both name the real situation instead of
                     // reading as "done, pending a formality" either way.
-                    let conflict_paths = task
+                    let conflict_check = task
                         .assignee
                         .as_deref()
                         .map(|assignee| {
@@ -659,30 +676,28 @@ impl CasCore {
                                 &format!("factory/{assignee}"),
                             )
                         })
-                        .unwrap_or_default();
-                    let merge_conflicted = !conflict_paths.is_empty();
+                        .unwrap_or_else(|| Ok(Vec::new()));
+                    let (conflict_paths, conflict_check_error) =
+                        classify_merge_conflict_preflight(conflict_check);
+                    // cas-7308a: an unavailable preflight is not evidence that
+                    // the branch is clean. Mark the park reopen-eligible so a
+                    // transient git error cannot reinstate the awaiting_merge
+                    // dead end that cas-5054 removed.
+                    let merge_conflicted =
+                        !conflict_paths.is_empty() || conflict_check_error.is_some();
 
                     // cas-a844 AC4: name the alternative in the refusal
                     // itself when the merge genuinely can't succeed — not
                     // just in the parked task's notes. Computed before
                     // parking so the enriched text is what both the parked
                     // task's activity log AND the returned refusal carry.
-                    let msg = if merge_conflicted {
-                        format!(
-                            "{msg}\n\n\
-                             ⚠️ This branch has a genuine git merge conflict against \
-                             {resolved_parent_branch} (not just unmerged commits) — a \
-                             supervisor merge attempt will fail here. Conflicting \
-                             file(s): {}.\n\nAlternative: the assigned worker can \
-                             `mcp__cas__task action=start id={}` (now permitted from \
-                             `awaiting_merge`) to resolve the conflict directly on \
-                             their factory branch and re-close.",
-                            conflict_paths.join(", "),
-                            task.id
-                        )
-                    } else {
-                        msg
-                    };
+                    let msg = enrich_merge_required_with_conflict_check(
+                        msg,
+                        &resolved_parent_branch,
+                        &task.id,
+                        &conflict_paths,
+                        conflict_check_error.as_deref(),
+                    );
 
                     // cas-627f: a worker looping `close` before the
                     // supervisor merges (the documented #1 worker failure
@@ -713,11 +728,9 @@ impl CasCore {
                         );
                     } else if merge_conflicted && !task.deliverables.merge_conflicted {
                         // Already parked (a retry), but a fresh preflight now
-                        // shows a genuine conflict that wasn't detected (or
-                        // didn't exist) at first park — e.g. the epic branch
-                        // moved underneath it. Refresh the flag so status
-                        // output stays truthful without duplicating the park
-                        // audit note.
+                        // shows a genuine conflict or cannot be evaluated.
+                        // Refresh the flag so the worker exit remains open
+                        // without duplicating the park audit note.
                         self.mark_awaiting_merge_conflicted(task_store.as_ref(), &task.id);
                     }
 
@@ -1538,11 +1551,20 @@ impl CasCore {
                         &resolved_parent_branch,
                         true,
                         task.deliverables.factory_branch_anchor.as_deref(),
+                        req.commit_receipt.as_deref(),
+                        commit_receipt_window.as_ref(),
                     ) {
                         CommitClaimGateOutcome::Reject(msg) => {
                             return Ok(Self::tool_error(msg));
                         }
                         CommitClaimGateOutcome::Proceed => {}
+                        CommitClaimGateOutcome::ProceedWithReceipt(note) => {
+                            append_commit_receipt_decision_note(
+                                task_store.as_ref(),
+                                &mut task,
+                                &note,
+                            );
+                        }
                     }
                 }
             }
@@ -1902,11 +1924,20 @@ impl CasCore {
                         // cas-127f: parked tip from MERGE REQUIRED — proves
                         // real work even when merge-base..HEAD is now empty.
                         task.deliverables.factory_branch_anchor.as_deref(),
+                        req.commit_receipt.as_deref(),
+                        commit_receipt_window.as_ref(),
                     ) {
                         ZeroCommitCloseOutcome::AmbiguousCodeTask(msg) => {
                             return Ok(Self::tool_error(msg));
                         }
                         ZeroCommitCloseOutcome::Proceed => {}
+                        ZeroCommitCloseOutcome::ProceedWithReceipt(note) => {
+                            append_commit_receipt_decision_note(
+                                task_store.as_ref(),
+                                &mut task,
+                                &note,
+                            );
+                        }
                     }
                 }
             }
@@ -1950,7 +1981,6 @@ impl CasCore {
         };
 
         // Proceed with close
-        let mut task = task;
         let now = chrono::Utc::now();
         // cas-062d: capture pre-close status for durable lifecycle push identity.
         let old_status_for_lifecycle = task.status;
@@ -3079,23 +3109,62 @@ pub(crate) enum MergeStateGateOutcome {
 /// the working tree or index, so it's safe to call from this read-only
 /// close-time gate.
 ///
-/// Returns `false` when the check itself can't be evaluated (branch
-/// missing, git failure unrelated to a content conflict, etc.) — an
-/// unknowable state must not be reported as a positive conflict finding,
-/// matching the fail-closed-on-claims-but-fail-open-on-uncertainty posture
-/// used throughout this gate.
-/// Returns the conflicting file paths (empty = cleanly mergeable / unknowable
-/// — see below). Named-paths beat a bare boolean: they're exactly what a
+/// Returns the conflicting file paths when the check succeeds (empty =
+/// cleanly mergeable). Evaluation failures remain errors so the caller can
+/// distinguish "clean" from "unknown" and keep the task's rework exit open.
+/// Named paths beat a bare boolean: they're exactly what a
 /// worker needs to go resolve the conflict, and what a supervisor needs to
 /// judge severity, without either party re-running the check by hand.
 pub(crate) fn factory_branch_merge_conflict_paths(
     repo_path: &std::path::Path,
     parent_branch: &str,
     factory_branch: &str,
-) -> Vec<String> {
+) -> Result<Vec<String>, crate::worktree::GitError> {
     crate::worktree::GitOperations::new(repo_path.to_path_buf())
         .preflight_merge_conflicts(parent_branch, factory_branch)
-        .unwrap_or_default()
+}
+
+fn classify_merge_conflict_preflight(
+    check: Result<Vec<String>, crate::worktree::GitError>,
+) -> (Vec<String>, Option<String>) {
+    match check {
+        Ok(paths) => (paths, None),
+        Err(error) => (Vec::new(), Some(error.to_string())),
+    }
+}
+
+fn enrich_merge_required_with_conflict_check(
+    message: String,
+    parent_branch: &str,
+    task_id: &str,
+    conflict_paths: &[String],
+    check_error: Option<&str>,
+) -> String {
+    if !conflict_paths.is_empty() {
+        format!(
+            "{message}\n\n\
+             ⚠️ This branch has a genuine git merge conflict against \
+             {parent_branch} (not just unmerged commits) — a supervisor \
+             merge attempt will fail here. Conflicting file(s): {}.\n\n\
+             Alternative: the assigned worker can \
+             `mcp__cas__task action=start id={task_id}` (now permitted from \
+             `awaiting_merge`) to resolve the conflict directly on their \
+             factory branch and re-close.",
+            conflict_paths.join(", ")
+        )
+    } else if let Some(error) = check_error {
+        format!(
+            "{message}\n\n\
+             ⚠️ CAS could not determine whether this branch merges cleanly \
+             into {parent_branch}. Git conflict preflight failed: {error}.\n\n\
+             To avoid stranding the task in `awaiting_merge`, CAS marks this \
+             park as reopen-eligible. The assigned worker can \
+             `mcp__cas__task action=start id={task_id}` to inspect or resolve \
+             the branch, then re-close."
+        )
+    } else {
+        message
+    }
 }
 
 pub(crate) fn run_factory_branch_merge_gate(
@@ -4276,6 +4345,9 @@ pub(crate) enum CommitClaimGateOutcome {
     /// Close may proceed — either no `code_review_findings` was provided,
     /// or the worker branch has at least one commit to back up the claim.
     Proceed,
+    /// Close may proceed because a worker-supplied receipt was validated
+    /// against the current task work cycle. Carries the audit-note body.
+    ProceedWithReceipt(String),
     /// Close must be rejected — worker provided `code_review_findings`
     /// (claiming code was written and reviewed) but the branch has 0
     /// commits beyond the parent (fabrication signal).
@@ -4287,8 +4359,10 @@ pub(crate) enum CommitClaimGateOutcome {
 ///
 /// When `has_review_findings` is true, calls
 /// [`count_worker_branch_commits`] inside `worker_worktree_path`. If the
-/// count is 0, returns `Reject` with an explicit "FABRICATION DETECTED"
-/// message. Otherwise returns `Proceed`.
+/// count is 0, an integrated automatic anchor or validated task commit
+/// receipt satisfies the claim; otherwise returns `Reject` with an explicit
+/// "FABRICATION DETECTED" or invalid-receipt message. A positive branch count
+/// returns `Proceed`.
 ///
 /// Graceful degradation: `count_worker_branch_commits` returns 0 on git
 /// failures. Callers must only invoke this gate when a resolved worktree
@@ -4300,6 +4374,8 @@ pub(crate) fn check_commit_claim_integrity(
     parent_branch: &str,
     has_review_findings: bool,
     factory_branch_anchor: Option<&str>,
+    commit_receipt: Option<&str>,
+    commit_receipt_window: Option<&TaskCommitReceiptWindow>,
 ) -> CommitClaimGateOutcome {
     if !has_review_findings {
         return CommitClaimGateOutcome::Proceed;
@@ -4313,6 +4389,28 @@ pub(crate) fn check_commit_claim_integrity(
             if commit_is_merged_into_parent(worker_worktree_path, anchor, parent_branch) {
                 return CommitClaimGateOutcome::Proceed;
             }
+        }
+        if let Some(receipt) = commit_receipt {
+            let Some(window) = commit_receipt_window else {
+                return CommitClaimGateOutcome::Reject(commit_receipt_rejection(
+                    receipt,
+                    parent_branch,
+                    "task attribution window is unavailable; ask the supervisor for an audited bypass",
+                ));
+            };
+            return match validate_task_commit_receipt(
+                worker_worktree_path,
+                receipt,
+                parent_branch,
+                window,
+            ) {
+                Ok(note) => CommitClaimGateOutcome::ProceedWithReceipt(note),
+                Err(reason) => CommitClaimGateOutcome::Reject(commit_receipt_rejection(
+                    receipt,
+                    parent_branch,
+                    &reason,
+                )),
+            };
         }
         CommitClaimGateOutcome::Reject(format!(
             "⚠️ FABRICATION DETECTED\n\n\
@@ -4355,9 +4453,44 @@ pub(crate) enum ZeroCommitCloseOutcome {
     /// committed docs-only changes (count > 0), or the review findings
     /// claim is present (handled by the cas-490f gate instead).
     Proceed,
+    /// Close may proceed because a worker-supplied receipt was validated
+    /// against the current task work cycle. Carries the audit-note body.
+    ProceedWithReceipt(String),
     /// Close rejected — ambiguous zero-commit close on a code task with
     /// no execution_note. Carries the user-facing rejection message.
     AmbiguousCodeTask(String),
+}
+
+const COMMIT_RECEIPT_CLOCK_SKEW_SECS: i64 = 5;
+
+/// Durable lower bound used to attribute a receipt to one task work cycle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TaskCommitReceiptWindow {
+    pub not_before: chrono::DateTime<chrono::Utc>,
+    pub basis: &'static str,
+}
+
+/// Prefer the most recent claim/transfer (the current work cycle), falling
+/// back to task creation when lease history is unavailable.
+pub(crate) fn resolve_task_commit_receipt_window(
+    task_created_at: chrono::DateTime<chrono::Utc>,
+    lease_history: &[cas_store::LeaseHistoryEntry],
+) -> TaskCommitReceiptWindow {
+    let cycle_start = lease_history
+        .iter()
+        .filter(|entry| matches!(entry.event_type.as_str(), "claimed" | "transferred"))
+        .map(|entry| entry.timestamp)
+        .max();
+    match cycle_start {
+        Some(timestamp) if timestamp > task_created_at => TaskCommitReceiptWindow {
+            not_before: timestamp,
+            basis: "latest task lease claim/transfer",
+        },
+        _ => TaskCommitReceiptWindow {
+            not_before: task_created_at,
+            basis: "task creation time (lease-history fallback)",
+        },
+    }
 }
 
 /// cas-127f: true when `commit_ish` is an ancestor of `parent_branch`
@@ -4398,6 +4531,141 @@ pub(crate) fn commit_is_merged_into_parent(
         return check(&origin_parent);
     }
     false
+}
+
+/// Validate a worker-supplied task commit receipt.
+///
+/// The receipt is deliberately narrower than a git rev: callers must provide
+/// a full SHA, the object must be a commit with a non-empty merge-aware file
+/// diff, the committer timestamp must fall inside the current task work cycle,
+/// and the commit must already be reachable from the resolved parent branch
+/// (local or origin). This is evidence for the merge-before-close case only;
+/// it does not mutate the task's durable commit-time anchor.
+pub(crate) fn validate_task_commit_receipt(
+    repo_path: &std::path::Path,
+    receipt: &str,
+    parent_branch: &str,
+    window: &TaskCommitReceiptWindow,
+) -> Result<String, String> {
+    use std::process::Command;
+
+    let receipt = receipt.trim();
+    if !matches!(receipt.len(), 40 | 64) || !receipt.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("expected a full 40- or 64-character hexadecimal commit SHA".to_string());
+    }
+
+    let commit_object = format!("{receipt}^{{commit}}");
+    let exists = Command::new("git")
+        .args(["cat-file", "-e", &commit_object])
+        .current_dir(repo_path)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+    if !exists {
+        return Err("the SHA does not resolve to a commit in this worktree".to_string());
+    }
+
+    if !commit_is_merged_into_parent(repo_path, receipt, parent_branch) {
+        return Err(format!(
+            "the commit is not an ancestor of {parent_branch} or origin/{parent_branch}"
+        ));
+    }
+
+    let commit_epoch_output = Command::new("git")
+        .args(["show", "-s", "--format=%ct", receipt, "--"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|error| format!("failed to inspect the commit timestamp: {error}"))?;
+    if !commit_epoch_output.status.success() {
+        return Err("git could not inspect the commit timestamp".to_string());
+    }
+    let commit_epoch = String::from_utf8_lossy(&commit_epoch_output.stdout)
+        .trim()
+        .parse::<i64>()
+        .map_err(|_| "git returned an invalid commit timestamp".to_string())?;
+    let earliest_allowed = window.not_before.timestamp() - COMMIT_RECEIPT_CLOCK_SKEW_SECS;
+    if commit_epoch < earliest_allowed {
+        return Err(format!(
+            "the commit predates this task work cycle (commit epoch {commit_epoch}; \
+             earliest accepted epoch {earliest_allowed}, based on {})",
+            window.basis
+        ));
+    }
+
+    let diff = Command::new("git")
+        .args([
+            "diff-tree",
+            "--root",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            "-m",
+            receipt,
+            "--",
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|error| format!("failed to inspect the commit diff: {error}"))?;
+    if !diff.status.success() {
+        return Err("git could not inspect the commit diff".to_string());
+    }
+    if diff.stdout.iter().all(|byte| byte.is_ascii_whitespace()) {
+        return Err("the commit carries an empty file diff".to_string());
+    }
+
+    Ok(format!(
+        "decision: accepted commit_receipt `{receipt}` as task-attributed merge evidence; \
+         commit epoch {commit_epoch} is within the current task work cycle beginning {} \
+         (basis: {}; {}s clock-skew allowance), the commit is merged into \
+         {parent_branch}/origin/{parent_branch}, and its merge-aware file diff is non-empty.",
+        window.not_before.to_rfc3339(),
+        window.basis,
+        COMMIT_RECEIPT_CLOCK_SKEW_SECS
+    ))
+}
+
+fn append_commit_receipt_decision_note(
+    task_store: &dyn cas_store::TaskStore,
+    task: &mut Task,
+    note: &str,
+) {
+    if task.notes.contains(note) {
+        return;
+    }
+    let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");
+    let formatted = format!("[{timestamp}] {note}");
+    task.notes = if task.notes.is_empty() {
+        formatted
+    } else {
+        format!("{}\n\n{formatted}", task.notes)
+    };
+    task.updated_at = chrono::Utc::now();
+    if let Err(error) = task_store.update(task) {
+        tracing::warn!(
+            task_id = %task.id,
+            error = %error,
+            "failed to persist accepted commit receipt decision note"
+        );
+    }
+}
+
+fn commit_receipt_rejection(receipt: &str, parent_branch: &str, reason: &str) -> String {
+    format!(
+        "⚠️ INVALID TASK COMMIT RECEIPT\n\n\
+         task close rejected: commit_receipt `{receipt}` is not valid merge \
+         evidence: {reason}.\n\n\
+         A close receipt must be the full SHA of a commit produced by this \
+         task, carry a non-empty file diff, and already be an ancestor of \
+         {parent_branch} (or origin/{parent_branch}).\n\n\
+         To resolve:\n\
+         1. Find the task commit with `git log --oneline --all`.\n\
+         2. Verify it with `git show --stat <sha>` and \
+            `git merge-base --is-ancestor <sha> {parent_branch}`.\n\
+         3. Retry close with `commit_receipt=<full-sha>`.\n\
+         4. If no commit from this task's current work cycle is available, \
+            ask the supervisor to audit the merge and close with \
+            `bypass_code_review=true`."
+    )
 }
 
 /// cas-ee2b: check whether a zero-commit close is ambiguous and should be
@@ -4441,6 +4709,11 @@ pub(crate) fn commit_is_merged_into_parent(
 /// worker commit, with `park_task_awaiting_merge` as a legacy/fallback capture.
 /// Genuine zero-commit tasks never receive an anchor.
 ///
+/// `commit_receipt`: optional full SHA supplied on close when no automatic
+/// anchor was captured. It is accepted only after
+/// [`validate_task_commit_receipt`] proves existence, current-cycle
+/// attribution, non-empty merge-aware diff, and ancestry from the parent.
+///
 /// Returns `Proceed` on any git failure for the count path (graceful
 /// degradation — not ambiguous when history is unknowable). Ancestor
 /// checks fail closed (unknown integration ≠ merge-satisfied).
@@ -4452,6 +4725,8 @@ pub(crate) fn check_zero_commit_close(
     execution_note: Option<&str>,
     has_review_findings: bool,
     factory_branch_anchor: Option<&str>,
+    commit_receipt: Option<&str>,
+    commit_receipt_window: Option<&TaskCommitReceiptWindow>,
 ) -> ZeroCommitCloseOutcome {
     // Not a code-expecting task type → no ambiguity.
     if !matches!(
@@ -4514,6 +4789,28 @@ pub(crate) fn check_zero_commit_close(
             return ZeroCommitCloseOutcome::Proceed;
         }
     }
+    if let Some(receipt) = commit_receipt {
+        let Some(window) = commit_receipt_window else {
+            return ZeroCommitCloseOutcome::AmbiguousCodeTask(commit_receipt_rejection(
+                receipt,
+                parent_branch,
+                "task attribution window is unavailable; ask the supervisor for an audited bypass",
+            ));
+        };
+        return match validate_task_commit_receipt(
+            worker_worktree_path,
+            receipt,
+            parent_branch,
+            window,
+        ) {
+            Ok(note) => ZeroCommitCloseOutcome::ProceedWithReceipt(note),
+            Err(reason) => ZeroCommitCloseOutcome::AmbiguousCodeTask(commit_receipt_rejection(
+                receipt,
+                parent_branch,
+                &reason,
+            )),
+        };
+    }
     // Case 3: ambiguous zero-commit close.
     let task_type_str = format!("{task_type:?}").to_lowercase();
     let wt_display = worker_worktree_path.display();
@@ -4532,11 +4829,16 @@ pub(crate) fn check_zero_commit_close(
            docs-only, characterization-only): update the task with an \
            execution_note to signal intentional no-code work:\n\
            `mcp__cas__task action=update id={task_id} execution_note=additive-only`\n\
-        3. If this task's work was merged before its first close attempt and \
-           this message still appears, ask the supervisor to verify the task \
-           commit is an ancestor of {parent_branch}, then close it with \
-           `bypass_code_review=true`. Only a supervisor can perform that \
-           audited recovery; workers cannot self-bypass this gate."
+        3. If the supervisor already merged this task's work — including an \
+           out-of-band merge after conflict rework cleared the old anchor — \
+           find the full SHA of the worker task commit OR the merge commit \
+           that actually carried this task's work (never an unrelated \
+           historical commit), verify it is an ancestor of \
+           {parent_branch}, then retry close with \
+           `commit_receipt=<full-sha>`.\n\
+        4. If no task commit receipt is available, ask the supervisor to \
+           audit the merge and close with `bypass_code_review=true`. Only a \
+           supervisor can perform that bypass."
     ))
 }
 
@@ -6935,6 +7237,7 @@ mod code_review_gate_tests {
             bypass_code_review: None,
             code_review_findings: None,
             search_manifest: None,
+            commit_receipt: None,
         }
     }
 
@@ -7701,6 +8004,7 @@ mod search_manifest_gate_tests {
             bypass_code_review: None,
             code_review_findings: None,
             search_manifest: manifest_json.map(str::to_string),
+            commit_receipt: None,
         }
     }
 
@@ -7880,6 +8184,7 @@ mod merge_state_gate_tests {
             bypass_code_review: None,
             code_review_findings: None,
             search_manifest: None,
+            commit_receipt: None,
         }
     }
 
@@ -9509,7 +9814,9 @@ mod merge_conflict_detection_tests {
         git(p, &["commit", "-q", "-m", "worker change"]);
 
         assert!(
-            factory_branch_merge_conflict_paths(p, "main", "factory/worker").is_empty(),
+            factory_branch_merge_conflict_paths(p, "main", "factory/worker")
+                .expect("preflight succeeds")
+                .is_empty(),
             "a clean, non-overlapping divergence must not be reported as conflicted"
         );
     }
@@ -9528,7 +9835,8 @@ mod merge_conflict_detection_tests {
         std::fs::write(p.join("seed.txt"), "main's conflicting edit\n").unwrap();
         git(p, &["commit", "-aq", "-m", "main edits seed differently"]);
 
-        let paths = factory_branch_merge_conflict_paths(p, "main", "factory/worker");
+        let paths = factory_branch_merge_conflict_paths(p, "main", "factory/worker")
+            .expect("preflight succeeds");
         assert_eq!(
             paths,
             vec!["seed.txt".to_string()],
@@ -9537,13 +9845,37 @@ mod merge_conflict_detection_tests {
     }
 
     #[test]
-    fn missing_branch_is_not_conflicted() {
-        // Unknowable state (branch doesn't exist) must not be reported as
-        // a positive conflict finding — fail open on uncertainty, per the
-        // gate's existing posture elsewhere in this file.
+    fn missing_branch_preserves_preflight_error() {
+        // cas-7308a: unknown is not clean. The close path uses this error
+        // to park reopen-eligible instead of recreating the dead end.
         let dir = init_factory_repo("worker");
         let p = dir.path();
-        assert!(factory_branch_merge_conflict_paths(p, "main", "factory/nobody").is_empty());
+        let (paths, error) = classify_merge_conflict_preflight(
+            factory_branch_merge_conflict_paths(p, "main", "factory/nobody"),
+        );
+        assert!(paths.is_empty());
+        let error = error.expect("missing source branch must remain distinguishable from clean");
+        assert!(
+            error.contains("factory/nobody"),
+            "error should name the missing source branch: {error}"
+        );
+        assert!(
+            !paths.is_empty() || !error.is_empty(),
+            "the production reopen predicate must treat preflight errors as eligible"
+        );
+        let message = enrich_merge_required_with_conflict_check(
+            "MERGE REQUIRED".to_string(),
+            "main",
+            "cas-7308a",
+            &paths,
+            Some(&error),
+        );
+        assert!(
+            message.contains("Git conflict preflight failed")
+                && message.contains("reopen-eligible")
+                && message.contains("action=start id=cas-7308a"),
+            "error refusal must preserve the cause and the worker exit: {message}"
+        );
     }
 
     #[test]
@@ -9551,7 +9883,9 @@ mod merge_conflict_detection_tests {
         let dir = init_factory_repo("worker");
         let p = dir.path();
         assert!(
-            factory_branch_merge_conflict_paths(p, "factory/worker", "factory/worker").is_empty()
+            factory_branch_merge_conflict_paths(p, "factory/worker", "factory/worker")
+                .expect("preflight succeeds")
+                .is_empty()
         );
     }
 }
@@ -9939,6 +10273,7 @@ mod epic_status_gate_tests {
             bypass_code_review: None,
             code_review_findings: None,
             search_manifest: None,
+            commit_receipt: None,
         }
     }
 
@@ -10618,7 +10953,7 @@ mod commit_claim_integrity_tests {
     fn fabrication_detected_when_zero_commits_with_review_findings() {
         let dir = init_worker_repo();
         // No commits beyond base — fabrication scenario.
-        let outcome = check_commit_claim_integrity(dir.path(), "main", true, None);
+        let outcome = check_commit_claim_integrity(dir.path(), "main", true, None, None, None);
         match outcome {
             CommitClaimGateOutcome::Reject(msg) => {
                 assert!(
@@ -10637,6 +10972,9 @@ mod commit_claim_integrity_tests {
             CommitClaimGateOutcome::Proceed => {
                 panic!("gate must reject zero-commit + findings = fabrication scenario (cas-ba91)");
             }
+            CommitClaimGateOutcome::ProceedWithReceipt(_) => {
+                panic!("gate must not accept an absent receipt")
+            }
         }
     }
 
@@ -10645,7 +10983,7 @@ mod commit_claim_integrity_tests {
         // Worker did documentation-only work and did not supply
         // code_review_findings. Empty branch is fine in that case.
         let dir = init_worker_repo();
-        let outcome = check_commit_claim_integrity(dir.path(), "main", false, None);
+        let outcome = check_commit_claim_integrity(dir.path(), "main", false, None, None, None);
         assert!(
             matches!(outcome, CommitClaimGateOutcome::Proceed),
             "no-findings close on empty branch must proceed (no fabrication claim)"
@@ -10660,7 +10998,7 @@ mod commit_claim_integrity_tests {
         git(dir.path(), &["add", "real.rs"]);
         git(dir.path(), &["commit", "-q", "-m", "real work"]);
 
-        let outcome = check_commit_claim_integrity(dir.path(), "main", true, None);
+        let outcome = check_commit_claim_integrity(dir.path(), "main", true, None, None, None);
         assert!(
             matches!(outcome, CommitClaimGateOutcome::Proceed),
             "commits + findings must proceed (worker did real work)"
@@ -10708,7 +11046,8 @@ mod commit_claim_integrity_tests {
             0,
             "post-merge worker tip must not be ahead of parent"
         );
-        let outcome = check_commit_claim_integrity(dir.path(), "main", true, Some(&anchor));
+        let outcome =
+            check_commit_claim_integrity(dir.path(), "main", true, Some(&anchor), None, None);
         assert!(
             matches!(outcome, CommitClaimGateOutcome::Proceed),
             "merge-satisfied anchor must not look like fabrication"
@@ -10763,6 +11102,27 @@ mod zero_change_close_tests {
         git(p, &["commit", "-q", "-m", "seed"]);
         git(p, &["checkout", "-q", "-b", "factory/test-worker"]);
         dir
+    }
+
+    fn head_sha(dir: &Path) -> String {
+        String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(dir)
+                .output()
+                .expect("rev-parse HEAD")
+                .stdout,
+        )
+        .expect("utf8 SHA")
+        .trim()
+        .to_string()
+    }
+
+    fn test_receipt_window() -> TaskCommitReceiptWindow {
+        TaskCommitReceiptWindow {
+            not_before: chrono::Utc::now() - chrono::Duration::hours(1),
+            basis: "test fixture",
+        }
     }
 
     // ── has_worker_committed_reviewable_changes ──────────────────────────────
@@ -10851,6 +11211,8 @@ mod zero_change_close_tests {
             None,  // no execution_note
             false, // no review findings
             None,  // factory_branch_anchor
+            None,  // commit_receipt
+            None,  // commit_receipt_window
         );
         assert!(
             matches!(outcome, ZeroCommitCloseOutcome::Proceed),
@@ -10872,6 +11234,8 @@ mod zero_change_close_tests {
             None,  // no execution_note
             false, // no review findings
             None,  // factory_branch_anchor
+            None,  // commit_receipt
+            None,  // commit_receipt_window
         );
         match outcome {
             ZeroCommitCloseOutcome::AmbiguousCodeTask(msg) => {
@@ -10884,15 +11248,26 @@ mod zero_change_close_tests {
                     "rejection must guide worker to set execution_note: {msg}"
                 );
                 assert!(
-                    msg.contains("ask the supervisor")
+                    msg.contains("commit_receipt=<full-sha>")
+                        && msg.contains("ask the supervisor")
                         && msg.contains("bypass_code_review=true")
                         && msg.contains("Only a supervisor"),
-                    "worker-unrecoverable refusal must name the concrete \
-                     supervisor-side remedy: {msg}"
+                    "rejection must name both the worker receipt path and the \
+                     audited supervisor fallback: {msg}"
+                );
+                assert!(
+                    msg.contains("out-of-band merge after conflict rework")
+                        && msg.contains("worker task commit OR the merge commit")
+                        && msg.contains("never an unrelated historical commit"),
+                    "cleared-anchor guidance must identify an attributable task or \
+                     merge commit, never an unrelated historical commit: {msg}"
                 );
             }
             ZeroCommitCloseOutcome::Proceed => {
                 panic!("case 3 must reject ambiguous zero-commit bug task");
+            }
+            ZeroCommitCloseOutcome::ProceedWithReceipt(_) => {
+                panic!("gate must not accept an absent receipt")
             }
         }
     }
@@ -10942,6 +11317,8 @@ mod zero_change_close_tests {
             None,
             false,
             Some(&anchor),
+            None,
+            None,
         );
         assert!(
             matches!(outcome, ZeroCommitCloseOutcome::Proceed),
@@ -10963,6 +11340,8 @@ mod zero_change_close_tests {
             Some("additive-only"), // explicit no-code signal
             false,
             None, // factory_branch_anchor
+            None, // commit_receipt
+            None, // commit_receipt_window
         );
         assert!(
             matches!(outcome, ZeroCommitCloseOutcome::Proceed),
@@ -10982,6 +11361,8 @@ mod zero_change_close_tests {
                 &task_type,
                 None,
                 false,
+                None,
+                None,
                 None,
             );
             assert!(
@@ -11004,6 +11385,8 @@ mod zero_change_close_tests {
             None,
             true, // has_review_findings = true (cas-490f rejects, not this gate)
             None, // factory_branch_anchor
+            None, // commit_receipt
+            None, // commit_receipt_window
         );
         assert!(
             matches!(outcome, ZeroCommitCloseOutcome::Proceed),
@@ -11058,6 +11441,8 @@ mod zero_change_close_tests {
             None,  // no execution_note
             false, // no review findings
             None,  // factory_branch_anchor
+            None,  // commit_receipt
+            None,  // commit_receipt_window
         );
         match outcome {
             ZeroCommitCloseOutcome::AmbiguousCodeTask(msg) => {
@@ -11072,6 +11457,9 @@ mod zero_change_close_tests {
                      be rejected as ambiguous — 'did HEAD move' is not sufficient, \
                      per cas-9eae"
                 );
+            }
+            ZeroCommitCloseOutcome::ProceedWithReceipt(_) => {
+                panic!("gate must not accept an absent receipt")
             }
         }
     }
@@ -11136,6 +11524,8 @@ mod zero_change_close_tests {
             None,
             false,
             Some(&anchor),
+            None,
+            None,
         );
         assert!(
             matches!(outcome, ZeroCommitCloseOutcome::Proceed),
@@ -11155,6 +11545,8 @@ mod zero_change_close_tests {
             None,
             false,
             None,
+            None,
+            None,
         );
         match outcome {
             ZeroCommitCloseOutcome::AmbiguousCodeTask(msg) => {
@@ -11165,6 +11557,9 @@ mod zero_change_close_tests {
             }
             ZeroCommitCloseOutcome::Proceed => {
                 panic!("genuine zero-commit without anchor must not Proceed");
+            }
+            ZeroCommitCloseOutcome::ProceedWithReceipt(_) => {
+                panic!("gate must not accept an absent receipt")
             }
         }
     }
@@ -11206,10 +11601,424 @@ mod zero_change_close_tests {
             None,
             false,
             Some(&anchor),
+            None,
+            None,
         );
         assert!(
             matches!(outcome, ZeroCommitCloseOutcome::AmbiguousCodeTask(_)),
             "unmerged anchor must not unlock zero-commit; got {outcome:?}"
+        );
+    }
+
+    /// cas-26bb: a worker whose commit hook did not capture an anchor can
+    /// supply the exact task commit after the supervisor has merged it.
+    #[test]
+    fn cas26bb_valid_merged_receipt_without_anchor_proceeds() {
+        let dir = init_worker_repo();
+        std::fs::write(dir.path().join("receipt.rs"), "pub fn receipt() {}\n").unwrap();
+        git(dir.path(), &["add", "receipt.rs"]);
+        git(dir.path(), &["commit", "-q", "-m", "fix: receipted work"]);
+        let receipt = head_sha(dir.path());
+
+        git(dir.path(), &["checkout", "-q", "main"]);
+        git(
+            dir.path(),
+            &[
+                "merge",
+                "--no-ff",
+                "-m",
+                "merge receipted work",
+                "factory/test-worker",
+            ],
+        );
+        git(dir.path(), &["checkout", "-q", "factory/test-worker"]);
+        git(dir.path(), &["reset", "--hard", "main"]);
+        assert_eq!(count_worker_branch_commits(dir.path(), "main"), 0);
+        let receipt_window = test_receipt_window();
+
+        let outcome = check_zero_commit_close(
+            dir.path(),
+            "main",
+            "cas-26bb",
+            &TaskType::Bug,
+            None,
+            false,
+            None,
+            Some(&receipt),
+            Some(&receipt_window),
+        );
+        assert!(
+            matches!(outcome, ZeroCommitCloseOutcome::ProceedWithReceipt(_)),
+            "validated task receipt must satisfy merged-before-close; got {outcome:?}"
+        );
+    }
+
+    /// cas-7308a: conflict resume clears the parked anchor, then the
+    /// supervisor resolves and merges out-of-band while the worker branch
+    /// has no commits beyond the parent. This fixture exercises the worker
+    /// task-commit receipt; cas-5626 separately covers a merge-commit receipt.
+    #[test]
+    fn cas7308a_conflict_resume_accepts_worker_commit_receipt_after_out_of_band_merge() {
+        let dir = init_worker_repo();
+        std::fs::write(
+            dir.path().join("resolved.rs"),
+            "pub fn resolved_conflict() {}\n",
+        )
+        .unwrap();
+        git(dir.path(), &["add", "resolved.rs"]);
+        git(
+            dir.path(),
+            &["commit", "-q", "-m", "fix: worker conflict resolution"],
+        );
+        let worker_task_receipt = head_sha(dir.path());
+
+        git(dir.path(), &["checkout", "-q", "main"]);
+        git(
+            dir.path(),
+            &[
+                "merge",
+                "--no-ff",
+                "-m",
+                "supervisor out-of-band merge",
+                "factory/test-worker",
+            ],
+        );
+        let supervisor_merge_commit = head_sha(dir.path());
+        assert_ne!(
+            worker_task_receipt, supervisor_merge_commit,
+            "fixture must distinguish the attributable worker commit from the merge commit"
+        );
+
+        git(dir.path(), &["checkout", "-q", "factory/test-worker"]);
+        git(dir.path(), &["reset", "--hard", "main"]);
+        assert_eq!(count_worker_branch_commits(dir.path(), "main"), 0);
+        let receipt_window = test_receipt_window();
+
+        let outcome = check_zero_commit_close(
+            dir.path(),
+            "main",
+            "cas-7308a",
+            &TaskType::Bug,
+            None,
+            false,
+            None, // conflict resume cleared the old anchor
+            Some(&worker_task_receipt),
+            Some(&receipt_window),
+        );
+        assert!(
+            matches!(outcome, ZeroCommitCloseOutcome::ProceedWithReceipt(_)),
+            "the worker's merged task commit must close the cleared-anchor shape: {outcome:?}"
+        );
+    }
+
+    /// cas-09f2 live shape: the hook captured C, a pre-push rebase rewrote
+    /// it to C', and only C' was merged. The stale stored anchor must not
+    /// prevent the worker from presenting the merged post-rebase receipt.
+    #[test]
+    fn cas26bb_post_rebase_receipt_supersedes_stale_anchor() {
+        let dir = init_worker_repo();
+        std::fs::write(dir.path().join("rebased.rs"), "pub fn rebased() {}\n").unwrap();
+        git(dir.path(), &["add", "rebased.rs"]);
+        git(dir.path(), &["commit", "-q", "-m", "fix: pre-rebase task work"]);
+        let stale_anchor = head_sha(dir.path());
+
+        git(dir.path(), &["checkout", "-q", "main"]);
+        std::fs::write(dir.path().join("epic.txt"), "new epic work\n").unwrap();
+        git(dir.path(), &["add", "epic.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "feat: advance epic"]);
+
+        git(dir.path(), &["checkout", "-q", "factory/test-worker"]);
+        git(dir.path(), &["rebase", "main"]);
+        let post_rebase_receipt = head_sha(dir.path());
+        assert_ne!(
+            stale_anchor, post_rebase_receipt,
+            "rebase fixture must rewrite the task commit"
+        );
+
+        git(dir.path(), &["checkout", "-q", "main"]);
+        git(
+            dir.path(),
+            &[
+                "merge",
+                "--no-ff",
+                "-m",
+                "merge post-rebase task work",
+                "factory/test-worker",
+            ],
+        );
+        git(dir.path(), &["checkout", "-q", "factory/test-worker"]);
+        git(dir.path(), &["reset", "--hard", "main"]);
+
+        assert!(
+            !commit_is_merged_into_parent(dir.path(), &stale_anchor, "main"),
+            "pre-rebase anchor must be stale"
+        );
+        assert!(
+            commit_is_merged_into_parent(dir.path(), &post_rebase_receipt, "main"),
+            "post-rebase receipt must be merged"
+        );
+        let receipt_window = test_receipt_window();
+
+        let outcome = check_zero_commit_close(
+            dir.path(),
+            "main",
+            "cas-26bb",
+            &TaskType::Bug,
+            None,
+            false,
+            Some(&stale_anchor),
+            Some(&post_rebase_receipt),
+            Some(&receipt_window),
+        );
+        assert!(
+            matches!(outcome, ZeroCommitCloseOutcome::ProceedWithReceipt(_)),
+            "validated post-rebase receipt must supersede a stale anchor; got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn cas26bb_unknown_receipt_rejects_with_actionable_reason() {
+        let dir = init_worker_repo();
+        let unknown = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let receipt_window = test_receipt_window();
+        let outcome = check_zero_commit_close(
+            dir.path(),
+            "main",
+            "cas-26bb",
+            &TaskType::Bug,
+            None,
+            false,
+            None,
+            Some(unknown),
+            Some(&receipt_window),
+        );
+        match outcome {
+            ZeroCommitCloseOutcome::AmbiguousCodeTask(msg) => {
+                assert!(msg.contains("INVALID TASK COMMIT RECEIPT"), "{msg}");
+                assert!(msg.contains("does not resolve to a commit"), "{msg}");
+                assert!(msg.contains("commit_receipt=<full-sha>"), "{msg}");
+            }
+            ZeroCommitCloseOutcome::Proceed => panic!("unknown receipt must not proceed"),
+            ZeroCommitCloseOutcome::ProceedWithReceipt(_) => {
+                panic!("unknown receipt must not proceed")
+            }
+        }
+    }
+
+    #[test]
+    fn cas26bb_empty_diff_receipt_rejects_with_actionable_reason() {
+        let dir = init_worker_repo();
+        git(
+            dir.path(),
+            &["commit", "--allow-empty", "-q", "-m", "empty task receipt"],
+        );
+        let receipt = head_sha(dir.path());
+        git(dir.path(), &["checkout", "-q", "main"]);
+        git(
+            dir.path(),
+            &[
+                "merge",
+                "--no-ff",
+                "-m",
+                "merge empty receipt",
+                "factory/test-worker",
+            ],
+        );
+        git(dir.path(), &["checkout", "-q", "factory/test-worker"]);
+        git(dir.path(), &["reset", "--hard", "main"]);
+        let receipt_window = test_receipt_window();
+
+        let outcome = check_zero_commit_close(
+            dir.path(),
+            "main",
+            "cas-26bb",
+            &TaskType::Feature,
+            None,
+            false,
+            None,
+            Some(&receipt),
+            Some(&receipt_window),
+        );
+        match outcome {
+            ZeroCommitCloseOutcome::AmbiguousCodeTask(msg) => {
+                assert!(msg.contains("INVALID TASK COMMIT RECEIPT"), "{msg}");
+                assert!(msg.contains("empty file diff"), "{msg}");
+            }
+            ZeroCommitCloseOutcome::Proceed => panic!("empty receipt must not proceed"),
+            ZeroCommitCloseOutcome::ProceedWithReceipt(_) => {
+                panic!("empty receipt must not proceed")
+            }
+        }
+    }
+
+    #[test]
+    fn cas26bb_valid_receipt_also_satisfies_commit_claim_gate() {
+        let dir = init_worker_repo();
+        std::fs::write(dir.path().join("reviewed.rs"), "pub fn reviewed() {}\n").unwrap();
+        git(dir.path(), &["add", "reviewed.rs"]);
+        git(dir.path(), &["commit", "-q", "-m", "fix: reviewed work"]);
+        let receipt = head_sha(dir.path());
+        git(dir.path(), &["checkout", "-q", "main"]);
+        git(
+            dir.path(),
+            &[
+                "merge",
+                "--no-ff",
+                "-m",
+                "merge reviewed work",
+                "factory/test-worker",
+            ],
+        );
+        git(dir.path(), &["checkout", "-q", "factory/test-worker"]);
+        git(dir.path(), &["reset", "--hard", "main"]);
+        let receipt_window = test_receipt_window();
+
+        let outcome = check_commit_claim_integrity(
+            dir.path(),
+            "main",
+            true,
+            None,
+            Some(&receipt),
+            Some(&receipt_window),
+        );
+        assert!(
+            matches!(outcome, CommitClaimGateOutcome::ProceedWithReceipt(_)),
+            "a validated receipt must also prevent a false fabrication rejection"
+        );
+    }
+
+    #[test]
+    fn cas5626_historical_receipt_is_rejected_by_both_close_gates() {
+        let dir = init_worker_repo();
+        let historical = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "main"])
+                .current_dir(dir.path())
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        let window = TaskCommitReceiptWindow {
+            // Put the task cycle definitively after the fixture commit. This
+            // reproduces copying an arbitrary old merged SHA from git log.
+            not_before: chrono::Utc::now() + chrono::Duration::hours(1),
+            basis: "latest task lease claim/transfer",
+        };
+
+        let zero_outcome = check_zero_commit_close(
+            dir.path(),
+            "main",
+            "cas-5626",
+            &TaskType::Bug,
+            None,
+            false,
+            None,
+            Some(&historical),
+            Some(&window),
+        );
+        match zero_outcome {
+            ZeroCommitCloseOutcome::AmbiguousCodeTask(message) => {
+                assert!(
+                    message.contains("predates this task work cycle"),
+                    "{message}"
+                );
+                assert!(message.contains("ask the supervisor"), "{message}");
+            }
+            other => panic!("historical receipt must fail zero-commit gate: {other:?}"),
+        }
+
+        let claim_outcome = check_commit_claim_integrity(
+            dir.path(),
+            "main",
+            true,
+            None,
+            Some(&historical),
+            Some(&window),
+        );
+        match claim_outcome {
+            CommitClaimGateOutcome::Reject(message) => {
+                assert!(
+                    message.contains("predates this task work cycle"),
+                    "{message}"
+                );
+                assert!(message.contains("INVALID TASK COMMIT RECEIPT"), "{message}");
+            }
+            other => panic!("historical receipt must fail fabrication gate: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cas5626_merge_commit_receipt_is_valid_and_auditable() {
+        let dir = init_worker_repo();
+        std::fs::write(dir.path().join("merged.rs"), "pub fn merged() {}\n").unwrap();
+        git(dir.path(), &["add", "merged.rs"]);
+        git(
+            dir.path(),
+            &["commit", "-q", "-m", "fix: merge receipt work"],
+        );
+
+        git(dir.path(), &["checkout", "-q", "main"]);
+        git(
+            dir.path(),
+            &[
+                "merge",
+                "--no-ff",
+                "-m",
+                "merge task branch",
+                "factory/test-worker",
+            ],
+        );
+        let merge_receipt = head_sha(dir.path());
+        git(dir.path(), &["checkout", "-q", "factory/test-worker"]);
+        git(dir.path(), &["reset", "--hard", "main"]);
+
+        let window = TaskCommitReceiptWindow {
+            not_before: chrono::Utc::now() - chrono::Duration::hours(1),
+            basis: "latest task lease claim/transfer",
+        };
+        let outcome = check_zero_commit_close(
+            dir.path(),
+            "main",
+            "cas-5626",
+            &TaskType::Bug,
+            None,
+            false,
+            None,
+            Some(&merge_receipt),
+            Some(&window),
+        );
+        match outcome {
+            ZeroCommitCloseOutcome::ProceedWithReceipt(note) => {
+                assert!(note.contains("decision: accepted commit_receipt"), "{note}");
+                assert!(note.contains(&merge_receipt), "{note}");
+                assert!(note.contains("latest task lease claim/transfer"), "{note}");
+                assert!(
+                    note.contains("merge-aware file diff is non-empty"),
+                    "{note}"
+                );
+            }
+            other => panic!("legitimate merge receipt must validate: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cas5626_accepted_receipt_note_is_persisted_once() {
+        let mut task = Task::new("cas-5626".to_string(), "receipt audit".to_string());
+        let store = crate::store::mock::MockTaskStore::with_tasks(vec![task.clone()]);
+        let note = "decision: accepted commit_receipt `abc` using latest task lease claim/transfer";
+
+        append_commit_receipt_decision_note(&store, &mut task, note);
+        append_commit_receipt_decision_note(&store, &mut task, note);
+
+        let persisted = cas_store::TaskStore::get(&store, "cas-5626").unwrap();
+        assert!(persisted.notes.contains(note), "{}", persisted.notes);
+        assert_eq!(
+            persisted.notes.matches(note).count(),
+            1,
+            "accepted receipt decision note must be idempotent"
         );
     }
 
@@ -11332,6 +12141,8 @@ mod zero_change_close_tests {
             None,
             false,
             Some(&anchor),
+            None,
+            None,
         );
         assert!(
             matches!(outcome, ZeroCommitCloseOutcome::Proceed),
@@ -11395,6 +12206,8 @@ mod zero_change_close_tests {
             None,
             false,
             Some(&anchor),
+            None,
+            None,
         );
         assert!(
             matches!(outcome, ZeroCommitCloseOutcome::AmbiguousCodeTask(_)),

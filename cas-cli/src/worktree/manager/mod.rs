@@ -327,6 +327,30 @@ impl WorktreeManager {
         force: bool,
         cleanup: bool,
     ) -> WorktreeResult<Option<String>> {
+        if self.config.auto_merge {
+            // cas-e18f/cas-09f2: inspect the shared merge point before even
+            // evaluating the requested source worktree. Residue from an
+            // earlier operation is the primary failure and must never be
+            // misreported as belonging to the branch requested now.
+            if self.git.merge_in_progress() {
+                return Err(WorktreeError::Git(GitError::MergeInProgress(
+                    self.git.describe_merge_in_progress(),
+                )));
+            }
+
+            // MERGE_HEAD is not the only residue that can poison the shared
+            // checkout. A staged or modified tracked path makes the next
+            // merge fail for reasons belonging to an earlier operation.
+            // `force` intentionally does not bypass this gate; it applies
+            // only to the source worktree.
+            let target_dirty = self.git.classify_dirty_status(&self.repo_root)?;
+            if target_dirty.is_blocked() {
+                return Err(WorktreeError::Git(GitError::MergeCheckoutDirty(
+                    target_dirty.describe_blocking(),
+                )));
+            }
+        }
+
         // Check for uncommitted changes (cas-006c: named-path classification,
         // not a raw "any porcelain output" check — see
         // GitOperations::classify_dirty_status). will_remove=cleanup: when
@@ -338,17 +362,6 @@ impl WorktreeManager {
         }
 
         let merge_commit = if self.config.auto_merge {
-            // cas-e18f (fix d): a prior conflicting merge that was never
-            // aborted leaves the shared checkout mid-merge. Detect that
-            // *before* touching anything, so it's reported as its own
-            // distinct failure rather than surfacing as an opaque error on
-            // this (unrelated) merge once we try to checkout/merge below.
-            if self.git.merge_in_progress() {
-                return Err(WorktreeError::Git(GitError::MergeInProgress(
-                    self.git.describe_merge_in_progress(),
-                )));
-            }
-
             // cas-e18f (fix b+c): pre-flight with `git merge-tree
             // --write-tree`, which computes the merge purely in-memory —
             // it never touches the working tree or index. A conflicting

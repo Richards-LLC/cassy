@@ -26,6 +26,9 @@ pub const PROMPT_RETRY_MAX_ATTEMPTS: u32 = 120;
 pub const PROMPT_RETRY_MAX_AGE_SECS: i64 = 15 * 60;
 const PROMPT_RETRY_BASE_DELAY_MS: i64 = 250;
 const PROMPT_RETRY_MAX_DELAY_MS: i64 = 5_000;
+/// Exact-content worker reports are collapsed only while a recent,
+/// transport-delivered copy is still awaiting confirmation.
+const PROMPT_DUPLICATE_WINDOW_SECS: i64 = 30;
 
 /// Result of recording a failed daemon delivery attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +135,50 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_prompt_queue_dedupe_key
     ON prompt_queue(dedupe_key)
     WHERE dedupe_key IS NOT NULL;
 "#;
+
+/// Indexes for the two per-send queue queries (cas-c061).
+///
+/// These deliberately live outside [`PROMPT_QUEUE_SCHEMA`]: `acked_at`,
+/// `urgent`, `factory_session`, and `transport_delivered_at` are migration-
+/// added columns and do not exist when the baseline schema is applied over a
+/// legacy table. `init` installs these only after every column migration.
+const PROMPT_QUEUE_MESSAGE_HOT_PATH_INDEXES_MIGRATION: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_prompt_queue_recent_unacked_dedupe
+    ON prompt_queue(
+        source,
+        target,
+        prompt,
+        factory_session,
+        transport_delivered_at DESC,
+        id DESC
+    )
+    WHERE urgent = 0
+      AND transport_delivered_at IS NOT NULL
+      AND acked_at IS NULL
+      AND highest_stage IS NOT 'confirmed';
+CREATE INDEX IF NOT EXISTS idx_prompt_queue_ack_counterparty
+    ON prompt_queue(target, source, factory_session)
+    WHERE transport_delivered_at IS NOT NULL
+      AND acked_at IS NULL;
+"#;
+
+/// Result of a normal queue enqueue that may collapse a recent worker resend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnqueueOutcome {
+    /// New row inserted.
+    Created(i64),
+    /// A recent, delivered, still-unconfirmed identical worker report exists.
+    SuppressedDuplicate(i64),
+}
+
+impl EnqueueOutcome {
+    /// Queue row ID created or reused by this enqueue.
+    pub fn id(self) -> i64 {
+        match self {
+            Self::Created(id) | Self::SuppressedDuplicate(id) => id,
+        }
+    }
+}
 
 /// Result of an idempotent prompt enqueue (cas-ecff).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -512,7 +559,35 @@ pub trait PromptQueueStore: Send + Sync {
         summary: Option<&str>,
         priority: Option<NotificationPriority>,
         urgent: bool,
-    ) -> Result<i64>;
+    ) -> Result<i64> {
+        Ok(self
+            .enqueue_urgent_with_outcome(
+                source,
+                target,
+                prompt,
+                factory_session,
+                summary,
+                priority,
+                urgent,
+            )?
+            .id())
+    }
+
+    /// Queue with an observable result for recent exact-content suppression.
+    ///
+    /// Legacy callers can continue using [`PromptQueueStore::enqueue_urgent`]
+    /// when they only need the row ID. User-facing send paths should use this
+    /// method so a reused ID is never presented as a fresh enqueue.
+    fn enqueue_urgent_with_outcome(
+        &self,
+        source: &str,
+        target: &str,
+        prompt: &str,
+        factory_session: Option<&str>,
+        summary: Option<&str>,
+        priority: Option<NotificationPriority>,
+        urgent: bool,
+    ) -> Result<EnqueueOutcome>;
 
     /// Idempotent enqueue keyed by `dedupe_key` (cas-ecff lifecycle outbox).
     ///
@@ -600,6 +675,20 @@ pub trait PromptQueueStore: Send + Sync {
 
     /// Acknowledge receipt of a prompt (target agent confirms delivery)
     fn ack(&self, prompt_id: i64) -> Result<()>;
+
+    /// Confirm delivered messages that the current recipient demonstrably
+    /// consumed by sending a response back to one of `sender_aliases`.
+    ///
+    /// Factory supervisors have both a display name and the logical
+    /// `"supervisor"` alias, so both sides are expressed as alias slices.
+    /// Only transport-delivered, still-unacked rows in the observing factory
+    /// session are advanced.
+    fn ack_delivered_for_recipient(
+        &self,
+        recipient_aliases: &[&str],
+        sender_aliases: &[&str],
+        factory_session: Option<&str>,
+    ) -> Result<usize>;
 
     /// Get messages that were processed but not acked within the timeout
     fn unacked(&self, timeout_secs: i64, limit: usize) -> Result<Vec<QueuedPrompt>>;
@@ -1178,6 +1267,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             // Indexes are IF NOT EXISTS — safe under concurrency once columns exist.
             conn.execute_batch(PROMPT_QUEUE_TWO_LANE_INDEXES)?;
             conn.execute_batch(PROMPT_QUEUE_DEDUPE_KEY_INDEX)?;
+            conn.execute_batch(PROMPT_QUEUE_MESSAGE_HOT_PATH_INDEXES_MIGRATION)?;
             Ok(())
         })
     }
@@ -1196,7 +1286,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         self.enqueue_full(source, target, prompt, Some(factory_session), None, None)
     }
 
-    fn enqueue_urgent(
+    fn enqueue_urgent_with_outcome(
         &self,
         source: &str,
         target: &str,
@@ -1205,21 +1295,64 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         summary: Option<&str>,
         priority: Option<NotificationPriority>,
         urgent: bool,
-    ) -> Result<i64> {
+    ) -> Result<EnqueueOutcome> {
         crate::shared_db::with_write_retry(|| {
             let conn = self.conn.lock().unwrap();
-            let now = Utc::now().to_rfc3339();
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            let now = Utc::now();
+            let now_text = now.to_rfc3339();
+            let duplicate_cutoff =
+                (now - chrono::Duration::seconds(PROMPT_DUPLICATE_WINDOW_SECS)).to_rfc3339();
             let prio: i32 = priority.unwrap_or(NotificationPriority::Normal).into();
             let urgent_flag: i64 = if urgent { 1 } else { 0 };
 
-            conn.execute(
+            // cas-6ad2/cas-c061: collapse only the immediate race where a worker
+            // repeats an unchanged report while its acknowledgement is in
+            // flight. Confirmed or older rows are historical events and must
+            // never permanently reserve the body. Supervisors are exempt
+            // because repeating an instruction can be intentional; urgent
+            // sends are always intentional redelivery.
+            if !urgent && source != "supervisor" {
+                let delivered_duplicate = tx
+                    .query_row(
+                        "SELECT id
+                         FROM prompt_queue
+                         WHERE source = ?
+                           AND target = ?
+                           AND prompt = ?
+                           AND factory_session IS ?
+                           AND urgent = 0
+                           AND transport_delivered_at IS NOT NULL
+                           AND acked_at IS NULL
+                           AND highest_stage IS NOT 'confirmed'
+                           AND transport_delivered_at >= ?
+                         ORDER BY transport_delivered_at DESC, id DESC
+                         LIMIT 1",
+                        params![
+                            source,
+                            target,
+                            prompt,
+                            factory_session,
+                            duplicate_cutoff
+                        ],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()?;
+                if let Some(existing_id) = delivered_duplicate {
+                    tx.commit()?;
+                    return Ok(EnqueueOutcome::SuppressedDuplicate(existing_id));
+                }
+            }
+
+            tx.execute(
             "INSERT INTO prompt_queue (source, target, prompt, created_at, factory_session, summary, priority, urgent) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            params![source, target, prompt, now, factory_session, summary, prio, urgent_flag],
+            params![source, target, prompt, now_text, factory_session, summary, prio, urgent_flag],
         )?;
 
-            let id = conn.last_insert_rowid();
-            let _ = capture_message_event(&conn, source, target);
-            Ok(id)
+            let id = tx.last_insert_rowid();
+            let _ = capture_message_event(&tx, source, target);
+            tx.commit()?;
+            Ok(EnqueueOutcome::Created(id))
         }) // with_write_retry
     }
 
@@ -1636,6 +1769,67 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             // rows_affected == 0 means either not found or already acked — both idempotent
             Ok(())
         }) // with_write_retry
+    }
+
+    fn ack_delivered_for_recipient(
+        &self,
+        recipient_aliases: &[&str],
+        sender_aliases: &[&str],
+        factory_session: Option<&str>,
+    ) -> Result<usize> {
+        if recipient_aliases.is_empty() || sender_aliases.is_empty() {
+            return Ok(0);
+        }
+
+        crate::shared_db::with_write_retry(|| {
+            let conn = self.conn.lock().unwrap();
+            let now = Utc::now().to_rfc3339();
+            let recipient_placeholders =
+                std::iter::repeat_n("?", recipient_aliases.len()).collect::<Vec<_>>();
+            let sender_placeholders =
+                std::iter::repeat_n("?", sender_aliases.len()).collect::<Vec<_>>();
+            let session_clause = if factory_session.is_some() {
+                "AND (factory_session = ? OR factory_session IS NULL)"
+            } else {
+                "AND factory_session IS NULL"
+            };
+            let sql = format!(
+                "UPDATE prompt_queue
+                 SET acked_at = ?,
+                     highest_stage = 'confirmed',
+                     last_pending_reason = NULL,
+                     last_pending_detail = NULL
+                 WHERE acked_at IS NULL
+                   AND transport_delivered_at IS NOT NULL
+                   AND target IN ({})
+                   AND source IN ({})
+                   {session_clause}",
+                recipient_placeholders.join(", "),
+                sender_placeholders.join(", "),
+            );
+
+            let mut query_params: Vec<Box<dyn rusqlite::ToSql>> =
+                Vec::with_capacity(1 + recipient_aliases.len() + sender_aliases.len() + 1);
+            query_params.push(Box::new(now));
+            query_params.extend(
+                recipient_aliases
+                    .iter()
+                    .map(|value| Box::new((*value).to_string()) as Box<dyn rusqlite::ToSql>),
+            );
+            query_params.extend(
+                sender_aliases
+                    .iter()
+                    .map(|value| Box::new((*value).to_string()) as Box<dyn rusqlite::ToSql>),
+            );
+            if let Some(session) = factory_session {
+                query_params.push(Box::new(session.to_string()));
+            }
+
+            Ok(conn.execute(
+                &sql,
+                rusqlite::params_from_iter(query_params.iter().map(|value| value.as_ref())),
+            )?)
+        })
     }
 
     fn unacked(&self, timeout_secs: i64, limit: usize) -> Result<Vec<QueuedPrompt>> {
@@ -2290,6 +2484,113 @@ mod tests {
         // Simulate successful retry path by explicitly acknowledging it.
         store.mark_processed(prompt_id).unwrap();
         assert_eq!(store.pending_count().unwrap(), 0);
+    }
+
+    /// cas-6ad2: an exact worker report that already reached the supervisor
+    /// must not become a fresh injectable turn merely because the worker
+    /// re-enqueued the same stale report while waiting for an acknowledgement.
+    #[test]
+    fn delivered_worker_report_is_not_selected_again() {
+        let (_temp, store) = create_test_store();
+        let first = store
+            .enqueue_with_session(
+                "worker-1",
+                "supervisor",
+                "cas-b769 complete; MERGE NEEDED",
+                "factory-session",
+            )
+            .unwrap();
+        store.mark_transport_delivered(first).unwrap();
+
+        let duplicate = store
+            .enqueue_urgent_with_outcome(
+                "worker-1",
+                "supervisor",
+                "cas-b769 complete; MERGE NEEDED",
+                Some("factory-session"),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            duplicate,
+            EnqueueOutcome::SuppressedDuplicate(first),
+            "an exact recent delivered report should expose suppression and reuse the row id"
+        );
+
+        let selected = store
+            .peek_for_targets(&["supervisor"], Some("factory-session"), 10)
+            .unwrap();
+        assert!(
+            selected.is_empty(),
+            "an already-delivered exact report must be terminal, not selected again: {selected:?}"
+        );
+    }
+
+    #[test]
+    fn recipient_response_confirms_only_delivered_counterparty_messages() {
+        let (_temp, store) = create_test_store();
+        let consumed = store
+            .enqueue_with_session(
+                "supervisor",
+                "worker-1",
+                "start cas-6ad2",
+                "factory-session",
+            )
+            .unwrap();
+        let still_pending = store
+            .enqueue_with_session(
+                "supervisor",
+                "worker-1",
+                "later instruction",
+                "factory-session",
+            )
+            .unwrap();
+        let other_worker = store
+            .enqueue_with_session(
+                "supervisor",
+                "worker-2",
+                "unrelated instruction",
+                "factory-session",
+            )
+            .unwrap();
+        store.mark_transport_delivered(consumed).unwrap();
+
+        let confirmed = store
+            .ack_delivered_for_recipient(
+                &["worker-1"],
+                &["supervisor", "display-supervisor"],
+                Some("factory-session"),
+            )
+            .unwrap();
+        assert_eq!(confirmed, 1);
+        assert_eq!(
+            store
+                .message_delivery_report(consumed)
+                .unwrap()
+                .unwrap()
+                .stage,
+            DeliveryStage::Confirmed
+        );
+        assert_eq!(
+            store
+                .message_delivery_report(still_pending)
+                .unwrap()
+                .unwrap()
+                .stage,
+            DeliveryStage::Enqueued,
+            "a response must not confirm a message that never reached transport delivery"
+        );
+        assert_eq!(
+            store
+                .message_delivery_report(other_worker)
+                .unwrap()
+                .unwrap()
+                .stage,
+            DeliveryStage::Enqueued,
+            "recipient aliases must prevent confirming another worker's mail"
+        );
     }
 
     #[test]
@@ -3845,6 +4146,156 @@ mod tests {
         assert!(r.delivered_at.is_some());
         assert_eq!(r.legacy_status, MessageStatus::Delivered);
         assert_eq!(r.pending_reason, Some(PendingReason::AwaitingAck));
+    }
+
+    /// cas-c061: historical delivered rows must not permanently reserve an
+    /// exact message body. Once the recipient confirmed the first send, an
+    /// intentional identical resend is a new queue event with a fresh ID.
+    #[test]
+    fn test_confirmed_worker_message_does_not_swallow_identical_resend() {
+        let (_temp, store) = create_test_store();
+        let first = store
+            .enqueue_with_session("worker", "supervisor", "same report", "factory-a")
+            .unwrap();
+        store.mark_transport_delivered(first).unwrap();
+        store.ack(first).unwrap();
+
+        let second = store
+            .enqueue_with_session("worker", "supervisor", "same report", "factory-a")
+            .unwrap();
+
+        assert_ne!(
+            first, second,
+            "a confirmed historical row must not impersonate a fresh enqueue"
+        );
+    }
+
+    /// cas-c061: even without an explicit acknowledgement, exact-content
+    /// collapse is bounded. A stale unconfirmed report is history, not a
+    /// permanent reservation on that message body.
+    #[test]
+    fn test_stale_unconfirmed_worker_message_does_not_swallow_identical_resend() {
+        let (_temp, store) = create_test_store();
+        let first = store
+            .enqueue_with_session("worker", "supervisor", "same report", "factory-a")
+            .unwrap();
+        store.mark_transport_delivered(first).unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            let stale_delivered_at =
+                (Utc::now() - chrono::Duration::seconds(PROMPT_DUPLICATE_WINDOW_SECS + 1))
+                    .to_rfc3339();
+            conn.execute(
+                "UPDATE prompt_queue SET transport_delivered_at = ? WHERE id = ?",
+                params![stale_delivered_at, first],
+            )
+            .unwrap();
+        }
+
+        let second = store
+            .enqueue_with_session("worker", "supervisor", "same report", "factory-a")
+            .unwrap();
+        assert_ne!(
+            first, second,
+            "an unconfirmed row beyond the dedup window must not swallow a resend"
+        );
+    }
+
+    /// cas-c061: the enqueue-dedup and reciprocal-confirm predicates are hot
+    /// on every coordination send. Their indexes must be installed only after
+    /// the lifecycle columns have been migrated onto legacy prompt_queue DBs.
+    #[test]
+    fn test_message_send_hot_path_indexes_are_migrated() {
+        let (_temp, store) = create_test_store();
+        let conn = store.conn.lock().unwrap();
+        for index in [
+            "idx_prompt_queue_recent_unacked_dedupe",
+            "idx_prompt_queue_ack_counterparty",
+        ] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'index' AND name = ?",
+                    params![index],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 1, "missing migrated hot-path index {index}");
+        }
+
+        fn explain_plan(
+            conn: &rusqlite::Connection,
+            sql: &str,
+            values: &[&dyn rusqlite::ToSql],
+        ) -> String {
+            let mut stmt = conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap();
+            stmt.query_map(rusqlite::params_from_iter(values.iter().copied()), |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+        }
+
+        let dedupe_plan = explain_plan(
+            &conn,
+            "SELECT id
+             FROM prompt_queue
+             WHERE source = ?
+               AND target = ?
+               AND prompt = ?
+               AND factory_session IS ?
+               AND urgent = 0
+               AND transport_delivered_at IS NOT NULL
+               AND acked_at IS NULL
+               AND highest_stage IS NOT 'confirmed'
+               AND transport_delivered_at >= ?
+             ORDER BY transport_delivered_at DESC, id DESC
+             LIMIT 1",
+            &[
+                &"worker",
+                &"supervisor",
+                &"body",
+                &"factory-a",
+                &"2026-07-29T00:00:00Z",
+            ],
+        );
+        assert!(
+            dedupe_plan.contains("idx_prompt_queue_recent_unacked_dedupe"),
+            "dedupe query must use its migrated index; plan was:\n{dedupe_plan}"
+        );
+        assert!(
+            !dedupe_plan.to_lowercase().contains("scan prompt_queue"),
+            "dedupe query must not scan prompt_queue; plan was:\n{dedupe_plan}"
+        );
+
+        let ack_plan = explain_plan(
+            &conn,
+            "UPDATE prompt_queue
+             SET acked_at = ?
+             WHERE acked_at IS NULL
+               AND transport_delivered_at IS NOT NULL
+               AND target IN (?)
+               AND source IN (?)
+               AND (factory_session = ? OR factory_session IS NULL)",
+            &[
+                &"2026-07-29T00:00:01Z",
+                &"worker",
+                &"supervisor",
+                &"factory-a",
+            ],
+        );
+        assert!(
+            ack_plan.contains("idx_prompt_queue_ack_counterparty"),
+            "reciprocal-confirm query must use its migrated index; plan was:\n{ack_plan}"
+        );
+        assert!(
+            !ack_plan.to_lowercase().contains("scan prompt_queue"),
+            "reciprocal-confirm query must not scan prompt_queue; plan was:\n{ack_plan}"
+        );
     }
 
     #[test]

@@ -133,7 +133,7 @@ impl Notifier {
                 ..
             } => {
                 format!(
-                    "{worker} stalled for {}m despite a nudge",
+                    "{worker} requires attention after {}m without activity",
                     elapsed_secs / 60
                 )
             }

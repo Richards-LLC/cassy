@@ -1000,6 +1000,68 @@ impl DirectorEventDetector {
                 continue;
             }
 
+            // cas-78bf: an assigned Open task is normally a brief dispatch
+            // window, and cas-dbbb intentionally suppresses WorkerIdle while
+            // the worker has not called `task start` yet. That suppression
+            // must not hide the same state forever. Once the configurable
+            // stall threshold has elapsed with a live heartbeat and no
+            // activity newer than the assignment, use the existing
+            // WorkerStalled supervisor-escalation path. Transcript
+            // confirmation remains the final gate, so harness-specific
+            // liveness and in-flight tool-call evidence stay centralized in
+            // `transcript_confirms_stall`.
+            let assigned_open_task = data.ready_tasks.iter().find(|task| {
+                task.status == TaskStatus::Open
+                    && (task.assignee.as_deref() == Some(resolved_name.as_str())
+                        || task.assignee.as_deref() == Some(agent.id.as_str()))
+            });
+            // An active InProgress task is the stronger signal: let the
+            // existing stall block below evaluate it instead of allowing a
+            // secondary assigned-Open task to shadow it.
+            if let Some(task) = assigned_open_task.filter(|_| agent.current_task.is_none()) {
+                let has_fresh_heartbeat = agent
+                    .last_heartbeat
+                    .map(|hb| {
+                        let age_secs = (now_utc - hb).num_seconds();
+                        age_secs >= 0 && age_secs < FRESH_HEARTBEAT_SECS
+                    })
+                    .unwrap_or(false);
+                let effective_threshold =
+                    effective_stall_threshold_secs(self.stall_threshold_secs, agent.effort);
+                let elapsed = task.updated_at.and_then(|assigned_at| {
+                    let activity_baseline = agent
+                        .latest_activity
+                        .as_ref()
+                        .map(|(_, activity_at)| assigned_at.max(*activity_at))
+                        .unwrap_or(assigned_at);
+                    let quiet_age_secs = (now_utc - activity_baseline).num_seconds();
+                    let assigned_age_secs = (now_utc - assigned_at).num_seconds();
+                    (quiet_age_secs >= effective_threshold as i64 && assigned_age_secs >= 0)
+                        .then_some(assigned_age_secs as u64)
+                });
+
+                if has_fresh_heartbeat
+                    && elapsed.is_some()
+                    && self.transcript_confirms_stall(&resolved_name)
+                {
+                    if !self.stall_escalated.contains(&agent.id) {
+                        events.push(DirectorEvent::WorkerStalled {
+                            worker: resolved_name.clone(),
+                            task_id: task.id.clone(),
+                            elapsed_secs: elapsed.unwrap_or_default(),
+                            escalate: true,
+                        });
+                        self.stall_escalated.insert(agent.id.clone());
+                    }
+                    // Do not also generate a generic WorkerIdle event for the
+                    // same sustained assigned-Open state.
+                    continue;
+                }
+
+                self.stall_nudged.remove(&agent.id);
+                self.stall_escalated.remove(&agent.id);
+            }
+
             if let Some(task_id) = &agent.current_task {
                 // Agent is working — reset the idle streak. The next time this
                 // agent's `current_task` goes to `None`, the counter starts

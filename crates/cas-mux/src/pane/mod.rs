@@ -73,6 +73,14 @@ pub enum PaneBackend {
     Pty(Pty),
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum ComposerEscapeState {
+    #[default]
+    Normal,
+    Escape,
+    ControlSequence,
+}
+
 /// A pane in the multiplexer
 pub struct Pane {
     /// Unique identifier (usually agent name)
@@ -163,6 +171,16 @@ pub struct Pane {
     /// Survives split `\x1b[200~` / `\x1b[201~` packets so embedded CR/LF inside
     /// a paste never marks turn-in-flight. StructuredPaste does not advance this.
     paste_tracker: std::sync::Mutex<crate::input_stream::BracketedPasteTracker>,
+    /// Whether an attached operator has unsubmitted input in this pane's
+    /// composer (cas-1a4d).
+    ///
+    /// Sticky after printable input/paste until a true submit or an explicit
+    /// clear/cancel. Panes that never receive attached-client input remain
+    /// clean, preserving immediate worker-to-worker injection.
+    composer_dirty: std::sync::atomic::AtomicBool,
+    /// When the current dirty-composer interval began. This lets the mux
+    /// enforce bounded deferral without retaining the payload itself.
+    composer_dirty_since: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 impl Pane {
@@ -213,6 +231,8 @@ impl Pane {
             paste_tracker: std::sync::Mutex::new(
                 crate::input_stream::BracketedPasteTracker::new(),
             ),
+            composer_dirty: std::sync::atomic::AtomicBool::new(false),
+            composer_dirty_since: std::sync::Mutex::new(None),
         })
     }
 
@@ -1238,6 +1258,7 @@ impl Pane {
                     let _ = guard.write_all(b"\r");
                     let _ = guard.flush();
                 });
+                self.clear_composer_dirty();
                 // Inject submits a prompt → turn is in flight (cas-7f6f).
                 self.mark_turn_in_flight();
                 Ok(())
@@ -1272,16 +1293,141 @@ impl Pane {
     /// - [`UserInputKind::StructuredPaste`]: never marks (paste/drop); does not
     ///   advance the KeyStream paste tracker (payload is already framed).
     pub async fn deliver_user_input(&self, data: &[u8], kind: UserInputKind) -> Result<()> {
-        if matches!(kind, UserInputKind::KeyStream) {
-            let marks = match self.paste_tracker.lock() {
-                Ok(mut t) => t.feed_chunk_marks_submit(data),
-                Err(poisoned) => poisoned.into_inner().feed_chunk_marks_submit(data),
-            };
-            if marks {
-                self.mark_turn_in_flight();
+        let marks_submit = match kind {
+            UserInputKind::KeyStream => self.observe_key_stream_composer_input(data),
+            UserInputKind::StructuredPaste => {
+                if !data.is_empty() {
+                    self.mark_composer_dirty();
+                }
+                false
             }
+        };
+        if marks_submit {
+            self.mark_turn_in_flight();
         }
         self.write(data).await
+    }
+
+    /// Whether an attached operator currently has an unsubmitted draft.
+    pub fn is_composer_dirty(&self) -> bool {
+        self.composer_dirty
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn mark_composer_dirty(&self) {
+        if !self
+            .composer_dirty
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            match self.composer_dirty_since.lock() {
+                Ok(mut since) => *since = Some(std::time::Instant::now()),
+                Err(poisoned) => {
+                    *poisoned.into_inner() = Some(std::time::Instant::now());
+                }
+            }
+        }
+    }
+
+    fn clear_composer_dirty(&self) {
+        self.composer_dirty
+            .store(false, std::sync::atomic::Ordering::Release);
+        match self.composer_dirty_since.lock() {
+            Ok(mut since) => *since = None,
+            Err(poisoned) => *poisoned.into_inner() = None,
+        }
+    }
+
+    pub(crate) fn composer_dirty_elapsed(&self) -> Option<std::time::Duration> {
+        let since = match self.composer_dirty_since.lock() {
+            Ok(since) => *since,
+            Err(poisoned) => *poisoned.into_inner(),
+        };
+        since.map(|started| started.elapsed())
+    }
+
+    /// Track the final composer state after one attached-client keystream
+    /// chunk. The same streaming paste tracker that recognizes true submits
+    /// also keeps embedded paste newlines from looking like Enter.
+    fn observe_key_stream_composer_input(&self, data: &[u8]) -> bool {
+        let mut dirty = self.is_composer_dirty();
+        let mut marks_submit = false;
+        let mut tracker = match self.paste_tracker.lock() {
+            Ok(tracker) => tracker,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let mut escape_state = ComposerEscapeState::Normal;
+
+        for &byte in data {
+            let class = tracker.feed_byte(byte);
+            if class == crate::input_stream::StreamByteClass::Paste {
+                dirty = true;
+                escape_state = ComposerEscapeState::Normal;
+                continue;
+            }
+
+            match escape_state {
+                ComposerEscapeState::Escape => match byte {
+                    b'[' | b'O' => {
+                        escape_state = ComposerEscapeState::ControlSequence;
+                        continue;
+                    }
+                    0x1b => {
+                        dirty = false;
+                        continue;
+                    }
+                    _ => {
+                        // The preceding Esc was standalone. Apply its clear
+                        // before classifying the current non-sequence byte.
+                        dirty = false;
+                        escape_state = ComposerEscapeState::Normal;
+                    }
+                },
+                ComposerEscapeState::ControlSequence => {
+                    if (0x40..=0x7e).contains(&byte) {
+                        escape_state = ComposerEscapeState::Normal;
+                    }
+                    continue;
+                }
+                ComposerEscapeState::Normal => {}
+            }
+
+            match byte {
+                b'\r' | b'\n' => {
+                    dirty = false;
+                    marks_submit = true;
+                }
+                // Defer deciding whether Esc is standalone until the next
+                // byte so a complete CSI/SS3 sequence does not clear or dirty
+                // the composer.
+                0x1b => escape_state = ComposerEscapeState::Escape,
+                // The two common line-clear/cancel controls.
+                0x03 | 0x15 => dirty = false,
+                // Printable input plus editing keys that can create/modify an
+                // unsubmitted draft. Backspace stays conservatively sticky:
+                // without the inner composer's buffer we cannot know whether
+                // it erased the final character.
+                b'\t' | 0x7f | 0x20..=0x7e => dirty = true,
+                _ => {}
+            }
+        }
+        if escape_state == ComposerEscapeState::Escape {
+            dirty = false;
+        }
+        if dirty {
+            self.mark_composer_dirty();
+        } else {
+            self.clear_composer_dirty();
+        }
+        marks_submit
+    }
+
+    /// Observe a raw control write from an attached client. Raw writes are
+    /// used for standalone Esc and navigation/SGR sequences; only exact clear
+    /// controls reset state so arrow/mouse escape sequences do not.
+    pub(crate) fn observe_raw_client_input(&self, data: &[u8]) {
+        if matches!(data, b"\x1b" | b"\x03" | b"\x15") {
+            self.clear_composer_dirty();
+        }
     }
 
     /// Break the current turn with a harness-aware cancel payload (cas-7f6f).
@@ -1300,6 +1446,7 @@ impl Pane {
             PaneBackend::Pty(pty) => {
                 pty.write(self.harness.turn_cancel_bytes()).await?;
                 self.clear_turn_in_flight();
+                self.clear_composer_dirty();
                 Ok(())
             }
             PaneBackend::None => Err(Error::pty("Pane has no backend")),
@@ -1312,6 +1459,7 @@ impl Pane {
                 pty.interrupt().await?;
                 // Ctrl+C is also a cancel path for Grok mid-turn.
                 self.clear_turn_in_flight();
+                self.clear_composer_dirty();
                 Ok(())
             }
             PaneBackend::None => Err(Error::pty("Pane has no backend")),
@@ -1395,14 +1543,28 @@ impl Pane {
         }
     }
 
+    /// Process group owned by this pane's PTY child.
+    pub fn process_group_id(&self) -> Option<u32> {
+        match &self.backend {
+            PaneBackend::Pty(pty) => pty.process_group_id(),
+            PaneBackend::None => None,
+        }
+    }
+
     /// Kill the pane's process tree (cas-8c5a).
     ///
-    /// Delegates to `Pty::kill_tree(force)` which sends SIGKILL (`force=true`)
-    /// or SIGTERM (`force=false`) to the entire process group, then kills the
-    /// direct child handle as a belt-and-suspenders fallback.
-    pub fn kill_tree(&mut self, force: bool) {
+    /// Delegates to `Pty::kill_tree(force)`, including its async grace window.
+    pub async fn kill_tree(&mut self, force: bool) {
         match &mut self.backend {
-            PaneBackend::Pty(pty) => pty.kill_tree(force),
+            PaneBackend::Pty(pty) => pty.kill_tree(force).await,
+            PaneBackend::None => {}
+        }
+    }
+
+    /// Immediate teardown used when the whole factory process is exiting.
+    pub fn kill_tree_force(&mut self) {
+        match &mut self.backend {
+            PaneBackend::Pty(pty) => pty.kill_tree_force(),
             PaneBackend::None => {}
         }
     }

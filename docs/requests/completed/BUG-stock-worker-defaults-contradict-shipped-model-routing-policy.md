@@ -1,5 +1,15 @@
 # BUG: stock worker defaults (`gpt-5.5`, `sonnet`) contradict the routing policy CAS itself ships
 
+## Resolution
+
+Resolved in cas-98ce. The stock Codex fallback now uses `gpt-5.6-sol`,
+and an explicitly selected Claude worker with no model now uses the shipped
+policy's `opus` slug. Omitted-field warnings name the fully resolved worker
+spec and distinguish a policy default from a configured fallback. A hermetic
+runtime regression resolves the stock paths with an empty HOME and requires
+their `cli/model` pairs to appear in the shipped `model-selection.md`, while
+existing project-default coverage proves configured overrides still win.
+
 **Filed:** 2026-07-28
 **Reporter:** supervisor `wild-condor-51`, factory session `Penguinz-witty-viper-34` (project: Penguinz, host: soundwave)
 **Severity:** High — silent, and it routes real work to models the shipped policy says are retired.

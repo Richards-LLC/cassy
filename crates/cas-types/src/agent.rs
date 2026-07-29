@@ -221,9 +221,8 @@ pub struct Agent {
     /// which updates both the typed field and the metadata shadow
     /// atomically.
     ///
-    /// Linux-only in practice. `None` on non-Linux hosts (the daemon's
-    /// `read_pid_starttime` helper returns `None` there) and on
-    /// pre-migration legacy agents.
+    /// Available on Linux and macOS. `None` on hosts without a supported
+    /// stable process-start API and on pre-migration legacy agents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid_starttime: Option<u64>,
 

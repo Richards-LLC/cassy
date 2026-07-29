@@ -35,6 +35,7 @@ pub mod sweep;
 
 pub use external_symlinks::{scan_external_symlinks_into, ExternalSymlink};
 pub use git::{GitError, GitOperations};
+pub(crate) use manager::WorktreeError;
 pub use manager::{
     CleanupReport, DirtyWorktreeWarning, ExternalSymlinkWarning, RemoveOutcome, WorktreeConfig,
     WorktreeManager, WorktreeResult, symlink_project_config,

@@ -297,11 +297,17 @@ impl FactoryDaemon {
             let (bytes_processed, events) = self.app.mux.poll_batch();
             let had_output = bytes_processed > 0;
             for event in events {
-                self.handle_mux_event(event);
+                self.handle_mux_event(event).await;
             }
 
             // Process relay events from cloud (remote terminal attach/input/detach)
             self.process_relay_events().await;
+
+            // cas-1a4d: retry non-urgent PTY injects only after every attached
+            // client surface had a chance to submit or clear its composer.
+            // This stays outside process_prompt_queue so a deferred inject
+            // never blocks the input loop that can make its target clean.
+            self.app.mux.flush_deferred_injections().await;
 
             // Poll prompt queue (on notification or timer)
             if prompt_notified || last_prompt_poll.elapsed() >= poll_interval {
@@ -514,7 +520,7 @@ impl FactoryDaemon {
                         let inject_ms = inject_started.elapsed().as_secs_f64() * 1000.0;
                         let total_ms = refresh_started.elapsed().as_secs_f64() * 1000.0;
                         match inject_result {
-                            Ok(()) => tracing::info!(
+                            Ok(cas_mux::InjectOutcome::Delivered) => tracing::info!(
                                 target: "cas::coordination",
                                 stage = "delivered",
                                 channel = "director_events",
@@ -522,6 +528,14 @@ impl FactoryDaemon {
                                 inject_ms,
                                 refresh_to_deliver_ms = total_ms,
                                 "director prompt delivered to inbox"
+                            ),
+                            Ok(cas_mux::InjectOutcome::DeferredComposerDirty) => tracing::info!(
+                                target: "cas::coordination",
+                                stage = "composer_inject_deferred",
+                                channel = "director_events",
+                                target_agent = %prompt.target,
+                                inject_ms,
+                                "director prompt deferred before any PTY write because the operator composer is dirty"
                             ),
                             Err(e) => tracing::warn!(
                                 target: "cas::coordination",
@@ -775,7 +789,7 @@ impl FactoryDaemon {
         }
 
         // Cleanup
-        let cleanup_result = self.cleanup();
+        let cleanup_result = self.cleanup().await;
 
         let duration_secs = session_started_at.elapsed().as_secs().to_string();
         let final_workers = self.app.worker_names().len().to_string();
@@ -802,7 +816,7 @@ impl FactoryDaemon {
     }
 
     /// Cleanup on shutdown
-    fn cleanup(&mut self) -> anyhow::Result<()> {
+    async fn cleanup(&mut self) -> anyhow::Result<()> {
         // Clean up notification socket
         if let Some(ref notify) = self.notify_rx {
             notify.cleanup();
@@ -816,8 +830,19 @@ impl FactoryDaemon {
         // Disconnect cloud phone-home client
         self.disconnect_cloud();
 
-        // Kill all PTY processes (Claude instances)
+        // Kill all PTY process groups. Snapshot worker PGIDs first so their
+        // durable ownership records can be removed only after death is
+        // confirmed; any survivor stays visible to gc_report.
+        let worker_process_groups: Vec<u32> = self
+            .app
+            .worker_names()
+            .iter()
+            .filter_map(|name| self.app.mux.pane_process_group_id(name))
+            .collect();
         self.app.mux.kill_all();
+        for pgid in worker_process_groups {
+            self.app.untrack_worker_process_group_if_gone(pgid).await;
+        }
 
         // Unregister all factory agents (supervisor + workers)
         if let Ok(agent_store) = open_agent_store(self.app.cas_dir()) {

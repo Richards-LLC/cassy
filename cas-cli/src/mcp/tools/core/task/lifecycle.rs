@@ -401,31 +401,37 @@ impl CasCore {
             ));
         }
 
-        // cas-a844: `awaiting_merge` used to be a dead end when the parked
-        // branch could not be merged (a real git conflict) — the supervisor
-        // couldn't merge it and the worker was refused `start` "because the
-        // work is already complete". If the merge genuinely can't happen,
-        // the work is NOT complete, and the assigned worker is the right
-        // party to resolve it. Allow starting from `AwaitingMerge`; it falls
-        // through to the ordinary start path below, which sets
-        // `TaskStatus::InProgress` unconditionally. The self-dispatch guard
-        // just below still applies, so a *different* worker cannot grab a
-        // task parked under someone else's name without an explicit
-        // supervisor reassignment first.
+        // cas-a844/cas-5054: a genuinely conflicted parked branch is unfinished
+        // work, so its assigned worker may resume it. A clean AwaitingMerge
+        // task remains worker-complete and must stay parked for the supervisor.
         let resuming_awaiting_merge = task.status == TaskStatus::AwaitingMerge;
         if resuming_awaiting_merge {
+            if !task.deliverables.merge_conflicted {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!(
+                        "Cannot start a task that is awaiting merge. The worker work is \
+                         already complete; wait for the supervisor to merge the factory \
+                         branch, then retry task close. If that merge fails with a genuine \
+                         git conflict, CAS marks the parked task conflicted and its assigned \
+                         worker can then start task {} to resolve it.",
+                        req.id
+                    ),
+                ));
+            }
+
             let now = chrono::Utc::now();
             let timestamp = now.format("%Y-%m-%d %H:%M");
-            let conflict_note = if task.deliverables.merge_conflicted {
-                " (flagged as a merge conflict — the parked branch cannot be \
-                  fast-forwarded or auto-merged cleanly)"
-            } else {
-                ""
-            };
+            let parked_branch = task
+                .deliverables
+                .parked_branch
+                .as_deref()
+                .unwrap_or("the parked factory branch");
             let audit = format!(
-                "[{timestamp}] Resumed from awaiting_merge{conflict_note}: the parked \
-                 merge cannot be completed as-is, so the task is back in_progress for \
-                 the worker to resolve directly."
+                "[{timestamp}] Decision: resume from awaiting_merge for merge recovery. \
+                 {parked_branch} was flagged with a merge conflict or its conflict \
+                 preflight could not be evaluated, so the task is back in_progress for \
+                 the assigned worker to inspect and resolve directly."
             );
             task.notes = if task.notes.is_empty() {
                 audit

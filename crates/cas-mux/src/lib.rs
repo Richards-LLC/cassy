@@ -39,7 +39,7 @@ mod spec;
 pub use error::{Error, Result};
 pub use harness::{HarnessCapabilities, SupervisorCli};
 pub use input_stream::{BracketedPasteTracker, StreamByteClass, key_stream_marks_submit};
-pub use mux::{Mux, MuxConfig, MuxEvent};
+pub use mux::{InjectOutcome, Mux, MuxConfig, MuxEvent};
 pub use pane::TerminalSnapshot;
 pub use pane::{Pane, PaneBackend, PaneId, PaneKind, UserInputKind};
 pub use pty::{

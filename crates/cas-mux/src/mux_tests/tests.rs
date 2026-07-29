@@ -1,5 +1,6 @@
 use crate::harness::SupervisorCli;
 use crate::mux::*;
+use crate::pane::UserInputKind;
 use crate::spec::{Effort, WorkerSpec};
 use std::path::PathBuf;
 
@@ -675,6 +676,164 @@ fn cat_pane(name: &str) -> Option<Pane> {
     Pane::shell(name, PathBuf::from("/tmp"), Some("cat"), 24, 80).ok()
 }
 
+#[cfg(target_os = "linux")]
+fn proc_state_and_group(pid: u32) -> Option<(char, u32)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after_comm = stat.rsplit_once(')')?.1.trim_start();
+    let mut fields = after_comm.split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    fields.next()?;
+    let pgid = fields.next()?.parse().ok()?;
+    Some((state, pgid))
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn kill_all_terminates_a_synthetic_long_lived_child_group() {
+    let config = crate::pty::PtyConfig {
+        command: "sh".to_string(),
+        args: vec!["-c".to_string(), "sleep 300 & wait".to_string()],
+        cwd: Some(PathBuf::from("/tmp")),
+        env: vec![],
+        rows: 24,
+        cols: 80,
+    };
+    let Ok(pty) = crate::pty::Pty::spawn("synthetic-worker", config) else {
+        return;
+    };
+    let pane = Pane::with_pty(
+        "synthetic-worker",
+        PaneKind::Worker,
+        pty,
+        24,
+        80,
+        SupervisorCli::Claude,
+    )
+    .unwrap();
+    let mut mux = Mux::new(24, 80);
+    mux.add_pane(pane);
+    let pgid = mux
+        .pane_process_group_id("synthetic-worker")
+        .expect("PTY worker must expose its process group");
+
+    let mut long_lived_child = None;
+    for _ in 0..40 {
+        long_lived_child = std::fs::read_dir("/proc").ok().and_then(|entries| {
+            entries.flatten().find_map(|entry| {
+                let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
+                (pid != pgid
+                    && proc_state_and_group(pid)
+                        .is_some_and(|(state, group)| state != 'Z' && group == pgid))
+                .then_some(pid)
+            })
+        });
+        if long_lived_child.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    let child_pid = long_lived_child.expect("synthetic shell must spawn its long-lived child");
+
+    mux.kill_all();
+
+    for _ in 0..40 {
+        if proc_state_and_group(child_pid).is_none_or(|(state, _)| state == 'Z') {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!("factory-exit kill_all left synthetic child {child_pid} alive");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn graceful_kill_worker_waits_before_escalating_a_term_ignoring_group() {
+    let config = crate::pty::PtyConfig {
+        command: "sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            "trap '' TERM HUP; sleep 300 & wait".to_string(),
+        ],
+        cwd: Some(PathBuf::from("/tmp")),
+        env: vec![],
+        rows: 24,
+        cols: 80,
+    };
+    let Ok(pty) = crate::pty::Pty::spawn("synthetic-grace-worker", config) else {
+        return;
+    };
+    let pane = Pane::with_pty(
+        "synthetic-grace-worker",
+        PaneKind::Worker,
+        pty,
+        24,
+        80,
+        SupervisorCli::Claude,
+    )
+    .unwrap();
+    let mut mux = Mux::new(24, 80);
+    mux.add_pane(pane);
+    let pgid = mux
+        .pane_process_group_id("synthetic-grace-worker")
+        .expect("PTY worker must expose its process group");
+
+    // Give the shell time to install its TERM/HUP ignores before teardown.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let started = std::time::Instant::now();
+    mux.kill_worker("synthetic-grace-worker", false)
+        .await
+        .unwrap();
+
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(2_750),
+        "TERM-ignoring group must receive a real grace period before escalation"
+    );
+    for _ in 0..40 {
+        if proc_state_and_group(pgid).is_none_or(|(state, _)| state == 'Z') {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("graceful escalation left synthetic process group {pgid} alive");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn graceful_kill_worker_returns_when_the_group_honors_term() {
+    let config = crate::pty::PtyConfig {
+        command: "sh".to_string(),
+        args: vec!["-c".to_string(), "sleep 300 & wait".to_string()],
+        cwd: Some(PathBuf::from("/tmp")),
+        env: vec![],
+        rows: 24,
+        cols: 80,
+    };
+    let Ok(pty) = crate::pty::Pty::spawn("synthetic-term-worker", config) else {
+        return;
+    };
+    let pane = Pane::with_pty(
+        "synthetic-term-worker",
+        PaneKind::Worker,
+        pty,
+        24,
+        80,
+        SupervisorCli::Claude,
+    )
+    .unwrap();
+    let mut mux = Mux::new(24, 80);
+    mux.add_pane(pane);
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let started = std::time::Instant::now();
+    mux.kill_worker("synthetic-term-worker", false)
+        .await
+        .unwrap();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "TERM-compliant groups should not consume the escalation grace window"
+    );
+}
+
 #[tokio::test]
 async fn break_turn_targets_pane_by_name_independent_of_focus() {
     let mut mux = Mux::new(24, 80);
@@ -712,9 +871,19 @@ async fn interrupt_and_inject_breaks_then_injects_by_name() {
     };
     mux.add_pane(w1);
 
+    mux.deliver_user_input_to("w1", b"operator draft", UserInputKind::KeyStream)
+        .await
+        .expect("mark dirty through attached-client input");
+    assert!(
+        mux.panes
+            .get("w1")
+            .expect("pane exists")
+            .is_composer_dirty()
+    );
+
     // Zero settle keeps the test fast; the ordering (Esc then inject) is
-    // enforced by interrupt_and_inject internally. Just assert the by-name
-    // delivery completes Ok against a live PTY-backed pane.
+    // enforced by interrupt_and_inject internally. The urgent path must bypass
+    // non-urgent composer deferral and its Esc must clear the stale draft.
     let res = mux
         .interrupt_and_inject(
             "w1",
@@ -723,6 +892,175 @@ async fn interrupt_and_inject_breaks_then_injects_by_name() {
         )
         .await;
     assert!(res.is_ok(), "urgent redirect to a live pane must succeed");
+    assert!(
+        !mux.panes
+            .get("w1")
+            .expect("pane exists")
+            .is_composer_dirty(),
+        "urgent break-turn Esc clears the composer before redirect"
+    );
+}
+
+// ── cas-1a4d: non-urgent injects defer around operator drafts ───────────────
+
+#[tokio::test]
+async fn nonurgent_inject_defers_until_composer_clears_cas_1a4d() {
+    let mut mux = Mux::new(24, 80);
+    let Some(pane) = cat_pane("operator-pane") else {
+        return;
+    };
+    mux.add_pane(pane);
+
+    mux.deliver_user_input_to(
+        "operator-pane",
+        b"half-written thought",
+        UserInputKind::KeyStream,
+    )
+    .await
+    .expect("type draft");
+    let outcome = mux
+        .inject("operator-pane", "non-urgent report")
+        .await
+        .expect("dirty inject should be deferred");
+    assert_eq!(outcome, InjectOutcome::DeferredComposerDirty);
+    assert!(
+        !mux.panes
+            .get("operator-pane")
+            .expect("pane exists")
+            .is_turn_in_flight(),
+        "deferred report must not submit into the dirty composer"
+    );
+
+    mux.send_input_to("operator-pane", b"\x1b")
+        .await
+        .expect("standalone Esc clears draft");
+    let outcome = mux.inject("operator-pane", "non-urgent report").await;
+
+    assert_eq!(
+        outcome.expect("durable queue retry after clear"),
+        InjectOutcome::Delivered
+    );
+    assert!(
+        mux.panes
+            .get("operator-pane")
+            .expect("pane exists")
+            .is_turn_in_flight(),
+        "retained report delivers as soon as the composer becomes clean"
+    );
+}
+
+#[tokio::test]
+async fn nonurgent_inject_delivers_on_bounded_dirty_timeout_cas_1a4d() {
+    let mut mux = Mux::new(24, 80);
+    let Some(pane) = cat_pane("timeout-pane") else {
+        return;
+    };
+    mux.add_pane(pane);
+
+    mux.deliver_user_input_to("timeout-pane", b"draft", UserInputKind::KeyStream)
+        .await
+        .expect("type draft");
+    let outcome = mux
+        .inject_with_timeout("timeout-pane", "eventual report", std::time::Duration::ZERO)
+        .await
+        .expect("bounded fallback performs a real write");
+
+    assert_eq!(
+        outcome,
+        InjectOutcome::Delivered,
+        "bounded fallback reports delivery only after the real write"
+    );
+    assert!(
+        mux.panes
+            .get("timeout-pane")
+            .expect("pane exists")
+            .is_turn_in_flight(),
+        "timeout fallback delivers even while the pane remains dirty"
+    );
+}
+
+#[tokio::test]
+async fn expired_dirty_inject_surfaces_write_failure_cas_0b64() {
+    let mut mux = Mux::new(24, 80);
+    mux.add_pane(Pane::director("no-backend", 24, 80).expect("director pane"));
+
+    // Pane::director has no writable PTY. State tracking happens before the
+    // expected write error so this gives us a deterministic dirty target and
+    // a deterministic deferred-delivery failure.
+    assert!(
+        mux.deliver_user_input_to("no-backend", b"draft", UserInputKind::KeyStream)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        mux.inject("no-backend", "must stay durable")
+            .await
+            .expect("dirty target returns a deferred outcome"),
+        InjectOutcome::DeferredComposerDirty
+    );
+    assert!(
+        mux.inject_with_timeout("no-backend", "must stay durable", std::time::Duration::ZERO)
+            .await
+            .is_err(),
+        "an expired deferral must surface the failed real write so the durable queue retries"
+    );
+}
+
+#[tokio::test]
+async fn pane_without_client_input_injects_immediately_cas_1a4d() {
+    let mut mux = Mux::new(24, 80);
+    let Some(pane) = cat_pane("worker-pane") else {
+        return;
+    };
+    mux.add_pane(pane);
+
+    let outcome = mux
+        .inject("worker-pane", "ordinary worker message")
+        .await
+        .expect("clean worker inject");
+
+    assert_eq!(outcome, InjectOutcome::Delivered);
+    assert!(
+        mux.panes
+            .get("worker-pane")
+            .expect("pane exists")
+            .is_turn_in_flight(),
+        "a pane with no attached-client input keeps immediate delivery"
+    );
+}
+
+#[tokio::test]
+async fn deferred_payload_is_not_retained_across_teardown_or_respawn_cas_0b64() {
+    let mut mux = Mux::new(24, 80);
+    let Some(old_pane) = cat_pane("reused-name") else {
+        return;
+    };
+    mux.add_pane(old_pane);
+    mux.deliver_user_input_to("reused-name", b"operator draft", UserInputKind::KeyStream)
+        .await
+        .expect("mark old pane dirty");
+
+    assert_eq!(
+        mux.inject("reused-name", "old process payload")
+            .await
+            .expect("defer to durable queue"),
+        InjectOutcome::DeferredComposerDirty
+    );
+    mux.remove_pane("reused-name");
+
+    let Some(new_pane) = cat_pane("reused-name") else {
+        return;
+    };
+    mux.add_pane(new_pane);
+    mux.flush_deferred_injections().await;
+
+    assert!(
+        !mux.panes
+            .get("reused-name")
+            .expect("respawned pane exists")
+            .is_turn_in_flight(),
+        "old deferred payload must never be flushed into a same-name respawn"
+    );
 }
 
 // ── cas-4208: post-break settle must observe real quiescence, not a blind

@@ -123,7 +123,7 @@ fn enqueue_spawn_cancelled_notice(
 }
 
 impl FactoryDaemon {
-    pub(super) fn handle_mux_event(&mut self, event: cas_mux::MuxEvent) {
+    pub(super) async fn handle_mux_event(&mut self, event: cas_mux::MuxEvent) {
         match event {
             cas_mux::MuxEvent::PaneOutput { pane_id, data } => {
                 // Always buffer raw PTY bytes (warm buffer for future viewers)
@@ -145,7 +145,7 @@ impl FactoryDaemon {
                     tracing::info!("Supervisor exited with code {exit_code:?}, shutting down");
                     self.shutdown.store(true, Ordering::Relaxed);
                 } else if is_worker {
-                    let _ = self.handle_worker_crash(&pane_id, exit_code);
+                    let _ = self.handle_worker_crash(&pane_id, exit_code).await;
                 }
             }
             _ => {}
@@ -153,7 +153,7 @@ impl FactoryDaemon {
     }
 
     /// Handle worker crash
-    fn handle_worker_crash(
+    async fn handle_worker_crash(
         &mut self,
         worker_name: &str,
         exit_code: Option<i32>,
@@ -173,7 +173,7 @@ impl FactoryDaemon {
             let _ = agent_store.mark_stale(&id);
         }
 
-        self.app.mark_worker_crashed(worker_name);
+        self.app.mark_worker_crashed(worker_name).await;
         self.dead_workers.insert(worker_name.to_string());
 
         let exit_info = match exit_code {
@@ -316,6 +316,15 @@ impl FactoryDaemon {
             })
             .unwrap_or(false);
         !(has_fresh_heartbeat && has_recent_activity)
+    }
+
+    fn target_looks_like_idle_worker(
+        data: &crate::ui::factory::director::DirectorData,
+        pane_target: &str,
+        supervisor_name: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> bool {
+        pane_target != supervisor_name && Self::worker_looks_idle(data, pane_target, now)
     }
 
     /// Minimum settle floor between an urgent turn-break (Esc) and the
@@ -674,7 +683,7 @@ impl FactoryDaemon {
                         fail_notes.push(format!("{name}: pane not ready"));
                         continue;
                     }
-                    let inject_result: anyhow::Result<()> = if queued.urgent {
+                    let inject_result: anyhow::Result<cas_mux::InjectOutcome> = if queued.urgent {
                         // cas-ab80: urgent Codex recipients still need the shared
                         // `Message from <sender>:` framing (same contract as
                         // normal `deliver_to_worker`); Claude/Grok stay bare.
@@ -689,6 +698,7 @@ impl FactoryDaemon {
                             .mux
                             .interrupt_and_inject(name, &payload, settle)
                             .await
+                            .map(|()| cas_mux::InjectOutcome::Delivered)
                             .map_err(Into::into)
                     } else {
                         // Recipient-aware routing (cas-b68a): each worker may run a
@@ -707,7 +717,7 @@ impl FactoryDaemon {
                         .await
                     };
                     match inject_result {
-                        Ok(_) => {
+                        Ok(cas_mux::InjectOutcome::Delivered) => {
                             succeeded += 1;
                             tracing::info!("Injected to worker '{}'", name);
                             if let Some(ref store) = event_store {
@@ -719,6 +729,28 @@ impl FactoryDaemon {
                                     name,
                                     "ok",
                                     None,
+                                );
+                            }
+                        }
+                        Ok(cas_mux::InjectOutcome::DeferredComposerDirty) => {
+                            failed += 1;
+                            fail_notes.push(format!("{name}: operator composer is dirty"));
+                            tracing::info!(
+                                target: "cas::coordination",
+                                stage = "composer_inject_deferred",
+                                message_id = queued.id,
+                                target_agent = %name,
+                                "broadcast recipient deferred before any PTY write"
+                            );
+                            if let Some(ref store) = event_store {
+                                record_injection(
+                                    store,
+                                    queued.id,
+                                    &queued.source,
+                                    &queued.target,
+                                    name,
+                                    "deferred",
+                                    Some("operator composer is dirty".to_string()),
                                 );
                             }
                         }
@@ -783,7 +815,7 @@ impl FactoryDaemon {
                 } else {
                     target.clone()
                 };
-                let inject_result: anyhow::Result<()> = if queued.urgent {
+                let inject_result: anyhow::Result<cas_mux::InjectOutcome> = if queued.urgent {
                     // Urgent: interrupt-and-redirect by name via the PTY,
                     // bypassing the inbox even in teams mode. Break the turn
                     // (Esc), wait the bounded settle window for the turn to
@@ -809,6 +841,7 @@ impl FactoryDaemon {
                         .mux
                         .interrupt_and_inject(&pane_target, &payload, settle)
                         .await
+                        .map(|()| cas_mux::InjectOutcome::Delivered)
                         .map_err(Into::into)
                 } else {
                     // Recipient-aware routing (cas-b68a): delivery channel +
@@ -820,12 +853,12 @@ impl FactoryDaemon {
                     // supervisor) and looks genuinely idle right now, also
                     // PTY-nudge the teams-inbox write so it isn't left
                     // sitting in a file nobody is polling.
-                    let worker_is_idle = target != "supervisor"
-                        && Self::worker_looks_idle(
-                            self.app.director_data(),
-                            target.as_str(),
-                            chrono::Utc::now(),
-                        );
+                    let worker_is_idle = Self::target_looks_like_idle_worker(
+                        self.app.director_data(),
+                        &pane_target,
+                        self.app.supervisor_name(),
+                        chrono::Utc::now(),
+                    );
                     self.deliver_to_worker_with_idle_nudge(
                         target,
                         &inbox_source,
@@ -837,7 +870,7 @@ impl FactoryDaemon {
                     .await
                 };
                 match inject_result {
-                    Ok(_) => {
+                    Ok(cas_mux::InjectOutcome::Delivered) => {
                         success = true;
                         // cas-f9e8 telemetry: end-to-end delivery latency
                         // measured from the sender-assigned `created_at` to
@@ -864,6 +897,31 @@ impl FactoryDaemon {
                                 &pane_target,
                                 "ok",
                                 None,
+                            );
+                        }
+                    }
+                    Ok(cas_mux::InjectOutcome::DeferredComposerDirty) => {
+                        tracing::info!(
+                            target: "cas::coordination",
+                            stage = "composer_inject_deferred",
+                            message_id = queued.id,
+                            target_agent = %pane_target,
+                            "prompt_queue message remains durable pending a clean composer"
+                        );
+                        let _ = queue.record_retry(
+                            queued.id,
+                            cas_store::PendingReason::GatedNotReady,
+                            Some("operator composer is dirty"),
+                        );
+                        if let Some(ref store) = event_store {
+                            record_injection(
+                                store,
+                                queued.id,
+                                &queued.source,
+                                &queued.target,
+                                &pane_target,
+                                "deferred",
+                                Some("operator composer is dirty".to_string()),
                             );
                         }
                     }
@@ -1454,7 +1512,7 @@ impl FactoryDaemon {
                         name,
                     );
                 }
-                if let Err(e) = self.app.shutdown_workers(count, &names, force) {
+                if let Err(e) = self.app.shutdown_workers(count, &names, force).await {
                     let target = if !names.is_empty() {
                         names.join(", ")
                     } else if let Some(c) = count {
@@ -1896,11 +1954,10 @@ fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        cancel_targeted_in_flight_spawn, enqueue_spawn_cancelled_notice,
-        is_exact_agent_name_match, matches_event_filter, prompt_poison_sweep_due,
-        prompt_poison_sweep_targets, registered_prompt_sweep_agents,
-        reminder_matches_factory_session, shutdown_targets, take_next_pending_spawn,
-        take_spawn_cancellation,
+        cancel_targeted_in_flight_spawn, enqueue_spawn_cancelled_notice, is_exact_agent_name_match,
+        matches_event_filter, prompt_poison_sweep_due, prompt_poison_sweep_targets,
+        registered_prompt_sweep_agents, reminder_matches_factory_session, shutdown_targets,
+        take_next_pending_spawn, take_spawn_cancellation,
     };
     use crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound;
     use crate::ui::factory::daemon::{FactoryDaemon, PendingSpawn};
@@ -1909,6 +1966,69 @@ mod tests {
     use cas_types::{AgentStatus, Task, TaskStatus};
     use std::collections::{HashMap, HashSet, VecDeque};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn composer_deferred_delivery_stays_durable_across_restart_cas_0b64() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let row_id = queue
+            .enqueue_with_session("supervisor", "worker-1", "report", "factory-session")
+            .unwrap();
+
+        let outcome = cas_mux::InjectOutcome::DeferredComposerDirty;
+        match outcome {
+            cas_mux::InjectOutcome::Delivered => {
+                queue.mark_transport_delivered(row_id).unwrap();
+            }
+            cas_mux::InjectOutcome::DeferredComposerDirty => {
+                queue
+                    .record_retry(
+                        row_id,
+                        cas_store::PendingReason::GatedNotReady,
+                        Some("operator composer is dirty"),
+                    )
+                    .unwrap();
+            }
+        }
+        drop(queue);
+
+        let reopened = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let report = reopened.message_delivery_report(row_id).unwrap().unwrap();
+        assert_eq!(report.legacy_status, cas_store::MessageStatus::Pending);
+        assert_eq!(report.delivered_at, None);
+        assert_eq!(reopened.pending_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn deferred_recipient_is_not_counted_as_broadcast_delivery_cas_0b64() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let row_id = queue
+            .enqueue_with_session("supervisor", "all_workers", "report", "factory-session")
+            .unwrap();
+        let outcome = cas_mux::InjectOutcome::DeferredComposerDirty;
+        let succeeded = match outcome {
+            cas_mux::InjectOutcome::Delivered => 1,
+            cas_mux::InjectOutcome::DeferredComposerDirty => 0,
+        };
+
+        queue
+            .mark_broadcast_outcome(
+                row_id,
+                1,
+                succeeded,
+                1 - succeeded,
+                Some("worker-1: operator composer is dirty"),
+            )
+            .unwrap();
+
+        let report = queue.message_delivery_report(row_id).unwrap().unwrap();
+        assert_ne!(report.stage, cas_store::DeliveryStage::Delivered);
+        assert_eq!(report.delivered_at, None);
+        assert_eq!(queue.pending_count().unwrap(), 1);
+    }
 
     #[test]
     fn first_prompt_queue_tick_with_empty_roster_does_not_abandon_pending_rows() {
@@ -2124,6 +2244,35 @@ mod tests {
             !FactoryDaemon::worker_looks_idle(&data, "ghost-worker", now),
             "an agent absent from DirectorData (e.g. mid-spawn) must not be \
              guessed idle — fall back to the plain inbox write"
+        );
+    }
+
+    #[test]
+    fn idle_nudge_excludes_supervisor_display_name_but_keeps_idle_worker() {
+        let now = chrono::Utc::now();
+        let data = director_data_with(vec![
+            agent_summary("cosmic-bear-43", None, None, None),
+            agent_summary("swift-fox", None, None, None),
+        ]);
+
+        assert!(
+            !FactoryDaemon::target_looks_like_idle_worker(
+                &data,
+                "cosmic-bear-43",
+                "cosmic-bear-43",
+                now,
+            ),
+            "a supervisor addressed by display name must receive only the inbox write, never a \
+             second PTY delivery"
+        );
+        assert!(
+            FactoryDaemon::target_looks_like_idle_worker(
+                &data,
+                "swift-fox",
+                "cosmic-bear-43",
+                now,
+            ),
+            "an idle worker target must remain eligible for the PTY nudge"
         );
     }
 

@@ -203,6 +203,16 @@ pub struct TaskCloseRequest {
     )]
     #[serde(default)]
     pub search_manifest: Option<String>,
+
+    /// Task-attributed commit receipt for merged-before-close recovery.
+    #[schemars(
+        description = "Full commit SHA produced by this task. CAS validates \
+                       that it exists, carries a non-empty diff, and is an \
+                       ancestor of the task's parent branch before allowing \
+                       a zero-commit close."
+    )]
+    #[serde(default)]
+    pub commit_receipt: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

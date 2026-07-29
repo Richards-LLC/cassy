@@ -54,3 +54,15 @@ It also leaves a dirty working tree in the checkout, which interacts badly with 
 - d) Detect and report a pre-existing merge-in-progress on entry, instead of surfacing it as an opaque git failure on an unrelated branch.
 
 (a) and (b) together are small and would have turned a factory-wide stall into a one-line "these paths conflict, rebase and resolve".
+
+## Resolution (cas-09f2, 2026-07-29)
+
+Resolved across the low-level merge guard and the supervisor-facing
+`worktree_merge` surface. Conflicts are preflighted without touching the
+checkout, real merge failures abort before returning, and regressions prove
+that no `MERGE_HEAD` or staged conflict remains and that the next unrelated
+merge succeeds. Entry now also fails fast on either an existing `MERGE_HEAD`
+or tracked target-checkout residue. Errors distinguish a content conflict from
+pre-existing residue, name the affected paths, state whether the checkout was
+left/restored clean, and give safe worker-branch or temporary-worktree recovery
+options.

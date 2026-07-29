@@ -640,8 +640,16 @@ async fn test_spawn_workers_isolate_flag() {
     req.count = Some(2);
     req.isolate = Some(true);
 
-    let result = env.service.factory(Parameters(req)).await;
-    assert!(result.is_ok());
+    let result = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect("stock spawn should succeed");
+    let text = get_text(&result);
+    assert!(
+        text.contains("policy default codex/gpt-5.6-sol/medium"),
+        "caller-facing response must name the resolved policy fallback: {text}"
+    );
 
     let entries = env.spawn_queue().peek(10).expect("peek");
     assert_eq!(entries.len(), 1);
@@ -900,7 +908,10 @@ async fn test_spawn_workers_no_cli_override_queues_safe_worker_spec() {
         .expect("no cli/model/effort should still queue a resolved worker_spec");
     let spec: cas_mux::WorkerSpec = serde_json::from_str(spec_json).expect("valid WorkerSpec");
     assert_eq!(spec.cli, cas_mux::SupervisorCli::Codex);
-    assert_eq!(spec.model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(
+        spec.model.as_deref(),
+        Some(cas::config::STOCK_WORKER_MODEL)
+    );
     assert_eq!(spec.effort, Some(cas_mux::Effort::Medium));
 }
 
@@ -2846,7 +2857,10 @@ async fn test_efc4_heterogeneous_codex_then_claude_spawn_queued_correctly() {
         .expect("cas-23dc: omitted overrides must still queue a resolved worker_spec");
     let spec: cas_mux::WorkerSpec = serde_json::from_str(spec_json).expect("valid WorkerSpec");
     assert_eq!(spec.cli, cas_mux::SupervisorCli::Codex);
-    assert_eq!(spec.model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(
+        spec.model.as_deref(),
+        Some(cas::config::STOCK_WORKER_MODEL)
+    );
     assert_eq!(spec.effort, Some(cas_mux::Effort::Medium));
 }
 

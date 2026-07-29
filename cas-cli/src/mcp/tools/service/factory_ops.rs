@@ -41,6 +41,13 @@ pub(crate) fn worker_cli_from_agent(agent: &cas_types::Agent) -> cas_mux::Superv
         .unwrap_or(cas_mux::SupervisorCli::Claude)
 }
 
+fn worker_effort_from_agent(agent: &cas_types::Agent) -> Option<cas_mux::Effort> {
+    agent
+        .metadata
+        .get("worker_effort")
+        .and_then(|effort| effort.parse::<cas_mux::Effort>().ok())
+}
+
 fn parse_spawn_cli(cli: Option<&str>) -> Result<Option<cas_mux::SupervisorCli>, String> {
     cli.map(|s| {
         s.parse::<cas_mux::SupervisorCli>()
@@ -61,7 +68,7 @@ fn parse_spawn_effort(effort: Option<&str>) -> Result<Option<cas_mux::Effort>, S
 
 fn default_worker_model_for_cli(cli: cas_mux::SupervisorCli) -> &'static str {
     match cli {
-        cas_mux::SupervisorCli::Claude => "sonnet",
+        cas_mux::SupervisorCli::Claude => "opus",
         cas_mux::SupervisorCli::Codex => crate::config::STOCK_WORKER_MODEL,
         // EPIC cas-8888 (cas-9a31, Phase 1): grok 0.2.93 default model.
         cas_mux::SupervisorCli::Grok => "grok-4.5",
@@ -184,10 +191,34 @@ fn spawn_spec_summary(spec_json: &str) -> String {
 fn spawn_spec_warning(model_explicit: bool, effort_explicit: bool, spec_json: &str) -> String {
     let mut warnings = Vec::new();
     if !model_explicit || !effort_explicit {
-        warnings.push(
-            "Warning: spawn_workers should include explicit model= and effort=; omitted fields were resolved to safe worker defaults for this request."
-                .to_string(),
-        );
+        let omitted = match (model_explicit, effort_explicit) {
+            (false, false) => "model=/effort=",
+            (false, true) => "model=",
+            (true, false) => "effort=",
+            (true, true) => unreachable!("warning requires at least one omitted field"),
+        };
+        match serde_json::from_str::<cas_mux::WorkerSpec>(spec_json) {
+            Ok(spec) => {
+                let model_uses_policy = model_explicit
+                    || spec.model.as_deref() == Some(default_worker_model_for_cli(spec.cli));
+                let effort_uses_policy = effort_explicit
+                    || spec.effort == Some(default_worker_effort_for_cli(spec.cli));
+                let fallback = if model_uses_policy && effort_uses_policy {
+                    "policy default"
+                } else {
+                    "configured fallback"
+                };
+                warnings.push(format!(
+                    "Warning: spawn_workers omitted {omitted}; resolved to {fallback} {}/{}/{} — pass model=/effort= explicitly to tier the spawn.",
+                    spec.cli.as_str(),
+                    spec.model.as_deref().unwrap_or("(backend default)"),
+                    format_effort(spec.effort)
+                ));
+            }
+            Err(_) => warnings.push(format!(
+                "Warning: spawn_workers omitted {omitted}; pass model=/effort= explicitly to tier the spawn."
+            )),
+        }
     }
     if !model_explicit {
         if let Ok(spec) = serde_json::from_str::<cas_mux::WorkerSpec>(spec_json) {
@@ -763,6 +794,20 @@ impl CasService {
                 .filter_map(|t| t.assignee)
                 .collect()
         };
+        // cas-78bf: retain assigned Open tasks (including their assignment
+        // timestamp) so worker_status can distinguish the normal dispatch
+        // grace window from a worker that has held work without ever
+        // starting it past the configured stall threshold.
+        let assigned_open_tasks: Vec<cas_types::Task> = {
+            use crate::store::open_task_store;
+            open_task_store(&self.inner.cas_root)
+                .ok()
+                .and_then(|ts| ts.list(Some(cas_types::TaskStatus::Open)).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|task| task.assignee.is_some())
+                .collect()
+        };
 
         let workers: Vec<_> = agents
             .iter()
@@ -975,13 +1020,42 @@ impl CasService {
                             worker_cli,
                         )
                     });
+                let assigned_open_task = assigned_open_tasks.iter().find(|task| {
+                    task.assignee.as_deref() == Some(agent.name.as_str())
+                        || task.assignee.as_deref() == Some(agent.id.as_str())
+                });
+                let assigned_unstarted_elapsed = assigned_open_task.and_then(|task| {
+                    let effective_threshold =
+                        crate::ui::factory::effective_stall_threshold_secs(
+                            stall_threshold_secs as u64,
+                            worker_effort_from_agent(agent),
+                        ) as i64;
+                    assigned_unstarted_elapsed_secs(
+                        task.updated_at,
+                        last_activity.map(|(secs, _)| secs),
+                        effective_threshold,
+                        in_flight_tool_call,
+                        chrono::Utc::now(),
+                    )
+                });
                 let stalled = is_worker_stalled(
                     has_in_progress_task,
                     last_activity.map(|(secs, _)| secs),
                     stall_threshold_secs,
                     in_flight_tool_call,
                 );
-                let activity_info = if !has_in_progress_task {
+                let activity_info = if let (Some(task), Some(elapsed)) =
+                    (assigned_open_task, assigned_unstarted_elapsed)
+                {
+                    format_assigned_unstarted_status(
+                        &task.id,
+                        elapsed,
+                        crate::ui::factory::effective_stall_threshold_secs(
+                            stall_threshold_secs as u64,
+                            worker_effort_from_agent(agent),
+                        ) as i64,
+                    )
+                } else if !has_in_progress_task {
                     match last_activity {
                         Some((secs, phase)) => {
                             format!("\n    last activity: {secs}s ago ({phase})")
@@ -2381,6 +2455,41 @@ pub(crate) fn last_worker_activity_secs_with_transcript(
     }
 }
 
+/// cas-78bf: elapsed time for the sustained assigned-but-unstarted state.
+///
+/// Assignment and the most recent harness-aware activity are both valid
+/// baselines; whichever is newer starts (or resets) the quiet window. An
+/// in-flight tool call is direct busy evidence and suppresses escalation.
+fn assigned_unstarted_elapsed_secs(
+    assigned_at: chrono::DateTime<chrono::Utc>,
+    last_activity_secs_ago: Option<i64>,
+    threshold_secs: i64,
+    in_flight_tool_call: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<i64> {
+    if in_flight_tool_call {
+        return None;
+    }
+    let assigned_elapsed = (now - assigned_at).num_seconds();
+    if assigned_elapsed < 0 {
+        return None;
+    }
+    let quiet_elapsed = last_activity_secs_ago
+        .map(|activity_elapsed| assigned_elapsed.min(activity_elapsed))
+        .unwrap_or(assigned_elapsed);
+    (quiet_elapsed >= threshold_secs).then_some(assigned_elapsed)
+}
+
+fn format_assigned_unstarted_status(
+    task_id: &str,
+    elapsed_secs: i64,
+    threshold_secs: i64,
+) -> String {
+    format!(
+        "\n    ⚠ ASSIGNED BUT UNSTARTED: {task_id} was assigned {elapsed_secs}s ago and remains unstarted with no recent activity (threshold: {threshold_secs}s)"
+    )
+}
+
 /// cas-9829: whether a `worker_status` row should render the `⚠ STALLED`
 /// marker instead of the soft "may be investigating or idle" hedge.
 ///
@@ -3502,7 +3611,7 @@ mod tests {
         let spec = decoded_spawn_spec(&json);
 
         assert_eq!(spec.cli, cas_mux::SupervisorCli::Claude);
-        assert_eq!(spec.model.as_deref(), Some("sonnet"));
+        assert_eq!(spec.model.as_deref(), Some("opus"));
         assert_eq!(spec.effort, Some(cas_mux::Effort::Medium));
     }
 
@@ -3539,6 +3648,55 @@ mod tests {
     }
 
     #[test]
+    fn spawn_policy_fallback_models_are_allowed_by_shipped_routing_doc() {
+        // Isolate HOME so no user or project-level worker override can mask
+        // the stock fallback this regression is intended to guard.
+        let _home = TestEnvGuard::temp_home();
+        let routing_doc = include_str!(
+            "../../../builtins/skills/cas-supervisor/references/model-selection.md"
+        );
+
+        for (cli, spec) in [
+            (
+                cas_mux::SupervisorCli::Codex,
+                decoded_spawn_spec(&build_spawn_spec_json(None, None, None).unwrap()),
+            ),
+            (
+                cas_mux::SupervisorCli::Claude,
+                decoded_spawn_spec(
+                    &build_spawn_spec_json(Some("claude"), None, None).unwrap(),
+                ),
+            ),
+        ] {
+            assert_eq!(spec.cli, cli);
+            let model = spec.model.as_deref().expect("fallback model");
+            let allowed_route = format!("cli={} model={model}", cli.as_str());
+            assert!(
+                routing_doc
+                    .lines()
+                    .any(|line| line.contains(&allowed_route)),
+                "runtime fallback {allowed_route} must be an allowed route in model-selection.md"
+            );
+        }
+    }
+
+    #[test]
+    fn omitted_fields_warning_names_resolved_policy_default_spec() {
+        let _home = TestEnvGuard::temp_home();
+        let json = build_spawn_spec_json(None, None, None).unwrap();
+        let warning = spawn_spec_warning(false, false, &json);
+
+        assert!(
+            warning.contains("policy default codex/gpt-5.6-sol/medium"),
+            "{warning}"
+        );
+        assert!(
+            warning.contains("pass model=/effort= explicitly to tier the spawn"),
+            "{warning}"
+        );
+    }
+
+    #[test]
     fn spawn_spec_omitted_cli_respects_project_factory_default() {
         let _home = TestEnvGuard::temp_home();
         let tmp = tempfile::tempdir().expect("temp project config");
@@ -3557,10 +3715,15 @@ effort = "high"
         let json =
             build_spawn_spec_json_with_project_config(None, None, None, Some(config)).unwrap();
         let spec = decoded_spawn_spec(&json);
+        let warning = spawn_spec_warning(false, false, &json);
 
         assert_eq!(spec.cli, cas_mux::SupervisorCli::Claude);
         assert_eq!(spec.model.as_deref(), Some("sonnet"));
         assert_eq!(spec.effort, Some(cas_mux::Effort::High));
+        assert!(
+            warning.contains("configured fallback claude/sonnet/high"),
+            "{warning}"
+        );
     }
 
     #[test]
@@ -3765,6 +3928,57 @@ effort = "high"
         // that's the pre-existing "may be investigating or idle" case.
         assert!(!is_worker_stalled(false, None, 300, false));
         assert!(!is_worker_stalled(false, Some(1_000), 300, false));
+    }
+
+    #[test]
+    fn test_78bf_assigned_unstarted_elapsed_crosses_threshold_and_reports_elapsed() {
+        let now = chrono::Utc::now();
+        assert_eq!(
+            assigned_unstarted_elapsed_secs(
+                now - chrono::Duration::seconds(310),
+                None,
+                300,
+                false,
+                now,
+            ),
+            Some(310)
+        );
+        assert_eq!(
+            assigned_unstarted_elapsed_secs(
+                now - chrono::Duration::seconds(299),
+                None,
+                300,
+                false,
+                now,
+            ),
+            None,
+            "the existing just-assigned grace window must remain unchanged"
+        );
+    }
+
+    #[test]
+    fn test_78bf_assigned_unstarted_elapsed_resets_for_activity_and_in_flight_work() {
+        let now = chrono::Utc::now();
+        let assigned_at = now - chrono::Duration::seconds(600);
+        assert_eq!(
+            assigned_unstarted_elapsed_secs(assigned_at, Some(10), 300, false, now),
+            None,
+            "recent harness-aware activity must suppress escalation"
+        );
+        assert_eq!(
+            assigned_unstarted_elapsed_secs(assigned_at, Some(600), 300, true, now),
+            None,
+            "an in-flight tool call is direct evidence that the worker is busy"
+        );
+    }
+
+    #[test]
+    fn test_78bf_worker_status_names_assigned_unstarted_state_and_elapsed() {
+        let rendered = format_assigned_unstarted_status("cas-unstarted", 310, 300);
+        assert!(rendered.contains("ASSIGNED BUT UNSTARTED"));
+        assert!(rendered.contains("cas-unstarted was assigned 310s ago"));
+        assert!(rendered.contains("remains unstarted with no recent activity"));
+        assert!(rendered.contains("threshold: 300s"));
     }
 
     #[test]

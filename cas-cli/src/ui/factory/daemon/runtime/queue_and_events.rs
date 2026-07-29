@@ -2,16 +2,25 @@ use crate::ui::factory::daemon::imports::*;
 use crate::ui::factory::director::AgentSummary;
 
 const PROMPT_POISON_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+/// Stale expiry self-heals on the next 2-second tick, so never spend the
+/// shared store's 5-second busy timeout (plus blocking retries) on this path.
+const REMINDER_EXPIRY_BUSY_BUDGET: Duration = Duration::from_millis(100);
 
 fn prompt_poison_sweep_due(last: Option<Instant>, now: Instant) -> bool {
     last.is_some_and(|last| now.saturating_duration_since(last) >= PROMPT_POISON_SWEEP_INTERVAL)
 }
 
-fn expire_stale_reminders_with_retry<F>(expire_stale: F) -> cas_store::Result<usize>
-where
-    F: Fn() -> cas_store::Result<usize>,
-{
-    cas_store::shared_db::with_write_retry(expire_stale)
+fn report_stale_reminder_expiry(result: cas_store::Result<cas_store::ReminderExpiryOutcome>) {
+    match result {
+        Ok(cas_store::ReminderExpiryOutcome::Expired(_)) => {}
+        Ok(cas_store::ReminderExpiryOutcome::DeferredBusy) => {
+            tracing::warn!(
+                budget_ms = REMINDER_EXPIRY_BUSY_BUDGET.as_millis(),
+                "SQLite busy; deferring stale reminder expiry to the next daemon tick"
+            );
+        }
+        Err(error) => tracing::error!("Failed to expire stale reminders: {}", error),
+    }
 }
 
 fn registered_prompt_sweep_agents(
@@ -1640,10 +1649,12 @@ impl FactoryDaemon {
             }
         };
 
-        // Expire stale reminders
-        if let Err(e) = expire_stale_reminders_with_retry(|| reminder_store.expire_stale()) {
-            tracing::error!("Failed to expire stale reminders: {}", e);
-        }
+        // Expire stale reminders within a small hot-path budget. Busy is
+        // expected to self-heal on the next tick; other failures are terminal.
+        report_stale_reminder_expiry(cas_store::expire_stale_bounded(
+            self.app.cas_dir(),
+            REMINDER_EXPIRY_BUSY_BUDGET,
+        ));
 
         // Check time-based reminders
         let due_reminders = match reminder_store.get_due_time_reminders() {
@@ -1968,10 +1979,10 @@ fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        cancel_targeted_in_flight_spawn, enqueue_spawn_cancelled_notice,
-        expire_stale_reminders_with_retry, is_exact_agent_name_match, matches_event_filter,
-        prompt_poison_sweep_due, prompt_poison_sweep_targets, registered_prompt_sweep_agents,
-        reminder_matches_factory_session, shutdown_targets, take_next_pending_spawn,
+        cancel_targeted_in_flight_spawn, enqueue_spawn_cancelled_notice, is_exact_agent_name_match,
+        matches_event_filter, prompt_poison_sweep_due, prompt_poison_sweep_targets,
+        registered_prompt_sweep_agents, reminder_matches_factory_session,
+        report_stale_reminder_expiry, shutdown_targets, take_next_pending_spawn,
         take_spawn_cancellation,
     };
     use crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound;
@@ -1999,8 +2010,7 @@ mod tests {
     }
 
     #[test]
-    fn reminder_expiry_retries_transient_busy_at_warn() {
-        let attempts = std::cell::Cell::new(0);
+    fn reminder_expiry_defers_transient_busy_at_warn() {
         let logs = Arc::new(Mutex::new(Vec::new()));
         let writer_logs = Arc::clone(&logs);
         let subscriber = tracing_subscriber::fmt()
@@ -2010,32 +2020,36 @@ mod tests {
             .with_writer(move || LogBuffer(Arc::clone(&writer_logs)))
             .finish();
 
-        let expired = tracing::subscriber::with_default(subscriber, || {
-            expire_stale_reminders_with_retry(|| {
-                attempts.set(attempts.get() + 1);
-                if attempts.get() == 1 {
-                    Err(cas_store::StoreError::Database(
-                        rusqlite::Error::SqliteFailure(
-                            rusqlite::ffi::Error {
-                                code: rusqlite::ffi::ErrorCode::DatabaseBusy,
-                                extended_code: 5,
-                            },
-                            Some("database is locked".to_string()),
-                        ),
-                    ))
-                } else {
-                    Ok(3)
-                }
-            })
-        })
-        .unwrap();
+        tracing::subscriber::with_default(subscriber, || {
+            report_stale_reminder_expiry(Ok(cas_store::ReminderExpiryOutcome::DeferredBusy));
+        });
 
         let output = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
-        assert_eq!(expired, 3);
-        assert_eq!(attempts.get(), 2);
-        assert!(output.contains(" WARN "));
-        assert!(output.contains("SQLite busy, retrying after backoff with jitter"));
-        assert!(!output.contains(" ERROR "));
+        assert!(output.contains("WARN "));
+        assert!(output.contains("deferring stale reminder expiry"));
+        assert!(!output.contains("ERROR "));
+    }
+
+    #[test]
+    fn reminder_expiry_logs_terminal_failure_at_error() {
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let writer_logs = Arc::clone(&logs);
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || LogBuffer(Arc::clone(&writer_logs)))
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            report_stale_reminder_expiry(Err(cas_store::StoreError::NotFound(
+                "reminder table missing".to_string(),
+            )));
+        });
+
+        let output = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("ERROR "));
+        assert!(output.contains("Failed to expire stale reminders"));
     }
 
     #[test]

@@ -127,7 +127,8 @@ pub use prompt_queue_store::{
 
 // Reminder store for supervisor "Remind Me" feature
 pub use reminder_store::{
-    Reminder, ReminderStatus, ReminderStore, ReminderTriggerType, SqliteReminderStore,
+    Reminder, ReminderExpiryOutcome, ReminderStatus, ReminderStore, ReminderTriggerType,
+    SqliteReminderStore, expire_stale_bounded,
 };
 
 // Spawn queue store for worker lifecycle commands

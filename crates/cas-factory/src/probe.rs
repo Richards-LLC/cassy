@@ -35,15 +35,14 @@ const PROBE_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// Returns `true` when `codex --version` resolves and exits (successfully
 /// or not — a binary that runs and errors is still "present"; we only care
-/// about resolving + executing, matching `is_codex_installed()`'s existing
-/// `cas-cli/src/cli/factory/mod.rs` convention) within [`PROBE_TIMEOUT`].
+/// about resolving + executing) within [`PROBE_TIMEOUT`].
 ///
 /// Uses a spawn + bounded `try_wait()` poll rather than the simpler
-/// `Command::output()` (blocking, no timeout) that `is_codex_installed()`
-/// uses today, because cas-a487 explicitly calls for a short timeout here:
-/// this probe can run on every worker-spec resolution, not just once at
-/// `cas factory` launch, so a wedged binary must not be able to stall
-/// every subsequent spawn attempt indefinitely.
+/// blocking `Command::output()` approach because cas-a487 explicitly calls
+/// for a short timeout: this probe can run on every worker-spec resolution,
+/// so a wedged binary must not be able to stall every subsequent spawn
+/// attempt indefinitely. As of cas-1c3a this is the sole Codex binary probe
+/// used for harness fallback; the CLI preflight deliberately defers to it.
 pub fn codex_binary_present() -> bool {
     codex_binary_present_with(|| {
         Command::new("codex")

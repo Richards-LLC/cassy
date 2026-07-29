@@ -3184,6 +3184,7 @@ async fn test_062d_lifecycle_close_pushes_closed() {
             code_review_findings: None,
             bypass_code_review: Some(true),
             search_manifest: None,
+            commit_receipt: None,
         }))
         .await
         .expect("close should succeed");

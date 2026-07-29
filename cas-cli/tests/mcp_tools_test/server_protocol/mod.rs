@@ -231,7 +231,8 @@ async fn test_start_blocked_with_pending_verification() {
         reason: Some("Completed".to_string()),
         bypass_code_review: None,
 code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -337,7 +338,8 @@ async fn test_claim_blocked_with_pending_verification() {
         reason: Some("Completed".to_string()),
         bypass_code_review: None,
 code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -549,7 +551,8 @@ async fn test_start_same_task_allowed_when_pending() {
         reason: Some("Completed".to_string()),
         bypass_code_review: None,
 code_review_findings: None,
-            search_manifest: None,    };
+            search_manifest: None,
+            commit_receipt: None,    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await

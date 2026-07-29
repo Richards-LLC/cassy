@@ -1564,3 +1564,45 @@ fn merge_and_cleanup_detects_pre_existing_merge_in_progress() {
     // check does not itself abort or otherwise touch it.
     assert!(manager.git().merge_in_progress());
 }
+
+/// AC4: tracked target-checkout residue without a MERGE_HEAD must also fail
+/// before checkout/merge, with the original staged path named.
+#[test]
+fn merge_and_cleanup_detects_pre_existing_dirty_target_index() {
+    let (_temp, repo_path) = create_test_repo();
+    let mut config = WorktreeConfig::default();
+    config.auto_merge = true;
+    let mut manager = WorktreeManager::new(&repo_path, config).unwrap();
+
+    let epic_branch = manager.create_epic_branch("Dirty Target Index").unwrap();
+    manager.git().checkout(&epic_branch).unwrap();
+
+    let mut worktree = manager.create_for_worker("dirty-target-worker").unwrap();
+    let wt_path = worktree.path.clone();
+    commit_file(&wt_path, "worker.txt", "worker\n", "worker work");
+    worktree.parent_branch = epic_branch;
+
+    std::fs::write(repo_path.join("leftover.txt"), "staged residue\n").unwrap();
+    Command::new("git")
+        .args(["add", "leftover.txt"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    let pre_head = manager.git().ref_sha("HEAD").unwrap();
+
+    let err = manager
+        .merge_and_cleanup(&mut worktree, false, false)
+        .expect_err("a dirty target index must fail before merge");
+
+    match err {
+        WorktreeError::Git(GitError::MergeCheckoutDirty(details)) => {
+            assert!(
+                details.contains("leftover.txt"),
+                "dirty-index error must name the staged path: {details}"
+            );
+        }
+        other => panic!("expected MergeCheckoutDirty, got {other:?}"),
+    }
+    assert_eq!(manager.git().ref_sha("HEAD").unwrap(), pre_head);
+    assert!(!manager.git().merge_in_progress());
+}

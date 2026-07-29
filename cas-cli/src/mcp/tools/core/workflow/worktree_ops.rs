@@ -65,6 +65,63 @@ pub(crate) fn resolve_worktree_merge_cleanup(
     }
 }
 
+/// Translate worktree merge failures into supervisor-actionable MCP errors.
+///
+/// The low-level merge layer owns cleanup and path discovery; this callable
+/// surface explains the resulting state and the safe recovery choices.
+fn worktree_merge_mcp_error(
+    error: crate::worktree::WorktreeError,
+    source_branch: &str,
+    target_branch: &str,
+) -> McpError {
+    use crate::worktree::{GitError, WorktreeError};
+
+    let message = match error {
+        WorktreeError::Git(GitError::MergeConflictPaths(paths)) => format!(
+            "CONTENT CONFLICT: {source_branch} cannot be merged into {target_branch}. \
+             Conflicting paths: {}.\n\n\
+             The shared checkout was left at or restored to its pre-merge state; this \
+             attempt left no MERGE_HEAD or staged conflict.\n\n\
+             Manual options:\n\
+             1. Resolve on {source_branch} by rebasing or merging {target_branch}, then retry.\n\
+             2. Use a temporary worktree for {target_branch}, merge {source_branch} there, \
+             resolve and commit the conflicts, then remove the temporary worktree.",
+            paths.join(", ")
+        ),
+        WorktreeError::Git(GitError::MergeConflict) => format!(
+            "CONTENT CONFLICT: {source_branch} cannot be merged into {target_branch}; \
+             Git did not report the conflicting paths.\n\n\
+             The shared checkout was left at or restored to its pre-merge state; this \
+             attempt left no MERGE_HEAD or staged conflict.\n\n\
+             Manual options:\n\
+             1. Resolve on {source_branch} by rebasing or merging {target_branch}, then retry.\n\
+             2. Use a temporary worktree for {target_branch}, merge {source_branch} there, \
+             resolve and commit the conflicts, then remove the temporary worktree."
+        ),
+        WorktreeError::Git(GitError::MergeInProgress(details)) => format!(
+            "PRE-EXISTING MERGE RESIDUE: the shared target checkout already has \
+             MERGE_HEAD and unresolved index state: {details}.\n\n\
+             worktree_merge did not attempt {source_branch}. Resolve and commit the \
+             existing merge, or run `git merge --abort` in the shared target checkout, \
+             before retrying the merge into {target_branch}."
+        ),
+        WorktreeError::Git(GitError::MergeCheckoutDirty(details)) => format!(
+            "PRE-EXISTING TARGET CHECKOUT RESIDUE: the shared target checkout has \
+             tracked changes from an earlier operation: {details}.\n\n\
+             worktree_merge did not attempt {source_branch}. Restore, commit, or move \
+             those changes before retrying the merge into {target_branch}; `force=true` \
+             does not bypass shared-checkout residue."
+        ),
+        other => format!("Failed to merge worktree: {other}"),
+    };
+
+    McpError {
+        code: ErrorCode::INTERNAL_ERROR,
+        message: Cow::Owned(message),
+        data: None,
+    }
+}
+
 /// True when `token` is the System-B worker name (bare or `factory/<name>`).
 fn worker_name_token_matches(token: &str, worker: &str) -> bool {
     token == worker || token.strip_prefix("factory/") == Some(worker)
@@ -1325,10 +1382,8 @@ impl CasCore {
 
         let merge_commit = manager
             .merge_and_cleanup(&mut worktree, force, do_cleanup)
-            .map_err(|e| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!("Failed to merge worktree: {e}")),
-                data: None,
+            .map_err(|e| {
+                worktree_merge_mcp_error(e, &worktree.branch, &worktree.parent_branch)
             })?;
 
         // Update store — System B worktrees were never registered there, so
@@ -1507,8 +1562,9 @@ impl CasCore {
 mod tests {
     use super::{
         is_cas_pattern_worktree, is_factory_style_worktree, is_git_worktree, path_is_under,
-        resolve_worktree_merge_cleanup,
+        resolve_worktree_merge_cleanup, worktree_merge_mcp_error,
     };
+    use crate::worktree::{GitError, WorktreeError};
     use std::path::Path;
     use tempfile::TempDir;
 
@@ -1632,5 +1688,56 @@ mod tests {
     fn resolve_merge_cleanup_system_a_uses_config() {
         assert!(resolve_worktree_merge_cleanup(None, false, true));
         assert!(!resolve_worktree_merge_cleanup(None, false, false));
+    }
+
+    #[test]
+    fn conflict_error_names_paths_restored_checkout_and_manual_options() {
+        let error = worktree_merge_mcp_error(
+            WorktreeError::Git(GitError::MergeConflictPaths(vec![
+                "src/one.rs".to_string(),
+                "src/two.rs".to_string(),
+            ])),
+            "factory/worker",
+            "epic/example",
+        );
+        let message = error.message.as_ref();
+
+        assert!(message.contains("CONTENT CONFLICT"));
+        assert!(message.contains("src/one.rs"));
+        assert!(message.contains("src/two.rs"));
+        assert!(message.contains("restored"));
+        assert!(message.contains("temporary worktree"));
+        assert!(message.contains("factory/worker"));
+        assert!(message.contains("epic/example"));
+    }
+
+    #[test]
+    fn pre_existing_checkout_residue_error_names_original_state() {
+        let error = worktree_merge_mcp_error(
+            WorktreeError::Git(GitError::MergeInProgress(
+                "UU src/leftover.rs".to_string(),
+            )),
+            "factory/unrelated",
+            "epic/example",
+        );
+        let message = error.message.as_ref();
+
+        assert!(message.contains("PRE-EXISTING MERGE RESIDUE"));
+        assert!(message.contains("MERGE_HEAD"));
+        assert!(message.contains("src/leftover.rs"));
+        assert!(message.contains("did not attempt"));
+        assert!(message.contains("factory/unrelated"));
+
+        let dirty_error = worktree_merge_mcp_error(
+            WorktreeError::Git(GitError::MergeCheckoutDirty(
+                "added src/staged.rs".to_string(),
+            )),
+            "factory/unrelated",
+            "epic/example",
+        );
+        let dirty_message = dirty_error.message.as_ref();
+        assert!(dirty_message.contains("PRE-EXISTING TARGET CHECKOUT RESIDUE"));
+        assert!(dirty_message.contains("src/staged.rs"));
+        assert!(dirty_message.contains("force=true"));
     }
 }

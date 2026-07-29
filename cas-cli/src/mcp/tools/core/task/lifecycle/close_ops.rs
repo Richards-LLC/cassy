@@ -4831,8 +4831,9 @@ pub(crate) fn check_zero_commit_close(
            `mcp__cas__task action=update id={task_id} execution_note=additive-only`\n\
         3. If the supervisor already merged this task's work — including an \
            out-of-band merge after conflict rework cleared the old anchor — \
-           find the full SHA of YOUR OWN worker task commit (not the \
-           supervisor's merge commit), verify it is an ancestor of \
+           find the full SHA of the worker task commit OR the merge commit \
+           that actually carried this task's work (never an unrelated \
+           historical commit), verify it is an ancestor of \
            {parent_branch}, then retry close with \
            `commit_receipt=<full-sha>`.\n\
         4. If no task commit receipt is available, ask the supervisor to \
@@ -11256,10 +11257,10 @@ mod zero_change_close_tests {
                 );
                 assert!(
                     msg.contains("out-of-band merge after conflict rework")
-                        && msg.contains("YOUR OWN worker task commit")
-                        && msg.contains("not the supervisor's merge commit"),
-                    "cleared-anchor guidance must identify the attributable worker \
-                     commit, not the out-of-band merge commit: {msg}"
+                        && msg.contains("worker task commit OR the merge commit")
+                        && msg.contains("never an unrelated historical commit"),
+                    "cleared-anchor guidance must identify an attributable task or \
+                     merge commit, never an unrelated historical commit: {msg}"
                 );
             }
             ZeroCommitCloseOutcome::Proceed => {
@@ -11654,8 +11655,8 @@ mod zero_change_close_tests {
 
     /// cas-7308a: conflict resume clears the parked anchor, then the
     /// supervisor resolves and merges out-of-band while the worker branch
-    /// has no commits beyond the parent. The receipt must be the worker's
-    /// own task commit, not the supervisor's merge commit.
+    /// has no commits beyond the parent. This fixture exercises the worker
+    /// task-commit receipt; cas-5626 separately covers a merge-commit receipt.
     #[test]
     fn cas7308a_conflict_resume_accepts_worker_commit_receipt_after_out_of_band_merge() {
         let dir = init_worker_repo();
@@ -11691,6 +11692,7 @@ mod zero_change_close_tests {
         git(dir.path(), &["checkout", "-q", "factory/test-worker"]);
         git(dir.path(), &["reset", "--hard", "main"]);
         assert_eq!(count_worker_branch_commits(dir.path(), "main"), 0);
+        let receipt_window = test_receipt_window();
 
         let outcome = check_zero_commit_close(
             dir.path(),
@@ -11701,9 +11703,10 @@ mod zero_change_close_tests {
             false,
             None, // conflict resume cleared the old anchor
             Some(&worker_task_receipt),
+            Some(&receipt_window),
         );
         assert!(
-            matches!(outcome, ZeroCommitCloseOutcome::Proceed),
+            matches!(outcome, ZeroCommitCloseOutcome::ProceedWithReceipt(_)),
             "the worker's merged task commit must close the cleared-anchor shape: {outcome:?}"
         );
     }

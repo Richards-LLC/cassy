@@ -796,7 +796,7 @@ impl Mux {
     ///
     /// After the signal, `remove_pane` still drops the PTY master, which sends
     /// a redundant SIGHUP as belt-and-suspenders.
-    pub fn kill_worker(&mut self, name: &str, force: bool) -> Result<()> {
+    pub async fn kill_worker(&mut self, name: &str, force: bool) -> Result<()> {
         // Verify it's a worker pane
         if let Some(pane) = self.panes.get(name) {
             if *pane.kind() != PaneKind::Worker {
@@ -812,7 +812,7 @@ impl Mux {
 
         // Kill the process group before removing the pane
         if let Some(pane) = self.panes.get_mut(name) {
-            pane.kill_tree(force);
+            pane.kill_tree(force).await;
         }
 
         // Remove the pane (drops the PTY master, sends residual SIGHUP)
@@ -1541,7 +1541,7 @@ impl Mux {
     /// groups, not only the direct interactive children, are terminated.
     pub fn kill_all(&mut self) {
         for pane in self.panes.values_mut() {
-            pane.kill_tree(true);
+            pane.kill_tree_force();
         }
     }
 }

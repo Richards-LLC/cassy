@@ -123,7 +123,7 @@ fn enqueue_spawn_cancelled_notice(
 }
 
 impl FactoryDaemon {
-    pub(super) fn handle_mux_event(&mut self, event: cas_mux::MuxEvent) {
+    pub(super) async fn handle_mux_event(&mut self, event: cas_mux::MuxEvent) {
         match event {
             cas_mux::MuxEvent::PaneOutput { pane_id, data } => {
                 // Always buffer raw PTY bytes (warm buffer for future viewers)
@@ -145,7 +145,7 @@ impl FactoryDaemon {
                     tracing::info!("Supervisor exited with code {exit_code:?}, shutting down");
                     self.shutdown.store(true, Ordering::Relaxed);
                 } else if is_worker {
-                    let _ = self.handle_worker_crash(&pane_id, exit_code);
+                    let _ = self.handle_worker_crash(&pane_id, exit_code).await;
                 }
             }
             _ => {}
@@ -153,7 +153,7 @@ impl FactoryDaemon {
     }
 
     /// Handle worker crash
-    fn handle_worker_crash(
+    async fn handle_worker_crash(
         &mut self,
         worker_name: &str,
         exit_code: Option<i32>,
@@ -173,7 +173,7 @@ impl FactoryDaemon {
             let _ = agent_store.mark_stale(&id);
         }
 
-        self.app.mark_worker_crashed(worker_name);
+        self.app.mark_worker_crashed(worker_name).await;
         self.dead_workers.insert(worker_name.to_string());
 
         let exit_info = match exit_code {
@@ -1463,7 +1463,7 @@ impl FactoryDaemon {
                         name,
                     );
                 }
-                if let Err(e) = self.app.shutdown_workers(count, &names, force) {
+                if let Err(e) = self.app.shutdown_workers(count, &names, force).await {
                     let target = if !names.is_empty() {
                         names.join(", ")
                     } else if let Some(c) = count {

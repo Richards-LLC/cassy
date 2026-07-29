@@ -1481,12 +1481,18 @@ impl Pane {
 
     /// Kill the pane's process tree (cas-8c5a).
     ///
-    /// Delegates to `Pty::kill_tree(force)` which sends SIGKILL (`force=true`)
-    /// or SIGTERM (`force=false`) to the entire process group, then kills the
-    /// direct child handle as a belt-and-suspenders fallback.
-    pub fn kill_tree(&mut self, force: bool) {
+    /// Delegates to `Pty::kill_tree(force)`, including its async grace window.
+    pub async fn kill_tree(&mut self, force: bool) {
         match &mut self.backend {
-            PaneBackend::Pty(pty) => pty.kill_tree(force),
+            PaneBackend::Pty(pty) => pty.kill_tree(force).await,
+            PaneBackend::None => {}
+        }
+    }
+
+    /// Immediate teardown used when the whole factory process is exiting.
+    pub fn kill_tree_force(&mut self) {
+        match &mut self.backend {
+            PaneBackend::Pty(pty) => pty.kill_tree_force(),
             PaneBackend::None => {}
         }
     }

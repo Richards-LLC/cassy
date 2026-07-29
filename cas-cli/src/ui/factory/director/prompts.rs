@@ -8,7 +8,7 @@ use std::path::Path;
 
 use crate::config::AutoPromptConfig;
 use crate::mcp::tools::core::task::lifecycle::close_ops::{
-    count_unmerged_factory_commits, resolve_branch_short_sha,
+    KnownUnmergedCount, known_unmerged_factory_commits, resolve_branch_short_sha,
 };
 use crate::ui::factory::director::data::{ActiveLeaseSummary, DirectorData, TaskSummary};
 use crate::ui::factory::director::events::DirectorEvent;
@@ -620,6 +620,11 @@ pub struct MergeAlertEvidence {
     pub factory_branch: String,
     pub unmerged_count: u32,
     pub epic_sha: String,
+    /// Exact local or remote-tracking epic ref used for the count.
+    pub checked_epic_ref: String,
+    /// Present when local and remote-tracking refs both resolved but did
+    /// not describe the same tip/count.
+    pub ref_disagreement: Option<String>,
 }
 
 /// Outcome of the cas-6883 send-time freshness re-check for a MERGE
@@ -637,6 +642,79 @@ pub enum MergeAlertFreshness {
     Fresh(MergeAlertEvidence),
 }
 
+/// Re-read both the local epic ref and `origin/<epic>` and classify the
+/// factory branch against every resolvable view. A known-zero result from
+/// either ref proves the requested merge landed; unknown Git state never
+/// masquerades as zero.
+fn fresh_merge_alert_git_evidence(
+    repo_root: &Path,
+    task_id: &str,
+    factory_branch: &str,
+    epic_branch: &str,
+) -> MergeAlertFreshness {
+    let refs = [epic_branch.to_string(), format!("origin/{epic_branch}")];
+    let observations = refs
+        .iter()
+        .filter_map(|epic_ref| {
+            let sha = resolve_branch_short_sha(repo_root, epic_ref)?;
+            let count = known_unmerged_factory_commits(repo_root, factory_branch, epic_ref);
+            Some((epic_ref.clone(), sha, count))
+        })
+        .collect::<Vec<_>>();
+
+    if observations
+        .iter()
+        .any(|(_, _, count)| *count == KnownUnmergedCount::KnownZero)
+    {
+        return MergeAlertFreshness::Stale;
+    }
+
+    let positives = observations
+        .iter()
+        .filter_map(|(epic_ref, sha, count)| match count {
+            KnownUnmergedCount::KnownPositive(count) => {
+                Some((epic_ref.clone(), sha.clone(), *count))
+            }
+            KnownUnmergedCount::KnownZero | KnownUnmergedCount::Unknown => None,
+        })
+        .collect::<Vec<_>>();
+    let Some((checked_epic_ref, epic_sha, unmerged_count)) = positives
+        .iter()
+        .find(|(epic_ref, _, _)| epic_ref.starts_with("origin/"))
+        .or_else(|| positives.first())
+        .cloned()
+    else {
+        return MergeAlertFreshness::NotApplicable;
+    };
+
+    let ref_disagreement = if positives.len() > 1
+        && positives
+            .iter()
+            .any(|(_, sha, count)| sha != &epic_sha || *count != unmerged_count)
+    {
+        Some(
+            positives
+                .iter()
+                .map(|(epic_ref, sha, count)| {
+                    format!("{epic_ref} at {sha} reports {count} unmerged commit(s)")
+                })
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
+    } else {
+        None
+    };
+
+    MergeAlertFreshness::Fresh(MergeAlertEvidence {
+        task_id: task_id.to_string(),
+        factory_branch: factory_branch.to_string(),
+        unmerged_count,
+        epic_sha,
+        checked_epic_ref,
+        ref_disagreement,
+    })
+}
+
 /// Re-validate a MERGE REQUIRED / AwaitingMerge `WorkerIdle` signal against
 /// live git state immediately before it would be sent (cas-6883).
 ///
@@ -644,11 +722,10 @@ pub enum MergeAlertFreshness {
 /// the task-status snapshot backing this alert can be accurate (the task
 /// really is still `AwaitingMerge` in the DB) while stale in the sense that
 /// matters — the branch was already merged and nobody has re-closed the
-/// task yet. `count_unmerged_factory_commits` is the SAME helper the
-/// close-time merge gate and `epic_status` use, so this check can never
-/// disagree with what a supervisor sees by running `epic_status` by hand
-/// (the report's own observation: "the check the alert recommends is one
-/// the alert could have run itself").
+/// task yet. The check uses the close gate's success-bearing
+/// `known_unmerged_factory_commits` helper against both the local epic ref
+/// and `origin/<epic>`. A stale local branch therefore cannot override a
+/// pushed merge, and unknown Git failures cannot masquerade as zero.
 pub fn check_merge_alert_freshness(
     event: &DirectorEvent,
     data: &DirectorData,
@@ -672,18 +749,7 @@ pub fn check_merge_alert_freshness(
         // data-linking gap unrelated to git state (pre-cas-6883 behavior).
         return MergeAlertFreshness::NotApplicable;
     };
-    let unmerged_count = count_unmerged_factory_commits(repo_root, &factory_branch, &epic_branch);
-    if unmerged_count == 0 {
-        return MergeAlertFreshness::Stale;
-    }
-    let epic_sha = resolve_branch_short_sha(repo_root, &epic_branch)
-        .unwrap_or_else(|| "unknown".to_string());
-    MergeAlertFreshness::Fresh(MergeAlertEvidence {
-        task_id: task.task_id.clone(),
-        factory_branch,
-        unmerged_count,
-        epic_sha,
-    })
+    fresh_merge_alert_git_evidence(repo_root, &task.task_id, &factory_branch, &epic_branch)
 }
 
 /// Re-validate a MERGE REQUIRED / `AwaitingMerge` alert already SITTING in
@@ -696,9 +762,9 @@ pub fn check_merge_alert_freshness(
 /// inbox at its own turn boundaries; `read` is never flipped to `true` by
 /// production code). This is the sweep-time counterpart: given only a
 /// `task_id` pulled from a queued row's `retract_task` tag, look the task
-/// up fresh in the CURRENT snapshot and re-run the same
-/// `count_unmerged_factory_commits` check against the CURRENT epic tip —
-/// never the tip captured when the row was written.
+/// up fresh in the CURRENT snapshot and re-run the same success-bearing
+/// check against the CURRENT local and remote-tracking epic refs — never
+/// the tip captured when the row was written.
 ///
 /// Returns `Stale` (retract the row) when:
 /// - the task is no longer tracked in `data.in_progress_tasks` at all
@@ -716,8 +782,8 @@ pub fn check_merge_alert_freshness(
 ///
 /// Returns `Fresh` (preserve the row) when the merge is still genuinely
 /// outstanding — this also covers the case where the epic tip moved for an
-/// UNRELATED reason (another task's merge): `count_unmerged_factory_commits`
-/// re-diffs against whatever the live epic tip is right now, so an
+/// UNRELATED reason (another task's merge): the fresh evidence helper
+/// re-diffs against whatever local/remote epic tips are visible now, so an
 /// unrelated tip move that doesn't touch this task's commits still yields a
 /// nonzero count and the alert correctly survives.
 pub fn check_merge_alert_freshness_for_task(
@@ -742,18 +808,7 @@ pub fn check_merge_alert_freshness_for_task(
     let Some(epic_branch) = epic_branch else {
         return MergeAlertFreshness::NotApplicable;
     };
-    let unmerged_count = count_unmerged_factory_commits(repo_root, &factory_branch, &epic_branch);
-    if unmerged_count == 0 {
-        return MergeAlertFreshness::Stale;
-    }
-    let epic_sha = resolve_branch_short_sha(repo_root, &epic_branch)
-        .unwrap_or_else(|| "unknown".to_string());
-    MergeAlertFreshness::Fresh(MergeAlertEvidence {
-        task_id: task_id.to_string(),
-        factory_branch,
-        unmerged_count,
-        epic_sha,
-    })
+    fresh_merge_alert_git_evidence(repo_root, task_id, &factory_branch, &epic_branch)
 }
 
 /// Resolve the focused epic id + branch for a parked task from the current
@@ -829,10 +884,27 @@ fn merge_required_idle_prompt_text(
         .as_deref()
         .unwrap_or("MERGE REQUIRED");
     let evidence_line = match evidence {
-        Some(e) => format!(
-            "Live evidence: {} unmerged commit(s) on {} vs {} (checked against epic tip {}).\n",
-            e.unmerged_count, e.factory_branch, target, e.epic_sha
-        ),
+        Some(e) => {
+            let disagreement = e
+                .ref_disagreement
+                .as_deref()
+                .map(|details| {
+                    format!(
+                        "Git ref disagreement detected: {details}. Using {} after re-reading both refs.\n",
+                        e.checked_epic_ref
+                    )
+                })
+                .unwrap_or_default();
+            format!(
+                "Live evidence: {} unmerged commit(s) on {} vs {} (checked {} at {}).\n{}",
+                e.unmerged_count,
+                e.factory_branch,
+                target,
+                e.checked_epic_ref,
+                e.epic_sha,
+                disagreement
+            )
+        }
         None => String::new(),
     };
 
@@ -4567,6 +4639,45 @@ mod tests {
             git(dir, &["commit", "-q", "-m", &format!("feat: {name}")]);
         }
 
+        fn init_bare_remote() -> TempDir {
+            let remote = tempfile::tempdir().unwrap();
+            git(remote.path(), &["init", "-q", "--bare"]);
+            git(
+                remote.path(),
+                &["symbolic-ref", "HEAD", "refs/heads/epic/test-epic"],
+            );
+            remote
+        }
+
+        fn publish_branch(dir: &std::path::Path, remote: &TempDir, branch: &str) {
+            let remote_path = remote.path().to_str().unwrap();
+            if !dir.join(".git/refs/remotes/origin").exists() {
+                git(dir, &["remote", "add", "origin", remote_path]);
+            }
+            git(dir, &["push", "-q", "-u", "origin", branch]);
+        }
+
+        fn clone_epic(remote: &TempDir) -> TempDir {
+            let checkout = tempfile::tempdir().unwrap();
+            git(
+                checkout.path(),
+                &["clone", "-q", remote.path().to_str().unwrap(), "."],
+            );
+            checkout
+        }
+
+        fn refresh_origin_epic(dir: &std::path::Path) {
+            git(
+                dir,
+                &[
+                    "fetch",
+                    "-q",
+                    "origin",
+                    "epic/test-epic:refs/remotes/origin/epic/test-epic",
+                ],
+            );
+        }
+
         /// Merge `factory/<worker>` into `epic/test-epic` (fast-forward),
         /// leaving the repo checked out on the epic branch.
         fn merge_worker_into_epic(dir: &std::path::Path, worker: &str) {
@@ -4629,6 +4740,43 @@ mod tests {
             assert!(
                 matches!(outcome, MergeAlertFreshness::Stale),
                 "already-merged branch must yield Stale (drop the alert): {outcome:?}"
+            );
+        }
+
+        #[test]
+        fn ac1_drops_after_merge_pushed_with_stale_local_epic_ref() {
+            let repo = init_repo("recipe-be");
+            commit_file(repo.path(), "a.rs");
+            let remote = init_bare_remote();
+            publish_branch(repo.path(), &remote, "epic/test-epic");
+            publish_branch(repo.path(), &remote, "factory/recipe-be");
+            let local_epic_before =
+                resolve_branch_short_sha(repo.path(), "epic/test-epic").unwrap();
+
+            let integrator = clone_epic(&remote);
+            git(
+                integrator.path(),
+                &["merge", "-q", "--ff-only", "origin/factory/recipe-be"],
+            );
+            git(
+                integrator.path(),
+                &["push", "-q", "origin", "epic/test-epic"],
+            );
+            refresh_origin_epic(repo.path());
+            assert_eq!(
+                resolve_branch_short_sha(repo.path(), "epic/test-epic").unwrap(),
+                local_epic_before,
+                "precondition: local epic ref remains stale"
+            );
+
+            let outcome = check_merge_alert_freshness(
+                &idle_event("recipe-be", TaskStatus::AwaitingMerge),
+                &awaiting_merge_data("recipe-be"),
+                repo.path(),
+            );
+            assert!(
+                matches!(outcome, MergeAlertFreshness::Stale),
+                "pushed merge visible on origin must suppress stale-local alert: {outcome:?}"
             );
         }
 
@@ -4696,6 +4844,49 @@ mod tests {
         }
 
         #[test]
+        fn ac2_genuine_unmerged_alert_discloses_local_origin_ref_split() {
+            let repo = init_repo("recipe-be");
+            commit_file(repo.path(), "a.rs");
+            commit_file(repo.path(), "b.rs");
+            let remote = init_bare_remote();
+            publish_branch(repo.path(), &remote, "epic/test-epic");
+            publish_branch(repo.path(), &remote, "factory/recipe-be");
+
+            let integrator = clone_epic(&remote);
+            commit_file(integrator.path(), "unrelated.rs");
+            git(
+                integrator.path(),
+                &["push", "-q", "origin", "epic/test-epic"],
+            );
+            refresh_origin_epic(repo.path());
+
+            let data = awaiting_merge_data("recipe-be");
+            let event = idle_event("recipe-be", TaskStatus::AwaitingMerge);
+            let evidence = match check_merge_alert_freshness(&event, &data, repo.path()) {
+                MergeAlertFreshness::Fresh(evidence) => evidence,
+                other => panic!("genuinely unmerged branch must still alert: {other:?}"),
+            };
+            assert_eq!(evidence.unmerged_count, 2);
+            assert_eq!(evidence.checked_epic_ref, "origin/epic/test-epic");
+            assert!(evidence.ref_disagreement.is_some());
+
+            let prompt = generate_prompt(
+                &event,
+                &data,
+                &data,
+                "supervisor",
+                &default_config(),
+                SupervisorCli::Claude,
+                SupervisorCli::Claude,
+                &HashSet::new(),
+                Some(&evidence),
+            )
+            .unwrap();
+            assert!(prompt.text.contains("Git ref disagreement detected"));
+            assert!(prompt.text.contains("origin/epic/test-epic"));
+        }
+
+        #[test]
         fn not_applicable_when_epic_branch_unresolvable() {
             let repo = init_repo("recipe-be");
             commit_file(repo.path(), "a.rs");
@@ -4758,6 +4949,43 @@ mod tests {
             assert!(
                 matches!(outcome, MergeAlertFreshness::Stale),
                 "landed merge must be Stale (retract the queued row): {outcome:?}"
+            );
+        }
+
+        #[test]
+        fn task_sweep_retracts_after_pushed_merge_with_stale_local_epic_ref() {
+            let repo = init_repo("recipe-be");
+            commit_file(repo.path(), "a.rs");
+            let remote = init_bare_remote();
+            publish_branch(repo.path(), &remote, "epic/test-epic");
+            publish_branch(repo.path(), &remote, "factory/recipe-be");
+            let local_epic_before =
+                resolve_branch_short_sha(repo.path(), "epic/test-epic").unwrap();
+
+            let integrator = clone_epic(&remote);
+            git(
+                integrator.path(),
+                &["merge", "-q", "--ff-only", "origin/factory/recipe-be"],
+            );
+            git(
+                integrator.path(),
+                &["push", "-q", "origin", "epic/test-epic"],
+            );
+            refresh_origin_epic(repo.path());
+            assert_eq!(
+                resolve_branch_short_sha(repo.path(), "epic/test-epic").unwrap(),
+                local_epic_before,
+                "precondition: queued-row sweep begins with stale local epic"
+            );
+
+            let outcome = check_merge_alert_freshness_for_task(
+                "cas-6883t",
+                &awaiting_merge_data("recipe-be"),
+                repo.path(),
+            );
+            assert!(
+                matches!(outcome, MergeAlertFreshness::Stale),
+                "supervisor alert must retract using origin evidence: {outcome:?}"
             );
         }
 

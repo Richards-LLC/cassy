@@ -3441,7 +3441,7 @@ pub(crate) fn count_unmerged_factory_commits(
 /// for the primary ancestry path), this tri-state never maps unknown state
 /// to zero. Callers that authorize close must match on [`KnownZero`] only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KnownUnmergedCount {
+pub(crate) enum KnownUnmergedCount {
     /// Refs resolved, merge-base computed, rev-list succeeded with count 0.
     KnownZero,
     /// Refs resolved and rev-list reported a positive stranded count.
@@ -3548,7 +3548,7 @@ fn commit_patches_cherry_equivalent_on_parent(
 ///   (or the cas-cf64 unsafe-refname fail-closed `u32::MAX` case).
 /// - [`KnownUnmergedCount::Unknown`] on any resolution/computation failure —
 ///   never treats "couldn't tell" as "zero ahead".
-fn known_unmerged_factory_commits(
+pub(crate) fn known_unmerged_factory_commits(
     repo_path: &std::path::Path,
     factory_branch: &str,
     parent_branch: &str,

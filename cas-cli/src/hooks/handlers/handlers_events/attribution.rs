@@ -212,9 +212,18 @@ pub fn detect_and_link_git_commit(cas_root: &std::path::Path, input: &HookInput)
         .and_then(|v| v.as_str())
         .or_else(|| tool_response.as_str())
         .unwrap_or("");
-    let commit_hash = match extract_commit_hash(stdout)
-        .and_then(|hash| resolve_git_revision(input, &hash))
-        .or_else(|| resolve_commit_head(input))
+    // HookInput.cwd describes where the shell tool started, not necessarily
+    // where a compound command ran Git. Until the hook carries the executed
+    // Git cwd explicitly, refuse to infer an anchor for commands that redirect
+    // Git's repository context. Resolving either an abbreviated stdout hash or
+    // HEAD in HookInput.cwd could otherwise persist an unrelated commit.
+    let commit_hash = match (!commit_uses_redirected_git_context(command))
+        .then(|| {
+            extract_commit_hash(stdout)
+                .and_then(|hash| resolve_git_revision(input, &hash))
+                .or_else(|| resolve_commit_head(input))
+        })
+        .flatten()
     {
         Some(hash) => hash,
         None => return, // Couldn't find commit hash
@@ -308,6 +317,85 @@ fn resolve_git_revision(input: &HookInput, revision: &str) -> Option<String> {
 
 fn resolve_commit_head(input: &HookInput) -> Option<String> {
     resolve_git_revision(input, "HEAD")
+}
+
+/// Return true when the command can run `git commit` against a repository
+/// other than `HookInput.cwd`.
+///
+/// This intentionally recognizes only shell words before the commit
+/// subcommand, so a commit message such as `-m "mention cd"` is not treated
+/// as redirection.
+fn commit_uses_redirected_git_context(command: &str) -> bool {
+    let words = split_shell_words(command);
+    for (git_index, word) in words.iter().enumerate() {
+        if word != "git" {
+            continue;
+        }
+        let Some(commit_offset) = words[git_index + 1..]
+            .iter()
+            .position(|word| word == "commit")
+        else {
+            continue;
+        };
+        let commit_index = git_index + 1 + commit_offset;
+        if words[..git_index].iter().any(|word| word == "cd") {
+            return true;
+        }
+        if words[git_index + 1..commit_index].iter().any(|word| {
+            word == "-C"
+                || (word.starts_with("-C") && word.len() > 2)
+                || word == "--git-dir"
+                || word.starts_with("--git-dir=")
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Split enough shell syntax to inspect words around a `git commit`
+/// invocation. Quoted contents remain one word, so commit-message text cannot
+/// masquerade as standalone `cd`, `git`, or Git option tokens.
+fn split_shell_words(command: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+
+    for ch in command.chars() {
+        if escaped {
+            word.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && quote != Some('\'') {
+            escaped = true;
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if ch == active_quote {
+                quote = None;
+            } else {
+                word.push(ch);
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"') {
+            quote = Some(ch);
+            continue;
+        }
+        if ch.is_whitespace() || matches!(ch, '&' | ';' | '|' | '(' | ')') {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            continue;
+        }
+        word.push(ch);
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
 }
 
 /// Persist commit-time merge evidence on the one active task held by a
@@ -710,6 +798,88 @@ mod commit_anchor_tests {
         assert_eq!(
             anchored.deliverables.factory_branch_anchor.as_deref(),
             Some(expected.as_str())
+        );
+    }
+
+    #[test]
+    fn redirected_git_context_detection_is_scoped_before_commit() {
+        assert!(commit_uses_redirected_git_context(
+            "cd /tmp/other && git commit -q -m work"
+        ));
+        assert!(commit_uses_redirected_git_context(
+            "git -C /tmp/other commit -m work"
+        ));
+        assert!(commit_uses_redirected_git_context(
+            "git --git-dir=/tmp/other/.git commit -m work"
+        ));
+        assert!(commit_uses_redirected_git_context(
+            "echo 'commit'; cd /tmp/other && git commit -m work"
+        ));
+        assert!(!commit_uses_redirected_git_context(
+            "git commit -m 'mention cd and git -C without redirecting'"
+        ));
+    }
+
+    #[test]
+    fn quiet_commit_after_cd_does_not_anchor_hook_cwd_head() {
+        let (_temp, cas_root, agent, task, task_store) = worker_task_fixture();
+        let hook_repo = cas_root.parent().expect("hook repo");
+        let hook_head = git_output(hook_repo, &["rev-parse", "HEAD"])
+            .trim()
+            .to_string();
+
+        let other = tempfile::tempdir().expect("other repo");
+        git(other.path(), &["init", "-q", "-b", "factory/other"]);
+        std::fs::write(other.path().join("work.rs"), "fn work() {}\n").unwrap();
+        git(other.path(), &["add", "work.rs"]);
+        let shell_command = format!(
+            "cd '{}' && git commit -q -m 'fix: redirected work'",
+            other.path().display()
+        );
+        let output = Command::new("bash")
+            .args(["-c", &shell_command])
+            .current_dir(hook_repo)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("quiet redirected commit");
+        assert!(output.status.success(), "quiet redirected commit failed");
+        assert!(output.stdout.is_empty(), "quiet commit must print no hash");
+        let committed_elsewhere = git_output(other.path(), &["rev-parse", "HEAD"])
+            .trim()
+            .to_string();
+        assert_ne!(
+            committed_elsewhere, hook_head,
+            "fixture must distinguish the committed repo from the hook cwd"
+        );
+
+        detect_and_link_git_commit(
+            &cas_root,
+            &HookInput {
+                session_id: agent.id,
+                cwd: hook_repo.display().to_string(),
+                hook_event_name: "PostToolUse".to_string(),
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({
+                    "command": shell_command
+                })),
+                tool_response: Some(serde_json::json!({
+                    "exitCode": 0,
+                    "stdout": ""
+                })),
+                agent_role: Some("worker".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let anchored = task_store.get(&task.id).expect("task after hook");
+        assert_eq!(
+            anchored.deliverables.factory_branch_anchor, None,
+            "redirected quiet commit must not anchor HookInput.cwd HEAD"
         );
     }
 

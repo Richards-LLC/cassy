@@ -118,11 +118,11 @@ pub use supervisor_queue_store::{
 };
 
 // Prompt queue store for supervisor → worker communication
-// (includes EnqueueIdempotentResult for cas-ecff lifecycle outbox)
+// (includes enqueue outcomes for message dedup and cas-ecff lifecycle outbox)
 pub use prompt_queue_store::{
-    DeliveryStage, EnqueueIdempotentResult, MessageDeliveryReport, MessageStatus,
-    ObservationStatus, PROMPT_RETRY_MAX_AGE_SECS, PendingReason, PromptQueueStore,
-    PromptRetryDisposition, QueuedPrompt, SqlitePromptQueueStore,
+    DeliveryStage, EnqueueIdempotentResult, EnqueueOutcome, MessageDeliveryReport,
+    MessageStatus, ObservationStatus, PROMPT_RETRY_MAX_AGE_SECS, PendingReason,
+    PromptQueueStore, PromptRetryDisposition, QueuedPrompt, SqlitePromptQueueStore,
 };
 
 // Reminder store for supervisor "Remind Me" feature

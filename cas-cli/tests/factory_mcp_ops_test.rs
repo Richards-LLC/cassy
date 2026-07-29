@@ -2441,6 +2441,99 @@ async fn test_worker_response_confirms_consumed_supervisor_message() {
     );
 }
 
+/// cas-c061: exact-content dedup is an observable send outcome. Reusing the
+/// existing row ID must not be reported as a newly queued message.
+#[tokio::test]
+async fn test_worker_duplicate_send_reports_suppression() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "worker"),
+        ("CAS_AGENT_NAME", "swift-fox"),
+        ("CAS_SUPERVISOR_NAME", "cosmic-bear-43"),
+    ]);
+    let env = FactoryTestEnv::new();
+    env.register_supervisor("cosmic-bear-43");
+
+    let first = coord_msg("message", "supervisor", "same completion report", None);
+    let first_result = env
+        .service
+        .coordination(Parameters(first))
+        .await
+        .expect("first send");
+    let first_text = get_text(&first_result);
+    let first_id = first_text
+        .lines()
+        .find_map(|line| line.strip_prefix("notification_id: "))
+        .expect("first response notification id")
+        .parse::<i64>()
+        .expect("numeric notification id");
+    env.prompt_queue()
+        .mark_transport_delivered(first_id)
+        .expect("deliver first report");
+
+    let duplicate = coord_msg("message", "supervisor", "same completion report", None);
+    let duplicate_result = env
+        .service
+        .coordination(Parameters(duplicate))
+        .await
+        .expect("duplicate send");
+    let duplicate_text = get_text(&duplicate_result);
+
+    assert!(
+        duplicate_text.to_lowercase().contains("suppressed"),
+        "dedup must be visible instead of claiming a fresh enqueue: {duplicate_text}"
+    );
+    assert!(
+        !duplicate_text.starts_with("Message queued"),
+        "a suppressed duplicate must not impersonate a fresh queue insert: {duplicate_text}"
+    );
+}
+
+/// cas-c061: responding to a peer proves consumption only of messages from
+/// that peer. A display-name route must not broaden the counterparty to the
+/// logical `supervisor` alias and confirm unrelated supervisor instructions.
+#[tokio::test]
+async fn test_worker_peer_message_does_not_confirm_supervisor_instruction() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "worker"),
+        ("CAS_AGENT_NAME", "swift-fox"),
+        ("CAS_SUPERVISOR_NAME", "peer-worker"),
+    ]);
+    let env = FactoryTestEnv::new();
+    env.register_worker("peer-worker");
+    let instruction = env
+        .prompt_queue()
+        .enqueue_urgent(
+            "supervisor",
+            "swift-fox",
+            "unread supervisor instruction",
+            None,
+            Some("assignment"),
+            None,
+            false,
+        )
+        .expect("enqueue supervisor instruction");
+    env.prompt_queue()
+        .mark_transport_delivered(instruction)
+        .expect("deliver supervisor instruction");
+
+    let peer_message = coord_msg("message", "peer-worker", "peer status", None);
+    env.service
+        .coordination(Parameters(peer_message))
+        .await
+        .expect("peer display-name route should send");
+
+    let report = env
+        .prompt_queue()
+        .message_delivery_report(instruction)
+        .expect("delivery report")
+        .expect("instruction exists");
+    assert_eq!(
+        report.stage,
+        cas_store::DeliveryStage::Delivered,
+        "peer messaging must not confirm an unrelated supervisor instruction"
+    );
+}
+
 /// cas-0440: the send response must name the same parameter that
 /// `message_status` accepts. Drive the caller-visible two-call sequence:
 /// send a message, copy the returned notification_id verbatim, then query it.

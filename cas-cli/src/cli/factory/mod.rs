@@ -1400,17 +1400,24 @@ fn resolve_cli_choice(
     requested: &str,
     claude_installed: bool,
     grok_installed: bool,
+    codex_available: impl FnOnce() -> bool,
 ) -> Result<cas_mux::SupervisorCli> {
     let parsed = parse_supervisor_cli(requested)?;
 
-    // cas-1c3a: Codex deliberately bypasses this binary-only preflight.
-    // `apply_codex_fallback` is the single post-cascade authority for Codex
-    // availability and requires BOTH a runnable binary and
-    // `~/.codex/auth.json`; it also owns codex -> claude and strict-mode
-    // policy. An early binary-only verdict here used to duplicate that policy
-    // with weaker evidence.
+    // cas-1c3a / cas-5eaf: `apply_codex_fallback` remains the post-cascade
+    // authority for codex -> claude and strict-mode policy. Preflight only
+    // consults the SAME shared binary+auth probe when Claude is absent, so it
+    // can reject the otherwise-unrecoverable "neither harness is available"
+    // case. When Claude can serve as fallback, Codex passes through for the
+    // resolver to decide after the full config cascade.
     match parsed {
-        cas_mux::SupervisorCli::Codex => Ok(parsed),
+        cas_mux::SupervisorCli::Codex if claude_installed || codex_available() => Ok(parsed),
+        cas_mux::SupervisorCli::Codex => bail!(
+            "{role} 'codex' is unavailable (a runnable Codex CLI and \
+             ~/.codex/auth.json login are required), and fallback 'claude' is \
+             not installed. Run `codex login` after installing Codex, or install \
+             Claude with: npm install -g @anthropic-ai/claude-cli"
+        ),
         cas_mux::SupervisorCli::Claude if claude_installed => Ok(parsed),
         cas_mux::SupervisorCli::Claude => bail!(
             "{role} 'claude' is not installed. Install with: npm install -g @anthropic-ai/claude-cli"
@@ -1453,6 +1460,7 @@ fn preflight_factory_launch(
         &args.supervisor_cli,
         claude_installed,
         grok_installed,
+        cas_factory::probe::codex_available,
     ) {
         Ok(cli) => Some(cli),
         Err(e) => {
@@ -1466,6 +1474,7 @@ fn preflight_factory_launch(
             &args.worker_cli,
             claude_installed,
             grok_installed,
+            cas_factory::probe::codex_available,
         ) {
             Ok(cli) => Some(cli),
             Err(e) => {
@@ -1479,6 +1488,7 @@ fn preflight_factory_launch(
             &args.worker_cli,
             claude_installed,
             grok_installed,
+            cas_factory::probe::codex_available,
         )
         .ok()
         .or(supervisor_cli)
@@ -1652,13 +1662,18 @@ mod tests {
     // EPIC cas-8888 (cas-964a, Phase 3): resolve_cli_choice's Grok arm.
     #[test]
     fn resolve_cli_choice_grok_installed_passes_through() {
-        let result = resolve_cli_choice("supervisor", "grok", true, true);
+        let result = resolve_cli_choice("supervisor", "grok", true, true, || {
+            panic!("Grok resolution must not probe Codex")
+        });
         assert_eq!(result.unwrap(), cas_mux::SupervisorCli::Grok);
     }
 
     #[test]
     fn resolve_cli_choice_grok_missing_bails_with_installer_command() {
-        let err = resolve_cli_choice("supervisor", "grok", true, false).unwrap_err();
+        let err = resolve_cli_choice("supervisor", "grok", true, false, || {
+            panic!("Grok resolution must not probe Codex")
+        })
+        .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("'grok' is not installed"), "got: {msg}");
         assert!(
@@ -1671,7 +1686,9 @@ mod tests {
     fn resolve_cli_choice_grok_missing_does_not_silently_fall_back() {
         // An explicit `--cli grok` request that's not installed must bail
         // rather than silently swap to Claude.
-        let result = resolve_cli_choice("supervisor", "grok", true, false);
+        let result = resolve_cli_choice("supervisor", "grok", true, false, || {
+            panic!("Grok resolution must not probe Codex")
+        });
         assert!(result.is_err());
     }
 
@@ -1680,7 +1697,10 @@ mod tests {
     /// deliberately one-way and never touches Claude specs.
     #[test]
     fn resolve_cli_choice_claude_missing_never_falls_back_to_codex() {
-        let err = resolve_cli_choice("supervisor", "claude", false, true).unwrap_err();
+        let err = resolve_cli_choice("supervisor", "claude", false, true, || {
+            panic!("Claude resolution must not probe Codex")
+        })
+        .unwrap_err();
         assert!(
             err.to_string().contains("'claude' is not installed"),
             "got: {err}"
@@ -1692,11 +1712,35 @@ mod tests {
     /// codex -> claude fallback, and strict-mode error.
     #[test]
     fn resolve_cli_choice_codex_defers_to_post_cascade_authority() {
-        let result = resolve_cli_choice("supervisor", "codex", false, false);
+        let result = resolve_cli_choice("supervisor", "codex", true, false, || {
+            panic!("Codex availability is irrelevant when its Claude fallback is installed")
+        });
         assert_eq!(
             result.unwrap(),
             cas_mux::SupervisorCli::Codex,
             "preflight must preserve Codex for apply_codex_fallback to probe"
+        );
+    }
+
+    #[test]
+    fn resolve_cli_choice_codex_available_without_claude_passes_through() {
+        let result = resolve_cli_choice("supervisor", "codex", false, false, || true);
+        assert_eq!(result.unwrap(), cas_mux::SupervisorCli::Codex);
+    }
+
+    #[test]
+    fn resolve_cli_choice_codex_and_claude_unavailable_errors_clearly() {
+        let err = resolve_cli_choice("Worker CLI", "codex", false, false, || false).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("'codex' is unavailable"), "got: {msg}");
+        assert!(
+            msg.contains("fallback 'claude' is not installed"),
+            "must explain that neither requested nor fallback harness can run: {msg}"
+        );
+        assert!(msg.contains("codex login"), "must give Codex remediation: {msg}");
+        assert!(
+            msg.contains("npm install -g @anthropic-ai/claude-cli"),
+            "must give Claude remediation: {msg}"
         );
     }
 

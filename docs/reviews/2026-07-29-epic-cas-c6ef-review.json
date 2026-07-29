@@ -1,0 +1,1078 @@
+{
+  "residual": [
+    {
+      "title": "Codex transport failures are reported as successful persona runs",
+      "severity": "P1",
+      "file": "cas-cli/src/builtins/workflows/cas-code-review.js",
+      "line": 907,
+      "why_it_matters": "If Codex is unavailable, authentication expires, or a reviewer exhausts its retries, every non-security shim returns an empty result with skipped_reason. The workflow checks skipped_reason only on the optional independent reviewer, so failures from correctness, testing, maintainability, project-standards, performance, adversarial, and fallow are silently merged as zero findings and counted as completed reviews. For a small diff with Codex unavailable and no security activation, the workflow can therefore return a clean review while none of its substantive reviewers ran.",
+      "autofix_class": "manual",
+      "owner": "human",
+      "confidence": 1,
+      "evidence": [
+        "Lines 429-430 explicitly make dispatchReviewPersona return findings:[] plus skipped_reason for any Codex transport failure.",
+        "Line 907 derives the skipped state solely from gpt55Result?.skipped_reason; personaResults and fallowResult are never inspected for skipped_reason.",
+        "Line 909 passes the dispatched persona count and fallowRuns boolean to personasRunCount, which counts those lanes without considering their results.",
+        "Line 917 merges empty findings normally, allowing the failed-review path to produce an empty residual array without an error or skip indication."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Collect skipped_reason from every persona result, exclude skipped lanes from personas_run, expose them through skipped_personas, and return an explicit degraded/error status when required always-on personas fail.",
+      "requires_verification": true
+    },
+    {
+      "title": "Merge remediation hardcodes an unusable tool alias for Codex and Grok workers",
+      "severity": "P1",
+      "file": "cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs",
+      "line": 3320,
+      "why_it_matters": "A Codex worker reaching MERGE REQUIRED is told to invoke `mcp__cas__coordination`, but its registered alias is `mcp__cs__coordination`; Grok uses `cas__coordination`. The worker therefore cannot perform the newly required inbox check and may remain stuck or escalate without reading the supervisor's merge instruction.",
+      "autofix_class": "safe_auto",
+      "owner": "review-fixer",
+      "confidence": 0.99,
+      "evidence": [
+        "Changed line 3320 emits the literal `mcp__cas__coordination action=inbox_poll`; line 3344 repeats the same hardcoded command.",
+        "`close_ops.rs` already imports and uses `worker_coordination_tool()` for harness-specific guidance at lines 3, 943, 1296, and 1366.",
+        "`harness_policy.rs:163-168` maps Codex to `mcp__cs__coordination`, Grok to `cas__coordination`, and Claude to `mcp__cas__coordination`."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Resolve `let coord = worker_coordination_tool();` before formatting remediation and interpolate `{coord}` into both inbox-poll commands and the supervisor-message example.",
+      "requires_verification": true
+    },
+    {
+      "title": "Hard-coded Claude MCP alias makes remediation unusable for Codex workers",
+      "severity": "P1",
+      "file": "cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs",
+      "line": 3320,
+      "why_it_matters": "This shared close gate now requires `mcp__cas__coordination`, but Codex workers expose CAS as `mcp__cs__coordination`. A Codex worker whose branch is rejected cannot perform the first remediation step, potentially repeating close attempts or escalating without reading a supervisor's merge/rework message. This reopens the documented Codex lifecycle-stall incident class.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "confidence": 0.99,
+      "evidence": [
+        "Both remediation branches hard-code `mcp__cas__coordination action=inbox_poll` at lines 3320 and 3344, with no caller-harness detection.",
+        "Codex worker guidance in `cas-cli/src/builtins/codex/skills/cas-worker.md` and its recovery reference consistently requires the `mcp__cs__coordination` alias.",
+        "`docs/requests/completed/BUG-codex-worker-stalls-in-task-lifecycle-gates.md` records the same failure class: lifecycle-gate guidance using an unavailable harness-specific transport."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Render the coordination tool name from the caller harness, or use transport-neutral wording that points Claude to `mcp__cas__coordination` and Codex to `mcp__cs__coordination`.",
+      "requires_verification": true
+    },
+    {
+      "title": "Skipped Codex lanes are counted as successful reviews",
+      "severity": "P1",
+      "file": "cas-cli/src/builtins/workflows/cas-code-review.js",
+      "line": 906,
+      "why_it_matters": "When Codex is missing, unauthenticated, times out, or exhausts schema retries, each regular persona returns an empty finding set with skipped_reason. The merge path only checks skipped_reason on the independent lane, counts the other skipped lanes as personas_run, and can return a clean review. Because this change routes nearly every persona through Codex, one transport outage can silently remove correctness, testing, maintainability, project-standards, fallow, performance, and adversarial coverage while downstream close/review consumers see apparent success.",
+      "autofix_class": "manual",
+      "owner": "human",
+      "confidence": 0.99,
+      "evidence": [
+        "dispatchReviewPersona's failure contract at lines 429-430 returns findings:[] plus skipped_reason for every non-security persona.",
+        "Lines 906-909 inspect skipped_reason only on gpt55Result and compute personasRun from dispatchedReviewCount regardless of skipped regular persona outputs.",
+        "Line 917 merges all empty skipped outputs without converting the transport failure into an error or dropped diagnostic."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Collect skipped_reason from every persona result, exclude skipped lanes from personas_run, expose all of them in activation.skipped_personas, and fail the workflow or explicitly mark it incomplete when required always-on personas did not execute.",
+      "requires_verification": true
+    },
+    {
+      "title": "Mandatory Codex transport failures are reported as successful reviews",
+      "severity": "P1",
+      "file": "cas-cli/src/builtins/workflows/cas-code-review.js",
+      "line": 908,
+      "why_it_matters": "The shared shim can return `skipped_reason` for every Codex-backed persona, but aggregation only recognizes a skipped independent reviewer. If Codex is missing, authentication fails, or retries are exhausted, correctness/testing/maintainability/project-standards can all produce no findings while `personas_run` still reports them as completed. Consumers can therefore accept a clean review even though none of the mandatory lanes actually ran.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "confidence": 0.99,
+      "evidence": [
+        "Shim failure handling at lines 429-430 returns `skipped_reason` for any reviewer name.",
+        "Lines 907-909 inspect only `gpt55Result?.skipped_reason` and initialize `skippedPersonas` exclusively through `gpt55SkippedPersonas`.",
+        "`personasRunCount` receives the full dispatched reviewer count and subtracts only a skipped independent pass."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Derive skipped personas from every output, exclude all skipped results from `personas_run`, and fail or prominently mark the review incomplete when an always-on persona cannot run.",
+      "requires_verification": true
+    },
+    {
+      "title": "Global acknowledgment can hide a broadcast from every other recipient",
+      "severity": "P1",
+      "file": "crates/cas-store/src/prompt_queue_store.rs",
+      "line": 1547,
+      "why_it_matters": "The new per-recipient state does not actually preserve broadcast visibility once any recipient acknowledges the shared queue row. A worker can poll an `all_workers` message and then acknowledge its prompt ID; because `acked_at` is global, every worker polling afterward excludes that broadcast. This can silently suppress supervisor instructions across an entire factory session and undermine the stated reason for introducing recipient-specific state.",
+      "autofix_class": "manual",
+      "owner": "human",
+      "confidence": 0.98,
+      "evidence": [
+        "Both query branches require `q.acked_at IS NULL`, so acknowledgment suppresses the row before recipient-specific seen state is considered.",
+        "An `all_workers` broadcast has one `prompt_queue` row, while `ack()` writes the row-level `acked_at` field rather than recipient-specific acknowledgment state.",
+        "The new schema comment explicitly recognizes that one recipient must not hide a broadcast from every other worker, but the global acknowledgment path still does so.",
+        "The added test verifies independent polling only while the broadcast remains unacknowledged; it never acknowledges the broadcast between recipient polls."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Define broadcast acknowledgment per recipient, or ensure `poll_unseen_for_recipient` does not use row-level `acked_at` to suppress `all_workers` messages. Add an ordering test where worker A polls and acknowledges before worker B polls.",
+      "requires_verification": true
+    },
+    {
+      "title": "Hard-coded GNU timeout can disable all primary review lanes on macOS",
+      "severity": "P1",
+      "file": "cas-cli/src/builtins/workflows/cas-code-review.js",
+      "line": 425,
+      "why_it_matters": "Stock macOS does not provide /usr/bin/timeout. Previously this command affected only the optional independent review; dispatchReviewPersona now applies the same shim to every non-security persona. On a supported macOS installation, broad and small reviews can therefore lose all always-on review lanes and, together with the skipped-lane accounting defect, appear clean.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "confidence": 0.97,
+      "evidence": [
+        "Line 425 mandates the absolute executable /usr/bin/timeout.",
+        "Lines 455-460 route every persona except security through this shim.",
+        "The repository contains macOS-specific factory/TUI support and a Homebrew formula, so macOS is an actual deployment target rather than a hypothetical platform."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Move timeout enforcement into a platform-neutral orchestrator implementation, or resolve a supported timeout mechanism explicitly and treat its absence as a workflow-level incomplete review rather than an empty finding set.",
+      "requires_verification": true
+    },
+    {
+      "title": "Shared Codex transport failure paths are never exercised",
+      "severity": "P1",
+      "file": "cas-cli/src/builtins/workflows/cas-code-review.js",
+      "line": 444,
+      "why_it_matters": "The tests mock every agent call and return successful envelopes, so missing Codex, authentication failures, timeout exhaustion, and schema-retry exhaustion for always-on personas can regress without failing a test. A broad Codex outage could therefore suppress multiple review lanes while the suite remains green.",
+      "autofix_class": "manual",
+      "owner": "review-fixer",
+      "confidence": 0.96,
+      "evidence": [
+        "dispatchReviewPersona routes every non-security persona through the new Codex shim.",
+        "runWorkflowDryRun's mocked agent returns a successful empty ReviewerOutput unless an override is supplied; it never produces transport failures for correctness, testing, maintainability, project-standards, fallow, performance, or adversarial.",
+        "The only skipped-result tests exercise gpt55SkippedPersonas for the optional independent reviewer, not failures from the shared always-on transport."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Add workflow tests that return skipped_reason from each shared-transport lane and assert skipped-persona reporting and personas_run accounting; add a transport-level test using a controlled fake Codex command for missing binary/authentication failure.",
+      "requires_verification": true
+    },
+    {
+      "title": "Remote evidence is never refreshed before suppressing stale merge alerts",
+      "severity": "P1",
+      "file": "cas-cli/src/ui/factory/director/prompts.rs",
+      "line": 667,
+      "why_it_matters": "A merge pushed by another checkout or concurrent factory session remains invisible until an unrelated fetch updates this checkout's remote-tracking ref. The director therefore continues emitting and preserving obsolete MERGE REQUIRED instructions—the exact cross-session incident this change intends to close. By contrast, the close gate explicitly performs a best-effort fetch before consulting origin.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "confidence": 0.96,
+      "evidence": [
+        "`let refs = [epic_branch.to_string(), format!(\"origin/{epic_branch}\")];` only reads local refs; `fresh_merge_alert_git_evidence` performs no fetch.",
+        "The new regression test calls `refresh_origin_epic(repo.path())` before checking freshness, manually supplying a state transition absent from the production path.",
+        "`close_ops.rs` calls `fetch_parent_branch_best_effort(repo_path, parent_branch)` before evaluating `origin/<parent_branch>`, but this alert path does not."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Refresh the exact remote-tracking epic ref with a bounded, noninteractive fetch before classification, or consume a centrally refreshed snapshot shared with the close gate.",
+      "requires_verification": true
+    },
+    {
+      "title": "A stale local zero suppresses a genuinely unmerged remote branch",
+      "severity": "P1",
+      "file": "cas-cli/src/ui/factory/director/prompts.rs",
+      "line": 677,
+      "why_it_matters": "The function returns Stale when either local or origin evidence reports zero unmerged commits. If the local epic ref contains the worker commit but origin/epic was subsequently force-pushed or rebased without it, local reports KnownZero while origin reports KnownPositive. The alert is then suppressed even though the authoritative remote branch still needs the worker change, potentially leaving the task parked in AwaitingMerge without its supervisor notification.",
+      "autofix_class": "gated_auto",
+      "owner": "review-fixer",
+      "confidence": 0.93,
+      "evidence": [
+        "Lines 677-681 return Stale on observations.iter().any(... KnownZero), before selecting the origin observation.",
+        "Lines 693-697 otherwise explicitly prefer an origin/* positive observation, showing origin is intended to take precedence when available.",
+        "Concrete trigger: local epic/test-epic includes factory/worker; origin/epic/test-epic is rewritten to a tip that omits it. known_unmerged_factory_commits returns KnownZero locally and KnownPositive remotely, but the any-zero branch returns Stale."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "When origin/<epic> resolves to a known result, make that result authoritative. Fall back to the local ref only when the origin result is Unknown or unavailable; do not let a conflicting local KnownZero override origin KnownPositive.",
+      "requires_verification": true
+    },
+    {
+      "title": "Sharded reviews can create an unbounded storm of nested Codex processes",
+      "severity": "P1",
+      "file": "cas-cli/src/builtins/workflows/cas-code-review.js",
+      "line": 863,
+      "why_it_matters": "Large reviews dispatch every shard/persona job concurrently, and each job now launches a local Codex process that may run for 600 seconds and retry. One review can therefore create dozens of simultaneous Codex processes; concurrent factory sessions multiply that fan-out, risking resource exhaustion, API throttling, cascading timeouts, and widespread skipped reviews.",
+      "autofix_class": "manual",
+      "owner": "human",
+      "confidence": 0.9,
+      "evidence": [
+        "shardJobs is the Cartesian expansion of shards and their selected personas, with no local concurrency bound.",
+        "pipeline dispatches the complete shardJobs collection at line 863.",
+        "Each non-security dispatch invokes a Haiku shim that launches /usr/bin/timeout 600 codex exec and permits both timeout and schema retries."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Route Codex execution through a shared bounded transport queue with per-workflow and host-wide concurrency limits, cancellation, and aggregate retry budgets.",
+      "requires_verification": true
+    },
+    {
+      "title": "Codex fallback can select an unavailable Claude binary",
+      "severity": "P2",
+      "file": "cas-cli/src/cli/factory/mod.rs",
+      "line": 1413,
+      "why_it_matters": "On a host with neither Codex nor Claude installed, a non-strict launch requesting Codex now passes preflight. The post-cascade fallback rewrites the specs to Claude without checking whether Claude is installed, so factory launch proceeds toward spawning a nonexistent binary instead of returning the actionable preflight error. This also affects the common case where Codex is installed but lacks ~/.codex/auth.json and Claude is absent.",
+      "autofix_class": "gated_auto",
+      "owner": "downstream-resolver",
+      "confidence": 1,
+      "evidence": [
+        "The changed Codex match arm returns Ok(parsed) unconditionally, even though claude_installed is already available to this function.",
+        "Both worker and supervisor specs later pass through apply_codex_fallback, which rewrites unavailable Codex specs to Claude but probes only Codex binary/auth availability.",
+        "There is no subsequent Claude availability validation after the fallback calls at lines 1138 and 1186."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Before accepting a Codex-to-Claude fallback, validate that Claude is runnable and return a clear error if neither harness is available; centralize this check in the post-cascade resolver or immediately validate rewritten specs.",
+      "requires_verification": true
+    },
+    {
+      "title": "Recipient-seen rows survive every prompt-queue cleanup",
+      "severity": "P2",
+      "file": "crates/cas-store/src/prompt_queue_store.rs",
+      "line": 97,
+      "why_it_matters": "Every successful inbox poll inserts one row per message and recipient, but the new table has neither a foreign key with ON DELETE CASCADE nor corresponding deletion in clear/cleanup_old. Normal queue retention therefore deletes prompt_queue rows while permanently retaining their recipient-seen rows, causing unbounded database growth over long-running factories.",
+      "autofix_class": "safe_auto",
+      "owner": "downstream-resolver",
+      "confidence": 1,
+      "evidence": [
+        "Lines 97-102 define prompt_queue_recipient_seen without a foreign key or cascade to prompt_queue(id).",
+        "Lines 1593-1600 insert a seen row for every returned prompt/recipient pair.",
+        "Existing clear at line 2441 deletes only from prompt_queue, and cleanup_old at lines 2451-2454 likewise deletes only prompt_queue rows; no other DELETE FROM prompt_queue_recipient_seen exists."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Delete matching seen rows transactionally in clear and cleanup_old, or add a foreign key REFERENCES prompt_queue(id) ON DELETE CASCADE and ensure SQLite foreign-key enforcement is enabled.",
+      "requires_verification": true
+    },
+    {
+      "title": "Add handler-level coverage for the new inbox_poll action",
+      "severity": "P2",
+      "file": "cas-cli/src/mcp/tools/service/agent_search_system/message.rs",
+      "line": 674,
+      "why_it_matters": "The existing store test exercises only poll_unseen_for_recipient. A regression in coordination dispatch, registered-agent versus environment identity selection, factory-session filtering, limit handling, empty-inbox behavior, or response formatting would leave the new worker-guide workflow broken while all current tests still pass.",
+      "autofix_class": "manual",
+      "owner": "review-fixer",
+      "confidence": 0.99,
+      "evidence": [
+        "inbox_poll introduces a new service handler with identity, session, limit, error, empty-result, and formatted-result branches at lines 674-744.",
+        "The coordination dispatcher adds the public inbox_poll route in cas-cli/src/mcp/tools/service/mod.rs at lines 497 and 522, but no test invokes that action through coordination.",
+        "The only behavioral inbox_poll test found is crates/cas-store/src/prompt_queue_store.rs:4869, which directly tests poll_unseen_for_recipient and bypasses CasService and its dispatcher."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Add service-level tests invoking coordination(action=\"inbox_poll\") for registered identity and environment fallback, session scoping, empty and populated output, repeated polling, and limit/default/cap behavior. Serialize tests that mutate CAS_AGENT_NAME or CAS_FACTORY_SESSION.",
+      "requires_verification": true
+    },
+    {
+      "title": "Recipient-seen rows are never removed with their prompts",
+      "severity": "P2",
+      "file": "crates/cas-store/src/prompt_queue_store.rs",
+      "line": 97,
+      "why_it_matters": "Every successful inbox poll permanently adds one row per prompt and recipient. Both clear() and cleanup_old() delete only from prompt_queue, so a long-running factory—especially one polling broadcasts—accumulates orphaned rows without bound.",
+      "autofix_class": "gated_auto",
+      "owner": "review-fixer",
+      "confidence": 0.99,
+      "evidence": [
+        "prompt_queue_recipient_seen has no foreign key or ON DELETE CASCADE relationship to prompt_queue.",
+        "poll_unseen_for_recipient inserts one seen row for every returned prompt at lines 1593-1600.",
+        "clear() deletes only prompt_queue at line 2441, and cleanup_old() deletes only prompt_queue at lines 2451-2454."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Delete corresponding recipient-seen rows transactionally in clear() and cleanup_old(), or add an enforced foreign key with ON DELETE CASCADE and migrate existing orphan rows.",
+      "requires_verification": true
+    },
+    {
+      "title": "Sessionless query branch has no coverage",
+      "severity": "P2",
+      "file": "crates/cas-store/src/prompt_queue_store.rs",
+      "line": 1560,
+      "why_it_matters": "The factory_session=None path uses separate SQL with stricter session filtering. The only test passes Some(\"session-a\"), so regressions that return session-scoped messages to a sessionless caller—or fail to return legacy rows—would not fail a test.",
+      "autofix_class": "manual",
+      "owner": "review-fixer",
+      "confidence": 0.98,
+      "evidence": [
+        "The sole test call sites pass Some(\"session-a\").",
+        "No test invokes poll_unseen_for_recipient with factory_session=None.",
+        "The None branch independently binds parameters and requires q.factory_session IS NULL."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Poll with None after enqueueing both legacy and session-scoped direct/broadcast rows; assert only legacy rows are returned and become seen.",
+      "requires_verification": false
+    },
+    {
+      "title": "Queue cleanup leaves recipient-seen state orphaned",
+      "severity": "P2",
+      "file": "crates/cas-store/src/prompt_queue_store.rs",
+      "line": 97,
+      "why_it_matters": "The new queue-owned table has no cascading foreign key, while the existing clear and retention operations delete only prompt_queue rows. Queue cleanup therefore no longer cleans the queue's complete state, and every deleted prompt can leave permanent bookkeeping rows that future maintainers must discover and handle separately.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "confidence": 0.98,
+      "evidence": [
+        "The new table declares `prompt_id INTEGER NOT NULL` but no `REFERENCES prompt_queue(id) ON DELETE CASCADE` at prompt_queue_store.rs:97-102.",
+        "`clear` executes only `DELETE FROM prompt_queue` at prompt_queue_store.rs:2438-2443.",
+        "`cleanup_old` likewise deletes only from `prompt_queue` at prompt_queue_store.rs:2446-2457.",
+        "Repo grep finds no other deletion from `prompt_queue_recipient_seen`; its only write is the insert in `poll_unseen_for_recipient`."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Give the read-state table an explicit lifecycle: either add an enforced cascading foreign key or delete matching recipient-seen rows transactionally in both `clear` and `cleanup_old`.",
+      "requires_verification": true
+    },
+    {
+      "title": "PendingSupervisorReview delivery races are untested",
+      "severity": "P2",
+      "file": "cas-cli/src/ui/factory/director/prompts.rs",
+      "line": 461,
+      "why_it_matters": "The new filters explicitly suppress both AwaitingMerge and PendingSupervisorReview tasks, but the regression tests exercise only AwaitingMerge. A future status-specific implementation could redispatch completed work or send a stalled-worker nudge during supervisor review without any test failing.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "confidence": 0.97,
+      "evidence": [
+        "Lines 461-463 and 530 filter worker-actionable statuses to Open or InProgress, with comments explicitly naming PendingSupervisorReview and AwaitingMerge.",
+        "The added tests at lines 1823 and 1861 construct only TaskStatus::AwaitingMerge; no prompts.rs test constructs PendingSupervisorReview for TaskAssigned or WorkerStalled revalidation."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Add TaskAssigned and WorkerStalled delivery-revalidation cases with the task in PendingSupervisorReview and assert both events are dropped.",
+      "requires_verification": true
+    },
+    {
+      "title": "Processed messages are not tested for inbox eligibility",
+      "severity": "P2",
+      "file": "crates/cas-store/src/prompt_queue_store.rs",
+      "line": 1547,
+      "why_it_matters": "The API intentionally filters only on acked_at, so a message already consumed by daemon transport must remain available to the recipient inbox. Every test message is still pending; adding an incorrect processed_at IS NULL predicate would leave the test green while workers could miss supervisor messages processed by the daemon first.",
+      "autofix_class": "manual",
+      "owner": "review-fixer",
+      "confidence": 0.97,
+      "evidence": [
+        "The new test enqueues messages and calls poll_unseen_for_recipient before any poll_for_target or poll_all operation marks them processed.",
+        "Assertions after inbox polling only prove that inbox polling does not itself change MessageStatus; they do not prove that previously processed rows remain eligible.",
+        "Repository-wide search found no other poll_unseen_for_recipient tests."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Add a test that marks a direct message and broadcast processed through the daemon polling API, then verifies poll_unseen_for_recipient still returns both while they remain unacknowledged.",
+      "requires_verification": false
+    },
+    {
+      "title": "Do not expose generic Git state through the task-close implementation",
+      "severity": "P2",
+      "file": "cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs",
+      "line": 3443,
+      "why_it_matters": "Making this enum and its helper crate-visible causes the director UI to depend on a deeply nested MCP task-lifecycle implementation. Future changes to close-gate internals can now affect an unrelated prompting subsystem, and other Git-state consumers may continue accumulating in an already oversized close_ops.rs. Move the fail-closed unmerged-count abstraction into a shared Git/domain module and have both callers depend on it.",
+      "autofix_class": "manual",
+      "owner": "review-fixer",
+      "confidence": 0.96,
+      "evidence": [
+        "This diff changes KnownUnmergedCount and known_unmerged_factory_commits from private to pub(crate).",
+        "Repository grep shows cas-cli/src/ui/factory/director/prompts.rs imports both symbols directly from crate::mcp::tools::core::task::lifecycle::close_ops.",
+        "The abstraction only describes generic Git-ref resolution, merge-base, and rev-list outcomes; it contains no task-close-specific state.",
+        "The repository already has dedicated Git code under cas-cli/src/worktree/git, while close_ops.rs exceeds 11,000 lines."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Move KnownUnmergedCount, known_unmerged_factory_commits, and related branch-resolution helpers to a shared Git utility module, then import that module from close_ops and director prompts.",
+      "requires_verification": true
+    },
+    {
+      "title": "Recipient-seen rows are never removed with their queue messages",
+      "severity": "P2",
+      "file": "crates/cas-store/src/prompt_queue_store.rs",
+      "line": 97,
+      "why_it_matters": "Every recipient poll permanently adds a row to the new table, but the schema has no foreign key or cascading cleanup. Existing `clear()` and `cleanup_old()` operations delete only from `prompt_queue`, leaving orphaned seen rows indefinitely. Broadcast fan-out can therefore grow the SQLite database in proportion to messages times recipients even after queue retention runs, creating an operational disk-growth and hot-index-cost surprise.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "confidence": 0.96,
+      "evidence": [
+        "`prompt_queue_recipient_seen.prompt_id` has no `REFERENCES prompt_queue(id) ON DELETE CASCADE` constraint.",
+        "`clear()` executes only `DELETE FROM prompt_queue`.",
+        "`cleanup_old()` executes only `DELETE FROM prompt_queue WHERE processed_at IS NOT NULL AND processed_at < ?`.",
+        "The added index retains every orphaned `(recipient, prompt_id)` entry, and no deletion path for `prompt_queue_recipient_seen` exists in this store."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Give the seen table a cascading foreign key where SQLite foreign-key enforcement is guaranteed, or explicitly delete matching seen rows transactionally in both `clear()` and `cleanup_old()`. Include migration/cleanup handling for already-orphaned rows.",
+      "requires_verification": true
+    },
+    {
+      "title": "Coordination actions are duplicated across multiple registries",
+      "severity": "P2",
+      "file": "cas-cli/src/mcp/tools/service/mod.rs",
+      "line": 480,
+      "why_it_matters": "Every new action must be repeated in tool documentation, two dispatch matches, the invalid-action message, and multiple request schemas. These copies already differ—`interrupt` is accepted by dispatch but omitted from the tool description and invalid-action list—so future additions can easily expose incomplete or contradictory API documentation.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "confidence": 0.95,
+      "evidence": [
+        "`inbox_poll` is repeated in the tool description at cas-cli/src/mcp/tools/service/mod.rs:480, routing lists at lines 497 and 522, and the error text at line 647.",
+        "The same action is repeated in crates/cas-mcp/src/types.rs:680 and twice in crates/cas-mcp/src/types/ops_secondary.rs:497 and 508.",
+        "`interrupt` appears in dispatch at cas-cli/src/mcp/tools/service/mod.rs:497 but not in that file's tool description at line 480 or valid-action error at line 647, demonstrating existing drift among the copies."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Define typed coordination action metadata once and derive dispatch classification, schema descriptions, and valid-action diagnostics from it.",
+      "requires_verification": true
+    },
+    {
+      "title": "One default inbox poll does not establish the claimed freshness boundary",
+      "severity": "P2",
+      "file": "cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs",
+      "line": 3335,
+      "why_it_matters": "The remediation tells a worker to describe its escalation as fresh after polling unread messages, but a parameterless `inbox_poll` returns only 10 rows. In a busy concurrent factory, an applicable merge or rework instruction can remain unread behind a larger equal-or-higher-priority backlog, causing duplicate merge requests, work on already-merged branches, or ignored rework instructions.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "confidence": 0.95,
+      "evidence": [
+        "Lines 3320-3335 instruct exactly one parameterless poll and then provide the assertion `Fresh after polling unread inbox messages`.",
+        "`message.rs::inbox_poll` defaults `limit` to 10, while `prompt_queue_store.rs::poll_unseen_for_recipient` applies `LIMIT ?` and leaves later rows unseen.",
+        "The remediation neither requests `limit=100` nor requires repeated polling until `No unread messages`."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Require polling with the maximum supported limit and repeating until the inbox reports no unread messages before using the freshness qualifier.",
+      "requires_verification": true
+    },
+    {
+      "title": "Worker-actionable status policy is duplicated across three paths",
+      "severity": "P2",
+      "file": "cas-cli/src/ui/factory/director/prompts.rs",
+      "line": 462,
+      "why_it_matters": "The definition of a worker-actionable task now lives in multiple predicates that can drift when another task status is added. The existing helper named `worker_has_open_or_in_progress_assignment` already uses the same buckets but does not apply this status predicate, making the name and implementation disagree with the newly added call-site rules.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "confidence": 0.95,
+      "evidence": [
+        "`matches!(task.status, TaskStatus::Open | TaskStatus::InProgress)` is newly repeated at prompts.rs:462 and prompts.rs:530.",
+        "`worker_has_open_or_in_progress_assignment` at prompts.rs:97 chains the same task buckets without filtering `in_progress_tasks` by status.",
+        "The event-generation path independently defines the same policy at `cas-cli/src/ui/factory/director/events.rs:837`."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Centralize the actionable-status predicate or actionable-task iterator and reuse it in assignment detection, idle checks, stalled-event revalidation, and assignment revalidation.",
+      "requires_verification": true
+    },
+    {
+      "title": "Inbox messages are marked seen before the MCP response is delivered",
+      "severity": "P2",
+      "file": "cas-cli/src/mcp/tools/service/agent_search_system/message.rs",
+      "line": 713,
+      "why_it_matters": "poll_unseen_for_recipient commits the seen marker before this method constructs and transports the response. Cancellation, connection loss, serialization failure, or an oversized response can therefore hide up to 100 supervisor messages from every later inbox_poll even though the worker never received the result. This is especially damaging because inbox_poll is being documented as the recovery path for unread factory coordination.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "confidence": 0.94,
+      "evidence": [
+        "Line 713 invokes the mutating poll before any response content is constructed.",
+        "The returned text explicitly says messages were already marked seen.",
+        "The method embeds complete, unbounded message bodies and permits a batch limit of 100, increasing the chance of response-delivery failure after the database commit.",
+        "A subsequent poll cannot distinguish successful response delivery from an interrupted MCP call."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Use a non-mutating fetch plus explicit acknowledgement, or introduce a retryable claim/receipt protocol that marks messages seen only after confirmed response delivery.",
+      "requires_verification": true
+    },
+    {
+      "title": "Retry budgets are checked as prompt text, not behavior",
+      "severity": "P2",
+      "file": "cas-cli/src/builtins/workflows/cas-code-review.js",
+      "line": 409,
+      "why_it_matters": "The tests only search the generated shim prompt for model, schema, timeout, and retry markers. They would still pass if the adapter failed to retry, shared a retry counter incorrectly, ignored timeout exit codes, parsed the wrong output file, or leaked its temporary directory.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "confidence": 0.94,
+      "evidence": [
+        "The Codex reviewer transport test extracts buildCodexReviewerShimPrompt source and applies regex assertions.",
+        "No test induces exit 124, 137, or 143, malformed JSON, schema-invalid JSON, authentication failure, or retry exhaustion.",
+        "No assertion verifies the requested two schema retries and one independent timeout retry by observing invocation counts."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Move transport execution and retry accounting into a deterministic helper that accepts an injectable command runner, then test schema failures, each timeout exit code, independent retry counters, exhaustion output, and cleanup. Keep only reviewer reasoning in the agent prompt.",
+      "requires_verification": true
+    },
+    {
+      "title": "Git evidence failure-state matrix lacks caller-level tests",
+      "severity": "P2",
+      "file": "cas-cli/src/ui/factory/director/prompts.rs",
+      "line": 677,
+      "why_it_matters": "The new helper's safety contract depends on distinguishing KnownZero, KnownPositive, and Unknown across two refs. Current tests cover zero and positive/disagreement cases but never exercise a resolved epic ref whose comparison returns Unknown. Regressions that treat Git failures as Stale or otherwise suppress a possibly valid merge alert would therefore escape.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "confidence": 0.94,
+      "evidence": [
+        "Lines 677-699 separately map any KnownZero to Stale, KnownPositive to evidence, and an empty positive set—including Unknown observations—to NotApplicable.",
+        "The existing not_applicable_when_epic_branch_unresolvable test clears epic_tasks and returns before fresh_merge_alert_git_evidence, so it does not cover KnownUnmergedCount::Unknown inside this helper.",
+        "The new Git tests cover local-positive/origin-zero and differing positive refs, but no test creates missing/disconnected factory history or another comparison failure that yields Unknown."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Add table-style real-Git tests for Unknown/Unknown, Unknown/Positive, and Positive/Unknown observations and assert conservative NotApplicable or Fresh behavior as intended for both send-time and sweep-time entry points.",
+      "requires_verification": true
+    },
+    {
+      "title": "Retry and timeout budgets are only probabilistic prompt instructions",
+      "severity": "P2",
+      "file": "cas-cli/src/builtins/workflows/cas-code-review.js",
+      "line": 409,
+      "why_it_matters": "The advertised schema and timeout budgets are not implemented by program control flow. A Haiku agent is asked to create files, run Codex, classify exit codes, maintain two counters, validate JSON, and clean up. The outer workflow only schema-validates the object Haiku returns, so it cannot prove Codex ran, enforce attempt counts, or guarantee cleanup. This makes the central transport contract nondeterministic precisely on failure paths.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "confidence": 0.94,
+      "evidence": [
+        "`buildCodexReviewerShimPrompt` expresses the complete retry loop and cleanup behavior solely as prose at lines 422-431.",
+        "`dispatchReviewPersona` at lines 455-461 simply invokes a Haiku agent and contains no retry counters or subprocess result handling.",
+        "The workflow test only matches command and budget strings in source; it never executes a timeout, malformed output, authentication failure, or cleanup path."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Implement command execution, JSON validation, retry counters, and temporary-directory cleanup in deterministic code or a dedicated helper executable; keep the model responsible only for the review itself.",
+      "requires_verification": true
+    },
+    {
+      "title": "CONTRIBUTING.md:52: Register the new table as a migration",
+      "severity": "P2",
+      "file": "crates/cas-store/src/prompt_queue_store.rs",
+      "line": 96,
+      "why_it_matters": "The table and index are created as an untracked side effect of store initialization, so schema update, dry-run, detection, and doctor tooling cannot account for this database change through the project's forward-only migration system.",
+      "autofix_class": "gated_auto",
+      "owner": "review-fixer",
+      "confidence": 0.93,
+      "evidence": [
+        "Project standard, cas-cli/docs/CONTRIBUTING.md:52: \"New migration: Create file in `cas-cli/src/migration/migrations/` ... Add to the `MIGRATIONS` array ... Each migration needs: unique sequential ID, up SQL, and a detect query.\"",
+        "Migration guidance, cas-cli/docs/MIGRATIONS.md:66-68: \"For existing databases, add a migration\"; its Important Rules require both the base schema and migration.",
+        "crates/cas-store/src/prompt_queue_store.rs:96-105 introduces `prompt_queue_recipient_seen` and its index, while line 1306 executes that DDL directly during `init()`.",
+        "Repository search found no `prompt_queue_recipient_seen` migration under `cas-cli/src/migration`; the base-to-HEAD changed-file list contains no migration file."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Add versioned table and index migrations with detection queries to the migration registry, retaining the store schema for fresh databases.",
+      "requires_verification": true
+    },
+    {
+      "title": "A single default inbox poll can leave relevant supervisor messages unread",
+      "severity": "P2",
+      "file": "cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs",
+      "line": 3320,
+      "why_it_matters": "The remediation treats one `inbox_poll` call as a freshness barrier, but the action returns at most 10 messages by default. With more than 10 unread messages, a merge-complete or change-request message can remain unseen while the worker follows the next step and sends a stale merge request.",
+      "autofix_class": "safe_auto",
+      "owner": "review-fixer",
+      "confidence": 0.92,
+      "evidence": [
+        "Changed lines 3320-3324 instruct one poll and then permit escalation; lines 3344-3345 similarly say to poll once before continuing.",
+        "`message.rs:706` sets `let limit = req.limit.unwrap_or(10).min(100)`.",
+        "`prompt_queue_store.rs:1520-1575` applies SQL `LIMIT ?` to unseen messages ordered by priority and ID, so a concrete queue of 11 unread messages can leave the relevant eleventh message unread."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Tell workers to repeat `inbox_poll` until it returns `No unread messages` before treating the inbox as fresh, or have the API report that additional unseen rows remain.",
+      "requires_verification": true
+    },
+    {
+      "title": "Atomic same-recipient polling is only exercised sequentially",
+      "severity": "P2",
+      "file": "crates/cas-store/src/prompt_queue_store.rs",
+      "line": 1534,
+      "why_it_matters": "Atomic selection and seen marking are central to preventing duplicate delivery when two callers poll the same recipient concurrently. The sequential repeat test would still pass if the transaction were weakened or removed, allowing both callers to select the same unseen rows before either inserts read state.",
+      "autofix_class": "manual",
+      "owner": "review-fixer",
+      "confidence": 0.9,
+      "evidence": [
+        "The implementation uses ImmediateTx to cover SELECT and INSERT, indicating concurrency is an intended invariant.",
+        "The test performs the second poll only after the first poll has committed.",
+        "No concurrent poll_unseen_for_recipient test exists elsewhere in the repository."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Use two store connections and synchronized threads polling the same recipient; assert no prompt ID appears in both results and all eligible IDs appear exactly once overall.",
+      "requires_verification": false
+    },
+    {
+      "title": "New required method makes the exported store trait harder to extend compatibly",
+      "severity": "P2",
+      "file": "crates/cas-store/src/prompt_queue_store.rs",
+      "line": 646,
+      "why_it_matters": "Adding a required method to the public PromptQueueStore trait forces every downstream implementation to change, even when recipient-specific inbox state is unsupported. This couples a specialized inbox capability to the entire queue abstraction and makes future alternate or test stores more expensive to implement.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "confidence": 0.87,
+      "evidence": [
+        "Line 514 declares `pub trait PromptQueueStore`, and line 646 adds `poll_unseen_for_recipient` without a default implementation.",
+        "crates/cas-store/src/lib.rs publicly re-exports PromptQueueStore.",
+        "Repo grep finds only one in-tree `impl PromptQueueStore for`, for SqlitePromptQueueStore, so the new contract is specialized to its sole current implementation while remaining mandatory for downstream implementors."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Consider a separate recipient-inbox capability trait, or provide a documented default implementation/error so existing PromptQueueStore implementors remain source-compatible.",
+      "requires_verification": true
+    },
+    {
+      "title": "Non-atomic ref observations can suppress a newly required merge alert",
+      "severity": "P2",
+      "file": "cas-cli/src/ui/factory/director/prompts.rs",
+      "line": 677,
+      "why_it_matters": "The local and remote evidence is gathered through several independent Git processes, then any earlier KnownZero wins. If the factory branch advances or is force-updated after the local observation reports zero but before the remote observation completes, the function returns Stale even though the current factory tip has unmerged commits. The supervisor alert is then incorrectly dropped or retracted.",
+      "autofix_class": "gated_auto",
+      "owner": "review-fixer",
+      "confidence": 0.82,
+      "evidence": [
+        "Each observation separately resolves the epic SHA and then calls known_unmerged_factory_commits, which itself launches additional Git commands; no immutable factory or epic commit IDs are captured for the complete classification.",
+        "Lines 677-681 return Stale when any observation is KnownZero, without verifying that the factory ref still points to the tip used by that zero observation.",
+        "Concrete race: local epic contains factory tip A and yields KnownZero; factory/<worker> advances to B; origin comparison yields KnownPositive(B); the retained zero for A still causes Stale."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Resolve the factory tip and both epic tips to full immutable commit IDs first, compute every count against those IDs, then verify the live factory ref still equals the captured tip before returning Stale; retry or return NotApplicable if it moved.",
+      "requires_verification": true
+    },
+    {
+      "title": "Transport command bypasses the model and effort constants",
+      "severity": "P3",
+      "file": "cas-cli/src/builtins/workflows/cas-code-review.js",
+      "line": 425,
+      "why_it_matters": "The transport contract displays values from CODEX_PERSONA_MODEL and CODEX_PERSONA_EFFORT, but the executable command repeats both as literals. A future model or effort update can therefore change the advertised contract without changing the actual reviewer invocation, undermining the intended central configuration point.",
+      "autofix_class": "safe_auto",
+      "owner": "review-fixer",
+      "confidence": 0.99,
+      "evidence": [
+        "Lines 41-42 define CODEX_PERSONA_MODEL and CODEX_PERSONA_EFFORT as transport configuration constants.",
+        "Lines 415-416 interpolate those constants into the human-readable contract.",
+        "Line 425 independently hardcodes `gpt-5.6-sol` and `medium` in the command instead of interpolating the constants."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Interpolate CODEX_PERSONA_MODEL and CODEX_PERSONA_EFFORT into the command template as well.",
+      "requires_verification": false
+    },
+    {
+      "title": "Renamed 5.6 independent lane retains pervasive gpt55 internal naming",
+      "severity": "P3",
+      "file": "cas-cli/src/builtins/workflows/cas-code-review.js",
+      "line": 464,
+      "why_it_matters": "The public reviewer identity is now `gpt-5.6-sol:independent`, but helpers and live state still call the lane `gpt55`. This makes it unclear which names are compatibility aliases and which describe current behavior, increasing the chance that future model-specific changes update only part of the workflow.",
+      "autofix_class": "manual",
+      "owner": "review-fixer",
+      "confidence": 0.99,
+      "evidence": [
+        "`gpt55ShouldRun`, `gpt55SkippedPersonas`, and `personasRunCount(... gpt55Runs, gpt55Skipped)` remain current helper names at lines 464-498.",
+        "Runtime variables `gpt55Runs`, `gpt55Result`, and `gpt55Skipped` drive the new `gpt-5.6-sol:independent` reviewer at lines 805-909.",
+        "The activation envelope emits both gpt55_* and gpt56_* fields from the same gpt55-named variables at lines 944-949.",
+        "Repo grep confirms current workflow code uses the new reviewer identity while the old terminology remains concentrated in compatibility inputs and these internal names."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Normalize legacy gpt55 input aliases once at the workflow boundary, then use model-neutral or gpt56 names internally; retain old output fields only in an explicitly documented compatibility adapter if consumers require them.",
+      "requires_verification": true
+    },
+    {
+      "title": "AgentRequest limit documentation excludes its new inbox use",
+      "severity": "P3",
+      "file": "crates/cas-mcp/src/types.rs",
+      "line": 739,
+      "why_it_matters": "The field is now part of inbox polling behavior, but its doc comment still says it is only for list operations. This makes the request contract harder to discover and invites callers or maintainers to overlook the inbox limit and its 100-message cap.",
+      "autofix_class": "safe_auto",
+      "owner": "review-fixer",
+      "confidence": 0.98,
+      "evidence": [
+        "crates/cas-mcp/src/types.rs:739 documents `limit` as `Limit for list operations`.",
+        "cas-cli/src/mcp/tools/service/agent_search_system/message.rs:705 now reads `req.limit.unwrap_or(10).min(100)` for `inbox_poll`."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Change the comment and schema description to mention list, queue, and inbox polling operations, including the inbox default and cap if those are part of the public contract.",
+      "requires_verification": false
+    },
+    {
+      "title": "Large limits wrap to negative and disable the SQL limit",
+      "severity": "P3",
+      "file": "crates/cas-store/src/prompt_queue_store.rs",
+      "line": 1557,
+      "why_it_matters": "The public trait accepts any usize, but values above i64::MAX wrap during `as i64`. SQLite interprets a negative LIMIT as no upper bound, so a caller passing usize::MAX can retrieve and mark every unread message instead of the requested bounded batch.",
+      "autofix_class": "safe_auto",
+      "owner": "review-fixer",
+      "confidence": 0.98,
+      "evidence": [
+        "Both query branches bind `limit as i64` at lines 1557 and 1577 without checked conversion.",
+        "The only validation rejects limit == 0; it does not cap or reject values above i64::MAX.",
+        "SQLite LIMIT values below zero remove the result cap, making usize::MAX a concrete triggering input on 64-bit targets."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Convert with i64::try_from(limit) and return an error on overflow, or clamp to i64::MAX before binding.",
+      "requires_verification": true
+    },
+    {
+      "title": "Codex transport settings have two sources of truth",
+      "severity": "P3",
+      "file": "cas-cli/src/builtins/workflows/cas-code-review.js",
+      "line": 425,
+      "why_it_matters": "The shim presents the model, effort, and timeout constants as the shared transport contract, but the executable command repeats the model and effort as literals. A future transport upgrade can update the constants while silently continuing to invoke the old settings, making the centralization misleading and harder to maintain.",
+      "autofix_class": "safe_auto",
+      "owner": "review-fixer",
+      "confidence": 0.98,
+      "evidence": [
+        "Lines 40-44 define CODEX_PERSONA_MODEL, CODEX_PERSONA_EFFORT, and CODEX_PERSONA_TIMEOUT_SECONDS.",
+        "Lines 415-420 interpolate those constants into the documented transport contract.",
+        "Line 425 interpolates only the timeout while hard-coding `-m gpt-5.6-sol` and `model_reasoning_effort=medium` instead of using CODEX_PERSONA_MODEL and CODEX_PERSONA_EFFORT."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Interpolate CODEX_PERSONA_MODEL and CODEX_PERSONA_EFFORT into the command template as well.",
+      "requires_verification": false
+    },
+    {
+      "title": "Canonical 5.6 flow retains misleading gpt55 internal names",
+      "severity": "P3",
+      "file": "cas-cli/src/builtins/workflows/cas-code-review.js",
+      "line": 464,
+      "why_it_matters": "The implementation now dispatches `gpt-5.6-sol:independent`, but its helpers, state variables, and log field still describe the active flow as gpt55. These internal names are not required for compatibility and make future maintenance and diagnostics ambiguous about which transport is actually running.",
+      "autofix_class": "gated_auto",
+      "owner": "review-fixer",
+      "confidence": 0.96,
+      "evidence": [
+        "Line 464 declares `gpt55ShouldRun`, and lines 472-486 use `gpt55Explicit` and `gpt55BroadDiff` while evaluating both 5.6 and legacy inputs.",
+        "Lines 805-819 use `gpt55Runs` and log `gpt55=...`, although line 813 activates `gpt-5.6-sol:independent`.",
+        "Lines 897-909 continue with `gpt55Result`, `gpt55Skipped`, and `gpt55SkippedPersonas`; only the external activation envelope at lines 944-949 needs to preserve legacy gpt55 keys."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Rename internal helpers and locals to version-neutral or canonical names such as `independentShouldRun`, `independentRuns`, and `independentResult`; retain legacy input and output keys only at the compatibility boundary.",
+      "requires_verification": true
+    },
+    {
+      "title": "Remediation tests do not enforce polling before escalation",
+      "severity": "P3",
+      "file": "cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs",
+      "line": 3317,
+      "why_it_matters": "The new safety invariant is sequencing: workers must poll unread messages before continuing or escalating. Both tests only check that inbox_poll-related fragments occur somewhere, so regressions such as instructing workers to poll after escalation would still pass and could recreate stale merge requests.",
+      "autofix_class": "manual",
+      "owner": "review-fixer",
+      "confidence": 0.96,
+      "evidence": [
+        "worker_task_close_rejects_when_factory_branch_unmerged asserts only that the message contains the inbox_poll command and an unread-instruction fragment; it does not assert \"before continuing\" or relative ordering.",
+        "worker_task_close_on_local_epic_branch_points_at_supervisor_merge_not_pr asserts the command and transport-delivery fragment but not that polling precedes the supervisor escalation step.",
+        "The modified production text explicitly says \"Before escalating\" for local epic branches and \"before continuing\" for ordinary branches, making ordering part of the intended behavior."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Assert the complete first remediation step and verify its position precedes the push, PR, or supervisor-message steps in both branch variants.",
+      "requires_verification": true
+    },
+    {
+      "title": "Session branching duplicates the complete inbox query",
+      "severity": "P3",
+      "file": "crates/cas-store/src/prompt_queue_store.rs",
+      "line": 1538,
+      "why_it_matters": "The two branches repeat the projection, joins, eligibility predicates, ordering, and limit, differing only in the factory-session clause and one parameter. Any later change to inbox eligibility or QueuedPrompt columns must be kept synchronized across both copies, increasing drift risk in an already SQL-heavy store.",
+      "autofix_class": "advisory",
+      "owner": "human",
+      "confidence": 0.95,
+      "evidence": [
+        "The SQL blocks at prompt_queue_store.rs:1541-1552 and prompt_queue_store.rs:1562-1573 duplicate the same SELECT, LEFT JOIN, acknowledgement/seen/target predicates, ORDER BY, and LIMIT.",
+        "Nearby methods such as `latest_created_at_for_targets_from_sources` and `ack_delivered_for_recipient` select a `session_clause` first and build one SQL statement, at prompt_queue_store.rs:1817-1821 and prompt_queue_store.rs:1919-1923."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Select only the session predicate and optional session parameter conditionally, then construct and maintain one inbox query body.",
+      "requires_verification": false
+    },
+    {
+      "title": "Freshness documentation contradicts indeterminate-ref handling",
+      "severity": "P3",
+      "file": "cas-cli/src/ui/factory/director/prompts.rs",
+      "line": 637,
+      "why_it_matters": "Future callers cannot reliably infer what `ref_disagreement` and `NotApplicable` mean. The comments describe all resolved ref disagreements and a narrow set of not-applicable cases, while the implementation silently excludes resolved refs whose counts are unknown and returns `NotApplicable` when no positive observation remains.",
+      "autofix_class": "manual",
+      "owner": "downstream-resolver",
+      "confidence": 0.92,
+      "evidence": [
+        "The field comment at prompts.rs:637 says disagreement is present when local and remote refs both resolved but differ in tip/count.",
+        "The `positives` collection at prompts.rs:684-692 drops every `KnownUnmergedCount::Unknown` observation before disagreement is computed.",
+        "The `else` at prompts.rs:698-700 returns `NotApplicable` for all-unknown observations, but the enum documentation at prompts.rs:646-648 only names event shape, task status, and unresolved epic branch."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Define the observation states explicitly, then either include unknown resolved refs in disagreement evidence or narrow the comments. Document Git indeterminacy as a `NotApplicable` cause, or introduce a distinct indeterminate variant.",
+      "requires_verification": false
+    },
+    {
+      "title": "Inbox polling duplicates caller-identity resolution",
+      "severity": "P3",
+      "file": "cas-cli/src/mcp/tools/service/agent_search_system/message.rs",
+      "line": 680,
+      "why_it_matters": "Caller identity and session precedence are now assembled independently in multiple message operations. Changes to registration races, environment fallbacks, or session scoping must be synchronized manually, increasing the chance that sending and polling disagree about the same agent.",
+      "autofix_class": "advisory",
+      "owner": "human",
+      "confidence": 0.82,
+      "evidence": [
+        "The new block at cas-cli/src/mcp/tools/service/agent_search_system/message.rs:680-704 resolves agent ID, opens the agent store, falls back to `CAS_AGENT_NAME`, and resolves `CAS_FACTORY_SESSION`.",
+        "The existing `message_send` path in the same file resolves the same agent ID/store/environment concepts around lines 31-48 and reads `CAS_FACTORY_SESSION` again around line 284, but with separately encoded precedence and error handling."
+      ],
+      "pre_existing": false,
+      "suggested_fix": "Extract a small caller-context helper returning the registered agent, display/recipient name, role, and factory session, while allowing each operation to specify whether missing identity is fatal.",
+      "requires_verification": false
+    }
+  ],
+  "pre_existing": [
+    {
+      "title": "Any zero result hides a local-versus-origin push disagreement",
+      "severity": "P1",
+      "file": "cas-cli/src/ui/factory/director/prompts.rs",
+      "line": 677,
+      "why_it_matters": "If the local epic contains the factory commits but origin still reports them unmerged, the helper returns Stale immediately and retracts the supervisor alert. A crash or supervisor handoff between local merge and push can therefore leave the task parked and the integration unpushed with no remaining coordination signal, despite the prompt workflow explicitly requiring the epic branch to be pushed. The advertised disagreement evidence is never produced for this zero-versus-positive split.",
+      "autofix_class": "manual",
+      "owner": "human",
+      "confidence": 0.91,
+      "evidence": [
+        "`any(|(_, _, count)| *count == KnownUnmergedCount::KnownZero)` returns `MergeAlertFreshness::Stale` before the refs are compared.",
+        "`ref_disagreement` is computed only from `positives`, excluding `KnownZero`, so a local `KnownZero` plus origin `KnownPositive` can never be disclosed.",
+        "`merge_required_idle_prompt_text` includes step 3, `Push the epic branch if remote tracking applies`, demonstrating that a local-only merge is not the complete operational workflow."
+      ],
+      "pre_existing": true,
+      "suggested_fix": "Classify local-zero/origin-positive separately and preserve an actionable push-required alert; only origin KnownZero should conclusively suppress a remotely tracked merge alert.",
+      "requires_verification": true
+    }
+  ],
+  "dropped": [],
+  "mode": "headless",
+  "intent_summary": "EPIC cas-c6ef unifies code-review persona dispatch through shared Codex transport (gpt-5.6-sol, 600s timeout, schema/timeout retry budgets) with security retained on Claude Opus for diversity. Centralizes Codex availability checks and updates worker guides to use inbox_poll for supervisor messages.",
+  "activation": {
+    "activated": [
+      "correctness",
+      "testing",
+      "maintainability",
+      "project-standards",
+      "adversarial",
+      "gpt-5.6-sol:independent"
+    ],
+    "fallow_skipped": true,
+    "fallow_skip_reason": "Rust-primary repo; .js files are builtins not product code",
+    "gpt55_independent": true,
+    "gpt55_independent_skipped": false,
+    "gpt55_independent_skip_reason": null,
+    "gpt56_independent": true,
+    "gpt56_independent_skipped": false,
+    "gpt56_independent_skip_reason": null,
+    "skipped_personas": [],
+    "personas_run": 30,
+    "sharding": {
+      "enabled": true,
+      "threshold": 12000,
+      "estimated_tokens": 32371,
+      "shards": [
+        {
+          "id": "subsystem:code-other",
+          "kind": "subsystem",
+          "subsystem": "code-other",
+          "files": [
+            "cas-cli/src/builtins.rs",
+            "cas-cli/src/cli/factory/mod.rs",
+            "cas-cli/src/mcp/tools/service/agent_search_system/message.rs",
+            "cas-cli/src/mcp/tools/service/mod.rs",
+            "crates/cas-mcp/src/types.rs",
+            "crates/cas-mcp/src/types/ops_secondary.rs",
+            "crates/cas-mux/src/mux.rs",
+            "crates/cas-mux/src/pane/mod.rs",
+            "crates/cas-mux/src/pane/tests.rs"
+          ],
+          "personas": [
+            "correctness",
+            "testing",
+            "maintainability",
+            "project-standards",
+            "adversarial"
+          ],
+          "diff_tokens": 9162
+        },
+        {
+          "id": "subsystem:docs-skills",
+          "kind": "subsystem",
+          "subsystem": "docs-skills",
+          "files": [
+            "cas-cli/src/builtins/skills/cas-code-review/SKILL.md",
+            "cas-cli/src/builtins/skills/cas-code-review/references/fixer.md",
+            "cas-cli/src/builtins/skills/cas-code-review/references/personas/adversarial.md",
+            "cas-cli/src/builtins/skills/cas-code-review/references/personas/correctness.md",
+            "cas-cli/src/builtins/skills/cas-code-review/references/personas/fallow.md",
+            "cas-cli/src/builtins/skills/cas-code-review/references/personas/maintainability.md",
+            "cas-cli/src/builtins/skills/cas-code-review/references/personas/performance.md",
+            "cas-cli/src/builtins/skills/cas-code-review/references/personas/project-standards.md",
+            "cas-cli/src/builtins/skills/cas-code-review/references/personas/security.md",
+            "cas-cli/src/builtins/skills/cas-code-review/references/personas/testing.md",
+            "cas-cli/src/builtins/skills/cas-supervisor/references/reference.md",
+            "cas-cli/src/builtins/skills/cas-worker.md",
+            "cas-cli/src/builtins/skills/cas-worker/references/close-gate.md",
+            "cas-cli/src/builtins/skills/cas-worker/references/details.md",
+            "cas-cli/src/builtins/skills/cas-worker/references/recovery.md",
+            "docs/requests/completed/BUG-director-redispatches-awaiting-merge-tasks.md"
+          ],
+          "personas": [
+            "project-standards"
+          ],
+          "diff_tokens": 6174
+        },
+        {
+          "id": "subsystem:code-review-workflow",
+          "kind": "subsystem",
+          "subsystem": "code-review-workflow",
+          "files": [
+            "cas-cli/src/builtins/workflows/cas-code-review.js"
+          ],
+          "personas": [
+            "correctness",
+            "testing",
+            "maintainability",
+            "project-standards",
+            "adversarial"
+          ],
+          "diff_tokens": 4451
+        },
+        {
+          "id": "subsystem:mcp-task-lifecycle",
+          "kind": "subsystem",
+          "subsystem": "mcp-task-lifecycle",
+          "files": [
+            "cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs",
+            "cas-cli/src/mcp/tools/core/task/lifecycle/stale_close_guard.rs"
+          ],
+          "personas": [
+            "correctness",
+            "testing",
+            "maintainability",
+            "project-standards",
+            "adversarial"
+          ],
+          "diff_tokens": 3294
+        },
+        {
+          "id": "subsystem:factory-ui",
+          "kind": "subsystem",
+          "subsystem": "factory-ui",
+          "files": [
+            "cas-cli/src/ui/factory/app/sidecar_and_selection.rs",
+            "cas-cli/src/ui/factory/director/prompts.rs",
+            "crates/cas-factory/src/probe.rs"
+          ],
+          "personas": [
+            "correctness",
+            "testing",
+            "maintainability",
+            "project-standards",
+            "adversarial"
+          ],
+          "diff_tokens": 7003
+        },
+        {
+          "id": "subsystem:store-types",
+          "kind": "subsystem",
+          "subsystem": "store-types",
+          "files": [
+            "crates/cas-store/src/prompt_queue_store.rs"
+          ],
+          "personas": [
+            "correctness",
+            "testing",
+            "maintainability",
+            "project-standards",
+            "adversarial"
+          ],
+          "diff_tokens": 2288
+        },
+        {
+          "id": "interface-integrator",
+          "kind": "interface",
+          "subsystem": "cross-shard-interfaces",
+          "files": [
+            "cas-cli/src/builtins.rs",
+            "cas-cli/src/builtins/skills/cas-code-review/SKILL.md",
+            "cas-cli/src/builtins/skills/cas-code-review/references/fixer.md",
+            "cas-cli/src/builtins/skills/cas-code-review/references/personas/adversarial.md",
+            "cas-cli/src/builtins/skills/cas-code-review/references/personas/correctness.md",
+            "cas-cli/src/builtins/skills/cas-code-review/references/personas/fallow.md",
+            "cas-cli/src/builtins/skills/cas-code-review/references/personas/maintainability.md",
+            "cas-cli/src/builtins/skills/cas-code-review/references/personas/performance.md",
+            "cas-cli/src/builtins/skills/cas-code-review/references/personas/project-standards.md",
+            "cas-cli/src/builtins/skills/cas-code-review/references/personas/security.md",
+            "cas-cli/src/builtins/skills/cas-code-review/references/personas/testing.md",
+            "cas-cli/src/builtins/skills/cas-supervisor/references/reference.md",
+            "cas-cli/src/builtins/skills/cas-worker.md",
+            "cas-cli/src/builtins/skills/cas-worker/references/close-gate.md",
+            "cas-cli/src/builtins/skills/cas-worker/references/details.md",
+            "cas-cli/src/builtins/skills/cas-worker/references/recovery.md",
+            "cas-cli/src/builtins/workflows/cas-code-review.js",
+            "cas-cli/src/cli/factory/mod.rs",
+            "cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs",
+            "cas-cli/src/mcp/tools/core/task/lifecycle/stale_close_guard.rs",
+            "cas-cli/src/mcp/tools/service/agent_search_system/message.rs",
+            "cas-cli/src/mcp/tools/service/mod.rs",
+            "cas-cli/src/ui/factory/app/sidecar_and_selection.rs",
+            "cas-cli/src/ui/factory/director/prompts.rs",
+            "crates/cas-factory/src/probe.rs",
+            "crates/cas-mcp/src/types.rs",
+            "crates/cas-mcp/src/types/ops_secondary.rs",
+            "crates/cas-mux/src/mux.rs",
+            "crates/cas-mux/src/pane/mod.rs",
+            "crates/cas-mux/src/pane/tests.rs",
+            "crates/cas-store/src/prompt_queue_store.rs",
+            "docs/requests/completed/BUG-director-redispatches-awaiting-merge-tasks.md"
+          ],
+          "personas": [
+            "correctness",
+            "maintainability",
+            "adversarial"
+          ],
+          "diff_tokens": 1534
+        }
+      ],
+      "coverage": {
+        "changed_files": [
+          "cas-cli/src/builtins.rs",
+          "cas-cli/src/builtins/skills/cas-code-review/SKILL.md",
+          "cas-cli/src/builtins/skills/cas-code-review/references/fixer.md",
+          "cas-cli/src/builtins/skills/cas-code-review/references/personas/adversarial.md",
+          "cas-cli/src/builtins/skills/cas-code-review/references/personas/correctness.md",
+          "cas-cli/src/builtins/skills/cas-code-review/references/personas/fallow.md",
+          "cas-cli/src/builtins/skills/cas-code-review/references/personas/maintainability.md",
+          "cas-cli/src/builtins/skills/cas-code-review/references/personas/performance.md",
+          "cas-cli/src/builtins/skills/cas-code-review/references/personas/project-standards.md",
+          "cas-cli/src/builtins/skills/cas-code-review/references/personas/security.md",
+          "cas-cli/src/builtins/skills/cas-code-review/references/personas/testing.md",
+          "cas-cli/src/builtins/skills/cas-supervisor/references/reference.md",
+          "cas-cli/src/builtins/skills/cas-worker.md",
+          "cas-cli/src/builtins/skills/cas-worker/references/close-gate.md",
+          "cas-cli/src/builtins/skills/cas-worker/references/details.md",
+          "cas-cli/src/builtins/skills/cas-worker/references/recovery.md",
+          "cas-cli/src/builtins/workflows/cas-code-review.js",
+          "cas-cli/src/cli/factory/mod.rs",
+          "cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs",
+          "cas-cli/src/mcp/tools/core/task/lifecycle/stale_close_guard.rs",
+          "cas-cli/src/mcp/tools/service/agent_search_system/message.rs",
+          "cas-cli/src/mcp/tools/service/mod.rs",
+          "cas-cli/src/ui/factory/app/sidecar_and_selection.rs",
+          "cas-cli/src/ui/factory/director/prompts.rs",
+          "crates/cas-factory/src/probe.rs",
+          "crates/cas-mcp/src/types.rs",
+          "crates/cas-mcp/src/types/ops_secondary.rs",
+          "crates/cas-mux/src/mux.rs",
+          "crates/cas-mux/src/pane/mod.rs",
+          "crates/cas-mux/src/pane/tests.rs",
+          "crates/cas-store/src/prompt_queue_store.rs",
+          "docs/requests/completed/BUG-director-redispatches-awaiting-merge-tasks.md"
+        ],
+        "covered_files": [
+          "cas-cli/src/builtins.rs",
+          "cas-cli/src/cli/factory/mod.rs",
+          "cas-cli/src/mcp/tools/service/agent_search_system/message.rs",
+          "cas-cli/src/mcp/tools/service/mod.rs",
+          "crates/cas-mcp/src/types.rs",
+          "crates/cas-mcp/src/types/ops_secondary.rs",
+          "crates/cas-mux/src/mux.rs",
+          "crates/cas-mux/src/pane/mod.rs",
+          "crates/cas-mux/src/pane/tests.rs",
+          "cas-cli/src/builtins/skills/cas-code-review/SKILL.md",
+          "cas-cli/src/builtins/skills/cas-code-review/references/fixer.md",
+          "cas-cli/src/builtins/skills/cas-code-review/references/personas/adversarial.md",
+          "cas-cli/src/builtins/skills/cas-code-review/references/personas/correctness.md",
+          "cas-cli/src/builtins/skills/cas-code-review/references/personas/fallow.md",
+          "cas-cli/src/builtins/skills/cas-code-review/references/personas/maintainability.md",
+          "cas-cli/src/builtins/skills/cas-code-review/references/personas/performance.md",
+          "cas-cli/src/builtins/skills/cas-code-review/references/personas/project-standards.md",
+          "cas-cli/src/builtins/skills/cas-code-review/references/personas/security.md",
+          "cas-cli/src/builtins/skills/cas-code-review/references/personas/testing.md",
+          "cas-cli/src/builtins/skills/cas-supervisor/references/reference.md",
+          "cas-cli/src/builtins/skills/cas-worker.md",
+          "cas-cli/src/builtins/skills/cas-worker/references/close-gate.md",
+          "cas-cli/src/builtins/skills/cas-worker/references/details.md",
+          "cas-cli/src/builtins/skills/cas-worker/references/recovery.md",
+          "docs/requests/completed/BUG-director-redispatches-awaiting-merge-tasks.md",
+          "cas-cli/src/builtins/workflows/cas-code-review.js",
+          "cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs",
+          "cas-cli/src/mcp/tools/core/task/lifecycle/stale_close_guard.rs",
+          "cas-cli/src/ui/factory/app/sidecar_and_selection.rs",
+          "cas-cli/src/ui/factory/director/prompts.rs",
+          "crates/cas-factory/src/probe.rs",
+          "crates/cas-store/src/prompt_queue_store.rs"
+        ],
+        "missing_files": [],
+        "duplicate_files": [],
+        "extra_files": []
+      }
+    }
+  },
+  "stats": {
+    "total_findings": 44,
+    "p0": 0,
+    "p1": 11,
+    "p2": 22,
+    "p3": 10,
+    "personas_run": 30,
+    "dropped_findings": 0,
+    "task_id": "cas-c6ef"
+  }
+}

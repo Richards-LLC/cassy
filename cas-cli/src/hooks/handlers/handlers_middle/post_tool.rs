@@ -209,11 +209,15 @@ fn handle_post_tool_use_with_guardrail(
 ///
 /// Grok sends the real terminal tool name (`run_terminal_command`) even
 /// though its hook matcher calls that tool `Bash`. Reuse the established Bash
-/// path for Grok hooks only; an identically named tool from Claude or Codex
-/// must retain its original meaning.
+/// path for Grok hooks only. Factory-spawned hooks take the cheap env fast
+/// path; standalone Grok sessions are recognized by fields unique to Grok's
+/// camelCase hook envelope. An identically named tool from Claude or Codex
+/// without those markers retains its original meaning.
 fn normalize_post_tool_input(input: &HookInput) -> Cow<'_, HookInput> {
     if input.tool_name.as_deref() == Some("run_terminal_command")
-        && crate::harness_policy::own_harness_from_env() == cas_mux::SupervisorCli::Grok
+        && (crate::harness_policy::own_harness_from_env() == cas_mux::SupervisorCli::Grok
+            || input.workspace_root.is_some()
+            || input.tool_input_truncated.is_some())
     {
         let mut normalized = input.clone();
         normalized.tool_name = Some("Bash".to_string());
@@ -955,6 +959,33 @@ mod post_tool_wiring_tests {
         let normalized = normalize_post_tool_input(&input);
 
         assert_eq!(normalized.tool_name.as_deref(), Some("Bash"));
+    }
+
+    #[test]
+    fn standalone_grok_payload_shape_normalizes_to_bash_without_factory_env() {
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", None),
+            ("CAS_FACTORY_WORKER_CLI", None),
+            ("CAS_FACTORY_SUPERVISOR_CLI", None),
+            ("CAS_FACTORY_MODE", None),
+            ("CAS_FACTORY_SESSION", None),
+        ]);
+        let input: HookInput = serde_json::from_value(json!({
+            "hookEventName": "post_tool_use",
+            "sessionId": "standalone-grok",
+            "cwd": "/tmp/project",
+            "workspaceRoot": "/tmp/project",
+            "toolName": "run_terminal_command",
+            "toolInput": {"command": "git status"},
+            "toolResult": {"exitCode": 0},
+            "toolInputTruncated": false
+        }))
+        .expect("standalone Grok fixture");
+
+        let normalized = normalize_post_tool_input(&input);
+
+        assert_eq!(normalized.tool_name.as_deref(), Some("Bash"));
+        assert!(matches!(normalized, Cow::Owned(_)));
     }
 
     #[test]

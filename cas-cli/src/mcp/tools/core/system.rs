@@ -22,12 +22,14 @@ impl CasCore {
                 .unwrap_or(&self.cas_root)
                 .to_string_lossy()
                 .to_string(),
+            workspace_root: None,
             permission_mode: None,
             hook_event_name: "McpContext".to_string(),
             tool_name: None,
             tool_input: None,
             tool_response: None,
             tool_use_id: None,
+            tool_input_truncated: None,
             user_prompt: None,
             source: None,
             reason: None,

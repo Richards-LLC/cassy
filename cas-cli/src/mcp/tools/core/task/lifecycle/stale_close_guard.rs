@@ -35,16 +35,6 @@ pub fn is_terminal_closed(status: TaskStatus) -> bool {
     status == TaskStatus::Closed
 }
 
-/// Idempotent response when `task close` targets an already-closed task.
-pub fn already_closed_close_message(task_id: &str) -> String {
-    format!(
-        "ALREADY CLOSED\n\n\
-         Task {task_id} is already Closed. Do not re-verify or re-close it.\n\
-         Await a new assignment (`task action=mine`) or an explicit new task start.\n\
-         (cas-b269)"
-    )
-}
-
 /// Error when recording verification against a closed task.
 pub fn verification_on_closed_message(task_id: &str) -> String {
     format!(
@@ -192,28 +182,6 @@ pub fn looks_like_close_or_verify_guidance(text: &str) -> bool {
     MARKERS.iter().any(|m| lower.contains(m))
 }
 
-/// If guidance still tells a worker to close/verify tasks that are already
-/// closed, rewrite to an idle instruction. Returns `None` when no rewrite.
-pub fn rewrite_stale_close_guidance(
-    text: &str,
-    closed_task_ids: &[&str],
-) -> Option<String> {
-    if closed_task_ids.is_empty() || !looks_like_close_or_verify_guidance(text) {
-        return None;
-    }
-    let mentions_closed = closed_task_ids.iter().any(|id| text.contains(id));
-    if !mentions_closed {
-        return None;
-    }
-    let ids = closed_task_ids.join(", ");
-    Some(format!(
-        "STALE GUIDANCE SUPPRESSED (cas-b269)\n\n\
-         Task(s) {ids} are already Closed. Do not re-verify or re-close.\n\
-         Idle and await a new assignment (`task action=mine`).\n\n\
-         --- original message (for audit) ---\n{text}"
-    ))
-}
-
 /// Whether a byte can be part of a CAS task-id run (`cas-<hex>`): ASCII
 /// alphanumeric or `-`. Used to reject prefix/suffix near-matches so that
 /// `cas-5c02x` (trailing alnum) or `xcas-5c02` (leading alnum) do NOT count as
@@ -252,11 +220,11 @@ pub fn text_mentions_task_id_bounded(text: &str, task_id: &str) -> bool {
 ///
 /// The urgent "MERGE DONE → re-close now" notification wakes a worker parked in
 /// [`TaskStatus::AwaitingMerge`] and instructs it to `task close` the very task
-/// the message names. Arming halt on *that* send deadlocks the worker: close is
-/// refused (`WORK HALTED`) yet the parked task cannot be `start`ed to clear the
-/// halt (starting an `AwaitingMerge` task is illegal by design), so the only
-/// escape is starting an *unrelated* Open task — the exact multi-step recovery
-/// that made factory throughput die at the merge/re-close handoff.
+/// the message names. Arming halt on *that* send needlessly refuses the requested
+/// close (`WORK HALTED`). Although cas-a844 now permits restarting an
+/// `AwaitingMerge` task, forcing that extra state transition merely to clear a
+/// halt created by the re-close hand-off adds avoidable lifecycle churn at the
+/// merge boundary.
 ///
 /// We exempt exactly this class — close/verify guidance that references, as a
 /// **bounded** token, at least one task the caller has already resolved to be
@@ -292,9 +260,10 @@ pub fn is_merge_reclose_exempt_urgent(text: &str, target_awaiting_merge_task_ids
 /// that fix untouched: the worker is parked in [`TaskStatus::AwaitingMerge`],
 /// the supervisor merges the branch, and the re-close is refused anyway
 /// because `halt_task_work` is still `1` from the older, unrelated event.
-/// There is no in-band recovery — starting the parked task is illegal (you
-/// cannot `start` an `AwaitingMerge` task), so only an operator can clear the
-/// halt out of band. cas-60393 closed that deadlock for `AwaitingMerge`.
+/// cas-a844 now permits restarting the parked task, but requiring a redundant
+/// `start` solely to clear an unrelated halt would move it back to `InProgress`
+/// and complicate the merge/re-close hand-off. cas-60393 keeps that re-close
+/// direct for `AwaitingMerge`.
 ///
 /// cas-3894: the same trap recurs one state earlier, for `InProgress`, and
 /// is worse there because it can be a genuine mutual deadlock rather than
@@ -368,15 +337,6 @@ mod tests {
     }
 
     #[test]
-    fn test_b269_already_closed_message_forbids_reclose() {
-        let msg = already_closed_close_message("cas-a651");
-        assert!(msg.contains("ALREADY CLOSED"));
-        assert!(msg.contains("cas-a651"));
-        assert!(msg.to_lowercase().contains("do not re-verify"));
-        assert!(msg.contains("mine"));
-    }
-
-    #[test]
     fn test_b269_verification_on_closed_rejected_message() {
         let msg = verification_on_closed_message("cas-a651");
         assert!(msg.contains("Closed"));
@@ -394,29 +354,6 @@ mod tests {
         assert!(agent_task_work_halted(&meta));
         meta.insert(HALT_TASK_WORK_META.to_string(), "0".to_string());
         assert!(!agent_task_work_halted(&meta));
-    }
-
-    #[test]
-    fn test_b269_rewrite_stale_close_guidance_when_task_closed() {
-        let original = "Please re-verify and task action=close id=cas-a651 reason=\"done\"";
-        let rewritten = rewrite_stale_close_guidance(original, &["cas-a651"])
-            .expect("must rewrite stale close guidance");
-        assert!(rewritten.contains("STALE GUIDANCE SUPPRESSED"));
-        assert!(rewritten.contains("cas-a651"));
-        assert!(rewritten.to_lowercase().contains("already closed"));
-        assert!(rewritten.contains("original message"));
-    }
-
-    #[test]
-    fn test_b269_no_rewrite_when_task_still_open_guidance() {
-        let original = "task action=close id=cas-open reason=x";
-        assert!(rewrite_stale_close_guidance(original, &[]).is_none());
-        assert!(rewrite_stale_close_guidance("hello idle", &["cas-a651"]).is_none());
-        assert!(rewrite_stale_close_guidance(
-            "task action=close id=cas-other",
-            &["cas-a651"]
-        )
-        .is_none());
     }
 
     #[test]

@@ -297,7 +297,7 @@ impl FactoryDaemon {
             let (bytes_processed, events) = self.app.mux.poll_batch();
             let had_output = bytes_processed > 0;
             for event in events {
-                self.handle_mux_event(event);
+                self.handle_mux_event(event).await;
             }
 
             // Process relay events from cloud (remote terminal attach/input/detach)
@@ -789,7 +789,7 @@ impl FactoryDaemon {
         }
 
         // Cleanup
-        let cleanup_result = self.cleanup();
+        let cleanup_result = self.cleanup().await;
 
         let duration_secs = session_started_at.elapsed().as_secs().to_string();
         let final_workers = self.app.worker_names().len().to_string();
@@ -816,7 +816,7 @@ impl FactoryDaemon {
     }
 
     /// Cleanup on shutdown
-    fn cleanup(&mut self) -> anyhow::Result<()> {
+    async fn cleanup(&mut self) -> anyhow::Result<()> {
         // Clean up notification socket
         if let Some(ref notify) = self.notify_rx {
             notify.cleanup();
@@ -841,7 +841,7 @@ impl FactoryDaemon {
             .collect();
         self.app.mux.kill_all();
         for pgid in worker_process_groups {
-            self.app.untrack_worker_process_group_if_gone(pgid);
+            self.app.untrack_worker_process_group_if_gone(pgid).await;
         }
 
         // Unregister all factory agents (supervisor + workers)

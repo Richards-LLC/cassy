@@ -1024,16 +1024,15 @@ impl CasService {
                     task.assignee.as_deref() == Some(agent.name.as_str())
                         || task.assignee.as_deref() == Some(agent.id.as_str())
                 });
+                let effective_stall_threshold = crate::ui::factory::effective_stall_threshold_secs(
+                    stall_threshold_secs as u64,
+                    worker_effort_from_agent(agent),
+                ) as i64;
                 let assigned_unstarted_elapsed = assigned_open_task.and_then(|task| {
-                    let effective_threshold =
-                        crate::ui::factory::effective_stall_threshold_secs(
-                            stall_threshold_secs as u64,
-                            worker_effort_from_agent(agent),
-                        ) as i64;
                     assigned_unstarted_elapsed_secs(
                         task.updated_at,
                         last_activity.map(|(secs, _)| secs),
-                        effective_threshold,
+                        effective_stall_threshold,
                         in_flight_tool_call,
                         chrono::Utc::now(),
                     )
@@ -1044,17 +1043,18 @@ impl CasService {
                     stall_threshold_secs,
                     in_flight_tool_call,
                 );
-                let activity_info = if let (Some(task), Some(elapsed)) =
-                    (assigned_open_task, assigned_unstarted_elapsed)
-                {
-                    format_assigned_unstarted_status(
-                        &task.id,
-                        elapsed,
-                        crate::ui::factory::effective_stall_threshold_secs(
-                            stall_threshold_secs as u64,
-                            worker_effort_from_agent(agent),
-                        ) as i64,
-                    )
+                let priority_alert = format_priority_worker_status_alert(
+                    stalled,
+                    last_activity,
+                    stall_threshold_secs,
+                    assigned_open_task
+                        .zip(assigned_unstarted_elapsed)
+                        .map(|(task, elapsed)| {
+                            (task.id.as_str(), elapsed, effective_stall_threshold)
+                        }),
+                );
+                let activity_info = if let Some(alert) = priority_alert {
+                    alert
                 } else if !has_in_progress_task {
                     match last_activity {
                         Some((secs, phase)) => {
@@ -1064,14 +1064,6 @@ impl CasService {
                             "\n    last activity: none in last 10m (may be investigating or idle)"
                                 .to_string()
                         }
-                    }
-                } else if stalled {
-                    match last_activity {
-                        Some((secs, phase)) => format!(
-                            "\n    last activity: {secs}s ago ({phase}) ⚠ STALLED (no activity ≥{stall_threshold_secs}s while task in progress)"
-                        ),
-                        None => "\n    ⚠ STALLED: no activity in last 10m while task in progress"
-                            .to_string(),
                     }
                 } else if in_flight_tool_call {
                     // Has an assignment, would otherwise read as stalled
@@ -1599,9 +1591,13 @@ impl CasService {
             )
         })?;
         let stale_agents = agent_store.list_stale(stale_after).unwrap_or_default();
-        let active_workers = active_factory_workers(agent_store.as_ref());
-        let (orphan_process_groups, stale_process_group_records) =
-            orphan_process_groups(&self.inner.cas_root, stale_after, &active_workers);
+        let live_workers = live_factory_workers(agent_store.as_ref());
+        let (
+            orphan_process_groups,
+            live_owned_process_groups,
+            stale_process_group_records,
+            unverifiable_process_groups,
+        ) = orphan_process_groups(&self.inner.cas_root, stale_after, &live_workers);
 
         let prompt_queue = open_prompt_queue_store(&self.inner.cas_root).map_err(|e| {
             Self::error(
@@ -1627,13 +1623,15 @@ impl CasService {
 
         let mut out = String::from("Factory GC Report\n=================\n");
         out.push_str(&format!(
-            "\nStale agent threshold: {}s\nStale agents: {}\nPending prompts: {}\nActive worktrees: {}\nOrphan worktrees: {}\nOrphan worker process groups: {}\nStale process-group records: {}\n",
+            "\nStale agent threshold: {}s\nStale agents: {}\nPending prompts: {}\nActive worktrees: {}\nOrphan worktrees: {}\nOrphan worker process groups: {}\nLive-owned process groups skipped: {}\nUnverifiable process-group records preserved: {}\nStale process-group records: {}\n",
             stale_after,
             stale_agents.len(),
             pending_prompts,
             active_worktrees.len(),
             orphan_worktrees.len(),
             orphan_process_groups.len(),
+            live_owned_process_groups.len(),
+            unverifiable_process_groups.len(),
             stale_process_group_records,
         ));
 
@@ -1663,6 +1661,24 @@ impl CasService {
             out.push_str(
                 "\nReclaim with gc_cleanup force=true after reviewing these fingerprinted groups.\n",
             );
+        }
+        if !live_owned_process_groups.is_empty() {
+            out.push_str("\nLive-owned process groups skipped:\n");
+            for record in &live_owned_process_groups {
+                out.push_str(&format!(
+                    "  - {} (session {}, PGID {}; registered owner is supervision-live)\n",
+                    record.worker_name, record.factory_session, record.pgid,
+                ));
+            }
+        }
+        if !unverifiable_process_groups.is_empty() {
+            out.push_str("\nUnverifiable process-group records preserved:\n");
+            for record in &unverifiable_process_groups {
+                out.push_str(&format!(
+                    "  - {} (session {}, PGID {}; cleanup refused without a validated start-time fingerprint)\n",
+                    record.worker_name, record.factory_session, record.pgid,
+                ));
+            }
         }
 
         // Task cas-a9ab: surface uncommitted files in the main worktree as
@@ -1905,10 +1921,15 @@ impl CasService {
                 format!("Failed to open agent store: {e}"),
             )
         })?;
-        let active_workers = active_factory_workers(agent_store.as_ref());
-        let (orphan_process_groups, _) =
-            orphan_process_groups(&self.inner.cas_root, stale_after, &active_workers);
+        let live_workers = live_factory_workers(agent_store.as_ref());
+        let (
+            orphan_process_groups,
+            live_owned_process_groups,
+            _,
+            unverifiable_process_groups,
+        ) = orphan_process_groups(&self.inner.cas_root, stale_after, &live_workers);
         let mut orphan_process_groups_reaped = 0usize;
+        let mut live_owned_process_groups_skipped = live_owned_process_groups.len();
         let mut stale_process_group_records_removed = 0usize;
         let mut process_group_errors = Vec::new();
 
@@ -1917,7 +1938,11 @@ impl CasService {
         for record in crate::ui::factory::process_groups::list(&self.inner.cas_root)
             .unwrap_or_default()
         {
-            if !crate::ui::factory::process_groups::is_live(&record)
+            if matches!(
+                crate::ui::factory::process_groups::status(&record),
+                crate::ui::factory::process_groups::ProcessGroupStatus::Gone
+                    | crate::ui::factory::process_groups::ProcessGroupStatus::FingerprintMismatch
+            )
                 && crate::ui::factory::process_groups::untrack(
                     &self.inner.cas_root,
                     record.pgid,
@@ -1929,10 +1954,22 @@ impl CasService {
         }
         if req.force.unwrap_or(false) {
             for record in &orphan_process_groups {
+                // Re-read canonical liveness immediately before the destructive
+                // action. A worker may have registered or recovered after the
+                // report/classification snapshot.
+                if process_group_has_live_owner(
+                    record,
+                    &live_factory_workers(agent_store.as_ref()),
+                ) {
+                    live_owned_process_groups_skipped += 1;
+                    continue;
+                }
                 match crate::ui::factory::process_groups::reap(
                     &self.inner.cas_root,
                     record,
-                ) {
+                )
+                .await
+                {
                     Ok(crate::ui::factory::process_groups::ReapOutcome::Reaped) => {
                         orphan_process_groups_reaped += 1;
                     }
@@ -1951,6 +1988,11 @@ impl CasService {
             if agent.role == AgentRole::Supervisor || agent.role == AgentRole::Director {
                 continue;
             }
+            if crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness(&agent)
+                .is_live()
+            {
+                continue;
+            }
             if agent_store.mark_stale(&agent.id).is_ok() {
                 stale_marked += 1;
             }
@@ -1960,6 +2002,13 @@ impl CasService {
         for status in [AgentStatus::Stale, AgentStatus::Shutdown] {
             for agent in agent_store.list(Some(status)).unwrap_or_default() {
                 if agent.role == AgentRole::Supervisor || agent.role == AgentRole::Director {
+                    continue;
+                }
+                if crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness(
+                    &agent,
+                )
+                .is_live()
+                {
                     continue;
                 }
                 if agent_store.unregister(&agent.id).is_ok() {
@@ -2016,7 +2065,8 @@ impl CasService {
             cleanup_stale_skill_markers(&self.inner.cas_root, SKILL_MARKER_MAX_AGE);
 
         let mut output = format!(
-            "Factory GC cleanup complete.\n\nStale agents marked: {stale_marked}\nDead agent records purged: {dead_agent_records_purged}\nOrphan worktrees marked removed: {orphan_marked_removed}\nOrphan worker process groups reaped: {orphan_process_groups_reaped}\nStale process-group records removed: {stale_process_group_records_removed}\nPrompt queue entries expired: {expired_prompts}\nPrompt queue entries cleared: {cleared_prompts}\nStale skill markers removed: {stale_skill_markers_removed}"
+            "Factory GC cleanup complete.\n\nStale agents marked: {stale_marked}\nDead agent records purged: {dead_agent_records_purged}\nOrphan worktrees marked removed: {orphan_marked_removed}\nOrphan worker process groups reaped: {orphan_process_groups_reaped}\nLive-owned process groups skipped: {live_owned_process_groups_skipped}\nUnverifiable process-group records preserved: {}\nStale process-group records removed: {stale_process_group_records_removed}\nPrompt queue entries expired: {expired_prompts}\nPrompt queue entries cleared: {cleared_prompts}\nStale skill markers removed: {stale_skill_markers_removed}",
+            unverifiable_process_groups.len(),
         );
         if !req.force.unwrap_or(false) && !orphan_process_groups.is_empty() {
             output.push_str(&format!(
@@ -2035,31 +2085,46 @@ impl CasService {
     }
 }
 
-fn active_factory_workers(
-    agent_store: &dyn cas_store::AgentStore,
-) -> std::collections::HashSet<(String, String)> {
-    use cas_types::{AgentRole, AgentStatus};
+type LiveFactoryWorkers = std::collections::HashSet<(String, Option<String>)>;
 
-    agent_store
-        .list(Some(AgentStatus::Active))
-        .unwrap_or_default()
+fn live_factory_workers(
+    agent_store: &dyn cas_store::AgentStore,
+) -> LiveFactoryWorkers {
+    live_factory_workers_from_agents(agent_store.list(None).unwrap_or_default())
+}
+
+fn live_factory_workers_from_agents(
+    agents: impl IntoIterator<Item = cas_types::Agent>,
+) -> LiveFactoryWorkers {
+    use cas_types::AgentRole;
+
+    agents
         .into_iter()
         .filter(|agent| agent.role == AgentRole::Worker)
-        .filter_map(|agent| {
-            agent
-                .factory_session
-                .map(|session| (agent.name, session))
-        })
+        .filter(crate::mcp::tools::service::agent_liveness::is_live_factory_worker)
+        .map(|agent| (agent.name, agent.factory_session))
         .collect()
+}
+
+fn process_group_has_live_owner(
+    record: &crate::ui::factory::process_groups::TrackedProcessGroup,
+    live_workers: &LiveFactoryWorkers,
+) -> bool {
+    live_workers.contains(&(
+        record.worker_name.clone(),
+        Some(record.factory_session.clone()),
+    )) || live_workers.contains(&(record.worker_name.clone(), None))
 }
 
 fn orphan_process_groups(
     cas_root: &std::path::Path,
     stale_after_secs: i64,
-    active_workers: &std::collections::HashSet<(String, String)>,
+    live_workers: &LiveFactoryWorkers,
 ) -> (
     Vec<crate::ui::factory::process_groups::TrackedProcessGroup>,
+    Vec<crate::ui::factory::process_groups::TrackedProcessGroup>,
     usize,
+    Vec<crate::ui::factory::process_groups::TrackedProcessGroup>,
 ) {
     let live_sessions: std::collections::HashSet<String> =
         crate::ui::factory::SessionManager::new()
@@ -2072,21 +2137,38 @@ fn orphan_process_groups(
     let records = crate::ui::factory::process_groups::list(cas_root).unwrap_or_default();
     let stale_records = records
         .iter()
-        .filter(|record| !crate::ui::factory::process_groups::is_live(record))
+        .filter(|record| {
+            matches!(
+                crate::ui::factory::process_groups::status(record),
+                crate::ui::factory::process_groups::ProcessGroupStatus::Gone
+                    | crate::ui::factory::process_groups::ProcessGroupStatus::FingerprintMismatch
+            )
+        })
         .count();
+    let unverifiable_records: Vec<_> = records
+        .iter()
+        .filter(|record| {
+            crate::ui::factory::process_groups::status(record)
+                == crate::ui::factory::process_groups::ProcessGroupStatus::Unverifiable
+        })
+        .cloned()
+        .collect();
     let minimum_age = std::time::Duration::from_secs(stale_after_secs.max(0) as u64);
-    let mut orphans: Vec<_> = records
+    let candidates: Vec<_> = records
         .into_iter()
         .filter(crate::ui::factory::process_groups::is_live)
         .filter(|record| crate::ui::factory::process_groups::age(record) >= minimum_age)
         .filter(|record| {
             !live_sessions.contains(&record.factory_session)
-                || !active_workers
-                    .contains(&(record.worker_name.clone(), record.factory_session.clone()))
+                || !process_group_has_live_owner(record, live_workers)
         })
         .collect();
+    let (mut live_owned, mut orphans): (Vec<_>, Vec<_>) = candidates
+        .into_iter()
+        .partition(|record| process_group_has_live_owner(record, live_workers));
     orphans.sort_by_key(|record| record.pgid);
-    (orphans, stale_records)
+    live_owned.sort_by_key(|record| record.pgid);
+    (orphans, live_owned, stale_records, unverifiable_records)
 }
 
 fn cleanup_stale_skill_markers(cas_root: &std::path::Path, max_age: std::time::Duration) -> usize {
@@ -2488,6 +2570,30 @@ fn format_assigned_unstarted_status(
     format!(
         "\n    ⚠ ASSIGNED BUT UNSTARTED: {task_id} was assigned {elapsed_secs}s ago and remains unstarted with no recent activity (threshold: {threshold_secs}s)"
     )
+}
+
+/// Render the highest-priority worker-status alert.
+///
+/// A confirmed InProgress stall is more urgent than a second assigned Open
+/// task that has not started, so it must win when both states coexist.
+fn format_priority_worker_status_alert(
+    stalled: bool,
+    last_activity: Option<(i64, &'static str)>,
+    stall_threshold_secs: i64,
+    assigned_unstarted: Option<(&str, i64, i64)>,
+) -> Option<String> {
+    if stalled {
+        return Some(match last_activity {
+            Some((secs, phase)) => format!(
+                "\n    last activity: {secs}s ago ({phase}) ⚠ STALLED (no activity ≥{stall_threshold_secs}s while task in progress)"
+            ),
+            None => "\n    ⚠ STALLED: no activity in last 10m while task in progress".to_string(),
+        });
+    }
+
+    assigned_unstarted.map(|(task_id, elapsed, threshold)| {
+        format_assigned_unstarted_status(task_id, elapsed, threshold)
+    })
 }
 
 /// cas-9829: whether a `worker_status` row should render the `⚠ STALLED`
@@ -3560,6 +3666,83 @@ pub(crate) fn format_worker_git_status(gs: &WorkerGitStatus) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    struct SyntheticProcessGroup {
+        child: std::process::Child,
+        pgid: u32,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for SyntheticProcessGroup {
+        fn drop(&mut self) {
+            // SAFETY: the test child starts a dedicated session/process group.
+            unsafe { libc::killpg(self.pgid as libc::pid_t, libc::SIGKILL) };
+            let _ = self.child.wait();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn orphan_gc_skips_stale_heartbeat_worker_with_live_registered_process() {
+        use std::os::unix::process::CommandExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "sleep 300 & wait"]);
+        // SAFETY: isolate this synthetic lane from cargo's process group.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = command.spawn().unwrap();
+        let pgid = child.id();
+        let mut group = SyntheticProcessGroup { child, pgid };
+        let session = format!("dead-test-session-{}", uuid::Uuid::new_v4());
+        let record = crate::ui::factory::process_groups::track(
+            temp.path(),
+            "synthetic-live-worker",
+            &session,
+            pgid,
+        )
+        .unwrap();
+
+        let mut agent = cas_types::Agent::new(
+            "synthetic-live-agent".into(),
+            "synthetic-live-worker".into(),
+        );
+        agent.role = cas_types::AgentRole::Worker;
+        agent.status = cas_types::AgentStatus::Stale;
+        agent.last_heartbeat = chrono::Utc::now() - chrono::Duration::minutes(10);
+        agent.pid = Some(pgid);
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, pgid);
+        // Legacy/malformed registrations may lack this field; liveness must
+        // still protect the matching named lane.
+        agent.factory_session = None;
+
+        let live_workers = live_factory_workers_from_agents([agent]);
+        let (orphans, skipped_live, _, unverifiable) =
+            orphan_process_groups(temp.path(), 0, &live_workers);
+        assert!(orphans.is_empty(), "live owner must never enter the reap set");
+        assert_eq!(skipped_live, vec![record.clone()]);
+        assert!(unverifiable.is_empty());
+        assert!(
+            crate::mcp::daemon::pid_alive(pgid),
+            "GC classification must not signal a stale-heartbeat live owner"
+        );
+
+        assert_eq!(
+            crate::ui::factory::process_groups::reap(temp.path(), &record)
+                .await
+                .unwrap(),
+            crate::ui::factory::process_groups::ReapOutcome::Reaped
+        );
+        let _ = group.child.wait();
+    }
     use crate::test_support::TestEnvGuard;
     use cas_types::AgentRole;
 
@@ -3979,6 +4162,20 @@ effort = "high"
         assert!(rendered.contains("cas-unstarted was assigned 310s ago"));
         assert!(rendered.contains("remains unstarted with no recent activity"));
         assert!(rendered.contains("threshold: 300s"));
+    }
+
+    #[test]
+    fn test_c14e4_worker_status_stall_wins_over_assigned_unstarted_banner() {
+        let rendered = format_priority_worker_status_alert(
+            true,
+            Some((310, "activity")),
+            300,
+            Some(("cas-unstarted", 600, 300)),
+        )
+        .expect("coexisting stalled and assigned-unstarted states must render an alert");
+
+        assert!(rendered.contains("⚠ STALLED"), "{rendered}");
+        assert!(!rendered.contains("ASSIGNED BUT UNSTARTED"), "{rendered}");
     }
 
     #[test]

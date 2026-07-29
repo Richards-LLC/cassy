@@ -745,6 +745,95 @@ fn kill_all_terminates_a_synthetic_long_lived_child_group() {
     panic!("factory-exit kill_all left synthetic child {child_pid} alive");
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn graceful_kill_worker_waits_before_escalating_a_term_ignoring_group() {
+    let config = crate::pty::PtyConfig {
+        command: "sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            "trap '' TERM HUP; sleep 300 & wait".to_string(),
+        ],
+        cwd: Some(PathBuf::from("/tmp")),
+        env: vec![],
+        rows: 24,
+        cols: 80,
+    };
+    let Ok(pty) = crate::pty::Pty::spawn("synthetic-grace-worker", config) else {
+        return;
+    };
+    let pane = Pane::with_pty(
+        "synthetic-grace-worker",
+        PaneKind::Worker,
+        pty,
+        24,
+        80,
+        SupervisorCli::Claude,
+    )
+    .unwrap();
+    let mut mux = Mux::new(24, 80);
+    mux.add_pane(pane);
+    let pgid = mux
+        .pane_process_group_id("synthetic-grace-worker")
+        .expect("PTY worker must expose its process group");
+
+    // Give the shell time to install its TERM/HUP ignores before teardown.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let started = std::time::Instant::now();
+    mux.kill_worker("synthetic-grace-worker", false)
+        .await
+        .unwrap();
+
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(2_750),
+        "TERM-ignoring group must receive a real grace period before escalation"
+    );
+    for _ in 0..40 {
+        if proc_state_and_group(pgid).is_none_or(|(state, _)| state == 'Z') {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("graceful escalation left synthetic process group {pgid} alive");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn graceful_kill_worker_returns_when_the_group_honors_term() {
+    let config = crate::pty::PtyConfig {
+        command: "sh".to_string(),
+        args: vec!["-c".to_string(), "sleep 300 & wait".to_string()],
+        cwd: Some(PathBuf::from("/tmp")),
+        env: vec![],
+        rows: 24,
+        cols: 80,
+    };
+    let Ok(pty) = crate::pty::Pty::spawn("synthetic-term-worker", config) else {
+        return;
+    };
+    let pane = Pane::with_pty(
+        "synthetic-term-worker",
+        PaneKind::Worker,
+        pty,
+        24,
+        80,
+        SupervisorCli::Claude,
+    )
+    .unwrap();
+    let mut mux = Mux::new(24, 80);
+    mux.add_pane(pane);
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let started = std::time::Instant::now();
+    mux.kill_worker("synthetic-term-worker", false)
+        .await
+        .unwrap();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "TERM-compliant groups should not consume the escalation grace window"
+    );
+}
+
 #[tokio::test]
 async fn break_turn_targets_pane_by_name_independent_of_focus() {
     let mut mux = Mux::new(24, 80);

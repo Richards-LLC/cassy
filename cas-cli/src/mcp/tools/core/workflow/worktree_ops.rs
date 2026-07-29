@@ -766,7 +766,7 @@ fn load_validated_focused_epic(
 /// has it as its cwd. Reap only the record bound to the worktree owner's
 /// factory session; when legacy worktree metadata has no owner, restrict the
 /// fallback to sessions whose daemon is already dead.
-fn reap_worker_group_before_worktree_cleanup(
+async fn reap_worker_group_before_worktree_cleanup(
     cas_root: &Path,
     worktree: &crate::types::Worktree,
     agent_store: &dyn cas_store::AgentStore,
@@ -803,12 +803,14 @@ fn reap_worker_group_before_worktree_cleanup(
         if !belongs_to_lane {
             continue;
         }
-        crate::ui::factory::process_groups::reap(cas_root, &record).map_err(|error| {
-            format!(
-                "worker process group {} could not be reaped before worktree removal: {error}",
-                record.pgid
-            )
-        })?;
+        crate::ui::factory::process_groups::reap(cas_root, &record)
+            .await
+            .map_err(|error| {
+                format!(
+                    "worker process group {} could not be reaped before worktree removal: {error}",
+                    record.pgid
+                )
+            })?;
     }
     Ok(())
 }
@@ -1199,6 +1201,7 @@ impl CasCore {
         for mut wt in orphans {
             if let Err(error) =
                 reap_worker_group_before_worktree_cleanup(&cas_root, &wt, agent_store.as_ref())
+                    .await
             {
                 errors.push(format!("{} ({error})", wt.id));
                 continue;

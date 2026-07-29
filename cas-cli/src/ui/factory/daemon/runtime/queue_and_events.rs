@@ -3,10 +3,6 @@ use crate::ui::factory::director::AgentSummary;
 
 const PROMPT_POISON_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
-fn delivery_was_written(outcome: cas_mux::InjectOutcome) -> bool {
-    outcome == cas_mux::InjectOutcome::Delivered
-}
-
 fn prompt_poison_sweep_due(last: Option<Instant>, now: Instant) -> bool {
     last.is_some_and(|last| now.saturating_duration_since(last) >= PROMPT_POISON_SWEEP_INTERVAL)
 }
@@ -721,7 +717,7 @@ impl FactoryDaemon {
                         .await
                     };
                     match inject_result {
-                        Ok(outcome) if delivery_was_written(outcome) => {
+                        Ok(cas_mux::InjectOutcome::Delivered) => {
                             succeeded += 1;
                             tracing::info!("Injected to worker '{}'", name);
                             if let Some(ref store) = event_store {
@@ -757,11 +753,6 @@ impl FactoryDaemon {
                                     Some("operator composer is dirty".to_string()),
                                 );
                             }
-                        }
-                        Ok(outcome) => {
-                            unreachable!(
-                                "delivery_was_written disagreed with inject outcome {outcome:?}"
-                            );
                         }
                         Err(e) => {
                             failed += 1;
@@ -879,7 +870,7 @@ impl FactoryDaemon {
                     .await
                 };
                 match inject_result {
-                    Ok(outcome) if delivery_was_written(outcome) => {
+                    Ok(cas_mux::InjectOutcome::Delivered) => {
                         success = true;
                         // cas-f9e8 telemetry: end-to-end delivery latency
                         // measured from the sender-assigned `created_at` to
@@ -933,11 +924,6 @@ impl FactoryDaemon {
                                 Some("operator composer is dirty".to_string()),
                             );
                         }
-                    }
-                    Ok(outcome) => {
-                        unreachable!(
-                            "delivery_was_written disagreed with inject outcome {outcome:?}"
-                        );
                     }
                     Err(e) => {
                         // cas-6257 + cas-2c5f: centralised bookkeeping via
@@ -1968,11 +1954,10 @@ fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        cancel_targeted_in_flight_spawn, delivery_was_written, enqueue_spawn_cancelled_notice,
-        is_exact_agent_name_match, matches_event_filter, prompt_poison_sweep_due,
-        prompt_poison_sweep_targets, registered_prompt_sweep_agents,
-        reminder_matches_factory_session, shutdown_targets, take_next_pending_spawn,
-        take_spawn_cancellation,
+        cancel_targeted_in_flight_spawn, enqueue_spawn_cancelled_notice, is_exact_agent_name_match,
+        matches_event_filter, prompt_poison_sweep_due, prompt_poison_sweep_targets,
+        registered_prompt_sweep_agents, reminder_matches_factory_session, shutdown_targets,
+        take_next_pending_spawn, take_spawn_cancellation,
     };
     use crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound;
     use crate::ui::factory::daemon::{FactoryDaemon, PendingSpawn};
@@ -1992,16 +1977,19 @@ mod tests {
             .unwrap();
 
         let outcome = cas_mux::InjectOutcome::DeferredComposerDirty;
-        if delivery_was_written(outcome) {
-            queue.mark_transport_delivered(row_id).unwrap();
-        } else {
-            queue
-                .record_retry(
-                    row_id,
-                    cas_store::PendingReason::GatedNotReady,
-                    Some("operator composer is dirty"),
-                )
-                .unwrap();
+        match outcome {
+            cas_mux::InjectOutcome::Delivered => {
+                queue.mark_transport_delivered(row_id).unwrap();
+            }
+            cas_mux::InjectOutcome::DeferredComposerDirty => {
+                queue
+                    .record_retry(
+                        row_id,
+                        cas_store::PendingReason::GatedNotReady,
+                        Some("operator composer is dirty"),
+                    )
+                    .unwrap();
+            }
         }
         drop(queue);
 
@@ -2014,10 +2002,32 @@ mod tests {
 
     #[test]
     fn deferred_recipient_is_not_counted_as_broadcast_delivery_cas_0b64() {
-        assert!(!delivery_was_written(
-            cas_mux::InjectOutcome::DeferredComposerDirty
-        ));
-        assert!(delivery_was_written(cas_mux::InjectOutcome::Delivered));
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let row_id = queue
+            .enqueue_with_session("supervisor", "all_workers", "report", "factory-session")
+            .unwrap();
+        let outcome = cas_mux::InjectOutcome::DeferredComposerDirty;
+        let succeeded = match outcome {
+            cas_mux::InjectOutcome::Delivered => 1,
+            cas_mux::InjectOutcome::DeferredComposerDirty => 0,
+        };
+
+        queue
+            .mark_broadcast_outcome(
+                row_id,
+                1,
+                succeeded,
+                1 - succeeded,
+                Some("worker-1: operator composer is dirty"),
+            )
+            .unwrap();
+
+        let report = queue.message_delivery_report(row_id).unwrap().unwrap();
+        assert_ne!(report.stage, cas_store::DeliveryStage::Delivered);
+        assert_eq!(report.delivered_at, None);
+        assert_eq!(queue.pending_count().unwrap(), 1);
     }
 
     #[test]

@@ -5,11 +5,14 @@
 //! - File layer: always on, writes to .cas/logs/
 //! - EnvFilter: respects RUST_LOG env var
 
+use arc_swap::ArcSwap;
+use fs2::FileExt;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, fmt};
@@ -49,8 +52,6 @@ pub fn init(cas_root: Option<&Path>, verbose: bool, config: &LoggingConfig) -> i
             let log_dir = root.join(&config.log_dir);
             fs::create_dir_all(&log_dir)?;
 
-            // Re-evaluate the local date for every write so a daemon that
-            // survives midnight moves to the new day's file without restart.
             let log_writer = DailyLogWriter::new(&log_dir)?;
 
             Some(
@@ -81,35 +82,63 @@ pub fn init(cas_root: Option<&Path>, verbose: bool, config: &LoggingConfig) -> i
 
 #[derive(Clone)]
 struct DailyLogWriter {
-    state: Arc<Mutex<DailyLogState>>,
-    local_date: Arc<dyn Fn() -> chrono::NaiveDate + Send + Sync>,
+    shared: Arc<DailyLogShared>,
 }
 
-struct DailyLogState {
+struct DailyLogShared {
     log_dir: PathBuf,
+    active: ArcSwap<ActiveLogFile>,
+    next_date_check: AtomicU64,
+    rotation: Mutex<()>,
+    local_date: Arc<dyn Fn() -> chrono::NaiveDate + Send + Sync>,
+    coarse_time: Arc<dyn Fn() -> u64 + Send + Sync>,
+    open_file: Arc<dyn Fn(&Path, chrono::NaiveDate) -> io::Result<File> + Send + Sync>,
+}
+
+struct ActiveLogFile {
     date: chrono::NaiveDate,
     file: File,
 }
 
+const DATE_CHECK_INTERVAL_SECS: u64 = 1;
+
 impl DailyLogWriter {
     fn new(log_dir: &Path) -> io::Result<Self> {
-        Self::new_with_clock(log_dir, || chrono::Local::now().date_naive())
+        Self::new_with_clocks_and_opener(
+            log_dir,
+            || chrono::Local::now().date_naive(),
+            coarse_unix_time,
+            open_log_file,
+        )
     }
 
-    fn new_with_clock<F>(log_dir: &Path, local_date: F) -> io::Result<Self>
+    fn new_with_clocks_and_opener<D, C, O>(
+        log_dir: &Path,
+        local_date: D,
+        coarse_time: C,
+        open_file: O,
+    ) -> io::Result<Self>
     where
-        F: Fn() -> chrono::NaiveDate + Send + Sync + 'static,
+        D: Fn() -> chrono::NaiveDate + Send + Sync + 'static,
+        C: Fn() -> u64 + Send + Sync + 'static,
+        O: Fn(&Path, chrono::NaiveDate) -> io::Result<File> + Send + Sync + 'static,
     {
         let local_date = Arc::new(local_date);
+        let coarse_time = Arc::new(coarse_time);
+        let open_file = Arc::new(open_file);
         let date = local_date();
-        let file = open_log_file(log_dir, date)?;
+        let file = open_file(log_dir, date)?;
+        let next_date_check = coarse_time().saturating_add(DATE_CHECK_INTERVAL_SECS);
         Ok(Self {
-            state: Arc::new(Mutex::new(DailyLogState {
+            shared: Arc::new(DailyLogShared {
                 log_dir: log_dir.to_path_buf(),
-                date,
-                file,
-            })),
-            local_date,
+                active: ArcSwap::from_pointee(ActiveLogFile { date, file }),
+                next_date_check: AtomicU64::new(next_date_check),
+                rotation: Mutex::new(()),
+                local_date,
+                coarse_time,
+                open_file,
+            }),
         })
     }
 }
@@ -119,57 +148,113 @@ impl<'a> MakeWriter<'a> for DailyLogWriter {
 
     fn make_writer(&'a self) -> Self::Writer {
         DailyLogGuard {
-            state: Arc::clone(&self.state),
-            local_date: Arc::clone(&self.local_date),
+            shared: Arc::clone(&self.shared),
         }
     }
 }
 
 struct DailyLogGuard {
-    state: Arc<Mutex<DailyLogState>>,
-    local_date: Arc<dyn Fn() -> chrono::NaiveDate + Send + Sync>,
+    shared: Arc<DailyLogShared>,
 }
 
 impl DailyLogGuard {
-    fn with_current_file<T>(
-        &self,
-        operation: impl FnOnce(&mut File) -> io::Result<T>,
-    ) -> io::Result<T> {
-        let date = (self.local_date)();
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| io::Error::other("daily log writer lock poisoned"))?;
-        if state.date != date {
-            let file = open_log_file(&state.log_dir, date)?;
-            state.date = date;
-            state.file = file;
+    fn maybe_rotate(&self) {
+        let now = (self.shared.coarse_time)();
+        let next_check = self.shared.next_date_check.load(Ordering::Relaxed);
+        if now < next_check
+            || self
+                .shared
+                .next_date_check
+                .compare_exchange(
+                    next_check,
+                    now.saturating_add(DATE_CHECK_INTERVAL_SECS),
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                )
+                .is_err()
+        {
+            return;
         }
-        operation(&mut state.file)
+
+        // Only the thread which advances the coarse deadline pays for local
+        // timezone conversion. The mutex is likewise off the steady-state path.
+        let date = (self.shared.local_date)();
+        if self.shared.active.load().date == date {
+            return;
+        }
+
+        let _rotation = self
+            .shared
+            .rotation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.shared.active.load().date == date {
+            return;
+        }
+
+        match (self.shared.open_file)(&self.shared.log_dir, date) {
+            Ok(file) => self
+                .shared
+                .active
+                .store(Arc::new(ActiveLogFile { date, file })),
+            Err(error) => {
+                // Keep the old append handle live so a transient rotation
+                // failure cannot discard the log record. The atomic deadline
+                // allows another attempt after the bounded check interval.
+                eprintln!("Warning: Failed to rotate CAS log to {date}: {error}");
+            }
+        }
     }
 }
 
 impl Write for DailyLogGuard {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.with_current_file(|file| file.write(buf))
+        self.maybe_rotate();
+        let active = self.shared.active.load();
+        (&active.file).write(buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.with_current_file(File::flush)
+        self.maybe_rotate();
+        let active = self.shared.active.load();
+        (&active.file).flush()
     }
 }
 
 fn open_log_file(log_dir: &Path, date: chrono::NaiveDate) -> io::Result<File> {
     let log_path = log_path_for_date(log_dir, date);
-    File::options().create(true).append(true).open(log_path)
+    let file = File::options().create(true).append(true).open(log_path)?;
+    FileExt::lock_shared(&file)?;
+    Ok(file)
 }
 
 fn log_path_for_date(log_dir: &Path, date: chrono::NaiveDate) -> PathBuf {
     log_dir.join(format!("cas-{}.log", date.format("%Y-%m-%d")))
 }
 
+fn coarse_unix_time() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 /// Clean up old log files based on retention policy
 pub fn cleanup_old_logs(log_dir: &Path, retention_days: u32) -> io::Result<usize> {
+    cleanup_old_logs_with_hooks(log_dir, retention_days, |_, _| {})
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CleanupStage {
+    BeforeMetadata,
+    BeforeRemove,
+}
+
+fn cleanup_old_logs_with_hooks(
+    log_dir: &Path,
+    retention_days: u32,
+    mut hook: impl FnMut(&Path, CleanupStage),
+) -> io::Result<usize> {
     let mut removed = 0;
     let now = SystemTime::now();
     let cutoff = now
@@ -195,10 +280,29 @@ pub fn cleanup_old_logs(log_dir: &Path, retention_days: u32) -> io::Result<usize
             if chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d").is_err() {
                 continue;
             }
-            let modified = entry.metadata()?.modified()?;
+            hook(&path, CleanupStage::BeforeMetadata);
+            let modified = match entry.metadata().and_then(|metadata| metadata.modified()) {
+                Ok(modified) => modified,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
             if modified < cutoff {
-                fs::remove_file(&path)?;
-                removed += 1;
+                let candidate = match File::options().read(true).write(true).open(&path) {
+                    Ok(file) => file,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error),
+                };
+                match FileExt::try_lock_exclusive(&candidate) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                    Err(error) => return Err(error),
+                }
+                hook(&path, CleanupStage::BeforeRemove);
+                match fs::remove_file(&path) {
+                    Ok(()) => removed += 1,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error),
+                }
             }
         }
     }
@@ -257,6 +361,7 @@ impl Default for LoggingConfig {
 mod tests {
     use crate::logging::*;
     use std::io::Write;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
 
@@ -273,7 +378,13 @@ mod tests {
     fn daily_log_writer_creates_current_date_file() {
         let dir = tempdir().unwrap();
         let date = chrono::NaiveDate::from_ymd_opt(2026, 7, 29).unwrap();
-        let writer = DailyLogWriter::new_with_clock(dir.path(), move || date).unwrap();
+        let writer = DailyLogWriter::new_with_clocks_and_opener(
+            dir.path(),
+            move || date,
+            || 0,
+            open_log_file,
+        )
+        .unwrap();
         let mut guard = writer.make_writer();
         guard.write_all(b"current\n").unwrap();
         guard.flush().unwrap();
@@ -290,15 +401,21 @@ mod tests {
         let first_date = chrono::NaiveDate::from_ymd_opt(2026, 7, 28).unwrap();
         let second_date = chrono::NaiveDate::from_ymd_opt(2026, 7, 29).unwrap();
         let clock = Arc::new(Mutex::new(first_date));
+        let coarse_time = Arc::new(AtomicU64::new(0));
         let writer_clock = Arc::clone(&clock);
-        let writer = DailyLogWriter::new_with_clock(dir.path(), move || {
-            *writer_clock.lock().unwrap()
-        })
+        let writer_time = Arc::clone(&coarse_time);
+        let writer = DailyLogWriter::new_with_clocks_and_opener(
+            dir.path(),
+            move || *writer_clock.lock().unwrap(),
+            move || writer_time.load(Ordering::Relaxed),
+            open_log_file,
+        )
         .unwrap();
         let mut guard = writer.make_writer();
 
         guard.write_all(b"before midnight\n").unwrap();
         *clock.lock().unwrap() = second_date;
+        coarse_time.store(2, Ordering::Relaxed);
         guard.write_all(b"after midnight\n").unwrap();
         guard.flush().unwrap();
 
@@ -313,6 +430,83 @@ mod tests {
     }
 
     #[test]
+    fn daily_log_writer_steady_state_avoids_local_date_lookup() {
+        let dir = tempdir().unwrap();
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 7, 29).unwrap();
+        let date_calls = Arc::new(AtomicUsize::new(0));
+        let writer_calls = Arc::clone(&date_calls);
+        let writer = DailyLogWriter::new_with_clocks_and_opener(
+            dir.path(),
+            move || {
+                writer_calls.fetch_add(1, Ordering::Relaxed);
+                date
+            },
+            || 0,
+            open_log_file,
+        )
+        .unwrap();
+        let mut guard = writer.make_writer();
+
+        for _ in 0..100 {
+            guard.write_all(b"steady state\n").unwrap();
+        }
+
+        assert_eq!(
+            date_calls.load(Ordering::Relaxed),
+            1,
+            "only construction should convert the local date before the coarse deadline"
+        );
+    }
+
+    #[test]
+    fn daily_log_writer_falls_back_and_retries_after_rotation_failure() {
+        let dir = tempdir().unwrap();
+        let first_date = chrono::NaiveDate::from_ymd_opt(2026, 7, 28).unwrap();
+        let second_date = chrono::NaiveDate::from_ymd_opt(2026, 7, 29).unwrap();
+        let date = Arc::new(Mutex::new(first_date));
+        let coarse_time = Arc::new(AtomicU64::new(0));
+        let fail_rotation = Arc::new(AtomicBool::new(true));
+        let writer_date = Arc::clone(&date);
+        let writer_time = Arc::clone(&coarse_time);
+        let writer_failure = Arc::clone(&fail_rotation);
+        let writer = DailyLogWriter::new_with_clocks_and_opener(
+            dir.path(),
+            move || *writer_date.lock().unwrap(),
+            move || writer_time.load(Ordering::Relaxed),
+            move |log_dir, requested_date| {
+                if requested_date == second_date && writer_failure.load(Ordering::Relaxed) {
+                    Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "injected rotation failure",
+                    ))
+                } else {
+                    open_log_file(log_dir, requested_date)
+                }
+            },
+        )
+        .unwrap();
+        let mut guard = writer.make_writer();
+
+        guard.write_all(b"before midnight\n").unwrap();
+        *date.lock().unwrap() = second_date;
+        coarse_time.store(2, Ordering::Relaxed);
+        guard.write_all(b"rotation failed but retained\n").unwrap();
+        assert_eq!(
+            fs::read_to_string(log_path_for_date(dir.path(), first_date)).unwrap(),
+            "before midnight\nrotation failed but retained\n"
+        );
+
+        fail_rotation.store(false, Ordering::Relaxed);
+        coarse_time.store(4, Ordering::Relaxed);
+        guard.write_all(b"rotation retried\n").unwrap();
+        guard.flush().unwrap();
+        assert_eq!(
+            fs::read_to_string(log_path_for_date(dir.path(), second_date)).unwrap(),
+            "rotation retried\n"
+        );
+    }
+
+    #[test]
     fn cleanup_old_logs_uses_mtime_and_preserves_active_file() {
         let dir = tempdir().unwrap();
         let now = SystemTime::now();
@@ -321,9 +515,7 @@ mod tests {
         fs::write(&stale_path, "stale log").unwrap();
         filetime::set_file_mtime(
             &stale_path,
-            filetime::FileTime::from_system_time(
-                now - Duration::from_secs(10 * 86_400),
-            ),
+            filetime::FileTime::from_system_time(now - Duration::from_secs(10 * 86_400)),
         )
         .unwrap();
 
@@ -331,8 +523,13 @@ mod tests {
         // recent mtime proves it is hot even though its filename is ancient.
         let hot_old_date = chrono::NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
         let hot_old_path = log_path_for_date(dir.path(), hot_old_date);
-        let hot_writer =
-            DailyLogWriter::new_with_clock(dir.path(), move || hot_old_date).unwrap();
+        let hot_writer = DailyLogWriter::new_with_clocks_and_opener(
+            dir.path(),
+            move || hot_old_date,
+            || 0,
+            open_log_file,
+        )
+        .unwrap();
         let mut hot_guard = hot_writer.make_writer();
         hot_guard.write_all(b"actively written log\n").unwrap();
         hot_guard.flush().unwrap();
@@ -343,13 +540,11 @@ mod tests {
         fs::write(&active_path, "active log").unwrap();
         filetime::set_file_mtime(
             &active_path,
-            filetime::FileTime::from_system_time(
-                now - Duration::from_secs(30 * 86_400),
-            ),
+            filetime::FileTime::from_system_time(now - Duration::from_secs(30 * 86_400)),
         )
         .unwrap();
 
-        let removed = cleanup_old_logs(dir.path(), 7).unwrap();
+        let removed = cleanup_old_logs(dir.path(), 0).unwrap();
         assert_eq!(removed, 1);
         assert!(!stale_path.exists());
         assert!(hot_old_path.exists());
@@ -360,5 +555,45 @@ mod tests {
             fs::read_to_string(hot_old_path).unwrap(),
             "actively written log\nstill active\n"
         );
+    }
+
+    #[test]
+    fn cleanup_old_logs_skips_files_unlinked_before_metadata() {
+        let dir = tempdir().unwrap();
+        let raced_path = dir.path().join("cas-2020-01-01.log");
+        let removable_path = dir.path().join("cas-2020-01-02.log");
+        fs::write(&raced_path, "raced").unwrap();
+        fs::write(&removable_path, "removable").unwrap();
+
+        let removed = cleanup_old_logs_with_hooks(dir.path(), 0, |path, stage| {
+            if path == raced_path && stage == CleanupStage::BeforeMetadata {
+                fs::remove_file(path).unwrap();
+            }
+        })
+        .unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(!raced_path.exists());
+        assert!(!removable_path.exists());
+    }
+
+    #[test]
+    fn cleanup_old_logs_skips_files_unlinked_before_remove() {
+        let dir = tempdir().unwrap();
+        let raced_path = dir.path().join("cas-2020-01-01.log");
+        let removable_path = dir.path().join("cas-2020-01-02.log");
+        fs::write(&raced_path, "raced").unwrap();
+        fs::write(&removable_path, "removable").unwrap();
+
+        let removed = cleanup_old_logs_with_hooks(dir.path(), 0, |path, stage| {
+            if path == raced_path && stage == CleanupStage::BeforeRemove {
+                fs::remove_file(path).unwrap();
+            }
+        })
+        .unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(!raced_path.exists());
+        assert!(!removable_path.exists());
     }
 }

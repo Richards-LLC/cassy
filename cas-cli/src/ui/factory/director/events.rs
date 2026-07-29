@@ -1015,7 +1015,10 @@ impl DirectorEventDetector {
                     && (task.assignee.as_deref() == Some(resolved_name.as_str())
                         || task.assignee.as_deref() == Some(agent.id.as_str()))
             });
-            if let Some(task) = assigned_open_task {
+            // An active InProgress task is the stronger signal: let the
+            // existing stall block below evaluate it instead of allowing a
+            // secondary assigned-Open task to shadow it.
+            if let Some(task) = assigned_open_task.filter(|_| agent.current_task.is_none()) {
                 let has_fresh_heartbeat = agent
                     .last_heartbeat
                     .map(|hb| {

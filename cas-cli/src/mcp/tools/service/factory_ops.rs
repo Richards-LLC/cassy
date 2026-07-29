@@ -1024,16 +1024,15 @@ impl CasService {
                     task.assignee.as_deref() == Some(agent.name.as_str())
                         || task.assignee.as_deref() == Some(agent.id.as_str())
                 });
+                let effective_stall_threshold = crate::ui::factory::effective_stall_threshold_secs(
+                    stall_threshold_secs as u64,
+                    worker_effort_from_agent(agent),
+                ) as i64;
                 let assigned_unstarted_elapsed = assigned_open_task.and_then(|task| {
-                    let effective_threshold =
-                        crate::ui::factory::effective_stall_threshold_secs(
-                            stall_threshold_secs as u64,
-                            worker_effort_from_agent(agent),
-                        ) as i64;
                     assigned_unstarted_elapsed_secs(
                         task.updated_at,
                         last_activity.map(|(secs, _)| secs),
-                        effective_threshold,
+                        effective_stall_threshold,
                         in_flight_tool_call,
                         chrono::Utc::now(),
                     )
@@ -1044,17 +1043,18 @@ impl CasService {
                     stall_threshold_secs,
                     in_flight_tool_call,
                 );
-                let activity_info = if let (Some(task), Some(elapsed)) =
-                    (assigned_open_task, assigned_unstarted_elapsed)
-                {
-                    format_assigned_unstarted_status(
-                        &task.id,
-                        elapsed,
-                        crate::ui::factory::effective_stall_threshold_secs(
-                            stall_threshold_secs as u64,
-                            worker_effort_from_agent(agent),
-                        ) as i64,
-                    )
+                let priority_alert = format_priority_worker_status_alert(
+                    stalled,
+                    last_activity,
+                    stall_threshold_secs,
+                    assigned_open_task
+                        .zip(assigned_unstarted_elapsed)
+                        .map(|(task, elapsed)| {
+                            (task.id.as_str(), elapsed, effective_stall_threshold)
+                        }),
+                );
+                let activity_info = if let Some(alert) = priority_alert {
+                    alert
                 } else if !has_in_progress_task {
                     match last_activity {
                         Some((secs, phase)) => {
@@ -1064,14 +1064,6 @@ impl CasService {
                             "\n    last activity: none in last 10m (may be investigating or idle)"
                                 .to_string()
                         }
-                    }
-                } else if stalled {
-                    match last_activity {
-                        Some((secs, phase)) => format!(
-                            "\n    last activity: {secs}s ago ({phase}) ⚠ STALLED (no activity ≥{stall_threshold_secs}s while task in progress)"
-                        ),
-                        None => "\n    ⚠ STALLED: no activity in last 10m while task in progress"
-                            .to_string(),
                     }
                 } else if in_flight_tool_call {
                     // Has an assignment, would otherwise read as stalled
@@ -2488,6 +2480,30 @@ fn format_assigned_unstarted_status(
     format!(
         "\n    ⚠ ASSIGNED BUT UNSTARTED: {task_id} was assigned {elapsed_secs}s ago and remains unstarted with no recent activity (threshold: {threshold_secs}s)"
     )
+}
+
+/// Render the highest-priority worker-status alert.
+///
+/// A confirmed InProgress stall is more urgent than a second assigned Open
+/// task that has not started, so it must win when both states coexist.
+fn format_priority_worker_status_alert(
+    stalled: bool,
+    last_activity: Option<(i64, &'static str)>,
+    stall_threshold_secs: i64,
+    assigned_unstarted: Option<(&str, i64, i64)>,
+) -> Option<String> {
+    if stalled {
+        return Some(match last_activity {
+            Some((secs, phase)) => format!(
+                "\n    last activity: {secs}s ago ({phase}) ⚠ STALLED (no activity ≥{stall_threshold_secs}s while task in progress)"
+            ),
+            None => "\n    ⚠ STALLED: no activity in last 10m while task in progress".to_string(),
+        });
+    }
+
+    assigned_unstarted.map(|(task_id, elapsed, threshold)| {
+        format_assigned_unstarted_status(task_id, elapsed, threshold)
+    })
 }
 
 /// cas-9829: whether a `worker_status` row should render the `⚠ STALLED`
@@ -3979,6 +3995,20 @@ effort = "high"
         assert!(rendered.contains("cas-unstarted was assigned 310s ago"));
         assert!(rendered.contains("remains unstarted with no recent activity"));
         assert!(rendered.contains("threshold: 300s"));
+    }
+
+    #[test]
+    fn test_c14e4_worker_status_stall_wins_over_assigned_unstarted_banner() {
+        let rendered = format_priority_worker_status_alert(
+            true,
+            Some((310, "activity")),
+            300,
+            Some(("cas-unstarted", 600, 300)),
+        )
+        .expect("coexisting stalled and assigned-unstarted states must render an alert");
+
+        assert!(rendered.contains("⚠ STALLED"), "{rendered}");
+        assert!(!rendered.contains("ASSIGNED BUT UNSTARTED"), "{rendered}");
     }
 
     #[test]

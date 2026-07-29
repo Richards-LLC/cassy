@@ -1369,7 +1369,7 @@ impl FactoryApp {
     ///
     /// A survivor intentionally remains registered for `gc_report` rather
     /// than being silently forgotten.
-    pub(crate) fn untrack_worker_process_group_if_gone(&self, pgid: u32) {
+    pub(crate) async fn untrack_worker_process_group_if_gone(&self, pgid: u32) {
         let record = crate::ui::factory::process_groups::list(self.cas_dir())
             .unwrap_or_default()
             .into_iter()
@@ -1390,7 +1390,7 @@ impl FactoryApp {
                 }
                 return;
             }
-            std::thread::sleep(std::time::Duration::from_millis(25));
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
         tracing::warn!(
             pgid,

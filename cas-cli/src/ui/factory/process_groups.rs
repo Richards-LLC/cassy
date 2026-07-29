@@ -37,6 +37,15 @@ enum GroupIdentity {
     Original,
     Gone,
     FingerprintMismatch,
+    Unverifiable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProcessGroupStatus {
+    Live,
+    Gone,
+    FingerprintMismatch,
+    Unverifiable,
 }
 
 fn registry_dir(cas_root: &Path) -> PathBuf {
@@ -118,11 +127,20 @@ pub(crate) fn is_live(record: &TrackedProcessGroup) -> bool {
     group_identity(record) == GroupIdentity::Original
 }
 
+pub(crate) fn status(record: &TrackedProcessGroup) -> ProcessGroupStatus {
+    match group_identity(record) {
+        GroupIdentity::Original => ProcessGroupStatus::Live,
+        GroupIdentity::Gone => ProcessGroupStatus::Gone,
+        GroupIdentity::FingerprintMismatch => ProcessGroupStatus::FingerprintMismatch,
+        GroupIdentity::Unverifiable => ProcessGroupStatus::Unverifiable,
+    }
+}
+
 fn group_identity(record: &TrackedProcessGroup) -> GroupIdentity {
     #[cfg(target_os = "linux")]
     {
         let Some(expected) = record.pid_starttime else {
-            return GroupIdentity::FingerprintMismatch;
+            return GroupIdentity::Unverifiable;
         };
         return match crate::mcp::daemon::read_pid_starttime(record.pgid) {
             Some(actual) if actual == expected => {
@@ -140,15 +158,46 @@ fn group_identity(record: &TrackedProcessGroup) -> GroupIdentity {
         };
     }
 
-    #[cfg(all(unix, not(target_os = "linux")))]
+    #[cfg(target_os = "macos")]
     {
-        // SAFETY: getpgid is a read-only process-table query.
+        let Some(expected) = record.pid_starttime else {
+            return GroupIdentity::Unverifiable;
+        };
+        let Some(actual_starttime) = crate::mcp::daemon::read_pid_starttime(record.pgid) else {
+            return if crate::mcp::daemon::pid_alive(record.pgid) {
+                GroupIdentity::Unverifiable
+            } else if macos_process_group_has_members(record.pgid) {
+                // As on Linux, a leaderless group cannot acquire a new leader
+                // with the same PGID while those original members remain.
+                GroupIdentity::Original
+            } else {
+                GroupIdentity::Gone
+            };
+        };
+        if actual_starttime != expected {
+            return GroupIdentity::FingerprintMismatch;
+        }
+        // SAFETY: getpgid is a read-only process-table query. Both the start
+        // timestamp and process-group relationship must still match.
         let actual_pgid = unsafe { libc::getpgid(record.pgid as libc::pid_t) };
         if actual_pgid == record.pgid as libc::pid_t {
             GroupIdentity::Original
         } else {
             GroupIdentity::Gone
         }
+    }
+
+    #[cfg(all(
+        unix,
+        not(any(target_os = "linux", target_os = "macos"))
+    ))]
+    {
+        // No stable, supported process-start fingerprint is available here.
+        // Destructive cleanup must fail closed instead of trusting a recycled
+        // numeric PGID. We also preserve the record when the original leader
+        // appears gone because this platform has no supported group-member
+        // probe to prove that descendants are gone too.
+        GroupIdentity::Unverifiable
     }
 
     #[cfg(not(unix))]
@@ -159,6 +208,21 @@ fn group_identity(record: &TrackedProcessGroup) -> GroupIdentity {
             GroupIdentity::Gone
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_process_group_has_members(pgid: u32) -> bool {
+    let mut pids = [0 as libc::pid_t; 64];
+    // SAFETY: proc_listpgrppids writes at most `size_of_val(pids)` bytes into
+    // the supplied stack buffer and does not retain the pointer.
+    let written = unsafe {
+        libc::proc_listpgrppids(
+            pgid as libc::pid_t,
+            pids.as_mut_ptr().cast(),
+            std::mem::size_of_val(&pids) as libc::c_int,
+        )
+    };
+    written > 0 && pids.iter().any(|pid| *pid > 0)
 }
 
 #[cfg(target_os = "linux")]
@@ -202,7 +266,10 @@ pub(crate) fn age(record: &TrackedProcessGroup) -> Duration {
 }
 
 /// Reclaim one fingerprint-matched orphan process group.
-pub(crate) fn reap(cas_root: &Path, record: &TrackedProcessGroup) -> io::Result<ReapOutcome> {
+pub(crate) async fn reap(
+    cas_root: &Path,
+    record: &TrackedProcessGroup,
+) -> io::Result<ReapOutcome> {
     match group_identity(record) {
         GroupIdentity::Original => {}
         GroupIdentity::Gone => {
@@ -212,6 +279,15 @@ pub(crate) fn reap(cas_root: &Path, record: &TrackedProcessGroup) -> io::Result<
         GroupIdentity::FingerprintMismatch => {
             untrack(cas_root, record.pgid)?;
             return Ok(ReapOutcome::FingerprintMismatch);
+        }
+        GroupIdentity::Unverifiable => {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "refusing to signal process group {}: durable process identity cannot be verified",
+                    record.pgid
+                ),
+            ));
         }
     }
 
@@ -241,7 +317,7 @@ pub(crate) fn reap(cas_root: &Path, record: &TrackedProcessGroup) -> io::Result<
             untrack(cas_root, record.pgid)?;
             return Ok(ReapOutcome::Reaped);
         }
-        std::thread::sleep(Duration::from_millis(25));
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
 
     Err(io::Error::other(format!(
@@ -274,15 +350,15 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[test]
-    fn reap_refuses_a_recycled_pgid_fingerprint_at_kill_time() {
+    #[tokio::test]
+    async fn reap_refuses_a_recycled_pgid_fingerprint_at_kill_time() {
         let temp = tempfile::tempdir().unwrap();
         let pid = std::process::id();
         let mut record = track(temp.path(), "stale-worker", "dead-factory", pid).unwrap();
         record.pid_starttime = record.pid_starttime.map(|start| start + 1);
 
         assert_eq!(
-            reap(temp.path(), &record).unwrap(),
+            reap(temp.path(), &record).await.unwrap(),
             ReapOutcome::FingerprintMismatch
         );
         assert!(
@@ -291,9 +367,32 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn reap_preserves_an_unverifiable_live_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid = std::process::id();
+        let mut record = track(temp.path(), "legacy-worker", "legacy-factory", pid).unwrap();
+        record.pid_starttime = None;
+        fs::write(
+            record_path(temp.path(), pid),
+            serde_json::to_vec_pretty(&record).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(status(&record), ProcessGroupStatus::Unverifiable);
+        let error = reap(temp.path(), &record).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(
+            crate::mcp::daemon::pid_alive(pid),
+            "unverifiable identity must never be signaled"
+        );
+        assert_eq!(list(temp.path()).unwrap(), vec![record]);
+    }
+
     #[cfg(unix)]
-    #[test]
-    fn reap_kills_a_synthetic_long_lived_process_group() {
+    #[tokio::test]
+    async fn reap_kills_a_synthetic_long_lived_process_group() {
         use std::os::unix::process::CommandExt;
         use std::process::Command;
 
@@ -315,15 +414,18 @@ mod tests {
         let record = track(temp.path(), "synthetic-worker", "synthetic-factory", pgid).unwrap();
         assert!(is_live(&record));
 
-        assert_eq!(reap(temp.path(), &record).unwrap(), ReapOutcome::Reaped);
+        assert_eq!(
+            reap(temp.path(), &record).await.unwrap(),
+            ReapOutcome::Reaped
+        );
         let _ = child.wait();
         assert!(!is_live(&record));
         assert!(list(temp.path()).unwrap().is_empty());
     }
 
     #[cfg(target_os = "linux")]
-    #[test]
-    fn reap_kills_group_after_the_original_leader_has_exited() {
+    #[tokio::test]
+    async fn reap_kills_group_after_the_original_leader_has_exited() {
         use std::os::unix::process::CommandExt;
         use std::process::Command;
 
@@ -364,7 +466,10 @@ mod tests {
             "leaderless descendants must keep the tracked group live"
         );
 
-        assert_eq!(reap(temp.path(), &record).unwrap(), ReapOutcome::Reaped);
+        assert_eq!(
+            reap(temp.path(), &record).await.unwrap(),
+            ReapOutcome::Reaped
+        );
         assert!(
             !crate::mcp::daemon::pid_alive(child_pid)
                 || process_state_and_group(child_pid).is_some_and(|(state, _)| state == 'Z'),

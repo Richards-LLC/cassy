@@ -1327,11 +1327,12 @@ impl Pty {
     /// inherits that PGID, so `killpg(pgid, sig)` terminates the whole tree.
     ///
     /// * `force = true`  → SIGKILL  (immediate, cannot be caught)
-    /// * `force = false` → SIGTERM followed by SIGKILL escalation for the group
+    /// * `force = false` → SIGTERM, a real three-second grace period, then
+    ///   SIGKILL escalation if any member of the group remains
     ///
     /// Falls back to `child.kill()` (SIGKILL on the direct child) when no PID
     /// is available (non-unix builds, already-reaped process, etc.).
-    pub fn kill_tree(&mut self, force: bool) {
+    pub async fn kill_tree(&mut self, force: bool) {
         #[cfg(unix)]
         {
             if let Some(pid) = self.process_group_id() {
@@ -1339,20 +1340,53 @@ impl Pty {
                 // SAFETY: standard POSIX call; pid is a valid u32 just returned
                 // by portable_pty — casting to pid_t is always safe on all
                 // Unix targets where pid_t is i32/i64.
-                unsafe {
-                    libc::killpg(pid as libc::pid_t, sig);
-                    // The old implementation immediately called child.kill()
-                    // after SIGTERM, so it never provided a real grace period
-                    // and could leave SIGTERM-ignoring descendants alive.
-                    // Escalate the same group before touching the direct-child
-                    // handle so teardown is complete and deterministic.
-                    if !force {
-                        libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+                unsafe { libc::killpg(pid as libc::pid_t, sig) };
+                if !force {
+                    const GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+                    const POLL: std::time::Duration = std::time::Duration::from_millis(50);
+                    let deadline = tokio::time::Instant::now() + GRACE;
+                    loop {
+                        // Reap the direct child when it honored SIGTERM. This
+                        // prevents a zombie group leader from making killpg(0)
+                        // look live for the entire grace window.
+                        let _ = self.child.try_wait();
+                        // SAFETY: signal 0 only probes group existence.
+                        let alive = unsafe {
+                            libc::killpg(pid as libc::pid_t, 0) == 0
+                                || std::io::Error::last_os_error().raw_os_error()
+                                    != Some(libc::ESRCH)
+                        };
+                        if !alive {
+                            return;
+                        }
+                        if tokio::time::Instant::now() >= deadline {
+                            // SAFETY: this is the same process group selected
+                            // above and it remained continuously live throughout
+                            // the bounded grace period.
+                            unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) };
+                            break;
+                        }
+                        tokio::time::sleep(POLL).await;
                     }
                 }
+                // Force mode and graceful escalation both finish by touching
+                // the direct-child handle as a belt-and-suspenders fallback.
+                let _ = self.child.kill();
+                return;
             }
         }
-        // Belt-and-suspenders: also kill the direct child handle.
+        // Non-Unix/no-PID fallback: portable_pty only exposes an immediate
+        // direct-child kill.
+        let _ = self.child.kill();
+    }
+
+    /// Immediate group-wide teardown for synchronous process-exit paths.
+    pub fn kill_tree_force(&mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.process_group_id() {
+            // SAFETY: standard POSIX call on the PGID returned by portable_pty.
+            unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) };
+        }
         let _ = self.child.kill();
     }
 }

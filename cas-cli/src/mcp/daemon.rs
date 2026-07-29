@@ -1326,8 +1326,8 @@ pub(crate) fn stamp_pid_fingerprint(agent: &mut crate::types::Agent, pid: u32) {
     }
 }
 
-/// Read `/proc/<pid>/stat` field 22 (process start time in clock ticks since
-/// boot) to fingerprint a PID (EPIC cas-9508 / cas-ea46).
+/// Read the OS process-start timestamp used to fingerprint a PID
+/// (EPIC cas-9508 / cas-ea46).
 ///
 /// The Linux kernel recycles PIDs — `pid_max` defaults to 4_194_304 and a busy
 /// factory host can wrap it within hours. `pid_alive(pid)` alone cannot tell
@@ -1347,10 +1347,39 @@ pub(crate) fn read_pid_starttime(pid: u32) -> Option<u64> {
     parse_starttime_from_stat(&raw)
 }
 
-#[cfg(not(target_os = "linux"))]
+/// macOS exposes a stable `(seconds, microseconds)` start timestamp through
+/// libproc's `PROC_PIDTBSDINFO`. Combining it into microseconds gives the same
+/// equality-only fingerprint contract as Linux's clock-tick value.
+#[cfg(target_os = "macos")]
+pub(crate) fn read_pid_starttime(pid: u32) -> Option<u64> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>();
+    // SAFETY: proc_pidinfo initializes `size` bytes of the supplied
+    // proc_bsdinfo buffer on success and does not retain the pointer.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size as libc::c_int,
+        )
+    };
+    if written != size as libc::c_int {
+        return None;
+    }
+    // SAFETY: exact-size success above guarantees full initialization.
+    let info = unsafe { info.assume_init() };
+    info.pbi_start_tvsec
+        .checked_mul(1_000_000)?
+        .checked_add(info.pbi_start_tvusec)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn read_pid_starttime(_pid: u32) -> Option<u64> {
-    // /proc/<pid>/stat is Linux-specific. On macOS/BSD/Windows we fall back
-    // to pid-only liveness (see pid_matches_fingerprint below).
+    // Platforms without a supported stable start-time API retain pid-only
+    // agent liveness. Destructive process-group cleanup separately fails
+    // closed when it cannot validate a durable fingerprint.
     None
 }
 

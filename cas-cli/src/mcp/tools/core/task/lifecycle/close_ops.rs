@@ -4852,14 +4852,35 @@ pub(crate) struct EpicChildBranchStatus {
     pub task_id: String,
     pub task_status: TaskStatus,
     pub assignee: Option<String>,
-    /// The branch recorded when this task parked. `None` for legacy or
-    /// non-parked tasks without task-specific merge evidence.
+    /// Primary branch checked when the task-specific anchor is unavailable.
+    /// This is the historical parked branch when present, otherwise the
+    /// current assignee-derived branch.
     pub factory_branch: Option<String>,
+    /// Other branches checked for the same task. A reassigned task can retain
+    /// a historical `parked_branch` while its current assignee has live work
+    /// on a different factory branch; both must remain visible to the gate.
+    pub additional_factory_branches: Vec<String>,
     pub unmerged_count: u32,
-    /// Unix epoch seconds of the most recent commit on
-    /// `factory_branch`. `None` when the branch ref doesn't resolve
-    /// or `git log` fails.
+    /// Unix epoch seconds of the most recent commit across the checked
+    /// commit-ish values. `None` when none resolve or `git log` fails.
     pub last_commit_unix: Option<i64>,
+}
+
+impl EpicChildBranchStatus {
+    fn factory_branches_label(&self) -> String {
+        let branches = self
+            .factory_branch
+            .iter()
+            .chain(self.additional_factory_branches.iter())
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        if branches.is_empty() {
+            "—".to_string()
+        } else {
+            branches
+        }
+    }
 }
 
 /// Walk an epic's children and report whether each child task's own recorded
@@ -4867,13 +4888,12 @@ pub(crate) struct EpicChildBranchStatus {
 ///
 /// A parked `factory_branch_anchor` is the authoritative commit-ish. It is
 /// task-specific and remains stable when a worker later reuses the same
-/// factory branch for another epic. `parked_branch` is the authoritative
-/// branch name for diagnostics and survives reassignment. Legacy/non-parked
-/// tasks without either recorded datum fall back to the assignee-derived live
-/// branch. That fallback is load-bearing for workers whose harness did not
-/// record a commit-time receipt: treating missing evidence as zero unmerged
-/// commits would make the hard close gate fail open. Recorded evidence always
-/// wins, so later branch reuse cannot re-strand a task whose anchor was captured.
+/// factory branch for another epic. When that anchor is absent or no longer
+/// resolves, both the historical `parked_branch` and a distinct current
+/// assignee-derived live branch are checked. Taking the maximum unmerged count
+/// avoids double-counting shared history while ensuring reassignment cannot
+/// hide either worker's stranded commits. A valid recorded anchor still wins,
+/// so later branch reuse cannot re-strand a task whose anchor was captured.
 ///
 /// Used by both:
 /// - `factory_epic_status` (read-only diagnostic — renders all rows)
@@ -4892,35 +4912,60 @@ pub(crate) fn collect_epic_branch_statuses(
     subtasks
         .iter()
         .map(|t| {
-            let factory_branch = t.deliverables.parked_branch.clone().or_else(|| {
-                if t.deliverables.factory_branch_anchor.is_none() {
-                    t.assignee
-                        .as_ref()
-                        .map(|assignee| format!("factory/{assignee}"))
-                } else {
-                    None
-                }
-            });
-            let commit_ish = t
+            let parked_branch = t.deliverables.parked_branch.clone();
+            let live_factory_branch = t
+                .assignee
+                .as_ref()
+                .map(|assignee| format!("factory/{assignee}"));
+            let resolved_anchor = t
                 .deliverables
                 .factory_branch_anchor
                 .as_deref()
-                .filter(|anchor| git_ref_exists(repo_path, anchor))
-                .or(factory_branch.as_deref());
-            let (unmerged_count, last_commit_unix) = match commit_ish {
-                Some(commit) => (
-                    count_unmerged_factory_commits(repo_path, commit, parent_branch),
-                    last_commit_unix(repo_path, commit),
-                ),
-                None => (0, None),
+                .filter(|anchor| git_ref_exists(repo_path, anchor));
+
+            let mut fallback_branches = Vec::new();
+            if resolved_anchor.is_none() {
+                if let Some(branch) = parked_branch.as_ref() {
+                    fallback_branches.push(branch.clone());
+                }
+                if let Some(branch) = live_factory_branch.as_ref()
+                    && !fallback_branches.contains(branch)
+                {
+                    fallback_branches.push(branch.clone());
+                }
+            }
+            let factory_branch = fallback_branches.first().cloned().or(parked_branch);
+            let additional_factory_branches: Vec<String> =
+                fallback_branches.into_iter().skip(1).collect();
+
+            let checked_refs = if let Some(anchor) = resolved_anchor {
+                vec![anchor]
+            } else {
+                factory_branch
+                    .as_deref()
+                    .into_iter()
+                    .chain(additional_factory_branches.iter().map(String::as_str))
+                    .collect()
             };
+            let mut unmerged_count = 0;
+            let mut latest_commit_unix = None;
+            for commit in checked_refs {
+                unmerged_count = unmerged_count.max(count_unmerged_factory_commits(
+                    repo_path,
+                    commit,
+                    parent_branch,
+                ));
+                latest_commit_unix =
+                    latest_commit_unix.max(last_commit_unix(repo_path, commit));
+            }
             EpicChildBranchStatus {
                 task_id: t.id.clone(),
                 task_status: t.status,
                 assignee: t.assignee.clone(),
                 factory_branch,
+                additional_factory_branches,
                 unmerged_count,
-                last_commit_unix,
+                last_commit_unix: latest_commit_unix,
             }
         })
         .collect()
@@ -4952,7 +4997,7 @@ pub(crate) fn render_epic_status_report(
         // (e.g., `task list`). Round-1 cas-code-review fix.
         let status_str = s.task_status.to_string();
         let assignee = s.assignee.as_deref().unwrap_or("—");
-        let branch = s.factory_branch.as_deref().unwrap_or("—");
+        let branch = s.factory_branches_label();
         let unmerged = if s.factory_branch.is_some() {
             s.unmerged_count.to_string()
         } else {
@@ -5089,7 +5134,7 @@ pub(crate) fn run_epic_close_merge_gate(
             detail,
             "  - {task} ({branch}): {n} commit(s) not on {parent}",
             task = s.task_id,
-            branch = s.factory_branch.as_deref().unwrap_or("—"),
+            branch = s.factory_branches_label(),
             n = s.unmerged_count,
             parent = parent_branch,
         );
@@ -10453,6 +10498,47 @@ mod epic_status_gate_tests {
         );
     }
 
+    #[test]
+    fn dangling_anchor_checks_stale_parked_and_current_assignee_branches() {
+        let dir = init_epic_repo(&[("alice", 1), ("bob", 1)]);
+        git(
+            dir.path(),
+            &["merge", "--no-ff", "-m", "merge alice", "factory/alice"],
+        );
+
+        let mut reassigned = child("cas-reassigned", TaskStatus::InProgress, Some("bob"));
+        reassigned.deliverables.parked_branch = Some("factory/alice".to_string());
+        reassigned.deliverables.factory_branch_anchor = Some("0".repeat(40));
+        let task = epic("cas-epic-reassigned");
+        let req = base_req(&task.id);
+
+        match run_epic_close_merge_gate(
+            &task,
+            &req,
+            "main",
+            dir.path(),
+            std::slice::from_ref(&reassigned),
+        ) {
+            EpicCloseGateOutcome::Reject(message) => {
+                assert!(
+                    message.contains("factory/alice"),
+                    "the rejection must name the historical parked branch: {message}"
+                );
+                assert!(
+                    message.contains("factory/bob"),
+                    "the rejection must name the current assignee branch: {message}"
+                );
+                assert!(
+                    message.contains("1 commit"),
+                    "Bob's stranded commit must be visible: {message}"
+                );
+            }
+            EpicCloseGateOutcome::Proceed => {
+                panic!("Bob's live stranded work must block epic close")
+            }
+        }
+    }
+
     /// cas-54ca: missing task-specific evidence must not turn UNKNOWN into
     /// VERIFIED-MERGED. Codex workers do not currently receive the commit-time
     /// PostToolUse hook, so this legacy/no-receipt shape occurs in practice.
@@ -10660,6 +10746,7 @@ mod epic_status_gate_tests {
                 task_status: TaskStatus::Closed,
                 assignee: Some("alpha".to_string()),
                 factory_branch: Some("factory/alpha".to_string()),
+                additional_factory_branches: Vec::new(),
                 unmerged_count: 0,
                 last_commit_unix: Some(1735689600), // 2025-01-01 00:00 UTC
             },
@@ -10668,6 +10755,7 @@ mod epic_status_gate_tests {
                 task_status: TaskStatus::InProgress,
                 assignee: Some("bravo".to_string()),
                 factory_branch: Some("factory/bravo".to_string()),
+                additional_factory_branches: Vec::new(),
                 unmerged_count: 2,
                 last_commit_unix: Some(1735776000), // 2025-01-02 00:00 UTC
             },
@@ -10676,6 +10764,7 @@ mod epic_status_gate_tests {
                 task_status: TaskStatus::InProgress,
                 assignee: None,
                 factory_branch: None,
+                additional_factory_branches: Vec::new(),
                 unmerged_count: 0,
                 last_commit_unix: None,
             },

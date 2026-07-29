@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use crate::Result;
+use crate::{Result, StoreError};
 use crate::recording_store::capture_message_event;
 use crate::supervisor_queue_store::NotificationPriority;
 
@@ -651,6 +651,10 @@ pub trait PromptQueueStore: Send + Sync {
     ///
     /// Without a session tag, behavior is the historical single-lane target
     /// filter. Session isolation: other sessions' tagged rows never leak.
+    ///
+    /// # Errors
+    /// Returns an error when `targets` is empty. Session-wide peeks are not
+    /// supported; callers must state the exact delivery target universe.
     fn peek_for_targets(
         &self,
         targets: &[&str],
@@ -1545,7 +1549,13 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         factory_session: Option<&str>,
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>> {
-        if limit == 0 || targets.is_empty() {
+        if targets.is_empty() {
+            return Err(StoreError::Other(
+                "peek_for_targets requires at least one target; session-wide peeks are not supported"
+                    .to_string(),
+            ));
+        }
+        if limit == 0 {
             return Ok(Vec::new());
         }
 
@@ -1554,9 +1564,6 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
         // Legacy path (no session): single-lane target filter.
         let Some(session) = factory_session else {
-            if targets.is_empty() {
-                return Ok(Vec::new());
-            }
             let placeholders: Vec<&str> = std::iter::repeat_n("?", targets.len()).collect();
             let sql = format!(
                 "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session
@@ -2638,6 +2645,24 @@ mod tests {
         assert_eq!(prompts_b.len(), 1);
         assert_eq!(prompts_b[0].target, "worker-b1");
         assert_eq!(prompts_b[0].factory_session.as_deref(), Some("session-b"));
+    }
+
+    #[test]
+    fn peek_for_targets_rejects_empty_target_universe() {
+        let (_temp, store) = create_test_store();
+        store
+            .enqueue_with_session("supervisor", "worker", "session row", "session-a")
+            .unwrap();
+
+        let error = store
+            .peek_for_targets(&[], Some("session-a"), 10)
+            .expect_err("session-only peeks must fail loudly");
+        assert!(
+            error
+                .to_string()
+                .contains("requires at least one target; session-wide peeks are not supported"),
+            "unexpected error: {error}"
+        );
     }
 
     /// Regression test for cas-7210 ("active workers stop receiving ALL

@@ -1,6 +1,7 @@
 use crate::hooks::handlers::handlers_middle::tmpfs_guardrail::maybe_tmpfs_guardrail_warning;
 use crate::hooks::handlers::*;
 use crate::hooks::types::HookSpecificOutput;
+use std::borrow::Cow;
 
 pub fn handle_post_tool_use(
     input: &HookInput,
@@ -16,6 +17,8 @@ fn handle_post_tool_use_with_guardrail(
     cas_root: Option<&Path>,
     guardrail: impl FnOnce(&Path, &HookInput, &mut ToolHookStores<'_>) -> Option<HookOutput>,
 ) -> Result<HookOutput, MemError> {
+    let input = normalize_post_tool_input(input);
+    let input = input.as_ref();
     let tool_name = match &input.tool_name {
         Some(name) => name.as_str(),
         None => return Ok(HookOutput::empty()),
@@ -200,6 +203,28 @@ fn handle_post_tool_use_with_guardrail(
 
     // Silent success - don't clutter Claude's output
     Ok(HookOutput::empty())
+}
+
+/// Normalize harness-specific tool names before any shared PostToolUse logic.
+///
+/// Grok sends the real terminal tool name (`run_terminal_command`) even
+/// though its hook matcher calls that tool `Bash`. Reuse the established Bash
+/// path for Grok hooks only. Factory-spawned hooks take the cheap env fast
+/// path; standalone Grok sessions are recognized by fields unique to Grok's
+/// camelCase hook envelope. An identically named tool from Claude or Codex
+/// without those markers retains its original meaning.
+fn normalize_post_tool_input(input: &HookInput) -> Cow<'_, HookInput> {
+    if input.tool_name.as_deref() == Some("run_terminal_command")
+        && (crate::harness_policy::own_harness_from_env() == cas_mux::SupervisorCli::Grok
+            || input.workspace_root.is_some()
+            || input.tool_input_truncated.is_some())
+    {
+        let mut normalized = input.clone();
+        normalized.tool_name = Some("Bash".to_string());
+        Cow::Owned(normalized)
+    } else {
+        Cow::Borrowed(input)
+    }
 }
 
 fn should_run_tmpfs_guardrail(tool_name: &str) -> bool {
@@ -883,6 +908,7 @@ fn spec_references_file(
 #[cfg(test)]
 mod post_tool_wiring_tests {
     use super::*;
+    use crate::test_support::TestEnvGuard;
     use serde_json::json;
     use std::cell::Cell;
 
@@ -917,6 +943,72 @@ mod post_tool_wiring_tests {
 
     fn warning_output() -> HookOutput {
         HookOutput::with_post_tool_context("TMPFS WARNING".to_string())
+    }
+
+    #[test]
+    fn grok_terminal_tool_normalizes_to_bash() {
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_FACTORY_WORKER_CLI", Some("grok")),
+        ]);
+        let input = HookInput {
+            tool_name: Some("run_terminal_command".to_string()),
+            ..Default::default()
+        };
+
+        let normalized = normalize_post_tool_input(&input);
+
+        assert_eq!(normalized.tool_name.as_deref(), Some("Bash"));
+    }
+
+    #[test]
+    fn standalone_grok_payload_shape_normalizes_to_bash_without_factory_env() {
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", None),
+            ("CAS_FACTORY_WORKER_CLI", None),
+            ("CAS_FACTORY_SUPERVISOR_CLI", None),
+            ("CAS_FACTORY_MODE", None),
+            ("CAS_FACTORY_SESSION", None),
+        ]);
+        let input: HookInput = serde_json::from_value(json!({
+            "hookEventName": "post_tool_use",
+            "sessionId": "standalone-grok",
+            "cwd": "/tmp/project",
+            "workspaceRoot": "/tmp/project",
+            "toolName": "run_terminal_command",
+            "toolInput": {"command": "git status"},
+            "toolResult": {"exitCode": 0},
+            "toolInputTruncated": false
+        }))
+        .expect("standalone Grok fixture");
+
+        let normalized = normalize_post_tool_input(&input);
+
+        assert_eq!(normalized.tool_name.as_deref(), Some("Bash"));
+        assert!(matches!(normalized, Cow::Owned(_)));
+    }
+
+    #[test]
+    fn claude_and_codex_terminal_tool_name_is_unchanged() {
+        let mut env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_FACTORY_WORKER_CLI", None),
+        ]);
+        let input = HookInput {
+            tool_name: Some("run_terminal_command".to_string()),
+            ..Default::default()
+        };
+
+        for harness in ["claude", "codex"] {
+            env.set("CAS_FACTORY_WORKER_CLI", harness);
+            let normalized = normalize_post_tool_input(&input);
+
+            assert_eq!(
+                normalized.tool_name.as_deref(),
+                Some("run_terminal_command")
+            );
+            assert!(matches!(normalized, Cow::Borrowed(_)));
+        }
     }
 
     #[test]

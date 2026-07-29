@@ -116,11 +116,13 @@ pub struct AgentSummary {
     pub latest_activity: Option<(String, chrono::DateTime<chrono::Utc>)>,
     /// Last heartbeat timestamp
     pub last_heartbeat: Option<chrono::DateTime<chrono::Utc>>,
-    /// Number of pending (unprocessed) prompt-queue messages addressed to
-    /// this agent. Used by the idle detector to suppress `WorkerIdle` when
-    /// the worker has unread messages (spawn race mitigation, cas-afb7).
+    /// Number of currently delivery-eligible prompt-queue messages addressed
+    /// to this agent. Used by the idle detector to suppress `WorkerIdle` when
+    /// the worker has unread work it can poll now (spawn race mitigation,
+    /// cas-afb7). Rows in a future retry window are excluded.
     pub pending_messages: u32,
-    /// Pending subset authored by a live supervisor in this factory session.
+    /// Delivery-eligible subset authored by a live supervisor in this factory
+    /// session.
     pub pending_supervisor_messages: u32,
     /// Most recent prompt-queue message from this factory session's
     /// supervisor(s), including already-processed rows.
@@ -400,10 +402,13 @@ impl DirectorData {
             .filter(|a| a.visible_to_factory_session(factory_session.as_deref()))
             .collect();
 
-        // Compute per-agent pending message counts (best-effort, non-fatal).
+        // Compute per-agent delivery-eligible message counts (best-effort,
+        // non-fatal).
         // These are used by the idle detector to suppress `WorkerIdle` when a
         // freshly spawned worker has unread messages waiting in the queue before
-        // it has had a chance to poll them (spawn race fix, cas-afb7).
+        // it has had a chance to poll them (spawn race fix, cas-afb7). A row in
+        // a future retry window does not suppress idle: repeated delivery
+        // failures are themselves evidence that the worker needs attention.
         let agent_names_for_pq: Vec<&str> = agents_list.iter().map(|a| a.name.as_str()).collect();
         let supervisor_sources: Vec<&str> = agents_list
             .iter()
@@ -932,7 +937,7 @@ fn parse_diff_numstat(output: &str, line_counts: &mut HashMap<String, (usize, us
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cas_store::TaskStore;
+    use cas_store::{PendingReason, TaskStore};
     use cas_types::{Agent, EventEntityType};
     use chrono::{Duration, Utc};
 
@@ -1003,6 +1008,67 @@ mod tests {
         assert!(
             activity_age < crate::config::DEFAULT_STALL_THRESHOLD_SECS as i64,
             "recent task-note activity must keep the stall predicate below threshold"
+        );
+    }
+
+    #[test]
+    fn backed_off_prompt_is_not_counted_as_immediately_deliverable() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let stores = DirectorStores::open(temp_dir.path()).unwrap();
+        stores.task_store.init().unwrap();
+        stores.agent_store.init().unwrap();
+        stores.event_store.init().unwrap();
+        let prompt_queue = stores.prompt_queue_store.as_ref().unwrap();
+        prompt_queue.init().unwrap();
+
+        let supervisor = Agent::new_with_role(
+            "supervisor-session".to_string(),
+            "supervisor".to_string(),
+            AgentRole::Supervisor,
+        );
+        stores.agent_store.register(&supervisor).unwrap();
+        let worker = Agent::new_with_role(
+            "worker-session".to_string(),
+            "backed-off-worker".to_string(),
+            AgentRole::Worker,
+        );
+        stores.agent_store.register(&worker).unwrap();
+
+        let prompt_id = prompt_queue
+            .enqueue("supervisor", "backed-off-worker", "assigned work")
+            .unwrap();
+        for _ in 0..6 {
+            prompt_queue
+                .record_retry(
+                    prompt_id,
+                    PendingReason::TargetUnavailable,
+                    Some("pane unavailable"),
+                )
+                .unwrap();
+        }
+        assert!(
+            prompt_queue
+                .peek_for_targets(&["backed-off-worker"], None, 10)
+                .unwrap()
+                .is_empty(),
+            "delivery selection must not immediately retry the row"
+        );
+
+        let data =
+            DirectorData::load_with_stores(temp_dir.path(), None, false, Some(&stores)).unwrap();
+        let worker_summary = data
+            .agents
+            .iter()
+            .find(|agent| agent.id == "worker-session")
+            .expect("worker is present in director data");
+
+        assert_eq!(
+            worker_summary.pending_messages, 0,
+            "the idle detector must not treat a 5s retry as immediately deliverable"
+        );
+        assert_eq!(
+            worker_summary.pending_supervisor_messages, 0,
+            "a backed-off supervisor row must not permanently latch the idle transition"
         );
     }
 }

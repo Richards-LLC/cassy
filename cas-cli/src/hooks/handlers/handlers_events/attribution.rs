@@ -212,10 +212,30 @@ pub fn detect_and_link_git_commit(cas_root: &std::path::Path, input: &HookInput)
         .and_then(|v| v.as_str())
         .or_else(|| tool_response.as_str())
         .unwrap_or("");
-    let commit_hash = match extract_commit_hash(stdout)
-        .and_then(|hash| resolve_git_revision(input, &hash))
-        .or_else(|| resolve_commit_head(input))
-    {
+    // HookInput.cwd describes where the shell tool started, not necessarily
+    // where a compound command ran Git. A hash printed by `git commit` is
+    // authoritative only when that commit object resolves in HookInput.cwd's
+    // repository. Quiet commits print no hash, so their HEAD fallback first
+    // compares the effective Git cwd with HookInput.cwd's repository.
+    let resolved_commit = match extract_commit_hash(stdout) {
+        Some(hash) => {
+            let resolved = resolve_git_revision(input, &hash);
+            if resolved.is_none() {
+                eprintln!(
+                    "cas: skipped commit anchor: output commit {hash} is not in HookInput.cwd"
+                );
+            }
+            resolved
+        }
+        None if quiet_commit_targets_input_repo(command, input) => resolve_commit_head(input),
+        None => {
+            eprintln!(
+                "cas: skipped commit anchor: quiet commit does not target HookInput.cwd repository"
+            );
+            None
+        }
+    };
+    let commit_hash = match resolved_commit {
         Some(hash) => hash,
         None => return, // Couldn't find commit hash
     };
@@ -290,7 +310,8 @@ pub fn detect_and_link_git_commit(cas_root: &std::path::Path, input: &HookInput)
 /// inputs fall back to the hook process cwd so existing harnesses keep working.
 fn resolve_git_revision(input: &HookInput, revision: &str) -> Option<String> {
     let mut command = std::process::Command::new("git");
-    command.args(["rev-parse", revision]);
+    let commit_revision = format!("{revision}^{{commit}}");
+    command.args(["rev-parse", "--verify", "--end-of-options", &commit_revision]);
     if !input.cwd.trim().is_empty() {
         command.current_dir(&input.cwd);
     }
@@ -308,6 +329,184 @@ fn resolve_git_revision(input: &HookInput, revision: &str) -> Option<String> {
 
 fn resolve_commit_head(input: &HookInput) -> Option<String> {
     resolve_git_revision(input, "HEAD")
+}
+
+/// Resolve the repository targeted by a hashless/quiet `git commit`.
+///
+/// Printed commit hashes use object verification above and need no shell
+/// parsing. This narrower fallback tracks only persistent `cd` changes and
+/// per-invocation `git -C`; environment-based Git routing is refused because
+/// it cannot be represented by a cwd alone. Repository identity is decided by
+/// Git itself rather than path spelling, so a worktree root, its subdirectory,
+/// and `git -C .` all compare correctly.
+fn quiet_commit_targets_input_repo(command: &str, input: &HookInput) -> bool {
+    let Some(input_repo) = git_repo_root(if input.cwd.trim().is_empty() {
+        std::path::Path::new(".")
+    } else {
+        std::path::Path::new(&input.cwd)
+    }) else {
+        return false;
+    };
+    let mut shell_cwd = if input.cwd.trim().is_empty() {
+        std::env::current_dir().ok()
+    } else {
+        Some(std::path::PathBuf::from(&input.cwd))
+    };
+    let mut final_commit_cwd = None;
+    let mut cwd_scopes = Vec::new();
+
+    for words in split_shell_statements(command) {
+        if words.is_empty() {
+            continue;
+        }
+        if words.as_slice() == ["("] {
+            cwd_scopes.push(shell_cwd.clone());
+            continue;
+        }
+        if words.as_slice() == [")"] {
+            shell_cwd = cwd_scopes.pop().flatten();
+            continue;
+        }
+        if words[0] == "cd" {
+            let target = match words.as_slice() {
+                [_, path, ..] if path != "--" => Some(path.as_str()),
+                [_, flag, path, ..] if flag == "--" => Some(path.as_str()),
+                _ => None,
+            };
+            shell_cwd = target.and_then(|path| resolve_shell_path(shell_cwd.as_deref(), path));
+            continue;
+        }
+
+        let Some(git_index) = words.iter().position(|word| word == "git") else {
+            continue;
+        };
+        let git_words = &words[git_index + 1..];
+        let Some(commit_index) = git_words.iter().position(|word| word == "commit") else {
+            continue;
+        };
+        final_commit_cwd = None;
+        if words[..git_index].iter().any(|word| {
+            word.starts_with("GIT_DIR=") || word.starts_with("GIT_WORK_TREE=")
+        }) {
+            continue;
+        }
+        let mut git_cwd = shell_cwd.clone();
+        let mut index = 0;
+        let mut supported = true;
+        while index < commit_index {
+            let word = &git_words[index];
+            if word == "-C" {
+                let Some(path) = git_words.get(index + 1) else {
+                    supported = false;
+                    break;
+                };
+                git_cwd = resolve_shell_path(git_cwd.as_deref(), path);
+                index += 2;
+            } else if let Some(path) = word.strip_prefix("-C").filter(|path| !path.is_empty()) {
+                git_cwd = resolve_shell_path(git_cwd.as_deref(), path);
+                index += 1;
+            } else if word == "--git-dir"
+                || word.starts_with("--git-dir=")
+                || word == "--work-tree"
+                || word.starts_with("--work-tree=")
+            {
+                supported = false;
+                break;
+            } else {
+                index += 1;
+            }
+        }
+        if supported {
+            final_commit_cwd = git_cwd;
+        }
+    }
+
+    final_commit_cwd
+        .as_deref()
+        .and_then(git_repo_root)
+        .is_some_and(|repo| repo == input_repo)
+}
+
+fn resolve_shell_path(base: Option<&std::path::Path>, path: &str) -> Option<std::path::PathBuf> {
+    let path = std::path::Path::new(path);
+    if path.is_absolute() {
+        Some(path.to_path_buf())
+    } else {
+        Some(base?.join(path))
+    }
+}
+
+fn git_repo_root(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let root = String::from_utf8(output.stdout).ok()?;
+    std::fs::canonicalize(root.trim()).ok()
+}
+
+/// Split shell words into simple statements while preserving quoted contents
+/// and subshell scope markers. Other control operators terminate statements.
+fn split_shell_statements(command: &str) -> Vec<Vec<String>> {
+    let mut statements = Vec::new();
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+
+    for ch in command.chars() {
+        if escaped {
+            word.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && quote != Some('\'') {
+            escaped = true;
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if ch == active_quote {
+                quote = None;
+            } else {
+                word.push(ch);
+            }
+            continue;
+        }
+        if matches!(ch, '\'' | '"') {
+            quote = Some(ch);
+            continue;
+        }
+        if ch.is_whitespace() {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            continue;
+        }
+        if matches!(ch, '&' | ';' | '|' | '(' | ')') {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            if !words.is_empty() {
+                statements.push(std::mem::take(&mut words));
+            }
+            if matches!(ch, '(' | ')') {
+                statements.push(vec![ch.to_string()]);
+            }
+            continue;
+        }
+        word.push(ch);
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    if !words.is_empty() {
+        statements.push(words);
+    }
+    statements
 }
 
 /// Persist commit-time merge evidence on the one active task held by a
@@ -363,7 +562,10 @@ fn persist_active_task_factory_anchor(
         return false;
     };
     task.deliverables.factory_branch_anchor = Some(commit_hash.to_string());
-    task.deliverables.parked_branch = Some(branch);
+    // Keep the first recorded branch as the recovery pointer if this task is
+    // later reassigned. The current assignee still identifies the live branch,
+    // while overwriting this receipt would make prior stranded work invisible.
+    task.deliverables.parked_branch.get_or_insert(branch);
     task.updated_at = chrono::Utc::now();
     task_store.update(&task).is_ok()
 }
@@ -402,9 +604,24 @@ fn git_branch_in(cwd: &str) -> Option<String> {
 
 /// Check if a command is a git commit command
 pub fn is_git_commit_command(command: &str) -> bool {
-    let cmd_lower = command.to_lowercase();
-    // Match "git commit" but not "git commit --amend" etc. that just show status
-    cmd_lower.contains("git commit") && !cmd_lower.contains("--dry-run")
+    split_shell_statements(command).into_iter().any(|words| {
+        let Some(git_index) = words
+            .iter()
+            .position(|word| word.eq_ignore_ascii_case("git"))
+        else {
+            return false;
+        };
+        let Some(commit_index) = words[git_index + 1..]
+            .iter()
+            .position(|word| word.eq_ignore_ascii_case("commit"))
+            .map(|offset| git_index + 1 + offset)
+        else {
+            return false;
+        };
+        !words[commit_index + 1..]
+            .iter()
+            .any(|word| word == "--dry-run")
+    })
 }
 
 /// Extract commit hash from git commit output
@@ -532,6 +749,7 @@ pub fn get_git_author() -> Option<String> {
 mod commit_anchor_tests {
     use super::*;
     use crate::store::init_cas_dir;
+    use crate::test_support::TestEnvGuard;
     use std::process::Command;
 
     fn git(dir: &std::path::Path, args: &[&str]) {
@@ -566,12 +784,17 @@ mod commit_anchor_tests {
     }
 
     fn worker_task_fixture() -> (
+        TestEnvGuard,
         tempfile::TempDir,
         std::path::PathBuf,
         Agent,
         Task,
         std::sync::Arc<dyn crate::store::TaskStore>,
     ) {
+        let env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_FACTORY_MODE", None),
+            ("CAS_SESSION_ID", None),
+        ]);
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path().to_path_buf();
         let cas_root = init_cas_dir(&repo).expect("init cas");
@@ -594,12 +817,12 @@ mod commit_anchor_tests {
             .try_claim(&task.id, &agent.id, 600, None)
             .expect("claim task");
 
-        (temp, cas_root, agent, task, task_store)
+        (env, temp, cas_root, agent, task, task_store)
     }
 
     #[test]
     fn commit_then_reset_records_created_commit_not_post_command_head() {
-        let (_temp, cas_root, agent, task, task_store) = worker_task_fixture();
+        let (_env, _temp, cas_root, agent, task, task_store) = worker_task_fixture();
         let repo = cas_root.parent().expect("repo");
         std::fs::write(repo.join("work.rs"), "fn work() {}\n").unwrap();
         git(repo, &["add", "work.rs"]);
@@ -655,7 +878,7 @@ mod commit_anchor_tests {
 
     #[test]
     fn commit_then_amend_records_final_created_commit() {
-        let (_temp, cas_root, agent, task, task_store) = worker_task_fixture();
+        let (_env, _temp, cas_root, agent, task, task_store) = worker_task_fixture();
         let repo = cas_root.parent().expect("repo");
         std::fs::write(repo.join("work.rs"), "fn work() {}\n").unwrap();
         git(repo, &["add", "work.rs"]);
@@ -714,7 +937,400 @@ mod commit_anchor_tests {
     }
 
     #[test]
+    fn quiet_commit_repo_detection_uses_effective_repo_identity() {
+        let (_env, _temp, cas_root, agent, _task, _task_store) = worker_task_fixture();
+        let repo = cas_root.parent().expect("repo");
+        let subdir = repo.join("nested");
+        std::fs::create_dir(&subdir).unwrap();
+        let other = tempfile::tempdir().expect("other repo");
+        git(other.path(), &["init", "-q", "-b", "factory/other"]);
+        let input = HookInput {
+            session_id: agent.id,
+            cwd: repo.display().to_string(),
+            ..Default::default()
+        };
+
+        assert!(quiet_commit_targets_input_repo(
+            &format!("cd '{}' && git commit -q -m work", repo.display()),
+            &input
+        ));
+        assert!(quiet_commit_targets_input_repo(
+            &format!("cd '{}' && git commit -q -m work", subdir.display()),
+            &input
+        ));
+        assert!(quiet_commit_targets_input_repo(
+            "git -C . commit -q -m work",
+            &input
+        ));
+        assert!(!quiet_commit_targets_input_repo(
+            &format!("cd '{}' && git commit -q -m work", other.path().display()),
+            &input
+        ));
+        assert!(!quiet_commit_targets_input_repo(
+            &format!(
+                "GIT_DIR='{}/.git' GIT_WORK_TREE='{}' git commit -q -m work",
+                other.path().display(),
+                other.path().display()
+            ),
+            &input
+        ));
+        assert!(!quiet_commit_targets_input_repo(
+            "GIT commit -q -m work",
+            &input
+        ));
+        assert!(quiet_commit_targets_input_repo(
+            &format!(
+                "git -C '{}' status --short; git commit -q -m work",
+                other.path().display()
+            ),
+            &input
+        ));
+        assert!(quiet_commit_targets_input_repo(
+            &format!(
+                "(cd '{}' && git status --short); git commit -q -m work",
+                other.path().display()
+            ),
+            &input
+        ));
+        assert!(quiet_commit_targets_input_repo(
+            "git commit -q -m 'mention cd and git -C without redirecting'",
+            &input
+        ));
+    }
+
+    #[test]
+    fn quiet_commit_after_cd_within_same_repo_records_anchor() {
+        let (_env, _temp, cas_root, agent, task, task_store) = worker_task_fixture();
+        let repo = cas_root.parent().expect("repo");
+        let subdir = repo.join("nested");
+        std::fs::create_dir(&subdir).unwrap();
+        std::fs::write(repo.join("work.rs"), "fn work() {}\n").unwrap();
+        git(repo, &["add", "work.rs"]);
+        let shell_command = format!(
+            "cd '{}' && git -C . commit -q -m 'fix: same repo work'",
+            subdir.display()
+        );
+        let output = Command::new("bash")
+            .args(["-c", &shell_command])
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("quiet same-repo commit");
+        assert!(output.status.success(), "quiet same-repo commit failed");
+        assert!(output.stdout.is_empty(), "quiet commit must print no hash");
+        let expected = git_output(repo, &["rev-parse", "HEAD"]).trim().to_string();
+
+        detect_and_link_git_commit(
+            &cas_root,
+            &HookInput {
+                session_id: agent.id,
+                cwd: repo.display().to_string(),
+                hook_event_name: "PostToolUse".to_string(),
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({"command": shell_command})),
+                tool_response: Some(serde_json::json!({"exitCode": 0, "stdout": ""})),
+                agent_role: Some("worker".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let anchored = task_store.get(&task.id).expect("anchored task");
+        assert_eq!(
+            anchored.deliverables.factory_branch_anchor.as_deref(),
+            Some(expected.as_str())
+        );
+    }
+
+    #[test]
+    fn quiet_commit_after_cd_does_not_anchor_hook_cwd_head() {
+        let (_env, _temp, cas_root, agent, task, task_store) = worker_task_fixture();
+        let hook_repo = cas_root.parent().expect("hook repo");
+        let hook_head = git_output(hook_repo, &["rev-parse", "HEAD"])
+            .trim()
+            .to_string();
+
+        let other = tempfile::tempdir().expect("other repo");
+        git(other.path(), &["init", "-q", "-b", "factory/other"]);
+        std::fs::write(other.path().join("work.rs"), "fn work() {}\n").unwrap();
+        git(other.path(), &["add", "work.rs"]);
+        let shell_command = format!(
+            "cd '{}' && git commit -q -m 'fix: redirected work'",
+            other.path().display()
+        );
+        let output = Command::new("bash")
+            .args(["-c", &shell_command])
+            .current_dir(hook_repo)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("quiet redirected commit");
+        assert!(output.status.success(), "quiet redirected commit failed");
+        assert!(output.stdout.is_empty(), "quiet commit must print no hash");
+        let committed_elsewhere = git_output(other.path(), &["rev-parse", "HEAD"])
+            .trim()
+            .to_string();
+        assert_ne!(
+            committed_elsewhere, hook_head,
+            "fixture must distinguish the committed repo from the hook cwd"
+        );
+
+        detect_and_link_git_commit(
+            &cas_root,
+            &HookInput {
+                session_id: agent.id,
+                cwd: hook_repo.display().to_string(),
+                hook_event_name: "PostToolUse".to_string(),
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({
+                    "command": shell_command
+                })),
+                tool_response: Some(serde_json::json!({
+                    "exitCode": 0,
+                    "stdout": ""
+                })),
+                agent_role: Some("worker".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let anchored = task_store.get(&task.id).expect("task after hook");
+        assert_eq!(
+            anchored.deliverables.factory_branch_anchor, None,
+            "redirected quiet commit must not anchor HookInput.cwd HEAD"
+        );
+    }
+
+    #[test]
+    fn env_case_and_statement_boundaries_do_not_misattribute_anchor() {
+        let (_env, _temp, cas_root, agent, task, task_store) = worker_task_fixture();
+        let hook_repo = cas_root.parent().expect("hook repo");
+        let other = tempfile::tempdir().expect("other repo");
+        git(other.path(), &["init", "-q", "-b", "factory/other"]);
+        std::fs::write(other.path().join("seed.txt"), "seed\n").unwrap();
+        git(other.path(), &["add", "seed.txt"]);
+        git(other.path(), &["commit", "-q", "-m", "seed"]);
+        std::fs::write(other.path().join("other.rs"), "fn other() {}\n").unwrap();
+        git(other.path(), &["add", "other.rs"]);
+
+        let env_command = format!(
+            "GIT_DIR='{}/.git' GIT_WORK_TREE='{}' git commit -m 'fix: env redirected'",
+            other.path().display(),
+            other.path().display()
+        );
+        let env_output = Command::new("bash")
+            .args(["-c", &env_command])
+            .current_dir(hook_repo)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("env redirected commit");
+        assert!(env_output.status.success(), "env redirected commit failed");
+        let env_stdout = String::from_utf8(env_output.stdout).expect("env commit stdout");
+        assert!(
+            extract_commit_hash(&env_stdout).is_some(),
+            "non-quiet env commit must identify its commit"
+        );
+        detect_and_link_git_commit(
+            &cas_root,
+            &HookInput {
+                session_id: agent.id.clone(),
+                cwd: hook_repo.display().to_string(),
+                hook_event_name: "PostToolUse".to_string(),
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({"command": env_command})),
+                tool_response: Some(serde_json::json!({
+                    "exitCode": 0,
+                    "stdout": env_stdout
+                })),
+                agent_role: Some("worker".to_string()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            task_store
+                .get(&task.id)
+                .expect("task after env commit")
+                .deliverables
+                .factory_branch_anchor
+                .is_none(),
+            "a commit object absent from HookInput.cwd must not anchor"
+        );
+
+        detect_and_link_git_commit(
+            &cas_root,
+            &HookInput {
+                session_id: agent.id.clone(),
+                cwd: hook_repo.display().to_string(),
+                hook_event_name: "PostToolUse".to_string(),
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({
+                    "command": "cd /tmp/other && GIT commit -q -m work"
+                })),
+                tool_response: Some(serde_json::json!({"exitCode": 0, "stdout": ""})),
+                agent_role: Some("worker".to_string()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            task_store
+                .get(&task.id)
+                .expect("task after uppercase Git")
+                .deliverables
+                .factory_branch_anchor
+                .is_none(),
+            "case-mismatched Git must not fall back to HookInput.cwd HEAD"
+        );
+
+        std::fs::write(hook_repo.join("work.rs"), "fn work() {}\n").unwrap();
+        git(hook_repo, &["add", "work.rs"]);
+        let statement_command = format!(
+            "git -C '{}' status --short >/dev/null; git commit -q -m 'fix: local work'",
+            other.path().display()
+        );
+        let statement_output = Command::new("bash")
+            .args(["-c", &statement_command])
+            .current_dir(hook_repo)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("statement-boundary commit");
+        assert!(
+            statement_output.status.success(),
+            "statement-boundary commit failed"
+        );
+        assert!(
+            statement_output.stdout.is_empty(),
+            "quiet local commit must print no hash"
+        );
+        let expected = git_output(hook_repo, &["rev-parse", "HEAD"])
+            .trim()
+            .to_string();
+        detect_and_link_git_commit(
+            &cas_root,
+            &HookInput {
+                session_id: agent.id,
+                cwd: hook_repo.display().to_string(),
+                hook_event_name: "PostToolUse".to_string(),
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({"command": statement_command})),
+                tool_response: Some(serde_json::json!({"exitCode": 0, "stdout": ""})),
+                agent_role: Some("worker".to_string()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            task_store
+                .get(&task.id)
+                .expect("task after local commit")
+                .deliverables
+                .factory_branch_anchor
+                .as_deref(),
+            Some(expected.as_str()),
+            "an unrelated earlier git -C statement must not suppress a local commit"
+        );
+    }
+
+    #[test]
+    fn reassigned_worker_commit_preserves_prior_parked_branch() {
+        let (_env, _temp, cas_root, alice, task, task_store) = worker_task_fixture();
+        let repo = cas_root.parent().expect("repo");
+        git(repo, &["branch", "-m", "factory/alice"]);
+        std::fs::write(repo.join("alice.rs"), "fn alice_work() {}\n").unwrap();
+        git(repo, &["add", "alice.rs"]);
+        git(repo, &["commit", "-q", "-m", "fix: alice work"]);
+        let alice_anchor = git_output(repo, &["rev-parse", "HEAD"]).trim().to_string();
+
+        let agent_store = open_agent_store(&cas_root).expect("agent store");
+        agent_store
+            .release_lease(&task.id, &alice.id)
+            .expect("release alice lease");
+        let mut parked = task_store.get(&task.id).expect("task before reassignment");
+        parked.assignee = Some("bob".to_string());
+        parked.deliverables.factory_branch_anchor = Some(alice_anchor);
+        parked.deliverables.parked_branch = Some("factory/alice".to_string());
+        task_store.update(&parked).expect("park alice work");
+
+        let mut bob = Agent::new("session-bob".to_string(), "bob".to_string());
+        bob.role = AgentRole::Worker;
+        agent_store.register(&bob).expect("register bob");
+        agent_store
+            .try_claim(&task.id, &bob.id, 600, None)
+            .expect("claim task as bob");
+
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["checkout", "-q", "-b", "factory/bob"]);
+        std::fs::write(repo.join("bob.rs"), "fn bob_work() {}\n").unwrap();
+        git(repo, &["add", "bob.rs"]);
+        let output = Command::new("git")
+            .args(["commit", "-m", "fix: bob work"])
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("bob commit");
+        assert!(output.status.success(), "bob commit failed");
+        let stdout = String::from_utf8(output.stdout).expect("bob commit stdout");
+        let bob_anchor = git_output(repo, &["rev-parse", "HEAD"]).trim().to_string();
+
+        detect_and_link_git_commit(
+            &cas_root,
+            &HookInput {
+                session_id: bob.id,
+                cwd: repo.display().to_string(),
+                hook_event_name: "PostToolUse".to_string(),
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({
+                    "command": "git commit -m 'fix: bob work'"
+                })),
+                tool_response: Some(serde_json::json!({
+                    "exitCode": 0,
+                    "stdout": stdout
+                })),
+                agent_role: Some("worker".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let after = task_store.get(&task.id).expect("task after bob commit");
+        assert_eq!(
+            after.deliverables.factory_branch_anchor.as_deref(),
+            Some(bob_anchor.as_str()),
+            "cas-3d37 anchor must refresh to bob's new work"
+        );
+        assert_eq!(
+            after.deliverables.parked_branch.as_deref(),
+            Some("factory/alice"),
+            "alice's stranded branch must remain discoverable after reassignment"
+        );
+    }
+
+    #[test]
     fn successful_worker_commit_records_active_task_anchor_before_close() {
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_FACTORY_MODE", None),
+            ("CAS_SESSION_ID", None),
+        ]);
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path();
         let cas_root = init_cas_dir(repo).expect("init cas");
@@ -776,5 +1392,173 @@ mod commit_anchor_tests {
             anchored.deliverables.parked_branch.as_deref(),
             Some("factory/test-worker")
         );
+    }
+
+    #[test]
+    fn grok_camel_case_terminal_hook_records_anchor_and_attribution() {
+        let (mut env, _temp, cas_root, agent, task, task_store) = worker_task_fixture();
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_WORKER_CLI", "grok");
+        let repo = cas_root.parent().expect("repo");
+        let work_path = repo.join("work.rs");
+        std::fs::write(&work_path, "fn grok_work() {}\n").unwrap();
+        git(repo, &["add", "work.rs"]);
+
+        // Seed the uncommitted file-change record that commit attribution
+        // links. The Grok terminal fixture below must turn this into a
+        // committed attribution record as well as anchoring the active task.
+        capture_file_change_for_attribution(
+            &cas_root,
+            &HookInput {
+                session_id: agent.id.clone(),
+                cwd: repo.display().to_string(),
+                tool_input: Some(serde_json::json!({
+                    "file_path": work_path,
+                    "content": "fn grok_work() {}\n"
+                })),
+                ..Default::default()
+            },
+            "Write",
+        );
+
+        let output = Command::new("git")
+            .args(["commit", "-m", "fix: grok hook work"])
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("grok fixture commit");
+        assert!(output.status.success(), "grok fixture commit failed");
+        let stdout = String::from_utf8(output.stdout).expect("commit stdout");
+        let expected = git_output(repo, &["rev-parse", "HEAD"]).trim().to_string();
+
+        // Exact Grok Build command-hook envelope: camelCase common/tool
+        // fields, real terminal tool name, and toolResult (not
+        // Claude's tool_response).
+        let fixture = serde_json::json!({
+            "hookEventName": "post_tool_use",
+            "sessionId": agent.id,
+            "cwd": repo,
+            "workspaceRoot": repo,
+            "permissionMode": "default",
+            "toolName": "run_terminal_command",
+            "toolInput": {"command": "git commit -m 'fix: grok hook work'"},
+            "toolResult": {"exitCode": 0, "stdout": stdout},
+            "toolUseId": "grok-tool-use-1",
+            "toolInputTruncated": false,
+            "timestamp": "2026-04-14T12:00:00Z"
+        });
+        let input: HookInput = serde_json::from_value(fixture).expect("Grok hook fixture");
+
+        crate::hooks::handle_post_tool_use(&input, Some(&cas_root)).expect("Grok PostToolUse hook");
+
+        let anchored = task_store.get(&task.id).expect("anchored task");
+        assert_eq!(
+            anchored.deliverables.factory_branch_anchor.as_deref(),
+            Some(expected.as_str()),
+            "Grok run_terminal_command must use Bash-equivalent anchoring"
+        );
+
+        let commit_link = open_commit_link_store(&cas_root)
+            .expect("commit link store")
+            .get(&expected)
+            .expect("commit link lookup")
+            .expect("Grok commit attribution");
+        assert_eq!(commit_link.session_id, input.session_id);
+        assert_eq!(commit_link.files_changed, vec!["work.rs"]);
+
+        let committed_changes = open_file_change_store(&cas_root)
+            .expect("file change store")
+            .list_by_commit(&expected)
+            .expect("committed attribution records");
+        assert_eq!(committed_changes.len(), 1);
+        assert_eq!(committed_changes[0].session_id, input.session_id);
+    }
+
+    #[test]
+    fn non_worker_does_not_record_active_task_anchor() {
+        let (_env, _temp, cas_root, mut agent, task, task_store) = worker_task_fixture();
+        let repo = cas_root.parent().expect("repo");
+        let agent_store = open_agent_store(&cas_root).expect("agent store");
+        agent.role = AgentRole::Supervisor;
+        agent_store.update(&agent).expect("update agent role");
+        let commit_hash = git_output(repo, &["rev-parse", "HEAD"]).trim().to_string();
+
+        assert!(!persist_active_task_factory_anchor(
+            &cas_root,
+            &HookInput {
+                session_id: agent.id,
+                cwd: repo.display().to_string(),
+                ..Default::default()
+            },
+            &commit_hash,
+            false,
+        ));
+        let unchanged = task_store.get(&task.id).expect("unchanged task");
+        assert!(unchanged.deliverables.factory_branch_anchor.is_none());
+        assert!(unchanged.deliverables.parked_branch.is_none());
+    }
+
+    #[test]
+    fn multiple_active_leases_do_not_guess_which_task_owns_commit() {
+        let (_env, _temp, cas_root, agent, task, task_store) = worker_task_fixture();
+        let repo = cas_root.parent().expect("repo");
+        let agent_store = open_agent_store(&cas_root).expect("agent store");
+        let mut second = Task::new(
+            "cas-second-active".to_string(),
+            "second active task".to_string(),
+        );
+        second.status = TaskStatus::InProgress;
+        second.assignee = Some(agent.name.clone());
+        task_store.add(&second).expect("add second task");
+        agent_store
+            .try_claim(&second.id, &agent.id, 600, None)
+            .expect("claim second task");
+        let commit_hash = git_output(repo, &["rev-parse", "HEAD"]).trim().to_string();
+
+        assert!(!persist_active_task_factory_anchor(
+            &cas_root,
+            &HookInput {
+                session_id: agent.id,
+                cwd: repo.display().to_string(),
+                ..Default::default()
+            },
+            &commit_hash,
+            false,
+        ));
+        for task_id in [&task.id, &second.id] {
+            let unchanged = task_store.get(task_id).expect("unchanged task");
+            assert!(
+                unchanged.deliverables.factory_branch_anchor.is_none(),
+                "ambiguous active task {task_id} must not receive the anchor"
+            );
+            assert!(unchanged.deliverables.parked_branch.is_none());
+        }
+    }
+
+    #[test]
+    fn non_factory_branch_does_not_record_active_task_anchor() {
+        let (_env, _temp, cas_root, agent, task, task_store) = worker_task_fixture();
+        let repo = cas_root.parent().expect("repo");
+        git(repo, &["checkout", "-q", "main"]);
+        let commit_hash = git_output(repo, &["rev-parse", "HEAD"]).trim().to_string();
+
+        assert!(!persist_active_task_factory_anchor(
+            &cas_root,
+            &HookInput {
+                session_id: agent.id,
+                cwd: repo.display().to_string(),
+                ..Default::default()
+            },
+            &commit_hash,
+            false,
+        ));
+        let unchanged = task_store.get(&task.id).expect("unchanged task");
+        assert!(unchanged.deliverables.factory_branch_anchor.is_none());
+        assert!(unchanged.deliverables.parked_branch.is_none());
     }
 }

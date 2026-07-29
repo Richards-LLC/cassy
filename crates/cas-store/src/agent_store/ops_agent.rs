@@ -410,7 +410,7 @@ impl SqliteAgentStore {
                     id,
                     "revoked",
                     *epoch as u64,
-                    Some(r#"{"reason":"agent_stale"}"#),
+                    None,
                     None,
                     Some("agent_stale"),
                 )?;

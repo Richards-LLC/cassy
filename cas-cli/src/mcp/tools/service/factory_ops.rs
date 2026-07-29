@@ -870,6 +870,33 @@ impl CasService {
                 let clone_info = worktree_status.clone_info;
                 // cas-844bf: git introspection — branch/HEAD/ahead-behind/dirty/PR
                 let git_info = worktree_status.git_info;
+                let session_uuid = agent.cc_session_id.as_deref().unwrap_or(&agent.id);
+                let worker_cli = worker_cli_from_agent(agent);
+                // Scan-based harness resolution is a bounded-TTL lookup after
+                // the first poll for this worker. Keep the rich result so the
+                // same lookup feeds context/activity/in-flight evidence and
+                // hard-dead salvage diagnostics. Claude retains its single
+                // stat fast path.
+                let transcript_resolution_for_worker = match worker_cli {
+                    cas_mux::SupervisorCli::Codex | cas_mux::SupervisorCli::Grok => {
+                        Some(worker_status_cached_transcript_resolution(
+                            clone_path.as_deref(),
+                            session_uuid,
+                            worker_cli,
+                        ))
+                    }
+                    cas_mux::SupervisorCli::Claude => None,
+                };
+                let transcript_path_for_worker = transcript_resolution_for_worker
+                    .as_ref()
+                    .and_then(|cached| {
+                        worker_status_path_from_resolution(cached.resolution.clone(), worker_cli)
+                    })
+                    .or_else(|| {
+                        (worker_cli == cas_mux::SupervisorCli::Claude)
+                            .then(|| transcript_path_fast(clone_path.as_deref(), session_uuid))
+                            .flatten()
+                    });
                 // Surface transcript path only for hard-dead workers so the
                 // supervisor can salvage whatever was in-flight when the CC
                 // client died (cas-2749 AC: transcript-path-surfacing on
@@ -878,12 +905,10 @@ impl CasService {
                 // need its transcript surfaced yet, and emitting it there
                 // would produce the false-positive noise cas-8240 is fixing.
                 //
-                // cas-900b: when we do emit, use `format_transcript_block`
-                // which globs ~/.claude/projects/*/<session_id>.jsonl for
-                // the real on-disk path and falls back to the reconstructed
-                // path only when the glob can't pin a unique match. Always
-                // surfaces session_id so a supervisor who doesn't trust our
-                // resolution can grep the projects tree themselves.
+                // cas-900b: when we do emit, render the rich harness-aware
+                // resolution. It surfaces the real path, a labelled likely
+                // path, or every ambiguous candidate, plus session_id so a
+                // supervisor can independently search the transcript tree.
                 //
                 // In factory mode, `agent.id` is the CC SessionStart UUID
                 // (daemon.rs + server/mod.rs both construct the Agent via
@@ -892,11 +917,11 @@ impl CasService {
                 // but for now `id` is the right key and has been correct
                 // since cas-2749.
                 let transcript_info = if elapsed >= WORKER_DEAD_SECS {
-                    let session_id = agent.cc_session_id.as_deref().unwrap_or(&agent.id);
-                    format_transcript_block(
+                    hard_dead_worker_transcript_block(
+                        transcript_resolution_for_worker.as_ref(),
                         clone_path.as_deref(),
-                        session_id,
-                        worker_cli_from_agent(agent),
+                        session_uuid,
+                        worker_cli,
                     )
                 } else {
                     String::new()
@@ -905,7 +930,6 @@ impl CasService {
                 // supervisor can cross-reference task-ownership errors
                 // ("owned by worker-backfill (0a7f2802-...)") without manual
                 // table-lookup. cas-85bf.
-                let session_uuid = agent.cc_session_id.as_deref().unwrap_or(&agent.id);
                 let model_info = match (
                     agent.metadata.get("worker_model"),
                     agent.metadata.get("worker_effort"),
@@ -926,12 +950,6 @@ impl CasService {
                 // same resolved path can also feed the in-flight-tool-call
                 // check below — one resolution, two consumers, instead of
                 // globbing/reading the transcript twice per worker.
-                let worker_cli = worker_cli_from_agent(agent);
-                let transcript_path_for_worker = worker_status_transcript_path(
-                    clone_path.as_deref(),
-                    session_uuid,
-                    worker_cli,
-                );
                 let context_info = {
                     match transcript_path_for_worker
                         .as_deref()
@@ -3042,6 +3060,34 @@ pub(crate) fn codex_rollout_cwd(path: &std::path::Path) -> Option<String> {
 /// spirit).
 const MAX_CODEX_ROLLOUT_SCAN: usize = 200;
 
+const WORKER_TRANSCRIPT_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+const MAX_WORKER_TRANSCRIPT_CACHE_ENTRIES: usize = 512;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct WorkerTranscriptCacheKey {
+    cli: &'static str,
+    base_dir: Option<std::path::PathBuf>,
+    clone_path: Option<String>,
+    session_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct WorkerTranscriptCacheEntry {
+    resolved_at: std::time::Instant,
+    resolution: TranscriptResolution,
+}
+
+fn worker_transcript_cache() -> &'static std::sync::Mutex<
+    std::collections::HashMap<WorkerTranscriptCacheKey, WorkerTranscriptCacheEntry>,
+> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::HashMap<WorkerTranscriptCacheKey, WorkerTranscriptCacheEntry>,
+        >,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 /// Collect recent rollout paths under `sessions_dir`, newest mtime first.
 fn collect_codex_rollouts(sessions_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     let pattern = format!("{}/**/rollout-*.jsonl", sessions_dir.to_string_lossy());
@@ -3204,51 +3250,131 @@ pub(crate) fn resolve_worker_transcript_path(
 /// Resolve the activity/context path for `worker_status`.
 ///
 /// Codex is the cas-fa69 fix: use the existing cli-aware resolver so a real
-/// rollout is reachable. Claude and Grok intentionally retain the historical
-/// single-stat fast path byte-for-byte (AC7); changing those harnesses belongs
-/// to a separately characterized change.
+/// rollout is reachable. Grok is the cas-a9ea follow-up: its
+/// directory-per-session layout must use the same harness-aware resolver as
+/// `cas factory is-wedged`, otherwise this function stats a synthesized Claude
+/// path and returns `None` while the wedged classifier finds `updates.jsonl`.
+/// Claude alone retains the historical single-stat fast path.
 fn worker_status_transcript_path(
     clone_path: Option<&str>,
     session_id: &str,
     cli: cas_mux::SupervisorCli,
 ) -> Option<std::path::PathBuf> {
     match cli {
-        cas_mux::SupervisorCli::Codex => worker_status_codex_transcript_path(
-            clone_path,
-            session_id,
-        ),
-        cas_mux::SupervisorCli::Claude | cas_mux::SupervisorCli::Grok => {
-            transcript_path_fast(clone_path, session_id)
+        cas_mux::SupervisorCli::Codex | cas_mux::SupervisorCli::Grok => {
+            let cached = worker_status_cached_transcript_resolution(clone_path, session_id, cli);
+            worker_status_path_from_resolution(cached.resolution, cli)
         }
+        cas_mux::SupervisorCli::Claude => transcript_path_fast(clone_path, session_id),
     }
 }
 
-fn worker_status_codex_transcript_path(
+#[derive(Debug, Clone)]
+struct WorkerStatusTranscriptResolution {
+    resolution: TranscriptResolution,
+    base_dir_resolved: bool,
+}
+
+fn hard_dead_worker_transcript_block(
+    cached: Option<&WorkerStatusTranscriptResolution>,
     clone_path: Option<&str>,
     session_id: &str,
-) -> Option<std::path::PathBuf> {
-    let sessions_dir = default_codex_sessions_dir();
-    worker_status_codex_transcript_path_in(
-        sessions_dir.as_deref(),
-        clone_path,
-        session_id,
+    cli: cas_mux::SupervisorCli,
+) -> String {
+    cached.map_or_else(
+        || format_transcript_block(clone_path, session_id, cli),
+        |cached| render_transcript_block(&cached.resolution, session_id, cached.base_dir_resolved),
     )
 }
 
-/// Codex worker_status accepts only a resolved real rollout. Synthesized paths
-/// are not evidence (cas-de95), and any residual Ambiguous result remains
-/// unresolved rather than inventing an activity age.
+fn worker_status_cached_transcript_resolution(
+    clone_path: Option<&str>,
+    session_id: &str,
+    cli: cas_mux::SupervisorCli,
+) -> WorkerStatusTranscriptResolution {
+    let base_dir = match cli {
+        cas_mux::SupervisorCli::Grok => default_grok_sessions_dir(),
+        cas_mux::SupervisorCli::Codex => default_codex_sessions_dir(),
+        cas_mux::SupervisorCli::Claude => default_claude_projects_dir(),
+    };
+    WorkerStatusTranscriptResolution {
+        resolution: worker_status_cached_transcript_resolution_in(
+            base_dir.as_deref(),
+            clone_path,
+            session_id,
+            cli,
+        ),
+        base_dir_resolved: base_dir.is_some(),
+    }
+}
+
+fn worker_status_path_from_resolution(
+    resolution: TranscriptResolution,
+    cli: cas_mux::SupervisorCli,
+) -> Option<std::path::PathBuf> {
+    match cli {
+        // Codex worker_status accepts only a resolved real rollout.
+        // Synthesized paths are not evidence (cas-de95), and any residual
+        // Ambiguous result remains unresolved rather than inventing an age.
+        cas_mux::SupervisorCli::Codex => worker_status_codex_path_from_resolution(resolution),
+        // Keep Grok aligned with is-wedged's historical ambiguity selection.
+        cas_mux::SupervisorCli::Grok => transcript_path_from_resolution(resolution),
+        cas_mux::SupervisorCli::Claude => transcript_path_from_resolution(resolution),
+    }
+}
+
+#[cfg(test)]
 fn worker_status_codex_transcript_path_in(
     sessions_dir: Option<&std::path::Path>,
     clone_path: Option<&str>,
     session_id: &str,
 ) -> Option<std::path::PathBuf> {
-    worker_status_codex_path_from_resolution(resolve_transcript(
+    worker_status_codex_path_from_resolution(worker_status_cached_transcript_resolution_in(
         sessions_dir,
         clone_path,
         session_id,
         cas_mux::SupervisorCli::Codex,
     ))
+}
+
+/// Bounded-TTL transcript resolution shared by worker_status and
+/// worker_activity for scan-based harnesses. Cache the rich resolution rather
+/// than only its concrete path so hard-dead status can surface Synthesized and
+/// Ambiguous salvage information without repeating the directory walk.
+fn worker_status_cached_transcript_resolution_in(
+    base_dir: Option<&std::path::Path>,
+    clone_path: Option<&str>,
+    session_id: &str,
+    cli: cas_mux::SupervisorCli,
+) -> TranscriptResolution {
+    let key = WorkerTranscriptCacheKey {
+        cli: cli.as_str(),
+        base_dir: base_dir.map(std::path::Path::to_path_buf),
+        clone_path: clone_path.map(str::to_owned),
+        session_id: session_id.to_owned(),
+    };
+    if let Ok(cache) = worker_transcript_cache().lock()
+        && let Some(entry) = cache.get(&key)
+        && entry.resolved_at.elapsed() < WORKER_TRANSCRIPT_CACHE_TTL
+    {
+        return entry.resolution.clone();
+    }
+
+    let resolution = resolve_transcript(base_dir, clone_path, session_id, cli);
+    if let Ok(mut cache) = worker_transcript_cache().lock() {
+        cache.retain(|_, entry| entry.resolved_at.elapsed() < WORKER_TRANSCRIPT_CACHE_TTL);
+        if cache.len() >= MAX_WORKER_TRANSCRIPT_CACHE_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(
+            key,
+            WorkerTranscriptCacheEntry {
+                resolved_at: std::time::Instant::now(),
+                resolution: resolution.clone(),
+            },
+        );
+    }
+    resolution
 }
 
 /// Injectable half of [`resolve_worker_transcript_path`] for deterministic
@@ -3355,11 +3481,11 @@ pub(crate) fn context_band(total_input_tokens: u64) -> &'static str {
     }
 }
 
-/// Historical live-worker path lookup used by Claude and Grok reporting.
+/// Historical live-worker path lookup used by Claude reporting.
 ///
 /// Reconstructs the Claude-layout path from `clone_path` + `session_id` and
-/// checks it with one `stat(2)`. Keeping this unchanged preserves the
-/// cas-573c latency and output contract for non-Codex harnesses.
+/// checks it with one `stat(2)`. Grok cannot use this path because its
+/// transcript is `~/.grok/sessions/<encoded-cwd>/<session>/updates.jsonl`.
 fn transcript_path_fast(
     clone_path: Option<&str>,
     session_id: &str,
@@ -3453,8 +3579,16 @@ fn read_context_usage_from_tail_for_cli(
     const TAIL_BYTES: u64 = 8192;
     file.seek(SeekFrom::Start(file_len.saturating_sub(TAIL_BYTES)))
         .ok()?;
-    let mut buf = String::new();
-    file.read_to_string(&mut buf).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    // A bounded seek can land on one of the at most three continuation
+    // bytes of a UTF-8 code point. Drop only that incomplete leading scalar;
+    // invalid UTF-8 anywhere else still fails closed as a malformed rollout.
+    let buf = (0..=3).find_map(|offset| {
+        bytes
+            .get(offset..)
+            .and_then(|tail| std::str::from_utf8(tail).ok())
+    })?;
 
     for line in buf.lines().rev() {
         if !line.contains("\"type\":\"token_count\"") {
@@ -5001,6 +5135,36 @@ effort = "high"
     }
 
     #[test]
+    fn resolve_codex_transcript_uses_freshest_cli_rollout_for_reused_cwd() {
+        let clone = "/tmp/reused-codex-worker";
+        let old_rel = "2026/07/27/rollout-2026-07-27T07-59-08-old-cli.jsonl";
+        let current_rel = "2026/07/28/rollout-2026-07-28T08-03-58-current-cli.jsonl";
+        let (_tmp, sessions) = fake_codex_sessions_dir_with_metadata(&[
+            (old_rel, clone, "codex-tui", "cli"),
+            (current_rel, clone, "codex-tui", "cli"),
+        ]);
+        let old_rollout = sessions.join(old_rel);
+        let current_rollout = sessions.join(current_rel);
+        filetime::set_file_mtime(
+            &old_rollout,
+            filetime::FileTime::from_system_time(
+                std::time::SystemTime::now() - std::time::Duration::from_secs(60),
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_codex_transcript(
+                Some(&sessions),
+                Some(clone),
+                "codex-worker-cas-session",
+            ),
+            TranscriptResolution::Resolved(current_rollout),
+            "worktree reuse leaves old CLI rollouts at the same cwd; the current worker is the freshest CLI session"
+        );
+    }
+
+    #[test]
     fn worker_status_activity_does_not_latch_onto_active_exec_rollout() {
         use std::io::Write;
 
@@ -5122,26 +5286,55 @@ effort = "high"
 
     #[test]
     fn worker_status_transcript_path_preserves_grok_fast_path_behavior() {
+        let _lock = crate::hooks::test_env_lock();
         let session = "grok-session-0000-0000-000000000000";
-        let (_tmp, sessions) =
+        let (tmp, sessions) =
             fake_grok_sessions_dir(&[("%2Fhome%2Falice%2Fworkspace", &[session])]);
-        let home = tempfile::tempdir().unwrap();
-        let got = transcript_path_fast_in(
-            home.path(),
+        let expected = sessions
+            .join("%2Fhome%2Falice%2Fworkspace")
+            .join(session)
+            .join("updates.jsonl");
+        let old = std::env::var("GROK_HOME").ok();
+        unsafe {
+            std::env::set_var("GROK_HOME", tmp.path());
+        }
+
+        // This test name is retained from cas-fa69, where AC7 deliberately
+        // pinned Grok's then-unreviewed fast-path behavior to `None`.
+        // cas-a9ea characterized the real on-disk layout and found that pin
+        // preserved a defect: worker_status used a Claude path while
+        // is-wedged resolved this Grok updates.jsonl. The legitimate new
+        // contract is agreement through the shared harness-aware resolver.
+        let worker_status_path = worker_status_transcript_path(
             Some("/home/alice/workspace"),
             session,
+            cas_mux::SupervisorCli::Grok,
+        );
+        let wedged_path = resolve_worker_transcript_path(
+            Some("/home/alice/workspace"),
+            session,
+            cas_mux::SupervisorCli::Grok,
+        );
+        unsafe {
+            match old {
+                Some(value) => std::env::set_var("GROK_HOME", value),
+                None => std::env::remove_var("GROK_HOME"),
+            }
+        }
+
+        assert_eq!(
+            worker_status_path,
+            Some(expected.clone()),
+            "worker_status must resolve the real Grok updates.jsonl"
         );
         assert_eq!(
-            got, None,
-            "the existing Grok worker_status fast path must remain unchanged"
+            worker_status_path, wedged_path,
+            "worker_status and is-wedged must use the same Grok evidence path"
         );
         assert!(
-            sessions
-                .join("%2Fhome%2Falice%2Fworkspace")
-                .join(session)
-                .join("updates.jsonl")
-                .exists(),
-            "the fixture must contain a real Grok transcript"
+            expected.with_file_name("signals.json").exists(),
+            "the resolved updates.jsonl must retain its sibling signals.json \
+             for harness-aware activity age"
         );
     }
 
@@ -5297,6 +5490,263 @@ effort = "high"
             elapsed.as_micros()
         );
         assert_eq!(candidates.len(), MAX_CODEX_ROLLOUT_SCAN);
+    }
+
+    #[test]
+    fn codex_worker_status_cache_amortizes_small_and_large_session_trees() {
+        fn measure(count: usize) -> (u128, u128) {
+            let tmp = tempfile::tempdir().unwrap();
+            let sessions = tmp.path().join("sessions");
+            let day = sessions.join("2026/07/28");
+            std::fs::create_dir_all(&day).unwrap();
+            let historical_mtime = filetime::FileTime::from_system_time(
+                std::time::SystemTime::now() - std::time::Duration::from_secs(60),
+            );
+            for index in 0..count {
+                let path = day.join(format!("rollout-history-{index:05}.jsonl"));
+                std::fs::write(
+                    &path,
+                    format!(
+                        r#"{{"type":"session_meta","payload":{{"cwd":"/tmp/history-{index}","originator":"codex-tui","source":"cli"}}}}"#
+                    ),
+                )
+                .unwrap();
+                filetime::set_file_mtime(&path, historical_mtime).unwrap();
+            }
+            let clone = format!("/tmp/live-worker-{count}");
+            let session_id = format!("codex-live-session-{count}");
+            let live = day.join(format!("rollout-live-{count}.jsonl"));
+            std::fs::write(
+                &live,
+                format!(
+                    r#"{{"type":"session_meta","payload":{{"cwd":"{clone}","originator":"codex-tui","source":"cli"}}}}"#
+                ),
+            )
+            .unwrap();
+
+            let cold_started = std::time::Instant::now();
+            let resolved =
+                worker_status_codex_transcript_path_in(Some(&sessions), Some(&clone), &session_id);
+            let cold_micros = cold_started.elapsed().as_micros();
+            assert_eq!(resolved, Some(live));
+
+            let key = WorkerTranscriptCacheKey {
+                cli: "codex",
+                base_dir: Some(sessions.clone()),
+                clone_path: Some(clone.clone()),
+                session_id: session_id.clone(),
+            };
+            let cached_at = worker_transcript_cache()
+                .lock()
+                .unwrap()
+                .get(&key)
+                .expect("cold lookup must populate cache")
+                .resolved_at;
+            let warm_started = std::time::Instant::now();
+            for _ in 0..100 {
+                assert!(
+                    worker_status_codex_transcript_path_in(
+                        Some(&sessions),
+                        Some(&clone),
+                        &session_id,
+                    )
+                    .is_some()
+                );
+            }
+            let warm_avg_nanos = warm_started.elapsed().as_nanos() / 100;
+            let still_cached_at = worker_transcript_cache()
+                .lock()
+                .unwrap()
+                .get(&key)
+                .expect("warm lookup must retain cache entry")
+                .resolved_at;
+            assert_eq!(
+                cached_at, still_cached_at,
+                "warm worker_status/activity polls must not rerun resolution"
+            );
+            (cold_micros, warm_avg_nanos)
+        }
+
+        let (small_cold, small_warm) = measure(25);
+        let (large_cold, large_warm) = measure(1_000);
+        eprintln!(
+            "cas-7182 resolver: small tree cold={small_cold}µs warm_avg={small_warm}ns; \
+             large tree cold={large_cold}µs warm_avg={large_warm}ns"
+        );
+    }
+
+    #[test]
+    fn codex_worker_status_cache_refreshes_after_ttl() {
+        let clone = "/tmp/codex-cache-refresh";
+        let session_id = "codex-cache-refresh-session";
+        let first_rel = "2026/07/28/rollout-first.jsonl";
+        let (_tmp, sessions) = fake_codex_sessions_dir(&[(first_rel, clone)]);
+        let first = sessions.join(first_rel);
+        assert_eq!(
+            worker_status_codex_transcript_path_in(Some(&sessions), Some(clone), session_id),
+            Some(first.clone())
+        );
+
+        let second = sessions.join("2026/07/28/rollout-second.jsonl");
+        std::fs::write(
+            &second,
+            format!(
+                r#"{{"type":"session_meta","payload":{{"cwd":"{clone}","originator":"codex-tui","source":"cli"}}}}"#
+            ),
+        )
+        .unwrap();
+        filetime::set_file_mtime(
+            &first,
+            filetime::FileTime::from_system_time(
+                std::time::SystemTime::now() - std::time::Duration::from_secs(60),
+            ),
+        )
+        .unwrap();
+
+        let key = WorkerTranscriptCacheKey {
+            cli: "codex",
+            base_dir: Some(sessions.clone()),
+            clone_path: Some(clone.to_string()),
+            session_id: session_id.to_string(),
+        };
+        worker_transcript_cache()
+            .lock()
+            .unwrap()
+            .get_mut(&key)
+            .expect("cache entry")
+            .resolved_at = std::time::Instant::now() - WORKER_TRANSCRIPT_CACHE_TTL;
+
+        assert_eq!(
+            worker_status_codex_transcript_path_in(Some(&sessions), Some(clone), session_id),
+            Some(second),
+            "expired cache entries must discover a newer live rollout"
+        );
+    }
+
+    #[test]
+    fn grok_worker_status_cache_amortizes_and_refreshes_after_ttl() {
+        let session_id = "grok-cache-refresh-session";
+        let clone = "/tmp/grok-cache-refresh";
+        let (_tmp, sessions) = fake_grok_sessions_dir(&[("first-cwd", &[session_id])]);
+        let first = sessions
+            .join("first-cwd")
+            .join(session_id)
+            .join("updates.jsonl");
+        let cold = worker_status_cached_transcript_resolution_in(
+            Some(&sessions),
+            Some(clone),
+            session_id,
+            cas_mux::SupervisorCli::Grok,
+        );
+        assert_eq!(cold, TranscriptResolution::Resolved(first.clone()));
+
+        let key = WorkerTranscriptCacheKey {
+            cli: "grok",
+            base_dir: Some(sessions.clone()),
+            clone_path: Some(clone.to_string()),
+            session_id: session_id.to_string(),
+        };
+        let cached_at = worker_transcript_cache()
+            .lock()
+            .unwrap()
+            .get(&key)
+            .expect("cold Grok lookup must populate cache")
+            .resolved_at;
+
+        std::fs::remove_file(&first).unwrap();
+        let second_dir = sessions.join("second-cwd").join(session_id);
+        std::fs::create_dir_all(&second_dir).unwrap();
+        let second = second_dir.join("updates.jsonl");
+        std::fs::write(&second, b"").unwrap();
+
+        let warm = worker_status_cached_transcript_resolution_in(
+            Some(&sessions),
+            Some(clone),
+            session_id,
+            cas_mux::SupervisorCli::Grok,
+        );
+        assert_eq!(
+            warm,
+            TranscriptResolution::Resolved(first),
+            "warm worker_status/activity polls must reuse the Grok resolution"
+        );
+        assert_eq!(
+            worker_transcript_cache()
+                .lock()
+                .unwrap()
+                .get(&key)
+                .expect("warm Grok lookup must retain cache entry")
+                .resolved_at,
+            cached_at
+        );
+
+        worker_transcript_cache()
+            .lock()
+            .unwrap()
+            .get_mut(&key)
+            .expect("Grok cache entry")
+            .resolved_at = std::time::Instant::now() - WORKER_TRANSCRIPT_CACHE_TTL;
+        let refreshed = worker_status_cached_transcript_resolution_in(
+            Some(&sessions),
+            Some(clone),
+            session_id,
+            cas_mux::SupervisorCli::Grok,
+        );
+        assert_eq!(
+            refreshed,
+            TranscriptResolution::Resolved(second),
+            "expired Grok cache entries must discover the moved transcript"
+        );
+    }
+
+    #[test]
+    fn hard_dead_codex_status_surfaces_cached_synthesized_and_ambiguous_salvage() {
+        let empty = tempfile::tempdir().unwrap();
+        let session_id = "codex-hard-dead-synthesized";
+        let clone = "/tmp/codex-hard-dead";
+        let synthesized = WorkerStatusTranscriptResolution {
+            resolution: worker_status_cached_transcript_resolution_in(
+                Some(empty.path()),
+                Some(clone),
+                session_id,
+                cas_mux::SupervisorCli::Codex,
+            ),
+            base_dir_resolved: true,
+        };
+        let synthesized_output = hard_dead_worker_transcript_block(
+            Some(&synthesized),
+            Some(clone),
+            session_id,
+            cas_mux::SupervisorCli::Codex,
+        );
+        assert!(synthesized_output.contains("Likely transcript:"));
+        assert!(synthesized_output.contains(&format!("Session: {session_id}")));
+        assert!(!synthesized_output.contains("unresolved Codex rollout"));
+
+        let collision_id = "019f84af-3121-7950-ba14-b01db2dad6c7";
+        let first_rel = format!("2026/07/28/rollout-first-{collision_id}.jsonl");
+        let second_rel = format!("2026/07/29/rollout-second-{collision_id}.jsonl");
+        let (_tmp, sessions) =
+            fake_codex_sessions_dir(&[(&first_rel, clone), (&second_rel, clone)]);
+        let ambiguous = WorkerStatusTranscriptResolution {
+            resolution: worker_status_cached_transcript_resolution_in(
+                Some(&sessions),
+                Some(clone),
+                collision_id,
+                cas_mux::SupervisorCli::Codex,
+            ),
+            base_dir_resolved: true,
+        };
+        let ambiguous_output = hard_dead_worker_transcript_block(
+            Some(&ambiguous),
+            Some(clone),
+            collision_id,
+            cas_mux::SupervisorCli::Codex,
+        );
+        assert!(ambiguous_output.contains("Transcript candidates"));
+        assert!(ambiguous_output.contains(&first_rel));
+        assert!(ambiguous_output.contains(&second_rel));
+        assert!(ambiguous_output.contains("Likely synthesized:"));
     }
 
     #[test]
@@ -5657,6 +6107,37 @@ effort = "high"
                 .expect("Codex token_count event should produce a context reading");
         assert_eq!(total, 123_456);
         assert_eq!(context_band(total), "approaching");
+    }
+
+    #[test]
+    fn read_context_usage_from_codex_rollout_recovers_split_utf8_tail_boundary() {
+        use std::io::Write;
+
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let token_count = r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":123456}}}}"#;
+        let filler_len = 8190usize
+            .checked_sub(2 + token_count.len())
+            .expect("token fixture fits in the tail window");
+
+        tmp.write_all(b"prefix").unwrap();
+        tmp.write_all("✓".as_bytes()).unwrap();
+        tmp.write_all(b"\n").unwrap();
+        tmp.write_all(&vec![b'x'; filler_len]).unwrap();
+        tmp.write_all(b"\n").unwrap();
+        tmp.write_all(token_count.as_bytes()).unwrap();
+
+        let bytes = std::fs::read(tmp.path()).unwrap();
+        let tail_start = bytes.len() - 8192;
+        assert_eq!(tail_start, b"prefix".len() + 1);
+        assert!(
+            std::str::from_utf8(&bytes[tail_start..]).is_err(),
+            "fixture must make the old read_to_string path fail at a continuation byte"
+        );
+
+        let total =
+            read_context_usage_from_tail_for_cli(tmp.path(), cas_mux::SupervisorCli::Codex)
+                .expect("a split UTF-8 code point at the seek boundary must not hide usage");
+        assert_eq!(total, 123_456);
     }
 
     /// When the tail has multiple assistant entries, the LAST one wins.

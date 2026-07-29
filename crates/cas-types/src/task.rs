@@ -250,8 +250,9 @@ pub struct TaskDeliverables {
     /// which branch to resolve it against; when the original assignee is
     /// lost (fleet restart, reassignment), the branch name itself is the
     /// only thing that still points at the orphaned commits. Commit-time
-    /// capture refreshes it together with the anchor; merge parking preserves
-    /// an existing value.
+    /// capture records the first branch but never overwrites a different
+    /// existing value; the anchor itself continues to refresh for new work.
+    /// Merge parking follows the same preservation rule.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parked_branch: Option<String>,
 

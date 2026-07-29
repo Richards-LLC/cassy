@@ -623,6 +623,7 @@ pub fn get_git_author() -> Option<String> {
 mod commit_anchor_tests {
     use super::*;
     use crate::store::init_cas_dir;
+    use crate::test_support::TestEnvGuard;
     use std::process::Command;
 
     fn git(dir: &std::path::Path, args: &[&str]) {
@@ -657,12 +658,17 @@ mod commit_anchor_tests {
     }
 
     fn worker_task_fixture() -> (
+        TestEnvGuard,
         tempfile::TempDir,
         std::path::PathBuf,
         Agent,
         Task,
         std::sync::Arc<dyn crate::store::TaskStore>,
     ) {
+        let env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_FACTORY_MODE", None),
+            ("CAS_SESSION_ID", None),
+        ]);
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path().to_path_buf();
         let cas_root = init_cas_dir(&repo).expect("init cas");
@@ -685,12 +691,12 @@ mod commit_anchor_tests {
             .try_claim(&task.id, &agent.id, 600, None)
             .expect("claim task");
 
-        (temp, cas_root, agent, task, task_store)
+        (env, temp, cas_root, agent, task, task_store)
     }
 
     #[test]
     fn commit_then_reset_records_created_commit_not_post_command_head() {
-        let (_temp, cas_root, agent, task, task_store) = worker_task_fixture();
+        let (_env, _temp, cas_root, agent, task, task_store) = worker_task_fixture();
         let repo = cas_root.parent().expect("repo");
         std::fs::write(repo.join("work.rs"), "fn work() {}\n").unwrap();
         git(repo, &["add", "work.rs"]);
@@ -746,7 +752,7 @@ mod commit_anchor_tests {
 
     #[test]
     fn commit_then_amend_records_final_created_commit() {
-        let (_temp, cas_root, agent, task, task_store) = worker_task_fixture();
+        let (_env, _temp, cas_root, agent, task, task_store) = worker_task_fixture();
         let repo = cas_root.parent().expect("repo");
         std::fs::write(repo.join("work.rs"), "fn work() {}\n").unwrap();
         git(repo, &["add", "work.rs"]);
@@ -825,7 +831,7 @@ mod commit_anchor_tests {
 
     #[test]
     fn quiet_commit_after_cd_does_not_anchor_hook_cwd_head() {
-        let (_temp, cas_root, agent, task, task_store) = worker_task_fixture();
+        let (_env, _temp, cas_root, agent, task, task_store) = worker_task_fixture();
         let hook_repo = cas_root.parent().expect("hook repo");
         let hook_head = git_output(hook_repo, &["rev-parse", "HEAD"])
             .trim()
@@ -966,6 +972,10 @@ mod commit_anchor_tests {
 
     #[test]
     fn successful_worker_commit_records_active_task_anchor_before_close() {
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_FACTORY_MODE", None),
+            ("CAS_SESSION_ID", None),
+        ]);
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path();
         let cas_root = init_cas_dir(repo).expect("init cas");
@@ -1027,5 +1037,88 @@ mod commit_anchor_tests {
             anchored.deliverables.parked_branch.as_deref(),
             Some("factory/test-worker")
         );
+    }
+
+    #[test]
+    fn non_worker_does_not_record_active_task_anchor() {
+        let (_env, _temp, cas_root, mut agent, task, task_store) = worker_task_fixture();
+        let repo = cas_root.parent().expect("repo");
+        let agent_store = open_agent_store(&cas_root).expect("agent store");
+        agent.role = AgentRole::Supervisor;
+        agent_store.update(&agent).expect("update agent role");
+        let commit_hash = git_output(repo, &["rev-parse", "HEAD"]).trim().to_string();
+
+        assert!(!persist_active_task_factory_anchor(
+            &cas_root,
+            &HookInput {
+                session_id: agent.id,
+                cwd: repo.display().to_string(),
+                ..Default::default()
+            },
+            &commit_hash,
+            false,
+        ));
+        let unchanged = task_store.get(&task.id).expect("unchanged task");
+        assert!(unchanged.deliverables.factory_branch_anchor.is_none());
+        assert!(unchanged.deliverables.parked_branch.is_none());
+    }
+
+    #[test]
+    fn multiple_active_leases_do_not_guess_which_task_owns_commit() {
+        let (_env, _temp, cas_root, agent, task, task_store) = worker_task_fixture();
+        let repo = cas_root.parent().expect("repo");
+        let agent_store = open_agent_store(&cas_root).expect("agent store");
+        let mut second = Task::new(
+            "cas-second-active".to_string(),
+            "second active task".to_string(),
+        );
+        second.status = TaskStatus::InProgress;
+        second.assignee = Some(agent.name.clone());
+        task_store.add(&second).expect("add second task");
+        agent_store
+            .try_claim(&second.id, &agent.id, 600, None)
+            .expect("claim second task");
+        let commit_hash = git_output(repo, &["rev-parse", "HEAD"]).trim().to_string();
+
+        assert!(!persist_active_task_factory_anchor(
+            &cas_root,
+            &HookInput {
+                session_id: agent.id,
+                cwd: repo.display().to_string(),
+                ..Default::default()
+            },
+            &commit_hash,
+            false,
+        ));
+        for task_id in [&task.id, &second.id] {
+            let unchanged = task_store.get(task_id).expect("unchanged task");
+            assert!(
+                unchanged.deliverables.factory_branch_anchor.is_none(),
+                "ambiguous active task {task_id} must not receive the anchor"
+            );
+            assert!(unchanged.deliverables.parked_branch.is_none());
+        }
+    }
+
+    #[test]
+    fn non_factory_branch_does_not_record_active_task_anchor() {
+        let (_env, _temp, cas_root, agent, task, task_store) = worker_task_fixture();
+        let repo = cas_root.parent().expect("repo");
+        git(repo, &["checkout", "-q", "main"]);
+        let commit_hash = git_output(repo, &["rev-parse", "HEAD"]).trim().to_string();
+
+        assert!(!persist_active_task_factory_anchor(
+            &cas_root,
+            &HookInput {
+                session_id: agent.id,
+                cwd: repo.display().to_string(),
+                ..Default::default()
+            },
+            &commit_hash,
+            false,
+        ));
+        let unchanged = task_store.get(&task.id).expect("unchanged task");
+        assert!(unchanged.deliverables.factory_branch_anchor.is_none());
+        assert!(unchanged.deliverables.parked_branch.is_none());
     }
 }

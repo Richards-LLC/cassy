@@ -1083,12 +1083,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures",
+ "http 1.4.0",
  "rmcp 0.16.0",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "toml",
+ "tracing",
 ]
 
 [[package]]

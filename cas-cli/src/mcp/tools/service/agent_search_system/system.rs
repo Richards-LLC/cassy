@@ -405,4 +405,43 @@ impl CasService {
             serde_json::to_string_pretty(&response).unwrap_or_default(),
         ))
     }
+
+    #[cfg(feature = "mcp-proxy")]
+    pub(in crate::mcp::tools::service) async fn system_proxy_health(
+        &self,
+        _req: SystemRequest,
+    ) -> Result<CallToolResult, McpError> {
+        let snapshot = match self.proxy.as_ref() {
+            Some(proxy) => serde_json::to_value(proxy.health_snapshot().await).map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Failed to serialize MCP proxy health: {error}"),
+                )
+            }),
+            None => {
+                let path = self.inner.cas_root.join("proxy_health.json");
+                std::fs::read_to_string(&path)
+                    .map_err(|error| {
+                        Self::error(
+                            ErrorCode::INTERNAL_ERROR,
+                            format!(
+                                "MCP proxy health is unavailable (no active proxy and no cache): {error}"
+                            ),
+                        )
+                    })
+                    .and_then(|json| {
+                        serde_json::from_str(&json).map_err(|error| {
+                            Self::error(
+                                ErrorCode::INTERNAL_ERROR,
+                                format!("MCP proxy health cache is invalid: {error}"),
+                            )
+                        })
+                    })
+            }
+        }?;
+
+        Ok(Self::success(
+            serde_json::to_string_pretty(&snapshot).unwrap_or_default(),
+        ))
+    }
 }

@@ -746,7 +746,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "System operations. Actions: version (CAS version info), doctor (diagnostics), stats, info (system info), reindex (BM25 index), maintenance_run, maintenance_status, config_docs (full config reference), config_search (search configs by query), report_cas_bug (submit CAS bug to GitHub - ANONYMIZE DATA: remove paths, credentials, proprietary code before submitting), proxy_add (add upstream MCP server), proxy_remove (remove server), proxy_list (list servers)."
+        description = "System operations. Actions: version (CAS version info), doctor (diagnostics), stats, info (system info), reindex (BM25 index), maintenance_run, maintenance_status, config_docs (full config reference), config_search (search configs by query), report_cas_bug (submit CAS bug to GitHub - ANONYMIZE DATA: remove paths, credentials, proprietary code before submitting), proxy_add (add upstream MCP server), proxy_remove (remove server), proxy_list (list servers), proxy_health (credential-free upstream health/backoff state)."
     )]
     pub async fn system(
         &self,
@@ -779,12 +779,14 @@ impl CasService {
                 "proxy_remove" => this.system_proxy_remove(req).await,
                 #[cfg(feature = "mcp-proxy")]
                 "proxy_list" => this.system_proxy_list(req).await,
+                #[cfg(feature = "mcp-proxy")]
+                "proxy_health" => this.system_proxy_health(req).await,
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
                         "Unknown system action: {}. Valid: version, doctor, stats, info, reindex, maintenance_run, maintenance_status, config_docs, config_search, report_cas_bug{}",
                         req.action,
-                        if cfg!(feature = "mcp-proxy") { ", proxy_add, proxy_remove, proxy_list" } else { "" }
+                        if cfg!(feature = "mcp-proxy") { ", proxy_add, proxy_remove, proxy_list, proxy_health" } else { "" }
                     ),
                 )),
             };

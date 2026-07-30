@@ -256,6 +256,17 @@ pub struct TaskRequest {
     #[serde(default)]
     pub commit_receipt: Option<String>,
 
+    /// Serialized immutable worker-delivery receipt. This is an additive,
+    /// opt-in transactional handoff; omitting it preserves legacy close.
+    #[schemars(
+        description = "Serialized WorkerCompletionReceiptInput JSON. CAS revalidates \
+                       the registered worker, task, repository, branch, commit/base/target \
+                       tips and proof reference before persisting an immutable delivery \
+                       transaction. Omit to use the legacy close path unchanged."
+    )]
+    #[serde(default)]
+    pub completion_receipt: Option<String>,
+
     /// Include dependencies (for show)
     #[schemars(description = "Include dependency information")]
     #[serde(default, deserialize_with = "deser::option_bool")]
@@ -910,3 +921,31 @@ pub use crate::types::ops_secondary::{
 #[cfg(test)]
 #[path = "types_tests/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod worker_delivery_request_tests {
+    use super::TaskRequest;
+
+    #[test]
+    fn legacy_close_request_omitting_completion_receipt_deserializes_unchanged() {
+        let request: TaskRequest =
+            serde_json::from_str(r#"{"action":"close","id":"cas-legacy","reason":"done"}"#)
+                .unwrap();
+        assert_eq!(request.action, "close");
+        assert_eq!(request.id.as_deref(), Some("cas-legacy"));
+        assert_eq!(request.reason.as_deref(), Some("done"));
+        assert!(request.completion_receipt.is_none());
+    }
+
+    #[test]
+    fn completion_receipt_is_additive_opaque_json_at_the_mcp_boundary() {
+        let request: TaskRequest = serde_json::from_str(
+            r#"{"action":"close","id":"cas-new","completion_receipt":"{\"task_id\":\"cas-new\"}"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            request.completion_receipt.as_deref(),
+            Some(r#"{"task_id":"cas-new"}"#)
+        );
+    }
+}

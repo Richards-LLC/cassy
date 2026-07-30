@@ -3,6 +3,78 @@ use crate::mcp::tools::core::imports::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone)]
+struct DeliverySupervisorAuthority {
+    agent_id: String,
+}
+
+fn derive_delivery_supervisor_authority(
+    agent: &cas_types::Agent,
+) -> Result<DeliverySupervisorAuthority, &'static str> {
+    if agent.role != cas_types::AgentRole::Supervisor || !agent.is_alive() {
+        return Err("only a live server-registered Supervisor may resume transactional delivery");
+    }
+    Ok(DeliverySupervisorAuthority {
+        agent_id: agent.id.clone(),
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeliveryMergePreflight {
+    Execute,
+    Reconcile,
+}
+
+fn classify_delivery_merge_preflight(
+    repo_binding_matches: bool,
+    commit_exists: bool,
+    already_merged: bool,
+    source_tip_matches: bool,
+    target_tip_matches: bool,
+    merge_base_matches: bool,
+) -> Result<DeliveryMergePreflight, (cas_types::WorkerDeliveryState, &'static str, &'static str)> {
+    use cas_types::WorkerDeliveryState;
+    if !repo_binding_matches {
+        return Err((
+            WorkerDeliveryState::RepoMismatch,
+            "repo_mismatch",
+            "receipt repository/branch binding no longer matches the server-resolved worktree target",
+        ));
+    }
+    if !commit_exists {
+        return Err((
+            WorkerDeliveryState::Stale,
+            "stale_commit",
+            "receipt commit no longer resolves to a commit object",
+        ));
+    }
+    if already_merged {
+        return Ok(DeliveryMergePreflight::Reconcile);
+    }
+    if !source_tip_matches {
+        return Err((
+            WorkerDeliveryState::TipChanged,
+            "tip_changed",
+            "worker branch tip changed after immutable receipt submission",
+        ));
+    }
+    if !target_tip_matches {
+        return Err((
+            WorkerDeliveryState::Stale,
+            "target_changed",
+            "target branch tip changed after receipt submission",
+        ));
+    }
+    if !merge_base_matches {
+        return Err((
+            WorkerDeliveryState::Stale,
+            "merge_base_changed",
+            "live merge base differs from the immutable receipt",
+        ));
+    }
+    Ok(DeliveryMergePreflight::Execute)
+}
+
 /// Check whether `path` looks like a live git worktree (has a `.git` entry
 /// — a file for linked worktrees, pointing back at the main repo's
 /// worktree admin dir).
@@ -1283,6 +1355,56 @@ impl CasCore {
             data: None,
         })?;
         let wt_config = config.worktrees();
+        let transactional_delivery =
+            match task_id {
+                Some(task_id) => cas_store::get_latest_worker_delivery(&cas_root, task_id)
+                    .map_err(|error| McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!(
+                            "Failed to load transactional worker delivery for {task_id}: {error}"
+                        )),
+                        data: None,
+                    })?,
+                None => None,
+            };
+        let delivery_authority = if transactional_delivery.is_some() {
+            let caller_id = self.get_agent_id().map_err(|_| McpError {
+                code: ErrorCode::INVALID_REQUEST,
+                message: Cow::from(
+                    "Transactional delivery merge requires an authenticated registered supervisor.",
+                ),
+                data: None,
+            })?;
+            let caller = self
+                .open_agent_store()?
+                .get(&caller_id)
+                .map_err(|_| McpError {
+                    code: ErrorCode::INVALID_REQUEST,
+                    message: Cow::from(
+                        "Transactional delivery merge requires a live registered supervisor session.",
+                    ),
+                    data: None,
+                })?;
+            Some(
+                derive_delivery_supervisor_authority(&caller).map_err(|reason| McpError {
+                    code: ErrorCode::INVALID_REQUEST,
+                    message: Cow::from(format!(
+                        "Transactional delivery merge authority rejected: {reason}; request flags, environment role labels, and task ownership do not grant authority."
+                    )),
+                    data: None,
+                })?,
+            )
+        } else {
+            None
+        };
+        if let Some((_, transaction)) = transactional_delivery.as_ref()
+            && transaction.state == cas_types::WorkerDeliveryState::Delivered
+        {
+            return Ok(Self::success(format!(
+                "Transactional delivery {} is already delivered; no Git merge, event, or close was repeated.",
+                transaction.id
+            )));
+        }
 
         let worktree_store = open_worktree_store(&cas_root).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
@@ -1369,15 +1491,14 @@ impl CasCore {
                 let task_store = self.open_task_store()?;
                 // cas-bd5f: agent store needed to bind explicit task_id to the
                 // System-B worker (assignee name and/or active lease holder).
-                let agent_store = crate::store::open_agent_store(&cas_root).map_err(|e| {
-                    McpError {
+                let agent_store =
+                    crate::store::open_agent_store(&cas_root).map_err(|e| McpError {
                         code: ErrorCode::INTERNAL_ERROR,
                         message: Cow::from(format!(
                             "Failed to open agent store for worktree_merge authorization: {e}"
                         )),
                         data: None,
-                    }
-                })?;
+                    })?;
                 let focused = load_validated_focused_epic(&cas_root, assignee);
                 let (resolved_parent_branch, mut target_reason) = resolve_system_b_merge_target(
                     task_store.as_ref(),
@@ -1445,19 +1566,273 @@ impl CasCore {
             })?;
         }
 
+        let mut reconciled_delivery = false;
+        if let (Some((receipt, transaction)), Some(authority)) =
+            (transactional_delivery.as_ref(), delivery_authority.as_ref())
+        {
+            let fail = |state: cas_types::WorkerDeliveryState,
+                        code: &'static str,
+                        detail: String|
+             -> Result<CallToolResult, McpError> {
+                cas_store::transition_worker_delivery(
+                    &cas_root,
+                    &transaction.id,
+                    &[
+                        cas_types::WorkerDeliveryState::AwaitingMerge,
+                        cas_types::WorkerDeliveryState::MergeAuthorized,
+                    ],
+                    state,
+                    &authority.agent_id,
+                    Some(&authority.agent_id),
+                    None,
+                    None,
+                    Some((code, &detail)),
+                )
+                .map_err(|error| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!(
+                        "Failed to persist delivery failure state: {error}"
+                    )),
+                    data: None,
+                })?;
+                Ok(Self::tool_error(format!(
+                    "TRANSACTIONAL DELIVERY {state}: {detail}\n\nNo merge was attempted. A registered supervisor may recover after correcting the exact cause."
+                )))
+            };
+            if !matches!(
+                transaction.state,
+                cas_types::WorkerDeliveryState::AwaitingMerge
+                    | cas_types::WorkerDeliveryState::MergeAuthorized
+                    | cas_types::WorkerDeliveryState::Merged
+                    | cas_types::WorkerDeliveryState::CloseReady
+            ) {
+                return Ok(Self::tool_error(format!(
+                    "Transactional delivery {} is in state {}; merge/resume is not authorized from this state.",
+                    transaction.id, transaction.state
+                )));
+            }
+            let Some(expected) = declared_repo_context.as_ref() else {
+                return fail(
+                    cas_types::WorkerDeliveryState::RepoMismatch,
+                    "repo_mismatch",
+                    "receipt requires a declared task RepoContext, but none resolved".to_string(),
+                );
+            };
+            let repo_binding_matches = receipt.repo_selector == expected.repo_selector
+                && receipt.target_branch == expected.target_branch
+                && receipt.source_branch == worktree.branch
+                && receipt.target_branch == worktree.parent_branch;
+            let commit_exists =
+                crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha(
+                    &cwd,
+                    &receipt.commit_sha,
+                )
+                .is_some();
+            let target_tip =
+                crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha(
+                    &cwd,
+                    &receipt.target_branch,
+                );
+            let already_merged = target_tip.as_deref().is_some_and(|target| {
+                crate::mcp::tools::core::task::lifecycle::close_ops::git_commit_is_ancestor(
+                    &cwd,
+                    &receipt.commit_sha,
+                    target,
+                )
+            });
+            let source_tip =
+                crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha(
+                    &cwd,
+                    &receipt.source_branch,
+                );
+            let live_base = crate::mcp::tools::core::task::lifecycle::close_ops::git_merge_base(
+                &cwd,
+                &receipt.source_branch,
+                &receipt.target_branch,
+            );
+            let preflight = classify_delivery_merge_preflight(
+                repo_binding_matches,
+                commit_exists,
+                already_merged,
+                source_tip.as_deref() == Some(receipt.commit_sha.as_str()),
+                target_tip.as_deref() == Some(receipt.target_sha.as_str()),
+                live_base.as_deref() == Some(receipt.merge_base_sha.as_str()),
+            );
+            let preflight = match preflight {
+                Ok(preflight) => preflight,
+                Err((state, code, detail)) => {
+                    return fail(state, code, detail.to_string());
+                }
+            };
+            if preflight == DeliveryMergePreflight::Execute {
+                cas_store::transition_worker_delivery(
+                    &cas_root,
+                    &transaction.id,
+                    &[cas_types::WorkerDeliveryState::AwaitingMerge],
+                    cas_types::WorkerDeliveryState::MergeAuthorized,
+                    &authority.agent_id,
+                    Some(&authority.agent_id),
+                    None,
+                    None,
+                    None,
+                )
+                .map_err(|error| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("Failed to persist delivery merge intent: {error}")),
+                    data: None,
+                })?;
+            } else {
+                reconciled_delivery = true;
+            }
+        }
+
         // cas-369f: force (dirty) ≠ cleanup (remove). System-B factory
         // workers default to preserving the worktree mid-session.
-        let do_cleanup = resolve_worktree_merge_cleanup(
-            cleanup,
-            is_system_b,
-            wt_config.cleanup_on_close,
-        );
+        let do_cleanup =
+            resolve_worktree_merge_cleanup(cleanup, is_system_b, wt_config.cleanup_on_close);
 
-        let merge_commit = manager
-            .merge_and_cleanup(&mut worktree, force, do_cleanup)
-            .map_err(|e| {
-                worktree_merge_mcp_error(e, &worktree.branch, &worktree.parent_branch)
-            })?;
+        let merge_commit = if reconciled_delivery {
+            crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha(
+                &cwd,
+                &worktree.parent_branch,
+            )
+        } else {
+            match manager.merge_and_cleanup(&mut worktree, force, do_cleanup) {
+                Ok(commit) => commit,
+                Err(error) => {
+                    if let (Some((_, transaction)), Some(authority)) =
+                        (transactional_delivery.as_ref(), delivery_authority.as_ref())
+                    {
+                        // Keep durable delivery events portable and diagnostic-only:
+                        // the user-facing MCP error below may name local paths, but
+                        // SQLite stores no path-bearing Git error payload.
+                        let detail =
+                            "Git merge did not complete; explicit conflict/recovery is required.";
+                        let _ = cas_store::transition_worker_delivery(
+                            &cas_root,
+                            &transaction.id,
+                            &[cas_types::WorkerDeliveryState::MergeAuthorized],
+                            cas_types::WorkerDeliveryState::Conflict,
+                            &authority.agent_id,
+                            Some(&authority.agent_id),
+                            None,
+                            None,
+                            Some(("merge_conflict", detail)),
+                        );
+                    }
+                    return Err(worktree_merge_mcp_error(
+                        error,
+                        &worktree.branch,
+                        &worktree.parent_branch,
+                    ));
+                }
+            }
+        };
+
+        if let (Some((receipt, transaction)), Some(authority)) =
+            (transactional_delivery.as_ref(), delivery_authority.as_ref())
+        {
+            let target_tip =
+                crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha(
+                    &cwd,
+                    &receipt.target_branch,
+                )
+                .ok_or_else(|| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(
+                        "Transactional delivery cannot resolve target tip after merge.",
+                    ),
+                    data: None,
+                })?;
+            if !crate::mcp::tools::core::task::lifecycle::close_ops::git_commit_is_ancestor(
+                &cwd,
+                &receipt.commit_sha,
+                &target_tip,
+            ) {
+                return Err(McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(
+                        "Transactional delivery refused to mark merged: exact receipt commit is not an ancestor of the target after Git returned.",
+                    ),
+                    data: None,
+                });
+            }
+            if transaction.state != cas_types::WorkerDeliveryState::CloseReady {
+                cas_store::transition_worker_delivery(
+                    &cas_root,
+                    &transaction.id,
+                    &[
+                        cas_types::WorkerDeliveryState::MergeAuthorized,
+                        cas_types::WorkerDeliveryState::AwaitingMerge,
+                        cas_types::WorkerDeliveryState::Merged,
+                    ],
+                    cas_types::WorkerDeliveryState::Merged,
+                    &authority.agent_id,
+                    Some(&authority.agent_id),
+                    None,
+                    Some(&target_tip),
+                    None,
+                )
+                .and_then(|_| {
+                    cas_store::transition_worker_delivery(
+                        &cas_root,
+                        &transaction.id,
+                        &[cas_types::WorkerDeliveryState::Merged],
+                        cas_types::WorkerDeliveryState::CloseReady,
+                        &authority.agent_id,
+                        Some(&authority.agent_id),
+                        None,
+                        Some(&target_tip),
+                        None,
+                    )
+                })
+                .map_err(|error| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!(
+                        "Failed to persist post-merge delivery state: {error}"
+                    )),
+                    data: None,
+                })?;
+            }
+
+            if let Some(task_id) = task_id {
+                let _ = self
+                    .cas_task_close(Parameters(TaskCloseRequest {
+                        id: task_id.to_string(),
+                        reason: Some(receipt.scope_summary.clone()),
+                        bypass_code_review: None,
+                        code_review_findings: None,
+                        search_manifest: None,
+                        commit_receipt: Some(receipt.commit_sha.clone()),
+                    }))
+                    .await?;
+                if self
+                    .open_task_store()?
+                    .get(task_id)
+                    .map(|task| task.status == cas_types::TaskStatus::Closed)
+                    .unwrap_or(false)
+                {
+                    cas_store::transition_worker_delivery(
+                        &cas_root,
+                        &transaction.id,
+                        &[cas_types::WorkerDeliveryState::CloseReady],
+                        cas_types::WorkerDeliveryState::Delivered,
+                        &authority.agent_id,
+                        Some(&authority.agent_id),
+                        None,
+                        Some(&target_tip),
+                        None,
+                    )
+                    .map_err(|error| McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!(
+                            "Failed to mark worker delivery complete: {error}"
+                        )),
+                        data: None,
+                    })?;
+                }
+            }
+        }
 
         // Update store — System B worktrees were never registered there, so
         // there's no row to update (and nothing worth persisting: the
@@ -1559,7 +1934,10 @@ impl CasCore {
         output.push_str(&format!("  Base path:      {}\n", wt_config.base_path));
         output.push_str(&format!("  Branch prefix:  {}\n", wt_config.branch_prefix));
         output.push_str(&format!("  Auto-merge:     {}\n", wt_config.auto_merge));
-        output.push_str(&format!("  Cleanup:        {}\n", wt_config.cleanup_on_close));
+        output.push_str(&format!(
+            "  Cleanup:        {}\n",
+            wt_config.cleanup_on_close
+        ));
 
         // Query worktree store for active worktrees
         let mut stored_branches: HashSet<String> = HashSet::new();
@@ -1634,12 +2012,76 @@ impl CasCore {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_cas_pattern_worktree, is_factory_style_worktree, is_git_worktree, path_is_under,
-        resolve_worktree_merge_cleanup, worktree_merge_mcp_error,
+        DeliveryMergePreflight, classify_delivery_merge_preflight,
+        derive_delivery_supervisor_authority, is_cas_pattern_worktree, is_factory_style_worktree,
+        is_git_worktree, path_is_under, resolve_worktree_merge_cleanup, worktree_merge_mcp_error,
     };
     use crate::worktree::{GitError, WorktreeError};
     use std::path::Path;
     use tempfile::TempDir;
+
+    #[test]
+    fn delivery_resume_authority_is_derived_only_from_live_registered_supervisor() {
+        let mut supervisor =
+            cas_types::Agent::new("sup-session".to_string(), "supervisor".to_string());
+        supervisor.role = cas_types::AgentRole::Supervisor;
+        assert_eq!(
+            derive_delivery_supervisor_authority(&supervisor)
+                .unwrap()
+                .agent_id,
+            "sup-session"
+        );
+
+        let mut worker = cas_types::Agent::new("worker-session".to_string(), "worker".to_string());
+        worker.role = cas_types::AgentRole::Worker;
+        assert!(derive_delivery_supervisor_authority(&worker).is_err());
+
+        supervisor.status = cas_types::AgentStatus::Shutdown;
+        assert!(derive_delivery_supervisor_authority(&supervisor).is_err());
+    }
+
+    #[test]
+    fn delivery_preflight_classifies_happy_retry_and_explicit_failures() {
+        assert_eq!(
+            classify_delivery_merge_preflight(true, true, false, true, true, true).unwrap(),
+            DeliveryMergePreflight::Execute
+        );
+        // Interrupted resume reconciles exact ancestry before checking drift.
+        assert_eq!(
+            classify_delivery_merge_preflight(true, true, true, false, false, false).unwrap(),
+            DeliveryMergePreflight::Reconcile
+        );
+        assert_eq!(
+            classify_delivery_merge_preflight(false, true, false, true, true, true)
+                .unwrap_err()
+                .0,
+            cas_types::WorkerDeliveryState::RepoMismatch
+        );
+        assert_eq!(
+            classify_delivery_merge_preflight(true, false, false, true, true, true)
+                .unwrap_err()
+                .0,
+            cas_types::WorkerDeliveryState::Stale
+        );
+        assert_eq!(
+            classify_delivery_merge_preflight(true, true, false, false, true, true)
+                .unwrap_err()
+                .0,
+            cas_types::WorkerDeliveryState::TipChanged
+        );
+        assert_eq!(
+            classify_delivery_merge_preflight(true, true, false, true, false, true)
+                .unwrap_err()
+                .1,
+            "target_changed"
+        );
+        assert_eq!(
+            classify_delivery_merge_preflight(true, true, false, true, true, false)
+                .unwrap_err()
+                .1,
+            "merge_base_changed"
+        );
+    }
 
     #[test]
     fn is_git_worktree_true_when_git_entry_present() {
@@ -1727,10 +2169,7 @@ mod tests {
     #[test]
     fn path_is_under_matches_prefix() {
         let base = Path::new("/proj/.cas/worktrees");
-        assert!(path_is_under(
-            Path::new("/proj/.cas/worktrees/alice"),
-            base
-        ));
+        assert!(path_is_under(Path::new("/proj/.cas/worktrees/alice"), base));
         assert!(!path_is_under(Path::new("/proj/other"), base));
     }
 
@@ -1787,9 +2226,7 @@ mod tests {
     #[test]
     fn pre_existing_checkout_residue_error_names_original_state() {
         let error = worktree_merge_mcp_error(
-            WorktreeError::Git(GitError::MergeInProgress(
-                "UU src/leftover.rs".to_string(),
-            )),
+            WorktreeError::Git(GitError::MergeInProgress("UU src/leftover.rs".to_string())),
             "factory/unrelated",
             "epic/example",
         );

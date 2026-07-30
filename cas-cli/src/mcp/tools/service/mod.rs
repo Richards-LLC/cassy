@@ -162,6 +162,17 @@ impl CasService {
             .collect()
     }
 
+    /// Names compiled into this build without opening a store or starting an
+    /// MCP server. Factory preflight uses this as local tool-availability
+    /// evidence; an active MCP invocation separately records live observation.
+    pub fn registered_tool_names_for_build() -> Vec<String> {
+        Self::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.into_owned())
+            .collect()
+    }
+
     #[allow(dead_code)]
     fn success(text: impl Into<String>) -> CallToolResult {
         CasCore::success(text)
@@ -708,7 +719,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "System operations. Actions: version (CAS version info), doctor (diagnostics), stats, info (system info), reindex (BM25 index), maintenance_run, maintenance_status, config_docs (full config reference), config_search (search configs by query), report_cas_bug (submit CAS bug to GitHub - ANONYMIZE DATA: remove paths, credentials, proprietary code before submitting), proxy_add (add upstream MCP server), proxy_remove (remove server), proxy_list (list servers), proxy_health (credential-free upstream health/backoff state)."
+        description = "System operations. Actions: version (CAS version info), preflight (bounded unified factory readiness report), doctor (diagnostics), stats, info (system info), reindex (BM25 index), maintenance_run, maintenance_status, config_docs (full config reference), config_search (search configs by query), report_cas_bug (submit CAS bug to GitHub - ANONYMIZE DATA: remove paths, credentials, proprietary code before submitting), proxy_add (add upstream MCP server), proxy_remove (remove server), proxy_list (list servers), proxy_health (credential-free upstream health/backoff state)."
     )]
     pub async fn system(
         &self,
@@ -726,6 +737,7 @@ impl CasService {
             let action = req.action.clone();
             let result = match req.action.as_str() {
                 "version" => this.system_version().await,
+                "preflight" => this.system_preflight().await,
                 "doctor" => this.system_doctor(req).await,
                 "stats" => this.system_stats(req).await,
                 "info" => this.system_info(req).await,
@@ -746,7 +758,7 @@ impl CasService {
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Unknown system action: {}. Valid: version, doctor, stats, info, reindex, maintenance_run, maintenance_status, config_docs, config_search, report_cas_bug{}",
+                        "Unknown system action: {}. Valid: version, preflight, doctor, stats, info, reindex, maintenance_run, maintenance_status, config_docs, config_search, report_cas_bug{}",
                         req.action,
                         if cfg!(feature = "mcp-proxy") { ", proxy_add, proxy_remove, proxy_list, proxy_health" } else { "" }
                     ),
@@ -1157,5 +1169,68 @@ mod tests {
                 "missing canonical tool '{required}' in registry: {names:?}"
             );
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn active_system_preflight_is_live_mcp_evidence_without_project_registration() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "git@example.invalid:org/preflight.git",
+            ])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        std::fs::create_dir(dir.path().join(".cas")).unwrap();
+        std::fs::write(
+            dir.path().join(".cas/config.toml"),
+            "[project]\ncanonical_id = \"mcp-preflight-test\"\n",
+        )
+        .unwrap();
+        assert!(!dir.path().join(".mcp.json").exists());
+
+        let core = CasCore::with_daemon(dir.path().join(".cas"), None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let svc = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let svc = CasService::new(core);
+        let req: SystemRequest = serde_json::from_value(serde_json::json!({
+            "action": "preflight"
+        }))
+        .unwrap();
+        let result = svc.system(Parameters(req)).await.unwrap();
+        let text = result
+            .content
+            .into_iter()
+            .filter_map(|content| match content.raw {
+                rmcp::model::RawContent::Text(text) => Some(text.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let report: crate::factory_preflight::FactoryPreflightReport =
+            serde_json::from_str(&text).unwrap();
+
+        assert!(report.cas_mcp.observed_via_mcp);
+        assert!(!report.cas_mcp.configured);
+        assert_eq!(
+            report.cas_mcp.state,
+            crate::factory_preflight::ComponentState::Ready
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|finding| finding.code != "cas_mcp.registration_missing")
+        );
     }
 }

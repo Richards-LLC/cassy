@@ -33,6 +33,7 @@ pub mod daemon;
 pub mod duplicate_check;
 pub mod error;
 pub mod extraction;
+pub mod factory_preflight;
 pub mod harness_policy;
 pub mod hooks;
 pub mod hybrid_search;

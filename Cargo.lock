@@ -582,6 +582,7 @@ dependencies = [
  "cas-factory-protocol",
  "cas-mcp",
  "cas-mux",
+ "cas-pty",
  "cas-recording",
  "cas-search",
  "cas-store",

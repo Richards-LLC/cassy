@@ -356,6 +356,13 @@ pub struct KillAllArgs {
 /// Internal factory subcommands (hidden from help)
 #[derive(Subcommand, Debug, Clone)]
 pub enum FactoryCommands {
+    /// Run the bounded unified factory readiness report without spawning workers
+    Preflight {
+        /// Explicit CAS root (.cas directory)
+        #[arg(long)]
+        cas_root: Option<std::path::PathBuf>,
+    },
+
     /// Run as a factory daemon (internal use)
     #[command(hide = true)]
     Daemon {
@@ -698,6 +705,9 @@ pub enum FactoryCommands {
 pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>) -> Result<()> {
     if let Some(ref cmd) = args.command {
         return match cmd {
+            FactoryCommands::Preflight {
+                cas_root: sub_cas_root,
+            } => execute_unified_preflight(cli, sub_cas_root.as_deref().or(cas_root)),
             FactoryCommands::Daemon {
                 session,
                 cwd,
@@ -1244,6 +1254,26 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
     } else {
         daemon::run_factory_with_daemon(session_name, config, phone_home)
     }
+}
+
+fn execute_unified_preflight(cli: &Cli, cas_root: Option<&std::path::Path>) -> Result<()> {
+    let project_root = std::env::current_dir()?;
+    let default_cas_root = project_root.join(".cas");
+    let cas_root = cas_root.unwrap_or(&default_cas_root);
+    let report =
+        crate::factory_preflight::collect_factory_preflight(&project_root, cas_root, false, None);
+    if cli.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "{}",
+            crate::factory_preflight::render_factory_preflight_human(&report)
+        );
+    }
+    if report.factory_blocked {
+        anyhow::bail!("factory preflight found critical blockers");
+    }
+    Ok(())
 }
 
 /// Attach to an existing factory session (local or remote via SSH)

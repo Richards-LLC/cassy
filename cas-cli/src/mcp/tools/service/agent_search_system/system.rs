@@ -20,6 +20,29 @@ impl CasService {
         ))
     }
 
+    pub(in crate::mcp::tools::service) async fn system_preflight(
+        &self,
+    ) -> Result<CallToolResult, McpError> {
+        #[cfg(feature = "mcp-proxy")]
+        let live_proxy = match self.proxy.as_ref() {
+            Some(proxy) => Some(proxy.health_snapshot().await.into()),
+            None => None,
+        };
+        #[cfg(not(feature = "mcp-proxy"))]
+        let live_proxy = None;
+
+        let project_root = self.inner.cas_root.parent().unwrap_or(&self.inner.cas_root);
+        let report = crate::factory_preflight::collect_factory_preflight(
+            project_root,
+            &self.inner.cas_root,
+            true,
+            live_proxy,
+        );
+        Ok(Self::success(
+            serde_json::to_string_pretty(&report).unwrap_or_default(),
+        ))
+    }
+
     pub(in crate::mcp::tools::service) async fn system_doctor(
         &self,
         _req: SystemRequest,

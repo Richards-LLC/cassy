@@ -501,11 +501,60 @@ impl CasCore {
         // before for `Deep` and is simply redundant for `Light`.
         let depth_light = task.depth == crate::types::TaskDepth::Light;
 
+        // cas-ede8: every factory merge-enforcement gate must bind to the same
+        // verified repository. `cas_root.parent()` is only correct for the
+        // conventional `<repo>/.cas` layout; nested/custom CAS roots otherwise
+        // make the gates query a non-repository and silently proceed.
+        //
+        // CAS also supports non-git stores (including verification-only MCP
+        // usage) that never enter factory merge enforcement. Preserve that
+        // behavior outside factory mode; once factory enforcement is active,
+        // an unresolved repository is a hard rejection.
+        let has_recorded_merge_evidence = if task.task_type == TaskType::Epic {
+            task.branch.is_some()
+        } else {
+            task.worktree_id.is_some()
+                || task.deliverables.factory_branch_anchor.is_some()
+                || task.deliverables.parked_branch.is_some()
+                || task
+                    .assignee
+                    .as_deref()
+                    .and_then(|assignee| resolve_system_b_worktree_path(&self.cas_root, assignee))
+                    .is_some()
+        };
+        let factory_merge_enforcement =
+            std::env::var_os("CAS_FACTORY_MODE").is_some() && has_recorded_merge_evidence;
+        let resolved_close_repo = resolve_close_gate_repo_root(&self.cas_root);
+        let close_repo_verified = resolved_close_repo.is_ok();
+        let close_project_root = match resolved_close_repo {
+            Ok(repo_root) => repo_root,
+            Err(message) if factory_merge_enforcement => {
+                return Ok(Self::tool_error(message));
+            }
+            Err(_) => self
+                .cas_root
+                .parent()
+                .unwrap_or(&self.cas_root)
+                .to_path_buf(),
+        };
+
         // For Epics: Check that all worker branches are merged before verification
         // This ensures epic-level verification runs on the complete merged code
         if task.task_type == TaskType::Epic {
-            let target_branch = task.branch.as_deref().unwrap_or("master");
-            let unmerged = check_unmerged_epic_branches(&req.id, target_branch);
+            let target_branch = match task.branch.clone() {
+                Some(branch) => branch,
+                None if close_repo_verified => {
+                    match resolve_close_gate_default_branch(&close_project_root) {
+                        Ok(branch) => branch,
+                        Err(message) if factory_merge_enforcement => {
+                            return Ok(Self::tool_error(message));
+                        }
+                        Err(_) => "master".to_string(),
+                    }
+                }
+                None => "master".to_string(),
+            };
+            let unmerged = check_unmerged_epic_branches(&req.id, &target_branch);
             if !unmerged.is_empty() {
                 let branch_list = unmerged.join("\n  - ");
                 return Ok(Self::tool_error(format!(
@@ -551,12 +600,11 @@ impl CasCore {
                 )),
                 data: None,
             })?;
-            let close_project_root = self.cas_root.parent().unwrap_or(&self.cas_root);
             match run_epic_close_merge_gate(
                 &task,
                 &req,
-                target_branch,
-                close_project_root,
+                &target_branch,
+                &close_project_root,
                 &subtasks,
             ) {
                 EpicCloseGateOutcome::Proceed => {}
@@ -604,8 +652,6 @@ impl CasCore {
         // (`resolve_standalone_merge_target`: configured
         // `epic_base_branch`, falling back to git's detected default
         // branch) instead of skipping the gate or guessing `"main"`.
-        let close_project_root = self.cas_root.parent().unwrap_or(&self.cas_root);
-
         // cas-7efe: single, authoritative parent-branch resolution for
         // every close-time gate below (merge gate, commit-claim gate,
         // additive-only gate, zero-commit gate, diff stat). Resolved once
@@ -630,11 +676,24 @@ impl CasCore {
             .ok()
             .flatten()
             .and_then(|p| p.branch);
-        let resolved_parent_branch = resolve_close_parent_branch(
-            worktree_store_parent_branch,
-            epic_parent_branch,
-            close_project_root,
-        );
+        let parent_branch_resolution = if close_repo_verified {
+            resolve_close_parent_branch(
+                worktree_store_parent_branch,
+                epic_parent_branch,
+                &close_project_root,
+            )
+        } else {
+            Ok(worktree_store_parent_branch
+                .or(epic_parent_branch)
+                .unwrap_or_else(|| "main".to_string()))
+        };
+        let resolved_parent_branch = match parent_branch_resolution {
+            Ok(branch) => branch,
+            Err(message) if factory_merge_enforcement => {
+                return Ok(Self::tool_error(message));
+            }
+            Err(_) => "main".to_string(),
+        };
         // cas-5626: a worker-supplied receipt is attributable only to the
         // current task work cycle. The latest claim/transfer survives the
         // AwaitingMerge park path, while a reopened task gets a newer claim.
@@ -657,7 +716,7 @@ impl CasCore {
                 &task,
                 &req,
                 &resolved_parent_branch,
-                close_project_root,
+                &close_project_root,
             ) {
                 MergeStateGateOutcome::Proceed => {}
                 MergeStateGateOutcome::Reject(msg) => {
@@ -675,7 +734,7 @@ impl CasCore {
                         .as_deref()
                         .map(|assignee| {
                             factory_branch_merge_conflict_paths(
-                                close_project_root,
+                                &close_project_root,
                                 &resolved_parent_branch,
                                 &format!("factory/{assignee}"),
                             )
@@ -720,7 +779,7 @@ impl CasCore {
                         // commit range, not whatever HEAD drifts to if a
                         // second task starts on the same branch.
                         let anchor = task.assignee.as_deref().and_then(|assignee| {
-                            resolve_branch_sha(close_project_root, &format!("factory/{assignee}"))
+                            resolve_branch_sha(&close_project_root, &format!("factory/{assignee}"))
                         });
                         self.park_task_awaiting_merge(
                             task_store.as_ref(),
@@ -1666,8 +1725,6 @@ impl CasCore {
         //     rejection — we do not silently ignore unauthorized
         //     overrides because that would mask a misconfigured
         //     harness.
-        let close_project_root = self.cas_root.parent().unwrap_or(&self.cas_root);
-
         // cas-ee2b: resolve the effective "has reviewable changes" signal and
         // the parent branch for worker git operations.
         //
@@ -1694,7 +1751,7 @@ impl CasCore {
         let effective_has_reviewable = if let Some(worker_wt) = worker_worktree_path.as_ref() {
             has_worker_committed_reviewable_changes(worker_wt, &resolved_parent_branch)
         } else {
-            has_reviewable_changes(close_project_root)
+            has_reviewable_changes(&close_project_root)
         };
 
         // cas-762e (B2): factory branch merge-reality gate.
@@ -1724,9 +1781,11 @@ impl CasCore {
         {
             if let Some(assignee) = task.assignee.as_deref() {
                 // cas-7efe: single close-time resolver, not a bare "main".
-                let close_root = self.cas_root.parent().unwrap_or(&self.cas_root);
-                match check_factory_branch_merge_reality(close_root, assignee, &resolved_parent_branch)
-                {
+                match check_factory_branch_merge_reality(
+                    &close_project_root,
+                    assignee,
+                    &resolved_parent_branch,
+                ) {
                     MergeRealityOutcome::Proceed => {}
                     MergeRealityOutcome::Refuse(msg) => {
                         return Ok(Self::tool_error(msg));
@@ -1795,7 +1854,7 @@ impl CasCore {
                     Some(resolved_parent_branch.as_str()),
                 )
             } else {
-                run_lightweight_structural_lint(close_project_root)
+                run_lightweight_structural_lint(&close_project_root)
             };
             match lint_outcome {
                 LightweightLintOutcome::Fail(msg) => {
@@ -1949,7 +2008,7 @@ impl CasCore {
             // no-code (spike, chore, execution_note set, bypass).
             CodeReviewGateOutcome::Proceed
         } else {
-            run_code_review_gate(&task, &req, close_project_root, supervisor_review_mode)
+            run_code_review_gate(&task, &req, &close_project_root, supervisor_review_mode)
         };
         match gate_outcome {
             CodeReviewGateOutcome::Proceed => {}
@@ -3899,6 +3958,94 @@ pub(crate) fn resolve_branch_sha(repo_path: &std::path::Path, refname: &str) -> 
     if sha.is_empty() { None } else { Some(sha) }
 }
 
+/// Resolve the git repository that owns `cas_root` for close-time enforcement.
+///
+/// A CAS root is conventionally `<repo>/.cas`, but custom state layouts may
+/// place it more deeply inside the checkout. Walking ancestors keeps those
+/// layouts bound to the owning repository while refusing roots that are not
+/// contained in a git checkout at all. A `.git` file is accepted as well as a
+/// directory so linked worktrees use the same path.
+fn resolve_close_gate_repo_root(cas_root: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    use std::process::Command;
+
+    for ancestor in cas_root.ancestors() {
+        if !ancestor.join(".git").exists() {
+            continue;
+        }
+        let output = Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(ancestor)
+            .output();
+        match output {
+            Ok(output) if output.status.success() => {
+                let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !root.is_empty() {
+                    return Ok(std::path::PathBuf::from(root));
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    Err(format!(
+        "⚠️ CLOSE GATE GIT REPOSITORY ERROR\n\n\
+         Cannot resolve a git repository containing CAS root {}. Close-time \
+         merge enforcement refuses to proceed because git state would be \
+         unknowable. Start CAS from a project checkout or configure CAS_ROOT \
+         beneath the intended repository, then retry.",
+        cas_root.display()
+    ))
+}
+
+/// Resolve the repository's default branch for close-time merge enforcement.
+///
+/// `origin/HEAD` is authoritative when configured. Local-only repositories
+/// then use the conventional branch refs in deterministic order (`main`,
+/// followed by `master`). No current-HEAD or hardcoded fallback is allowed:
+/// close gates must not bind to an arbitrary feature branch or silently guess
+/// when HEAD is detached and neither conventional default exists.
+fn resolve_close_gate_default_branch(repo_path: &std::path::Path) -> Result<String, String> {
+    use std::process::Command;
+
+    let remote_head = Command::new("git")
+        .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
+        .current_dir(repo_path)
+        .output();
+    if let Ok(output) = remote_head {
+        if output.status.success() {
+            let reference = String::from_utf8_lossy(&output.stdout);
+            if let Some(branch) = reference
+                .trim()
+                .strip_prefix("refs/remotes/origin/")
+                .filter(|branch| is_safe_git_refname(branch))
+            {
+                return Ok(branch.to_string());
+            }
+        }
+    }
+
+    for candidate in ["main", "master"] {
+        let reference = format!("refs/heads/{candidate}");
+        let exists = Command::new("git")
+            .args(["show-ref", "--verify", "--quiet", &reference])
+            .current_dir(repo_path)
+            .status();
+        if matches!(exists, Ok(status) if status.success()) {
+            return Ok(candidate.to_string());
+        }
+    }
+
+    Err(format!(
+        "⚠️ CLOSE GATE DEFAULT BRANCH ERROR\n\n\
+         Cannot resolve the default branch for git repository {}. \
+         refs/remotes/origin/HEAD is unset and neither local `main` nor \
+         `master` exists. Close-time merge enforcement refuses to guess; \
+         configure origin/HEAD or set an explicit task/epic base branch, \
+         then retry.",
+        repo_path.display()
+    ))
+}
+
 /// cas-cf64: resolve the real integration target for a non-epic task with
 /// no parent-epic branch recorded.
 ///
@@ -3912,17 +4059,18 @@ pub(crate) fn resolve_branch_sha(repo_path: &std::path::Path, refname: &str) -> 
 /// resolution already agree on (cas-b082):
 ///
 /// 1. `[factory] epic_base_branch` from `.cas/config.toml`, if configured.
-/// 2. Otherwise git's own detected default branch (remote HEAD →
-///    `init.defaultBranch` → common names → HEAD symref → `"main"` as
-///    absolute last resort) — see `GitOperations::detect_default_branch`.
+/// 2. Otherwise the shared close-gate default resolver (remote HEAD →
+///    existing `main` → existing `master`), which fails closed rather than
+///    guessing from current HEAD.
 ///
 /// Genuine review/docs/zero-commit standalone tasks are unaffected: when
 /// `factory/<assignee>` has no commits beyond whatever this resolves to,
 /// `count_unmerged_factory_commits` still naturally returns 0 → Proceed.
-fn resolve_standalone_merge_target(repo_path: &std::path::Path) -> String {
-    crate::config::Config::configured_epic_base_branch(repo_path).unwrap_or_else(|| {
-        crate::worktree::git::GitOperations::new(repo_path.to_path_buf()).detect_default_branch()
-    })
+fn resolve_standalone_merge_target(repo_path: &std::path::Path) -> Result<String, String> {
+    match crate::config::Config::configured_epic_base_branch(repo_path) {
+        Some(branch) => Ok(branch),
+        None => resolve_close_gate_default_branch(repo_path),
+    }
 }
 
 /// cas-7efe: the single, authoritative parent-branch resolution policy for
@@ -3967,10 +4115,11 @@ fn resolve_close_parent_branch(
     worktree_parent_branch: Option<String>,
     epic_branch: Option<String>,
     repo_path: &std::path::Path,
-) -> String {
-    worktree_parent_branch
-        .or(epic_branch)
-        .unwrap_or_else(|| resolve_standalone_merge_target(repo_path))
+) -> Result<String, String> {
+    match worktree_parent_branch.or(epic_branch) {
+        Some(branch) => Ok(branch),
+        None => resolve_standalone_merge_target(repo_path),
+    }
 }
 
 /// cas-e093: build the `task.close` success message with the confirmation
@@ -4005,6 +4154,30 @@ mod parent_branch_resolver_tests {
     //! truncation/spilling.
     use super::*;
 
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn init_committed_repo(branch: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-q", "-b", branch]);
+        std::fs::write(dir.path().join("seed"), "seed").unwrap();
+        git(dir.path(), &["add", "seed"]);
+        git(dir.path(), &["commit", "-q", "-m", "seed"]);
+        dir
+    }
+
     #[test]
     fn worktree_store_parent_wins_over_epic_branch() {
         let dir = tempfile::tempdir().unwrap();
@@ -4012,7 +4185,8 @@ mod parent_branch_resolver_tests {
             Some("staging".to_string()),
             Some("epic/other".to_string()),
             dir.path(),
-        );
+        )
+        .expect("explicit worktree branch resolves without git fallback");
         assert_eq!(
             resolved, "staging",
             "the most specific source (worktree store) must win"
@@ -4026,11 +4200,9 @@ mod parent_branch_resolver_tests {
         // worktree-store tier is always `None` for them. The resolver
         // must still prefer the real epic branch over guessing "main".
         let dir = tempfile::tempdir().unwrap();
-        let resolved = resolve_close_parent_branch(
-            None,
-            Some("epic/staging-thing".to_string()),
-            dir.path(),
-        );
+        let resolved =
+            resolve_close_parent_branch(None, Some("epic/staging-thing".to_string()), dir.path())
+                .expect("explicit epic branch resolves without git fallback");
         assert_eq!(
             resolved, "epic/staging-thing",
             "must never fall through to a bare 'main' literal when the \
@@ -4043,22 +4215,61 @@ mod parent_branch_resolver_tests {
         // Neither the worktree store nor a parent epic resolved (a
         // standalone task with no epic) — falls back to
         // `resolve_standalone_merge_target`, which is a real git-detected
-        // answer, not a blind guess. A repo whose init branch is
-        // deliberately non-`main` proves this isn't hardcoded.
-        let dir = tempfile::tempdir().unwrap();
-        std::process::Command::new("git")
-            .args(["init", "-q", "-b", "trunk"])
-            .current_dir(dir.path())
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .status()
-            .expect("git init");
-        let resolved = resolve_close_parent_branch(None, None, dir.path());
+        // answer, not a blind guess. A repo whose default is the legacy
+        // `master` name proves both supported conventions work.
+        let dir = init_committed_repo("master");
+        let resolved = resolve_close_parent_branch(None, None, dir.path())
+            .expect("master must be detected as the default branch");
         assert_eq!(
-            resolved, "trunk",
+            resolved, "master",
             "final tier must reflect the repo's real detected default, \
              never a hardcoded 'main'"
         );
+    }
+
+    #[test]
+    fn repo_root_resolves_when_cas_root_is_nested_below_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-q"]);
+        let cas_root = dir.path().join("state/runtime/.cas");
+        std::fs::create_dir_all(&cas_root).unwrap();
+
+        let resolved = resolve_close_gate_repo_root(&cas_root).expect("ancestor repo must resolve");
+        assert_eq!(resolved, dir.path());
+    }
+
+    #[test]
+    fn repo_root_resolution_fails_loud_outside_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas_root = dir.path().join("state/.cas");
+        std::fs::create_dir_all(&cas_root).unwrap();
+
+        let error = resolve_close_gate_repo_root(&cas_root).expect_err("missing repo must reject");
+        assert!(error.contains("CLOSE GATE GIT REPOSITORY ERROR"));
+        assert!(error.contains(&cas_root.display().to_string()));
+    }
+
+    #[test]
+    fn detached_head_still_resolves_existing_main() {
+        let dir = init_committed_repo("main");
+        git(dir.path(), &["checkout", "-q", "--detach"]);
+
+        assert_eq!(
+            resolve_close_gate_default_branch(dir.path())
+                .expect("existing main must resolve while HEAD is detached"),
+            "main"
+        );
+    }
+
+    #[test]
+    fn detached_head_without_known_default_fails_closed() {
+        let dir = init_committed_repo("topic");
+        git(dir.path(), &["checkout", "-q", "--detach"]);
+
+        let error = resolve_close_gate_default_branch(dir.path())
+            .expect_err("ambiguous detached HEAD must reject");
+        assert!(error.contains("CLOSE GATE DEFAULT BRANCH ERROR"));
+        assert!(error.contains("neither local `main` nor `master` exists"));
     }
 
     // ── cas-e093: success message ordering ──────────────────────────────────
@@ -12738,8 +12949,8 @@ mod zero_change_close_tests {
         // The fix: resolve_close_parent_branch must select the epic
         // branch, never guess "main", when the worktree store has
         // nothing recorded (the common System-B factory-isolation shape).
-        let resolved =
-            resolve_close_parent_branch(None, Some("epic/foo".to_string()), p);
+        let resolved = resolve_close_parent_branch(None, Some("epic/foo".to_string()), p)
+            .expect("explicit epic branch resolves");
         assert_eq!(
             resolved, "epic/foo",
             "must resolve the real epic branch, never a bare 'main'"

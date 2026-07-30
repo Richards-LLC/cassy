@@ -98,6 +98,9 @@ impl FromStr for VerificationProvenance {
 pub struct VerifierCapability {
     pub id: String,
     pub task_id: String,
+    /// Exact durable verification dispatch (and therefore proof cycle).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_id: Option<String>,
     pub issuer_agent_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verifier_agent_id: Option<String>,
@@ -123,6 +126,8 @@ pub enum VerificationDispatchState {
     TimedOut,
     /// A legitimate verifier or supervisor recorded a verdict.
     Resolved,
+    /// A later task lifecycle explicitly started a new proof cycle.
+    Invalidated,
 }
 
 impl fmt::Display for VerificationDispatchState {
@@ -132,6 +137,7 @@ impl fmt::Display for VerificationDispatchState {
             VerificationDispatchState::Claimed => write!(f, "claimed"),
             VerificationDispatchState::TimedOut => write!(f, "timed_out"),
             VerificationDispatchState::Resolved => write!(f, "resolved"),
+            VerificationDispatchState::Invalidated => write!(f, "invalidated"),
         }
     }
 }
@@ -145,6 +151,7 @@ impl FromStr for VerificationDispatchState {
             "claimed" => Ok(VerificationDispatchState::Claimed),
             "timed_out" => Ok(VerificationDispatchState::TimedOut),
             "resolved" => Ok(VerificationDispatchState::Resolved),
+            "invalidated" => Ok(VerificationDispatchState::Invalidated),
             _ => Err(TypeError::Parse(format!(
                 "invalid verification dispatch state: {s}"
             ))),
@@ -187,6 +194,31 @@ impl FromStr for VerificationRecoveryAction {
     }
 }
 
+/// Immutable external identity attached to a verification proof cycle.
+///
+/// A task-only close has neither delivery field; the dispatch ID itself is
+/// still the exact proof boundary. Delivery verification binds both IDs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationProofBoundary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_transaction_id: Option<String>,
+}
+
+impl VerificationProofBoundary {
+    pub fn task() -> Self {
+        Self::default()
+    }
+
+    pub fn delivery(receipt_id: String, delivery_transaction_id: String) -> Self {
+        Self {
+            receipt_id: Some(receipt_id),
+            delivery_transaction_id: Some(delivery_transaction_id),
+        }
+    }
+}
+
 /// Durable task-scoped verification work assignment.
 ///
 /// This record is the forcing-function state. It is separate from verdict
@@ -195,6 +227,12 @@ impl FromStr for VerificationRecoveryAction {
 pub struct VerificationDispatch {
     pub id: String,
     pub task_id: String,
+    /// Exact immutable delivery receipt, when this dispatch verifies delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_id: Option<String>,
+    /// Exact delivery transaction advanced by this dispatch's verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_transaction_id: Option<String>,
     pub requester_agent_id: String,
     pub owner_agent_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -395,6 +433,10 @@ pub struct Verification {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capability_id: Option<String>,
 
+    /// Exact durable dispatch whose proof boundary this verdict resolves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_id: Option<String>,
+
     /// Registered parent session that issued the task-verifier capability.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issuer_agent_id: Option<String>,
@@ -437,6 +479,7 @@ impl Verification {
             verification_type: VerificationType::Task,
             provenance: VerificationProvenance::System,
             capability_id: None,
+            dispatch_id: None,
             issuer_agent_id: None,
             status: VerificationStatus::Approved,
             confidence: None,
@@ -457,6 +500,7 @@ impl Verification {
             verification_type: VerificationType::Task,
             provenance: VerificationProvenance::System,
             capability_id: None,
+            dispatch_id: None,
             issuer_agent_id: None,
             status: VerificationStatus::Approved,
             confidence: None,
@@ -482,6 +526,7 @@ impl Verification {
             verification_type: VerificationType::Task,
             provenance: VerificationProvenance::System,
             capability_id: None,
+            dispatch_id: None,
             issuer_agent_id: None,
             status: VerificationStatus::Rejected,
             confidence: None,
@@ -502,6 +547,7 @@ impl Verification {
             verification_type: VerificationType::Task,
             provenance: VerificationProvenance::System,
             capability_id: None,
+            dispatch_id: None,
             issuer_agent_id: None,
             status: VerificationStatus::Error,
             confidence: None,
@@ -522,6 +568,7 @@ impl Verification {
             verification_type: VerificationType::Task,
             provenance: VerificationProvenance::System,
             capability_id: None,
+            dispatch_id: None,
             issuer_agent_id: None,
             status: VerificationStatus::Skipped,
             confidence: None,
@@ -590,6 +637,7 @@ impl Default for Verification {
             verification_type: VerificationType::Task,
             provenance: VerificationProvenance::System,
             capability_id: None,
+            dispatch_id: None,
             issuer_agent_id: None,
             status: VerificationStatus::Approved,
             confidence: None,

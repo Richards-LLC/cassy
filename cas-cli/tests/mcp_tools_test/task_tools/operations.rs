@@ -1042,6 +1042,14 @@ async fn test_close_auto_unblocks_blocked_dependents() {
         .await
         .expect("blocked task update should succeed");
 
+    let dispatch = cas_store::create_verification_dispatch(
+        &cas_dir,
+        &blocker_id,
+        &session_id,
+        &session_id,
+        chrono::Utc::now() + chrono::Duration::minutes(5),
+    )
+    .expect("create exact supervisor verification dispatch");
     let _ = service
         .cas_verification_add(Parameters(VerificationAddRequest {
             task_id: blocker_id.clone(),
@@ -1053,6 +1061,7 @@ async fn test_close_auto_unblocks_blocked_dependents() {
             duration_ms: None,
             verification_type: None,
             verifier_capability: None,
+            dispatch_id: Some(dispatch.id),
         }))
         .await
         .expect("verification add should succeed");

@@ -16,8 +16,8 @@ use cas::mcp::tools::{TaskCloseRequest, TaskUpdateRequest};
 use cas::mcp::{CasCore, CasService};
 use cas::store::{init_cas_dir, open_agent_store, open_task_store};
 use cas::types::{
-    Agent, AgentRole, AgentType, Task, TaskDepth, TaskStatus, TaskType,
-    WorkerCompletionReceiptInput, WorkerDeliveryState, WorkTarget,
+    Agent, AgentRole, AgentType, Task, TaskDepth, TaskStatus, TaskType, WorkTarget,
+    WorkerCompletionReceiptInput, WorkerDeliveryState,
 };
 use cas_mcp::types::{CoordinationRequest, TaskRequest, VerificationRequest};
 use rmcp::handler::server::wrapper::Parameters;
@@ -2004,7 +2004,9 @@ fn register_delivery_agent(
     agent.role = role;
     agent.factory_session = Some(factory_session.to_string());
     agent.heartbeat();
-    agent_store.register(&agent).expect("register delivery agent");
+    agent_store
+        .register(&agent)
+        .expect("register delivery agent");
 }
 
 fn delivery_service(cas_root: &Path, agent_id: &str) -> CasService {
@@ -2058,6 +2060,9 @@ async fn submit_and_verify_delivery(
         "{}",
         get_text(&close)
     );
+    let dispatch = cas_store::get_latest_verification_dispatch(cas_root, task_id)
+        .expect("verification dispatch lookup")
+        .expect("receipt-bound verification dispatch");
 
     let supervisor_service = delivery_service(cas_root, supervisor_id);
     let verification = supervisor_service
@@ -2067,6 +2072,7 @@ async fn submit_and_verify_delivery(
             "status": "approved",
             "summary": "fresh external delivery proof approved",
             "confidence": 1.0,
+            "dispatch_id": dispatch.id,
         }))))
         .await
         .expect("public verification add");
@@ -2080,16 +2086,16 @@ async fn transactional_delivery_public_interrupted_resume_is_ancestry_gated_and_
     let _home = HomeGuard::enter(home.path());
     let repo = GitRepo::new();
     run_git(
-        &[
-            "remote",
-            "add",
-            "origin",
-            "git@github.com:org/delivery.git",
-        ],
+        &["remote", "add", "origin", "git@github.com:org/delivery.git"],
         &repo.root,
     );
     let cas_root = init_cas_dir(&repo.root).expect("init CAS");
     disable_system_a(&cas_root);
+    std::fs::write(
+        cas_root.join("config.toml"),
+        "[verification]\nenabled = true\n",
+    )
+    .expect("enable exact post-merge verification gate");
     let factory_session = "delivery-factory";
     let worker_id = "delivery-worker-session";
     let supervisor_id = "delivery-supervisor-session";
@@ -2120,7 +2126,7 @@ async fn transactional_delivery_public_interrupted_resume_is_ancestry_gated_and_
         "Transactional delivery integration".to_string(),
     );
     task.status = TaskStatus::InProgress;
-    task.depth = TaskDepth::Light;
+    task.depth = TaskDepth::Deep;
     task.assignee = Some("alice".to_string());
     task.deliverables.work_target = Some(WorkTarget {
         repo_selector: "remote:github.com/org/delivery".to_string(),
@@ -2128,14 +2134,29 @@ async fn transactional_delivery_public_interrupted_resume_is_ancestry_gated_and_
     });
     task_store.add(&task).expect("add delivery task");
     let receipt = delivery_receipt(&task.id, worker_id, &repo, "alice");
-    submit_and_verify_delivery(
+    submit_and_verify_delivery(&cas_root, &task.id, worker_id, supervisor_id, &receipt).await;
+
+    // Arm a newer exact task proof cycle after the delivery proof is approved.
+    // The post-merge internal close must surface this gate verbatim rather
+    // than discarding it and claiming that delivery completed.
+    let post_merge_dispatch = cas_store::create_verification_dispatch_bound(
         &cas_root,
         &task.id,
-        worker_id,
         supervisor_id,
-        &receipt,
+        supervisor_id,
+        &cas_types::VerificationProofBoundary::task(),
+        chrono::Utc::now() + chrono::Duration::minutes(10),
+        false,
     )
-    .await;
+    .expect("post-merge exact verification gate");
+    assert_eq!(
+        cas_store::get_latest_verification_dispatch(&cas_root, &task.id)
+            .unwrap()
+            .unwrap()
+            .id,
+        post_merge_dispatch.id,
+        "the new task proof cycle must be authoritative before merge"
+    );
 
     // Simulate interruption after the authorized Git merge but before CAS
     // persisted its post-Git state. Public retry must reconcile ancestry
@@ -2168,16 +2189,41 @@ async fn transactional_delivery_public_interrupted_resume_is_ancestry_gated_and_
         .coordination(Parameters(merge))
         .await
         .expect("public interrupted-resume merge");
-    assert!(get_text(&result).contains("Merged worktree"));
-    let persisted = task_store.get(&task.id).expect("closed task");
-    assert_eq!(persisted.status, TaskStatus::Closed);
+    let gate_text = get_text(&result);
+    assert!(
+        gate_text.contains("VERIFICATION") && gate_text.contains(&post_merge_dispatch.id),
+        "worktree_merge must return the exact actionable close gate, got:\n{gate_text}"
+    );
+    assert!(
+        !gate_text.contains("Merged worktree"),
+        "a remaining close gate must not be reported as generic merge success"
+    );
+    let persisted = task_store.get(&task.id).expect("gated task");
+    assert_ne!(persisted.status, TaskStatus::Closed);
     let (_, transaction) = cas_store::get_latest_worker_delivery(&cas_root, &task.id)
         .unwrap()
         .unwrap();
-    assert_eq!(transaction.state, WorkerDeliveryState::Delivered);
-    let events_before =
-        cas_store::list_worker_delivery_events(&cas_root, &transaction.id).unwrap();
-    assert_eq!(events_before.len(), 5);
+    assert_eq!(transaction.state, WorkerDeliveryState::CloseReady);
+    let events_before = cas_store::list_worker_delivery_events(&cas_root, &transaction.id).unwrap();
+    assert_eq!(events_before.len(), 4);
+
+    let gate_clear = supervisor_service
+        .verification(Parameters(verification_req(serde_json::json!({
+            "action": "add",
+            "task_id": task.id,
+            "status": "approved",
+            "summary": "post-merge exact close proof approved",
+            "confidence": 1.0,
+            "dispatch_id": post_merge_dispatch.id,
+        }))))
+        .await
+        .expect("public exact post-merge gate resolution");
+    assert!(get_text(&gate_clear).contains("approved"));
+    let mut gate_cleared_task = task_store.get(&task.id).expect("gate-cleared task");
+    gate_cleared_task.depth = TaskDepth::Light;
+    task_store
+        .update(&gate_cleared_task)
+        .expect("isolate retry from unrelated review gate");
 
     let mut retry = coord_req("worktree_merge");
     retry.id = Some("factory/alice".to_string());
@@ -2187,11 +2233,30 @@ async fn transactional_delivery_public_interrupted_resume_is_ancestry_gated_and_
     let retry_result = supervisor_service
         .coordination(Parameters(retry))
         .await
-        .expect("idempotent delivered retry");
-    assert!(get_text(&retry_result).contains("already delivered"));
-    let events_after =
-        cas_store::list_worker_delivery_events(&cas_root, &transaction.id).unwrap();
-    assert_eq!(events_after, events_before);
+        .expect("idempotent close-ready retry");
+    assert!(
+        get_text(&retry_result).contains("Merged worktree"),
+        "{}",
+        get_text(&retry_result)
+    );
+    assert_eq!(
+        task_store.get(&task.id).expect("closed retry").status,
+        TaskStatus::Closed
+    );
+    let (_, delivered) = cas_store::get_latest_worker_delivery(&cas_root, &task.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(delivered.state, WorkerDeliveryState::Delivered);
+    let events_after = cas_store::list_worker_delivery_events(&cas_root, &transaction.id).unwrap();
+    assert_eq!(events_after.len(), events_before.len() + 1);
+    assert_eq!(
+        events_after
+            .iter()
+            .filter(|event| event.state == WorkerDeliveryState::Merged)
+            .count(),
+        1,
+        "resume must not append a second merge event"
+    );
 }
 
 #[tokio::test]
@@ -2201,12 +2266,7 @@ async fn transactional_delivery_public_merge_persists_changed_worker_tip_without
     let _home = HomeGuard::enter(home.path());
     let repo = GitRepo::new();
     run_git(
-        &[
-            "remote",
-            "add",
-            "origin",
-            "git@github.com:org/delivery.git",
-        ],
+        &["remote", "add", "origin", "git@github.com:org/delivery.git"],
         &repo.root,
     );
     let cas_root = init_cas_dir(&repo.root).expect("init CAS");
@@ -2247,14 +2307,7 @@ async fn transactional_delivery_public_merge_persists_changed_worker_tip_without
     });
     task_store.add(&task).expect("add stale task");
     let receipt = delivery_receipt(&task.id, worker_id, &repo, "bob");
-    submit_and_verify_delivery(
-        &cas_root,
-        &task.id,
-        worker_id,
-        supervisor_id,
-        &receipt,
-    )
-    .await;
+    submit_and_verify_delivery(&cas_root, &task.id, worker_id, supervisor_id, &receipt).await;
     std::fs::write(worker_path.join("drift.rs"), "pub fn drift() {}\n").unwrap();
     run_git(&["add", "drift.rs"], &worker_path);
     run_git(&["commit", "-m", "tip drift after receipt"], &worker_path);

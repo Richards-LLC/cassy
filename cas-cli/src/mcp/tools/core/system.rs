@@ -34,6 +34,8 @@ impl CasCore {
             source: None,
             reason: None,
             subagent_type: None,
+            agent_id: None,
+            agent_type: None,
             subagent_prompt: None,
             agent_role: std::env::var("CAS_AGENT_ROLE").ok(),
             message: None,

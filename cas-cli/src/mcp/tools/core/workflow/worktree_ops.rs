@@ -1567,6 +1567,7 @@ impl CasCore {
         }
 
         let mut reconciled_delivery = false;
+        let mut delivery_close_result = None;
         if let (Some((receipt, transaction)), Some(authority)) =
             (transactional_delivery.as_ref(), delivery_authority.as_ref())
         {
@@ -1796,7 +1797,7 @@ impl CasCore {
             }
 
             if let Some(task_id) = task_id {
-                let _ = self
+                let close_result = self
                     .cas_task_close(Parameters(TaskCloseRequest {
                         id: task_id.to_string(),
                         reason: Some(receipt.scope_summary.clone()),
@@ -1830,6 +1831,8 @@ impl CasCore {
                         )),
                         data: None,
                     })?;
+                } else {
+                    delivery_close_result = Some(close_result);
                 }
             }
         }
@@ -1871,6 +1874,14 @@ impl CasCore {
                 ("cleanup", if do_cleanup { "true" } else { "false" }),
             ],
         );
+
+        if let Some(close_result) = delivery_close_result {
+            // Git and durable delivery state reached CloseReady, but the
+            // internal close surfaced another exact gate. Preserve that
+            // result verbatim so the caller receives the required next action
+            // instead of a misleading generic merge success.
+            return Ok(close_result);
+        }
 
         // Promote entries if configured
         if wt_config.promote_entries_on_merge {

@@ -403,24 +403,55 @@ impl CasCore {
         let initial_state = cas_types::WorkerDeliveryState::AwaitingVerification;
         let receipt =
             cas_store::build_worker_completion_receipt(&input, &caller.name, chrono::Utc::now());
-        let transaction =
-            cas_store::create_worker_delivery(&self.cas_root, &receipt, initial_state, &caller.id)
-                .map_err(|error| McpError {
+        let existing_delivery =
+            cas_store::get_worker_delivery_by_receipt(&self.cas_root, &receipt.id).map_err(
+                |error| McpError {
                     code: ErrorCode::INTERNAL_ERROR,
                     message: Cow::from(format!(
-                        "Failed to persist worker delivery receipt: {error}"
+                        "Failed to inspect worker delivery receipt: {error}"
                     )),
                     data: None,
-                })?;
+                },
+            )?;
+        let delivery_boundary = cas_types::VerificationProofBoundary::delivery(
+            receipt.id.clone(),
+            cas_store::worker_delivery_transaction_id(&receipt.id),
+        );
+        let owner_id = self.verification_dispatch_owner(&caller.id)?;
+        let transaction = if let Some((_, transaction)) = existing_delivery {
+            transaction
+        } else {
+            // The immutable receipt, delivery transaction, and exact dispatch
+            // are one SQLite intent transaction. Receipt B therefore cannot
+            // persist if active dispatch A rejects the new boundary.
+            cas_store::create_worker_delivery_with_dispatch(
+                &self.cas_root,
+                &receipt,
+                initial_state,
+                &caller.id,
+                &owner_id,
+                chrono::Utc::now() + chrono::Duration::seconds(VERIFICATION_DISPATCH_TIMEOUT_SECS),
+            )
+            .map(|(transaction, _)| transaction)
+            .map_err(|error| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "DELIVERY RECEIPT REJECTED: exact verification proof boundary conflict: {error}"
+                )),
+                data: None,
+            })?
+        };
 
         if transaction.state == cas_types::WorkerDeliveryState::AwaitingVerification {
-            let owner_id = self.verification_dispatch_owner(&caller.id)?;
-            cas_store::create_verification_dispatch(
+            // Exact retries validate and recover only their own boundary.
+            cas_store::create_verification_dispatch_bound(
                 &self.cas_root,
                 &task.id,
                 &caller.id,
                 &owner_id,
+                &delivery_boundary,
                 chrono::Utc::now() + chrono::Duration::seconds(VERIFICATION_DISPATCH_TIMEOUT_SECS),
+                false,
             )
             .map_err(|error| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
@@ -490,18 +521,17 @@ impl CasCore {
         if requester.role != cas_types::AgentRole::Worker || requester.factory_session.is_none() {
             return Ok(requester.id);
         }
-        super::supervisor_push::resolve_owning_supervisor(
+        let owner_id = super::supervisor_push::resolve_owning_supervisor(
             agent_store.as_ref(),
             requester.factory_session.as_deref(),
         )
         .map(|supervisor| supervisor.agent_id)
-        .ok_or_else(|| McpError {
-            code: ErrorCode::INVALID_REQUEST,
-            message: Cow::from(
-                "Verification dispatch has no registered owning supervisor; refusing an ownerless request.",
-            ),
-            data: None,
-        })
+        // A registered worker may own issuance when no live supervisor is
+        // registered. This does not grant verdict authority: the worker must
+        // still mint, bind, and present the one-time capability to a distinct
+        // registered task-verifier child.
+        .unwrap_or(requester.id);
+        Ok(owner_id)
     }
 
     fn record_close_rejection_activity(&self, task_id: &str, reason: &str, message: &str) {
@@ -714,6 +744,71 @@ impl CasCore {
                  the task; closed_at and notes were left unchanged.",
                 req.id, task.title, closed_at_msg
             )));
+        }
+
+        // An explicitly persisted proof cycle is stronger than configuration,
+        // depth, orphan, and review convenience paths. Once one exists, no
+        // close projection may proceed until that exact dispatch resolves.
+        // This guard also protects internal post-merge re-close calls.
+        match cas_store::get_latest_verification_dispatch(&self.cas_root, &req.id) {
+            Err(error) => {
+                return Ok(Self::tool_error(format!(
+                    "⚠️ VERIFICATION DISPATCH INVALID\n\nTask {} has unreadable exact dispatch state: {}. CAS refuses to infer close authority.",
+                    req.id, error
+                )));
+            }
+            Ok(Some(dispatch))
+                if matches!(
+                    dispatch.state,
+                    cas_types::VerificationDispatchState::Pending
+                        | cas_types::VerificationDispatchState::Claimed
+                ) =>
+            {
+                if dispatch.deadline_at <= chrono::Utc::now() {
+                    cas_store::timeout_verification_dispatch(
+                        &self.cas_root,
+                        &req.id,
+                        chrono::Utc::now(),
+                    )
+                    .map_err(|error| McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!(
+                            "Failed to persist exact verification timeout: {error}"
+                        )),
+                        data: None,
+                    })?;
+                    let mut timed_out_task = task.clone();
+                    timed_out_task.pending_verification = false;
+                    timed_out_task.updated_at = chrono::Utc::now();
+                    task_store
+                        .update(&timed_out_task)
+                        .map_err(|error| McpError {
+                            code: ErrorCode::INTERNAL_ERROR,
+                            message: Cow::from(format!(
+                                "Failed to project exact verification timeout: {error}"
+                            )),
+                            data: None,
+                        })?;
+                    let sup_ver = supervisor_verification_tool();
+                    return Ok(Self::tool_error(format!(
+                        "⚠️ VERIFICATION TIMED OUT\n\nTask {} exact dispatch {} requires named registered-supervisor recovery before close.\n\nRecord the direct recovery verdict with {sup_ver} action=add task_id={} dispatch_id={} status=approved summary=\"...\", then retry close.",
+                        req.id, dispatch.id, req.id, dispatch.id
+                    )));
+                }
+                return Ok(Self::tool_error(format!(
+                    "⚠️ VERIFICATION REQUIRED\n\nTask {} cannot close until exact pending dispatch {} records its capability-bound verifier or registered supervisor-direct verdict.",
+                    req.id, dispatch.id
+                )));
+            }
+            Ok(Some(dispatch))
+                if dispatch.state == cas_types::VerificationDispatchState::TimedOut =>
+            {
+                return Ok(Self::tool_error(format!(
+                    "⚠️ VERIFICATION TIMED OUT\n\nTask {} exact dispatch {} requires named registered-supervisor recovery before close.",
+                    req.id, dispatch.id
+                )));
+            }
+            Ok(_) => {}
         }
 
         // cas-b269: urgent stop sets halt_task_work; block close until new start.
@@ -1194,7 +1289,19 @@ impl CasCore {
         } else {
             VerificationSkipReason::None
         };
-        let skip_verification = skip_reason.is_skip();
+        // Orphan/supervisor convenience may not erase an explicit current
+        // proof cycle. Once a typed dispatch exists, only its exact verdict or
+        // named supervisor-direct recovery can authorize close.
+        let exact_dispatch_allows_skip = matches!(
+            cas_store::get_latest_verification_dispatch(&self.cas_root, &req.id),
+            Ok(None)
+                | Ok(Some(cas_types::VerificationDispatch {
+                    state: cas_types::VerificationDispatchState::Resolved
+                        | cas_types::VerificationDispatchState::Invalidated,
+                    ..
+                }))
+        );
+        let skip_verification = skip_reason.is_skip() && exact_dispatch_allows_skip;
 
         // Also allow supervisor to skip verification jail when they are the
         // task assignee for a non-epic task (fixes supervisor self-close deadlock).
@@ -1229,7 +1336,7 @@ impl CasCore {
                 };
 
                 // Get the appropriate verification (by type for epics, any for tasks)
-                let latest = if is_epic {
+                let task_wide_latest = if is_epic {
                     verification_store.get_latest_for_task_by_type(&req.id, verification_type)
                 } else {
                     verification_store.get_latest_for_task(&req.id)
@@ -1251,7 +1358,29 @@ impl CasCore {
                 // exists. Used below to decide whether to persist a fresh
                 // dispatch-request marker so the close attempt is durably
                 // observable instead of fire-and-forget.
-                let had_prior_verification = matches!(&latest, Ok(Some(_)));
+                let had_prior_verification = matches!(&task_wide_latest, Ok(Some(_)));
+
+                // A verdict authorizes only the exact durable proof cycle it
+                // resolved. Task-wide rows remain readable for legacy timeout
+                // diagnostics but can never authorize a current close.
+                let latest = match typed_dispatch.as_ref() {
+                    Some(dispatch)
+                        if dispatch.state == cas_types::VerificationDispatchState::Resolved =>
+                    {
+                        cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id)
+                    }
+                    // Pre-m213 tasks have no typed dispatch boundary. Preserve
+                    // their legacy close behavior, but only for rows that also
+                    // lack dispatch provenance. As soon as any typed dispatch
+                    // exists, this fallback is unreachable and can never
+                    // authorize that current cycle.
+                    None => match task_wide_latest.as_ref() {
+                        Ok(Some(row)) if row.dispatch_id.is_none() => Ok(Some(row.clone())),
+                        Ok(_) => Ok(None),
+                        Err(_) => Ok(None),
+                    },
+                    _ => Ok(None),
+                };
 
                 // Typed state is authoritative for new dispatches. The legacy
                 // Error row remains a readable fallback for pre-m211 databases,
@@ -1264,7 +1393,7 @@ impl CasCore {
                             | cas_types::VerificationDispatchState::Claimed
                     ) && dispatch.deadline_at > now
                 }) || (typed_dispatch.is_none()
-                    && matches!(&latest, Ok(Some(v))
+                    && matches!(&task_wide_latest, Ok(Some(v))
                         if v.status == VerificationStatus::Error
                             && v.summary.starts_with(DISPATCH_SUMMARY_PREFIX)
                             && (now - v.created_at).num_seconds()
@@ -1318,8 +1447,9 @@ impl CasCore {
 
                 match latest {
                     Ok(Some(v))
-                        if v.status == VerificationStatus::Approved
-                            || v.status == VerificationStatus::Skipped =>
+                        if (v.status == VerificationStatus::Approved
+                            || v.status == VerificationStatus::Skipped)
+                            && v.verification_type == verification_type =>
                     {
                         // Verification approved or explicitly skipped
                         // (supervisor bypass row from a prior orphaned close) —
@@ -1706,13 +1836,22 @@ impl CasCore {
 
                             let requester_id = self.get_agent_id()?;
                             let owner_id = self.verification_dispatch_owner(&requester_id)?;
-                            let dispatch = cas_store::create_verification_dispatch(
+                            let supervisor_recovery = self
+                                .open_agent_store()?
+                                .get(&requester_id)
+                                .is_ok_and(|agent| {
+                                    agent.role == cas_types::AgentRole::Supervisor
+                                        && agent.is_alive()
+                                });
+                            let dispatch = cas_store::create_verification_dispatch_bound(
                                 &self.cas_root,
                                 &req.id,
                                 &requester_id,
                                 &owner_id,
+                                &cas_types::VerificationProofBoundary::task(),
                                 chrono::Utc::now()
                                     + chrono::Duration::seconds(VERIFICATION_DISPATCH_TIMEOUT_SECS),
+                                supervisor_recovery,
                             )
                             .map_err(|error| McpError {
                                 code: ErrorCode::INTERNAL_ERROR,
@@ -3174,6 +3313,16 @@ impl CasCore {
         }
 
         let old_status = task.status;
+        if old_status == TaskStatus::Closed {
+            cas_store::invalidate_verification_dispatch_for_new_cycle(&self.cas_root, &task.id)
+                .map_err(|error| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!(
+                        "Failed to invalidate reopened task proof cycle: {error}"
+                    )),
+                    data: None,
+                })?;
+        }
         task.status = TaskStatus::Open;
         if old_status == TaskStatus::Closed {
             // cas-cd24: closed-specific resets stay gated to the closed

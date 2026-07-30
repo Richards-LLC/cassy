@@ -616,7 +616,12 @@ pub fn handle_pre_tool_use(
                     ));
                 }
             }
-            Ok(_) => {}
+            Ok(_) => {
+                return Ok(HookOutput::with_pre_tool_permission(
+                    "deny",
+                    "No active owned verification dispatch exists for this task; create the exact close proof cycle before spawning a verifier.",
+                ));
+            }
             Err(_) => {
                 return Ok(HookOutput::with_pre_tool_permission(
                     "deny",
@@ -1734,6 +1739,24 @@ mod worker_commit_guard_tests {
             "prompt": "Review CAS task cas-hook-capability"
         }));
 
+        let denied = handle_pre_tool_use(&input, Some(&cas_root)).expect("pretool denial");
+        let denied_value = serde_json::to_value(denied).expect("serialize denial");
+        assert_eq!(
+            denied_value["hookSpecificOutput"]["permissionDecision"], "deny",
+            "verifier capability mint must fail closed without an active dispatch"
+        );
+
+        cas_store::create_verification_dispatch_bound(
+            &cas_root,
+            "cas-hook-capability",
+            parent_id,
+            parent_id,
+            &cas_types::VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(10),
+            false,
+        )
+        .expect("create proof-cycle dispatch");
+
         let output = handle_pre_tool_use(&input, Some(&cas_root)).expect("pretool");
         let value = serde_json::to_value(output).expect("serialize output");
         let updated_prompt = value["hookSpecificOutput"]["updatedInput"]["prompt"]
@@ -1753,10 +1776,18 @@ mod worker_commit_guard_tests {
             .expect("capability row");
         assert_ne!(persisted_hash, token, "raw token must not persist");
 
-        let mut child_start = crate::hooks::handlers::HookInput::default();
-        child_start.hook_event_name = "SubagentStart".to_string();
-        child_start.session_id = "registered-verifier-child".to_string();
-        child_start.subagent_prompt = Some(updated_prompt.to_string());
+        let child_start: crate::hooks::handlers::HookInput =
+            serde_json::from_value(serde_json::json!({
+                "hook_event_name": "SubagentStart",
+                "session_id": parent_id,
+                "agent_id": "registered-verifier-child",
+                "agent_type": "task-verifier",
+                "agent_transcript_path": "/portable/child.jsonl",
+                "cwd": cas_root,
+                "permission_mode": "default",
+                "prompt": updated_prompt,
+            }))
+            .expect("deserialize official production-shaped SubagentStart payload");
         crate::hooks::handlers::handle_subagent_start(&child_start, Some(&cas_root))
             .expect("bind child");
 

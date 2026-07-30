@@ -118,6 +118,8 @@ impl CasCore {
             source: Some("codex".to_string()),
             reason: None,
             subagent_type: None,
+            agent_id: None,
+            agent_type: None,
             subagent_prompt: None,
             // Carry the role explicitly so downstream handlers don't depend on
             // the process-global env mutation above (which races under shared
@@ -313,6 +315,8 @@ impl CasCore {
             source: Some("codex".to_string()),
             reason: req.reason,
             subagent_type: None,
+            agent_id: None,
+            agent_type: None,
             subagent_prompt: None,
             agent_role: std::env::var("CAS_AGENT_ROLE").ok(),
             message: None,

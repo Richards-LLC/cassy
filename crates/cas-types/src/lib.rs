@@ -43,6 +43,7 @@ mod event;
 mod file_change;
 mod lease;
 mod loop_state;
+mod preview;
 mod prompt;
 mod recording;
 mod rule;
@@ -52,7 +53,6 @@ mod session;
 mod skill;
 mod sort;
 mod spec;
-mod preview;
 mod task;
 mod verification;
 mod worktree;
@@ -102,8 +102,8 @@ pub use task::{
 };
 pub use verification::{
     IssueSeverity, Verification, VerificationDispatch, VerificationDispatchState,
-    VerificationIssue, VerificationProvenance, VerificationRecoveryAction, VerificationStatus,
-    VerificationType, VerifierCapability,
+    VerificationIssue, VerificationProofBoundary, VerificationProvenance,
+    VerificationRecoveryAction, VerificationStatus, VerificationType, VerifierCapability,
 };
 pub use worktree::{GitContext, Worktree, WorktreeStatus};
 

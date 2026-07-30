@@ -1085,8 +1085,16 @@ mod tests {
                 );
             }
 
-            let fresh = Connection::open_in_memory().unwrap();
-            fresh.execute_batch(cas_store::VERIFICATION_SCHEMA).unwrap();
+            // Compare against the production bootstrap path, including
+            // indexes that are intentionally installed only after current
+            // exact-boundary columns are known to exist. Executing the static
+            // schema alone cannot safely do that against a serve-first legacy
+            // primary table.
+            let fresh_dir = TempDir::new().unwrap();
+            let fresh_store = cas_store::SqliteVerificationStore::open(fresh_dir.path())
+                .expect("fresh verification store init");
+            drop(fresh_store);
+            let fresh = Connection::open(fresh_dir.path().join("cas.db")).unwrap();
             for table in [
                 "verifications",
                 "verification_capabilities",

@@ -48,6 +48,13 @@ pub struct VerificationAddRequest {
     )]
     #[serde(default)]
     pub verifier_capability: Option<String>,
+
+    /// Exact dispatch to resolve. Required for supervisor-direct verdicts.
+    #[schemars(
+        description = "Exact durable verification dispatch ID; required for supervisor-direct add"
+    )]
+    #[serde(default)]
+    pub dispatch_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

@@ -479,10 +479,15 @@ fn test_verification_duration_ms_absent() {
         serde_json::from_str(r#"{"action": "add", "task_id": "t1"}"#).unwrap();
     assert_eq!(req.duration_ms, None);
     assert_eq!(req.verifier_capability, None);
+    assert_eq!(req.dispatch_id, None);
     let serialized = serde_json::to_value(&req).unwrap();
     assert!(
         serialized.get("verifier_capability").is_none(),
         "legacy request serialization must omit the additive capability field"
+    );
+    assert!(
+        serialized.get("dispatch_id").is_none(),
+        "legacy request serialization must omit the additive dispatch field"
     );
 }
 

@@ -4,7 +4,7 @@
   "harness": "codex-cli",
   "harness_version": "0.146.0",
   "validated_at": "2026-07-30",
-  "result": "fail",
+  "result": "pass",
   "checklist": [
     {
       "id": "cli_version",
@@ -44,16 +44,23 @@
     {
       "id": "mcp_cs_root_turn",
       "required": true,
-      "status": "fail",
+      "status": "pass",
       "evidence_refs": ["live-production-run", "focused-bug"],
-      "detail": "The root startup turn found no callable cs coordination/task tools and completed without either required call."
+      "detail": "The root startup turn called coordination whoami and task mine through the spawn-injected cs server pinned to the disposable CAS_ROOT."
     },
     {
       "id": "mcp_cs_followup_turn",
       "required": true,
-      "status": "fail",
+      "status": "pass",
       "evidence_refs": ["live-production-run", "native-exec-diagnostic", "focused-bug"],
-      "detail": "The production session could not reach a tool-capable follow-up. A diagnostic codex exec launch exposed both tools, isolating the failure to the interactive effective catalog rather than CAS stdio/env wiring."
+      "detail": "A later injected turn called coordination whoami and task mine again through the same production PTY and isolated cs store."
+    },
+    {
+      "id": "code_mode_and_direct_cs_coexist",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run", "focused-bug"],
+      "detail": "The follow-up used Codex's code-mode exec tool in the same turn as directly exposed cs coordination/task tools; production argv contained no code-mode disable override."
     },
     {
       "id": "skills_agents_and_agents_md_discovery",
@@ -74,7 +81,7 @@
       "required": true,
       "status": "pass",
       "evidence_refs": ["real-pty-interrupt-proof"],
-      "detail": "The existing real-Codex shipped Mux interrupt-and-inject proof completed the redirected turn and a later normal turn under --yolo."
+      "detail": "The fresh production matrix and the existing real-Codex proof both completed Mux interrupt-and-inject recovery under --yolo."
     },
     {
       "id": "no_low_rollout_token_budget_abort",
@@ -88,14 +95,14 @@
     {
       "id": "live-production-run",
       "kind": "live_test",
-      "reference": "task:cas-1c66#2026-07-30-production-run",
-      "summary": "Fresh real Codex 0.146.0 PtyConfig::codex run with target/debug/cas first on PATH and disposable project/CAS_ROOT; failed at root cs tool availability."
+      "reference": "task:cas-8c80#2026-07-30-production-run",
+      "summary": "Fresh real Codex 0.146.0 PtyConfig::codex run with target/debug/cas first on PATH and disposable project/CAS_ROOT; every required root, follow-up, code-mode coexistence, discovery, context, and interruption check passed."
     },
     {
       "id": "native-exec-diagnostic",
       "kind": "diagnostic",
-      "reference": "task:cas-1c66#2026-07-30-native-exec",
-      "summary": "Identical isolated cs stdio/env injection through codex exec with code-mode flags disabled successfully called coordination whoami and task mine."
+      "reference": "task:cas-8c80#2026-07-30-rooted-native-exec",
+      "summary": "An isolated native exec diagnostic proved that direct-only mcp__cs projection plus explicit MCP-subprocess CAS_ROOT successfully calls coordination whoami without disabling code mode."
     },
     {
       "id": "factory-parity",
@@ -113,13 +120,13 @@
       "id": "focused-bug",
       "kind": "task",
       "reference": "task:cas-8c80",
-      "summary": "Focused P1 repair task for missing injected cs tools in the Codex 0.146 interactive code-mode catalog."
+      "summary": "Focused P1 repair projects mcp__cs as direct-only under code mode and pins Codex's restricted MCP subprocess environment to the pane CAS_ROOT."
     },
     {
       "id": "gabber-deploy-smoke",
       "kind": "related_task",
       "reference": "task:cas-ce30",
-      "summary": "Complementary deployed-factory edit/commit smoke; linked rather than duplicated and not used to override this failed receipt."
+      "summary": "Complementary deployed-factory edit/commit smoke linked rather than duplicated by this conformance receipt."
     }
   ]
 }

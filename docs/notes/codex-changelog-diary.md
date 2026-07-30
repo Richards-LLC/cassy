@@ -28,17 +28,15 @@ verify on upgrade) · 🔧 fix shipped · 🏗 EPIC · ⏭ n/a
 
 ## Version status
 
-- **CAS validated against:** Codex CLI **0.128.0** (the `crates/cas-pty/src/pty.rs` effort-approach
-  comment pins to 0.128).
-- **0.146 validation attempt:** **FAILED** on 2026-07-30 because the exact interactive
-  `PtyConfig::codex` launch did not expose its injected `cs` MCP tools. The typed receipt is
-  `crates/cas-pty/conformance/codex-cli-0.146.0-2026-07-30.json`; focused repair is tracked by
-  `cas-8c80`. The validated pin therefore remains 0.128.0.
+- **CAS validated against:** Codex CLI **0.146.0**. The exact interactive `PtyConfig::codex`
+  matrix passed on 2026-07-30 after `cas-8c80` projected `mcp__cs` as a direct-only code-mode
+  namespace and pinned Codex's restricted MCP subprocess to the pane's `CAS_ROOT`. The typed
+  receipt is `crates/cas-pty/conformance/codex-cli-0.146.0-2026-07-30.json`.
 - **Locally installed:** **0.146.0** (`codex-cli 0.146.0`, checked 2026-07-30).
 - **Latest stable:** **0.146.0** (2026-07-29). **0.147.0** remains prerelease-only (alpha.2 as of
   2026-07-30) — untracked under this diary's stable-only policy.
-- **Gap:** ~18 minor versions between the validated pin (0.128) and what's installed/latest (0.146).
-  The entries below are a *triage pass* against the touchpoints, not a per-item code audit —
+- **Gap:** none: the validated pin, local installation, and latest stable are all 0.146.0.
+  The older entries below are a *triage pass* against the touchpoints, not a per-item code audit —
   upgrade-time re-verification is the trigger for promoting any 👀 to a task. (Contrast the Claude
   Code diary's .166/.162 entries, which were deep-verified for specific user questions.) The
   **0.130–0.135 block is a backfill** (lighter fidelity, consolidated) added 2026-06-30 to extend
@@ -76,7 +74,7 @@ The load-bearing surface, all in `crates/cas-pty/src/pty.rs::PtyConfig::codex` u
 | Codex version | Headline | CAS verdict | Pointer |
 |---------------|----------|-------------|---------|
 | 0.147.0-alpha | (pre-release; alpha.2 as of 2026-07-30 — untracked until stable) | — | — |
-| 0.146.0 | **Live MCP refresh/reconnect** · executor skills and Agent Plugins · approval-state preservation | 👀 watch | this doc |
+| 0.146.0 | **Live MCP refresh/reconnect** · executor skills and Agent Plugins · approval-state preservation | 🔧 validated/fix shipped | receipt + cas-8c80 |
 | 0.145.0 | **Multi-agent V2 stable** · broader `/import` · MCP startup hardening · concurrent skill discovery · approval tightening | 👀 watch | this doc |
 | 0.144.1–.4 | Installer/code-mode reliability · Guardian auto-review prompt revert · two empty patch releases | ✅ no action | this doc |
 | 0.144.0 | **`writes` app-approval mode** · MCP auth elicitation default · plugin skill-loading perf · Ultra+multi-agent usage warn | 👀 watch | this doc |
@@ -99,6 +97,14 @@ The load-bearing surface, all in `crates/cas-pty/src/pty.rs::PtyConfig::codex` u
 
 Reviewed 2026-07-30. Triage pass vs touchpoints. Source: official `rust-v0.146.0` release
 (`gh release view rust-v0.146.0 --repo openai/codex`; published 2026-07-29).
+
+- **Upgrade validation:** 🔧 **passed after `cas-8c80`.** Codex 0.146 code mode keeps the CAS
+  namespace top-level via
+  `features.code_mode.direct_only_tool_namespaces=["mcp__cs"]`; the launch also passes `CAS_ROOT`
+  explicitly to Codex's restricted MCP subprocess environment. The fresh real matrix proved root
+  and follow-up `coordination`/`task` calls, code-mode `exec` coexistence, project discovery,
+  model/effort/approval/cwd continuity, and interrupt/resume. The typed PASS receipt is
+  `crates/cas-pty/conformance/codex-cli-0.146.0-2026-07-30.json`.
 
 - **MCP connections and Apps tools now stay current after authentication or configuration changes,
   replace closed servers, and refresh without restarting healthy connections (#34952, #34957,
@@ -480,13 +486,9 @@ Reviewed 2026-06-09. Triage pass.
   `-c model_reasoning_effort=` TOML override (cleaner, version-stable). See 0.138 entry.
 - **Multi-agent v2 strategic posture:** decide CAS's stance toward Codex's native multi-agent
   orchestration (mirror of the Claude Code Workflow/Agent-Teams fork). See 0.137/0.138 entries.
-- **0.128 → 0.142 upgrade validation:** when bumping the local/factory Codex, run the touchpoint
-  checklist above (effort key, skills load, AGENTS.md pickup, `--yolo` deny-read, `cs` MCP smoke).
-  **Add for 0.139+:** (a) **rollout token budget** (0.142) — confirm workers don't inherit a low
-  default that aborts long turns; (b) **per-thread plugin stdio MCP activation** (0.141) — confirm
-  `mcp__cs__*` loads on every worker thread; (c) **env-scoped command/network approvals** (0.142) —
-  confirm `--yolo` bypass still holds; (d) **legacy `.codex` permission-profile blocks** (0.134) —
-  reject-on-migration could break worker startup.
+- **Future upgrade validation:** rerun the typed 0.146 matrix (effort key, skills/agents and
+  AGENTS.md discovery, `--yolo`, direct `cs` MCP calls alongside code mode, interruption, and
+  rollout-budget continuity) before advancing the validated pin.
 - **Codex hooks adoption (optional):** Codex now has hooks.json + PostToolUse with trust-bypass
   semantics (0.140/0.141). If CAS ever wants Claude-path parity (PreToolUse auto-approve, jail
   exemptions) on the Codex side instead of relying solely on `--yolo` + env, that's the surface.

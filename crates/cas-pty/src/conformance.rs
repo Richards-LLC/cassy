@@ -80,14 +80,14 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn codex_0146_receipt_is_typed_complete_and_fails_closed() {
+    fn codex_0146_receipt_is_typed_complete_and_passes_every_required_check() {
         let receipt = codex_0146_conformance_receipt().expect("embedded receipt must parse");
         assert_eq!(receipt.schema_version, 1);
         assert_eq!(receipt.harness, Harness::CodexCli);
         assert_eq!(receipt.harness_version, "0.146.0");
         assert_eq!(receipt.validated_at, "2026-07-30");
-        assert_eq!(receipt.result, ConformanceStatus::Fail);
-        assert!(!receipt.validates_pin());
+        assert_eq!(receipt.result, ConformanceStatus::Pass);
+        assert!(receipt.validates_pin());
 
         let evidence_ids: HashSet<&str> = receipt
             .evidence
@@ -115,15 +115,21 @@ mod tests {
             receipt
                 .checklist
                 .iter()
-                .any(|check| check.required && check.status == ConformanceStatus::Fail),
-            "a FAIL receipt must identify at least one failed required check"
+                .filter(|check| check.required)
+                .all(|check| check.status == ConformanceStatus::Pass),
+            "a PASS receipt must pass every required check"
         );
     }
 
     #[test]
-    fn failed_required_check_blocks_pin_even_if_top_level_is_tampered_to_pass() {
+    fn failed_required_check_blocks_pin_even_if_top_level_remains_pass() {
         let mut receipt = codex_0146_conformance_receipt().unwrap();
-        receipt.result = ConformanceStatus::Pass;
+        receipt
+            .checklist
+            .iter_mut()
+            .find(|check| check.required)
+            .expect("receipt has a required check")
+            .status = ConformanceStatus::Fail;
         assert!(
             !receipt.validates_pin(),
             "required-check failure must independently prevent a pin bump"

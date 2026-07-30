@@ -576,13 +576,13 @@ impl PtyConfig {
         // integrated for the Codex harness (no .codex/config.toml). Must precede
         // the developer_instructions block but order among `-c` flags is
         // irrelevant to Codex.
-        push_codex_mcp_server_args(&mut args, &session_id, name, role);
+        push_codex_mcp_server_args(&mut args, &session_id, name, role, cas_root);
 
         if let Some(m) = model {
             args.push("--model".to_string());
             args.push(m.to_string());
         }
-        // Codex CLI 0.128.0 has no --effort flag; effort is set via -c TOML override.
+        // Codex CLI 0.146.0 has no --effort flag; effort is set via -c TOML override.
         // Valid values: none, minimal, low, medium, high, xhigh (same vocabulary as Claude).
         // Unlike claude(), we do NOT apply a role-based default when effort is None — Codex
         // CLI's built-in server-side default is acceptable and avoids hard-coding a TOML
@@ -847,13 +847,38 @@ fn cargo_build_jobs_for_worker() -> Option<String> {
 /// strings, `["serve"]` becomes a string array. If a project DOES ship a
 /// `.codex/config.toml`, these `-c` overrides simply add the `cs` server on top
 /// — they never remove the project's own entries.
-fn push_codex_mcp_server_args(args: &mut Vec<String>, session_id: &str, name: &str, role: &str) {
+fn push_codex_mcp_server_args(
+    args: &mut Vec<String>,
+    session_id: &str,
+    name: &str,
+    role: &str,
+    cas_root: Option<&PathBuf>,
+) {
+    // cas-8c80: Codex 0.146's interactive code-mode catalog does not project
+    // spawn-injected MCP servers into its nested `exec` tool catalog. Keep code
+    // mode available, but make CAS a direct-only namespace so the native
+    // coordination/task tools remain callable alongside code-mode tools. This
+    // launch override is deliberately scoped to `mcp__cs`; it neither depends
+    // on user config nor disables code mode for other supported namespaces.
+    args.push("-c".to_string());
+    args.push("features.code_mode.direct_only_tool_namespaces=[\"mcp__cs\"]".to_string());
     args.push("-c".to_string());
     args.push("mcp_servers.cs.command=\"cas\"".to_string());
     args.push("-c".to_string());
     args.push("mcp_servers.cs.args=[\"serve\"]".to_string());
     args.push("-c".to_string());
     args.push("mcp_servers.cs.env.CAS_CODEX_FALLBACK_SESSION=\"1\"".to_string());
+    // Codex starts MCP servers with a restricted environment instead of
+    // inheriting arbitrary process variables. Pin the subprocess to the same
+    // store as its factory pane; otherwise isolated worktrees (and the
+    // conformance sandbox) can start `cas serve` against an unrelated or
+    // undiscoverable project and the namespace never reaches the tool catalog.
+    if let Some(root) = cas_root {
+        let root = serde_json::to_string(&root.to_string_lossy())
+            .expect("serializing a filesystem path string cannot fail");
+        args.push("-c".to_string());
+        args.push(format!("mcp_servers.cs.env.CAS_ROOT={root}"));
+    }
     // cas-3522: inject the canonical session id into the `cs` MCP server env so
     // `get_agent_id()` auto-registers the agent on its FIRST tool call — the same
     // env fast-path Claude workers rely on. Codex starts MCP servers with a
@@ -1712,6 +1737,39 @@ mod tests {
             all_args.contains("mcp_servers.cs.env.CAS_CODEX_FALLBACK_SESSION=\"1\""),
             "codex worker must inject CAS_CODEX_FALLBACK_SESSION env; got: {all_args}"
         );
+        assert!(
+            all_args.contains("features.code_mode.direct_only_tool_namespaces=[\"mcp__cs\"]"),
+            "codex worker must project CAS as a direct-only namespace; got: {all_args}"
+        );
+        assert!(
+            !all_args.contains("features.code_mode.enabled=false")
+                && !all_args.contains("code_mode=false"),
+            "CAS projection must not disable Codex code mode; got: {all_args}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pty_config_codex_pins_cas_mcp_server_to_factory_root() {
+        let _e = ScopedEnv::new();
+        let root = PathBuf::from("/tmp/cas root with spaces");
+        let config = PtyConfig::codex(
+            "test-worker",
+            "worker",
+            PathBuf::from("/tmp"),
+            Some(&root),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            config
+                .args
+                .iter()
+                .any(|arg| arg == "mcp_servers.cs.env.CAS_ROOT=\"/tmp/cas root with spaces\""),
+            "Codex's restricted MCP environment must receive the pane's CAS_ROOT"
+        );
     }
 
     /// cas-bbc2: the supervisor is equally self-contained — a Codex supervisor
@@ -2537,8 +2595,8 @@ mod tests {
         );
         // The CAS MCP server injection (cas-bbc2) always emits `-c` flags, so we
         // can no longer assert the total absence of `-c`. Instead assert that the
-        // only `-c` overrides present are the MCP server ones — none configure
-        // reasoning effort.
+        // only `-c` overrides present are the MCP server and direct namespace
+        // projection ones — none configure reasoning effort.
         let c_values: Vec<&String> = config
             .args
             .windows(2)
@@ -2546,8 +2604,11 @@ mod tests {
             .map(|w| &w[1])
             .collect();
         assert!(
-            c_values.iter().all(|v| v.starts_with("mcp_servers.cs.")),
-            "with effort=None the only -c overrides should be the cas MCP server injection; got: {c_values:?}"
+            c_values.iter().all(|v| {
+                v.starts_with("mcp_servers.cs.")
+                    || *v == "features.code_mode.direct_only_tool_namespaces=[\"mcp__cs\"]"
+            }),
+            "with effort=None the only -c overrides should be the cas MCP server injection and direct namespace projection; got: {c_values:?}"
         );
     }
 

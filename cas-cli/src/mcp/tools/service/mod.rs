@@ -701,7 +701,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Search and context operations. Actions: search (BM25 full-text), context (session context), context_for_subagent, observe (record observation), entity_list, entity_show, entity_extract, code_search (search code symbols), code_show (show symbol details), grep, blame."
+        description = "Search and context operations. Actions: search (BM25 full-text), retrieval_feedback (explicit retrieval outcome), retrieval_metrics (offline outcome aggregation), context (session context), context_for_subagent, observe (record observation), entity_list, entity_show, entity_extract, code_search (search code symbols), code_show (show symbol details), grep, blame."
     )]
     pub async fn search(
         &self,
@@ -712,6 +712,8 @@ impl CasService {
             let action = req.action.clone();
             let result = match req.action.as_str() {
                 "search" => this.search_impl(req).await,
+                "retrieval_feedback" => this.retrieval_feedback_impl(req).await,
+                "retrieval_metrics" => this.retrieval_metrics_impl().await,
                 "context" => this.context_impl(req).await,
                 "context_for_subagent" => this.context_for_subagent_impl(req).await,
                 "observe" => this.observe_impl(req).await,
@@ -725,7 +727,7 @@ impl CasService {
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Unknown search action: {}. Valid: search, context, context_for_subagent, observe, entity_list, entity_show, entity_extract, code_search, code_show, grep, blame",
+                        "Unknown search action: {}. Valid: search, retrieval_feedback, retrieval_metrics, context, context_for_subagent, observe, entity_list, entity_show, entity_extract, code_search, code_show, grep, blame",
                         req.action
                     ),
                 )),

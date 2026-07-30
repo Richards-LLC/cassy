@@ -6,6 +6,8 @@ impl CasService {
         req: SearchContextRequest,
     ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::SearchRequest;
+        let provenance_version = req.provenance_version;
+        let session_id = req.session_id;
         let inner_req = SearchRequest {
             query: req
                 .query
@@ -15,7 +17,80 @@ impl CasService {
             scope: req.scope.unwrap_or_else(|| "all".to_string()),
             tags: req.tags,
         };
-        self.inner.cas_search(Parameters(inner_req)).await
+        self.inner
+            .cas_search_with_provenance(Parameters(inner_req), provenance_version, session_id)
+            .await
+    }
+
+    pub(in crate::mcp::tools::service) async fn retrieval_feedback_impl(
+        &self,
+        req: SearchContextRequest,
+    ) -> Result<CallToolResult, McpError> {
+        use cas_store::{RetrievalOutcome, RetrievalStore, SqliteRetrievalStore};
+        use std::str::FromStr;
+
+        let query_id = req
+            .query_id
+            .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "query_id required"))?;
+        let result_id = req
+            .result_id
+            .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "result_id required"))?;
+        let outcome = RetrievalOutcome::from_str(
+            req.outcome
+                .as_deref()
+                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "outcome required"))?,
+        )
+        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+        let actor_id = req
+            .actor_id
+            .or_else(|| std::env::var("CAS_AGENT_ID").ok())
+            .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "actor_id required"))?;
+        let session_id = req
+            .session_id
+            .or_else(|| std::env::var("CAS_SESSION_ID").ok())
+            .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "session_id required"))?;
+        let store = SqliteRetrievalStore::open(&self.inner.cas_root)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        let event_id = format!("out-{}", uuid::Uuid::new_v4().simple());
+        let event = store
+            .record_outcome(
+                &event_id,
+                &query_id,
+                &result_id,
+                outcome,
+                &actor_id,
+                &session_id,
+                req.correction_ref.as_deref(),
+            )
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+        let response = serde_json::json!({
+            "version": 1,
+            "event_id": event.id,
+            "query_id": event.query_id,
+            "result_id": event.result_id,
+            "outcome": event.outcome,
+            "created_at": event.created_at,
+        });
+        Ok(Self::success(response.to_string()))
+    }
+
+    pub(in crate::mcp::tools::service) async fn retrieval_metrics_impl(
+        &self,
+    ) -> Result<CallToolResult, McpError> {
+        use cas_store::{RetrievalStore, SqliteRetrievalStore};
+
+        let store = SqliteRetrievalStore::open(&self.inner.cas_root)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        let aggregates = store
+            .aggregate()
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        Ok(Self::success(
+            serde_json::json!({
+                "version": 1,
+                "groups": aggregates,
+            })
+            .to_string(),
+        ))
     }
 
     pub(in crate::mcp::tools::service) async fn context_impl(

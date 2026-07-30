@@ -431,6 +431,32 @@ fn test_search_limit_as_string() {
     )
     .unwrap();
     assert_eq!(req.limit, Some(30));
+    assert_eq!(req.provenance_version, None);
+    assert_eq!(req.query_id, None);
+    assert_eq!(req.outcome, None);
+}
+
+#[test]
+fn test_retrieval_feedback_fields_are_additive_and_typed() {
+    let req: SearchContextRequest = serde_json::from_str(
+        r#"{
+            "action": "retrieval_feedback",
+            "query_id": "qry-123",
+            "result_id": "cas-abcd",
+            "outcome": "corrected",
+            "actor_id": "worker-1",
+            "session_id": "session-1",
+            "correction_ref": "cas-ef01",
+            "provenance_version": "1"
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(req.provenance_version, Some(1));
+    assert_eq!(req.query_id.as_deref(), Some("qry-123"));
+    assert_eq!(req.result_id.as_deref(), Some("cas-abcd"));
+    assert_eq!(req.outcome.as_deref(), Some("corrected"));
+    assert_eq!(req.actor_id.as_deref(), Some("worker-1"));
+    assert_eq!(req.correction_ref.as_deref(), Some("cas-ef01"));
 }
 
 #[test]

@@ -281,6 +281,12 @@ mod tests {
             repo_selector: "remote:github.com/org/repo".to_string(),
             target_branch: "master".to_string(),
         });
+        task.deliverables.pre_close_hook = Some(crate::types::PreCloseHookEvidence {
+            repo_selector: "remote:github.com/org/repo".to_string(),
+            target_branch: "master".to_string(),
+            worktree_branch: Some("factory/worker".to_string()),
+            task_tip: Some("0123456789abcdef".to_string()),
+        });
         store.add(&task).unwrap();
 
         let pending = queue.pending(10, 5).unwrap();
@@ -297,6 +303,9 @@ mod tests {
                 .target_branch,
             "master"
         );
+        let evidence = roundtrip.deliverables.pre_close_hook.as_ref().unwrap();
+        assert_eq!(evidence.worktree_branch.as_deref(), Some("factory/worker"));
+        assert_eq!(evidence.task_tip.as_deref(), Some("0123456789abcdef"));
     }
 
     #[test]

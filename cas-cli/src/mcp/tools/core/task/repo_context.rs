@@ -1,9 +1,12 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use cas_store::KnownRepoStore;
 use cas_types::WorkTarget;
+
+use crate::bounded_process::{BoundedCommandError, Deadline, run_command};
 
 /// Host-local repository evidence resolved fresh for one lifecycle mutation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,6 +15,69 @@ pub(crate) struct RepoContext {
     pub repo_root: PathBuf,
     pub git_common_dir: PathBuf,
     pub target_branch: String,
+}
+
+/// Preflight-only repository probe. Lifecycle mutations retain their existing
+/// resolver; preflight supplies one absolute deadline across every Git call.
+#[derive(Debug, Clone)]
+pub(crate) struct BoundedRepoProbe {
+    deadline: Deadline,
+    per_command_cap: Duration,
+    candidate_limit: usize,
+    git_program: PathBuf,
+}
+
+impl BoundedRepoProbe {
+    pub(crate) fn new(
+        deadline: Deadline,
+        per_command_cap: Duration,
+        candidate_limit: usize,
+    ) -> Self {
+        Self {
+            deadline,
+            per_command_cap,
+            candidate_limit,
+            git_program: PathBuf::from("git"),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_git_program(mut self, program: impl Into<PathBuf>) -> Self {
+        self.git_program = program.into();
+        self
+    }
+
+    pub(crate) fn output(&self, path: &Path, args: &[&str]) -> Result<String, BoundedRepoError> {
+        let output = run_command(
+            Command::new(&self.git_program)
+                .arg("-C")
+                .arg(path)
+                .args(args),
+            self.deadline,
+            self.per_command_cap,
+        )
+        .map_err(|error| match error {
+            BoundedCommandError::TimedOut => BoundedRepoError::TimedOut,
+            BoundedCommandError::Io => BoundedRepoError::Unavailable,
+        })?;
+        if !output.status.success() {
+            return Err(BoundedRepoError::Unavailable);
+        }
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if value.is_empty() {
+            Err(BoundedRepoError::Unavailable)
+        } else {
+            Ok(value)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BoundedRepoError {
+    TimedOut,
+    CandidateLimit,
+    Unavailable,
+    Ambiguous,
 }
 
 fn git_output(path: &Path, args: &[&str]) -> Result<String, String> {
@@ -59,6 +125,26 @@ fn git_layout(path: &Path) -> Result<(PathBuf, PathBuf), String> {
     Ok((canonical(repo_root), common_dir))
 }
 
+fn bounded_git_layout(
+    path: &Path,
+    probe: &BoundedRepoProbe,
+) -> Result<(PathBuf, PathBuf), BoundedRepoError> {
+    let checkout_root = PathBuf::from(probe.output(path, &["rev-parse", "--show-toplevel"])?);
+    let common_raw = PathBuf::from(probe.output(path, &["rev-parse", "--git-common-dir"])?);
+    let common_dir = canonical(if common_raw.is_absolute() {
+        common_raw
+    } else {
+        path.join(common_raw)
+    });
+    let repo_root = common_dir
+        .file_name()
+        .filter(|name| *name == ".git")
+        .and_then(|_| common_dir.parent())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| canonical(checkout_root));
+    Ok((canonical(repo_root), common_dir))
+}
+
 fn selector_for_repo(repo_root: &Path) -> Result<String, String> {
     let cas_root = repo_root.join(".cas");
     if let Some(project_id) = crate::cloud::canonical_id_from_config_toml(&cas_root)
@@ -75,6 +161,23 @@ fn selector_for_repo(repo_root: &Path) -> Result<String, String> {
                 repo_root.display()
             )
         })
+}
+
+fn bounded_selector_for_repo(
+    repo_root: &Path,
+    probe: &BoundedRepoProbe,
+) -> Result<String, BoundedRepoError> {
+    let cas_root = repo_root.join(".cas");
+    if let Some(project_id) = crate::cloud::canonical_id_from_config_toml(&cas_root)
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+    {
+        return Ok(format!("project:{project_id}"));
+    }
+    let remote = probe.output(repo_root, &["remote", "get-url", "origin"])?;
+    crate::cloud::normalize_git_remote_url(&remote)
+        .map(|remote| format!("remote:{remote}"))
+        .ok_or(BoundedRepoError::Unavailable)
 }
 
 pub(crate) fn resolve_default_branch(repo_root: &Path) -> Result<String, String> {
@@ -114,8 +217,9 @@ pub(crate) fn validate_target_branch(repo_root: &Path, branch: &str) -> Result<S
     if branch.is_empty() {
         return Err("WORK TARGET REJECTED: target branch is empty".to_string());
     }
-    git_output(repo_root, &["check-ref-format", "--branch", branch])
-        .map_err(|reason| format!("WORK TARGET REJECTED: invalid target branch `{branch}`: {reason}"))
+    git_output(repo_root, &["check-ref-format", "--branch", branch]).map_err(|reason| {
+        format!("WORK TARGET REJECTED: invalid target branch `{branch}`: {reason}")
+    })
 }
 
 /// Create the portable durable target. An omitted target remains `None` for
@@ -175,6 +279,58 @@ fn candidate_paths(cas_root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+fn bounded_registry_paths(candidate_limit: usize) -> Result<Vec<PathBuf>, BoundedRepoError> {
+    let db_path = crate::store::known_repos::host_cas_dir().join("cas.db");
+    if !db_path.is_file() {
+        return Ok(Vec::new());
+    }
+    let connection = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| BoundedRepoError::Unavailable)?;
+    connection
+        .busy_timeout(Duration::from_millis(50))
+        .map_err(|_| BoundedRepoError::Unavailable)?;
+    let mut statement = match connection
+        .prepare("SELECT path FROM known_repos ORDER BY last_touched_at DESC LIMIT ?1")
+    {
+        Ok(statement) => statement,
+        // An uninitialized host registry is equivalent to no known repos.
+        Err(_) => return Ok(Vec::new()),
+    };
+    let query_limit = candidate_limit.saturating_add(1) as i64;
+    let paths = statement
+        .query_map([query_limit], |row| row.get::<_, String>(0))
+        .map_err(|_| BoundedRepoError::Unavailable)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| BoundedRepoError::Unavailable)?;
+    if paths.len() > candidate_limit {
+        return Err(BoundedRepoError::CandidateLimit);
+    }
+    Ok(paths.into_iter().map(PathBuf::from).collect())
+}
+
+fn bounded_candidate_paths(
+    cas_root: &Path,
+    probe: &BoundedRepoProbe,
+) -> Result<Vec<(PathBuf, PathBuf)>, BoundedRepoError> {
+    let mut raw = vec![cas_root.to_path_buf()];
+    raw.extend(bounded_registry_paths(probe.candidate_limit)?);
+    let mut seen = HashSet::new();
+    let mut candidates = Vec::new();
+    for path in raw.into_iter().filter(|path| path.exists()) {
+        match bounded_git_layout(&path, probe) {
+            Ok((root, common)) if seen.insert(root.clone()) => {
+                candidates.push((root, common));
+            }
+            Ok(_) | Err(BoundedRepoError::Unavailable) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(candidates)
+}
+
 /// Resolve and identity-check a declared work target for one mutation.
 pub(crate) fn resolve_repo_context(
     cas_root: &Path,
@@ -217,6 +373,40 @@ pub(crate) fn resolve_repo_context(
     }
 }
 
+pub(crate) fn resolve_repo_context_bounded(
+    cas_root: &Path,
+    target: &WorkTarget,
+    probe: &BoundedRepoProbe,
+) -> Result<RepoContext, BoundedRepoError> {
+    let mut matches = Vec::new();
+    for (repo_root, git_common_dir) in bounded_candidate_paths(cas_root, probe)? {
+        match bounded_selector_for_repo(&repo_root, probe) {
+            Ok(selector) if selector == target.repo_selector => {
+                matches.push((repo_root, git_common_dir));
+            }
+            Ok(_) | Err(BoundedRepoError::Unavailable) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    matches.sort();
+    matches.dedup();
+    match matches.as_slice() {
+        [(repo_root, common_dir)] => probe
+            .output(
+                repo_root,
+                &["check-ref-format", "--branch", &target.target_branch],
+            )
+            .map(|target_branch| RepoContext {
+                repo_selector: target.repo_selector.clone(),
+                repo_root: repo_root.clone(),
+                git_common_dir: common_dir.clone(),
+                target_branch,
+            }),
+        [] => Err(BoundedRepoError::Unavailable),
+        _ => Err(BoundedRepoError::Ambiguous),
+    }
+}
+
 pub(crate) fn resolve_path_context(
     path: &Path,
     target_branch: &str,
@@ -224,6 +414,20 @@ pub(crate) fn resolve_path_context(
     let (repo_root, git_common_dir) = git_layout(path)?;
     Ok(RepoContext {
         repo_selector: selector_for_repo(&repo_root)?,
+        repo_root,
+        git_common_dir,
+        target_branch: target_branch.to_string(),
+    })
+}
+
+pub(crate) fn resolve_path_context_bounded(
+    path: &Path,
+    target_branch: &str,
+    probe: &BoundedRepoProbe,
+) -> Result<RepoContext, BoundedRepoError> {
+    let (repo_root, git_common_dir) = bounded_git_layout(path, probe)?;
+    Ok(RepoContext {
+        repo_selector: bounded_selector_for_repo(&repo_root, probe)?,
         repo_root,
         git_common_dir,
         target_branch: target_branch.to_string(),
@@ -269,6 +473,45 @@ mod tests {
                 .unwrap()
                 .success()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_git_probe_returns_typed_timeout_without_command_details() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let fake_git = dir.path().join("slow-git");
+        std::fs::write(&fake_git, "#!/bin/sh\nsleep 10\n").unwrap();
+        std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let probe = BoundedRepoProbe::new(
+            Deadline::after(Duration::from_millis(75)),
+            Duration::from_millis(75),
+            8,
+        )
+        .with_git_program(fake_git);
+        let started = std::time::Instant::now();
+        assert_eq!(
+            probe.output(dir.path(), &["rev-parse", "HEAD"]),
+            Err(BoundedRepoError::TimedOut)
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn bounded_registry_fails_closed_before_scanning_too_many_host_repos() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            crate::store::known_repos::ensure_host_schema().unwrap();
+            for index in 0..3 {
+                let repo = home.join(format!("repo-{index}"));
+                std::fs::create_dir(&repo).unwrap();
+                crate::store::known_repos::register_repo_strict(&repo).unwrap();
+            }
+            assert_eq!(
+                bounded_registry_paths(2),
+                Err(BoundedRepoError::CandidateLimit)
+            );
+        });
     }
 
     #[test]
@@ -540,8 +783,7 @@ mod tests {
         guard.set_current_dir(&repo_a);
 
         assert!(
-            crate::mcp::tools::check_unmerged_epic_branches(&repo_b, "cas-epic", "main")
-                .is_empty(),
+            crate::mcp::tools::check_unmerged_epic_branches(&repo_b, "cas-epic", "main").is_empty(),
             "repo A epic branch noise must not contaminate repo B close"
         );
 

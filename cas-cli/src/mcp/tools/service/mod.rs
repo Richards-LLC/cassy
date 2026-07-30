@@ -1207,7 +1207,13 @@ mod tests {
             "action": "preflight"
         }))
         .unwrap();
+        let started = std::time::Instant::now();
         let result = svc.system(Parameters(req)).await.unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(7),
+            "MCP preflight exceeded its advertised runtime bound: {:?}",
+            started.elapsed()
+        );
         let text = result
             .content
             .into_iter()
@@ -1220,6 +1226,8 @@ mod tests {
         let report: crate::factory_preflight::FactoryPreflightReport =
             serde_json::from_str(&text).unwrap();
 
+        assert_eq!(report.schema_version, 2);
+        assert!(report.runtime_elapsed_ms < report.runtime_bound_ms);
         assert!(report.cas_mcp.observed_via_mcp);
         assert!(!report.cas_mcp.configured);
         assert_eq!(
@@ -1232,5 +1240,13 @@ mod tests {
                 .iter()
                 .all(|finding| finding.code != "cas_mcp.registration_missing")
         );
+        for forbidden in [
+            dir.path().to_string_lossy().as_ref(),
+            "git -C",
+            "Bearer ",
+            "token=",
+        ] {
+            assert!(!text.contains(forbidden), "{forbidden} leaked: {text}");
+        }
     }
 }

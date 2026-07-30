@@ -23,6 +23,7 @@ compile_error!(
 // Core modules
 pub mod agent_id;
 pub mod async_runtime;
+mod bounded_process;
 pub mod bridge;
 pub mod builtins;
 pub mod cli;

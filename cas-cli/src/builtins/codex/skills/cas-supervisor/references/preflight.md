@@ -7,16 +7,25 @@ cas factory preflight
 cas --json factory preflight
 ```
 
-The command is read-only and bounded below seven seconds. It does not connect
-optional upstreams, start a model, or spawn a worker. The human and JSON views
-come from the same schema-versioned report covering:
+The command is read-only and hard-bounded below seven seconds, including every
+known-repository lookup and Git subprocess. It does not connect optional
+upstreams, start a model, or spawn a worker. The human and JSON views come from
+the same schema-versioned report covering:
 
 - the running CAS build SHA versus identifiable CAS source or configured
   deployment evidence;
 - the portable repository selector and active target branch;
 - CAS MCP registration and compiled `coordination`/`task` availability;
 - credential-free optional-upstream health and backoff state;
-- typed Claude, Codex, and Grok conformance receipts and default-version drift.
+- typed Claude, Codex, and Grok conformance receipts, live default-version
+  observations, and receipt-time observations kept as separate evidence.
+
+The `required` harness set is the effective supervisor and worker harnesses from
+`.cas/config.toml` (including stock defaults). Catalogued harnesses that are not
+used by either role remain visible but informational. Required harnesses without
+a passing receipt or observable matching live default produce a warning. This
+policy never invents a receipt: readiness is based only on real conformance
+evidence for the factory configuration that will actually launch.
 
 Exit status is nonzero only for critical factory blockers: unresolved,
 ambiguous, or wrong repository identity; uninitialized/missing CAS MCP; or a
@@ -32,7 +41,12 @@ not critical by itself.
 The report never emits absolute paths, proxy endpoints, headers, credentials,
 raw upstream content/errors, environment values, or MCP session IDs. Each
 non-ready state includes a stable finding code, evidence time when available,
-and remediation. `CAS_SOURCE_DIR` can identify a CAS source checkout when the
+and remediation. Deadline failures expose only typed component identifiers such
+as `repository` or `harness.codex`; probed paths and commands are never emitted.
+If `repository.candidate_limit` is reported, preview safe registry-only cleanup
+with `cas known-repos prune-missing --dry-run`, then apply it without the flag.
+This removes only rows for paths that no longer exist; it never deletes repo files.
+`CAS_SOURCE_DIR` can identify a CAS source checkout when the
 project being checked is downstream; `CAS_EXPECTED_DEPLOYMENT_SHA` can provide
 an explicit expected 7–40 character hexadecimal deployment commit. A
 downstream project HEAD is never compared to the embedded CAS SHA.

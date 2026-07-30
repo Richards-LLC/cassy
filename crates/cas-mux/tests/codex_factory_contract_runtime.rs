@@ -129,6 +129,17 @@ fn matching_tool_calls(body: &str, name: &str, action: &str) -> usize {
         .count()
 }
 
+fn matching_custom_tool_calls(body: &str, name: &str) -> usize {
+    body.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| {
+            event["type"] == "response_item"
+                && event["payload"]["type"] == "custom_tool_call"
+                && event["payload"]["name"] == name
+        })
+        .count()
+}
+
 fn assistant_text(body: &str) -> String {
     body.lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -297,6 +308,29 @@ fn codex_0146_factory_launch_contract_passes_live_matrix() {
         !config.args.iter().any(|arg| arg.contains("rollout_token")),
         "factory launch must not inherit a low rollout-token budget"
     );
+    assert!(
+        config
+            .args
+            .iter()
+            .any(|arg| { arg == "features.code_mode.direct_only_tool_namespaces=[\"mcp__cs\"]" }),
+        "production launch must expose CAS as direct tools under Codex code mode"
+    );
+    assert!(
+        config.args.iter().any(|arg| {
+            arg == &format!(
+                "mcp_servers.cs.env.CAS_ROOT={}",
+                serde_json::to_string(&cas_root.to_string_lossy()).unwrap()
+            )
+        }),
+        "production launch must pin the restricted MCP subprocess to the disposable CAS root"
+    );
+    assert!(
+        !config
+            .args
+            .iter()
+            .any(|arg| arg.contains("code_mode") && arg.contains("false")),
+        "production launch must not disable supported Codex code mode"
+    );
 
     let pty = Pty::spawn(PANE, config).expect("spawn real production Codex PTY");
     let pane = Pane::with_pty(PANE, PaneKind::Worker, pty, 24, 80, SupervisorCli::Codex)
@@ -330,13 +364,18 @@ fn codex_0146_factory_launch_contract_passes_live_matrix() {
         .block_on(mux.inject(
             PANE,
             "Use $cas-1c66-probe. Call coordination whoami and task mine again. \
+             Also use the code-mode exec tool to calculate 146 + 1. \
              Then reply with CAS-1C66-FOLLOWUP, CAS-1C66-AGENTS, CAS-1C66-SKILL, \
-             and whether .codex/agents/cas-1c66-probe.md exists.",
+             the calculation result, and whether .codex/agents/cas-1c66-probe.md exists.",
         ))
         .expect("inject follow-up");
     let second = wait_for_completions(&mut mux, &rollout, 2, Duration::from_secs(60));
     assert!(matching_tool_calls(&second, "coordination", "whoami") >= 2);
     assert!(matching_tool_calls(&second, "task", "mine") >= 2);
+    assert!(
+        matching_custom_tool_calls(&second, "exec") >= 1,
+        "CAS direct tools and the Codex code-mode exec tool must coexist"
+    );
     let second_assistant_text = assistant_text(&second);
     for marker in [
         "CAS-1C66-FOLLOWUP",

@@ -883,6 +883,28 @@ mod tests {
             second.applied_count, 0,
             "second migration run should apply nothing"
         );
+        let conn = Connection::open(&db_path).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM cas_migrations WHERE id = 214",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1,
+            "m214 must be recorded exactly once across repeated migration runs"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'known_repo_bindings'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1,
+            "m214 host-binding schema must survive repeated migration runs"
+        );
     }
 
     /// cas-bdb9: pre-existing DB where stores HAVE been constructed continues

@@ -116,7 +116,7 @@ pub use verification_store::{
 pub use worktree_store::{SqliteWorktreeStore, WORKTREE_SCHEMA, WorktreeStore};
 
 mod known_repo_store;
-pub use known_repo_store::{KnownRepo, KnownRepoStore, SqliteKnownRepoStore};
+pub use known_repo_store::{KnownRepo, KnownRepoBinding, KnownRepoStore, SqliteKnownRepoStore};
 
 // Recording store for terminal recording metadata
 pub use recording_store::{

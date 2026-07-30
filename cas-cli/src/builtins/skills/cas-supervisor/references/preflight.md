@@ -46,6 +46,11 @@ as `repository` or `harness.codex`; probed paths and commands are never emitted.
 If `repository.candidate_limit` is reported, preview safe registry-only cleanup
 with `cas known-repos prune-missing --dry-run`, then apply it without the flag.
 This removes only rows for paths that no longer exist; it never deletes repo files.
+If two live clones share one selector, inspect host-local state with
+`cas known-repos status`, then explicitly select the intended canonical root
+with `cas known-repos bind --repo <path>`. Remove a stale choice with
+`cas known-repos unbind <exact-selector>` before rebinding. Bindings stay in the
+host registry only; task, delivery, MCP, and preflight JSON remain path-free.
 `CAS_SOURCE_DIR` can identify a CAS source checkout when the
 project being checked is downstream; `CAS_EXPECTED_DEPLOYMENT_SHA` can provide
 an explicit expected 7–40 character hexadecimal deployment commit. A

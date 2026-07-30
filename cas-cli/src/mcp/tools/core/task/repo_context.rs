@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use cas_store::KnownRepoStore;
+use cas_store::{KnownRepoBinding, KnownRepoStore};
 use cas_types::WorkTarget;
 
 use crate::bounded_process::{BoundedCommandError, Deadline, run_command};
@@ -78,6 +78,7 @@ pub(crate) enum BoundedRepoError {
     CandidateLimit,
     Unavailable,
     Ambiguous,
+    StaleBinding,
 }
 
 fn git_output(path: &Path, args: &[&str]) -> Result<String, String> {
@@ -161,6 +162,93 @@ fn selector_for_repo(repo_root: &Path) -> Result<String, String> {
                 repo_root.display()
             )
         })
+}
+
+/// Resolve a path supplied to the host-local binding CLI. Bindings require a
+/// real canonical repository root, not a symlink, nested path, or linked
+/// worktree checkout.
+pub(crate) fn binding_identity_for_path(path: &Path) -> Result<(String, PathBuf, PathBuf), String> {
+    let absolute_input = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| format!("cannot resolve current directory: {error}"))?
+            .join(path)
+    };
+    let mut prefix = PathBuf::new();
+    for component in absolute_input.components() {
+        prefix.push(component.as_os_str());
+        if matches!(component, std::path::Component::Normal(_))
+            && std::fs::symlink_metadata(&prefix)
+                .map(|metadata| metadata.file_type().is_symlink())
+                .unwrap_or(false)
+        {
+            return Err("repository path and its parents must not be symlinks".to_string());
+        }
+    }
+    let metadata = std::fs::symlink_metadata(&absolute_input)
+        .map_err(|error| format!("cannot inspect repository path: {error}"))?;
+    if !metadata.is_dir() {
+        return Err("repository path must be a directory".to_string());
+    }
+    let canonical_input = absolute_input
+        .canonicalize()
+        .map_err(|error| format!("cannot canonicalize repository path: {error}"))?;
+    let (repo_root, git_common_dir) = git_layout(&canonical_input)?;
+    if repo_root != canonical_input {
+        return Err(
+            "repository path must be the canonical root whose Git common directory is being bound"
+                .to_string(),
+        );
+    }
+    if !git_common_dir.is_dir() {
+        return Err("resolved Git common directory is unavailable".to_string());
+    }
+    let selector = selector_for_repo(&repo_root)?;
+    Ok((selector, repo_root, git_common_dir))
+}
+
+fn validate_binding(
+    binding: &KnownRepoBinding,
+    expected_selector: &str,
+) -> Result<(PathBuf, PathBuf), ()> {
+    if binding.selector != expected_selector
+        || !binding.repo_root.is_absolute()
+        || !binding.git_common_dir.is_absolute()
+        || !binding.repo_root.exists()
+        || !binding.git_common_dir.exists()
+    {
+        return Err(());
+    }
+    let (repo_root, git_common_dir) = git_layout(&binding.repo_root).map_err(|_| ())?;
+    if repo_root != binding.repo_root
+        || git_common_dir != binding.git_common_dir
+        || selector_for_repo(&repo_root).map_err(|_| ())? != expected_selector
+    {
+        return Err(());
+    }
+    Ok((repo_root, git_common_dir))
+}
+
+pub(crate) fn binding_is_live(binding: &KnownRepoBinding) -> bool {
+    validate_binding(binding, &binding.selector).is_ok()
+}
+
+fn host_binding(selector: &str) -> Result<Option<KnownRepoBinding>, String> {
+    let store = crate::store::known_repos::open_host_known_repo_store().map_err(|_| {
+        "WORK TARGET BINDING UNAVAILABLE: host-local repository binding state could not be read"
+            .to_string()
+    })?;
+    match store.get_binding(selector) {
+        Ok(binding) => Ok(binding),
+        // Hosts predating m214 retain legacy unbound resolution until the
+        // maintenance CLI or migration runner installs the table.
+        Err(error) if error.to_string().contains("no such table") => Ok(None),
+        Err(_) => Err(
+            "WORK TARGET BINDING UNAVAILABLE: host-local repository binding state could not be read"
+                .to_string(),
+        ),
+    }
 }
 
 fn bounded_selector_for_repo(
@@ -311,6 +399,86 @@ fn bounded_registry_paths(candidate_limit: usize) -> Result<Vec<PathBuf>, Bounde
     Ok(paths.into_iter().map(PathBuf::from).collect())
 }
 
+fn bounded_host_binding(selector: &str) -> Result<Option<KnownRepoBinding>, BoundedRepoError> {
+    let db_path = crate::store::known_repos::host_cas_dir().join("cas.db");
+    if !db_path.is_file() {
+        return Ok(None);
+    }
+    let connection = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| BoundedRepoError::Unavailable)?;
+    connection
+        .busy_timeout(Duration::from_millis(50))
+        .map_err(|_| BoundedRepoError::Unavailable)?;
+    let result = connection.query_row(
+        "SELECT selector, repo_root, git_common_dir, created_at, updated_at
+         FROM known_repo_bindings WHERE selector = ?1 COLLATE BINARY",
+        [selector],
+        |row| {
+            let selector: String = row.get(0)?;
+            let repo_root: String = row.get(1)?;
+            let git_common_dir: String = row.get(2)?;
+            let created_at: String = row.get(3)?;
+            let updated_at: String = row.get(4)?;
+            Ok(KnownRepoBinding {
+                selector,
+                repo_root: PathBuf::from(repo_root),
+                git_common_dir: PathBuf::from(git_common_dir),
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
+                    .map(|value| value.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+                updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)
+                    .map(|value| value.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+            })
+        },
+    );
+    match result {
+        Ok(binding) => Ok(Some(binding)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        // Hosts predating m214 retain legacy unbound resolution until the
+        // maintenance CLI or normal migration runner installs the table.
+        Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+            if message.contains("no such table") =>
+        {
+            Ok(None)
+        }
+        Err(_) => Err(BoundedRepoError::Unavailable),
+    }
+}
+
+fn validate_binding_bounded(
+    binding: &KnownRepoBinding,
+    expected_selector: &str,
+    probe: &BoundedRepoProbe,
+) -> Result<(PathBuf, PathBuf), BoundedRepoError> {
+    if binding.selector != expected_selector
+        || !binding.repo_root.is_absolute()
+        || !binding.git_common_dir.is_absolute()
+        || !binding.repo_root.exists()
+        || !binding.git_common_dir.exists()
+    {
+        return Err(BoundedRepoError::StaleBinding);
+    }
+    let (repo_root, git_common_dir) =
+        bounded_git_layout(&binding.repo_root, probe).map_err(|error| match error {
+            BoundedRepoError::TimedOut => BoundedRepoError::TimedOut,
+            _ => BoundedRepoError::StaleBinding,
+        })?;
+    if repo_root != binding.repo_root
+        || git_common_dir != binding.git_common_dir
+        || bounded_selector_for_repo(&repo_root, probe).map_err(|error| match error {
+            BoundedRepoError::TimedOut => BoundedRepoError::TimedOut,
+            _ => BoundedRepoError::StaleBinding,
+        })? != expected_selector
+    {
+        return Err(BoundedRepoError::StaleBinding);
+    }
+    Ok((repo_root, git_common_dir))
+}
+
 fn bounded_candidate_paths(
     cas_root: &Path,
     probe: &BoundedRepoProbe,
@@ -336,6 +504,26 @@ pub(crate) fn resolve_repo_context(
     cas_root: &Path,
     target: &WorkTarget,
 ) -> Result<RepoContext, String> {
+    if let Some(binding) = host_binding(&target.repo_selector)? {
+        let (repo_root, git_common_dir) = validate_binding(&binding, &target.repo_selector)
+            .map_err(|()| {
+                format!(
+                    "⚠️ STALE WORK TARGET BINDING\n\n\
+                     Task selector `{}` has a host-local binding whose live \
+                     repository identity no longer matches. Refusing lifecycle \
+                     mutation without fallback. Run `cas known-repos status`, \
+                     then explicitly unbind and bind the intended repository.",
+                    target.repo_selector
+                )
+            })?;
+        let target_branch = validate_target_branch(&repo_root, &target.target_branch)?;
+        return Ok(RepoContext {
+            repo_selector: target.repo_selector.clone(),
+            repo_root,
+            git_common_dir,
+            target_branch,
+        });
+    }
     let mut matches = Vec::new();
     for candidate in candidate_paths(cas_root) {
         if selector_for_repo(&candidate).ok().as_deref() == Some(&target.repo_selector)
@@ -366,7 +554,9 @@ pub(crate) fn resolve_repo_context(
         many => Err(format!(
             "⚠️ AMBIGUOUS WORK TARGET\n\n\
              Task selector `{}` matched {} repositories on this host. Refusing \
-             lifecycle mutation before git merge/reachability checks.",
+             lifecycle mutation before git merge/reachability checks. Run \
+             `cas known-repos status`, then `cas known-repos bind --repo <path>` \
+             to make an explicit host-local choice.",
             target.repo_selector,
             many.len()
         )),
@@ -378,6 +568,21 @@ pub(crate) fn resolve_repo_context_bounded(
     target: &WorkTarget,
     probe: &BoundedRepoProbe,
 ) -> Result<RepoContext, BoundedRepoError> {
+    if let Some(binding) = bounded_host_binding(&target.repo_selector)? {
+        let (repo_root, git_common_dir) =
+            validate_binding_bounded(&binding, &target.repo_selector, probe)?;
+        return probe
+            .output(
+                &repo_root,
+                &["check-ref-format", "--branch", &target.target_branch],
+            )
+            .map(|target_branch| RepoContext {
+                repo_selector: target.repo_selector.clone(),
+                repo_root,
+                git_common_dir,
+                target_branch,
+            });
+    }
     let mut matches = Vec::new();
     for (repo_root, git_common_dir) in bounded_candidate_paths(cas_root, probe)? {
         match bounded_selector_for_repo(&repo_root, probe) {
@@ -683,6 +888,169 @@ mod tests {
             assert_eq!(context.repo_root, repo_b.canonicalize().unwrap());
             assert_eq!(context.repo_selector, "remote:github.com/org/work-b");
         });
+    }
+
+    #[test]
+    fn duplicate_selector_binding_survives_restart_and_never_falls_back() {
+        let mut guard = TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        let repo_a = guard.home().join("clone-a");
+        let repo_b = guard.home().join("clone-b");
+        for repo in [&repo_a, &repo_b] {
+            std::fs::create_dir(repo).unwrap();
+            git(repo, &["init", "-q", "-b", "main"]);
+            git(
+                repo,
+                &["remote", "add", "origin", "git@github.com:org/shared.git"],
+            );
+            std::fs::create_dir(repo.join(".cas")).unwrap();
+            crate::store::known_repos::register_repo_strict(repo).unwrap();
+        }
+        let target = WorkTarget {
+            repo_selector: "remote:github.com/org/shared".to_string(),
+            target_branch: "main".to_string(),
+        };
+        let ambiguous = resolve_repo_context(&repo_a.join(".cas"), &target).unwrap_err();
+        assert!(ambiguous.contains("AMBIGUOUS WORK TARGET"));
+        assert!(ambiguous.contains("known-repos bind --repo"));
+
+        let (_, root_b, common_b) = binding_identity_for_path(&repo_b).unwrap();
+        {
+            let store = crate::store::known_repos::open_host_known_repo_store().unwrap();
+            store
+                .bind(&target.repo_selector, &root_b, &common_b)
+                .unwrap();
+        }
+
+        // A fresh store open and a cwd in the newer/unrelated clone cannot
+        // influence the explicit host-local choice.
+        guard.set_current_dir(&repo_a);
+        let resolved = resolve_repo_context(&repo_a.join(".cas"), &target).unwrap();
+        assert_eq!(resolved.repo_root, repo_b.canonicalize().unwrap());
+        assert_eq!(
+            resolved.git_common_dir,
+            repo_b.join(".git").canonicalize().unwrap()
+        );
+
+        // Live identity drift invalidates the binding. Clone A remains a
+        // matching candidate, but stale bindings never fall back.
+        git(
+            &repo_b,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "git@github.com:org/changed.git",
+            ],
+        );
+        let stale = resolve_repo_context(&repo_a.join(".cas"), &target).unwrap_err();
+        assert!(stale.contains("STALE WORK TARGET BINDING"));
+        assert!(!stale.contains(repo_a.to_string_lossy().as_ref()));
+        assert!(!stale.contains(repo_b.to_string_lossy().as_ref()));
+
+        let store = crate::store::known_repos::open_host_known_repo_store().unwrap();
+        assert_eq!(store.unbind(&target.repo_selector).unwrap(), 1);
+        let after_unbind = resolve_repo_context(&repo_a.join(".cas"), &target).unwrap();
+        assert_eq!(
+            after_unbind.repo_root,
+            repo_a.canonicalize().unwrap(),
+            "unbind removes only the binding and restores ordinary unique matching"
+        );
+        assert!(
+            store
+                .list()
+                .unwrap()
+                .iter()
+                .any(|repo| repo.path == repo_b.canonicalize().unwrap()),
+            "unbind must retain the known-repo registration"
+        );
+    }
+
+    #[test]
+    fn wrong_or_disappeared_binding_fails_closed_without_path_disclosure() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            crate::store::known_repos::ensure_host_schema().unwrap();
+            let intended = home.join("intended");
+            let wrong = home.join("wrong");
+            for (repo, remote) in [
+                (&intended, "git@github.com:org/intended.git"),
+                (&wrong, "git@github.com:org/wrong.git"),
+            ] {
+                std::fs::create_dir(repo).unwrap();
+                git(repo, &["init", "-q", "-b", "main"]);
+                git(repo, &["remote", "add", "origin", remote]);
+                std::fs::create_dir(repo.join(".cas")).unwrap();
+                crate::store::known_repos::register_repo_strict(repo).unwrap();
+            }
+            let (_, wrong_root, wrong_common) = binding_identity_for_path(&wrong).unwrap();
+            let selector = "remote:github.com/org/intended";
+            crate::store::known_repos::open_host_known_repo_store()
+                .unwrap()
+                .bind(selector, &wrong_root, &wrong_common)
+                .unwrap();
+            let target = WorkTarget {
+                repo_selector: selector.to_string(),
+                target_branch: "main".to_string(),
+            };
+            let wrong_error = resolve_repo_context(&intended.join(".cas"), &target).unwrap_err();
+            assert!(wrong_error.contains("STALE WORK TARGET BINDING"));
+            assert!(!wrong_error.contains(home.to_string_lossy().as_ref()));
+
+            std::fs::remove_dir_all(&wrong).unwrap();
+            let missing_error = resolve_repo_context(&intended.join(".cas"), &target).unwrap_err();
+            assert!(missing_error.contains("STALE WORK TARGET BINDING"));
+            assert!(!missing_error.contains(home.to_string_lossy().as_ref()));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn binding_cli_identity_rejects_symlinks_nested_paths_and_linked_worktrees() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let main = dir.path().join("main");
+        std::fs::create_dir(&main).unwrap();
+        git(&main, &["init", "-q", "-b", "main"]);
+        git(
+            &main,
+            &["remote", "add", "origin", "git@github.com:org/shared.git"],
+        );
+        std::fs::create_dir(main.join("nested")).unwrap();
+        std::os::unix::fs::symlink(&main, dir.path().join("alias")).unwrap();
+        let parent_alias = dir.path().join("parent-alias");
+        std::os::unix::fs::symlink(dir.path(), &parent_alias).unwrap();
+        assert!(binding_identity_for_path(&dir.path().join("alias")).is_err());
+        assert!(binding_identity_for_path(&parent_alias.join("main")).is_err());
+        assert!(binding_identity_for_path(&main.join("nested")).is_err());
+
+        std::fs::write(main.join("base"), "base").unwrap();
+        git(&main, &["add", "base"]);
+        git(
+            &main,
+            &[
+                "-c",
+                "user.name=CAS",
+                "-c",
+                "user.email=cas@example.com",
+                "commit",
+                "-q",
+                "-m",
+                "base",
+            ],
+        );
+        let linked = dir.path().join("linked");
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "factory/worker",
+                linked.to_str().unwrap(),
+            ],
+        );
+        assert!(binding_identity_for_path(&linked).is_err());
+        assert!(binding_identity_for_path(&main).is_ok());
     }
 
     #[test]

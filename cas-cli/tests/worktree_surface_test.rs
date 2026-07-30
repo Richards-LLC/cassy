@@ -20,6 +20,7 @@ use cas::types::{
     WorkerCompletionReceiptInput, WorkerDeliveryState,
 };
 use cas_mcp::types::{CoordinationRequest, TaskRequest, VerificationRequest};
+use cas_store::KnownRepoStore;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::RawContent;
 use tempfile::TempDir;
@@ -675,6 +676,186 @@ async fn task_bound_cross_repo_merge_mutates_only_declared_repo() {
         git_stdout(&repo_a.root, &["status", "--porcelain=v1"]),
         a_status_before,
         "repo A working tree must remain unchanged"
+    );
+}
+
+#[tokio::test]
+async fn public_create_update_and_close_reuse_duplicate_selector_binding() {
+    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let home = TempDir::new().expect("temp HOME");
+    let _home = HomeGuard::enter(home.path());
+    let repo_a = GitRepo::new();
+    let repo_b = GitRepo::new();
+    for repo in [&repo_a, &repo_b] {
+        run_git(
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:org/shared-lifecycle.git",
+            ],
+            &repo.root,
+        );
+    }
+    let cas_root_a = init_cas_dir(&repo_a.root).expect("init clone A CAS");
+    init_cas_dir(&repo_b.root).expect("init clone B CAS");
+    let store = cas::store::known_repos::open_host_known_repo_store().unwrap();
+    store
+        .bind(
+            "remote:github.com/org/shared-lifecycle",
+            &repo_b.root,
+            &repo_b.root.join(".git").canonicalize().unwrap(),
+        )
+        .unwrap();
+    drop(store);
+
+    let svc = make_service(cas_root_a.clone());
+    let create = svc
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "create",
+            "title": "Bound lifecycle",
+            "depth": "light",
+            "target_repo": repo_b.root,
+            "target_branch": "main",
+        }))))
+        .await
+        .expect("public create with explicit target");
+    let create_text = get_text(&create);
+    let task_id = create_text
+        .split("Created task: ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .expect("created task id")
+        .to_string();
+
+    let update = svc
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "update",
+            "id": task_id,
+            "title": "Bound lifecycle updated",
+        }))))
+        .await
+        .expect("public update resolves existing binding");
+    assert!(
+        get_text(&update).contains("Updated task"),
+        "{}",
+        get_text(&update)
+    );
+
+    std::fs::write(repo_b.root.join("lifecycle-proof.txt"), "bound clone B").unwrap();
+    run_git(&["add", "lifecycle-proof.txt"], &repo_b.root);
+    run_git(&["commit", "-m", "bound lifecycle proof"], &repo_b.root);
+    let task_store = open_task_store(&cas_root_a).unwrap();
+    let mut task = task_store.get(&task_id).unwrap();
+    task.status = TaskStatus::InProgress;
+    task.deliverables.factory_branch_anchor =
+        Some(git_stdout(&repo_b.root, &["rev-parse", "HEAD"]));
+    task_store.update(&task).unwrap();
+
+    let close = svc
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "close",
+            "id": task_id,
+            "reason": "binding lifecycle proof",
+        }))))
+        .await
+        .expect("public close resolves existing binding");
+    let close_text = get_text(&close);
+    assert!(
+        close_text.contains("Closed task"),
+        "normal close must resolve the intended bound clone: {close_text}"
+    );
+    assert!(!close_text.contains("AMBIGUOUS WORK TARGET"));
+    assert!(!close_text.contains(home.path().to_string_lossy().as_ref()));
+
+    let persisted = task_store.get(&task_id).unwrap();
+    let portable = serde_json::to_string(&persisted.deliverables).unwrap();
+    assert!(!portable.contains(home.path().to_string_lossy().as_ref()));
+    assert!(!portable.contains("repo_root"));
+    assert!(!portable.contains("git_common_dir"));
+}
+
+#[tokio::test]
+async fn task_bound_merge_uses_persisted_binding_for_duplicate_live_clones() {
+    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let home = TempDir::new().expect("temp HOME");
+    let _home = HomeGuard::enter(home.path());
+
+    let repo_a = GitRepo::new();
+    let repo_b = GitRepo::new();
+    for repo in [&repo_a, &repo_b] {
+        run_git(
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:org/shared-work.git",
+            ],
+            &repo.root,
+        );
+    }
+    let cas_root_a = init_cas_dir(&repo_a.root).expect("init clone A CAS");
+    let cas_root_b = init_cas_dir(&repo_b.root).expect("init clone B CAS");
+    disable_system_a(&cas_root_a);
+
+    let store = cas::store::known_repos::open_host_known_repo_store().unwrap();
+    let common_b = repo_b.root.join(".git").canonicalize().unwrap();
+    store
+        .bind("remote:github.com/org/shared-work", &repo_b.root, &common_b)
+        .unwrap();
+    drop(store);
+
+    let task_store = open_task_store(&cas_root_a).expect("open clone A task store");
+    let mut task = Task::new(
+        "duplicate-selector-task".to_string(),
+        "Bound duplicate selector merge".to_string(),
+    );
+    task.assignee = Some("alice".to_string());
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "remote:github.com/org/shared-work".to_string(),
+        target_branch: "main".to_string(),
+    });
+    task_store.add(&task).expect("add task binding");
+
+    let wt_path = cas_root_b.join("worktrees").join("alice");
+    repo_b.add_worktree(&wt_path, "factory/alice");
+    std::fs::write(wt_path.join("bound-repo-work.txt"), "clone B only").unwrap();
+    run_git(&["add", "bound-repo-work.txt"], &wt_path);
+    run_git(&["commit", "-m", "bound clone B work"], &wt_path);
+
+    let a_head_before = git_stdout(&repo_a.root, &["rev-parse", "HEAD"]);
+    let a_index_before = git_stdout(&repo_a.root, &["write-tree"]);
+    let a_status_before = git_stdout(&repo_a.root, &["status", "--porcelain=v1"]);
+    let _cwd = CwdGuard::enter(&repo_a.root);
+
+    // Constructing a fresh service after the binding write models process
+    // restart: resolution must come from host persistence, never cwd/recency.
+    let svc = make_service(cas_root_a);
+    let mut req = coord_req("worktree_merge");
+    req.id = Some("factory/alice".to_string());
+    req.task_id = Some(task.id);
+    req.allow_trunk = Some(true);
+    req.cleanup = Some(false);
+    let result = svc
+        .coordination(Parameters(req))
+        .await
+        .expect("task-bound duplicate-selector merge call");
+    let text = get_text(&result);
+    assert!(
+        text.contains("Merged worktree") && text.contains("task WorkTarget"),
+        "public manager construction and merge must use the persisted binding.\nGot:\n{text}"
+    );
+
+    assert!(repo_b.root.join("bound-repo-work.txt").exists());
+    assert!(!repo_a.root.join("bound-repo-work.txt").exists());
+    assert_eq!(
+        git_stdout(&repo_a.root, &["rev-parse", "HEAD"]),
+        a_head_before
+    );
+    assert_eq!(git_stdout(&repo_a.root, &["write-tree"]), a_index_before);
+    assert_eq!(
+        git_stdout(&repo_a.root, &["status", "--porcelain=v1"]),
+        a_status_before
     );
 }
 

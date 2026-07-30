@@ -30,10 +30,10 @@ verify on upgrade) · 🔧 fix shipped · 🏗 EPIC · ⏭ n/a
 
 - **CAS validated against:** Codex CLI **0.128.0** (the `crates/cas-pty/src/pty.rs` effort-approach
   comment pins to 0.128).
-- **Locally installed:** **0.145.0** (`codex-cli 0.145.0`, checked 2026-07-22).
-- **Latest stable:** **0.145.0** (2026-07-21). **0.146.0** is prerelease-only (alpha.2 as of
-  2026-07-22) — untracked under this diary's stable-only policy.
-- **Gap:** ~17 minor versions between the validated pin (0.128) and what's installed/latest (0.145).
+- **Locally installed:** **0.146.0** (`codex-cli 0.146.0`, checked 2026-07-30).
+- **Latest stable:** **0.146.0** (2026-07-29). **0.147.0** remains prerelease-only (alpha.2 as of
+  2026-07-30) — untracked under this diary's stable-only policy.
+- **Gap:** ~18 minor versions between the validated pin (0.128) and what's installed/latest (0.146).
   The entries below are a *triage pass* against the touchpoints, not a per-item code audit —
   upgrade-time re-verification is the trigger for promoting any 👀 to a task. (Contrast the Claude
   Code diary's .166/.162 entries, which were deep-verified for specific user questions.) The
@@ -71,7 +71,8 @@ The load-bearing surface, all in `crates/cas-pty/src/pty.rs::PtyConfig::codex` u
 
 | Codex version | Headline | CAS verdict | Pointer |
 |---------------|----------|-------------|---------|
-| 0.146.0-alpha | (pre-release; alpha.2 as of 2026-07-22 — untracked until stable) | — | — |
+| 0.147.0-alpha | (pre-release; alpha.2 as of 2026-07-30 — untracked until stable) | — | — |
+| 0.146.0 | **Live MCP refresh/reconnect** · executor skills and Agent Plugins · approval-state preservation | 👀 watch | this doc |
 | 0.145.0 | **Multi-agent V2 stable** · broader `/import` · MCP startup hardening · concurrent skill discovery · approval tightening | 👀 watch | this doc |
 | 0.144.1–.4 | Installer/code-mode reliability · Guardian auto-review prompt revert · two empty patch releases | ✅ no action | this doc |
 | 0.144.0 | **`writes` app-approval mode** · MCP auth elicitation default · plugin skill-loading perf · Ultra+multi-agent usage warn | 👀 watch | this doc |
@@ -89,6 +90,46 @@ The load-bearing surface, all in `crates/cas-pty/src/pty.rs::PtyConfig::codex` u
 ---
 
 ## Entries
+
+### 0.146.0 — live MCP refresh/reconnect · executor skills and Agent Plugins · approval continuity
+
+Reviewed 2026-07-30. Triage pass vs touchpoints. Source: official `rust-v0.146.0` release
+(`gh release view rust-v0.146.0 --repo openai/codex`; published 2026-07-29).
+
+- **MCP connections and Apps tools now stay current after authentication or configuration changes,
+  replace closed servers, and refresh without restarting healthy connections (#34952, #34957,
+  #35028, #35144, #35146, #35151).** → 👀 **touchpoint: MCP (`cs`).** Live reconciliation should
+  improve recovery for the local stdio server, but catalog/runtime refresh is load-bearing: on
+  upgrade, change or explicitly refresh MCP configuration and verify `mcp__cs__task` and
+  `mcp__cs__coordination` remain callable, with no stale catalog and no healthy `cs` connection
+  needlessly restarted.
+- **Codex can discover executor-provided skills and securely read their resources, including
+  explicitly selected skills (#35184, #35198); tight context budgets retain more skills and warn
+  before catalog truncation (#34732, #34738, #34997).** → 👀 **touchpoint: `.codex/skills/` +
+  `.codex/agents/`.** This expands skill sources and changes budget-pressure behavior. Verify the
+  CAS-synced mirror remains discoverable in a worktree, explicit resource reads stay within the
+  selected skill, and truncation warnings do not silently hide required worker guidance.
+- **Agent Plugins manifests and workspace publishing are now supported, with additional marketplaces
+  for Amazon Bedrock and Claude Code (#35105, #35254, #34931, #34979).** → 👀 **touchpoint:
+  `.codex/skills/` + `.codex/agents/`; multi-agent behavior.** CAS does not depend on Codex's plugin
+  marketplace or native agent orchestration, so no integration change is required. On upgrade,
+  confirm plugin-contributed agents/skills do not shadow the CAS mirror or relax the CAS
+  supervisor/worker contract.
+- **Approval settings and reviewer identity are preserved across interruptions, replay, imports, and
+  forks (#34989, #34664, with related continuity fixes in #34839, #34777, #35524).** → 👀
+  **touchpoint: `--yolo` + approval and multi-agent behavior.** Continuity is useful, but a resumed or
+  forked factory session must retain the non-interactive bypass rather than restoring an unrelated
+  interactive approval state; smoke interruption/resume once during upgrade validation.
+- **Proxy routing now applies consistently across authentication, plugin downloads, MCP
+  authorization, remote execution, WebSockets, redirects, and LM Studio (#34479, #34509, #34655,
+  #34678, #35023, #35056, #35239).** → 👀 **touchpoints: MCP (`cs`) and sandbox/network behavior.**
+  The local stdio `cs` server needs no proxy or OAuth, but host proxy policy must not prevent its
+  startup or alter factory network access under `--yolo`.
+- **Named/pinned/side-conversation sessions, paginated and ephemeral forks, remote Code Mode hosts,
+  standalone web search for custom providers, terminal rendering, installers, macOS signing,
+  enterprise update controls, and app-server performance work.** → ⏭ n/a to the documented CAS PTY
+  launch contract. The release notes report no `--yolo`, `--no-alt-screen`, `--model`,
+  `model_reasoning_effort`, `developer_instructions`, or `AGENTS.md` contract change.
 
 ### 0.145.0 — multi-agent V2 stable · broader `/import` · MCP startup and skills hardening
 

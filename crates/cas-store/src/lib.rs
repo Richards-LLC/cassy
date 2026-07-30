@@ -50,6 +50,7 @@ mod prompt_store;
 mod recording_store;
 mod recording_text_store;
 mod reminder_store;
+mod retrieval_store;
 mod skill_store;
 mod spawn_queue_store;
 mod spec_store;
@@ -129,6 +130,13 @@ pub use prompt_queue_store::{
 pub use reminder_store::{
     Reminder, ReminderExpiryOutcome, ReminderStatus, ReminderStore, ReminderTriggerType,
     SqliteReminderStore, expire_stale_bounded,
+};
+
+// Retrieval provenance and explicit outcome feedback
+pub use retrieval_store::{
+    DEFAULT_RETRIEVAL_POLICY, RETRIEVAL_SCHEMA, RETRIEVAL_SCHEMA_STATEMENTS, RetrievalAggregate,
+    RetrievalHitIdentity, RetrievalOutcome, RetrievalOutcomeEvent, RetrievalQuery, RetrievalStore,
+    SqliteRetrievalStore,
 };
 
 // Spawn queue store for worker lifecycle commands

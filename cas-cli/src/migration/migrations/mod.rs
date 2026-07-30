@@ -184,6 +184,7 @@ mod m205_agents_factory_session_index;
 mod m206_spawn_queue_add_task_id;
 mod m207_task_lease_history_add_reason;
 mod m208_prompt_queue_recipient_seen_create_table;
+mod m209_retrieval_feedback_create_tables;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -377,6 +378,8 @@ pub const MIGRATIONS: &[Migration] = &[
     m207_task_lease_history_add_reason::MIGRATION,
     // Register worker inbox per-recipient seen state (cas-337e)
     m208_prompt_queue_recipient_seen_create_table::MIGRATION,
+    // Versioned retrieval identity and explicit outcome feedback (cas-aeac)
+    m209_retrieval_feedback_create_tables::MIGRATION,
 ];
 
 #[cfg(test)]

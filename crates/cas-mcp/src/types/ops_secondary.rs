@@ -7,7 +7,7 @@ use super::deser;
 pub struct SearchContextRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'search', 'context', 'context_for_subagent', 'observe', 'entity_list', 'entity_show', 'entity_extract', 'code_search', 'code_show', 'grep', 'blame'"
+        description = "Action: 'search', 'retrieval_feedback', 'retrieval_metrics', 'context', 'context_for_subagent', 'observe', 'entity_list', 'entity_show', 'entity_extract', 'code_search', 'code_show', 'grep', 'blame'"
     )]
     pub action: String,
 
@@ -15,6 +15,37 @@ pub struct SearchContextRequest {
     #[schemars(description = "Search query")]
     #[serde(default)]
     pub query: Option<String>,
+
+    /// Opt into a versioned structured search response with provenance.
+    /// Omit for the legacy text response. Currently only version 1 is supported.
+    #[schemars(description = "Structured provenance response version for search (currently: 1)")]
+    #[serde(default, deserialize_with = "deser::option_usize")]
+    pub provenance_version: Option<usize>,
+
+    /// Retrieval query identity returned by a provenance search.
+    #[schemars(description = "Query ID returned by a provenance search")]
+    #[serde(default)]
+    pub query_id: Option<String>,
+
+    /// Retrieval result identity receiving an explicit outcome.
+    #[schemars(description = "Result ID from the identified provenance search")]
+    #[serde(default)]
+    pub result_id: Option<String>,
+
+    /// Explicit retrieval outcome.
+    #[schemars(description = "Outcome: 'used', 'helpful', 'ignored', 'corrected', or 'harmful'")]
+    #[serde(default)]
+    pub outcome: Option<String>,
+
+    /// Actor recording explicit retrieval feedback. Stored only as a hash.
+    #[schemars(description = "Actor identity for feedback attribution (stored as a hash)")]
+    #[serde(default)]
+    pub actor_id: Option<String>,
+
+    /// Optional opaque ID of the correcting entry/rule/task/code record.
+    #[schemars(description = "Opaque correction record ID (required for corrected outcomes)")]
+    #[serde(default)]
+    pub correction_ref: Option<String>,
 
     /// Document type filter: entry, task, rule, skill, code_symbol, code_file
     #[schemars(

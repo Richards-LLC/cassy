@@ -382,6 +382,122 @@ fn test_mcp_task_create_cannot_escape_cas_sandbox() {
 }
 
 #[test]
+fn test_sandbox_init_and_serve_never_touch_inherited_host_known_repos() {
+    let inherited = tempfile::tempdir().expect("create inherited host sentinel");
+    let host_home = inherited.path().join("home");
+    let host_xdg = inherited.path().join("xdg-config");
+    let host_cas = host_home.join(".cas");
+    std::fs::create_dir_all(&host_cas).unwrap();
+    std::fs::create_dir_all(&host_xdg).unwrap();
+    let host_config_sentinel = host_xdg.join("sentinel.toml");
+    std::fs::write(&host_config_sentinel, b"host-config-must-not-change").unwrap();
+    let host_db = host_cas.join("cas.db");
+    {
+        let conn = rusqlite::Connection::open(&host_db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE known_repos (
+                path TEXT PRIMARY KEY,
+                first_seen_at TEXT NOT NULL,
+                last_touched_at TEXT NOT NULL,
+                touch_count INTEGER NOT NULL DEFAULT 1
+             );
+             INSERT INTO known_repos
+                (path, first_seen_at, last_touched_at, touch_count)
+             VALUES
+                ('/sentinel/host/repo', 'HOST-BEFORE', 'HOST-BEFORE', 41);",
+        )
+        .unwrap();
+    }
+    let host_db_before = std::fs::read(&host_db).unwrap();
+    let host_config_before = std::fs::read(&host_config_sentinel).unwrap();
+
+    // The initializer starts with explicit inherited host paths. CasSandbox
+    // must replace them before launching the normal, non-cfg(test) `cas init`.
+    let sandbox = CasSandbox::new_with_host_environment(&host_home, &host_xdg);
+    assert_eq!(
+        std::fs::read(&host_db).unwrap(),
+        host_db_before,
+        "sandbox init mutated the inherited host known-repo database"
+    );
+    assert_eq!(
+        std::fs::read(&host_config_sentinel).unwrap(),
+        host_config_before,
+        "sandbox init mutated inherited XDG config state"
+    );
+
+    let sandbox_host_db = sandbox.home_dir().join(".cas/cas.db");
+    assert!(
+        sandbox_host_db.is_file(),
+        "sandbox init must create its host registry under sandbox HOME"
+    );
+    let (registered_path, touches_after_init): (String, i64) = {
+        let conn = rusqlite::Connection::open(&sandbox_host_db).unwrap();
+        conn.query_row("SELECT path, touch_count FROM known_repos", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap()
+    };
+    assert_eq!(
+        std::path::PathBuf::from(registered_path)
+            .canonicalize()
+            .unwrap(),
+        sandbox.path().canonicalize().unwrap(),
+        "sandbox init must register only the sandbox project"
+    );
+    assert_eq!(touches_after_init, 1);
+
+    // Prove the same overwrite is applied to the serve path, even when a
+    // caller seeds hostile HOME/XDG values on the command itself.
+    let mut serve = Command::new(env!("CARGO_BIN_EXE_cas"));
+    serve
+        .env("HOME", &host_home)
+        .env("XDG_CONFIG_HOME", &host_xdg);
+    sandbox.configure_command(&mut serve);
+    assert_command_is_sandboxed(&serve, &sandbox);
+    let mut client = McpTestClient::spawn_command(serve);
+    let initialized = client.initialize();
+    assert!(
+        initialized.error.is_none(),
+        "sandbox serve initialization failed: {:?}",
+        initialized.error
+    );
+    drop(client);
+
+    let touches_after_serve: i64 = rusqlite::Connection::open(&sandbox_host_db)
+        .unwrap()
+        .query_row(
+            "SELECT touch_count FROM known_repos WHERE path = ?1",
+            [sandbox.path().canonicalize().unwrap().to_string_lossy()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        touches_after_serve >= 2,
+        "sandbox serve must register/touch the sandbox-local repo"
+    );
+    assert_eq!(
+        std::fs::read(&host_db).unwrap(),
+        host_db_before,
+        "sandbox serve mutated the inherited host known-repo database"
+    );
+    assert_eq!(
+        std::fs::read(&host_config_sentinel).unwrap(),
+        host_config_before,
+        "sandbox serve mutated inherited XDG config state"
+    );
+    let host_row: (String, String, i64) = rusqlite::Connection::open(&host_db)
+        .unwrap()
+        .query_row(
+            "SELECT first_seen_at, last_touched_at, touch_count
+             FROM known_repos WHERE path = '/sentinel/host/repo'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(host_row, ("HOST-BEFORE".into(), "HOST-BEFORE".into(), 41));
+}
+
+#[test]
 fn test_mcp_tool_call_search() {
     let sandbox = CasSandbox::new();
 

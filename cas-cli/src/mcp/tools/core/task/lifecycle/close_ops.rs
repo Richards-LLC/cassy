@@ -1547,7 +1547,34 @@ impl CasCore {
         // they're safe to run in a shared worktree.
         let bypass_close_gates =
             req.bypass_code_review.unwrap_or(false) && is_supervisor_from_env();
-        let worker_worktree_path = self.resolve_worker_worktree_path(&task);
+        let worker_worktree_path = match self.resolve_worker_worktree_path(
+            &task,
+            declared_repo_context.as_ref(),
+        ) {
+            Ok(path) => path,
+            Err(message) => return Ok(Self::tool_error(message)),
+        };
+        // Explicit work targets opt into a fail-closed executable gate on
+        // every close path, independent of review owner/depth/bypass. This
+        // keeps normal close aligned with direct update-to-closed: neither
+        // may select a process-cwd or merely most-recent worker checkout.
+        let declared_hook_evidence = if let Some(context) = declared_repo_context.as_ref() {
+            match run_declared_pre_close_hook(
+                &task,
+                context,
+                worker_worktree_path.as_deref(),
+                req.commit_receipt.as_deref(),
+            ) {
+                Ok(evidence) => Some(evidence),
+                Err(message) => {
+                    return Ok(Self::tool_error(format!(
+                        "⚠️ PRE-CLOSE HOOK FAILED\n\n{message}"
+                    )));
+                }
+            }
+        } else {
+            None
+        };
 
         // cas-895d: uncommitted work gate.
         //
@@ -1871,7 +1898,9 @@ impl CasCore {
             // the shared main checkout's working-tree WIP. Sibling gates
             // (cas-ee2b / cas-bc1b) already use this authority; lint was
             // the remaining caller of bare `close_project_root`.
-            let lint_outcome = if let Some(worker_wt) = worker_worktree_path.as_ref() {
+            let lint_outcome = if declared_hook_evidence.is_some() {
+                LightweightLintOutcome::Pass
+            } else if let Some(worker_wt) = worker_worktree_path.as_ref() {
                 // cas-7efe: single close-time resolver, not a bare "main".
                 run_lightweight_structural_lint_with_scope(
                     worker_wt,
@@ -1895,6 +1924,7 @@ impl CasCore {
                     let now = chrono::Utc::now();
                     task_to_pend.status = TaskStatus::PendingSupervisorReview;
                     task_to_pend.updated_at = now;
+                    task_to_pend.deliverables.pre_close_hook = declared_hook_evidence.clone();
                     // Persist the close reason so the supervisor can see it.
                     if let Some(ref reason) = req.reason {
                         task_to_pend.close_reason = Some(reason.clone());
@@ -2074,6 +2104,7 @@ impl CasCore {
         task.status = TaskStatus::Closed;
         task.closed_at = Some(now);
         task.updated_at = now;
+        task.deliverables.pre_close_hook = declared_hook_evidence;
         // cas-eaf8: preserve the task-specific factory anchor after close.
         // The epic close guard needs this durable receipt to distinguish
         // this task's merged work from later, unrelated commits added when
@@ -2556,22 +2587,61 @@ impl CasCore {
     pub(crate) fn resolve_worker_worktree_path(
         &self,
         task: &cas_types::Task,
-    ) -> Option<std::path::PathBuf> {
-        // System A first (unchanged behavior when it resolves).
-        if let Some(worktree_id) = task.worktree_id.as_deref() {
-            if let Some(path) = self
+        declared_repo_context: Option<
+            &crate::mcp::tools::core::task::repo_context::RepoContext,
+        >,
+    ) -> Result<Option<std::path::PathBuf>, String> {
+        let system_a = task.worktree_id.as_deref().and_then(|worktree_id| {
+            self
                 .open_worktree_store()
                 .ok()
                 .and_then(|store| store.get(worktree_id).ok())
                 .filter(|wt| wt.removed_at.is_none() && wt.path.exists())
-                .map(|wt| wt.path.clone())
-            {
-                return Some(path);
-            }
+        });
+        // Preserve legacy System-A precedence when no explicit repository was
+        // declared. Explicit targets instead reject multiple distinct
+        // candidates rather than guessing which checkout owns the task.
+        if declared_repo_context.is_none()
+            && let Some(worktree) = system_a.as_ref()
+        {
+            return Ok(Some(worktree.path.clone()));
         }
-        // System B fallback (cas-4b3f): the real day-to-day factory path.
-        let assignee = task.assignee.as_deref()?;
-        resolve_system_b_worktree_path(&self.cas_root, assignee)
+        let system_b = task.assignee.as_deref().and_then(|assignee| {
+            match declared_repo_context {
+                Some(context) => resolve_system_b_worktree_path_for_repo(
+                    &self.cas_root,
+                    &context.repo_root,
+                    assignee,
+                ),
+                None => resolve_system_b_worktree_path(&self.cas_root, assignee),
+            }
+        });
+        let Some(expected) = declared_repo_context else {
+            return Ok(system_b);
+        };
+        if let (Some(worktree), Some(system_b_path)) = (system_a.as_ref(), system_b.as_ref())
+            && worktree.path != *system_b_path
+        {
+            return Err(
+                "PRE-CLOSE HOOK CONTEXT REJECTED: multiple distinct task worktrees match the \
+                 declared target. No close-time executable gate was run."
+                    .to_string(),
+            );
+        }
+        if let Some(worktree) = system_a {
+            validate_pre_close_worktree(&worktree.path, expected, Some(&worktree.branch))?;
+            if let Some(assignee) = task.assignee.as_deref() {
+                let expected_branch = format!("factory/{assignee}");
+                validate_pre_close_worktree(&worktree.path, expected, Some(&expected_branch))?;
+            }
+            return Ok(Some(worktree.path));
+        }
+        if let Some(path) = system_b.as_ref() {
+            let assignee = task.assignee.as_deref().expect("System B requires assignee");
+            let expected_branch = format!("factory/{assignee}");
+            validate_pre_close_worktree(path, expected, Some(&expected_branch))?;
+        }
+        Ok(system_b)
     }
 
     /// Compute why (if at all) the task-verifier step should be skipped
@@ -4391,6 +4461,63 @@ pub(crate) fn resolve_system_b_worktree_path(
     }
 }
 
+fn resolve_system_b_worktree_path_for_repo(
+    cas_root: &std::path::Path,
+    repo_root: &std::path::Path,
+    assignee: &str,
+) -> Option<std::path::PathBuf> {
+    if !is_safe_path_component(assignee) {
+        return None;
+    }
+    let path = system_b_worktree_base_for_repo(cas_root, repo_root).join(assignee);
+    path.join(".git").exists().then_some(path)
+}
+
+fn validate_pre_close_worktree(
+    path: &std::path::Path,
+    expected: &crate::mcp::tools::core::task::repo_context::RepoContext,
+    expected_branch: Option<&str>,
+) -> Result<(), String> {
+    let actual = crate::mcp::tools::core::task::repo_context::resolve_path_context(
+        path,
+        &expected.target_branch,
+    )
+    .map_err(|reason| {
+        format!(
+            "PRE-CLOSE HOOK CONTEXT REJECTED: cannot resolve the task-owned worktree: {reason}"
+        )
+    })?;
+    if actual.repo_selector != expected.repo_selector
+        || actual.git_common_dir != expected.git_common_dir
+    {
+        return Err(format!(
+            "PRE-CLOSE HOOK CONTEXT REJECTED: task targets repository `{}`, but its recorded \
+             worktree resolves to `{}`. No close-time executable gate was run.",
+            expected.repo_selector, actual.repo_selector
+        ));
+    }
+    if let Some(expected_branch) = expected_branch {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(["branch", "--show-current"])
+            .output()
+            .map_err(|error| {
+                format!(
+                    "PRE-CLOSE HOOK CONTEXT REJECTED: cannot inspect task worktree branch: {error}"
+                )
+            })?;
+        let actual_branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !output.status.success() || actual_branch != expected_branch {
+            return Err(format!(
+                "PRE-CLOSE HOOK CONTEXT REJECTED: expected task worktree branch \
+                 `{expected_branch}`, found `{actual_branch}`. No close-time executable gate was run."
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// cas-cf64 (P3, path-traversal hardening): `true` when `name` is safe to
 /// use as a single filesystem path COMPONENT (not a full path) — i.e. it
 /// cannot escape the directory it's joined onto. Rejects empty strings,
@@ -4451,6 +4578,30 @@ fn system_b_worktree_base(cas_root: &std::path::Path) -> std::path::PathBuf {
             }
         }
         _ => cas_root.join("worktrees"),
+    }
+}
+
+fn system_b_worktree_base_for_repo(
+    cas_root: &std::path::Path,
+    repo_root: &std::path::Path,
+) -> std::path::PathBuf {
+    let configured_base_path = crate::config::Config::load(cas_root)
+        .ok()
+        .map(|c| c.worktrees().base_path);
+    match configured_base_path {
+        Some(base_path_template) if base_path_template != DEFAULT_WORKTREE_BASE_PATH_TEMPLATE => {
+            let project_name = repo_root
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("project");
+            let base = base_path_template.replace("{project}", project_name);
+            if base.starts_with('/') {
+                std::path::PathBuf::from(base)
+            } else {
+                repo_root.parent().unwrap_or(repo_root).join(base)
+            }
+        }
+        _ => repo_root.join(".cas").join("worktrees"),
     }
 }
 
@@ -6568,6 +6719,111 @@ pub(crate) enum LightweightLintOutcome {
     Fail(String),
 }
 
+pub(crate) fn run_declared_pre_close_hook(
+    task: &cas_types::Task,
+    repo_context: &crate::mcp::tools::core::task::repo_context::RepoContext,
+    worker_worktree_path: Option<&std::path::Path>,
+    commit_receipt: Option<&str>,
+) -> Result<cas_types::PreCloseHookEvidence, String> {
+    let (execution_root, worktree_branch, task_tip) = match worker_worktree_path {
+        Some(path) => {
+            let branch = git_branch_name(path).ok_or_else(|| {
+                "PRE-CLOSE HOOK CONTEXT REJECTED: task worktree has detached or unreadable HEAD"
+                    .to_string()
+            })?;
+            let tip = commit_receipt
+                .or(task.deliverables.factory_branch_anchor.as_deref())
+                .map(str::to_string)
+                .or_else(|| resolve_branch_sha(path, "HEAD"))
+                .ok_or_else(|| {
+                    "PRE-CLOSE HOOK CONTEXT REJECTED: cannot resolve task-owned commit tip"
+                        .to_string()
+                })?;
+            if !git_ref_exists(path, &tip) {
+                return Err(
+                    "PRE-CLOSE HOOK CONTEXT REJECTED: task commit evidence does not resolve in \
+                     its validated worktree repository."
+                        .to_string(),
+                );
+            }
+            if !git_commit_is_ancestor(path, &tip, "HEAD") {
+                return Err(
+                    "PRE-CLOSE HOOK CONTEXT REJECTED: task commit evidence is not reachable from \
+                     the validated task worktree branch. No close-time executable gate was run."
+                        .to_string(),
+                );
+            }
+            (path, Some(branch), tip)
+        }
+        None => {
+            let tip = commit_receipt
+                .or(task.deliverables.factory_branch_anchor.as_deref())
+                .ok_or_else(|| {
+                    "PRE-CLOSE HOOK CONTEXT REJECTED: declared task repository resolved, but no \
+                     task-owned worktree, commit receipt, or factory anchor identifies the code \
+                     to check. No close-time executable gate was run."
+                        .to_string()
+                })?;
+            if !git_ref_exists(&repo_context.repo_root, tip) {
+                return Err(
+                    "PRE-CLOSE HOOK CONTEXT REJECTED: task commit evidence does not resolve in \
+                     the declared repository. No close-time executable gate was run."
+                        .to_string(),
+                );
+            }
+            if !commit_is_merged_into_parent(
+                &repo_context.repo_root,
+                tip,
+                &repo_context.target_branch,
+            ) {
+                return Err(
+                    "PRE-CLOSE HOOK CONTEXT REJECTED: task commit evidence is not reachable from \
+                     the declared target branch. No close-time executable gate was run."
+                        .to_string(),
+                );
+            }
+            (repo_context.repo_root.as_path(), None, tip.to_string())
+        }
+    };
+    match run_lightweight_structural_lint_at_tip(
+        execution_root,
+        Some(&repo_context.target_branch),
+        &task_tip,
+    ) {
+        LightweightLintOutcome::Pass => Ok(cas_types::PreCloseHookEvidence {
+            repo_selector: repo_context.repo_selector.clone(),
+            target_branch: repo_context.target_branch.clone(),
+            worktree_branch,
+            task_tip: Some(task_tip),
+        }),
+        LightweightLintOutcome::Fail(message) => Err(message),
+    }
+}
+
+fn git_commit_is_ancestor(repo_path: &std::path::Path, commit: &str, descendant: &str) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["merge-base", "--is-ancestor", commit, descendant])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn git_branch_name(repo_path: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["branch", "--show-current"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!branch.is_empty()).then_some(branch)
+}
+
 /// Run the lightweight structural lint used in supervisor-owned review mode
 /// against the working tree at `project_root` (`git diff HEAD` / `--cached`).
 ///
@@ -6608,6 +6864,14 @@ pub(crate) fn run_lightweight_structural_lint_with_scope(
     project_root: &std::path::Path,
     committed_range_parent: Option<&str>,
 ) -> LightweightLintOutcome {
+    run_lightweight_structural_lint_at_tip(project_root, committed_range_parent, "HEAD")
+}
+
+fn run_lightweight_structural_lint_at_tip(
+    project_root: &std::path::Path,
+    committed_range_parent: Option<&str>,
+    task_tip: &str,
+) -> LightweightLintOutcome {
     use std::process::Command;
 
     // Collect the diff text.
@@ -6636,8 +6900,14 @@ pub(crate) fn run_lightweight_structural_lint_with_scope(
                  (fetch or merge base) and retry close."
             ));
         }
+        if !git_ref_exists(project_root, task_tip) {
+            return LightweightLintOutcome::Fail(format!(
+                "Cannot scope structural lint: task tip `{task_tip}` does not resolve in the \
+                 selected task repository."
+            ));
+        }
         let merge_base_out = Command::new("git")
-            .args(["merge-base", "HEAD", parent])
+            .args(["merge-base", task_tip, parent])
             .current_dir(project_root)
             .output();
         let merge_base = match merge_base_out {
@@ -6645,7 +6915,7 @@ pub(crate) fn run_lightweight_structural_lint_with_scope(
                 let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
                 if s.is_empty() {
                     return LightweightLintOutcome::Fail(format!(
-                        "Cannot scope structural lint: empty merge-base between HEAD and \
+                        "Cannot scope structural lint: empty merge-base between task tip and \
                          `{parent}`. Check that the worker branch shares history with the \
                          integration branch."
                     ));
@@ -6654,13 +6924,17 @@ pub(crate) fn run_lightweight_structural_lint_with_scope(
             }
             _ => {
                 return LightweightLintOutcome::Fail(format!(
-                    "Cannot scope structural lint: failed to compute merge-base(HEAD, `{parent}`). \
+                    "Cannot scope structural lint: failed to compute merge-base(task tip, `{parent}`). \
                      Ensure both refs exist in the worker worktree and share history."
                 ));
             }
         };
         match Command::new("git")
-            .args(["diff", "--unified=0", &format!("{merge_base}..HEAD")])
+            .args([
+                "diff",
+                "--unified=0",
+                &format!("{merge_base}..{task_tip}"),
+            ])
             .current_dir(project_root)
             .output()
         {
@@ -6668,8 +6942,8 @@ pub(crate) fn run_lightweight_structural_lint_with_scope(
             Ok(o) => {
                 let stderr = String::from_utf8_lossy(&o.stderr);
                 return LightweightLintOutcome::Fail(format!(
-                    "Cannot scope structural lint: `git diff {merge_base}..HEAD` failed \
-                     against parent `{parent}`.{maybe_stderr}",
+                    "Cannot scope structural lint: `git diff {merge_base}..{task_tip}` failed \
+                     against target branch `{parent}`.{maybe_stderr}",
                     maybe_stderr = if stderr.trim().is_empty() {
                         String::new()
                     } else {

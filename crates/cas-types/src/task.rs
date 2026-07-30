@@ -215,6 +215,18 @@ pub struct WorkTarget {
     pub target_branch: String,
 }
 
+/// Portable evidence identifying the repository/ref scope selected for a
+/// close-time executable gate. Host-local paths are intentionally excluded.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PreCloseHookEvidence {
+    pub repo_selector: String,
+    pub target_branch: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_tip: Option<String>,
+}
+
 /// Deliverables and durable lifecycle evidence for a task.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TaskDeliverables {
@@ -222,6 +234,11 @@ pub struct TaskDeliverables {
     /// worktree mutations. Legacy JSON defaults to no explicit binding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_target: Option<WorkTarget>,
+
+    /// Last successfully selected close-hook scope. This is sync-safe audit
+    /// evidence, not an authoritative host-local path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_close_hook: Option<PreCloseHookEvidence>,
 
     /// Files changed (excluding deletions)
     #[serde(default)]
@@ -284,6 +301,7 @@ pub struct TaskDeliverables {
 impl TaskDeliverables {
     pub fn is_empty(&self) -> bool {
         self.work_target.is_none()
+            && self.pre_close_hook.is_none()
             && self.files_changed.is_empty()
             && self.commit_hash.is_none()
             && self.merge_commit.is_none()
@@ -535,6 +553,7 @@ mod tests {
     fn legacy_deliverables_json_defaults_to_no_work_target() {
         let deliverables: TaskDeliverables = serde_json::from_str("{}").unwrap();
         assert!(deliverables.work_target.is_none());
+        assert!(deliverables.pre_close_hook.is_none());
     }
 
     #[test]

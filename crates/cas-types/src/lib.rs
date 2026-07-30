@@ -91,7 +91,10 @@ pub use sort::{
     TaskSortOptions,
 };
 pub use spec::{Spec, SpecStatus, SpecType};
-pub use task::{Priority, Task, TaskDeliverables, TaskDepth, TaskStatus, TaskType, WorkTarget};
+pub use task::{
+    PreCloseHookEvidence, Priority, Task, TaskDeliverables, TaskDepth, TaskStatus, TaskType,
+    WorkTarget,
+};
 pub use verification::{
     IssueSeverity, Verification, VerificationIssue, VerificationProvenance, VerificationStatus,
     VerificationType, VerifierCapability,

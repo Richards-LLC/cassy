@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use cas::mcp::{CasCore, CasService};
+use cas::mcp::tools::{TaskCloseRequest, TaskUpdateRequest};
 use cas::store::{init_cas_dir, open_agent_store, open_task_store};
 use cas::types::{Agent, AgentType, Task, TaskType, WorkTarget};
 use cas_mcp::types::CoordinationRequest;
@@ -158,6 +159,27 @@ fn get_text(result: &rmcp::model::CallToolResult) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn close_update_request(id: String) -> TaskUpdateRequest {
+    TaskUpdateRequest {
+        id,
+        title: None,
+        notes: None,
+        priority: None,
+        labels: None,
+        description: None,
+        design: None,
+        acceptance_criteria: None,
+        demo_statement: None,
+        execution_note: None,
+        external_ref: None,
+        assignee: None,
+        status: Some("closed".to_string()),
+        epic: None,
+        epic_verification_owner: None,
+        depth: None,
+    }
 }
 
 // =============================================================================
@@ -420,6 +442,30 @@ struct HomeGuard {
     original: Option<std::ffi::OsString>,
 }
 
+struct VarGuard {
+    key: &'static str,
+    original: Option<std::ffi::OsString>,
+}
+
+impl VarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let original = std::env::var_os(key);
+        unsafe { std::env::set_var(key, value) };
+        Self { key, original }
+    }
+}
+
+impl Drop for VarGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.original {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
+
 impl HomeGuard {
     fn enter(path: &Path) -> Self {
         let original = std::env::var_os("HOME");
@@ -622,6 +668,262 @@ async fn task_bound_cross_repo_merge_mutates_only_declared_repo() {
         a_status_before,
         "repo A working tree must remain unchanged"
     );
+}
+
+#[tokio::test]
+async fn update_to_closed_runs_hook_in_declared_task_worktree_and_records_path_free_evidence() {
+    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let home = TempDir::new().expect("temp HOME");
+    let _home = HomeGuard::enter(home.path());
+    let repo_a = GitRepo::new();
+    let repo_b = GitRepo::new();
+    run_git(
+        &["remote", "add", "origin", "git@github.com:org/spawn-a.git"],
+        &repo_a.root,
+    );
+    run_git(
+        &["remote", "add", "origin", "git@github.com:org/work-b.git"],
+        &repo_b.root,
+    );
+    let cas_root_a = init_cas_dir(&repo_a.root).expect("init repo A CAS");
+    let cas_root_b = init_cas_dir(&repo_b.root).expect("init repo B CAS");
+
+    let own_path = cas_root_b.join("worktrees").join("frontend");
+    repo_b.add_worktree(&own_path, "factory/frontend");
+    std::fs::write(own_path.join("frontend.rs"), "pub fn done() {}\n").unwrap();
+    run_git(&["add", "frontend.rs"], &own_path);
+    run_git(&["commit", "-m", "frontend task"], &own_path);
+    let own_tip = git_stdout(&own_path, &["rev-parse", "HEAD"]);
+
+    let unrelated_path = cas_root_b.join("worktrees").join("worker-pulse");
+    repo_b.add_worktree(&unrelated_path, "factory/worker-pulse");
+    std::fs::write(
+        unrelated_path.join("backend.rs"),
+        "pub fn transient() { todo!(\"mid-edit\") }\n",
+    )
+    .unwrap();
+    run_git(&["add", "backend.rs"], &unrelated_path);
+    run_git(&["commit", "-m", "newer unrelated backend work"], &unrelated_path);
+    std::fs::write(unrelated_path.join("dirty.tmp"), "newest dirty worktree").unwrap();
+
+    let task_store = open_task_store(&cas_root_a).expect("task store");
+    let mut task = Task::new("close-via-update".to_string(), "Frontend task".to_string());
+    task.assignee = Some("frontend".to_string());
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "remote:github.com/org/work-b".to_string(),
+        target_branch: "main".to_string(),
+    });
+    task_store.add(&task).expect("add task");
+
+    let core = CasCore::with_daemon(cas_root_a, None, None);
+    core.cas_task_update(Parameters(close_update_request(task.id.clone())))
+    .await
+    .expect("update-to-closed must use frontend context");
+
+    let persisted = task_store.get(&task.id).expect("persisted task");
+    assert_eq!(persisted.status, cas::types::TaskStatus::Closed);
+    let evidence = persisted
+        .deliverables
+        .pre_close_hook
+        .as_ref()
+        .expect("portable hook evidence");
+    assert_eq!(evidence.repo_selector, "remote:github.com/org/work-b");
+    assert_eq!(evidence.worktree_branch.as_deref(), Some("factory/frontend"));
+    assert_eq!(evidence.task_tip.as_deref(), Some(own_tip.as_str()));
+    let json = serde_json::to_string(&persisted.deliverables).unwrap();
+    assert!(!json.contains(home.path().to_string_lossy().as_ref()));
+    assert!(!json.contains(unrelated_path.to_string_lossy().as_ref()));
+}
+
+#[tokio::test]
+async fn update_to_closed_fails_closed_when_declared_task_worktree_branch_is_ambiguous() {
+    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let home = TempDir::new().expect("temp HOME");
+    let _home = HomeGuard::enter(home.path());
+    let repo_a = GitRepo::new();
+    let repo_b = GitRepo::new();
+    run_git(
+        &["remote", "add", "origin", "git@github.com:org/spawn-a.git"],
+        &repo_a.root,
+    );
+    run_git(
+        &["remote", "add", "origin", "git@github.com:org/work-b.git"],
+        &repo_b.root,
+    );
+    let cas_root_a = init_cas_dir(&repo_a.root).expect("init repo A CAS");
+    let cas_root_b = init_cas_dir(&repo_b.root).expect("init repo B CAS");
+
+    let misleading_path = cas_root_b.join("worktrees").join("frontend");
+    repo_b.add_worktree(&misleading_path, "factory/other-worker");
+
+    let task_store = open_task_store(&cas_root_a).expect("task store");
+    let mut task = Task::new("ambiguous-close".to_string(), "Frontend task".to_string());
+    task.assignee = Some("frontend".to_string());
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "remote:github.com/org/work-b".to_string(),
+        target_branch: "main".to_string(),
+    });
+    task_store.add(&task).expect("add task");
+
+    let core = CasCore::with_daemon(cas_root_a, None, None);
+    let error = core
+        .cas_task_update(Parameters(close_update_request(task.id.clone())))
+        .await
+        .expect_err("mismatched task branch must fail closed");
+    assert!(
+        error.message.contains("expected task worktree branch"),
+        "unexpected rejection: {}",
+        error.message
+    );
+    let persisted = task_store.get(&task.id).expect("persisted task");
+    assert_eq!(persisted.status, cas::types::TaskStatus::Open);
+    assert!(persisted.deliverables.pre_close_hook.is_none());
+}
+
+#[tokio::test]
+async fn update_to_closed_failed_hook_leaves_status_and_evidence_unchanged() {
+    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let home = TempDir::new().expect("temp HOME");
+    let _home = HomeGuard::enter(home.path());
+    let repo_a = GitRepo::new();
+    let repo_b = GitRepo::new();
+    run_git(
+        &["remote", "add", "origin", "git@github.com:org/spawn-a.git"],
+        &repo_a.root,
+    );
+    run_git(
+        &["remote", "add", "origin", "git@github.com:org/work-b.git"],
+        &repo_b.root,
+    );
+    let cas_root_a = init_cas_dir(&repo_a.root).expect("init repo A CAS");
+    let cas_root_b = init_cas_dir(&repo_b.root).expect("init repo B CAS");
+
+    let own_path = cas_root_b.join("worktrees").join("frontend");
+    repo_b.add_worktree(&own_path, "factory/frontend");
+    std::fs::write(
+        own_path.join("unfinished.rs"),
+        "pub fn unfinished() { todo!(\"not done\") }\n",
+    )
+    .unwrap();
+    run_git(&["add", "unfinished.rs"], &own_path);
+    run_git(&["commit", "-m", "unfinished frontend task"], &own_path);
+
+    let task_store = open_task_store(&cas_root_a).expect("task store");
+    let mut task = Task::new("failed-hook-close".to_string(), "Frontend task".to_string());
+    task.assignee = Some("frontend".to_string());
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "remote:github.com/org/work-b".to_string(),
+        target_branch: "main".to_string(),
+    });
+    task.deliverables.pre_close_hook = Some(cas::types::PreCloseHookEvidence {
+        repo_selector: "remote:github.com/org/work-b".to_string(),
+        target_branch: "main".to_string(),
+        worktree_branch: Some("factory/frontend".to_string()),
+        task_tip: Some("prior-success".to_string()),
+    });
+    task_store.add(&task).expect("add task");
+
+    let core = CasCore::with_daemon(cas_root_a, None, None);
+    let error = core
+        .cas_task_update(Parameters(close_update_request(task.id.clone())))
+        .await
+        .expect_err("lint failure must reject update-to-closed");
+    assert!(
+        error.message.contains("Lightweight structural lint found"),
+        "unexpected hook failure: {}",
+        error.message
+    );
+    let persisted = task_store.get(&task.id).expect("persisted task");
+    assert_eq!(persisted.status, cas::types::TaskStatus::Open);
+    assert_eq!(
+        persisted
+            .deliverables
+            .pre_close_hook
+            .as_ref()
+            .and_then(|evidence| evidence.task_tip.as_deref()),
+        Some("prior-success"),
+        "failed hook must not overwrite prior portable evidence"
+    );
+}
+
+#[tokio::test]
+async fn normal_close_lints_task_anchor_not_newer_same_worker_or_unrelated_worktree() {
+    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let home = TempDir::new().expect("temp HOME");
+    let _home = HomeGuard::enter(home.path());
+    let _role = VarGuard::set("CAS_AGENT_ROLE", "worker");
+    let _factory = VarGuard::set("CAS_FACTORY_MODE", "1");
+    let repo_a = GitRepo::new();
+    let repo_b = GitRepo::new();
+    run_git(
+        &["remote", "add", "origin", "git@github.com:org/spawn-a.git"],
+        &repo_a.root,
+    );
+    run_git(
+        &["remote", "add", "origin", "git@github.com:org/work-b.git"],
+        &repo_b.root,
+    );
+    let cas_root_a = init_cas_dir(&repo_a.root).expect("init repo A CAS");
+    let cas_root_b = init_cas_dir(&repo_b.root).expect("init repo B CAS");
+
+    let own_path = cas_root_b.join("worktrees").join("frontend");
+    repo_b.add_worktree(&own_path, "factory/frontend");
+    std::fs::write(own_path.join("task-a.rs"), "pub fn task_a() {}\n").unwrap();
+    run_git(&["add", "task-a.rs"], &own_path);
+    run_git(&["commit", "-m", "task A"], &own_path);
+    let task_a_tip = git_stdout(&own_path, &["rev-parse", "HEAD"]);
+    run_git(&["merge", "--no-ff", "factory/frontend", "-m", "merge task A"], &repo_b.root);
+
+    // Same worker starts task B after A was merged. Its bad lint must not be
+    // attributed to A; A's recorded anchor is the task-owned proof scope.
+    std::fs::write(
+        own_path.join("task-b.rs"),
+        "pub fn task_b() { todo!(\"later task\") }\n",
+    )
+    .unwrap();
+    run_git(&["add", "task-b.rs"], &own_path);
+    run_git(&["commit", "-m", "later task B"], &own_path);
+
+    let unrelated_path = cas_root_b.join("worktrees").join("worker-pulse");
+    repo_b.add_worktree(&unrelated_path, "factory/worker-pulse");
+    std::fs::write(unrelated_path.join("dirty.ts"), "transient type error").unwrap();
+
+    let task_store = open_task_store(&cas_root_a).expect("task store");
+    let mut task = Task::new("normal-close".to_string(), "Task A".to_string());
+    task.status = cas::types::TaskStatus::AwaitingMerge;
+    task.assignee = Some("frontend".to_string());
+    task.deliverables.factory_branch_anchor = Some(task_a_tip.clone());
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "remote:github.com/org/work-b".to_string(),
+        target_branch: "main".to_string(),
+    });
+    task_store.add(&task).expect("add task");
+
+    let core = CasCore::with_daemon(cas_root_a, None, None);
+    let result = core
+        .cas_task_close(Parameters(TaskCloseRequest {
+            id: task.id.clone(),
+            reason: Some("task A complete".to_string()),
+            bypass_code_review: None,
+            code_review_findings: None,
+            search_manifest: None,
+            commit_receipt: None,
+        }))
+        .await
+        .expect("normal close call");
+    let text = get_text(&result);
+    assert!(
+        text.contains("queued for supervisor review"),
+        "task A anchor must pass despite later bad task B and dirty pulse worktree: {text}"
+    );
+    let persisted = task_store.get(&task.id).expect("persisted task");
+    let evidence = persisted
+        .deliverables
+        .pre_close_hook
+        .as_ref()
+        .expect("hook evidence");
+    assert_eq!(evidence.worktree_branch.as_deref(), Some("factory/frontend"));
+    assert_eq!(evidence.task_tip.as_deref(), Some(task_a_tip.as_str()));
 }
 
 /// Negative case: when neither System A nor System B has a matching

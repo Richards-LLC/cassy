@@ -1,5 +1,12 @@
 use crate::mcp::tools::service::imports::*;
 
+#[cfg(feature = "mcp-proxy")]
+fn parse_proxy_health_cache(json: &str) -> serde_json::Result<serde_json::Value> {
+    serde_json::from_str::<cmcp_core::ProxyHealthSnapshot>(json)
+        .map(cmcp_core::ProxyHealthSnapshot::sanitized)
+        .and_then(serde_json::to_value)
+}
+
 impl CasService {
     pub(in crate::mcp::tools::service) async fn system_version(
         &self,
@@ -453,7 +460,7 @@ impl CasService {
                         )
                     })
                     .and_then(|json| {
-                        serde_json::from_str(&json).map_err(|error| {
+                        parse_proxy_health_cache(&json).map_err(|error| {
                             Self::error(
                                 ErrorCode::INTERNAL_ERROR,
                                 format!("MCP proxy health cache is invalid: {error}"),
@@ -466,5 +473,53 @@ impl CasService {
         Ok(Self::success(
             serde_json::to_string_pretty(&snapshot).unwrap_or_default(),
         ))
+    }
+}
+
+#[cfg(all(test, feature = "mcp-proxy"))]
+mod tests {
+    use super::parse_proxy_health_cache;
+
+    #[test]
+    fn forged_cached_health_is_sanitized_before_system_json() {
+        let raw_name = "https://user:token@example.invalid/private";
+        let raw_session = "/home/operator/secret-session";
+        let forged = cmcp_core::ProxyHealthSnapshot {
+            session_id: raw_session.to_string(),
+            generated_at_ms: 42,
+            healthy: 0,
+            degraded: 1,
+            servers: vec![cmcp_core::UpstreamHealth {
+                name: raw_name.to_string(),
+                transport: "Bearer cache-secret".to_string(),
+                state: cmcp_core::UpstreamState::Backoff,
+                attempts: 1,
+                consecutive_failures: 1,
+                tool_count: 0,
+                last_error_code: Some("token=cache-secret\ncontrol".to_string()),
+                last_attempt_at_ms: Some(40),
+                next_retry_at_ms: Some(50),
+            }],
+        };
+        let health = parse_proxy_health_cache(&serde_json::to_string(&forged).unwrap()).unwrap();
+        let json = serde_json::to_string(&health).unwrap();
+
+        assert_eq!(health["session_id"], "proxy-unknown");
+        assert_eq!(health["servers"][0]["transport"], "unknown");
+        assert_eq!(health["servers"][0]["last_error_code"], "unknown");
+        assert!(
+            health["servers"][0]["name"]
+                .as_str()
+                .is_some_and(|name| name.starts_with("upstream-") && name.len() == 41)
+        );
+        for forbidden in [
+            raw_name,
+            raw_session,
+            "Bearer cache-secret",
+            "token=cache-secret",
+            "control",
+        ] {
+            assert!(!json.contains(forbidden), "{forbidden:?} leaked: {json}");
+        }
     }
 }

@@ -224,6 +224,8 @@ impl CasService {
     // Task implementations
     pub(super) async fn task_create(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::TaskCreateRequest;
+        let target_repo = req.target_repo.clone();
+        let target_branch = req.target_branch.clone();
         let inner_req = TaskCreateRequest {
             title: req.title.ok_or_else(|| {
                 Self::error(
@@ -247,7 +249,13 @@ impl CasService {
             epic: req.epic,
             depth: req.depth,
         };
-        self.inner.cas_task_create(Parameters(inner_req)).await
+        self.inner
+            .cas_task_create_with_target(
+                inner_req,
+                target_repo.as_deref(),
+                target_branch.as_deref(),
+            )
+            .await
     }
 
     pub(super) async fn task_show(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
@@ -263,6 +271,8 @@ impl CasService {
 
     pub(super) async fn task_update(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::TaskUpdateRequest;
+        let target_repo = req.target_repo.clone();
+        let target_branch = req.target_branch.clone();
         let inner_req = TaskUpdateRequest {
             id: req
                 .id
@@ -283,7 +293,13 @@ impl CasService {
             epic_verification_owner: req.epic_verification_owner,
             depth: req.depth,
         };
-        self.inner.cas_task_update(Parameters(inner_req)).await
+        self.inner
+            .cas_task_update_with_target(
+                inner_req,
+                target_repo.as_deref(),
+                target_branch.as_deref(),
+            )
+            .await
     }
 
     pub(super) async fn task_start(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {

@@ -370,6 +370,16 @@ pub struct TaskRequest {
     #[serde(default)]
     pub depth: Option<String>,
 
+    /// Explicit repository containing this task's code changes.
+    #[schemars(description = "Repository path containing this task's code changes (create/update).")]
+    #[serde(default)]
+    pub target_repo: Option<String>,
+
+    /// Expected integration branch in the target repository.
+    #[schemars(description = "Expected integration branch in target_repo (create/update).")]
+    #[serde(default)]
+    pub target_branch: Option<String>,
+
     /// Override the alive-worker safety guard on `action=reset` (cas-86c5).
     ///
     /// By default, `reset` refuses to drop the lease of a task whose

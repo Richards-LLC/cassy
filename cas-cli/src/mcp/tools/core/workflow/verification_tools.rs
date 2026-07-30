@@ -17,6 +17,18 @@ impl CasCore {
             data: None,
         })?;
 
+        if let Some(target) = task.deliverables.work_target.as_ref() {
+            crate::mcp::tools::core::task::repo_context::resolve_repo_context(
+                &self.cas_root,
+                target,
+            )
+            .map_err(|message| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(message),
+                data: None,
+            })?;
+        }
+
         // cas-b269: refuse verification against an already-closed task so
         // stale post-close guidance cannot restart the verify/re-close loop.
         if crate::mcp::tools::core::task::lifecycle::stale_close_guard::is_terminal_closed(

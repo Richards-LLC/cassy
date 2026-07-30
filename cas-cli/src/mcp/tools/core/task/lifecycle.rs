@@ -43,6 +43,15 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<TaskCreateRequest>,
     ) -> Result<CallToolResult, McpError> {
+        self.cas_task_create_with_target(req, None, None).await
+    }
+
+    pub(crate) async fn cas_task_create_with_target(
+        &self,
+        req: TaskCreateRequest,
+        target_repo: Option<&str>,
+        target_branch: Option<&str>,
+    ) -> Result<CallToolResult, McpError> {
         let task_store = self.open_task_store()?;
 
         let id = task_store.generate_id().map_err(|e| McpError {
@@ -115,6 +124,13 @@ impl CasCore {
                 data: None,
             })?
             .unwrap_or_default();
+        let work_target =
+            super::repo_context::declare_work_target(&self.cas_root, target_repo, target_branch)
+                .map_err(|message| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(message),
+                    data: None,
+                })?;
 
         let now = chrono::Utc::now();
         // cas-9fff: in factory mode, stamp the creating agent as
@@ -165,7 +181,10 @@ impl CasCore {
             external_ref: req.external_ref,
             content_hash: None,
             branch: None,
-            deliverables: crate::types::TaskDeliverables::default(),
+            deliverables: crate::types::TaskDeliverables {
+                work_target,
+                ..Default::default()
+            },
             team_id: None,
             worktree_id: None,
             pending_verification: false,
@@ -219,8 +238,22 @@ impl CasCore {
         {
             use crate::worktree::GitOperations;
 
-            // Get project root (parent of .cas directory)
-            let project_root = self.cas_root.parent().unwrap_or(&self.cas_root);
+            let declared_context = match task.deliverables.work_target.as_ref() {
+                Some(target) => Some(
+                    super::repo_context::resolve_repo_context(&self.cas_root, target).map_err(
+                        |message| McpError {
+                            code: ErrorCode::INVALID_PARAMS,
+                            message: Cow::from(message),
+                            data: None,
+                        },
+                    )?,
+                ),
+                None => None,
+            };
+            let project_root = declared_context
+                .as_ref()
+                .map(|context| context.repo_root.as_path())
+                .unwrap_or_else(|| self.cas_root.parent().unwrap_or(&self.cas_root));
 
             // Try to create epic branch using git operations directly
             // This works regardless of whether worktrees are enabled
@@ -231,7 +264,10 @@ impl CasCore {
                     let branch_name = format!("epic/{}-{}", slugify_for_branch(&task.title), id);
                     // Base epic branches on the configured trunk, never on
                     // the caller's incidental HEAD (cas-dc28).
-                    let trunk = git_ops.detect_default_branch();
+                    let trunk = declared_context
+                        .as_ref()
+                        .map(|context| context.target_branch.clone())
+                        .unwrap_or_else(|| git_ops.detect_default_branch());
                     let trunk_sha = git_ops.ref_sha(&trunk).unwrap_or_default();
                     let sha_preview = &trunk_sha[..trunk_sha.len().min(8)];
                     match git_ops.create_branch_from(&branch_name, &trunk) {
@@ -399,6 +435,16 @@ impl CasCore {
                 The work is already complete — wait for the supervisor to \
                 review and close it (or reopen it if rework is needed).",
             ));
+        }
+
+        if let Some(target) = task.deliverables.work_target.as_ref() {
+            super::repo_context::resolve_repo_context(&self.cas_root, target).map_err(
+                |message| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(message),
+                    data: None,
+                },
+            )?;
         }
 
         // cas-a844/cas-5054: a genuinely conflicted parked branch is unfinished

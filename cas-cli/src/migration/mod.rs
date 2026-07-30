@@ -930,6 +930,183 @@ mod tests {
     }
 
     #[test]
+    fn test_verifier_migrations_survive_serve_before_update_on_legacy_db() {
+        fn table_shape(
+            conn: &Connection,
+            table: &str,
+        ) -> (
+            Vec<(String, String, i64, Option<String>, i64)>,
+            Vec<(String, i64, i64)>,
+        ) {
+            let mut columns = conn
+                .prepare(&format!(
+                    "SELECT name, type, \"notnull\", dflt_value, pk
+                     FROM pragma_table_info('{table}')"
+                ))
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap();
+            columns.sort();
+
+            let mut indexes = conn
+                .prepare(&format!(
+                    "SELECT name, \"unique\", partial
+                     FROM pragma_index_list('{table}')"
+                ))
+                .unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap();
+            indexes.sort();
+            (columns, indexes)
+        }
+
+        crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
+            let project = home.join("proj");
+            std::fs::create_dir_all(&project).unwrap();
+            crate::store::init_cas_dir(&project).unwrap();
+            let cas_dir = project.join(".cas");
+            let db_path = cas_dir.join("cas.db");
+
+            {
+                let conn = Connection::open(&db_path).unwrap();
+                conn.execute(
+                    "INSERT INTO verifications
+                     (id, task_id, verification_type, provenance, status, summary,
+                      files_reviewed, created_at)
+                     VALUES ('ver-legacy-upgrade', 'cas-legacy', 'task', 'legacy',
+                             'approved', 'preserve this row', '[]',
+                             '2026-01-01T00:00:00Z')",
+                    [],
+                )
+                .unwrap();
+
+                // Recreate the pre-m210 authority shape while retaining a real
+                // legacy row. Remove side tables so the next store open
+                // exercises the same eager schema initialization as `cas serve`.
+                conn.execute_batch(
+                    "DROP INDEX IF EXISTS idx_verification_dispatches_active_task;
+                     DROP INDEX IF EXISTS idx_verification_dispatches_task;
+                     DROP INDEX IF EXISTS idx_verification_capabilities_task;
+                     DROP TABLE verification_dispatches;
+                     DROP TABLE verification_capabilities;
+                     ALTER TABLE verifications DROP COLUMN issuer_agent_id;
+                     ALTER TABLE verifications DROP COLUMN capability_id;
+                     ALTER TABLE verifications DROP COLUMN provenance;
+                     DELETE FROM cas_migrations WHERE id IN (210, 211);",
+                )
+                .unwrap();
+            }
+
+            // Production-equivalent serve startup: current store DDL creates
+            // the authority side tables but cannot alter the legacy primary
+            // table. Historically that made m210's later CREATE TABLE collide.
+            let store = cas_store::SqliteVerificationStore::open(&cas_dir)
+                .expect("serve-first verification store init");
+            drop(store);
+
+            let before = Connection::open(&db_path).unwrap();
+            assert_eq!(
+                before
+                    .query_row(
+                        "SELECT COUNT(*) FROM pragma_table_info('verifications')
+                         WHERE name = 'provenance'",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                0,
+                "serve-first store open must leave the legacy primary table unmigrated"
+            );
+            assert_eq!(
+                before
+                    .query_row(
+                        "SELECT COUNT(*) FROM sqlite_master
+                         WHERE type = 'table'
+                           AND name IN ('verification_capabilities',
+                                        'verification_dispatches')",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                2,
+                "serve-first store open must reproduce the side-table collision precondition"
+            );
+            drop(before);
+
+            let first = run_migrations(&cas_dir, false)
+                .expect("serve-first legacy verifier upgrade must succeed");
+            assert!(
+                first
+                    .applied_names
+                    .iter()
+                    .any(|name| name == "verifier_authority"),
+                "m210 must apply rather than being incorrectly bootstrapped: {:?}",
+                first.applied_names
+            );
+
+            let conn = Connection::open(&db_path).unwrap();
+            let (summary, provenance): (String, String) = conn
+                .query_row(
+                    "SELECT summary, provenance FROM verifications
+                     WHERE id = 'ver-legacy-upgrade'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(summary, "preserve this row");
+            assert_eq!(provenance, "legacy");
+            for index in [
+                "idx_verification_capabilities_task",
+                "idx_verification_dispatches_task",
+                "idx_verification_dispatches_active_task",
+            ] {
+                assert_eq!(
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM sqlite_master
+                         WHERE type = 'index' AND name = ?1",
+                        [index],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                    1,
+                    "missing authority index {index}"
+                );
+            }
+
+            let fresh = Connection::open_in_memory().unwrap();
+            fresh.execute_batch(cas_store::VERIFICATION_SCHEMA).unwrap();
+            for table in [
+                "verifications",
+                "verification_capabilities",
+                "verification_dispatches",
+            ] {
+                assert_eq!(
+                    table_shape(&conn, table),
+                    table_shape(&fresh, table),
+                    "serve-first upgraded `{table}` shape must match a fresh current store"
+                );
+            }
+            drop(conn);
+
+            let second =
+                run_migrations(&cas_dir, false).expect("repeated verifier upgrade must be a no-op");
+            assert_eq!(second.applied_count, 0);
+        });
+    }
+
+    #[test]
     fn test_failing_migration_rolls_back_cleanly() {
         let temp = TempDir::new().unwrap();
         let db_path = temp.path().join("cas.db");

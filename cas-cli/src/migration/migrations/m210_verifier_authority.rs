@@ -11,7 +11,7 @@ pub const MIGRATION: Migration = Migration {
         "ALTER TABLE verifications ADD COLUMN provenance TEXT NOT NULL DEFAULT 'legacy'",
         "ALTER TABLE verifications ADD COLUMN capability_id TEXT",
         "ALTER TABLE verifications ADD COLUMN issuer_agent_id TEXT",
-        "CREATE TABLE verification_capabilities (
+        "CREATE TABLE IF NOT EXISTS verification_capabilities (
             id TEXT PRIMARY KEY,
             task_id TEXT NOT NULL,
             issuer_agent_id TEXT NOT NULL,
@@ -22,7 +22,7 @@ pub const MIGRATION: Migration = Migration {
             bound_at TEXT,
             consumed_at TEXT
         )",
-        "CREATE INDEX idx_verification_capabilities_task
+        "CREATE INDEX IF NOT EXISTS idx_verification_capabilities_task
             ON verification_capabilities(task_id, consumed_at, expires_at)",
     ],
     detect: Some(
@@ -73,6 +73,14 @@ mod tests {
     fn migration_adds_authority_schema_and_preserves_legacy_default() {
         let conn = Connection::open_in_memory().unwrap();
         legacy_verification_schema(&conn);
+        conn.execute(
+            "INSERT INTO verifications
+             (id, task_id, verification_type, status, summary, files_reviewed, created_at)
+             VALUES ('ver-old', 'cas-old', 'task', 'approved', 'old', '[]',
+                     '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
         let detect = super::MIGRATION.detect.unwrap();
         assert_eq!(
             conn.query_row(detect, [], |row| row.get::<_, i64>(0))
@@ -84,14 +92,6 @@ mod tests {
             conn.execute(sql, []).unwrap();
         }
 
-        conn.execute(
-            "INSERT INTO verifications
-             (id, task_id, verification_type, status, summary, files_reviewed, created_at)
-             VALUES ('ver-old', 'cas-old', 'task', 'approved', 'old', '[]',
-                     '2026-01-01T00:00:00Z')",
-            [],
-        )
-        .unwrap();
         assert_eq!(
             conn.query_row(
                 "SELECT provenance FROM verifications WHERE id = 'ver-old'",
@@ -104,6 +104,51 @@ mod tests {
         assert_eq!(
             conn.query_row(detect, [], |row| row.get::<_, i64>(0))
                 .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn migration_tolerates_store_created_capability_schema() {
+        let conn = Connection::open_in_memory().unwrap();
+        legacy_verification_schema(&conn);
+        conn.execute(
+            "INSERT INTO verifications
+             (id, task_id, verification_type, status, summary, files_reviewed, created_at)
+             VALUES ('ver-before-serve', 'cas-old', 'task', 'approved', 'keep-me', '[]',
+                     '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        // Production `cas serve` opens the current VerificationStore before
+        // migrations run. Its IF-NOT-EXISTS schema leaves the legacy
+        // `verifications` table untouched while eagerly creating this side
+        // table and index.
+        conn.execute_batch(cas_store::VERIFICATION_SCHEMA).unwrap();
+
+        for sql in super::MIGRATION.up {
+            conn.execute(sql, []).unwrap();
+        }
+
+        let (summary, provenance): (String, String) = conn
+            .query_row(
+                "SELECT summary, provenance FROM verifications
+                 WHERE id = 'ver-before-serve'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(summary, "keep-me");
+        assert_eq!(provenance, "legacy");
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_verification_capabilities_task'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
             1
         );
     }

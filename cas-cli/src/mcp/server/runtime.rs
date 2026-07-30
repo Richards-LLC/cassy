@@ -259,6 +259,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
                         let count = engine.tool_count().await;
                         eprintln!("[CAS] MCP proxy ready ({count} upstream tools)");
                         write_proxy_catalog_cache(&cas_root, &engine).await;
+                        write_proxy_health_cache(&cas_root, &engine).await;
                         Some(std::sync::Arc::new(engine))
                     }
                     Err(e) => {
@@ -534,9 +535,6 @@ pub async fn write_proxy_catalog_cache(
     engine: &cmcp_core::ProxyEngine,
 ) {
     let servers = engine.catalog_entries_by_server().await;
-    if servers.is_empty() {
-        return;
-    }
     // Convert to the format expected by build_mcp_tools_section: { server: [tool_names] }
     let simplified: std::collections::HashMap<String, Vec<String>> = servers
         .into_iter()
@@ -558,6 +556,27 @@ pub async fn write_proxy_catalog_cache(
     }
 }
 
+/// Persist credential-free optional-upstream health for factory preflight.
+#[cfg(feature = "mcp-proxy")]
+pub async fn write_proxy_health_cache(cas_root: &std::path::Path, engine: &cmcp_core::ProxyEngine) {
+    let snapshot = engine.health_snapshot().await;
+    let cache_path = cas_root.join("proxy_health.json");
+    match serde_json::to_string_pretty(&snapshot) {
+        Ok(json) => {
+            if let Err(error) = std::fs::write(&cache_path, json) {
+                tracing::debug!(
+                    path = %cache_path.display(),
+                    error = %error,
+                    "failed to write MCP proxy health cache"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::debug!(error = %error, "failed to serialize MCP proxy health");
+        }
+    }
+}
+
 // =============================================================================
 // Unit tests for resolve_mcp_serve_root (cas-7cc3)
 // =============================================================================
@@ -567,6 +586,37 @@ mod tests {
     use crate::store::init_cas_dir;
     use crate::test_support::TestEnvGuard;
     use tempfile::TempDir;
+
+    #[cfg(feature = "mcp-proxy")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn empty_proxy_state_clears_stale_catalog_and_writes_health() {
+        let tmp = TempDir::new().unwrap();
+        let cas_root = tmp.path();
+        std::fs::write(cas_root.join("proxy_catalog.json"), r#"{"stale":["tool"]}"#).unwrap();
+        let engine = cmcp_core::ProxyEngine::from_configs(Default::default())
+            .await
+            .unwrap();
+
+        super::write_proxy_catalog_cache(cas_root, &engine).await;
+        super::write_proxy_health_cache(cas_root, &engine).await;
+
+        let catalog: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(cas_root.join("proxy_catalog.json")).unwrap())
+                .unwrap();
+        assert_eq!(catalog, serde_json::json!({}));
+
+        let health: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(cas_root.join("proxy_health.json")).unwrap())
+                .unwrap();
+        assert_eq!(health["healthy"], 0);
+        assert_eq!(health["degraded"], 0);
+        assert!(
+            health["session_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+        );
+        assert_eq!(health["servers"], serde_json::json!([]));
+    }
 
     /// When CLAUDE_PROJECT_DIR is set to a directory that contains a `.cas/`,
     /// resolve_mcp_serve_root must return that `.cas/` path even if the process

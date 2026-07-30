@@ -205,6 +205,18 @@ impl EmbeddedDaemon {
     #[cfg(feature = "mcp-proxy")]
     async fn check_proxy_config_reload(&self) {
         let proxy_path = self.config.cas_root.join("proxy.toml");
+        let proxy = {
+            let proxy_guard = self.proxy.read().await;
+            proxy_guard.as_ref().cloned()
+        };
+        let Some(proxy) = proxy else {
+            return;
+        };
+
+        if proxy.retry_unhealthy().await > 0 {
+            crate::mcp::server::write_proxy_catalog_cache(&self.config.cas_root, &proxy).await;
+            crate::mcp::server::write_proxy_health_cache(&self.config.cas_root, &proxy).await;
+        }
 
         // Check mtime
         let new_mtime = match std::fs::metadata(&proxy_path) {
@@ -228,12 +240,6 @@ impl EmbeddedDaemon {
             *guard = new_mtime;
         }
 
-        // Reload proxy config
-        let proxy_guard = self.proxy.read().await;
-        let Some(proxy) = proxy_guard.as_ref() else {
-            return;
-        };
-
         eprintln!("[CAS] Proxy config changed, reloading...");
 
         let cfg = cmcp_core::config::Config::load_merged(if proxy_path.exists() {
@@ -251,7 +257,12 @@ impl EmbeddedDaemon {
                         eprintln!(
                             "[CAS] Proxy reloaded ({server_count} server(s), {tool_count} tools)"
                         );
-                        crate::mcp::server::write_proxy_catalog_cache(&self.config.cas_root, proxy)
+                        crate::mcp::server::write_proxy_catalog_cache(
+                            &self.config.cas_root,
+                            &proxy,
+                        )
+                        .await;
+                        crate::mcp::server::write_proxy_health_cache(&self.config.cas_root, &proxy)
                             .await;
                     }
                     Err(e) => {

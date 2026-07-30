@@ -230,6 +230,7 @@ enum RepositoryFailure {
     Missing,
     Wrong,
     Ambiguous,
+    StaleBinding,
     TimedOut,
     CandidateLimit,
 }
@@ -476,7 +477,12 @@ fn classify_repository(
                 RepositoryFailure::Ambiguous => (
                     "repository.ambiguous",
                     "The canonical repository selector matches multiple host checkouts.",
-                    "Remove or re-identify duplicate known-repo entries, then rerun preflight.",
+                    "Run `cas known-repos status`, then `cas known-repos bind --repo <path>` to make an explicit host-local choice.",
+                ),
+                RepositoryFailure::StaleBinding => (
+                    "repository.binding_stale",
+                    "The explicit host-local repository binding no longer matches live Git identity.",
+                    "Run `cas known-repos status`, explicitly unbind the stale selector, then bind the intended canonical repository root.",
                 ),
                 RepositoryFailure::TimedOut => (
                     "repository.probe_timed_out",
@@ -889,6 +895,7 @@ fn collect_repository_facts(
         BoundedRepoError::CandidateLimit => RepositoryFailure::CandidateLimit,
         BoundedRepoError::Unavailable => RepositoryFailure::Missing,
         BoundedRepoError::Ambiguous => RepositoryFailure::Ambiguous,
+        BoundedRepoError::StaleBinding => RepositoryFailure::StaleBinding,
     };
     let branch = probe
         .output(project_root, &["symbolic-ref", "--short", "HEAD"])
@@ -920,14 +927,20 @@ fn collect_repository_facts(
     match crate::mcp::tools::core::task::repo_context::resolve_repo_context_bounded(
         cas_root, &target, probe,
     ) {
-        Ok(context) if context.repo_selector == active.repo_selector => Ok(RepositoryFacts {
-            selector: context.repo_selector,
-            target_branch: branch,
-        }),
+        Ok(context)
+            if context.repo_selector == active.repo_selector
+                && context.repo_root == active.repo_root =>
+        {
+            Ok(RepositoryFacts {
+                selector: context.repo_selector,
+                target_branch: branch,
+            })
+        }
         Ok(_) => Err(RepositoryFailure::Wrong),
         Err(BoundedRepoError::TimedOut) => Err(RepositoryFailure::TimedOut),
         Err(BoundedRepoError::CandidateLimit) => Err(RepositoryFailure::CandidateLimit),
         Err(BoundedRepoError::Ambiguous) => Err(RepositoryFailure::Ambiguous),
+        Err(BoundedRepoError::StaleBinding) => Err(RepositoryFailure::StaleBinding),
         Err(BoundedRepoError::Unavailable) => Err(RepositoryFailure::Wrong),
     }
 }
@@ -1660,6 +1673,84 @@ mod tests {
                 if selector == "project:preflight-boundary" && target_branch == "main"),
             "unexpected repository facts: {facts:?}"
         );
+    }
+
+    #[cfg(feature = "mcp-server")]
+    #[test]
+    fn repository_preflight_honors_binding_without_disclosing_host_paths() {
+        use cas_store::KnownRepoStore;
+
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        let home = dirs::home_dir().unwrap();
+        let clone_a = home.join("clone-a");
+        let clone_b = home.join("clone-b");
+        let git = |repo: &Path, args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(repo)
+                    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                    .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        for repo in [&clone_a, &clone_b] {
+            std::fs::create_dir(repo).unwrap();
+            git(repo, &["init", "-q", "-b", "main"]);
+            git(
+                repo,
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "git@github.com:org/preflight-shared.git",
+                ],
+            );
+            std::fs::create_dir(repo.join(".cas")).unwrap();
+            crate::store::known_repos::register_repo_strict(repo).unwrap();
+        }
+        let (selector, root_b, common_b) =
+            crate::mcp::tools::core::task::repo_context::binding_identity_for_path(&clone_b)
+                .unwrap();
+        crate::store::known_repos::open_host_known_repo_store()
+            .unwrap()
+            .bind(&selector, &root_b, &common_b)
+            .unwrap();
+
+        let probe = crate::mcp::tools::core::task::repo_context::BoundedRepoProbe::new(
+            Deadline::after(Duration::from_secs(2)),
+            Duration::from_millis(500),
+            8,
+        );
+        let ready = collect_repository_facts(&clone_b, &clone_b.join(".cas"), &probe);
+        assert!(matches!(ready, Ok(RepositoryFacts { ref selector, .. })
+            if selector == "remote:github.com/org/preflight-shared"));
+        assert!(matches!(
+            collect_repository_facts(&clone_a, &clone_a.join(".cas"), &probe),
+            Err(RepositoryFailure::Wrong)
+        ));
+
+        git(
+            &clone_b,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "git@github.com:org/changed.git",
+            ],
+        );
+        let stale = collect_repository_facts(&clone_a, &clone_a.join(".cas"), &probe);
+        assert!(matches!(stale, Err(RepositoryFailure::StaleBinding)));
+        let mut findings = Vec::new();
+        let report = classify_repository(stale, &mut findings);
+        let serialized = serde_json::to_string(&(report, findings)).unwrap();
+        assert!(serialized.contains("repository.binding_stale"));
+        assert!(!serialized.contains(home.to_string_lossy().as_ref()));
+        assert!(!serialized.contains(clone_a.to_string_lossy().as_ref()));
+        assert!(!serialized.contains(clone_b.to_string_lossy().as_ref()));
     }
 
     #[cfg(unix)]

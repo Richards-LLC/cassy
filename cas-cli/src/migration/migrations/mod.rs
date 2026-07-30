@@ -189,6 +189,7 @@ mod m210_verifier_authority;
 mod m211_verification_dispatches;
 mod m212_worker_delivery_transactions;
 mod m213_verification_proof_boundaries;
+pub mod m214_known_repo_bindings;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -390,6 +391,7 @@ pub const MIGRATIONS: &[Migration] = &[
     m211_verification_dispatches::MIGRATION,
     m212_worker_delivery_transactions::MIGRATION,
     m213_verification_proof_boundaries::MIGRATION,
+    m214_known_repo_bindings::MIGRATION,
 ];
 
 #[cfg(test)]

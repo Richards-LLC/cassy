@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::StoreError;
 
@@ -36,6 +36,19 @@ pub struct KnownRepo {
     pub last_touched_at: DateTime<Utc>,
     /// Number of times this path has been upserted.
     pub touch_count: u64,
+}
+
+/// An explicit host-local choice for one portable repository selector.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnownRepoBinding {
+    /// Exact portable selector from `WorkTarget`.
+    pub selector: String,
+    /// Canonical repository root on this host.
+    pub repo_root: PathBuf,
+    /// Canonical Git common directory observed when the binding was created.
+    pub git_common_dir: PathBuf,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 /// Registry trait for host-scoped repo discovery.
@@ -67,6 +80,24 @@ pub trait KnownRepoStore: Send + Sync {
 
     /// Count of known repos.
     fn count(&self) -> Result<usize>;
+
+    /// Create or refresh an exact selector binding. Rebinding an existing
+    /// selector to a different identity is rejected.
+    fn bind(
+        &self,
+        selector: &str,
+        repo_root: &Path,
+        git_common_dir: &Path,
+    ) -> Result<KnownRepoBinding>;
+
+    /// Return the binding for an exact selector, if one exists.
+    fn get_binding(&self, selector: &str) -> Result<Option<KnownRepoBinding>>;
+
+    /// List host-local selector bindings, newest first.
+    fn list_bindings(&self) -> Result<Vec<KnownRepoBinding>>;
+
+    /// Remove an exact selector binding. Repository files are never changed.
+    fn unbind(&self, selector: &str) -> Result<usize>;
 }
 
 /// SQLite-backed `KnownRepoStore` sharing the process connection pool.
@@ -103,6 +134,21 @@ impl SqliteKnownRepoStore {
         })
     }
 
+    fn row_to_binding(row: &rusqlite::Row) -> rusqlite::Result<KnownRepoBinding> {
+        let selector: String = row.get(0)?;
+        let repo_root: String = row.get(1)?;
+        let git_common_dir: String = row.get(2)?;
+        let created_at: String = row.get(3)?;
+        let updated_at: String = row.get(4)?;
+        Ok(KnownRepoBinding {
+            selector,
+            repo_root: PathBuf::from(repo_root),
+            git_common_dir: PathBuf::from(git_common_dir),
+            created_at: Self::parse_ts(&created_at),
+            updated_at: Self::parse_ts(&updated_at),
+        })
+    }
+
     /// Canonicalize a path for storage. Falls back to the original path if
     /// canonicalization fails (e.g., path does not exist yet).
     fn canonical_key(path: &Path) -> String {
@@ -122,7 +168,16 @@ impl KnownRepoStore for SqliteKnownRepoStore {
                 touch_count INTEGER NOT NULL DEFAULT 1\
             );\
             CREATE INDEX IF NOT EXISTS idx_known_repos_last_touched \
-            ON known_repos(last_touched_at DESC);",
+            ON known_repos(last_touched_at DESC);\
+            CREATE TABLE IF NOT EXISTS known_repo_bindings (\
+                selector TEXT PRIMARY KEY COLLATE BINARY,\
+                repo_root TEXT NOT NULL,\
+                git_common_dir TEXT NOT NULL UNIQUE,\
+                created_at TEXT NOT NULL,\
+                updated_at TEXT NOT NULL\
+            );\
+            CREATE INDEX IF NOT EXISTS idx_known_repo_bindings_updated \
+            ON known_repo_bindings(updated_at DESC);",
         )?;
         Ok(())
     }
@@ -175,9 +230,100 @@ impl KnownRepoStore for SqliteKnownRepoStore {
 
     fn count(&self) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
-        let n: i64 =
-            conn.query_row("SELECT COUNT(*) FROM known_repos", [], |row| row.get(0))?;
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM known_repos", [], |row| row.get(0))?;
         Ok(n.max(0) as usize)
+    }
+
+    fn bind(
+        &self,
+        selector: &str,
+        repo_root: &Path,
+        git_common_dir: &Path,
+    ) -> Result<KnownRepoBinding> {
+        let repo_root = Self::canonical_key(repo_root);
+        let git_common_dir = Self::canonical_key(git_common_dir);
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.conn.lock().unwrap();
+        let transaction =
+            conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let existing_selector = transaction
+            .query_row(
+                "SELECT selector FROM known_repo_bindings
+                 WHERE git_common_dir = ?1 AND selector <> ?2 COLLATE BINARY",
+                params![git_common_dir, selector],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(existing_selector) = existing_selector {
+            return Err(StoreError::Other(format!(
+                "host repository is already bound under selector `{existing_selector}`; unbind that exact selector before rebinding"
+            )));
+        }
+        transaction.execute(
+            "INSERT INTO known_repos (path, first_seen_at, last_touched_at, touch_count)
+             VALUES (?1, ?2, ?2, 1)
+             ON CONFLICT(path) DO UPDATE SET
+                last_touched_at = excluded.last_touched_at,
+                touch_count = touch_count + 1",
+            params![repo_root, now],
+        )?;
+        let changed = transaction.execute(
+            "INSERT INTO known_repo_bindings
+                (selector, repo_root, git_common_dir, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT(selector) DO UPDATE SET updated_at = excluded.updated_at
+             WHERE known_repo_bindings.repo_root = excluded.repo_root
+               AND known_repo_bindings.git_common_dir = excluded.git_common_dir",
+            params![selector, repo_root, git_common_dir, now],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::Other(format!(
+                "selector `{selector}` is already bound to a different host repository"
+            )));
+        }
+        let binding = transaction.query_row(
+            "SELECT selector, repo_root, git_common_dir, created_at, updated_at
+             FROM known_repo_bindings WHERE selector = ?1 COLLATE BINARY",
+            [selector],
+            Self::row_to_binding,
+        )?;
+        transaction.commit()?;
+        Ok(binding)
+    }
+
+    fn get_binding(&self, selector: &str) -> Result<Option<KnownRepoBinding>> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn.query_row(
+            "SELECT selector, repo_root, git_common_dir, created_at, updated_at
+             FROM known_repo_bindings WHERE selector = ?1 COLLATE BINARY",
+            [selector],
+            Self::row_to_binding,
+        );
+        match result {
+            Ok(binding) => Ok(Some(binding)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn list_bindings(&self) -> Result<Vec<KnownRepoBinding>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare_cached(
+            "SELECT selector, repo_root, git_common_dir, created_at, updated_at
+             FROM known_repo_bindings ORDER BY updated_at DESC",
+        )?;
+        stmt.query_map([], Self::row_to_binding)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    fn unbind(&self, selector: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM known_repo_bindings WHERE selector = ?1 COLLATE BINARY",
+            [selector],
+        )
+        .map_err(StoreError::from)
     }
 }
 
@@ -274,6 +420,90 @@ mod tests {
             .map(|r| r.path.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, vec!["c", "b", "a"]);
+    }
+
+    #[test]
+    fn exact_selector_binding_is_persistent_idempotent_and_conflict_safe() {
+        let (temp, store) = store();
+        let repo_a = temp.path().join("a");
+        let repo_b = temp.path().join("b");
+        for repo in [&repo_a, &repo_b] {
+            std::fs::create_dir_all(repo.join(".git")).unwrap();
+        }
+
+        let first = store
+            .bind("project:Case", &repo_a, &repo_a.join(".git"))
+            .unwrap();
+        let again = store
+            .bind("project:Case", &repo_a, &repo_a.join(".git"))
+            .unwrap();
+        assert_eq!(first.selector, again.selector);
+        assert!(
+            store
+                .bind("project:Case", &repo_b, &repo_b.join(".git"))
+                .is_err()
+        );
+        assert!(store.get_binding("project:case").unwrap().is_none());
+
+        drop(store);
+        let reopened = SqliteKnownRepoStore::open(temp.path()).unwrap();
+        assert_eq!(
+            reopened
+                .get_binding("project:Case")
+                .unwrap()
+                .unwrap()
+                .repo_root,
+            repo_a.canonicalize().unwrap()
+        );
+        assert_eq!(reopened.unbind("project:Case").unwrap(), 1);
+        assert!(reopened.get_binding("project:Case").unwrap().is_none());
+    }
+
+    #[test]
+    fn concurrent_registration_and_same_identity_bind_are_atomic() {
+        use std::sync::{Arc, Barrier};
+
+        let temp = TempDir::new().unwrap();
+        let bootstrap = SqliteKnownRepoStore::open(temp.path()).unwrap();
+        bootstrap.init().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+
+        let barrier = Arc::new(Barrier::new(8));
+        let mut threads = Vec::new();
+        for index in 0..8 {
+            let store = SqliteKnownRepoStore::open(temp.path()).unwrap();
+            let barrier = Arc::clone(&barrier);
+            let repo = repo.clone();
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                if index % 2 == 0 {
+                    store
+                        .bind("project:shared", &repo, &repo.join(".git"))
+                        .unwrap();
+                } else {
+                    store.upsert(&repo).unwrap();
+                }
+            }));
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        let reopened = SqliteKnownRepoStore::open(temp.path()).unwrap();
+        assert!(reopened.get_binding("project:shared").unwrap().is_some());
+        let known = reopened.list().unwrap();
+        assert_eq!(known.len(), 1);
+        assert_eq!(
+            known[0].touch_count, 8,
+            "each atomic bind/register write must be retained"
+        );
+        assert_eq!(reopened.unbind("project:shared").unwrap(), 1);
+        assert_eq!(
+            reopened.count().unwrap(),
+            1,
+            "unbind must not race-delete registration state"
+        );
     }
 
     #[test]

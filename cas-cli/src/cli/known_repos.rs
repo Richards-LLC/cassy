@@ -1,5 +1,5 @@
-//! `cas known-repos {list,seed,prune-missing}` — inspect and maintain the host
-//! repo registry.
+//! `cas known-repos {list,status,bind,unbind,seed,prune-missing}` — inspect and
+//! maintain the host repo registry.
 //!
 //! The registry itself lives in `~/.cas/cas.db::known_repos` and is upserted
 //! automatically by `cas init`, factory daemon startup, and MCP server
@@ -9,6 +9,7 @@
 use anyhow::Result;
 use cas_store::KnownRepoStore;
 use clap::Subcommand;
+use std::path::PathBuf;
 
 use crate::store::known_repos::{ensure_host_schema, open_host_known_repo_store};
 use crate::worktree::discovery::{list_tracked_repos, seed};
@@ -17,6 +18,20 @@ use crate::worktree::discovery::{list_tracked_repos, seed};
 pub enum KnownReposCommands {
     /// Print every repo in the host-scoped known_repos registry.
     List,
+    /// Show explicit selector bindings and validate their live host identity.
+    Status,
+    /// Explicitly bind a portable selector to one canonical repository root.
+    Bind {
+        /// Canonical repository root to select. Symlinks and nested paths are rejected.
+        #[arg(long)]
+        repo: PathBuf,
+    },
+    /// Remove one exact host-local selector binding. Repositories and their
+    /// known-repo registrations are never removed.
+    Unbind {
+        /// Exact portable selector shown by `cas known-repos status`.
+        selector: String,
+    },
     /// Seed the registry from existing host state (sessions.cwd + session
     /// JSON files). Idempotent.
     Seed {
@@ -43,9 +58,64 @@ pub fn execute(cmd: &KnownReposCommands) -> Result<()> {
     ensure_host_schema()?;
     match cmd {
         KnownReposCommands::List => execute_list(),
+        KnownReposCommands::Status => execute_status(),
+        KnownReposCommands::Bind { repo } => execute_bind(repo),
+        KnownReposCommands::Unbind { selector } => execute_unbind(selector),
         KnownReposCommands::Seed { scan_home } => execute_seed(*scan_home),
         KnownReposCommands::PruneMissing { dry_run } => execute_prune_missing(*dry_run),
     }
+}
+
+fn execute_bind(repo: &std::path::Path) -> Result<()> {
+    let (selector, repo_root, git_common_dir) =
+        crate::mcp::tools::core::task::repo_context::binding_identity_for_path(repo)
+            .map_err(anyhow::Error::msg)?;
+    let store = open_host_known_repo_store()?;
+    store
+        .bind(&selector, &repo_root, &git_common_dir)
+        .map_err(anyhow::Error::from)?;
+    println!(
+        "Bound selector `{selector}` to host repository {}.",
+        repo_root.display()
+    );
+    println!("Portable task and delivery records remain path-free.");
+    Ok(())
+}
+
+fn execute_unbind(selector: &str) -> Result<()> {
+    let store = open_host_known_repo_store()?;
+    let removed = store.unbind(selector)?;
+    if removed == 0 {
+        println!("No host-local binding exists for selector `{selector}`.");
+    } else {
+        println!(
+            "Removed host-local binding for selector `{selector}`. Repository registration and files were not changed."
+        );
+    }
+    Ok(())
+}
+
+fn execute_status() -> Result<()> {
+    let store = open_host_known_repo_store()?;
+    let bindings = store.list_bindings()?;
+    if bindings.is_empty() {
+        println!("No explicit host-local repository bindings.");
+        return Ok(());
+    }
+    println!("{} host-local binding(s):", bindings.len());
+    for binding in bindings {
+        let state = if crate::mcp::tools::core::task::repo_context::binding_is_live(&binding) {
+            "valid"
+        } else {
+            "STALE"
+        };
+        println!(
+            "  [{state}] {} -> {}",
+            binding.selector,
+            binding.repo_root.display()
+        );
+    }
+    Ok(())
 }
 
 fn execute_prune_missing(dry_run: bool) -> Result<()> {
@@ -108,6 +178,13 @@ fn execute_list() -> Result<()> {
             "  [{flag}] touch_count={:<4} {}",
             r.touch_count,
             r.path.display()
+        );
+    }
+    let bindings = open_host_known_repo_store()?.list_bindings()?;
+    if !bindings.is_empty() {
+        println!(
+            "{} explicit binding(s); run `cas known-repos status` for validated details.",
+            bindings.len()
         );
     }
     Ok(())
@@ -179,6 +256,33 @@ mod tests {
             let rows = store.list().unwrap();
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].path, existing.canonicalize().unwrap());
+        });
+    }
+
+    #[test]
+    fn prune_missing_never_removes_or_rebinds_stale_selector_binding() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            ensure_host_schema().unwrap();
+            let stale = home.join("removed");
+            std::fs::create_dir_all(stale.join(".git")).unwrap();
+            let store = open_host_known_repo_store().unwrap();
+            store
+                .bind("project:stale", &stale, &stale.join(".git"))
+                .unwrap();
+            std::fs::remove_dir_all(&stale).unwrap();
+
+            assert_eq!(
+                prune_missing(false).unwrap(),
+                PruneMissingReport {
+                    missing: 1,
+                    removed: 1,
+                }
+            );
+            assert_eq!(store.count().unwrap(), 0);
+            assert!(
+                store.get_binding("project:stale").unwrap().is_some(),
+                "stale binding must remain explicit until operator unbind"
+            );
         });
     }
 }

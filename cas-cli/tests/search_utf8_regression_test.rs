@@ -18,11 +18,13 @@
 //! Runs in default `cargo test`, no network / no cloud auth.
 
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tempfile::TempDir;
+
+mod support;
+use support::{CasSandbox, assert_command_is_sandboxed};
 
 /// The exact entry content that crashed `cas serve` on 2026-04-16. Byte
 /// index 57 lands inside the three bytes of `→`. Changing this string
@@ -81,18 +83,14 @@ struct McpClient {
 }
 
 impl McpClient {
-    /// Spawn `cas serve` in `cas_dir`. Isolation from the host `.cas`
-    /// relies on `current_dir` + `scrub_cas_env` — the server does a
-    /// cwd walk via `find_cas_root` after the inherited CAS_* env vars
-    /// are cleared, so only the child's tempdir is reachable.
-    fn spawn(cas_dir: &std::path::Path) -> Self {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cas"));
+    /// Spawn `cas serve` in a hermetic CAS sandbox.
+    fn spawn(sandbox: &CasSandbox) -> Self {
+        let mut cmd = sandbox.command();
+        assert_command_is_sandboxed(&cmd, sandbox);
         cmd.arg("serve")
-            .current_dir(cas_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        scrub_cas_env(&mut cmd);
 
         let mut child = cmd.spawn().expect("Failed to spawn cas serve");
         let stdin = child.stdin.take().expect("stdin");
@@ -122,7 +120,9 @@ impl McpClient {
         };
         let line = serde_json::to_string(&req).expect("serialize");
         writeln!(self.stdin, "{line}").expect("write stdin — server pipe closed?");
-        self.stdin.flush().expect("flush stdin — server pipe closed?");
+        self.stdin
+            .flush()
+            .expect("flush stdin — server pipe closed?");
 
         // Skip notifications (no id) and any non-matching responses
         // (e.g., server-initiated requests per later MCP spec
@@ -165,11 +165,7 @@ impl McpClient {
                 "clientInfo": { "name": "cas-f5e4-test", "version": "1.0.0" }
             })),
         );
-        assert!(
-            resp.error.is_none(),
-            "initialize failed: {:?}",
-            resp.error
-        );
+        assert!(resp.error.is_none(), "initialize failed: {:?}", resp.error);
         self.send_notification("notifications/initialized", None);
     }
 
@@ -186,35 +182,6 @@ impl Drop for McpClient {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
-}
-
-/// Scrub CAS_* env vars so the child `cas serve` does not hijack the
-/// host cas.db (e.g., when the test harness runs inside a factory
-/// worker session that inherited CAS_ROOT).
-///
-/// Intentionally duplicated from mcp_protocol_test.rs — a shared
-/// test-util module is a follow-up refactor on EPIC cas-c351. Keep
-/// both lists in sync when adding new CAS_* vars.
-fn scrub_cas_env(cmd: &mut Command) -> &mut Command {
-    cmd.env_remove("CAS_ROOT")
-        .env_remove("CAS_DIR")
-        .env_remove("CAS_SESSION_ID")
-        .env_remove("CAS_AGENT_NAME")
-        .env_remove("CAS_AGENT_ROLE")
-        .env_remove("CAS_FACTORY_MODE")
-        .env_remove("CAS_CLONE_PATH")
-}
-
-fn init_cas_dir(dir: &TempDir) {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_cas"));
-    cmd.args(["init", "--yes"]).current_dir(dir.path());
-    scrub_cas_env(&mut cmd);
-    let out = cmd.output().expect("spawn cas init");
-    assert!(
-        out.status.success(),
-        "cas init failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
 }
 
 /// Collect the concatenated `text` from every text-content block in a
@@ -235,7 +202,10 @@ fn collect_response_text(result: &Value) -> String {
 /// uses to signal tool-level failures (distinct from JSON-RPC errors,
 /// which surface in the `.error` field).
 fn is_tool_error(result: &Value) -> bool {
-    result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false)
+    result
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
 }
 
 // ============================================================================
@@ -271,10 +241,9 @@ fn search_with_multibyte_boundary_content_does_not_crash_server() {
         "preview marker not in pre-cut prefix — assertion would miss even on a correct preview"
     );
 
-    let dir = TempDir::new().expect("tempdir");
-    init_cas_dir(&dir);
+    let sandbox = CasSandbox::new();
 
-    let mut client = McpClient::spawn(dir.path());
+    let mut client = McpClient::spawn(&sandbox);
     client.initialize();
 
     // Step 1: seed the crashing entry. `bypass_overlap=true` keeps the
@@ -358,5 +327,11 @@ fn search_with_multibyte_boundary_content_does_not_crash_server() {
     assert!(
         list.error.is_none(),
         "memory.list after search must succeed — server appears to have died"
+    );
+    drop(client);
+    assert_eq!(
+        sandbox.task_count(),
+        0,
+        "search regression must not create tasks in its sandbox"
     );
 }

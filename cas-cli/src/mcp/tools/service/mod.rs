@@ -16,9 +16,9 @@
 //! - mcp_execute: Execute tool calls across connected upstream MCP servers
 
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ErrorCode};
 #[cfg(feature = "mcp-proxy")]
 use rmcp::model::Content;
+use rmcp::model::{CallToolResult, ErrorCode};
 use rmcp::{ErrorData as McpError, tool, tool_router};
 
 use crate::mcp::server::CasCore;
@@ -204,10 +204,6 @@ impl CasService {
                     | "opinion_contradict"
             );
 
-            // Verification jail check
-            this.inner
-                .authorize_agent_action("memory", &action, is_mutating, None)?;
-
             let result = match req.action.as_str() {
                 "remember" => this.memory_remember(req).await,
                 "get" => this.memory_get(req).await,
@@ -277,32 +273,6 @@ impl CasService {
                     | "reset"
                     | "transfer"
             );
-
-            // Verification jail check.
-            // cas-a3ca: for task.close, scope the jail to only the requested
-            // task so an unrelated in-progress task cannot block closing a
-            // separately verified task.
-            let close_task_id = if action == "close" {
-                req.id.as_deref()
-            } else {
-                None
-            };
-            if let Err(error) =
-                this.inner
-                    .authorize_agent_action("task", &action, is_mutating, close_task_id)
-            {
-                let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(
-                    &this.inner.cas_root,
-                    "error",
-                    &[
-                        ("tool", "task"),
-                        ("action", &action),
-                        ("task_id", &event_task_id),
-                        ("message", error.message.as_ref()),
-                    ],
-                );
-                return Err(error);
-            }
 
             let result = match req.action.as_str() {
                 "create" => this.task_create(req).await,
@@ -379,10 +349,6 @@ impl CasService {
                 "create" | "update" | "delete" | "helpful" | "harmful" | "sync"
             );
 
-            // Verification jail check
-            this.inner
-                .authorize_agent_action("rule", &action, is_mutating, None)?;
-
             let result = match req.action.as_str() {
                 "create" => this.rule_create(req).await,
                 "show" => this.rule_show(req).await,
@@ -434,10 +400,6 @@ impl CasService {
                 req.action.as_str(),
                 "create" | "update" | "delete" | "enable" | "disable" | "sync" | "use"
             );
-
-            // Verification jail check
-            this.inner
-                .authorize_agent_action("skill", &action, is_mutating, None)?;
 
             let result = match req.action.as_str() {
                 "create" => this.skill_create(req).await,
@@ -885,26 +847,6 @@ impl CasService {
         let this = self.clone();
         panic_catch::dispatch_with_catch("pattern", async move {
             let action = req.action.clone();
-            let is_mutating = matches!(
-                req.action.as_str(),
-                "create"
-                    | "update"
-                    | "archive"
-                    | "adopt"
-                    | "helpful"
-                    | "harmful"
-                    | "team_create_suggestion"
-                    | "team_share"
-                    | "team_adopt"
-                    | "team_dismiss"
-                    | "team_recommend"
-                    | "team_archive_suggestion"
-            );
-
-            // Verification jail check
-            this.inner
-                .authorize_agent_action("pattern", &action, is_mutating, None)?;
-
             let result = match req.action.as_str() {
                 "create" => this.pattern_create(req).await,
                 "list" => this.pattern_list(req).await,
@@ -966,10 +908,6 @@ impl CasService {
                     | "unlink"
                     | "sync"
             );
-
-            // Verification jail check
-            this.inner
-                .authorize_agent_action("spec", &action, is_mutating, None)?;
 
             let result = match req.action.as_str() {
                 "create" => this.spec_create(req).await,
@@ -1156,8 +1094,8 @@ impl CasService {
 // Implementation methods - delegate to inner CasService
 // ============================================================================
 
-mod agent_search_system;
 pub(crate) mod agent_liveness;
+mod agent_search_system;
 mod core;
 pub(crate) mod factory_ops;
 mod factory_remind;

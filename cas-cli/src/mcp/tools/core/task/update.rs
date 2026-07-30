@@ -705,6 +705,43 @@ impl CasCore {
             if new_status != task.status {
                 lifecycle_status_change = Some((task.status, new_status));
             }
+            if new_status == TaskStatus::Closed
+                && task.status != TaskStatus::Closed
+                && self.load_config().verification_enabled()
+                && task.depth != cas_types::TaskDepth::Light
+                && crate::harness_policy::verification_required_for_task_type(task.task_type)
+            {
+                let verification = self
+                    .open_verification_store()?
+                    .get_latest_for_task(&task.id)
+                    .map_err(|error| McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!(
+                            "Failed to read task-scoped verification: {error}"
+                        )),
+                        data: None,
+                    })?;
+                let authorized = verification.as_ref().is_some_and(|row| {
+                    matches!(
+                        row.status,
+                        cas_types::VerificationStatus::Approved
+                            | cas_types::VerificationStatus::Skipped
+                    ) && !matches!(row.provenance, cas_types::VerificationProvenance::Legacy)
+                });
+                if !authorized {
+                    return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(format!(
+                            "VERIFICATION REQUIRED: update status=closed is gated only for task {} \
+                             and requires a legitimate capability-bound verifier or registered \
+                             supervisor verdict. Use task action=close to create or recover its \
+                             explicit verification dispatch. Other tasks and mutations remain available.",
+                            task.id
+                        )),
+                        data: None,
+                    });
+                }
+            }
             task.status = new_status;
             changes.push("status");
         }
@@ -788,14 +825,12 @@ impl CasCore {
             Some((old, TaskStatus::Closed)) if old != TaskStatus::Closed
         ) && let Some(target) = task.deliverables.work_target.as_ref()
         {
-            let context =
-                super::repo_context::resolve_repo_context(&self.cas_root, target).map_err(
-                    |message| McpError {
-                        code: ErrorCode::INVALID_PARAMS,
-                        message: Cow::from(message),
-                        data: None,
-                    },
-                )?;
+            let context = super::repo_context::resolve_repo_context(&self.cas_root, target)
+                .map_err(|message| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(message),
+                    data: None,
+                })?;
             let worker_worktree = self
                 .resolve_worker_worktree_path(&task, Some(&context))
                 .map_err(|message| McpError {
@@ -803,20 +838,19 @@ impl CasCore {
                     message: Cow::from(message),
                     data: None,
                 })?;
-            let evidence =
-                super::lifecycle::close_ops::run_declared_pre_close_hook(
-                    &task,
-                    &context,
-                    worker_worktree.as_deref(),
-                    None,
-                )
-                .map_err(|message| McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(format!(
-                        "PRE-CLOSE HOOK FAILED for task update status=closed: {message}"
-                    )),
-                    data: None,
-                })?;
+            let evidence = super::lifecycle::close_ops::run_declared_pre_close_hook(
+                &task,
+                &context,
+                worker_worktree.as_deref(),
+                None,
+            )
+            .map_err(|message| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "PRE-CLOSE HOOK FAILED for task update status=closed: {message}"
+                )),
+                data: None,
+            })?;
             task.deliverables.pre_close_hook = Some(evidence);
         }
 
@@ -1301,10 +1335,8 @@ mod assignment_freshness_branch_tests {
     #[test]
     fn falls_back_to_session_focus_pin_branch() {
         let session = format!("test-focus-{}", std::process::id());
-        let _env = TestEnvGuard::with_optional_vars(&[(
-            "CAS_FACTORY_SESSION",
-            Some(session.as_str()),
-        )]);
+        let _env =
+            TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_SESSION", Some(session.as_str()))]);
         let (_tmp, store) = open_store();
 
         let mut epic_a = Task::new("cas-epinf".into(), "Focused Epic".into());

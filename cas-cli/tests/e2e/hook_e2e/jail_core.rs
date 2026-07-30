@@ -1,9 +1,9 @@
 use super::*;
 
-/// Test that verification jail blocks tool use when task has pending_verification
+/// A pending close transition must not block unrelated hook tool use.
 #[test]
 #[ignore]
-fn test_verification_jail_blocks_tools() {
+fn test_pending_verification_allows_unrelated_tools() {
     let env = HookTestEnv::new();
 
     // Create a task
@@ -14,29 +14,21 @@ fn test_verification_jail_blocks_tools() {
     env.set_pending_verification(&task_id, true);
     println!("Set pending_verification=true for {}", task_id);
 
-    // Run hook directly - should be blocked
+    // Run hook directly - unrelated Read remains available.
     let (_, stdout) = env.run_pre_tool_use_read("test.txt");
     println!("Verification jail hook output: {}", stdout);
 
-    let is_blocked = stdout.contains("deny");
     assert!(
-        is_blocked,
-        "Expected verification jail to block tool use, got: {}",
-        stdout
-    );
-
-    // Verify the message mentions verification
-    assert!(
-        stdout.to_lowercase().contains("verification"),
-        "Jail message should mention verification: {}",
+        !stdout.contains("deny"),
+        "Pending verification must not block unrelated tool use: {}",
         stdout
     );
 }
 
-/// Test that SubagentStart unjails only tasks owned by the current agent
+/// A verifier spawn claims authority but never clears a pending transition.
 #[test]
 #[ignore]
-fn test_subagent_start_unjails_scoped_tasks() {
+fn test_subagent_start_does_not_clear_pending_tasks() {
     let env = HookTestEnv::new();
 
     let task_owned = env.create_task("Owned jailed task");
@@ -52,10 +44,9 @@ fn test_subagent_start_unjails_scoped_tasks() {
     let (success, output) = env.run_subagent_start_task_verifier();
     assert!(success, "SubagentStart should succeed: {}", output);
 
-    // Only the owned task should be unjailed
     assert!(
-        !env.get_pending_verification(&task_owned),
-        "Owned task should be unjailed"
+        env.get_pending_verification(&task_owned),
+        "spawn alone must not clear the owned task"
     );
     assert!(
         env.get_pending_verification(&task_other),
@@ -85,10 +76,10 @@ fn test_no_jail_allows_tools() {
     );
 }
 
-/// Test that verification jail is released when pending_verification is cleared
+/// Pending state does not alter unrelated hook permissions before or after clear.
 #[test]
 #[ignore]
-fn test_verification_jail_release() {
+fn test_pending_verification_does_not_change_unrelated_tool_permission() {
     let env = HookTestEnv::new();
 
     // Create a task and set it to jailed
@@ -96,11 +87,15 @@ fn test_verification_jail_release() {
     env.set_pending_verification(&task_id, true);
     println!("Created jailed task: {}", task_id);
 
-    // First verify tools are blocked
+    // Unrelated tools remain available while the exact close waits.
     let (_, stdout1) = env.run_pre_tool_use_read("test.txt");
     let was_blocked = stdout1.contains("deny");
     println!("First attempt blocked: {}", was_blocked);
-    assert!(was_blocked, "Should be blocked while jailed: {}", stdout1);
+    assert!(
+        !was_blocked,
+        "Pending verification must not block Read: {}",
+        stdout1
+    );
 
     // Now clear the jail
     env.set_pending_verification(&task_id, false);
@@ -117,13 +112,11 @@ fn test_verification_jail_release() {
     );
 }
 
-/// Regression for cas-c496: the `Task` tool was renamed to `Agent` in newer
-/// Claude Code. The jail check in pre_tool.rs must accept both names, or
-/// workers cannot spawn task-verifier (deadlock: the only way out of the
-/// jail is a tool that the jail is blocking).
+/// Regression for cas-c496: `Agent(task-verifier)` remains available, but
+/// spawning it cannot itself resolve the task transition.
 #[test]
 #[ignore]
-fn test_agent_tool_spawns_task_verifier_and_unjails() {
+fn test_agent_tool_spawns_task_verifier_without_clearing_pending() {
     let env = HookTestEnv::new();
 
     let task_id = env.create_task("Task for Agent-tool unjail test");
@@ -134,16 +127,16 @@ fn test_agent_tool_spawns_task_verifier_and_unjails() {
         "precondition: task should be jailed"
     );
 
-    // A plain Read is blocked (jail is live).
+    // A plain Read remains available.
     let (_, stdout_read) = env.run_pre_tool_use_read("test.txt");
     assert!(
-        stdout_read.contains("deny"),
-        "jail should block unrelated tools while active: {}",
+        !stdout_read.contains("deny"),
+        "pending verification should not block unrelated tools: {}",
         stdout_read
     );
 
     // Agent(task-verifier) must be ALLOWED (same allowance as Task(task-verifier))
-    // and must clear pending_verification as a side effect.
+    // without clearing pending_verification as a side effect.
     let (_, stdout_agent) = env.run_pre_tool_use_agent_verifier();
     assert!(
         !stdout_agent.contains("deny"),
@@ -151,8 +144,8 @@ fn test_agent_tool_spawns_task_verifier_and_unjails() {
         stdout_agent
     );
     assert!(
-        !env.get_pending_verification(&task_id),
-        "spawning Agent(task-verifier) should clear pending_verification"
+        env.get_pending_verification(&task_id),
+        "spawning Agent(task-verifier) must not clear pending_verification"
     );
 }
 
@@ -220,7 +213,11 @@ fn test_worktree_merge_jail_release() {
     let (_, stdout1) = env.run_pre_tool_use_read("test.txt");
     let was_blocked = stdout1.contains("deny");
     println!("Before release: blocked={}", was_blocked);
-    assert!(was_blocked, "Should be blocked while worktree-jailed: {}", stdout1);
+    assert!(
+        was_blocked,
+        "Should be blocked while worktree-jailed: {}",
+        stdout1
+    );
 
     // Clear the jail
     env.set_pending_worktree_merge(&task_id, false);
@@ -300,7 +297,10 @@ fn test_both_jails_block_tools() {
     env.set_pending_verification(&task1, false);
     let (_, stdout2) = env.run_pre_tool_use_read("test.txt");
     let still_blocked = stdout2.contains("deny");
-    println!("After clearing verification jail: blocked={}", still_blocked);
+    println!(
+        "After clearing verification jail: blocked={}",
+        still_blocked
+    );
     assert!(
         still_blocked,
         "Should still be blocked by worktree jail: {}",

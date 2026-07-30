@@ -82,6 +82,80 @@ impl CasCore {
                 data: None,
             });
         }
+        let requested_dispatch_id = if let Some(capability_token) =
+            req.verifier_capability.as_deref()
+        {
+            let capability = cas_store::inspect_verifier_capability(
+                &self.cas_root,
+                capability_token,
+            )
+            .map_err(|_| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from("Verifier capability rejected: it is malformed or unknown."),
+                data: None,
+            })?;
+            let dispatch_id = capability.dispatch_id.clone().ok_or_else(|| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(
+                    "Verifier capability rejected: legacy authority has no exact proof boundary.",
+                ),
+                data: None,
+            })?;
+            if req
+                .dispatch_id
+                .as_deref()
+                .is_some_and(|id| id != dispatch_id)
+            {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Verifier capability rejected: request names a different dispatch.",
+                    ),
+                    data: None,
+                });
+            }
+            let dispatch = cas_store::get_verification_dispatch(&self.cas_root, &dispatch_id)
+                .map_err(|_| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Verifier capability rejected: its exact dispatch is unavailable.",
+                    ),
+                    data: None,
+                })?;
+            if capability.task_id != req.task_id || dispatch.task_id != req.task_id {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Verifier capability rejected: exact dispatch belongs to another task.",
+                    ),
+                    data: None,
+                });
+            }
+            if dispatch.deadline_at <= chrono::Utc::now() {
+                let _ = cas_store::timeout_verification_dispatch(
+                    &self.cas_root,
+                    &req.task_id,
+                    chrono::Utc::now(),
+                );
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "Verifier capability rejected: exact dispatch {} expired and was marked timed_out; registered-supervisor recovery must name this dispatch.",
+                        dispatch.id
+                    )),
+                    data: None,
+                });
+            }
+            dispatch_id
+        } else {
+            req.dispatch_id.clone().ok_or_else(|| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(
+                    "Registered supervisor-direct verification must name the exact dispatch_id it resolves.",
+                ),
+                data: None,
+            })?
+        };
 
         // cas-b269: urgent stop halt blocks verification MCP.
         //
@@ -196,7 +270,7 @@ impl CasCore {
                 data: None,
             })?;
 
-            if let Some(capability_token) = req.verifier_capability.as_deref() {
+            let dispatch = if let Some(capability_token) = req.verifier_capability.as_deref() {
                 let capability = cas_store::consume_verifier_capability_with_conn(
                     &tx,
                     capability_token,
@@ -225,11 +299,38 @@ impl CasCore {
                 verification.set_agent(caller_id.clone());
                 verification.provenance = cas_types::VerificationProvenance::TaskVerifier;
                 verification.capability_id = Some(capability.id);
+                verification.dispatch_id = Some(requested_dispatch_id.clone());
                 verification.issuer_agent_id = Some(capability.issuer_agent_id);
+                cas_store::get_verification_dispatch_with_conn(&tx, &requested_dispatch_id)
+                    .map_err(|_| McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(
+                            "Verifier capability rejected: exact dispatch is unavailable.",
+                        ),
+                        data: None,
+                    })?
             } else {
                 verification.set_agent(caller_id.clone());
                 verification.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+                verification.dispatch_id = Some(requested_dispatch_id.clone());
                 verification.issuer_agent_id = Some(caller_id.clone());
+                cas_store::get_verification_dispatch_with_conn(&tx, &requested_dispatch_id)
+                    .map_err(|_| McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(
+                            "Supervisor-direct verification rejected: named dispatch is unavailable.",
+                        ),
+                        data: None,
+                    })?
+            };
+            if dispatch.task_id != req.task_id {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Verification rejected: named dispatch belongs to another task.",
+                    ),
+                    data: None,
+                });
             }
 
             cas_store::add_verification_with_conn(&tx, &verification).map_err(|e| McpError {
@@ -240,7 +341,7 @@ impl CasCore {
 
             cas_store::resolve_verification_dispatch_with_conn(
                 &tx,
-                &req.task_id,
+                &dispatch.id,
                 &caller_id,
                 verification.capability_id.as_deref(),
                 supervisor_direct,
@@ -257,21 +358,22 @@ impl CasCore {
                 verification.status,
                 VerificationStatus::Approved | VerificationStatus::Skipped
             );
-            if cas_store::transition_worker_delivery_verification_with_conn(
-                &tx,
-                &req.task_id,
-                &verification.id,
-                approved_delivery,
-                &caller_id,
-            )
-            .map_err(|e| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!(
-                    "Failed to advance transactional worker delivery: {e}"
-                )),
-                data: None,
-            })?
-            .is_some()
+            if let Some(delivery_transaction_id) = dispatch.delivery_transaction_id.as_deref()
+                && cas_store::transition_worker_delivery_verification_with_conn(
+                    &tx,
+                    delivery_transaction_id,
+                    &verification.id,
+                    approved_delivery,
+                    &caller_id,
+                )
+                .map_err(|e| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!(
+                        "Failed to advance transactional worker delivery: {e}"
+                    )),
+                    data: None,
+                })?
+                .is_some()
             {
                 tx.execute(
                     "UPDATE tasks
@@ -338,6 +440,7 @@ impl CasCore {
                 "verification_type": verification.verification_type.to_string(),
                 "provenance": verification.provenance.to_string(),
                 "capability_id": verification.capability_id,
+                "dispatch_id": verification.dispatch_id,
             }));
             // Add session ID if available for linking to the verifying agent
             let event = if let Some(Some(agent_id)) = self.agent_id.get() {

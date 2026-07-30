@@ -15,8 +15,8 @@ use crate::Result;
 use crate::error::StoreError;
 use cas_types::{
     IssueSeverity, Verification, VerificationDispatch, VerificationDispatchState,
-    VerificationIssue, VerificationProvenance, VerificationRecoveryAction, VerificationStatus,
-    VerificationType, VerifierCapability,
+    VerificationIssue, VerificationProofBoundary, VerificationProvenance,
+    VerificationRecoveryAction, VerificationStatus, VerificationType, VerifierCapability,
 };
 
 // Helper to convert lock errors
@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS verifications (
     verification_type TEXT NOT NULL DEFAULT 'task',
     provenance TEXT NOT NULL DEFAULT 'legacy',
     capability_id TEXT,
+    dispatch_id TEXT,
     issuer_agent_id TEXT,
     status TEXT NOT NULL DEFAULT 'approved',
     confidence REAL,
@@ -62,6 +63,7 @@ CREATE TABLE IF NOT EXISTS verification_issues (
 CREATE TABLE IF NOT EXISTS verification_capabilities (
     id TEXT PRIMARY KEY,
     task_id TEXT NOT NULL,
+    dispatch_id TEXT,
     issuer_agent_id TEXT NOT NULL,
     verifier_agent_id TEXT,
     token_hash TEXT NOT NULL,
@@ -74,6 +76,8 @@ CREATE TABLE IF NOT EXISTS verification_capabilities (
 CREATE TABLE IF NOT EXISTS verification_dispatches (
     id TEXT PRIMARY KEY,
     task_id TEXT NOT NULL,
+    receipt_id TEXT,
+    delivery_transaction_id TEXT,
     requester_agent_id TEXT NOT NULL,
     owner_agent_id TEXT NOT NULL,
     verifier_agent_id TEXT,
@@ -179,15 +183,15 @@ impl SqliteVerificationStore {
         let provenance_str: String = row.get(4)?;
         let provenance = VerificationProvenance::from_str(&provenance_str).unwrap_or_default();
 
-        let status_str: String = row.get(7)?;
+        let status_str: String = row.get(8)?;
         let status = VerificationStatus::from_str(&status_str).unwrap_or_default();
 
-        let created_at_str: String = row.get(12)?;
+        let created_at_str: String = row.get(13)?;
         let created_at = DateTime::parse_from_rfc3339(&created_at_str)
             .map(|dt| dt.with_timezone(&Utc))
             .unwrap_or_else(|_| Utc::now());
 
-        let files_reviewed_json: String = row.get(10)?;
+        let files_reviewed_json: String = row.get(11)?;
         let files_reviewed: Vec<String> =
             serde_json::from_str(&files_reviewed_json).unwrap_or_default();
 
@@ -198,12 +202,13 @@ impl SqliteVerificationStore {
             verification_type,
             provenance,
             capability_id: row.get(5)?,
-            issuer_agent_id: row.get(6)?,
+            dispatch_id: row.get(6)?,
+            issuer_agent_id: row.get(7)?,
             status,
-            confidence: row.get(8)?,
-            summary: row.get(9)?,
+            confidence: row.get(9)?,
+            summary: row.get(10)?,
             files_reviewed,
-            duration_ms: row.get::<_, Option<i64>>(11)?.map(|v| v as u64),
+            duration_ms: row.get::<_, Option<i64>>(12)?.map(|v| v as u64),
             created_at,
             issues: Vec::new(), // Issues loaded separately
         })
@@ -336,6 +341,37 @@ impl SqliteVerificationStore {
     }
 }
 
+/// Return the verdict bound to one exact durable proof-cycle dispatch.
+///
+/// Legacy task-wide rows have `dispatch_id IS NULL` and are intentionally
+/// invisible here so they cannot authorize a current close cycle.
+pub fn get_verification_for_dispatch(
+    cas_dir: &Path,
+    dispatch_id: &str,
+) -> Result<Option<Verification>> {
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let conn = store.conn.lock().map_err(lock_err)?;
+    let verification = conn
+        .query_row(
+            "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
+                    dispatch_id, issuer_agent_id, status, confidence, summary, files_reviewed,
+                    duration_ms, created_at
+             FROM verifications WHERE dispatch_id = ?1
+             ORDER BY created_at DESC, id DESC LIMIT 1",
+            params![dispatch_id],
+            SqliteVerificationStore::parse_verification,
+        )
+        .optional()
+        .map_err(StoreError::Database)?;
+    match verification {
+        Some(mut verification) => {
+            verification.issues = store.load_issues(&conn, &verification.id)?;
+            Ok(Some(verification))
+        }
+        None => Ok(None),
+    }
+}
+
 /// Add a verification record using an existing connection (for cross-store transactions).
 ///
 /// Caller is responsible for managing the transaction. Does not save issues -
@@ -346,9 +382,9 @@ pub fn add_verification_with_conn(conn: &Connection, verification: &Verification
 
     conn.execute(
         "INSERT INTO verifications
-         (id, task_id, agent_id, verification_type, provenance, capability_id, issuer_agent_id,
-          status, confidence, summary, files_reviewed, duration_ms, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+         (id, task_id, agent_id, verification_type, provenance, capability_id, dispatch_id,
+          issuer_agent_id, status, confidence, summary, files_reviewed, duration_ms, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             verification.id,
             verification.task_id,
@@ -356,6 +392,7 @@ pub fn add_verification_with_conn(conn: &Connection, verification: &Verification
             verification.verification_type.to_string(),
             verification.provenance.to_string(),
             verification.capability_id,
+            verification.dispatch_id,
             verification.issuer_agent_id,
             verification.status.to_string(),
             verification.confidence,
@@ -443,9 +480,26 @@ fn capability_id_from_token(token: &str) -> Result<&str> {
     Ok(id)
 }
 
+/// Validate a bearer against its stored digest without binding or consuming it.
+///
+/// This exists so the MCP boundary can persist an exact dispatch timeout
+/// before beginning the verdict transaction. The raw token is never returned.
+pub fn inspect_verifier_capability(cas_dir: &Path, token: &str) -> Result<VerifierCapability> {
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let conn = store.conn.lock().map_err(lock_err)?;
+    let id = capability_id_from_token(token)?;
+    let capability = load_capability_with_conn(&conn, id)?;
+    if !constant_time_eq(&capability.token_hash, &capability_token_hash(token)) {
+        return Err(StoreError::Parse(
+            "verifier capability is invalid".to_string(),
+        ));
+    }
+    Ok(capability)
+}
+
 fn load_capability_with_conn(conn: &Connection, id: &str) -> Result<VerifierCapability> {
     conn.query_row(
-        "SELECT id, task_id, issuer_agent_id, verifier_agent_id, token_hash,
+        "SELECT id, task_id, dispatch_id, issuer_agent_id, verifier_agent_id, token_hash,
                 issued_at, expires_at, bound_at, consumed_at
          FROM verification_capabilities WHERE id = ?1",
         params![id],
@@ -481,13 +535,14 @@ fn load_capability_with_conn(conn: &Connection, id: &str) -> Result<VerifierCapa
             Ok(VerifierCapability {
                 id: row.get(0)?,
                 task_id: row.get(1)?,
-                issuer_agent_id: row.get(2)?,
-                verifier_agent_id: row.get(3)?,
-                token_hash: row.get(4)?,
-                issued_at: parse_time(5)?,
-                expires_at: parse_time(6)?,
-                bound_at: parse_optional_time(7)?,
-                consumed_at: parse_optional_time(8)?,
+                dispatch_id: row.get(2)?,
+                issuer_agent_id: row.get(3)?,
+                verifier_agent_id: row.get(4)?,
+                token_hash: row.get(5)?,
+                issued_at: parse_time(6)?,
+                expires_at: parse_time(7)?,
+                bound_at: parse_optional_time(8)?,
+                consumed_at: parse_optional_time(9)?,
             })
         },
     )
@@ -528,15 +583,15 @@ fn parse_dispatch(row: &rusqlite::Row) -> rusqlite::Result<VerificationDispatch>
             })
             .transpose()
     };
-    let state_value: String = row.get(6)?;
+    let state_value: String = row.get(8)?;
     let state = VerificationDispatchState::from_str(&state_value).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(error))
+        rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, Box::new(error))
     })?;
-    let recovery_value: String = row.get(10)?;
+    let recovery_value: String = row.get(12)?;
     let recovery_action =
         VerificationRecoveryAction::from_str(&recovery_value).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
-                10,
+                12,
                 rusqlite::types::Type::Text,
                 Box::new(error),
             )
@@ -544,25 +599,28 @@ fn parse_dispatch(row: &rusqlite::Row) -> rusqlite::Result<VerificationDispatch>
     Ok(VerificationDispatch {
         id: row.get(0)?,
         task_id: row.get(1)?,
-        requester_agent_id: row.get(2)?,
-        owner_agent_id: row.get(3)?,
-        verifier_agent_id: row.get(4)?,
-        capability_id: row.get(5)?,
+        receipt_id: row.get(2)?,
+        delivery_transaction_id: row.get(3)?,
+        requester_agent_id: row.get(4)?,
+        owner_agent_id: row.get(5)?,
+        verifier_agent_id: row.get(6)?,
+        capability_id: row.get(7)?,
         state,
-        requested_at: parse_time(7)?,
-        deadline_at: parse_time(8)?,
-        resolved_at: parse_optional_time(9)?,
+        requested_at: parse_time(9)?,
+        deadline_at: parse_time(10)?,
+        resolved_at: parse_optional_time(11)?,
         recovery_action,
     })
 }
 
-fn latest_dispatch_with_conn(
+pub fn get_latest_verification_dispatch_with_conn(
     conn: &Connection,
     task_id: &str,
 ) -> Result<Option<VerificationDispatch>> {
     conn.query_row(
-        "SELECT id, task_id, requester_agent_id, owner_agent_id, verifier_agent_id,
-                capability_id, state, requested_at, deadline_at, resolved_at, recovery_action
+        "SELECT id, task_id, receipt_id, delivery_transaction_id, requester_agent_id,
+                owner_agent_id, verifier_agent_id, capability_id, state, requested_at,
+                deadline_at, resolved_at, recovery_action
          FROM verification_dispatches
          WHERE task_id = ?1
          ORDER BY requested_at DESC, id DESC
@@ -581,33 +639,109 @@ pub fn get_latest_verification_dispatch(
 ) -> Result<Option<VerificationDispatch>> {
     let store = SqliteVerificationStore::open(cas_dir)?;
     let conn = store.conn.lock().map_err(lock_err)?;
-    latest_dispatch_with_conn(&conn, task_id)
+    get_latest_verification_dispatch_with_conn(&conn, task_id)
+}
+
+pub fn get_verification_dispatch_with_conn(
+    conn: &Connection,
+    dispatch_id: &str,
+) -> Result<VerificationDispatch> {
+    conn.query_row(
+        "SELECT id, task_id, receipt_id, delivery_transaction_id, requester_agent_id,
+                owner_agent_id, verifier_agent_id, capability_id, state, requested_at,
+                deadline_at, resolved_at, recovery_action
+         FROM verification_dispatches WHERE id = ?1",
+        params![dispatch_id],
+        parse_dispatch,
+    )
+    .map_err(|error| match error {
+        rusqlite::Error::QueryReturnedNoRows => {
+            StoreError::NotFound("verification dispatch".to_string())
+        }
+        other => StoreError::Database(other),
+    })
+}
+
+/// Return one exact durable proof-cycle dispatch.
+pub fn get_verification_dispatch(
+    cas_dir: &Path,
+    dispatch_id: &str,
+) -> Result<VerificationDispatch> {
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let conn = store.conn.lock().map_err(lock_err)?;
+    get_verification_dispatch_with_conn(&conn, dispatch_id)
 }
 
 /// Create one durable task-scoped dispatch, returning an existing active
 /// dispatch when a retry races the same pending transition.
-pub fn create_verification_dispatch(
+pub fn create_verification_dispatch_bound(
     cas_dir: &Path,
     task_id: &str,
     requester_agent_id: &str,
     owner_agent_id: &str,
+    boundary: &VerificationProofBoundary,
     deadline_at: DateTime<Utc>,
+    supervisor_recovery: bool,
 ) -> Result<VerificationDispatch> {
     let store = SqliteVerificationStore::open(cas_dir)?;
     let conn = store.conn.lock().map_err(lock_err)?;
-    if let Some(existing) = latest_dispatch_with_conn(&conn, task_id)?
+    create_verification_dispatch_bound_with_conn(
+        &conn,
+        task_id,
+        requester_agent_id,
+        owner_agent_id,
+        boundary,
+        deadline_at,
+        supervisor_recovery,
+    )
+}
+
+/// Create an exact dispatch on a caller-owned SQLite transaction.
+///
+/// This is used to make delivery receipt, transaction, and proof-boundary
+/// intent one atomic persistence step.
+pub fn create_verification_dispatch_bound_with_conn(
+    conn: &Connection,
+    task_id: &str,
+    requester_agent_id: &str,
+    owner_agent_id: &str,
+    boundary: &VerificationProofBoundary,
+    deadline_at: DateTime<Utc>,
+    supervisor_recovery: bool,
+) -> Result<VerificationDispatch> {
+    if let Some(existing) = get_latest_verification_dispatch_with_conn(&conn, task_id)?
         && matches!(
             existing.state,
             VerificationDispatchState::Pending | VerificationDispatchState::Claimed
         )
     {
-        return Ok(existing);
+        if existing.requester_agent_id == requester_agent_id
+            && existing.owner_agent_id == owner_agent_id
+            && existing.receipt_id == boundary.receipt_id
+            && existing.delivery_transaction_id == boundary.delivery_transaction_id
+        {
+            return Ok(existing);
+        }
+        return Err(StoreError::Parse(
+            "a different verification proof boundary is already active for this task".to_string(),
+        ));
+    }
+    if let Some(existing) = get_latest_verification_dispatch_with_conn(&conn, task_id)?
+        && existing.state == VerificationDispatchState::TimedOut
+        && !supervisor_recovery
+    {
+        return Err(StoreError::Parse(format!(
+            "verification dispatch {} timed out; registered-supervisor recovery must name it",
+            existing.id
+        )));
     }
 
     let requested_at = Utc::now();
     let dispatch = VerificationDispatch {
         id: format!("vdispatch-{:032x}", rand::random::<u128>()),
         task_id: task_id.to_string(),
+        receipt_id: boundary.receipt_id.clone(),
+        delivery_transaction_id: boundary.delivery_transaction_id.clone(),
         requester_agent_id: requester_agent_id.to_string(),
         owner_agent_id: owner_agent_id.to_string(),
         verifier_agent_id: None,
@@ -620,12 +754,15 @@ pub fn create_verification_dispatch(
     };
     conn.execute(
         "INSERT INTO verification_dispatches
-         (id, task_id, requester_agent_id, owner_agent_id, verifier_agent_id,
-          capability_id, state, requested_at, deadline_at, resolved_at, recovery_action)
-         VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, ?6, ?7, NULL, ?8)",
+         (id, task_id, receipt_id, delivery_transaction_id, requester_agent_id,
+          owner_agent_id, verifier_agent_id, capability_id, state, requested_at,
+          deadline_at, resolved_at, recovery_action)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, ?7, ?8, ?9, NULL, ?10)",
         params![
             dispatch.id,
             dispatch.task_id,
+            dispatch.receipt_id,
+            dispatch.delivery_transaction_id,
             dispatch.requester_agent_id,
             dispatch.owner_agent_id,
             dispatch.state.to_string(),
@@ -637,10 +774,32 @@ pub fn create_verification_dispatch(
     Ok(dispatch)
 }
 
-/// Bind an active dispatch to the exact verifier child and capability.
-pub fn claim_verification_dispatch(
+/// Backward-compatible task-only dispatch creation.
+///
+/// This cannot recover a timed-out cycle; registered-supervisor recovery must
+/// use the explicit bound API and server-derived authority.
+pub fn create_verification_dispatch(
     cas_dir: &Path,
     task_id: &str,
+    requester_agent_id: &str,
+    owner_agent_id: &str,
+    deadline_at: DateTime<Utc>,
+) -> Result<VerificationDispatch> {
+    create_verification_dispatch_bound(
+        cas_dir,
+        task_id,
+        requester_agent_id,
+        owner_agent_id,
+        &VerificationProofBoundary::task(),
+        deadline_at,
+        false,
+    )
+}
+
+/// Bind an active dispatch to the exact verifier child and capability.
+pub fn claim_verification_dispatch_bound(
+    cas_dir: &Path,
+    dispatch_id: &str,
     owner_agent_id: &str,
     verifier_agent_id: &str,
     capability_id: &str,
@@ -651,15 +810,10 @@ pub fn claim_verification_dispatch(
     let changed = conn.execute(
         "UPDATE verification_dispatches
          SET verifier_agent_id = ?3, capability_id = ?4, state = 'claimed'
-         WHERE id = (
-             SELECT id FROM verification_dispatches
-             WHERE task_id = ?1 AND owner_agent_id = ?2 AND state = 'pending'
-                   AND deadline_at > ?5
-             ORDER BY requested_at DESC, id DESC
-             LIMIT 1
-         )",
+         WHERE id = ?1 AND owner_agent_id = ?2 AND state = 'pending'
+               AND deadline_at > ?5",
         params![
-            task_id,
+            dispatch_id,
             owner_agent_id,
             verifier_agent_id,
             capability_id,
@@ -671,8 +825,27 @@ pub fn claim_verification_dispatch(
             "verification dispatch cannot be claimed by this owner/verifier".to_string(),
         ));
     }
-    latest_dispatch_with_conn(&conn, task_id)?
-        .ok_or_else(|| StoreError::NotFound("claimed verification dispatch".to_string()))
+    get_verification_dispatch_with_conn(&conn, dispatch_id)
+}
+
+/// Backward-compatible task-only claim that still resolves to one exact
+/// current dispatch before performing the compare-and-update.
+pub fn claim_verification_dispatch(
+    cas_dir: &Path,
+    task_id: &str,
+    owner_agent_id: &str,
+    verifier_agent_id: &str,
+    capability_id: &str,
+) -> Result<VerificationDispatch> {
+    let dispatch = get_latest_verification_dispatch(cas_dir, task_id)?
+        .ok_or_else(|| StoreError::NotFound("verification dispatch".to_string()))?;
+    claim_verification_dispatch_bound(
+        cas_dir,
+        &dispatch.id,
+        owner_agent_id,
+        verifier_agent_id,
+        capability_id,
+    )
 }
 
 /// Resolve an active dispatch inside the verdict transaction.
@@ -682,37 +855,40 @@ pub fn claim_verification_dispatch(
 /// derived registered-supervisor authority for the caller.
 pub fn resolve_verification_dispatch_with_conn(
     conn: &Connection,
-    task_id: &str,
+    dispatch_id: &str,
     verifier_agent_id: &str,
     capability_id: Option<&str>,
     supervisor_direct: bool,
 ) -> Result<Option<VerificationDispatch>> {
-    let Some(dispatch) = latest_dispatch_with_conn(conn, task_id)? else {
-        return Ok(None);
-    };
-    if !matches!(
-        dispatch.state,
-        VerificationDispatchState::Pending | VerificationDispatchState::Claimed
-    ) {
-        return Ok(Some(dispatch));
-    }
+    let dispatch = get_verification_dispatch_with_conn(conn, dispatch_id)?;
+    let now = Utc::now();
     let authorized = match capability_id {
         Some(capability_id) => {
-            dispatch.verifier_agent_id.as_deref() == Some(verifier_agent_id)
+            dispatch.state == VerificationDispatchState::Claimed
+                && dispatch.deadline_at > now
+                && dispatch.verifier_agent_id.as_deref() == Some(verifier_agent_id)
                 && dispatch.capability_id.as_deref() == Some(capability_id)
         }
-        None => supervisor_direct,
+        None => {
+            supervisor_direct
+                && matches!(
+                    dispatch.state,
+                    VerificationDispatchState::Pending
+                        | VerificationDispatchState::Claimed
+                        | VerificationDispatchState::TimedOut
+                )
+        }
     };
     if !authorized {
         return Err(StoreError::Parse(
             "verification dispatch is owned by another verifier".to_string(),
         ));
     }
-    let resolved_at = Utc::now();
+    let resolved_at = now;
     let changed = conn.execute(
         "UPDATE verification_dispatches
          SET state = 'resolved', resolved_at = ?2
-         WHERE id = ?1 AND state IN ('pending', 'claimed')",
+         WHERE id = ?1 AND state IN ('pending', 'claimed', 'timed_out')",
         params![dispatch.id, resolved_at.to_rfc3339()],
     )?;
     if changed != 1 {
@@ -720,7 +896,7 @@ pub fn resolve_verification_dispatch_with_conn(
             "verification dispatch resolution raced".to_string(),
         ));
     }
-    latest_dispatch_with_conn(conn, task_id)
+    get_verification_dispatch_with_conn(conn, dispatch_id).map(Some)
 }
 
 /// Mark one exact due dispatch timed out. Other tasks are never touched.
@@ -746,7 +922,38 @@ pub fn timeout_verification_dispatch(
     if changed == 0 {
         return Ok(None);
     }
-    latest_dispatch_with_conn(&conn, task_id)
+    get_latest_verification_dispatch_with_conn(&conn, task_id)
+}
+
+/// Invalidate a reusable resolved proof cycle when task rework begins.
+pub fn invalidate_verification_dispatch_for_new_cycle(
+    cas_dir: &Path,
+    task_id: &str,
+) -> Result<Option<VerificationDispatch>> {
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let conn = store.conn.lock().map_err(lock_err)?;
+    let Some(dispatch) = get_latest_verification_dispatch_with_conn(&conn, task_id)? else {
+        return Ok(None);
+    };
+    if !matches!(
+        dispatch.state,
+        VerificationDispatchState::Resolved | VerificationDispatchState::TimedOut
+    ) {
+        return Ok(Some(dispatch));
+    }
+    let now = Utc::now();
+    let changed = conn.execute(
+        "UPDATE verification_dispatches
+         SET state = 'invalidated', resolved_at = ?2
+         WHERE id = ?1 AND state IN ('resolved', 'timed_out')",
+        params![dispatch.id, now.to_rfc3339()],
+    )?;
+    if changed != 1 {
+        return Err(StoreError::Parse(
+            "verification proof-cycle invalidation raced".to_string(),
+        ));
+    }
+    get_latest_verification_dispatch_with_conn(&conn, task_id)
 }
 
 /// Mint an unbound, one-time verifier capability.
@@ -760,6 +967,17 @@ pub fn issue_verifier_capability(
 ) -> Result<IssuedVerifierCapability> {
     let store = SqliteVerificationStore::open(cas_dir)?;
     let conn = store.conn.lock().map_err(lock_err)?;
+    let dispatch = get_latest_verification_dispatch_with_conn(&conn, task_id)?
+        .filter(|dispatch| {
+            dispatch.state == VerificationDispatchState::Pending
+                && dispatch.owner_agent_id == issuer_agent_id
+                && dispatch.deadline_at > Utc::now()
+        })
+        .ok_or_else(|| {
+            StoreError::Parse(
+                "verifier capability requires an active owned unexpired dispatch".to_string(),
+            )
+        })?;
     let random_id: u128 = rand::random();
     let random_secret: [u8; 32] = rand::random();
     let id = format!("vcap-{random_id:032x}");
@@ -772,6 +990,7 @@ pub fn issue_verifier_capability(
     let capability = VerifierCapability {
         id: id.clone(),
         task_id: task_id.to_string(),
+        dispatch_id: Some(dispatch.id),
         issuer_agent_id: issuer_agent_id.to_string(),
         verifier_agent_id: None,
         token_hash: capability_token_hash(&token),
@@ -782,12 +1001,13 @@ pub fn issue_verifier_capability(
     };
     conn.execute(
         "INSERT INTO verification_capabilities
-         (id, task_id, issuer_agent_id, verifier_agent_id, token_hash, issued_at,
-          expires_at, bound_at, consumed_at)
-         VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, NULL, NULL)",
+         (id, task_id, dispatch_id, issuer_agent_id, verifier_agent_id, token_hash,
+          issued_at, expires_at, bound_at, consumed_at)
+         VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, NULL, NULL)",
         params![
             capability.id,
             capability.task_id,
+            capability.dispatch_id,
             capability.issuer_agent_id,
             capability.token_hash,
             capability.issued_at.to_rfc3339(),
@@ -808,9 +1028,16 @@ pub fn bind_verifier_capability(
     let conn = store.conn.lock().map_err(lock_err)?;
     let id = capability_id_from_token(token)?;
     let capability = load_capability_with_conn(&conn, id)?;
+    let dispatch_id = capability.dispatch_id.as_deref().ok_or_else(|| {
+        StoreError::Parse("legacy verifier capability has no proof boundary".to_string())
+    })?;
+    let dispatch = get_verification_dispatch_with_conn(&conn, dispatch_id)?;
     if capability.consumed_at.is_some()
         || capability.verifier_agent_id.is_some()
         || capability.expires_at <= Utc::now()
+        || dispatch.state != VerificationDispatchState::Pending
+        || dispatch.owner_agent_id != capability.issuer_agent_id
+        || dispatch.deadline_at <= Utc::now()
         || !constant_time_eq(&capability.token_hash, &capability_token_hash(token))
         || verifier_agent_id == capability.issuer_agent_id
     {
@@ -844,10 +1071,19 @@ pub fn consume_verifier_capability_with_conn(
 ) -> Result<VerifierCapability> {
     let id = capability_id_from_token(token)?;
     let capability = load_capability_with_conn(conn, id)?;
+    let dispatch_id = capability.dispatch_id.as_deref().ok_or_else(|| {
+        StoreError::Parse("legacy verifier capability has no proof boundary".to_string())
+    })?;
+    let dispatch = get_verification_dispatch_with_conn(conn, dispatch_id)?;
     if capability.task_id != task_id
         || capability.verifier_agent_id.as_deref() != Some(verifier_agent_id)
         || capability.consumed_at.is_some()
         || capability.expires_at <= Utc::now()
+        || dispatch.task_id != task_id
+        || dispatch.state != VerificationDispatchState::Claimed
+        || dispatch.verifier_agent_id.as_deref() != Some(verifier_agent_id)
+        || dispatch.capability_id.as_deref() != Some(capability.id.as_str())
+        || dispatch.deadline_at <= Utc::now()
         || !constant_time_eq(&capability.token_hash, &capability_token_hash(token))
     {
         return Err(StoreError::Parse(
@@ -875,6 +1111,33 @@ impl VerificationStore for SqliteVerificationStore {
     fn init(&self) -> Result<()> {
         let conn = self.conn.lock().map_err(lock_err)?;
         conn.execute_batch(VERIFICATION_SCHEMA)?;
+        // Serve-first startup can open current store code against a legacy
+        // primary/side table before m213 runs. SQLite cannot conditionally
+        // create an index on a missing column, so add these bootstrap indexes
+        // only when both additive columns already exist. The migration creates
+        // them after upgrading legacy tables.
+        let has_exact_boundary_columns = conn.query_row(
+            "SELECT CASE WHEN
+                EXISTS (
+                    SELECT 1 FROM pragma_table_info('verification_capabilities')
+                    WHERE name = 'dispatch_id'
+                )
+                AND EXISTS (
+                    SELECT 1 FROM pragma_table_info('verifications')
+                    WHERE name = 'dispatch_id'
+                )
+             THEN 1 ELSE 0 END",
+            [],
+            |row| row.get::<_, i64>(0),
+        )? == 1;
+        if has_exact_boundary_columns {
+            conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_verification_capabilities_dispatch
+                    ON verification_capabilities(dispatch_id);
+                 CREATE INDEX IF NOT EXISTS idx_verifications_dispatch
+                    ON verifications(dispatch_id, created_at DESC);",
+            )?;
+        }
         Ok(())
     }
 
@@ -914,9 +1177,9 @@ impl VerificationStore for SqliteVerificationStore {
 
         conn.execute(
             "INSERT INTO verifications
-             (id, task_id, agent_id, verification_type, provenance, capability_id, issuer_agent_id,
-              status, confidence, summary, files_reviewed, duration_ms, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             (id, task_id, agent_id, verification_type, provenance, capability_id, dispatch_id,
+              issuer_agent_id, status, confidence, summary, files_reviewed, duration_ms, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 verification.id,
                 verification.task_id,
@@ -924,6 +1187,7 @@ impl VerificationStore for SqliteVerificationStore {
                 verification.verification_type.to_string(),
                 verification.provenance.to_string(),
                 verification.capability_id,
+                verification.dispatch_id,
                 verification.issuer_agent_id,
                 verification.status.to_string(),
                 verification.confidence,
@@ -946,8 +1210,8 @@ impl VerificationStore for SqliteVerificationStore {
         let mut verification = conn
             .query_row(
                 "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
-                        issuer_agent_id, status, confidence, summary, files_reviewed, duration_ms,
-                        created_at
+                        dispatch_id, issuer_agent_id, status, confidence, summary, files_reviewed,
+                        duration_ms, created_at
                  FROM verifications WHERE id = ?1",
                 params![id],
                 Self::parse_verification,
@@ -971,8 +1235,9 @@ impl VerificationStore for SqliteVerificationStore {
         let rows = conn.execute(
             "UPDATE verifications SET
              task_id = ?2, agent_id = ?3, verification_type = ?4, provenance = ?5,
-             capability_id = ?6, issuer_agent_id = ?7, status = ?8, confidence = ?9,
-             summary = ?10, files_reviewed = ?11, duration_ms = ?12, created_at = ?13
+             capability_id = ?6, dispatch_id = ?7, issuer_agent_id = ?8, status = ?9,
+             confidence = ?10, summary = ?11, files_reviewed = ?12, duration_ms = ?13,
+             created_at = ?14
              WHERE id = ?1",
             params![
                 verification.id,
@@ -981,6 +1246,7 @@ impl VerificationStore for SqliteVerificationStore {
                 verification.verification_type.to_string(),
                 verification.provenance.to_string(),
                 verification.capability_id,
+                verification.dispatch_id,
                 verification.issuer_agent_id,
                 verification.status.to_string(),
                 verification.confidence,
@@ -1019,8 +1285,8 @@ impl VerificationStore for SqliteVerificationStore {
 
         let mut stmt = conn.prepare_cached(
             "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
-                    issuer_agent_id, status, confidence, summary, files_reviewed, duration_ms,
-                    created_at
+                    dispatch_id, issuer_agent_id, status, confidence, summary, files_reviewed,
+                    duration_ms, created_at
              FROM verifications WHERE task_id = ?1
              ORDER BY created_at DESC",
         )?;
@@ -1041,8 +1307,8 @@ impl VerificationStore for SqliteVerificationStore {
         let verification = conn
             .query_row(
                 "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
-                        issuer_agent_id, status, confidence, summary, files_reviewed, duration_ms,
-                        created_at
+                        dispatch_id, issuer_agent_id, status, confidence, summary, files_reviewed,
+                        duration_ms, created_at
                  FROM verifications WHERE task_id = ?1
                  ORDER BY created_at DESC LIMIT 1",
                 params![task_id],
@@ -1070,8 +1336,8 @@ impl VerificationStore for SqliteVerificationStore {
         let verification = conn
             .query_row(
                 "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
-                        issuer_agent_id, status, confidence, summary, files_reviewed, duration_ms,
-                        created_at
+                        dispatch_id, issuer_agent_id, status, confidence, summary, files_reviewed,
+                        duration_ms, created_at
                  FROM verifications WHERE task_id = ?1 AND verification_type = ?2
                  ORDER BY created_at DESC LIMIT 1",
                 params![task_id, verification_type.to_string()],
@@ -1094,8 +1360,8 @@ impl VerificationStore for SqliteVerificationStore {
 
         let mut stmt = conn.prepare_cached(
             "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
-                    issuer_agent_id, status, confidence, summary, files_reviewed, duration_ms,
-                    created_at
+                    dispatch_id, issuer_agent_id, status, confidence, summary, files_reviewed,
+                    duration_ms, created_at
              FROM verifications ORDER BY created_at DESC LIMIT ?1",
         )?;
 
@@ -1114,8 +1380,8 @@ impl VerificationStore for SqliteVerificationStore {
 
         let mut stmt = conn.prepare_cached(
             "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
-                    issuer_agent_id, status, confidence, summary, files_reviewed, duration_ms,
-                    created_at
+                    dispatch_id, issuer_agent_id, status, confidence, summary, files_reviewed,
+                    duration_ms, created_at
              FROM verifications WHERE status = ?1
              ORDER BY created_at DESC",
         )?;
@@ -1473,6 +1739,14 @@ mod tests {
     #[test]
     fn verifier_capability_is_hashed_scoped_bound_expiring_and_one_time() {
         let (_store, dir) = create_test_store();
+        let dispatch = create_verification_dispatch(
+            dir.path(),
+            "cas-cap-a",
+            "owner-agent",
+            "owner-agent",
+            Utc::now() + Duration::minutes(10),
+        )
+        .expect("dispatch");
         let issued =
             issue_verifier_capability(dir.path(), "cas-cap-a", "owner-agent").expect("issue");
 
@@ -1483,6 +1757,14 @@ mod tests {
         let bound =
             bind_verifier_capability(dir.path(), &issued.token, "verifier-child").expect("bind");
         assert_eq!(bound.verifier_agent_id.as_deref(), Some("verifier-child"));
+        claim_verification_dispatch_bound(
+            dir.path(),
+            &dispatch.id,
+            "owner-agent",
+            "verifier-child",
+            &issued.capability.id,
+        )
+        .expect("claim exact dispatch");
 
         let conn = Connection::open(dir.path().join("cas.db")).expect("db");
         assert!(
@@ -1532,6 +1814,14 @@ mod tests {
             persisted.contains(&capability_token_hash(&issued.token)),
             "only the domain-separated capability digest should persist"
         );
+        resolve_verification_dispatch_with_conn(
+            &conn,
+            &dispatch.id,
+            "verifier-child",
+            Some(&issued.capability.id),
+            false,
+        )
+        .expect("resolve consumed capability dispatch");
         conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
             .expect("checkpoint capability writes");
         for suffix in ["", "-wal", "-shm"] {
@@ -1546,8 +1836,16 @@ mod tests {
             }
         }
 
+        create_verification_dispatch(
+            dir.path(),
+            "cas-cap-expired",
+            "owner-agent",
+            "owner-agent",
+            Utc::now() + Duration::minutes(10),
+        )
+        .expect("expired test dispatch");
         let expired =
-            issue_verifier_capability(dir.path(), "cas-cap-a", "owner-agent").expect("issue");
+            issue_verifier_capability(dir.path(), "cas-cap-expired", "owner-agent").expect("issue");
         conn.execute(
             "UPDATE verification_capabilities SET expires_at = ?2 WHERE id = ?1",
             params![
@@ -1581,16 +1879,17 @@ mod tests {
             VerificationRecoveryAction::SupervisorRedispatchOrDirect
         );
 
-        let retry = create_verification_dispatch(
-            dir.path(),
-            "cas-dispatch-a",
-            "worker-a",
-            "other-owner",
-            deadline,
-        )
-        .expect("idempotent retry");
-        assert_eq!(retry.id, dispatch.id);
-        assert_eq!(retry.owner_agent_id, "supervisor-a");
+        assert!(
+            create_verification_dispatch(
+                dir.path(),
+                "cas-dispatch-a",
+                "worker-a",
+                "other-owner",
+                deadline,
+            )
+            .is_err(),
+            "an active proof cycle cannot be rebound to a different owner"
+        );
         assert!(
             claim_verification_dispatch(
                 dir.path(),
@@ -1619,7 +1918,7 @@ mod tests {
         assert!(
             resolve_verification_dispatch_with_conn(
                 &conn,
-                "cas-dispatch-a",
+                &dispatch.id,
                 "wrong-verifier",
                 Some("vcap-a"),
                 false,
@@ -1628,7 +1927,7 @@ mod tests {
         );
         let resolved = resolve_verification_dispatch_with_conn(
             &conn,
-            "cas-dispatch-a",
+            &dispatch.id,
             "verifier-a",
             Some("vcap-a"),
             false,
@@ -1678,19 +1977,21 @@ mod tests {
     #[test]
     fn registered_supervisor_override_is_explicit_and_worker_cannot_steal_dispatch() {
         let (_store, dir) = create_test_store();
-        create_verification_dispatch(
+        let dispatch = create_verification_dispatch(
             dir.path(),
             "cas-recovery",
             "worker",
             "unavailable-owner",
-            Utc::now() + Duration::minutes(10),
+            Utc::now() - Duration::minutes(1),
         )
         .expect("create");
+        timeout_verification_dispatch(dir.path(), "cas-recovery", Utc::now())
+            .expect("persist exact timeout");
         let conn = Connection::open(dir.path().join("cas.db")).expect("db");
         assert!(
             resolve_verification_dispatch_with_conn(
                 &conn,
-                "cas-recovery",
+                &dispatch.id,
                 "unavailable-owner",
                 None,
                 false,
@@ -1699,13 +2000,13 @@ mod tests {
             "the original owner has no capability-free authority unless the server derives registered-supervisor-direct"
         );
         assert!(
-            resolve_verification_dispatch_with_conn(&conn, "cas-recovery", "worker", None, false)
+            resolve_verification_dispatch_with_conn(&conn, &dispatch.id, "worker", None, false)
                 .is_err(),
             "ordinary workers cannot steal a dispatch by omitting a capability"
         );
         let recovered = resolve_verification_dispatch_with_conn(
             &conn,
-            "cas-recovery",
+            &dispatch.id,
             "registered-supervisor",
             None,
             true,

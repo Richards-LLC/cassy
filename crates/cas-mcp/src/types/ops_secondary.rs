@@ -367,6 +367,11 @@ pub struct VerificationRequest {
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verifier_capability: Option<String>,
+
+    /// Exact dispatch to resolve (required for supervisor-direct add).
+    #[schemars(description = "Exact durable verification dispatch ID")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_id: Option<String>,
 }
 
 /// Unified team operations request

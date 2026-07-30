@@ -5,8 +5,9 @@ use std::path::Path;
 use std::str::FromStr;
 
 use cas_types::{
-    WorkerCompletionReceipt, WorkerCompletionReceiptInput, WorkerDeliveryEvent,
-    WorkerDeliveryState, WorkerDeliveryTransaction,
+    VerificationDispatch, VerificationProofBoundary, WorkerCompletionReceipt,
+    WorkerCompletionReceiptInput, WorkerDeliveryEvent, WorkerDeliveryState,
+    WorkerDeliveryTransaction,
 };
 
 use crate::error::StoreError;
@@ -208,7 +209,18 @@ pub fn create_worker_delivery(
 ) -> Result<WorkerDeliveryTransaction> {
     let mut conn = open(root)?;
     let tx = conn.transaction()?;
-    tx.execute(
+    let transaction = create_worker_delivery_with_conn(&tx, receipt, state, actor_agent_id)?;
+    tx.commit()?;
+    Ok(transaction)
+}
+
+fn create_worker_delivery_with_conn(
+    conn: &Connection,
+    receipt: &WorkerCompletionReceipt,
+    state: WorkerDeliveryState,
+    actor_agent_id: &str,
+) -> Result<WorkerDeliveryTransaction> {
+    conn.execute(
         "INSERT OR IGNORE INTO worker_completion_receipts
          (id, task_id, worker_agent_id, worker_name, repo_selector, source_branch,
           commit_sha, merge_base_sha, target_branch, target_sha, proof_reference,
@@ -230,7 +242,7 @@ pub fn create_worker_delivery(
             receipt.created_at.to_rfc3339(),
         ],
     )?;
-    let persisted = tx.query_row(
+    let persisted = conn.query_row(
         "SELECT id, task_id, worker_agent_id, worker_name, repo_selector, source_branch,
                 commit_sha, merge_base_sha, target_branch, target_sha, proof_reference,
                 scope_summary, created_at
@@ -256,8 +268,8 @@ pub fn create_worker_delivery(
         ));
     }
     let now = Utc::now();
-    let transaction_id = receipt.id.replacen("wcr-", "wdt-", 1);
-    tx.execute(
+    let transaction_id = worker_delivery_transaction_id(&receipt.id);
+    conn.execute(
         "INSERT OR IGNORE INTO worker_delivery_transactions
          (id, receipt_id, task_id, state, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
@@ -269,16 +281,89 @@ pub fn create_worker_delivery(
             now.to_rfc3339(),
         ],
     )?;
-    insert_event(&tx, &transaction_id, state, actor_agent_id, None, now)?;
-    let transaction = tx.query_row(
+    insert_event(conn, &transaction_id, state, actor_agent_id, None, now)?;
+    let transaction = conn.query_row(
         "SELECT id, receipt_id, task_id, state, supervisor_agent_id, verification_id,
                 merge_commit_sha, last_error_code, last_error_detail, created_at, updated_at
          FROM worker_delivery_transactions WHERE receipt_id = ?1",
         params![receipt.id],
         transaction_from_row,
     )?;
-    tx.commit()?;
     Ok(transaction)
+}
+
+/// Atomically persist a new immutable delivery and its exact verification
+/// dispatch. Git remains outside SQLite; this transaction only establishes
+/// the monotonic intent that later Git/reconciliation steps consume.
+pub fn create_worker_delivery_with_dispatch(
+    root: &Path,
+    receipt: &WorkerCompletionReceipt,
+    state: WorkerDeliveryState,
+    actor_agent_id: &str,
+    owner_agent_id: &str,
+    deadline_at: DateTime<Utc>,
+) -> Result<(WorkerDeliveryTransaction, VerificationDispatch)> {
+    let mut conn = open(root)?;
+    conn.execute_batch(crate::verification_store::VERIFICATION_SCHEMA)?;
+    let tx = conn.transaction()?;
+    let boundary = VerificationProofBoundary::delivery(
+        receipt.id.clone(),
+        worker_delivery_transaction_id(&receipt.id),
+    );
+    let dispatch = crate::verification_store::create_verification_dispatch_bound_with_conn(
+        &tx,
+        &receipt.task_id,
+        actor_agent_id,
+        owner_agent_id,
+        &boundary,
+        deadline_at,
+        false,
+    )?;
+    let transaction = create_worker_delivery_with_conn(&tx, receipt, state, actor_agent_id)?;
+    tx.commit()?;
+    Ok((transaction, dispatch))
+}
+
+pub fn worker_delivery_transaction_id(receipt_id: &str) -> String {
+    receipt_id.replacen("wcr-", "wdt-", 1)
+}
+
+pub fn get_worker_delivery_by_receipt(
+    root: &Path,
+    receipt_id: &str,
+) -> Result<Option<(WorkerCompletionReceipt, WorkerDeliveryTransaction)>> {
+    let conn = open(root)?;
+    conn.query_row(
+        "SELECT r.id, r.task_id, r.worker_agent_id, r.worker_name, r.repo_selector,
+                r.source_branch, r.commit_sha, r.merge_base_sha, r.target_branch,
+                r.target_sha, r.proof_reference, r.scope_summary, r.created_at,
+                t.id, t.receipt_id, t.task_id, t.state, t.supervisor_agent_id,
+                t.verification_id, t.merge_commit_sha, t.last_error_code,
+                t.last_error_detail, t.created_at, t.updated_at
+         FROM worker_completion_receipts r
+         JOIN worker_delivery_transactions t ON t.receipt_id = r.id
+         WHERE r.id = ?1",
+        params![receipt_id],
+        |row| {
+            let receipt = receipt_from_row(row)?;
+            let transaction = WorkerDeliveryTransaction {
+                id: row.get(13)?,
+                receipt_id: row.get(14)?,
+                task_id: row.get(15)?,
+                state: parse_state(row.get(16)?)?,
+                supervisor_agent_id: row.get(17)?,
+                verification_id: row.get(18)?,
+                merge_commit_sha: row.get(19)?,
+                last_error_code: row.get(20)?,
+                last_error_detail: row.get(21)?,
+                created_at: parse_time(row.get(22)?)?,
+                updated_at: parse_time(row.get(23)?)?,
+            };
+            Ok((receipt, transaction))
+        },
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 pub fn get_latest_worker_delivery(
@@ -395,7 +480,7 @@ pub fn transition_worker_delivery(
 
 pub fn transition_worker_delivery_verification_with_conn(
     conn: &Connection,
-    task_id: &str,
+    transaction_id: &str,
     verification_id: &str,
     approved: bool,
     actor_agent_id: &str,
@@ -406,8 +491,8 @@ pub fn transition_worker_delivery_verification_with_conn(
             "SELECT id, receipt_id, task_id, state, supervisor_agent_id, verification_id,
                     merge_commit_sha, last_error_code, last_error_detail, created_at, updated_at
              FROM worker_delivery_transactions
-             WHERE task_id = ?1 ORDER BY created_at DESC LIMIT 1",
-            params![task_id],
+             WHERE id = ?1",
+            params![transaction_id],
             transaction_from_row,
         )
         .optional()?;
@@ -419,14 +504,11 @@ pub fn transition_worker_delivery_verification_with_conn(
     } else {
         WorkerDeliveryState::VerificationFailed
     };
-    if current.state == target {
-        return Ok(Some(current));
-    }
     if current.state != WorkerDeliveryState::AwaitingVerification {
-        return Ok(Some(current));
+        return Ok(None);
     }
     let now = Utc::now();
-    conn.execute(
+    let changed = conn.execute(
         "UPDATE worker_delivery_transactions
          SET state = ?2, verification_id = ?3,
              last_error_code = ?4, last_error_detail = ?5, updated_at = ?6
@@ -448,6 +530,11 @@ pub fn transition_worker_delivery_verification_with_conn(
             now.to_rfc3339(),
         ],
     )?;
+    if changed != 1 {
+        return Err(StoreError::Parse(
+            "exact delivery verification transition raced".to_string(),
+        ));
+    }
     insert_event(
         conn,
         &current.id,
@@ -574,6 +661,62 @@ mod tests {
     }
 
     #[test]
+    fn different_receipt_cannot_persist_under_an_active_proof_cycle() {
+        let root = TempDir::new().unwrap();
+        let receipt_a = build_worker_completion_receipt(&input(), "worker", Utc::now());
+        let (transaction_a, dispatch_a) = create_worker_delivery_with_dispatch(
+            root.path(),
+            &receipt_a,
+            WorkerDeliveryState::AwaitingVerification,
+            "worker-session",
+            "verifier-owner",
+            Utc::now() + chrono::Duration::minutes(10),
+        )
+        .unwrap();
+
+        let mut input_b = input();
+        input_b.commit_sha = "d".repeat(40);
+        let receipt_b = build_worker_completion_receipt(&input_b, "worker", Utc::now());
+        assert_ne!(receipt_a.id, receipt_b.id);
+        assert!(
+            create_worker_delivery_with_dispatch(
+                root.path(),
+                &receipt_b,
+                WorkerDeliveryState::AwaitingVerification,
+                "worker-session",
+                "verifier-owner",
+                Utc::now() + chrono::Duration::minutes(10),
+            )
+            .is_err(),
+            "receipt B must not replace active dispatch A"
+        );
+        assert!(
+            get_worker_delivery_by_receipt(root.path(), &receipt_b.id)
+                .unwrap()
+                .is_none(),
+            "receipt B and its transaction must roll back with the rejected dispatch"
+        );
+        assert_eq!(
+            crate::verification_store::get_latest_verification_dispatch(
+                root.path(),
+                "cas-delivery",
+            )
+            .unwrap()
+            .unwrap()
+            .id,
+            dispatch_a.id
+        );
+        assert_eq!(
+            get_latest_worker_delivery(root.path(), "cas-delivery")
+                .unwrap()
+                .unwrap()
+                .1
+                .id,
+            transaction_a.id
+        );
+    }
+
+    #[test]
     fn transitions_are_strict_and_corrupt_state_fails_loudly() {
         let root = TempDir::new().unwrap();
         let receipt = build_worker_completion_receipt(&input(), "worker", Utc::now());
@@ -618,6 +761,46 @@ mod tests {
         )
         .unwrap();
         assert!(get_latest_worker_delivery(root.path(), "cas-delivery").is_err());
+    }
+
+    #[test]
+    fn verification_projection_returns_none_without_an_exact_state_mutation() {
+        let root = TempDir::new().unwrap();
+        let receipt = build_worker_completion_receipt(&input(), "worker", Utc::now());
+        let transaction = create_worker_delivery(
+            root.path(),
+            &receipt,
+            WorkerDeliveryState::AwaitingMerge,
+            "worker-session",
+        )
+        .unwrap();
+        let conn = open(root.path()).unwrap();
+
+        let projected = transition_worker_delivery_verification_with_conn(
+            &conn,
+            &transaction.id,
+            "ver-noop",
+            true,
+            "verifier-session",
+        )
+        .unwrap();
+
+        assert!(
+            projected.is_none(),
+            "a non-awaiting delivery must not report a verification transition"
+        );
+        let (_, unchanged) = get_latest_worker_delivery(root.path(), "cas-delivery")
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.state, WorkerDeliveryState::AwaitingMerge);
+        assert!(unchanged.verification_id.is_none());
+        assert_eq!(
+            list_worker_delivery_events(root.path(), &transaction.id)
+                .unwrap()
+                .len(),
+            1,
+            "a no-op projection must not append an event"
+        );
     }
 
     #[test]

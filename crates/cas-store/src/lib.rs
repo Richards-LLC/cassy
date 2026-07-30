@@ -86,8 +86,9 @@ pub use event_store::{EVENT_SCHEMA, EventStore, SqliteEventStore, record_event_w
 pub use code_store::CodeStore;
 pub use delivery_store::{
     DELIVERY_SCHEMA, build_worker_completion_receipt, create_worker_delivery,
-    get_latest_worker_delivery, list_worker_delivery_events, transition_worker_delivery,
-    transition_worker_delivery_verification_with_conn,
+    create_worker_delivery_with_dispatch, get_latest_worker_delivery,
+    get_worker_delivery_by_receipt, list_worker_delivery_events, transition_worker_delivery,
+    transition_worker_delivery_verification_with_conn, worker_delivery_transaction_id,
 };
 pub use sqlite_code_store::{CODE_SCHEMA, SqliteCodeStore};
 
@@ -101,10 +102,14 @@ pub use loop_store::{LOOP_SCHEMA, LoopStore, SqliteLoopStore};
 pub use verification_store::{
     IssuedVerifierCapability, SqliteVerificationStore, VERIFICATION_SCHEMA, VerificationStore,
     add_verification_with_conn, bind_verifier_capability, claim_verification_dispatch,
-    consume_verifier_capability_with_conn, create_verification_dispatch,
-    get_latest_verification_dispatch, issue_verifier_capability,
-    resolve_verification_dispatch_with_conn, save_verification_issues_with_conn,
-    timeout_verification_dispatch,
+    claim_verification_dispatch_bound, consume_verifier_capability_with_conn,
+    create_verification_dispatch, create_verification_dispatch_bound,
+    create_verification_dispatch_bound_with_conn, get_latest_verification_dispatch,
+    get_latest_verification_dispatch_with_conn, get_verification_dispatch,
+    get_verification_dispatch_with_conn, get_verification_for_dispatch,
+    inspect_verifier_capability, invalidate_verification_dispatch_for_new_cycle,
+    issue_verifier_capability, resolve_verification_dispatch_with_conn,
+    save_verification_issues_with_conn, timeout_verification_dispatch,
 };
 
 // Worktree store for git worktree tracking
@@ -131,9 +136,9 @@ pub use supervisor_queue_store::{
 // Prompt queue store for supervisor → worker communication
 // (includes enqueue outcomes for message dedup and cas-ecff lifecycle outbox)
 pub use prompt_queue_store::{
-    DeliveryStage, EnqueueIdempotentResult, EnqueueOutcome, MessageDeliveryReport,
-    MessageStatus, ObservationStatus, PROMPT_RETRY_MAX_AGE_SECS, PendingReason,
-    PromptQueueStore, PromptRetryDisposition, QueuedPrompt, SqlitePromptQueueStore,
+    DeliveryStage, EnqueueIdempotentResult, EnqueueOutcome, MessageDeliveryReport, MessageStatus,
+    ObservationStatus, PROMPT_RETRY_MAX_AGE_SECS, PendingReason, PromptQueueStore,
+    PromptRetryDisposition, QueuedPrompt, SqlitePromptQueueStore,
 };
 
 // Reminder store for supervisor "Remind Me" feature

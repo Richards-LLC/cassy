@@ -91,6 +91,7 @@ impl CasService {
             duration_ms: req.duration_ms,
             verification_type: req.verification_type,
             verifier_capability: req.verifier_capability,
+            dispatch_id: req.dispatch_id,
         };
         self.inner.cas_verification_add(Parameters(inner_req)).await
     }

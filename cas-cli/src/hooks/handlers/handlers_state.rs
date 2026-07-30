@@ -510,16 +510,29 @@ pub fn handle_subagent_start(
         .as_deref()
         .and_then(verifier_capability_from_prompt);
     if let Some(token) = capability_token {
-        let capability =
-            match cas_store::bind_verifier_capability(cas_root, token, &input.session_id) {
-                Ok(capability) => capability,
-                Err(_) => {
-                    return Ok(HookOutput::with_system_context(
+        let child_id = match input
+            .agent_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty() && *id != input.session_id)
+        {
+            Some(child_id) => child_id,
+            None => {
+                return Ok(HookOutput::with_system_context(
+                    "CAS task-verifier authority binding failed: SubagentStart did not provide a distinct child agent_id."
+                        .to_string(),
+                ));
+            }
+        };
+        let capability = match cas_store::bind_verifier_capability(cas_root, token, child_id) {
+            Ok(capability) => capability,
+            Err(_) => {
+                return Ok(HookOutput::with_system_context(
                     "CAS task-verifier authority binding failed; verification will fail closed."
                         .to_string(),
                 ));
-                }
-            };
+            }
+        };
         let agent_store = match open_agent_store(cas_root) {
             Ok(store) => store,
             Err(_) => {
@@ -544,10 +557,10 @@ pub fn handle_subagent_start(
                 ));
             }
         };
-        let existing = agent_store.get(&input.session_id).ok();
+        let existing = agent_store.get(child_id).ok();
         let mut child = existing.clone().unwrap_or_else(|| {
             Agent::new_sub_agent(
-                input.session_id.clone(),
+                child_id.to_string(),
                 "task-verifier".to_string(),
                 capability.issuer_agent_id.clone(),
             )
@@ -570,8 +583,14 @@ pub fn handle_subagent_start(
                     .to_string(),
             ));
         }
-        match cas_store::get_latest_verification_dispatch(cas_root, &capability.task_id) {
-            Ok(Some(dispatch))
+        match capability
+            .dispatch_id
+            .as_deref()
+            .ok_or(())
+            .and_then(|dispatch_id| {
+                cas_store::get_verification_dispatch(cas_root, dispatch_id).map_err(|_| ())
+            }) {
+            Ok(dispatch)
                 if matches!(
                     dispatch.state,
                     cas_types::VerificationDispatchState::Pending
@@ -584,11 +603,11 @@ pub fn handle_subagent_start(
                             .to_string(),
                     ));
                 }
-                if cas_store::claim_verification_dispatch(
+                if cas_store::claim_verification_dispatch_bound(
                     cas_root,
-                    &capability.task_id,
+                    &dispatch.id,
                     &capability.issuer_agent_id,
-                    &input.session_id,
+                    child_id,
                     &capability.id,
                 )
                 .is_err()
@@ -599,8 +618,7 @@ pub fn handle_subagent_start(
                     ));
                 }
             }
-            Ok(_) => {}
-            Err(_) => {
+            Ok(_) | Err(_) => {
                 return Ok(HookOutput::with_system_context(
                     "CAS verification dispatch state is unavailable; verification will fail closed."
                         .to_string(),

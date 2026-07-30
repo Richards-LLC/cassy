@@ -50,6 +50,7 @@ async fn test_worker_main_loop_cannot_self_attest_verification() {
             duration_ms: None,
             verification_type: None,
             verifier_capability: None,
+            dispatch_id: None,
         }))
         .await
         .expect_err("worker main-loop self-attestation must be rejected");
@@ -93,9 +94,7 @@ async fn test_task_verifier_capability_is_child_bound_and_replay_safe() {
         .expect("task id")
         .to_string();
 
-    let issued = cas_store::issue_verifier_capability(&cas_dir, &task_id, &parent_id)
-        .expect("server issues capability");
-    cas_store::create_verification_dispatch(
+    let _dispatch = cas_store::create_verification_dispatch(
         &cas_dir,
         &task_id,
         &parent_id,
@@ -103,6 +102,8 @@ async fn test_task_verifier_capability_is_child_bound_and_replay_safe() {
         chrono::Utc::now() + chrono::Duration::minutes(10),
     )
     .expect("create exact-task dispatch");
+    let issued = cas_store::issue_verifier_capability(&cas_dir, &task_id, &parent_id)
+        .expect("server issues capability");
     let child_id = format!("task-verifier-child-{}", std::process::id());
     cas_store::bind_verifier_capability(&cas_dir, &issued.token, &child_id)
         .expect("bind capability to child");
@@ -135,6 +136,7 @@ async fn test_task_verifier_capability_is_child_bound_and_replay_safe() {
             duration_ms: None,
             verification_type: None,
             verifier_capability: Some(issued.token.clone()),
+            dispatch_id: None,
         }))
         .await
         .expect_err("owner session cannot use the child's capability");
@@ -157,6 +159,7 @@ async fn test_task_verifier_capability_is_child_bound_and_replay_safe() {
             duration_ms: Some(12),
             verification_type: None,
             verifier_capability: Some(issued.token.clone()),
+            dispatch_id: None,
         }))
         .await
         .expect("bound task-verifier child succeeds once");
@@ -212,6 +215,7 @@ async fn test_task_verifier_capability_is_child_bound_and_replay_safe() {
             duration_ms: None,
             verification_type: None,
             verifier_capability: Some(issued.token),
+            dispatch_id: None,
         }))
         .await
         .expect_err("capability replay must fail");
@@ -256,6 +260,7 @@ async fn test_spoofed_supervisor_and_codex_claims_do_not_grant_authority() {
             duration_ms: None,
             verification_type: Some("epic".to_string()),
             verifier_capability: None,
+            dispatch_id: None,
         }))
         .await
         .expect_err("environment, Codex name, and epic type cannot spoof authority");
@@ -291,6 +296,7 @@ async fn test_anonymous_or_orphan_verification_add_fails_closed() {
             duration_ms: None,
             verification_type: None,
             verifier_capability: None,
+            dispatch_id: None,
         }))
         .await
         .expect_err("anonymous/orphan caller must fail");
@@ -391,6 +397,110 @@ async fn test_update_to_closed_is_exact_task_gated_but_other_task_update_remains
             .status,
         TaskStatus::Closed
     );
+}
+
+#[tokio::test]
+async fn test_update_to_closed_rejects_stale_task_row_behind_current_dispatch() {
+    let (temp, service) = setup_cas();
+    let cas_dir = temp.path().join(".cas");
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        "[verification]\nenabled = true\n",
+    )
+    .expect("enable verification");
+    let created = service
+        .cas_task_create(Parameters(simple_task_req("Exact update boundary")))
+        .await
+        .expect("create");
+    let task_id = extract_task_id(&extract_text(created))
+        .expect("task id")
+        .to_string();
+    service
+        .cas_task_start(Parameters(IdRequest {
+            id: task_id.clone(),
+        }))
+        .await
+        .expect("start");
+
+    let verification_store = open_verification_store(&cas_dir).expect("verification store");
+    verification_store
+        .add(&Verification::approved(
+            "ver-stale-task-row".to_string(),
+            task_id.clone(),
+            "older task-wide approval".to_string(),
+        ))
+        .expect("stale readable row");
+    let dispatch = cas_store::create_verification_dispatch_bound(
+        &cas_dir,
+        &task_id,
+        "requester",
+        "registered-supervisor",
+        &cas::types::VerificationProofBoundary::task(),
+        chrono::Utc::now() + chrono::Duration::minutes(10),
+        false,
+    )
+    .expect("current dispatch");
+
+    service
+        .cas_task_update(Parameters(task_status_update(
+            &task_id,
+            Some("closed"),
+            None,
+        )))
+        .await
+        .expect_err("older task-wide approval must not authorize a current dispatch");
+
+    let mut exact = Verification::approved(
+        "ver-exact-update".to_string(),
+        task_id.clone(),
+        "exact current approval".to_string(),
+    );
+    exact.provenance = cas::types::VerificationProvenance::SupervisorDirect;
+    exact.dispatch_id = Some(dispatch.id.clone());
+    verification_store.add(&exact).expect("exact verdict");
+    let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).expect("db");
+    cas_store::resolve_verification_dispatch_with_conn(
+        &conn,
+        &dispatch.id,
+        "registered-supervisor",
+        None,
+        true,
+    )
+    .expect("resolve exact dispatch");
+
+    service
+        .cas_task_update(Parameters(task_status_update(
+            &task_id,
+            Some("closed"),
+            None,
+        )))
+        .await
+        .expect("exact current verdict authorizes update");
+
+    service
+        .cas_task_update(Parameters(task_status_update(
+            &task_id,
+            Some("in_progress"),
+            None,
+        )))
+        .await
+        .expect("reopen exact task");
+    assert_eq!(
+        cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        cas::types::VerificationDispatchState::Invalidated,
+        "reopen must invalidate the prior proof cycle"
+    );
+    service
+        .cas_task_update(Parameters(task_status_update(
+            &task_id,
+            Some("closed"),
+            None,
+        )))
+        .await
+        .expect_err("reopened task cannot reuse the invalidated verdict");
 }
 
 // cas-3bd4: env_test_lock() now lives in `support.rs` so `setup_cas()`
@@ -3809,12 +3919,26 @@ async fn test_epic_close_requires_epic_verification_type() {
     );
 
     // Add a task-level verification - should NOT unblock epic close
-    let task_ver = Verification::approved(
+    let task_dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, id)
+        .unwrap()
+        .unwrap();
+    let mut task_ver = Verification::approved(
         "ver-epic-task".to_string(),
         id.to_string(),
         "Task-level verification".to_string(),
     );
+    task_ver.provenance = cas::types::VerificationProvenance::SupervisorDirect;
+    task_ver.dispatch_id = Some(task_dispatch.id.clone());
     verification_store.add(&task_ver).unwrap();
+    let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).expect("db");
+    cas_store::resolve_verification_dispatch_with_conn(
+        &conn,
+        &task_dispatch.id,
+        "registered-supervisor",
+        None,
+        true,
+    )
+    .expect("resolve task-level dispatch");
 
     let close_req = TaskCloseRequest {
         id: id.to_string(),
@@ -3835,13 +3959,27 @@ async fn test_epic_close_requires_epic_verification_type() {
     );
 
     // Add epic-level verification - should unblock
+    let epic_dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, id)
+        .unwrap()
+        .expect("fresh epic proof cycle");
+    assert_ne!(epic_dispatch.id, task_dispatch.id);
     let mut epic_ver = Verification::approved(
         "ver-epic-ok".to_string(),
         id.to_string(),
         "Epic verification passed".to_string(),
     );
     epic_ver.verification_type = VerificationType::Epic;
+    epic_ver.provenance = cas::types::VerificationProvenance::SupervisorDirect;
+    epic_ver.dispatch_id = Some(epic_dispatch.id.clone());
     verification_store.add(&epic_ver).unwrap();
+    cas_store::resolve_verification_dispatch_with_conn(
+        &conn,
+        &epic_dispatch.id,
+        "registered-supervisor",
+        None,
+        true,
+    )
+    .expect("resolve epic dispatch");
 
     let close_req = TaskCloseRequest {
         id: id.to_string(),
@@ -4528,7 +4666,6 @@ async fn test_close_supervisor_active_worker_assignee_by_name() {
     let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
     let task_store = open_task_store(&cas_dir).unwrap();
-    let verification_store = open_verification_store(&cas_dir).unwrap();
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
 
     // Register a fresh, alive agent with a distinct display name so the
@@ -4623,9 +4760,8 @@ async fn test_close_supervisor_active_worker_assignee_by_name() {
         "active assignee + no bypass must leave the task open"
     );
 
-    // --- Attempt 2: with bypass_code_review=true. The close proceeds but
-    //     the audit message must cite "supervisor bypass", not "assignee
-    //     inactive".
+    // --- Attempt 2: review bypass cannot erase the exact dispatch created by
+    //     attempt 1. Supervisor-direct recovery must name and resolve it.
     let close_req = TaskCloseRequest {
         id: id.clone(),
         reason: Some("supervisor forced close after alignment".to_string()),
@@ -4641,40 +4777,17 @@ async fn test_close_supervisor_active_worker_assignee_by_name() {
             .expect("task_close returns a result"),
     );
     assert!(
-        response_text.contains("Closed task:"),
-        "supervisor + bypass_code_review must close the task: {response_text}"
-    );
-    assert!(
-        response_text.contains("verification skipped — supervisor bypass"),
-        "audit suffix must cite supervisor bypass, not assignee inactive: {response_text}"
+        response_text.contains("VERIFICATION REQUIRED"),
+        "supervisor review bypass must not replace an exact verdict: {response_text}"
     );
     assert!(
         !response_text.contains("assignee inactive"),
         "active assignee must never be reported as inactive even with bypass: {response_text}"
     );
-    assert_eq!(
+    assert_ne!(
         task_store.get(&id).expect("task exists").status,
         cas::types::TaskStatus::Closed,
-        "supervisor bypass must transition task to Closed"
-    );
-
-    // Audit trail: the Skipped verification row must record the real
-    // reason, not the legacy "assignee inactive or orphaned task" string.
-    let row = verification_store
-        .get_latest_for_task(&id)
-        .expect("verification lookup")
-        .expect("supervisor bypass must write a Skipped row");
-    assert_eq!(row.status, cas::types::VerificationStatus::Skipped);
-    let summary_lc = row.summary.to_lowercase();
-    assert!(
-        summary_lc.contains("supervisor bypass") && summary_lc.contains("bypass_code_review"),
-        "Skipped row summary must name the real reason: {}",
-        row.summary
-    );
-    assert!(
-        !summary_lc.contains("inactive") && !summary_lc.contains("orphaned"),
-        "Skipped row summary must not inherit the legacy inactive/orphaned wording: {}",
-        row.summary
+        "active exact dispatch must keep the task open"
     );
 }
 
@@ -5602,13 +5715,28 @@ async fn test_close_forwards_persisted_review_envelope_after_jail() {
         "envelope must be persisted even when close is rejected on the verification jail"
     );
 
-    // Simulate the task-verifier subagent writing an approved verdict.
-    let ver = Verification::approved(
+    // Simulate an exact verdict for the dispatch created by the first close.
+    // A task-wide legacy row must not clear this current cycle.
+    let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &id)
+        .unwrap()
+        .unwrap();
+    let mut ver = Verification::approved(
         "ver-cas-3086".to_string(),
         id.clone(),
         "verified".to_string(),
     );
+    ver.provenance = cas::types::VerificationProvenance::SupervisorDirect;
+    ver.dispatch_id = Some(dispatch.id.clone());
     verification_store.add(&ver).expect("add verification");
+    let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).expect("db");
+    cas_store::resolve_verification_dispatch_with_conn(
+        &conn,
+        &dispatch.id,
+        "registered-supervisor",
+        None,
+        true,
+    )
+    .expect("resolve exact dispatch");
 
     // Supervisor closes — no bypass_code_review, no code_review_findings.
     // Pre-fix: gate would return CODE_REVIEW_REQUIRED because the
@@ -5769,7 +5897,7 @@ async fn test_registered_supervisor_can_verify_live_worker_task() {
     task.assignee = Some(worker_id.clone());
     task.pending_verification = true;
     task_store.update(&task).expect("update task");
-    cas_store::create_verification_dispatch(
+    let recovery_dispatch = cas_store::create_verification_dispatch(
         &cas_dir,
         &id,
         &worker_id,
@@ -5789,6 +5917,7 @@ async fn test_registered_supervisor_can_verify_live_worker_task() {
             duration_ms: None,
             verification_type: None,
             verifier_capability: None,
+            dispatch_id: Some(recovery_dispatch.id.clone()),
         }))
         .await
         .expect("registered supervisor verification should succeed");

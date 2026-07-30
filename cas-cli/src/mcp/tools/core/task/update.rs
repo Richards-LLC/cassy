@@ -711,22 +711,54 @@ impl CasCore {
                 && task.depth != cas_types::TaskDepth::Light
                 && crate::harness_policy::verification_required_for_task_type(task.task_type)
             {
-                let verification = self
-                    .open_verification_store()?
-                    .get_latest_for_task(&task.id)
-                    .map_err(|error| McpError {
-                        code: ErrorCode::INTERNAL_ERROR,
-                        message: Cow::from(format!(
-                            "Failed to read task-scoped verification: {error}"
-                        )),
-                        data: None,
-                    })?;
+                let dispatch =
+                    cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id).map_err(
+                        |error| McpError {
+                            code: ErrorCode::INTERNAL_ERROR,
+                            message: Cow::from(format!(
+                                "Failed to read exact verification dispatch: {error}"
+                            )),
+                            data: None,
+                        },
+                    )?;
+                let verification = match dispatch.as_ref() {
+                    Some(dispatch)
+                        if dispatch.state == cas_types::VerificationDispatchState::Resolved =>
+                    {
+                        cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id)
+                            .map_err(|error| McpError {
+                                code: ErrorCode::INTERNAL_ERROR,
+                                message: Cow::from(format!(
+                                    "Failed to read exact dispatch verdict: {error}"
+                                )),
+                                data: None,
+                            })?
+                    }
+                    None => self
+                        .open_verification_store()?
+                        .get_latest_for_task(&task.id)
+                        .map_err(|error| McpError {
+                            code: ErrorCode::INTERNAL_ERROR,
+                            message: Cow::from(format!(
+                                "Failed to read legacy task verification: {error}"
+                            )),
+                            data: None,
+                        })?
+                        .filter(|row| row.dispatch_id.is_none()),
+                    _ => None,
+                };
                 let authorized = verification.as_ref().is_some_and(|row| {
                     matches!(
                         row.status,
                         cas_types::VerificationStatus::Approved
                             | cas_types::VerificationStatus::Skipped
-                    ) && !matches!(row.provenance, cas_types::VerificationProvenance::Legacy)
+                    ) && match dispatch.as_ref() {
+                        Some(dispatch) => {
+                            !matches!(row.provenance, cas_types::VerificationProvenance::Legacy)
+                                && row.dispatch_id.as_deref() == Some(dispatch.id.as_str())
+                        }
+                        None => row.dispatch_id.is_none(),
+                    }
                 });
                 if !authorized {
                     return Err(McpError {
@@ -741,6 +773,16 @@ impl CasCore {
                         data: None,
                     });
                 }
+            }
+            if task.status == TaskStatus::Closed && new_status != TaskStatus::Closed {
+                cas_store::invalidate_verification_dispatch_for_new_cycle(&self.cas_root, &task.id)
+                    .map_err(|error| McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!(
+                            "Failed to invalidate reopened task proof cycle: {error}"
+                        )),
+                        data: None,
+                    })?;
             }
             task.status = new_status;
             changes.push("status");

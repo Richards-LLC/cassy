@@ -10,7 +10,6 @@ use rusqlite::{params, Connection};
 use tempfile::TempDir;
 
 /// Session ID injected into hook input JSON and set as task assignee.
-/// Session ID injected into hook input JSON and set as task assignee.
 const C496_SESSION: &str = "c496-0000-test-session-0000-000000000001";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -59,6 +58,15 @@ fn create_jailed_task(dir: &TempDir, task_id: &str) {
         params!["cas-c496-test-task-001", task_id, C496_SESSION, now],
     )
     .expect("insert jailed task");
+    conn.execute(
+        "INSERT INTO verification_dispatches
+         (id, task_id, requester_agent_id, owner_agent_id, state,
+          requested_at, deadline_at)
+         VALUES ('vdispatch-c496', 'cas-c496-test-task-001', ?1, ?1, 'pending',
+                 ?2, '2099-01-01T00:00:00+00:00')",
+        params![C496_SESSION, now],
+    )
+    .expect("insert exact task-scoped verification dispatch");
 }
 
 /// Run `cas hook PreToolUse` with the given JSON input and extra env vars.

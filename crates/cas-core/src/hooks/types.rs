@@ -71,8 +71,19 @@ pub struct HookInput {
     #[serde(default, alias = "subagentType")]
     pub subagent_type: Option<String>,
 
+    /// Distinct child identifier supplied by SubagentStart/SubagentStop.
+    ///
+    /// `session_id` remains the parent session for these events; authorization
+    /// that must distinguish parent from child must use this field.
+    #[serde(default, alias = "agentId")]
+    pub agent_id: Option<String>,
+
+    /// Current harness name for the spawned/stopped child.
+    #[serde(default, alias = "agentType")]
+    pub agent_type: Option<String>,
+
     /// Subagent prompt (SubagentStart)
-    #[serde(default, alias = "subagentPrompt")]
+    #[serde(default, alias = "subagentPrompt", alias = "prompt")]
     pub subagent_prompt: Option<String>,
 
     /// CAS agent role for this hook invocation ("supervisor" / "worker") —

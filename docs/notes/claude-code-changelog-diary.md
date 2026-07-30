@@ -44,6 +44,9 @@ When a new Claude Code version ships:
 
 | CC version | Headline | CAS verdict | Pointer |
 |------------|----------|-------------|---------|
+| 2.1.220 | Generic bug-fix and reliability rollup; no component detail in the official note | ⏭ source-limited | this doc |
+| 2.1.219 | **Opus 5 default** · bounded dynamic/nested agent changes · MCP startup/connection diagnostics | 👀 config watch / 🟢 / ✅ | this doc |
+| 2.1.218 | Built-in `/code-review` backgrounds · **tool/transcript evidence-loss fixes** | ✅ no action / 🟢 win | this doc |
 | 2.1.217 | **subagent concurrency/depth caps** · transcript-loss warnings · MCP-output leak + symlink-isolation fixes | 🟢 wins / ✅ | this doc |
 | 2.1.216 | **worktree escape routes closed** · resumed-agent restrictions restored · long-session stalls fixed | 🟢 direct wins | this doc |
 | 2.1.215 | `/verify` and `/code-review` no longer auto-invoked | ✅ no action | this doc |
@@ -92,6 +95,56 @@ When a new Claude Code version ships:
 ---
 
 ## Entries
+
+### 2.1.220 — generic bug-fix and reliability rollup
+
+Reviewed 2026-07-30. Host on **2.1.220**. Source: [Anthropic's official
+changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21220).
+
+- Anthropic publishes only **"Bug fixes and reliability improvements"** for this version, with no
+  affected component, command, hook, agent, or MCP surface named. → ⏭ **source-limited.** There is
+  not enough official evidence to attribute a specific fix or regression to CAS. The installed-version
+  status is current; the CAS verdict remains deliberately non-specific.
+
+### 2.1.219 — Opus 5 default · bounded workflow delegation · MCP diagnostics
+
+Reviewed 2026-07-30. Source: [Anthropic's official
+changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21219).
+
+- **Claude Opus 5 (`claude-opus-5`) is the default Opus model.** → 👀 **configuration watch, no code
+  change.** CAS's Claude worker fallback deliberately resolves to the stable `opus` alias
+  (`cas-cli/src/mcp/tools/service/factory_ops.rs`), and the PTY launcher passes that resolved value
+  through `--model` (`crates/cas-pty/src/pty.rs`). The alias therefore follows Anthropic's new Opus
+  default by design; deployments that require a fixed model can continue to set an explicit worker
+  model.
+- **Dynamic workflows now default to a medium size guideline (fewer than 15 agents), while nested
+  subagents may spawn to depth 3 by default.** → 🟢 **CAS remains explicitly bounded.** The
+  `cas-code-review` Workflow selects a finite persona set and enforces
+  `CODEX_MAX_CONCURRENCY = 4` in `.claude/workflows/cas-code-review.js`; its reviewer agents do not
+  depend on recursive delegation. The broader host default does not replace those workflow-owned
+  bounds, so no CAS change is required.
+- **Headless init can report invalid `--mcp-config` entries, and `claude mcp list`/`/mcp` now expose
+  connection status and error text.** → ✅ **diagnostics win.** CAS factory startup requires a
+  committed `.mcp.json` so isolated sessions receive CAS tools (`cas-cli/src/cli/factory/mod.rs`), and
+  `cas doctor` already validates its `mcpServers.cas` entry. The new host diagnostics make a skipped or
+  failed server easier to distinguish from a missing CAS tool; the `mcp_server_errors` init field is
+  additive and requires no CAS protocol change.
+
+### 2.1.218 — background built-in review · tool/transcript evidence correctness
+
+Reviewed 2026-07-30. Source: [Anthropic's official
+changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21218).
+
+- **The built-in `/code-review` now runs as a background subagent.** → ✅ **no action — separate
+  authority path.** CAS uses its own `cas-code-review` Workflow and keeps review ownership with the
+  supervisor (`cas-cli/src/builtins/skills/cas-code-review/SKILL.md`). Backgrounding Claude's bundled
+  command neither invokes nor bypasses CAS's close and review gates.
+- **Tool-executor errors are no longer silently dropped, aborted responses no longer leave an
+  unpaired `tool_use` block, and headless/SDK forks retain lineage after compaction.** → 🟢 **evidence
+  integrity win.** CAS records successful tool activity in its PostToolUse attribution path
+  (`cas-cli/src/hooks/handlers/handlers_events/attribution.rs`) and task verification relies on
+  coherent tool/transcript evidence (`docs/verifier-dispatch-trace.md`). These host fixes reduce false
+  evidence gaps without changing CAS's hook schema or verifier contract.
 
 ### 2.1.217 — bounded subagent fan-out · transcript/MCP memory safety · background isolation
 

@@ -49,6 +49,9 @@ cas-factory-protocol = { path = "../crates/cas-factory-protocol" }
 # Factory orchestration
 cas-factory = { path = "../crates/cas-factory" }
 
+# Typed harness conformance receipts consumed by factory preflight.
+cas-pty = { path = "../crates/cas-pty" }
+
 # Terminal emulation (for factory TUI client)
 ghostty_vt = { path = "../crates/ghostty_vt" }
 

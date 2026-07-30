@@ -42,7 +42,11 @@ fn git_layout(path: &Path) -> Result<(PathBuf, PathBuf), String> {
     let common_dir = canonical(if common_raw.is_absolute() {
         common_raw
     } else {
-        checkout_root.join(common_raw)
+        // `rev-parse --git-common-dir` is relative to Git's `-C <path>`,
+        // not necessarily to the checkout root. Preflight intentionally
+        // resolves from `<project>/.cas`; joining `../.git` to the checkout
+        // root would escape to the parent repository and fabricate a mismatch.
+        path.join(common_raw)
     });
     // Linked worktrees share `<main>/.git`; use its parent as the durable
     // host-local root. Ordinary repositories take the same path.
@@ -162,6 +166,10 @@ fn candidate_paths(cas_root: &Path) -> Vec<PathBuf> {
     raw.push(cas_root.to_path_buf());
     let mut seen = HashSet::new();
     raw.into_iter()
+        // The host registry intentionally retains historical checkouts. Avoid
+        // one failed `git` process per deleted TempDir/stale path during
+        // bounded preflight and lifecycle resolution.
+        .filter(|path| path.exists())
         .filter_map(|path| git_layout(&path).ok().map(|(root, _)| root))
         .filter(|root| seen.insert(root.clone()))
         .collect()
@@ -312,6 +320,49 @@ mod tests {
             let c = resolve_path_context(&dir.path().join("alias"), "master").unwrap();
             assert_eq!(a.git_common_dir, c.git_common_dir);
         }
+    }
+
+    #[test]
+    fn nonexistent_known_repo_is_skipped_before_git_resolution() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            crate::store::known_repos::ensure_host_schema().unwrap();
+            let stale = home.join("deleted-checkout");
+            std::fs::create_dir_all(&stale).unwrap();
+            crate::store::known_repos::register_repo_strict(&stale).unwrap();
+            std::fs::remove_dir(&stale).unwrap();
+
+            let project = home.join("active-project");
+            std::fs::create_dir_all(&project).unwrap();
+            git(&project, &["init", "-q", "-b", "main"]);
+            git(
+                &project,
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "git@example.invalid:org/active-project.git",
+                ],
+            );
+            std::fs::create_dir(project.join(".cas")).unwrap();
+            std::fs::write(
+                project.join(".cas/config.toml"),
+                "[project]\ncanonical_id = \"active-project\"\n",
+            )
+            .unwrap();
+
+            let target = WorkTarget {
+                repo_selector: "project:active-project".to_string(),
+                target_branch: "main".to_string(),
+            };
+            let resolved =
+                resolve_repo_context(&project.join(".cas"), &target).expect("active repo resolves");
+            assert_eq!(resolved.repo_selector, target.repo_selector);
+            assert_eq!(resolved.target_branch, "main");
+            assert!(
+                !stale.exists(),
+                "the stale registry entry must remain nonexistent"
+            );
+        });
     }
 
     #[test]

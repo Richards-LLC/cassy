@@ -203,7 +203,7 @@ pub struct SearchContextRequest {
 pub struct SystemRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'version', 'doctor', 'stats', 'info', 'reindex', 'maintenance_run', 'maintenance_status', 'config_docs', 'config_search', 'report_cas_bug', 'proxy_add', 'proxy_remove', 'proxy_list'"
+        description = "Action: 'version', 'preflight', 'doctor', 'stats', 'info', 'reindex', 'maintenance_run', 'maintenance_status', 'config_docs', 'config_search', 'report_cas_bug', 'proxy_add', 'proxy_remove', 'proxy_list', 'proxy_health'"
     )]
     pub action: String,
 

@@ -37,16 +37,21 @@ dependency, verify on upgrade) · 🔧 fix shipped · 🏗 EPIC · ⏭ n/a
 - **CAS validated against:** Grok Build **0.2.93** (comment on
   `crates/cas-pty/src/pty.rs` `PtyConfig::grok`, verified live 2026-07-09 via
   `grok --help` / `grok inspect` / `grok mcp doctor`).
-- **Locally installed:** **0.2.106** (`grok 0.2.106 (bde89716f6) [stable]`, checked
-  2026-07-22).
-- **Latest in local changelog:** **0.2.106** (2026-07-18). The current
-  `~/.grok/CHANGELOG.md` documents **0.2.104–0.2.106**; it no longer includes the
-  **0.2.100–0.2.101** sections captured here on 2026-07-14, and it omits
-  **0.2.102–0.2.103** entirely. Those two missing releases are recorded explicitly
-  below without invented history. **0.2.100** remains the diary's evidence-backed
+- **Locally installed:** **0.2.114** (`grok 0.2.114 (0c78503879) [stable]`, checked
+  2026-07-30).
+- **Latest versioned local changelog evidence:** **0.2.112** (2026-07-24). The
+  current `~/.grok/CHANGELOG.md` contains only a **0.2.112** section. The current
+  `~/.grok/CHANGELOG.json` is a flat item list with no version or date fields; its
+  items are therefore only **current-install evidence**, not grounds to assign
+  history to 0.2.113–0.2.114 or another guessed release. Earlier host snapshots
+  captured the evidence-backed **0.2.100–0.2.101** and **0.2.104–0.2.106** entries
+  retained below. Versions **0.2.102–0.2.103**, **0.2.107–0.2.111**, and
+  **0.2.113–0.2.114** have no attributable notes on the available local surfaces
+  and remain explicit source gaps. **0.2.100** remains the diary's evidence-backed
   **seed floor**.
-- **Gap:** ~13 patch versions between the validated pin (0.2.93) and
-  installed/latest (0.2.106). Entries below are a *changelog triage pass*, not a
+- **Gap:** ~21 patch versions between the validated pin (0.2.93) and locally
+  installed 0.2.114; the newest versioned changelog evidence trails the install by
+  two patches. Entries below are a *changelog triage pass*, not a
   re-run of the 0.2.93 live verification. Upgrade-time re-verification of the full
   touchpoint checklist remains the trigger for promoting any 👀 to a task.
 
@@ -120,6 +125,14 @@ At minimum, `PtyConfig::grok` sets:
 
 | Grok version | Headline | CAS verdict | Pointer |
 |--------------|----------|-------------|---------|
+| 0.2.114 | Missing from available versioned local changelog evidence | — (no attributable evidence) | this doc |
+| 0.2.113 | Missing from available versioned local changelog evidence | — (no attributable evidence) | this doc |
+| 0.2.112 | Version policy · env/provider config · session/resume/transcripts · MCP/subagents · hooks/workflows/background lifecycle | 👀 / ✅ / ⏭ | this doc |
+| 0.2.111 | Missing from available versioned local changelog evidence | — (no attributable evidence) | this doc |
+| 0.2.110 | Missing from available versioned local changelog evidence | — (no attributable evidence) | this doc |
+| 0.2.109 | Missing from available versioned local changelog evidence | — (no attributable evidence) | this doc |
+| 0.2.108 | Missing from available versioned local changelog evidence | — (no attributable evidence) | this doc |
+| 0.2.107 | Missing from available versioned local changelog evidence | — (no attributable evidence) | this doc |
 | 0.2.106 | Clipboard fallback/env opt-out · scheduled tasks become background commands · minimal-mode highlighting | ✅ / ⏭ | this doc |
 | 0.2.105 | Grok 4.5 defaults/effort + compaction · login-shell env · global rules discovery · MCP OAuth · background lifecycle/fleet roster | 👀 / ✅ / ⏭ | this doc |
 | 0.2.104 | Persistent background-work status · idle auth recovery · error/rate-limit copy · prompt editing | 👀 / ⏭ | this doc |
@@ -127,11 +140,116 @@ At minimum, `PtyConfig::grok` sets:
 | 0.2.102 | Missing from installed local changelog | — (no evidence) | this doc |
 | 0.2.101 | **grok inspect** multi-harness compatibility settings · TUI refresh cadence · queue/status/subagent polish · rate-limit copy | 👀 / ✅ / ⏭ | this doc |
 | 0.2.100 | **Session picker + welcome resume** across Claude/Codex/Cursor · web-fetch artifacts · queue/multiline Enter · pane-closed resume crash · hooks honor disabled-at-start · long-turn status markers | 👀 / ✅ / ⏭ | this doc |
-| *(seed floor)* | No evidence-backed versions before 0.2.100; current host changelog starts at 0.2.104 | — | — |
+| *(seed floor)* | No evidence-backed versions before 0.2.100; current host changelog contains only 0.2.112 | — | — |
 
 ---
 
 ## Entries
+
+### 0.2.114 — missing from the available versioned local changelog
+
+Reviewed 2026-07-30. The host binary is **0.2.114**, but
+`~/.grok/CHANGELOG.md` contains only a 0.2.112 section. The flat
+`~/.grok/CHANGELOG.json` has no version or date fields, so its current-install
+items cannot be attributed to 0.2.114. No release items, date, or CAS verdict are
+reconstructed from the installed version or neighboring release.
+
+### 0.2.113 — missing from the available versioned local changelog
+
+Reviewed 2026-07-30. Neither `~/.grok/CHANGELOG.md` nor the unversioned,
+flat `~/.grok/CHANGELOG.json` attributes notes to 0.2.113. The 0.2.112 section
+below does not fill this gap, and no history is inferred from its date.
+
+### 0.2.112 — version policy · env/MCP/hooks · session and workflow lifecycle
+
+Reviewed 2026-07-30. Source: the versioned **0.2.112 — 2026-07-24** section in
+`~/.grok/CHANGELOG.md`. The current `~/.grok/CHANGELOG.json` contains the same
+items as a flat list but supplies no independent version attribution.
+
+- **CLI version policy now separates soft update floors/ceilings from hard startup
+  requirements.** → 👀 **watch — unattended launch availability.** CAS launches
+  Grok workers directly; a hard startup requirement could prevent a factory pane
+  from reaching its injected `--rules`, env, or MCP contract. No flag change is
+  documented here, but upgrade/startup failures should distinguish Grok's version
+  gate from CAS worker lifecycle state.
+- **Custom model providers can take query parameters, environment-backed headers,
+  and an allowlist controlling which variables reach shell tools.** → 👀 **watch —
+  process env boundary.** CAS sets identity and factory variables on the Grok child.
+  Provider-header lookup and shell-variable filtering are separate config surfaces;
+  smoke that `CAS_AGENT_NAME`, `CAS_SESSION_ID`, and
+  `CAS_FACTORY_WORKER_CLI=grok` still reach the required child/tool paths when
+  operators enable these options.
+- **`tool_overrides` / `toolOverrides` adds date cutoffs and domain allowlists for
+  built-in search.** → ✅ no CAS launch change. These settings affect Grok-owned
+  search tools, not persistent CAS MCP discovery or the `cas__*` namespace.
+- **`/resume` defaults to native Grok sessions, `grok --resume` accepts a title,
+  resumed/replayed conversations restore file attachments, and rewound-session
+  forks copy live-branch history correctly.** → 👀 **watch — session/transcript
+  behavior.** Factory workers still launch with a fresh `--session-id` and CAS
+  resolves liveness under `~/.grok/sessions/*`; these resume/fork changes do not
+  authorize title-based lookup or foreign-session fallback in CAS. Confirm that
+  native transcript resolution remains keyed by the injected UUID.
+- **Remote-client terminal output is recorded so read-file hints and monitors work.**
+  → 👀 **watch — transcript/liveness evidence.** More complete recording is
+  favorable, but CAS still depends on the Grok session tree and correct
+  `CAS_FACTORY_WORKER_CLI=grok`, not on the interactive monitor alone.
+- **MCP tools appear without restart after managed-service enrollment/update, and
+  plugin subagents inherit the parent's MCP tools.** → 👀 **watch — MCP discovery
+  and subagents.** This should improve tool availability, but CAS still supplies no
+  per-spawn MCP override: discovery must expose the persistent server with Grok's
+  `cas__*` tool names to both the parent and any Grok-owned subagent.
+- **Hooks can now be defined in `config.toml` as well as JSON.** → 👀 **watch —
+  hook/config layering.** This expands Grok's hook configuration surface but does
+  not change CAS's posture: SessionStart stdout is not the role-context path;
+  explicit `--rules` plus inherited env remain load-bearing.
+- **Workflow overlays show live per-agent progress, failed workflow runs can resume,
+  and clicking “still running” opens the tasks pane.** → 👀 **watch — factory
+  messaging and lifecycle diagnosis.** These are Grok-owned workflow/task views,
+  not CAS coordination messages, leases, or factory membership. Do not treat their
+  roster or resumed-run state as CAS authority.
+- **Background shell commands now report real exit codes; the task tray clears
+  killed work and preserves descriptions after reconnect; startup hangs after
+  concurrent launches were fixed.** → ✅ **no CAS code action; operational
+  reliability win.** These fixes make shell proof and worker diagnosis less
+  misleading, while CAS remains responsible for process launch and task state.
+- **Queued prompts add an edit action, repeated identical tool calls stop silently,
+  and parked turns no longer duplicate transcript timing markers.** → 👀 **watch —
+  queued factory-message visibility and transcript evidence.** These are harness
+  behavior changes around the same surfaces operators inspect during injected
+  turns; CAS delivery truth remains its coordination state, not TUI copy alone.
+- **`/doctor`, tmux clipboard repair, auth/account, voice, image-edit, marketplace,
+  slash-command labels, colors, and other TUI fixes.** → ⏭ n/a unless a concrete
+  launch or tool-discovery regression is reproduced.
+
+### 0.2.111 — missing from the available versioned local changelog
+
+Reviewed 2026-07-30. `~/.grok/CHANGELOG.md` contains no 0.2.111 section, and
+the flat `~/.grok/CHANGELOG.json` does not attribute items to it. No release
+history or CAS verdict is inferred.
+
+### 0.2.110 — missing from the available versioned local changelog
+
+Reviewed 2026-07-30. `~/.grok/CHANGELOG.md` contains no 0.2.110 section, and
+the flat `~/.grok/CHANGELOG.json` does not attribute items to it. No release
+history or CAS verdict is inferred.
+
+### 0.2.109 — missing from the available versioned local changelog
+
+Reviewed 2026-07-30. `~/.grok/CHANGELOG.md` contains no 0.2.109 section, and
+the flat `~/.grok/CHANGELOG.json` does not attribute items to it. No release
+history or CAS verdict is inferred.
+
+### 0.2.108 — missing from the available versioned local changelog
+
+Reviewed 2026-07-30. `~/.grok/CHANGELOG.md` contains no 0.2.108 section, and
+the flat `~/.grok/CHANGELOG.json` does not attribute items to it. No release
+history or CAS verdict is inferred.
+
+### 0.2.107 — missing from the available versioned local changelog
+
+Reviewed 2026-07-30. `~/.grok/CHANGELOG.md` contains no 0.2.107 section, and
+the flat `~/.grok/CHANGELOG.json` does not attribute items to it. No release
+history or CAS verdict is inferred.
 
 ### 0.2.106 — scheduled-task lifecycle · clipboard fallback
 
@@ -294,18 +412,19 @@ changelog; no pre-0.2.100 entries inventable from this host.
 
 ## Backlog of opportunities (not required, tracked)
 
-- **0.2.93 → 0.2.106 upgrade validation:** re-run the live checklist that pinned 0.2.93
+- **0.2.93 → 0.2.114 upgrade validation:** re-run the live checklist that pinned 0.2.93
   (`grok --help` flags, `grok inspect`, `grok mcp doctor`, factory spawn smoke):
   `--permission-mode bypassPermissions`, `--session-id`, `-m` / `--reasoning-effort`,
   `--cwd`, `--rules`, MCP discovery of `cas` without per-spawn `-c`, env inheritance
   into `cas serve`, tools as `cas__*`, transcripts under `~/.grok/sessions/*`.
-- **Validated-pin comment bump:** after a successful factory smoke on 0.2.106, update
+- **Validated-pin comment bump:** after a successful factory smoke on 0.2.114, update
   the `PtyConfig::grok` "Verified against … 0.2.93" comment (and this diary's Version
   status) so the pin tracks reality.
 - **Changelog history depth:** find an authoritative release surface for the missing
-  0.2.102–0.2.103 notes and any pre-0.2.100 history before backfilling them. The
-  current local CHANGELOG covers only 0.2.104–0.2.106; keep both the gap and the
-  0.2.100 evidence-backed seed floor explicit until then.
+  0.2.102–0.2.103, 0.2.107–0.2.111, and 0.2.113–0.2.114 notes, plus any
+  pre-0.2.100 history, before backfilling them. The current local Markdown contains
+  only 0.2.112, and its companion JSON is unversioned; keep every gap and the
+  0.2.100 evidence-backed seed floor explicit until attributable sources exist.
 - **SessionStart stdout:** if a future Grok release starts delivering SessionStart
   stdout like Claude, re-evaluate whether `--rules` remains the sole context path or
   becomes defense-in-depth (would be a deliberate EPIC, not a silent drop of `--rules`).

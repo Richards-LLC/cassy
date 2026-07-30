@@ -95,9 +95,25 @@ async fn test_task_verifier_capability_is_child_bound_and_replay_safe() {
 
     let issued = cas_store::issue_verifier_capability(&cas_dir, &task_id, &parent_id)
         .expect("server issues capability");
+    cas_store::create_verification_dispatch(
+        &cas_dir,
+        &task_id,
+        &parent_id,
+        &parent_id,
+        chrono::Utc::now() + chrono::Duration::minutes(10),
+    )
+    .expect("create exact-task dispatch");
     let child_id = format!("task-verifier-child-{}", std::process::id());
     cas_store::bind_verifier_capability(&cas_dir, &issued.token, &child_id)
         .expect("bind capability to child");
+    cas_store::claim_verification_dispatch(
+        &cas_dir,
+        &task_id,
+        &parent_id,
+        &child_id,
+        &issued.capability.id,
+    )
+    .expect("child claims exact dispatch");
     let mut child = cas::types::Agent::new_sub_agent(
         child_id.clone(),
         "task-verifier".to_string(),
@@ -175,6 +191,14 @@ async fn test_task_verifier_capability_is_child_bound_and_replay_safe() {
     assert!(
         !event_payload.contains(&issued.token),
         "event/audit diagnostics must contain only capability IDs, never the raw bearer"
+    );
+    assert_eq!(
+        cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+            .expect("dispatch lookup")
+            .expect("dispatch")
+            .state,
+        cas::types::VerificationDispatchState::Resolved,
+        "the capability-bound verdict must atomically resolve its exact dispatch"
     );
 
     let replay = child_service
@@ -273,6 +297,102 @@ async fn test_anonymous_or_orphan_verification_add_fails_closed() {
     assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_REQUEST);
 }
 
+fn task_status_update(id: &str, status: Option<&str>, notes: Option<&str>) -> TaskUpdateRequest {
+    TaskUpdateRequest {
+        depth: None,
+        id: id.to_string(),
+        title: None,
+        notes: notes.map(str::to_string),
+        priority: None,
+        labels: None,
+        description: None,
+        design: None,
+        acceptance_criteria: None,
+        demo_statement: None,
+        execution_note: None,
+        external_ref: None,
+        assignee: None,
+        status: status.map(str::to_string),
+        epic: None,
+        epic_verification_owner: None,
+    }
+}
+
+#[tokio::test]
+async fn test_update_to_closed_is_exact_task_gated_but_other_task_update_remains_available() {
+    let (temp, service) = setup_cas();
+    let cas_dir = temp.path().join(".cas");
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        "[verification]\nenabled = true\n",
+    )
+    .expect("enable verification");
+
+    let create_a = service
+        .cas_task_create(Parameters(simple_task_req("Pending close A")))
+        .await
+        .expect("create A");
+    let id_a = extract_task_id(&extract_text(create_a))
+        .expect("id A")
+        .to_string();
+    service
+        .cas_task_start(Parameters(IdRequest { id: id_a.clone() }))
+        .await
+        .expect("start A");
+
+    let create_b = service
+        .cas_task_create(Parameters(simple_task_req("Unrelated task B")))
+        .await
+        .expect("create B");
+    let id_b = extract_task_id(&extract_text(create_b))
+        .expect("id B")
+        .to_string();
+
+    let close_err = service
+        .cas_task_update(Parameters(task_status_update(&id_a, Some("closed"), None)))
+        .await
+        .expect_err("A update-to-closed must require legitimate verification");
+    assert!(
+        close_err.message.contains(&id_a) && close_err.message.contains("VERIFICATION REQUIRED"),
+        "gate must identify only task A: {}",
+        close_err.message
+    );
+
+    let unrelated = service
+        .cas_task_update(Parameters(task_status_update(
+            &id_b,
+            None,
+            Some("still available while A waits"),
+        )))
+        .await
+        .expect("unrelated B update remains available");
+    assert!(extract_text(unrelated).contains("notes"));
+
+    let verification_store = open_verification_store(&cas_dir).expect("verification store");
+    let mut approved = Verification::approved(
+        "ver-update-close-authorized".to_string(),
+        id_a.clone(),
+        "registered supervisor verdict".to_string(),
+    );
+    approved.provenance = cas::types::VerificationProvenance::SupervisorDirect;
+    approved.agent_id = Some("registered-supervisor".to_string());
+    approved.issuer_agent_id = Some("registered-supervisor".to_string());
+    verification_store.add(&approved).expect("approved verdict");
+
+    service
+        .cas_task_update(Parameters(task_status_update(&id_a, Some("closed"), None)))
+        .await
+        .expect("legitimate verdict allows exact task close update");
+    assert_eq!(
+        open_task_store(&cas_dir)
+            .expect("task store")
+            .get(&id_a)
+            .expect("A")
+            .status,
+        TaskStatus::Closed
+    );
+}
+
 // cas-3bd4: env_test_lock() now lives in `support.rs` so `setup_cas()`
 // can hold it while clearing factory env vars. Tests that need to set
 // `CAS_AGENT_ROLE=supervisor` via `ScopedSupervisorEnv` MUST call
@@ -285,17 +405,6 @@ async fn test_task_close_blocked_without_verification() {
     let (temp, service) = setup_cas();
     let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
-    let agent_store = open_agent_store(&cas_dir).expect("open agent store");
-    {
-        let mut agent = agent_store
-            .list(None)
-            .expect("list agents")
-            .into_iter()
-            .find(|agent| agent.name == "test-agent")
-            .expect("test agent exists");
-        agent.role = AgentRole::Worker;
-        agent_store.update(&agent).expect("mark test agent worker");
-    }
 
     // Initialize verification store
     let verification_store = open_verification_store(&cas_dir).unwrap();
@@ -555,8 +664,8 @@ async fn test_task_start_not_blocked_by_merge_gated_sibling_cas_6a99() {
         "merge-gated sibling A must not block starting B, got: {text}"
     );
 
-    // Negative control: clear the merge gate → A is now just an unverified
-    // InProgress task → starting another task IS still blocked (jail intact).
+    // Clear the merge gate: A is now an unverified InProgress task, but C still
+    // starts because verification enforcement is scoped to A's close.
     let mut a = task_store.get(&id_a).expect("A exists");
     a.pending_worktree_merge = false;
     task_store.update(&a).expect("clear A merge gate");
@@ -574,8 +683,8 @@ async fn test_task_start_not_blocked_by_merge_gated_sibling_cas_6a99() {
             .expect("start C should return"),
     );
     assert!(
-        text.contains("VERIFICATION PENDING"),
-        "an unverified, non-merge-gated sibling should still jail, got: {text}"
+        !text.contains("VERIFICATION PENDING"),
+        "unverified sibling A must not block starting C, got: {text}"
     );
 }
 
@@ -4738,7 +4847,7 @@ fn task_req(value: serde_json::Value) -> cas_mcp::TaskRequest {
 /// MCP layer itself rejects the call with `VERIFICATION_JAIL_BLOCKED` and
 /// explicit Task() spawn instructions.
 #[tokio::test]
-async fn test_factory_worker_close_hits_narrowed_jail() {
+async fn test_factory_worker_close_creates_task_scoped_dispatch() {
     let (temp, core) = setup_cas();
     let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
@@ -4779,21 +4888,21 @@ owner = "worker"
         .await
         .expect("task.start should succeed — not jailed yet");
 
-    // Attempt to close. Must hit the narrowed jail in authorize_agent_action
-    // with an explicit McpError — NOT a soft warning from close_ops.
+    // Attempt to close. The close path itself creates a durable exact-task
+    // dispatch; there is no global dispatcher rejection.
     let close = task_req(serde_json::json!({
         "action": "close",
         "id": id,
         "reason": "Completed all acceptance criteria. Deployed to prod.",
     }));
-    let err = service
+    let result = service
         .task(Parameters(close))
         .await
-        .expect_err("close must be blocked by the narrowed MCP jail for factory workers");
-    let msg = err.message.to_string();
+        .expect("close returns task-scoped verification guidance");
+    let msg = extract_text(result);
     assert!(
-        msg.contains("VERIFICATION_JAIL_BLOCKED"),
-        "narrowed jail must return VERIFICATION_JAIL_BLOCKED, got: {msg}"
+        msg.contains("VERIFICATION REQUIRED") && msg.contains("vdispatch-"),
+        "close must create an explicit dispatch, got: {msg}"
     );
     // cas-778a: factory workers cannot spawn task-verifier themselves.
     // The jail error for factory workers must recommend forwarding to supervisor
@@ -4948,7 +5057,7 @@ async fn test_worker_close_additive_only_passes_jail_under_supervisor_owned_revi
 }
 
 #[tokio::test]
-async fn test_legacy_owner_worker_still_jails_clean_close_without_envelope_cas_8edb() {
+async fn test_legacy_owner_worker_still_requires_exact_close_verification_cas_8edb() {
     let (temp, core) = setup_cas();
     let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
@@ -4987,18 +5096,18 @@ owner = "worker"
         .await
         .expect("start");
 
-    let err = service
+    let result = service
         .task(Parameters(task_req(serde_json::json!({
             "action": "close",
             "id": id.clone(),
             "reason": "Done.",
         }))))
         .await
-        .expect_err("owner=worker must still jail clean close without envelope");
-    let msg = err.message.to_string();
+        .expect("owner=worker close returns task-scoped verification guidance");
+    let msg = extract_text(result);
     assert!(
-        msg.contains("VERIFICATION_JAIL_BLOCKED"),
-        "legacy owner=worker must still hit the narrowed jail, got: {msg}"
+        msg.contains("VERIFICATION REQUIRED") && msg.contains("vdispatch-"),
+        "legacy owner=worker must still gate this close, got: {msg}"
     );
 }
 
@@ -5223,17 +5332,12 @@ async fn test_task_close_succeeds_after_verifier_clearance() {
     );
 }
 
-/// cas-c29a: verification jail within-task deadlock.
+/// cas-c29a/cas-08ca: exact-task verification-dispatch timeout recovery.
 ///
 /// A task enters `pending_verification` on the first close attempt and the
-/// dispatch-request row is persisted in `Error` status. If the task-verifier
-/// subagent crashes or is never spawned, that row stays stale forever and
-/// every close retry returns `VERIFICATION REQUIRED` in a loop.
-///
-/// This test fabricates a dispatch-request row with a `created_at` older than
-/// the 10-minute jail timeout, then calls close again. Expected: close
-/// auto-escalates — returns `VERIFICATION TIMED OUT`, clears
-/// `pending_verification`, and replaces the stale row with a timeout diagnostic.
+/// If the task-verifier crashes, a retry after the durable deadline marks only
+/// the named dispatch timed_out and releases only that task. A different task's
+/// pending transition remains untouched.
 #[tokio::test]
 async fn test_close_auto_escalates_stale_verification_dispatch() {
     let (temp, service) = setup_cas();
@@ -5292,17 +5396,41 @@ async fn test_close_auto_escalates_stale_verification_dispatch() {
         "first close must set pending_verification"
     );
 
-    // Age the dispatch row beyond the 10-minute jail timeout.
-    let mut dispatch = verification_store
+    let legacy_dispatch = verification_store
         .get_latest_for_task(&id)
         .expect("get dispatch row")
         .expect("dispatch row exists");
-    assert_eq!(dispatch.status, cas::types::VerificationStatus::Error);
-    assert!(dispatch.summary.starts_with("Dispatch requested"));
-    dispatch.created_at = chrono::Utc::now() - chrono::Duration::seconds(700);
-    verification_store
-        .update(&dispatch)
-        .expect("age dispatch row");
+    assert_eq!(
+        legacy_dispatch.status,
+        cas::types::VerificationStatus::Error
+    );
+    assert!(legacy_dispatch.summary.starts_with("Dispatch requested"));
+
+    let mut other = cas::types::Task::new(
+        "cas-timeout-isolation-b".to_string(),
+        "Unrelated pending task B".to_string(),
+    );
+    other.status = TaskStatus::InProgress;
+    other.pending_verification = true;
+    task_store.add(&other).expect("add B");
+    cas_store::create_verification_dispatch(
+        &cas_dir,
+        &other.id,
+        "worker-b",
+        "supervisor-b",
+        chrono::Utc::now() + chrono::Duration::minutes(10),
+    )
+    .expect("create live B dispatch");
+
+    let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).expect("db");
+    conn.execute(
+        "UPDATE verification_dispatches SET deadline_at = ?2 WHERE task_id = ?1",
+        rusqlite::params![
+            id,
+            (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339()
+        ],
+    )
+    .expect("expire exact A dispatch");
 
     // Second close — should auto-escalate instead of looping.
     let result = service
@@ -5326,23 +5454,31 @@ async fn test_close_auto_escalates_stale_verification_dispatch() {
         "escalation must not fall back to the standard jail message"
     );
 
-    // pending_verification must be cleared so the task is no longer jailed.
+    // pending_verification is cleared only for A.
     let task_after_escalation = task_store.get(&id).expect("task exists");
     assert!(
         !task_after_escalation.pending_verification,
         "auto-escalation must clear pending_verification"
     );
 
-    // The dispatch row should have been updated with a timeout diagnostic.
-    let timed_out = verification_store
-        .get_latest_for_task(&id)
-        .expect("get row")
-        .expect("row exists");
-    assert_eq!(timed_out.status, cas::types::VerificationStatus::Error);
+    assert_eq!(
+        cas_store::get_latest_verification_dispatch(&cas_dir, &id)
+            .expect("A dispatch lookup")
+            .expect("A dispatch")
+            .state,
+        cas::types::VerificationDispatchState::TimedOut
+    );
     assert!(
-        timed_out.summary.contains("timed out"),
-        "stale dispatch row must be rewritten with timeout diagnostic: {}",
-        timed_out.summary
+        task_store.get(&other.id).expect("B").pending_verification,
+        "timing out A must not clear B"
+    );
+    assert_eq!(
+        cas_store::get_latest_verification_dispatch(&cas_dir, &other.id)
+            .expect("B dispatch lookup")
+            .expect("B dispatch")
+            .state,
+        cas::types::VerificationDispatchState::Pending,
+        "timing out A must not mutate B's dispatch"
     );
 }
 
@@ -5586,7 +5722,7 @@ async fn test_registered_supervisor_can_verify_live_worker_task() {
     // order would deadlock. Clearing the factory env vars ensures
     // `worker_harness_from_env()` falls back to Claude (subagents=true)
     // and the supervisor authz branch actually runs.
-    let (temp, service, _supervisor_id) = setup_cas_with_supervisor_session();
+    let (temp, service, supervisor_id) = setup_cas_with_supervisor_session();
     let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
@@ -5631,7 +5767,16 @@ async fn test_registered_supervisor_can_verify_live_worker_task() {
     let mut task = task_store.get(&id).expect("task exists");
     task.status = cas::types::TaskStatus::InProgress;
     task.assignee = Some(worker_id.clone());
+    task.pending_verification = true;
     task_store.update(&task).expect("update task");
+    cas_store::create_verification_dispatch(
+        &cas_dir,
+        &id,
+        &worker_id,
+        "unavailable-original-owner",
+        chrono::Utc::now() + chrono::Duration::minutes(10),
+    )
+    .expect("create dispatch owned by unavailable session");
 
     service
         .cas_verification_add(Parameters(VerificationAddRequest {
@@ -5657,12 +5802,21 @@ async fn test_registered_supervisor_can_verify_live_worker_task() {
         row.provenance,
         cas::types::VerificationProvenance::SupervisorDirect
     );
-    assert_eq!(row.agent_id.as_deref(), Some(_supervisor_id.as_str()));
-    assert_eq!(
-        row.issuer_agent_id.as_deref(),
-        Some(_supervisor_id.as_str())
-    );
+    assert_eq!(row.agent_id.as_deref(), Some(supervisor_id.as_str()));
+    assert_eq!(row.issuer_agent_id.as_deref(), Some(supervisor_id.as_str()));
     assert!(row.capability_id.is_none());
+    assert_eq!(
+        cas_store::get_latest_verification_dispatch(&cas_dir, &id)
+            .expect("dispatch lookup")
+            .expect("dispatch")
+            .state,
+        cas::types::VerificationDispatchState::Resolved,
+        "registered supervisor direct authority must recover an unavailable owner"
+    );
+    assert!(
+        !task_store.get(&id).expect("task").pending_verification,
+        "supervisor verdict must atomically clear only the named task transition"
+    );
 }
 
 // =============================================================================
@@ -6655,7 +6809,7 @@ async fn test_codex_worker_close_not_jailed_under_supervisor_owned_review_cas_8a
 /// This pins the existing behavior and guards against the guidance regressing to
 /// the non-factory branch. Complements the Codex variant below.
 #[tokio::test]
-async fn test_claude_worker_jail_close_block_recommends_cas_coordination_cas_8aaf() {
+async fn test_claude_worker_close_dispatch_recommends_cas_coordination_cas_8aaf() {
     let (temp, core) = setup_cas();
     let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
@@ -6691,18 +6845,18 @@ async fn test_claude_worker_jail_close_block_recommends_cas_coordination_cas_8aa
         .await
         .expect("start");
 
-    let err = service
+    let result = service
         .task(Parameters(task_req(serde_json::json!({
             "action": "close",
             "id": id.clone(),
             "reason": "Done.",
         }))))
         .await
-        .expect_err("close must be blocked for Claude worker under owner=worker");
-    let msg = err.message.to_string();
+        .expect("close returns task-scoped verification guidance");
+    let msg = extract_text(result);
     assert!(
-        msg.contains("VERIFICATION_JAIL_BLOCKED"),
-        "Claude worker under owner=worker must hit jail; got: {msg}"
+        msg.contains("VERIFICATION REQUIRED") && msg.contains("vdispatch-"),
+        "Claude worker close must create a task-scoped dispatch; got: {msg}"
     );
     // cas-778a + cas-8aaf: Claude factory workers must use mcp__cas__coordination.
     assert!(
@@ -6960,24 +7114,24 @@ async fn test_close_unverified_task_still_blocked_by_own_missing_verification_ca
         .expect("start A");
 
     // Attempt to close A without any verification — must be blocked
-    let err = service
+    let result = service
         .task(Parameters(task_req(serde_json::json!({
             "action": "close",
             "id": id_a.clone(),
             "reason": "unverified — should be blocked",
         }))))
         .await
-        .expect_err("close of unverified A must be blocked");
+        .expect("close of unverified A returns task-scoped guidance");
 
-    let msg = err.message.to_string();
+    let msg = extract_text(result);
     assert!(
-        msg.contains("VERIFICATION_JAIL_BLOCKED"),
-        "close of unverified task A must hit the jail; got: {msg}"
+        msg.contains("VERIFICATION REQUIRED") && msg.contains("vdispatch-"),
+        "close of unverified task A must be exact-task gated; got: {msg}"
     );
     // Error must name task A, not some other task
     assert!(
         msg.contains(&id_a),
-        "VERIFICATION_JAIL_BLOCKED must name task A ({id_a}); got: {msg}"
+        "task-scoped close gate must name task A ({id_a}); got: {msg}"
     );
 }
 
@@ -7170,21 +7324,20 @@ async fn test_codex_worker_epic_close_jail_recommends_cs_coordination_cas_1b80()
     // Attempt to close without verification. Because task_type=Epic and the
     // supervisor is Claude, verification is required even for Codex workers.
     // The jail must fire and the guidance must use the Codex MCP alias.
-    let err = service
+    let result = service
         .task(Parameters(task_req(serde_json::json!({
             "action": "close",
             "id": id.clone(),
             "reason": "Done.",
         }))))
         .await
-        .expect_err("Codex worker closing Epic without verification must be blocked by jail");
+        .expect("Codex worker epic close returns task-scoped verification guidance");
 
-    let msg = err.message.to_string();
+    let msg = extract_text(result);
 
-    // Jail must fire.
     assert!(
-        msg.contains("VERIFICATION_JAIL_BLOCKED"),
-        "Codex worker closing Epic under owner=worker must hit jail; got: {msg}"
+        msg.contains("VERIFICATION REQUIRED") && msg.contains("vdispatch-"),
+        "Codex worker epic close must create a task-scoped dispatch; got: {msg}"
     );
     // cas-1b80: Codex factory workers must receive the Codex MCP alias.
     assert!(
@@ -7354,7 +7507,6 @@ async fn test_timeout_escalation_uses_codex_supervisor_verification_alias_cas_79
     let (temp, service) = setup_cas();
     let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
-    let verification_store = open_verification_store(&cas_dir).unwrap();
 
     let created = service
         .cas_task_create(Parameters(TaskCreateRequest {
@@ -7397,15 +7549,16 @@ async fn test_timeout_escalation_uses_codex_supervisor_verification_alias_cas_79
         .await
         .expect("first close returns a result");
 
-    // Age the dispatch row beyond the jail timeout so the retry auto-escalates.
-    let mut dispatch = verification_store
-        .get_latest_for_task(&id)
-        .expect("get dispatch row")
-        .expect("dispatch row exists");
-    dispatch.created_at = chrono::Utc::now() - chrono::Duration::seconds(700);
-    verification_store
-        .update(&dispatch)
-        .expect("age dispatch row");
+    // Expire the authoritative typed deadline so the retry auto-escalates.
+    let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).expect("db");
+    conn.execute(
+        "UPDATE verification_dispatches SET deadline_at = ?2 WHERE task_id = ?1",
+        rusqlite::params![
+            id,
+            (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339()
+        ],
+    )
+    .expect("expire typed dispatch");
 
     // Codex supervisor harness drives the alias selection in the timeout arm.
     let _cli = ScopedSupervisorCliEnv::set("codex");

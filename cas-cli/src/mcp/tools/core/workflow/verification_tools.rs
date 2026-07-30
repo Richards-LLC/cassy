@@ -173,8 +173,9 @@ impl CasCore {
             }
         }
 
-        // Atomic unjail: persist verification record and clear pending_verification
-        // in the same SQLite transaction. If any step fails, both roll back.
+        // Atomically persist the verdict, resolve any active exact-task
+        // dispatch, and clear that task's pending transition. If any step
+        // fails, all authority and lifecycle writes roll back.
         {
             let db_path = self.cas_root.join("cas.db");
             let conn = rusqlite::Connection::open(&db_path).map_err(|e| McpError {
@@ -234,6 +235,21 @@ impl CasCore {
             cas_store::add_verification_with_conn(&tx, &verification).map_err(|e| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
                 message: Cow::from(format!("Failed to add verification: {e}")),
+                data: None,
+            })?;
+
+            cas_store::resolve_verification_dispatch_with_conn(
+                &tx,
+                &req.task_id,
+                &caller_id,
+                verification.capability_id.as_deref(),
+                supervisor_direct,
+            )
+            .map_err(|_| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(
+                    "Verification dispatch resolution rejected: caller is not the bound verifier or a registered supervisor-direct authority.",
+                ),
                 data: None,
             })?;
 

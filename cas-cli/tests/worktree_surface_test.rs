@@ -12,10 +12,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use cas::mcp::{CasCore, CasService};
 use cas::mcp::tools::{TaskCloseRequest, TaskUpdateRequest};
+use cas::mcp::{CasCore, CasService};
 use cas::store::{init_cas_dir, open_agent_store, open_task_store};
-use cas::types::{Agent, AgentType, Task, TaskType, WorkTarget};
+use cas::types::{Agent, AgentType, Task, TaskDepth, TaskType, WorkTarget};
 use cas_mcp::types::CoordinationRequest;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::RawContent;
@@ -66,13 +66,7 @@ impl GitRepo {
             std::fs::create_dir_all(parent).unwrap();
         }
         let out = Command::new("git")
-            .args([
-                "worktree",
-                "add",
-                "-b",
-                branch,
-                path.to_str().unwrap(),
-            ])
+            .args(["worktree", "add", "-b", branch, path.to_str().unwrap()])
             .current_dir(&self.root)
             .output()
             .expect("git worktree add");
@@ -606,7 +600,10 @@ async fn task_bound_cross_repo_merge_mutates_only_declared_repo() {
     disable_system_a(&cas_root_a);
 
     let task_store = open_task_store(&cas_root_a).expect("open repo A task store");
-    let mut task = Task::new("cross-repo-task".to_string(), "Cross repo merge".to_string());
+    let mut task = Task::new(
+        "cross-repo-task".to_string(),
+        "Cross repo merge".to_string(),
+    );
     task.assignee = Some("alice".to_string());
     task.deliverables.work_target = Some(WorkTarget {
         repo_selector: "remote:github.com/org/work-b".to_string(),
@@ -703,11 +700,15 @@ async fn update_to_closed_runs_hook_in_declared_task_worktree_and_records_path_f
     )
     .unwrap();
     run_git(&["add", "backend.rs"], &unrelated_path);
-    run_git(&["commit", "-m", "newer unrelated backend work"], &unrelated_path);
+    run_git(
+        &["commit", "-m", "newer unrelated backend work"],
+        &unrelated_path,
+    );
     std::fs::write(unrelated_path.join("dirty.tmp"), "newest dirty worktree").unwrap();
 
     let task_store = open_task_store(&cas_root_a).expect("task store");
     let mut task = Task::new("close-via-update".to_string(), "Frontend task".to_string());
+    task.depth = TaskDepth::Light;
     task.assignee = Some("frontend".to_string());
     task.deliverables.work_target = Some(WorkTarget {
         repo_selector: "remote:github.com/org/work-b".to_string(),
@@ -717,8 +718,8 @@ async fn update_to_closed_runs_hook_in_declared_task_worktree_and_records_path_f
 
     let core = CasCore::with_daemon(cas_root_a, None, None);
     core.cas_task_update(Parameters(close_update_request(task.id.clone())))
-    .await
-    .expect("update-to-closed must use frontend context");
+        .await
+        .expect("update-to-closed must use frontend context");
 
     let persisted = task_store.get(&task.id).expect("persisted task");
     assert_eq!(persisted.status, cas::types::TaskStatus::Closed);
@@ -728,7 +729,10 @@ async fn update_to_closed_runs_hook_in_declared_task_worktree_and_records_path_f
         .as_ref()
         .expect("portable hook evidence");
     assert_eq!(evidence.repo_selector, "remote:github.com/org/work-b");
-    assert_eq!(evidence.worktree_branch.as_deref(), Some("factory/frontend"));
+    assert_eq!(
+        evidence.worktree_branch.as_deref(),
+        Some("factory/frontend")
+    );
     assert_eq!(evidence.task_tip.as_deref(), Some(own_tip.as_str()));
     let json = serde_json::to_string(&persisted.deliverables).unwrap();
     assert!(!json.contains(home.path().to_string_lossy().as_ref()));
@@ -758,6 +762,7 @@ async fn update_to_closed_fails_closed_when_declared_task_worktree_branch_is_amb
 
     let task_store = open_task_store(&cas_root_a).expect("task store");
     let mut task = Task::new("ambiguous-close".to_string(), "Frontend task".to_string());
+    task.depth = TaskDepth::Light;
     task.assignee = Some("frontend".to_string());
     task.deliverables.work_target = Some(WorkTarget {
         repo_selector: "remote:github.com/org/work-b".to_string(),
@@ -810,6 +815,7 @@ async fn update_to_closed_failed_hook_leaves_status_and_evidence_unchanged() {
 
     let task_store = open_task_store(&cas_root_a).expect("task store");
     let mut task = Task::new("failed-hook-close".to_string(), "Frontend task".to_string());
+    task.depth = TaskDepth::Light;
     task.assignee = Some("frontend".to_string());
     task.deliverables.work_target = Some(WorkTarget {
         repo_selector: "remote:github.com/org/work-b".to_string(),
@@ -872,7 +878,10 @@ async fn normal_close_lints_task_anchor_not_newer_same_worker_or_unrelated_workt
     run_git(&["add", "task-a.rs"], &own_path);
     run_git(&["commit", "-m", "task A"], &own_path);
     let task_a_tip = git_stdout(&own_path, &["rev-parse", "HEAD"]);
-    run_git(&["merge", "--no-ff", "factory/frontend", "-m", "merge task A"], &repo_b.root);
+    run_git(
+        &["merge", "--no-ff", "factory/frontend", "-m", "merge task A"],
+        &repo_b.root,
+    );
 
     // Same worker starts task B after A was merged. Its bad lint must not be
     // attributed to A; A's recorded anchor is the task-owned proof scope.
@@ -922,7 +931,10 @@ async fn normal_close_lints_task_anchor_not_newer_same_worker_or_unrelated_workt
         .pre_close_hook
         .as_ref()
         .expect("hook evidence");
-    assert_eq!(evidence.worktree_branch.as_deref(), Some("factory/frontend"));
+    assert_eq!(
+        evidence.worktree_branch.as_deref(),
+        Some("factory/frontend")
+    );
     assert_eq!(evidence.task_tip.as_deref(), Some(task_a_tip.as_str()));
 }
 
@@ -1008,11 +1020,7 @@ fn create_epic_and_worker_task(
 }
 
 /// Register a System-B style worker agent and optionally claim a task lease.
-fn register_worker_agent(
-    cas_root: &Path,
-    name: &str,
-    factory_session: Option<&str>,
-) -> String {
+fn register_worker_agent(cas_root: &Path, name: &str, factory_session: Option<&str>) -> String {
     let agent_store = open_agent_store(cas_root).expect("open_agent_store");
     let id = Agent::generate_fallback_id();
     let mut agent = Agent::new(id.clone(), name.to_string());
@@ -1097,7 +1105,9 @@ async fn test_worktree_merge_standalone_task_requires_force_for_trunk() {
     let mut standalone_task = Task::new("standalone-1".to_string(), "Standalone task".to_string());
     // cas-bd5f: explicit task_id requires worker ownership.
     standalone_task.assignee = Some("bob".to_string());
-    task_store.add(&standalone_task).expect("add standalone task");
+    task_store
+        .add(&standalone_task)
+        .expect("add standalone task");
 
     let wt_path = cas_root.join("worktrees").join("bob");
     repo.add_worktree(&wt_path, "factory/bob");
@@ -1238,9 +1248,8 @@ async fn test_worktree_merge_uses_assignee_epic_when_no_task_id_cas_0b32() {
     let task_store = open_task_store(&cas_root).expect("open_task_store");
     let mut epic = Task::new("cas-0e22".to_string(), "EPIC triage".to_string());
     epic.task_type = TaskType::Epic;
-    epic.branch = Some(
-        "epic/epic-triage-and-fix-jul-9-11-docs-requests-factory-cas-0e22".to_string(),
-    );
+    epic.branch =
+        Some("epic/epic-triage-and-fix-jul-9-11-docs-requests-factory-cas-0e22".to_string());
     task_store.add(&epic).expect("add epic");
 
     let mut worker_task = Task::new("cas-9fff".to_string(), "Director routing".to_string());
@@ -1748,8 +1757,7 @@ async fn test_worktree_merge_task_id_matching_worker_succeeds_cas_bd5f() {
         .output()
         .unwrap();
 
-    let (_epic_id, task_id) =
-        create_epic_and_worker_task(&cas_root, "epic/match", Some("alice"));
+    let (_epic_id, task_id) = create_epic_and_worker_task(&cas_root, "epic/match", Some("alice"));
 
     let wt_path = cas_root.join("worktrees").join("alice");
     repo.add_worktree(&wt_path, "factory/alice");
@@ -1843,8 +1851,7 @@ async fn test_worktree_merge_rejects_task_without_assignee_or_lease_cas_bd5f() {
         .unwrap();
 
     // Intentionally no assignee — pre-cas-bd5f this would still merge to epic.
-    let (_epic_id, orphan_task_id) =
-        create_epic_and_worker_task(&cas_root, "epic/orphan", None);
+    let (_epic_id, orphan_task_id) = create_epic_and_worker_task(&cas_root, "epic/orphan", None);
 
     let wt_path = cas_root.join("worktrees").join("carol");
     repo.add_worktree(&wt_path, "factory/carol");
@@ -1886,8 +1893,7 @@ async fn test_worktree_merge_rejects_cross_session_lease_mismatch_cas_bd5f() {
         .unwrap();
 
     // Task has no assignee field but an active lease held by bob in session-B.
-    let (_epic_id, task_id) =
-        create_epic_and_worker_task(&cas_root, "epic/xsession", None);
+    let (_epic_id, task_id) = create_epic_and_worker_task(&cas_root, "epic/xsession", None);
 
     let bob_id = register_worker_agent(&cas_root, "bob", Some("session-b"));
     let agent_store = open_agent_store(&cas_root).expect("open_agent_store");
@@ -1938,8 +1944,7 @@ async fn test_worktree_merge_task_id_authorized_via_matching_lease_cas_bd5f() {
         .output()
         .unwrap();
 
-    let (_epic_id, task_id) =
-        create_epic_and_worker_task(&cas_root, "epic/lease-ok", None);
+    let (_epic_id, task_id) = create_epic_and_worker_task(&cas_root, "epic/lease-ok", None);
 
     let alice_id = register_worker_agent(&cas_root, "alice", Some("session-a"));
     let agent_store = open_agent_store(&cas_root).expect("open_agent_store");

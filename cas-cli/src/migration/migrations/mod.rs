@@ -186,6 +186,7 @@ mod m207_task_lease_history_add_reason;
 mod m208_prompt_queue_recipient_seen_create_table;
 mod m209_retrieval_feedback_create_tables;
 mod m210_verifier_authority;
+mod m211_verification_dispatches;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -383,6 +384,8 @@ pub const MIGRATIONS: &[Migration] = &[
     m209_retrieval_feedback_create_tables::MIGRATION,
     // Typed verifier provenance and one-time child capabilities (cas-941b)
     m210_verifier_authority::MIGRATION,
+    // Explicit task-scoped verification dispatch ownership and recovery (cas-08ca)
+    m211_verification_dispatches::MIGRATION,
 ];
 
 #[cfg(test)]

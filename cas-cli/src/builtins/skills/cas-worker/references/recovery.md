@@ -17,21 +17,21 @@ The most common close rejection: your `factory/<name>` branch has commits not ye
 5. **Guard still counts unmerged commits after a confirmed merge** → squash-merge SHA drift makes already-merged commits look missing. Send the supervisor the exact guard text (they reset the stale branch ref). Do not retry-loop against the guard.
 6. **Never route around it** with `action=update status=closed` plus a hand-written `verification action=add` — that forges the verification record and the audit trail. Rejection loops are a supervisor conversation, not a workaround opportunity.
 
-## Close hit VERIFICATION_JAIL_BLOCKED
+## Close requires task-scoped verification
 
 1. **Forward ONCE** to supervisor — include task ID, brief summary of completion state, and exact error text.
    - **Claude workers**: `mcp__cas__coordination action=message target=supervisor summary="..." message="..."`
    - **Codex workers**: `mcp__cs__coordination action=message target=supervisor summary="..." message="..."`
 
-   The VERIFICATION_JAIL_BLOCKED error text includes a pre-filled suggested message with the correct alias for your harness — copy and send that message directly.
+   The close response names the affected task, dispatch owner, deadline, and recovery path. Copy that guidance directly.
 2. **Do not re-report.** The supervisor will verify and close asynchronously. Re-sending the same message does not speed this up.
-3. **Re-poll the task DB, not your message queue.** Every 60 seconds (or when you otherwise become idle), check `mcp__cas__task action=show id=<your-task-id>`. If `Status: Closed`, treat it as closed regardless of what your message queue shows — **trust the DB over messages** (CAS has known message-queue drift on supervisor → worker channel B; see architecture_coordination_pipeline.md).
+3. **Continue unrelated work.** Verification gates only the named task's transition to closed; unrelated MCP and other-task work remain available. When idle, re-check `mcp__cas__task action=show id=<your-task-id>`. If `Status: Closed`, trust the DB over messages.
 4. **If still InProgress after 5 minutes of idle**, send ONE follow-up to the supervisor with note_type=blocker. Then continue to re-poll DB only.
 5. **Never spam idle notifications as a substitute for work.** If you are idle waiting on verification, stay silent until (a) the DB shows closed and you proceed to the next task, or (b) 5 minutes have elapsed and you send the one follow-up.
 
-## ALL tools blocked (universal jail)
+## ALL tools blocked (stale-binary universal jail)
 
-If **every** MCP tool call fails with a jail/blocked error (not just `close`), this is different from VERIFICATION_JAIL_BLOCKED above. This indicates a CAS build issue — the running binary likely predates the factory-mode jail exemption fix.
+If **every** MCP tool call fails with a jail/blocked error (not just the named task's close/update-to-closed), the running CAS binary predates task-scoped verification enforcement.
 
 1. **Do NOT attempt workarounds** — no sqlite edits, no env var hacks, no retries.
 2. **Report to supervisor immediately** via `mcp__cas__coordination action=message` with the exact error message and your agent name.

@@ -1,4 +1,3 @@
-use crate::harness_policy::is_worker_without_subagents_from_env;
 use crate::mcp::tools::core::imports::*;
 
 pub(crate) mod close_ops;
@@ -489,41 +488,6 @@ impl CasCore {
         // Auto-claim the task with a lease
         let agent_id = self.get_agent_id()?;
 
-        // Check if agent has pending verification (blocks starting new tasks).
-        // Pass None so all leases are evaluated — start intentionally blocks
-        // across all unverified tasks, not just the one being started.
-        if let Some((blocked_task_id, blocked_task_title)) =
-            self.check_pending_verification(&agent_id, None)?
-        {
-            // Allow if starting the same task that's blocking (resuming work)
-            if blocked_task_id != req.id {
-                let is_worker_without_subagents = is_worker_without_subagents_from_env();
-
-                return Ok(Self::tool_error(format!(
-                    "🚫 VERIFICATION PENDING\n\n\
-                    You have an unverified task: [{}] {}\n\n\
-                    Before starting new work, complete verification:\n\
-                    {}\n\n\
-                    Use `cas_task_show` with id={} to see task details.",
-                    blocked_task_id,
-                    blocked_task_title,
-                    if is_worker_without_subagents {
-                        format!(
-                            "1. Ask supervisor to verify task {blocked_task_id} (task-verifier or direct mcp__cs__verification)\n\
-                            2. Fix any issues found\n\
-                            3. Ask supervisor to close the task once verification is approved"
-                        )
-                    } else {
-                        format!(
-                            "1. Spawn the 'task-verifier' agent with task_id={blocked_task_id}\n\
-                            2. Fix any issues found\n\
-                            3. Once verified, close the task and start new work"
-                        )
-                    },
-                    blocked_task_id
-                )));
-            }
-        }
         let agent_store = self.open_agent_store()?;
 
         // Check agent role for supervisor/worker-specific logic

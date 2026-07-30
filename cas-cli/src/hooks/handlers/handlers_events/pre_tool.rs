@@ -1,4 +1,3 @@
-use crate::harness_policy::worker_harness_from_env;
 use crate::hooks::handlers::*;
 
 // PreToolUse Hook Handler
@@ -44,10 +43,8 @@ pub fn handle_pre_tool_use(
         let isolation = tool_input.and_then(|ti| ti.get("isolation").and_then(|v| v.as_str()));
         let subagent_type =
             tool_input.and_then(|ti| ti.get("subagent_type").and_then(|v| v.as_str()));
-        // Task-verifier is exempt: supervisors legitimately spawn it to unjail
-        // epic verification (see handlers_events/pre_tool.rs task-verifier unjail
-        // block below). Blocking it here would strand supervisors in
-        // pending_verification if a future caller ever pairs it with isolation.
+        // Task-verifier is exempt: supervisors legitimately spawn it to resolve
+        // a task-scoped verification dispatch.
         let is_verifier_exempt = subagent_type == Some("task-verifier");
         if isolation == Some("worktree") && !is_verifier_exempt {
             // EPIC cas-8888 (cas-fd9f): own_tool_prefix() — this reminder
@@ -210,21 +207,7 @@ pub fn handle_pre_tool_use(
         ));
     }
 
-    // ========================================================================
-    // VERIFICATION JAIL: Block all tools except task-verifier when pending
-    //
-    // When a task has pending_verification=true, block all tools except:
-    // 1. Task tool spawning task-verifier - unjails by clearing pending_verification
-    // 2. mcp__cas__verification - allows recording verification results
-    //
-    // The unjail happens in PreToolUse when Task(task-verifier) is detected.
-    // A marker file is also written as backup for edge cases.
-    //
-    // Only jail the agent that owns the tasks (via leases), not all agents.
-    // ========================================================================
-    // Supervisors are exempt from verification jail — their job is coordination
     let is_supervisor = crate::harness_policy::is_supervisor_from_env();
-    let worker_supports_subagents = worker_harness_from_env().capabilities().supports_subagents;
 
     // ========================================================================
     // CODEMAP FRESHNESS GATE: Block supervisor from creating tasks / spawning
@@ -262,287 +245,6 @@ pub fn handle_pre_tool_use(
                     ),
                 ));
             }
-        }
-    }
-
-    // Factory workers are exempt from verification jail — they may have multiple
-    // tasks assigned and must be able to continue working on other tasks while
-    // one awaits verification. The pending_verification flag on the task itself
-    // still prevents re-closing without verification (enforced in close_ops.rs).
-    let is_factory_worker = std::env::var("CAS_AGENT_ROLE")
-        .map(|role| role.eq_ignore_ascii_case("worker"))
-        .unwrap_or(false)
-        && std::env::var("CAS_FACTORY_MODE").is_ok();
-
-    // Verification jail is only relevant when worker harness supports subagents.
-    if worker_supports_subagents && !is_supervisor && !is_factory_worker {
-        if let Some(task_store) = stores.tasks().cloned() {
-            if let Ok(tasks) = task_store.list_pending_verification() {
-                // Filter to tasks owned by the current agent:
-                //    a. The current agent has an active lease on them (regular tasks), OR
-                //    b. The current agent is the epic_verification_owner (epic tasks)
-                let pending_tasks: Vec<_> = tasks
-                    .iter()
-                    .filter(|t| {
-                        // For epics with epic_verification_owner set, jail that owner
-                        if t.task_type == TaskType::Epic {
-                            if let Some(ref owner) = t.epic_verification_owner {
-                                return owner == &current_agent_id;
-                            }
-                        }
-                        // For regular tasks (or epics without owner), use lease ownership
-                        agent_task_ids.contains(&t.id)
-                            || t.assignee
-                                .as_ref()
-                                .map(|a| a == &current_agent_id)
-                                .unwrap_or(false)
-                    })
-                    .collect();
-
-                // cas-c29a: auto-escalate stale verification dispatches. If a task
-                // has been jailed for >VERIFICATION_JAIL_TIMEOUT_SECS with a
-                // dispatch-request row that never got a verdict, the task-verifier
-                // subagent is presumed dead. Clear pending_verification so the jail
-                // releases and the tool call proceeds instead of looping forever.
-                const VERIFICATION_JAIL_TIMEOUT_SECS: i64 = 600;
-                const DISPATCH_SUMMARY_PREFIX: &str = "Dispatch requested";
-                let pending_tasks: Vec<_> = if let Some(verification_store) =
-                    stores.verification().cloned()
-                {
-                    pending_tasks
-                            .into_iter()
-                            .filter(|t| {
-                                let is_stale = matches!(
-                                    verification_store.get_latest_for_task(&t.id),
-                                    Ok(Some(ref v))
-                                        if v.status == crate::types::VerificationStatus::Error
-                                            && v.summary.starts_with(DISPATCH_SUMMARY_PREFIX)
-                                            && (chrono::Utc::now() - v.created_at).num_seconds()
-                                                > VERIFICATION_JAIL_TIMEOUT_SECS
-                                );
-                                if is_stale {
-                                    let mut task_to_update = (*t).clone();
-                                    task_to_update.pending_verification = false;
-                                    task_to_update.updated_at = chrono::Utc::now();
-                                    let _ = task_store.update(&task_to_update);
-                                    warn!(
-                                        task_id = %t.id,
-                                        "[VERIFICATION JAIL] auto-escalated stale dispatch — verifier never responded"
-                                    );
-                                    false
-                                } else {
-                                    true
-                                }
-                            })
-                            .collect()
-                } else {
-                    pending_tasks
-                };
-
-                // Check for unjail marker file (backup mechanism)
-                // This marker indicates task-verifier is running and all tools should be allowed
-                let marker_path = cas_root.join(".verifier_unjail_marker");
-                let mut jail_cleared_via_marker = false;
-
-                // Log verification jail state for debugging
-                let task_ids_for_log: Vec<_> =
-                    pending_tasks.iter().map(|t| t.id.as_str()).collect();
-                debug!(
-                    tool = tool_name,
-                    agent = &current_agent_id[..8.min(current_agent_id.len())],
-                    pending_tasks = task_ids_for_log.join(", ").as_str(),
-                    marker_exists = marker_path.exists(),
-                    "[VERIFICATION JAIL] checking jail state"
-                );
-
-                if marker_path.exists() {
-                    if let Ok(contents) = std::fs::read_to_string(&marker_path) {
-                        let marker_session = contents
-                            .lines()
-                            .find_map(|line| line.strip_prefix("session="))
-                            .map(|s| s.trim());
-
-                        debug!(
-                            marker_session = ?marker_session,
-                            current_agent = &current_agent_id[..8.min(current_agent_id.len())],
-                            "[VERIFICATION JAIL] marker file found"
-                        );
-
-                        if marker_session == Some(current_agent_id.as_str()) {
-                            // Clear jail via marker - verifier is running for this agent
-                            for task in &pending_tasks {
-                                let mut task_to_update = (*task).clone();
-                                task_to_update.pending_verification = false;
-                                task_to_update.updated_at = chrono::Utc::now();
-                                let _ = task_store.update(&task_to_update);
-                            }
-                            // NOTE: Don't remove marker file here - keep it until verifier completes
-                            // The marker indicates verifier is actively running
-                            jail_cleared_via_marker = true;
-                            info!(
-                                "[VERIFICATION JAIL] jail cleared via marker file (task-verifier running)"
-                            );
-                        } else {
-                            warn!(
-                                marker_session = ?marker_session,
-                                current_agent = current_agent_id.as_str(),
-                                "[VERIFICATION JAIL] marker session MISMATCH"
-                            );
-                        }
-                    }
-                }
-
-                // Skip jail check if marker cleared it (verifier is running)
-                if !jail_cleared_via_marker && !pending_tasks.is_empty() {
-                    // Check if this is Task/Agent tool spawning task-verifier
-                    // (Newer Claude Code renamed "Task" to "Agent" — accept both.)
-                    let is_verifier_agent = if tool_name == "Task" || tool_name == "Agent" {
-                        let subagent_type = input
-                            .tool_input
-                            .as_ref()
-                            .and_then(|ti| ti.get("subagent_type").and_then(|v| v.as_str()));
-                        debug!(
-                            subagent_type = ?subagent_type,
-                            tool = tool_name,
-                            "[VERIFICATION JAIL] Task/Agent tool detected"
-                        );
-                        subagent_type == Some("task-verifier")
-                    } else {
-                        false
-                    };
-
-                    // Allow verification tool for recording results (any harness alias).
-                    let is_verification_tool = is_own_verification_tool_call(
-                        tool_name,
-                        crate::harness_policy::own_tool_prefix(),
-                    );
-
-                    debug!(
-                        is_verifier_agent = is_verifier_agent,
-                        is_verification_tool = is_verification_tool,
-                        tool = tool_name,
-                        "[VERIFICATION JAIL] evaluating tool"
-                    );
-
-                    if is_verifier_agent {
-                        // Write unjail marker as backup
-                        let marker_content = format!(
-                            "session={}\ntimestamp={}",
-                            current_agent_id,
-                            chrono::Utc::now()
-                        );
-                        let _ = std::fs::write(&marker_path, &marker_content);
-
-                        // Clear jail directly - subagent will see cleared flag
-                        let task_ids: Vec<_> =
-                            pending_tasks.iter().map(|t| t.id.as_str()).collect();
-                        for task in &pending_tasks {
-                            let mut task_to_update = (*task).clone();
-                            task_to_update.pending_verification = false;
-                            task_to_update.updated_at = chrono::Utc::now();
-                            let _ = task_store.update(&task_to_update);
-
-                            // Emit VerificationStarted event for task lifecycle tracking
-                            #[cfg(feature = "mcp-server")]
-                            {
-                                let event = crate::mcp::socket::DaemonEvent::WorkerActivity {
-                                    session_id: input.session_id.clone(),
-                                    event_type: "verification_started".to_string(),
-                                    description: format!("Verifying: {}", task.title),
-                                    entity_id: Some(task.id.clone()),
-                                };
-                                let _ = crate::mcp::socket::send_event(cas_root, &event);
-                            }
-                        }
-                        info!(
-                            tasks = task_ids.join(", ").as_str(),
-                            "[VERIFICATION JAIL] ALLOWING task-verifier spawn, unjailing tasks"
-                        );
-                    } else if is_verification_tool {
-                        // Allow verification tool through - this records verification directly.
-                        info!("[VERIFICATION JAIL] ALLOWING verification MCP tool through");
-                    } else {
-                        let task_ids: Vec<_> =
-                            pending_tasks.iter().map(|t| t.id.as_str()).collect();
-                        let task_list = task_ids.join(", ");
-
-                        warn!(
-                            tool = tool_name,
-                            pending_tasks = task_list.as_str(),
-                            "[VERIFICATION JAIL] BLOCKING tool"
-                        );
-
-                        // Use task-verifier for both tasks and epics (epics must set verification_type=epic)
-                        let has_epic = pending_tasks.iter().any(|t| t.task_type == TaskType::Epic);
-                        let verifier_name = "task-verifier";
-                        let epic_note = if has_epic {
-                            "\nFor epics: the verifier MUST record verification_type=epic."
-                        } else {
-                            ""
-                        };
-
-                        return Ok(HookOutput::with_pre_tool_permission(
-                            "deny",
-                            &format!(
-                                "🔒 VERIFICATION JAIL: Task(s) {task_list} require verification before you can continue.\n\n\
-                            You MUST spawn the '{verifier_name}' agent to review and verify the work.{epic_note}\n\n\
-                            Example: Use the Task tool with subagent_type=\"{verifier_name}\" and prompt describing the task to verify."
-                            ),
-                        ));
-                    }
-                }
-            }
-        }
-    }
-
-    // ========================================================================
-    // SUPERVISOR TASK-VERIFIER UNJAIL
-    //
-    // Supervisors are exempt from verification jail (above), but when they
-    // spawn task-verifier for their own tasks (or a worker's task), we still
-    // need to write the unjail marker so the task-verifier subagent (running
-    // in supervisor context) can record verification via cas_verification_add.
-    // We also clear pending_verification so the task isn't stuck.
-    // ========================================================================
-    if is_supervisor && (tool_name == "Task" || tool_name == "Agent") {
-        let is_task_verifier = input
-            .tool_input
-            .as_ref()
-            .and_then(|ti| ti.get("subagent_type").and_then(|v| v.as_str()))
-            == Some("task-verifier");
-
-        if is_task_verifier {
-            let marker_path = cas_root.join(".verifier_unjail_marker");
-            let marker_content = format!(
-                "session={}\ntimestamp={}",
-                current_agent_id,
-                chrono::Utc::now()
-            );
-            let _ = std::fs::write(&marker_path, &marker_content);
-
-            // Clear pending_verification for tasks assigned to this supervisor
-            if let Some(task_store) = stores.tasks().cloned() {
-                if let Ok(tasks) = task_store.list_pending_verification() {
-                    for task in &tasks {
-                        let is_owned = task
-                            .assignee
-                            .as_deref()
-                            .map(|a| a == current_agent_id)
-                            .unwrap_or(false)
-                            || agent_task_ids.contains(&task.id);
-                        if is_owned {
-                            let mut task_to_update = task.clone();
-                            task_to_update.pending_verification = false;
-                            task_to_update.updated_at = chrono::Utc::now();
-                            let _ = task_store.update(&task_to_update);
-                        }
-                    }
-                }
-            }
-
-            info!(
-                "[VERIFICATION] Supervisor spawning task-verifier — wrote unjail marker and cleared pending_verification"
-            );
         }
     }
 
@@ -893,6 +595,35 @@ pub fn handle_pre_tool_use(
                 "task-verifier prompt must name exactly one existing CAS task ID.",
             ));
         };
+        match cas_store::get_latest_verification_dispatch(cas_root, &task_id) {
+            Ok(Some(dispatch))
+                if matches!(
+                    dispatch.state,
+                    cas_types::VerificationDispatchState::Pending
+                        | cas_types::VerificationDispatchState::Claimed
+                ) =>
+            {
+                if dispatch.owner_agent_id != current_agent_id {
+                    return Ok(HookOutput::with_pre_tool_permission(
+                        "deny",
+                        "This task's verification dispatch is owned by another registered session.",
+                    ));
+                }
+                if dispatch.deadline_at <= chrono::Utc::now() {
+                    return Ok(HookOutput::with_pre_tool_permission(
+                        "deny",
+                        "This task's verification dispatch deadline has elapsed; use the recorded recovery path.",
+                    ));
+                }
+            }
+            Ok(_) => {}
+            Err(_) => {
+                return Ok(HookOutput::with_pre_tool_permission(
+                    "deny",
+                    "Could not validate task-scoped verification dispatch authority.",
+                ));
+            }
+        }
         let issued =
             match cas_store::issue_verifier_capability(cas_root, &task_id, &current_agent_id) {
                 Ok(issued) => issued,
@@ -1195,18 +926,6 @@ fn is_codemap_gated_tool_call(tool_name: &str, action: Option<&str>, tool_prefix
     (tool_name == task_tool && action == Some("create"))
         || (tool_name == coordination_tool
             && matches!(action, Some("spawn_workers") | Some("spawn_worker")))
-}
-
-/// Whether `tool_name` is the CALLER's own harness-namespaced `verification`
-/// tool (`mcp__cas__verification` / `mcp__cs__verification` /
-/// `cas__verification`) — used to let a verification-jailed agent record its
-/// own verification result without unjailing via task-verifier.
-///
-/// EPIC cas-8888 (cas-fd9f): was a 2-way OR (`mcp__cas__` + `mcp__cs__`) that
-/// silently never matched Grok's `cas__verification` — the jail would never
-/// unlock for a Grok agent recording its own result.
-fn is_own_verification_tool_call(tool_name: &str, tool_prefix: &str) -> bool {
-    tool_name == format!("{tool_prefix}verification")
 }
 
 /// Return the single existing CAS task ID named in a verifier prompt.
@@ -1942,34 +1661,6 @@ mod worker_commit_guard_tests {
         ));
         // Unrelated tool.
         assert!(!is_codemap_gated_tool_call("Bash", Some("create"), "cas__"));
-    }
-
-    #[test]
-    fn verification_tool_call_recognizes_all_three_harness_prefixes() {
-        assert!(is_own_verification_tool_call(
-            "mcp__cas__verification",
-            "mcp__cas__"
-        ));
-        assert!(is_own_verification_tool_call(
-            "mcp__cs__verification",
-            "mcp__cs__"
-        ));
-        // The load-bearing regression: previously a 2-way OR that never
-        // matched Grok's "cas__verification" — a Grok agent could never
-        // unjail itself by recording its own verification result.
-        assert!(is_own_verification_tool_call("cas__verification", "cas__"));
-    }
-
-    #[test]
-    fn verification_tool_call_rejects_mismatched_prefix() {
-        assert!(!is_own_verification_tool_call(
-            "mcp__cs__verification",
-            "cas__"
-        ));
-        assert!(!is_own_verification_tool_call(
-            "mcp__cas__task",
-            "mcp__cas__"
-        ));
     }
 
     /// Sanity check that the full `handle_pre_tool_use` entrypoint reaches

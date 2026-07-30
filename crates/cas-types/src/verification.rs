@@ -110,6 +110,107 @@ pub struct VerifierCapability {
     pub consumed_at: Option<DateTime<Utc>>,
 }
 
+/// Lifecycle state for one explicit verification dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationDispatchState {
+    /// A verifier owner has been assigned but no child has claimed the work.
+    #[default]
+    Pending,
+    /// A distinct task-verifier child claimed the dispatch.
+    Claimed,
+    /// The deadline elapsed without a verdict.
+    TimedOut,
+    /// A legitimate verifier or supervisor recorded a verdict.
+    Resolved,
+}
+
+impl fmt::Display for VerificationDispatchState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            VerificationDispatchState::Pending => write!(f, "pending"),
+            VerificationDispatchState::Claimed => write!(f, "claimed"),
+            VerificationDispatchState::TimedOut => write!(f, "timed_out"),
+            VerificationDispatchState::Resolved => write!(f, "resolved"),
+        }
+    }
+}
+
+impl FromStr for VerificationDispatchState {
+    type Err = TypeError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "pending" => Ok(VerificationDispatchState::Pending),
+            "claimed" => Ok(VerificationDispatchState::Claimed),
+            "timed_out" => Ok(VerificationDispatchState::TimedOut),
+            "resolved" => Ok(VerificationDispatchState::Resolved),
+            _ => Err(TypeError::Parse(format!(
+                "invalid verification dispatch state: {s}"
+            ))),
+        }
+    }
+}
+
+/// Recovery path advertised when a verification dispatch misses its deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationRecoveryAction {
+    /// The registered supervisor must re-dispatch a verifier or record a
+    /// direct verdict using server-derived supervisor authority.
+    #[default]
+    SupervisorRedispatchOrDirect,
+}
+
+impl fmt::Display for VerificationRecoveryAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            VerificationRecoveryAction::SupervisorRedispatchOrDirect => {
+                write!(f, "supervisor_redispatch_or_direct")
+            }
+        }
+    }
+}
+
+impl FromStr for VerificationRecoveryAction {
+    type Err = TypeError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "supervisor_redispatch_or_direct" => {
+                Ok(VerificationRecoveryAction::SupervisorRedispatchOrDirect)
+            }
+            _ => Err(TypeError::Parse(format!(
+                "invalid verification recovery action: {s}"
+            ))),
+        }
+    }
+}
+
+/// Durable task-scoped verification work assignment.
+///
+/// This record is the forcing-function state. It is separate from verdict
+/// rows so unrelated work can continue while one exact task transition waits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationDispatch {
+    pub id: String,
+    pub task_id: String,
+    pub requester_agent_id: String,
+    pub owner_agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifier_agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_id: Option<String>,
+    #[serde(default)]
+    pub state: VerificationDispatchState,
+    pub requested_at: DateTime<Utc>,
+    pub deadline_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub recovery_action: VerificationRecoveryAction,
+}
+
 /// Status of a verification
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]

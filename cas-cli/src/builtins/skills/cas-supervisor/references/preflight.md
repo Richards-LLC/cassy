@@ -1,6 +1,6 @@
 # Pre-flight: is the running `cas serve` binary current? (cas-d0f9)
 
-**Read this before you spawn workers.** The running `cas serve` daemon is whatever binary was installed the last time `cargo build --release` ran in this repo. If the binary predates recent close-gate / verification / hook changes, every worker will hit `VERIFICATION_JAIL_BLOCKED` on close, and you will burn time running `task-verifier` manually and adding `bypass_code_review=true` overrides that shouldn't be necessary.
+**Read this before you spawn workers.** The running `cas serve` daemon is whatever binary was installed the last time `cargo build --release` ran in this repo. If the binary predates recent close-gate / verification / hook changes, workers may see legacy global verification blocks instead of the current exact-task close gate.
 
 The canonical instance of this was 2026-04-22 (~8 min × 2 closes wasted) when `cas serve` predated commit `bba6fbf` (factory worker verification jail exemption). That fix is on `main` and has been for a while — but stale deploys keep re-discovering it.
 

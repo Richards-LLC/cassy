@@ -182,11 +182,11 @@ async fn test_all_store_types_accessible() {
 }
 
 // ========================================================================
-// Pending Verification Blocking Tests
+// Task-scoped verification isolation tests
 // ========================================================================
 
 #[tokio::test]
-async fn test_start_blocked_with_pending_verification() {
+async fn test_start_allowed_with_other_task_pending_verification() {
     let (_temp, service) = setup_cas();
 
     // Create and start first task
@@ -230,9 +230,10 @@ async fn test_start_blocked_with_pending_verification() {
         id: first_id.to_string(),
         reason: Some("Completed".to_string()),
         bypass_code_review: None,
-code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        code_review_findings: None,
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -271,7 +272,7 @@ code_review_findings: None,
     let text = extract_text(result);
     let second_id = extract_task_id(&text).expect("should have second task ID");
 
-    // Try to start second task - should be BLOCKED due to pending verification
+    // Starting unrelated task B remains available while A's close is pending.
     let start_req2 = IdRequest {
         id: second_id.to_string(),
     };
@@ -282,17 +283,13 @@ code_review_findings: None,
 
     let text = extract_text(result);
     assert!(
-        text.contains("VERIFICATION PENDING"),
-        "Start should be blocked: {text}"
-    );
-    assert!(
-        text.contains(first_id),
-        "Should mention blocking task: {text}"
+        !text.contains("VERIFICATION PENDING"),
+        "Task A must not block starting task B: {text}"
     );
 }
 
 #[tokio::test]
-async fn test_claim_blocked_with_pending_verification() {
+async fn test_claim_allowed_with_other_task_pending_verification() {
     let (temp, service) = setup_cas();
     let cas_dir = temp.path().join(".cas");
 
@@ -337,9 +334,10 @@ async fn test_claim_blocked_with_pending_verification() {
         id: first_id.to_string(),
         reason: Some("Completed".to_string()),
         bypass_code_review: None,
-code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        code_review_findings: None,
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -386,7 +384,7 @@ code_review_findings: None,
     let text = extract_text(result);
     let second_id = extract_task_id(&text).expect("should have second task ID");
 
-    // Try to claim second task - should be BLOCKED due to pending verification
+    // Claiming unrelated task B remains available while A's close is pending.
     let claim_req = TaskClaimRequest {
         task_id: second_id.to_string(),
         duration_secs: 600,
@@ -399,12 +397,8 @@ code_review_findings: None,
 
     let text = extract_text(result);
     assert!(
-        text.contains("VERIFICATION PENDING"),
-        "Claim should be blocked: {text}"
-    );
-    assert!(
-        text.contains(first_id),
-        "Should mention blocking task: {text}"
+        !text.contains("VERIFICATION PENDING"),
+        "Task A must not block claiming task B: {text}"
     );
 }
 

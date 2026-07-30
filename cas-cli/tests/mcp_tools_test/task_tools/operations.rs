@@ -2050,7 +2050,7 @@ async fn test_reset_refuses_closed_task() {
 
     let created = service
         .cas_task_create(Parameters(TaskCreateRequest {
-            depth: None,
+            depth: Some("light".to_string()),
             title: "Already closed".to_string(),
             description: None,
             priority: 2,

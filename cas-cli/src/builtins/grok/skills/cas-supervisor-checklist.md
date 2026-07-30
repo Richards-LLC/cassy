@@ -8,7 +8,7 @@ managed_by: cas
 
 ## Session Start
 
-0. **Binary freshness check (cas-d0f9).** Before anything else — confirm the running `cas serve` binary matches HEAD of this repo. If it doesn't and you spawn workers anyway, every close hits `VERIFICATION_JAIL_BLOCKED` and you burn ~8 min per task on manual verifier runs. See the Pre-flight section in the cas-supervisor SKILL for the full command; the 10-second version:
+0. **Binary freshness check (cas-d0f9).** Before anything else — confirm the running `cas serve` binary matches HEAD of this repo. A stale binary may impose legacy global verification blocks instead of the current exact-task close gate. See the Pre-flight section in the cas-supervisor SKILL for the full command; the 10-second version:
 
    ```
    # cas --version format: cas 2.27.0 (9b52e17-dirty 2026-07-16)

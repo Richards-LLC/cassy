@@ -96,7 +96,8 @@ pub use task::{
     WorkTarget,
 };
 pub use verification::{
-    IssueSeverity, Verification, VerificationIssue, VerificationProvenance, VerificationStatus,
+    IssueSeverity, Verification, VerificationDispatch, VerificationDispatchState,
+    VerificationIssue, VerificationProvenance, VerificationRecoveryAction, VerificationStatus,
     VerificationType, VerifierCapability,
 };
 pub use worktree::{GitContext, Worktree, WorktreeStatus};

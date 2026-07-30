@@ -324,7 +324,9 @@ impl CasService {
             search_manifest: req.search_manifest,
             commit_receipt: req.commit_receipt,
         };
-        self.inner.cas_task_close(Parameters(inner_req)).await
+        self.inner
+            .cas_task_close_with_completion(Parameters(inner_req), req.completion_receipt)
+            .await
     }
 
     pub(super) async fn task_reopen(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {

@@ -253,6 +253,49 @@ impl CasCore {
                 data: None,
             })?;
 
+            let approved_delivery = matches!(
+                verification.status,
+                VerificationStatus::Approved | VerificationStatus::Skipped
+            );
+            if cas_store::transition_worker_delivery_verification_with_conn(
+                &tx,
+                &req.task_id,
+                &verification.id,
+                approved_delivery,
+                &caller_id,
+            )
+            .map_err(|e| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!(
+                    "Failed to advance transactional worker delivery: {e}"
+                )),
+                data: None,
+            })?
+            .is_some()
+            {
+                tx.execute(
+                    "UPDATE tasks
+                     SET status = ?2, pending_verification = 0, updated_at = ?3
+                     WHERE id = ?1 AND status = 'pending_supervisor_review'",
+                    rusqlite::params![
+                        req.task_id,
+                        if approved_delivery {
+                            "awaiting_merge"
+                        } else {
+                            "blocked"
+                        },
+                        chrono::Utc::now().to_rfc3339(),
+                    ],
+                )
+                .map_err(|e| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!(
+                        "Failed to project delivery verification state: {e}"
+                    )),
+                    data: None,
+                })?;
+            }
+
             if task.pending_verification {
                 cas_store::clear_pending_verification_with_conn(&tx, &req.task_id).map_err(
                     |e| McpError {

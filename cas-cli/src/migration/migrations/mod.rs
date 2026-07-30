@@ -187,6 +187,7 @@ mod m208_prompt_queue_recipient_seen_create_table;
 mod m209_retrieval_feedback_create_tables;
 mod m210_verifier_authority;
 mod m211_verification_dispatches;
+mod m212_worker_delivery_transactions;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -386,6 +387,7 @@ pub const MIGRATIONS: &[Migration] = &[
     m210_verifier_authority::MIGRATION,
     // Explicit task-scoped verification dispatch ownership and recovery (cas-08ca)
     m211_verification_dispatches::MIGRATION,
+    m212_worker_delivery_transactions::MIGRATION,
 ];
 
 #[cfg(test)]

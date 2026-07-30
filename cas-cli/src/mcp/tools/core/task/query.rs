@@ -24,6 +24,53 @@ impl CasCore {
             task.depth
         );
 
+        match cas_store::get_latest_worker_delivery(&self.cas_root, &task.id) {
+            Ok(Some((receipt, transaction))) => {
+                let next_action = match transaction.state {
+                    cas_types::WorkerDeliveryState::AwaitingVerification => {
+                        "capability-bound verifier or registered supervisor verdict"
+                    }
+                    cas_types::WorkerDeliveryState::AwaitingMerge => {
+                        "registered supervisor worktree_merge with this task_id"
+                    }
+                    cas_types::WorkerDeliveryState::MergeAuthorized => {
+                        "registered supervisor retry; CAS reconciles exact target ancestry"
+                    }
+                    cas_types::WorkerDeliveryState::Merged
+                    | cas_types::WorkerDeliveryState::CloseReady => {
+                        "registered supervisor retry to resume the existing close"
+                    }
+                    cas_types::WorkerDeliveryState::Delivered => "none (delivery complete)",
+                    cas_types::WorkerDeliveryState::VerificationFailed => {
+                        "worker fixes findings, obtains fresh proof, and submits a new receipt"
+                    }
+                    cas_types::WorkerDeliveryState::Conflict => {
+                        "worker resolves conflict explicitly, then submits a new receipt"
+                    }
+                    cas_types::WorkerDeliveryState::Stale
+                    | cas_types::WorkerDeliveryState::RepoMismatch
+                    | cas_types::WorkerDeliveryState::TipChanged => {
+                        "worker revalidates repository/tips and submits a new receipt"
+                    }
+                };
+                output.push_str(&format!(
+                    "\nTransactional delivery: {}\n  Receipt: {}\n  Commit: {}\n  Next action: {}",
+                    transaction.state, receipt.id, receipt.commit_sha, next_action
+                ));
+                if let Some(detail) = transaction.last_error_detail {
+                    output.push_str(&format!("\n  Recovery detail: {detail}"));
+                }
+                output.push('\n');
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return Ok(Self::tool_error(format!(
+                    "DELIVERY STATE INVALID: task {} has unreadable durable worker-delivery state: {error}. CAS refuses to infer a plausible state or next action.",
+                    task.id
+                )));
+            }
+        }
+
         // cas-a844: `awaiting_merge` alone reads as "done, just a formality" —
         // whether that's true depends entirely on whether the parked branch
         // can actually merge cleanly. Surface the distinction explicitly so

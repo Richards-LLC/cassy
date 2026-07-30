@@ -60,6 +60,60 @@ const ASSIGNEE_STALE_SECS: i64 = 300;
 /// verifier-written Error verdict during auto-escalation.
 const DISPATCH_SUMMARY_PREFIX: &str = "Dispatch requested";
 
+fn delivery_audit_text_is_portable(value: &str) -> bool {
+    if value.chars().any(char::is_control) {
+        return false;
+    }
+    let lower = value.to_ascii_lowercase();
+    if [
+        "-----begin private key",
+        "-----begin rsa private key",
+        "token=",
+        "password=",
+        "secret=",
+        "authorization:",
+        "bearer ",
+        "sk-",
+        "ghp_",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        return false;
+    }
+    !value.split_whitespace().any(|token| {
+        let token = token.trim_matches(|ch: char| "(),[]{}<>\"'".contains(ch));
+        token.starts_with('/')
+            || (token.len() >= 3
+                && token.as_bytes()[1] == b':'
+                && matches!(token.as_bytes()[2], b'/' | b'\\'))
+    })
+}
+
+#[cfg(test)]
+mod delivery_audit_text_tests {
+    use super::delivery_audit_text_is_portable;
+
+    #[test]
+    fn receipt_audit_text_rejects_paths_secrets_and_payload_controls() {
+        assert!(delivery_audit_text_is_portable(
+            "proof:serialized-workspace-1"
+        ));
+        assert!(delivery_audit_text_is_portable(
+            "bounded delivery scope without local paths"
+        ));
+        assert!(!delivery_audit_text_is_portable(
+            "proof stored at /home/alice/proof.json"
+        ));
+        assert!(!delivery_audit_text_is_portable(
+            "proof stored at C:\\Users\\alice\\proof.json"
+        ));
+        assert!(!delivery_audit_text_is_portable("token=secret-value"));
+        assert!(!delivery_audit_text_is_portable("ghp_secret-shaped"));
+        assert!(!delivery_audit_text_is_portable("payload\nsecond line"));
+    }
+}
+
 /// Why the close path decided to skip (or not skip) the task-verifier step
 /// for a given close attempt.
 ///
@@ -194,6 +248,236 @@ impl VerificationSkipReason {
 }
 
 impl CasCore {
+    async fn submit_worker_completion_receipt(
+        &self,
+        raw_receipt: &str,
+        task: &mut cas_types::Task,
+        task_store: &dyn cas_store::TaskStore,
+    ) -> Result<CallToolResult, McpError> {
+        let input: cas_types::WorkerCompletionReceiptInput = serde_json::from_str(raw_receipt)
+            .map_err(|error| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "completion_receipt must be valid WorkerCompletionReceiptInput JSON: {error}"
+                )),
+                data: None,
+            })?;
+        if input.task_id != task.id {
+            return Ok(Self::tool_error(format!(
+                "DELIVERY RECEIPT REJECTED: receipt task {} does not match close task {}.",
+                input.task_id, task.id
+            )));
+        }
+        if input.proof_reference.is_empty()
+            || input.proof_reference.len() > 256
+            || !input
+                .proof_reference
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b":._/-".contains(&byte))
+            || !delivery_audit_text_is_portable(&input.proof_reference)
+        {
+            return Ok(Self::tool_error(
+                "DELIVERY RECEIPT REJECTED: proof_reference must be 1-256 opaque ASCII characters from [A-Za-z0-9:._/-]. It is audit linkage only and never grants authority.",
+            ));
+        }
+        if input.scope_summary.trim().is_empty()
+            || input.scope_summary.len() > 1000
+            || !delivery_audit_text_is_portable(&input.scope_summary)
+        {
+            return Ok(Self::tool_error(
+                "DELIVERY RECEIPT REJECTED: scope_summary must be non-empty, at most 1000 bytes, portable, and contain no absolute path or secret-shaped payload.",
+            ));
+        }
+        let full_sha =
+            |value: &str| value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit());
+        if !full_sha(&input.commit_sha)
+            || !full_sha(&input.merge_base_sha)
+            || !full_sha(&input.target_sha)
+        {
+            return Ok(Self::tool_error(
+                "DELIVERY RECEIPT REJECTED: commit_sha, merge_base_sha, and target_sha must be full 40-character hexadecimal commit IDs.",
+            ));
+        }
+
+        let caller_id = self.get_agent_id().map_err(|_| McpError {
+            code: ErrorCode::INVALID_REQUEST,
+            message: Cow::from(
+                "Delivery receipt submission requires an authenticated registered CAS worker.",
+            ),
+            data: None,
+        })?;
+        let agent_store = self.open_agent_store()?;
+        let caller = agent_store.get(&caller_id).map_err(|_| McpError {
+            code: ErrorCode::INVALID_REQUEST,
+            message: Cow::from(
+                "Delivery receipt submission requires an active registered CAS worker.",
+            ),
+            data: None,
+        })?;
+        if caller.role != cas_types::AgentRole::Worker
+            || !caller.is_alive()
+            || input.worker_agent_id != caller.id
+            || task.assignee.as_deref() != Some(caller.name.as_str())
+        {
+            return Ok(Self::tool_error(
+                "DELIVERY RECEIPT REJECTED: only the active registered worker assigned to this task may submit its own receipt; request identity claims do not grant authority.",
+            ));
+        }
+        let expected_source = format!("factory/{}", caller.name);
+        if input.source_branch != expected_source {
+            return Ok(Self::tool_error(format!(
+                "DELIVERY RECEIPT REJECTED: source branch must be the registered worker branch `{expected_source}`."
+            )));
+        }
+        let target = match task.deliverables.work_target.as_ref() {
+            Some(target) => target,
+            None => {
+                return Ok(Self::tool_error(
+                    "DELIVERY RECEIPT REJECTED: transactional delivery requires a declared WorkTarget/RepoContext; legacy close remains available without completion_receipt.",
+                ));
+            }
+        };
+        let context = match crate::mcp::tools::core::task::repo_context::resolve_repo_context(
+            &self.cas_root,
+            target,
+        ) {
+            Ok(context) => context,
+            Err(message) => return Ok(Self::tool_error(message)),
+        };
+        if input.repo_selector != context.repo_selector
+            || input.target_branch != context.target_branch
+        {
+            return Ok(Self::tool_error(
+                "DELIVERY RECEIPT REJECTED: repository selector or target branch does not match the task's server-resolved RepoContext.",
+            ));
+        }
+        let source_sha = resolve_branch_sha(&context.repo_root, &input.source_branch);
+        let target_sha = resolve_branch_sha(&context.repo_root, &input.target_branch);
+        let merge_base = git_merge_base(
+            &context.repo_root,
+            &input.source_branch,
+            &input.target_branch,
+        );
+        if source_sha.as_deref() != Some(input.commit_sha.as_str()) {
+            return Ok(Self::tool_error(
+                "DELIVERY RECEIPT REJECTED: changed worker tip; commit_sha is not the current source-branch tip.",
+            ));
+        }
+        if target_sha.as_deref() != Some(input.target_sha.as_str()) {
+            return Ok(Self::tool_error(
+                "DELIVERY RECEIPT REJECTED: target tip changed before receipt acceptance; refresh target_sha and merge_base.",
+            ));
+        }
+        if merge_base.as_deref() != Some(input.merge_base_sha.as_str()) {
+            return Ok(Self::tool_error(
+                "DELIVERY RECEIPT REJECTED: merge_base_sha does not match the live source/target merge base.",
+            ));
+        }
+        let worker_path = match self.resolve_worker_worktree_path(task, Some(&context)) {
+            Ok(Some(path)) => path,
+            Ok(None) => {
+                return Ok(Self::tool_error(
+                    "DELIVERY RECEIPT REJECTED: no task-owned worker worktree resolves for the declared repository.",
+                ));
+            }
+            Err(message) => return Ok(Self::tool_error(message)),
+        };
+        let hook_evidence = match run_declared_pre_close_hook(
+            task,
+            &context,
+            Some(&worker_path),
+            Some(&input.commit_sha),
+        ) {
+            Ok(evidence) => evidence,
+            Err(message) => {
+                return Ok(Self::tool_error(format!(
+                    "DELIVERY RECEIPT REJECTED: task-owned pre-close proof failed.\n\n{message}"
+                )));
+            }
+        };
+
+        // A receipt creates a fresh proof boundary. A legacy or earlier-cycle
+        // verdict must never authorize this immutable commit by accident.
+        // Exact retries return the existing transaction (which may already
+        // have advanced); genuinely new receipts always await a new verdict.
+        let initial_state = cas_types::WorkerDeliveryState::AwaitingVerification;
+        let receipt =
+            cas_store::build_worker_completion_receipt(&input, &caller.name, chrono::Utc::now());
+        let transaction =
+            cas_store::create_worker_delivery(&self.cas_root, &receipt, initial_state, &caller.id)
+                .map_err(|error| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!(
+                        "Failed to persist worker delivery receipt: {error}"
+                    )),
+                    data: None,
+                })?;
+
+        if transaction.state == cas_types::WorkerDeliveryState::AwaitingVerification {
+            let owner_id = self.verification_dispatch_owner(&caller.id)?;
+            cas_store::create_verification_dispatch(
+                &self.cas_root,
+                &task.id,
+                &caller.id,
+                &owner_id,
+                chrono::Utc::now() + chrono::Duration::seconds(VERIFICATION_DISPATCH_TIMEOUT_SECS),
+            )
+            .map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!(
+                    "Failed to persist task-scoped verification dispatch: {error}"
+                )),
+                data: None,
+            })?;
+            task.pending_verification = true;
+            task.status = TaskStatus::PendingSupervisorReview;
+        } else if transaction.state == cas_types::WorkerDeliveryState::AwaitingMerge {
+            task.pending_verification = false;
+            task.status = TaskStatus::AwaitingMerge;
+        }
+        task.deliverables.pre_close_hook = Some(hook_evidence);
+        task.deliverables.factory_branch_anchor = Some(input.commit_sha.clone());
+        task.deliverables.parked_branch = Some(input.source_branch.clone());
+        task.updated_at = chrono::Utc::now();
+        task_store.update(task).map_err(|error| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!(
+                "Failed to project worker delivery state onto task: {error}"
+            )),
+            data: None,
+        })?;
+        let _ = agent_store.release_lease_for_task(
+            &task.id,
+            "Immutable worker completion receipt accepted for supervisor delivery",
+        );
+
+        let next = match transaction.state {
+            cas_types::WorkerDeliveryState::AwaitingVerification => {
+                "A capability-bound task-verifier or registered supervisor must record the exact-task verdict."
+            }
+            cas_types::WorkerDeliveryState::AwaitingMerge
+            | cas_types::WorkerDeliveryState::MergeAuthorized
+            | cas_types::WorkerDeliveryState::Merged
+            | cas_types::WorkerDeliveryState::CloseReady => {
+                "A registered supervisor may call worktree_merge with this task_id; CAS will revalidate and resume the delivery."
+            }
+            cas_types::WorkerDeliveryState::Delivered => {
+                "No action; the exact immutable delivery is already complete."
+            }
+            cas_types::WorkerDeliveryState::VerificationFailed
+            | cas_types::WorkerDeliveryState::Conflict
+            | cas_types::WorkerDeliveryState::Stale
+            | cas_types::WorkerDeliveryState::RepoMismatch
+            | cas_types::WorkerDeliveryState::TipChanged => {
+                "Correct the recorded failure, produce fresh proof, and submit a new immutable receipt."
+            }
+        };
+        Ok(Self::success(format!(
+            "Worker delivery receipt accepted idempotently.\nReceipt: {}\nTransaction: {}\nState: {}\nNext action: {}",
+            receipt.id, transaction.id, transaction.state, next
+        )))
+    }
+
     fn verification_dispatch_owner(&self, requester_id: &str) -> Result<String, McpError> {
         let agent_store = self.open_agent_store()?;
         let requester = agent_store.get(requester_id).map_err(|_| McpError {
@@ -391,7 +675,15 @@ impl CasCore {
 
     pub async fn cas_task_close(
         &self,
+        params: Parameters<TaskCloseRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.cas_task_close_with_completion(params, None).await
+    }
+
+    pub async fn cas_task_close_with_completion(
+        &self,
         Parameters(req): Parameters<TaskCloseRequest>,
+        completion_receipt: Option<String>,
     ) -> Result<CallToolResult, McpError> {
         let task_store = self.open_task_store()?;
 
@@ -400,6 +692,12 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+
+        if let Some(raw_receipt) = completion_receipt.as_deref() {
+            return self
+                .submit_worker_completion_receipt(raw_receipt, &mut task, task_store.as_ref())
+                .await;
+        }
 
         // cas-6d0b / cas-b269: short-circuit already-Closed before
         // merge/review/verification gates. Do not re-success, overwrite
@@ -4123,6 +4421,28 @@ pub(crate) fn resolve_branch_sha(repo_path: &std::path::Path, refname: &str) -> 
     if sha.is_empty() { None } else { Some(sha) }
 }
 
+pub(crate) fn git_merge_base(
+    repo_path: &std::path::Path,
+    left: &str,
+    right: &str,
+) -> Option<String> {
+    use std::process::Command;
+    let out = Command::new("git")
+        .args(["merge-base", left, right])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Some(sha)
+    } else {
+        None
+    }
+}
+
 /// Resolve the git repository that owns `cas_root` for close-time enforcement.
 ///
 /// A CAS root is conventionally `<repo>/.cas`, but custom state layouts may
@@ -6856,7 +7176,11 @@ pub(crate) fn run_declared_pre_close_hook(
     }
 }
 
-fn git_commit_is_ancestor(repo_path: &std::path::Path, commit: &str, descendant: &str) -> bool {
+pub(crate) fn git_commit_is_ancestor(
+    repo_path: &std::path::Path,
+    commit: &str,
+    descendant: &str,
+) -> bool {
     std::process::Command::new("git")
         .arg("-C")
         .arg(repo_path)

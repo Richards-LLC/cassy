@@ -15,8 +15,11 @@ use std::process::Command;
 use cas::mcp::tools::{TaskCloseRequest, TaskUpdateRequest};
 use cas::mcp::{CasCore, CasService};
 use cas::store::{init_cas_dir, open_agent_store, open_task_store};
-use cas::types::{Agent, AgentType, Task, TaskDepth, TaskType, WorkTarget};
-use cas_mcp::types::CoordinationRequest;
+use cas::types::{
+    Agent, AgentRole, AgentType, Task, TaskDepth, TaskStatus, TaskType,
+    WorkerCompletionReceiptInput, WorkerDeliveryState, WorkTarget,
+};
+use cas_mcp::types::{CoordinationRequest, TaskRequest, VerificationRequest};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::RawContent;
 use tempfile::TempDir;
@@ -141,6 +144,14 @@ fn coord_req(action: &str) -> CoordinationRequest {
         orphans: None,
         dry_run: None,
     }
+}
+
+fn task_req(value: serde_json::Value) -> TaskRequest {
+    serde_json::from_value(value).expect("TaskRequest")
+}
+
+fn verification_req(value: serde_json::Value) -> VerificationRequest {
+    serde_json::from_value(value).expect("VerificationRequest")
 }
 
 fn get_text(result: &rmcp::model::CallToolResult) -> String {
@@ -1973,5 +1984,303 @@ async fn test_worktree_merge_task_id_authorized_via_matching_lease_cas_bd5f() {
     assert!(
         text.contains("Merged worktree") && text.contains("epic/lease-ok"),
         "lease-authorized merge must target epic. Got:\n{text}"
+    );
+}
+
+fn register_delivery_agent(
+    cas_root: &Path,
+    id: &str,
+    name: &str,
+    role: AgentRole,
+    factory_session: &str,
+) {
+    let agent_store = open_agent_store(cas_root).expect("agent store");
+    let mut agent = Agent::new(id.to_string(), name.to_string());
+    agent.agent_type = if role == AgentRole::Worker {
+        AgentType::Worker
+    } else {
+        AgentType::Primary
+    };
+    agent.role = role;
+    agent.factory_session = Some(factory_session.to_string());
+    agent.heartbeat();
+    agent_store.register(&agent).expect("register delivery agent");
+}
+
+fn delivery_service(cas_root: &Path, agent_id: &str) -> CasService {
+    let core = CasCore::with_daemon(cas_root.to_path_buf(), None, None);
+    core.set_agent_id_for_testing(agent_id.to_string());
+    CasService::new(core, None)
+}
+
+fn delivery_receipt(
+    task_id: &str,
+    worker_id: &str,
+    repo: &GitRepo,
+    worker: &str,
+) -> WorkerCompletionReceiptInput {
+    WorkerCompletionReceiptInput {
+        task_id: task_id.to_string(),
+        worker_agent_id: worker_id.to_string(),
+        repo_selector: "remote:github.com/org/delivery".to_string(),
+        source_branch: format!("factory/{worker}"),
+        commit_sha: git_stdout(&repo.root, &["rev-parse", &format!("factory/{worker}")]),
+        merge_base_sha: git_stdout(
+            &repo.root,
+            &["merge-base", &format!("factory/{worker}"), "main"],
+        ),
+        target_branch: "main".to_string(),
+        target_sha: git_stdout(&repo.root, &["rev-parse", "main"]),
+        proof_reference: "proof:serialized-workspace-1".to_string(),
+        scope_summary: "transactional delivery integration".to_string(),
+    }
+}
+
+async fn submit_and_verify_delivery(
+    cas_root: &Path,
+    task_id: &str,
+    worker_id: &str,
+    supervisor_id: &str,
+    receipt: &WorkerCompletionReceiptInput,
+) {
+    let worker_service = delivery_service(cas_root, worker_id);
+    let close = worker_service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "close",
+            "id": task_id,
+            "reason": "worker handoff",
+            "completion_receipt": serde_json::to_string(receipt).unwrap(),
+        }))))
+        .await
+        .expect("public task close receipt submission");
+    assert!(
+        get_text(&close).contains("Worker delivery receipt accepted idempotently"),
+        "{}",
+        get_text(&close)
+    );
+
+    let supervisor_service = delivery_service(cas_root, supervisor_id);
+    let verification = supervisor_service
+        .verification(Parameters(verification_req(serde_json::json!({
+            "action": "add",
+            "task_id": task_id,
+            "status": "approved",
+            "summary": "fresh external delivery proof approved",
+            "confidence": 1.0,
+        }))))
+        .await
+        .expect("public verification add");
+    assert!(get_text(&verification).contains("approved"));
+}
+
+#[tokio::test]
+async fn transactional_delivery_public_interrupted_resume_is_ancestry_gated_and_idempotent() {
+    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let home = TempDir::new().expect("temp HOME");
+    let _home = HomeGuard::enter(home.path());
+    let repo = GitRepo::new();
+    run_git(
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:org/delivery.git",
+        ],
+        &repo.root,
+    );
+    let cas_root = init_cas_dir(&repo.root).expect("init CAS");
+    disable_system_a(&cas_root);
+    let factory_session = "delivery-factory";
+    let worker_id = "delivery-worker-session";
+    let supervisor_id = "delivery-supervisor-session";
+    register_delivery_agent(
+        &cas_root,
+        worker_id,
+        "alice",
+        AgentRole::Worker,
+        factory_session,
+    );
+    register_delivery_agent(
+        &cas_root,
+        supervisor_id,
+        "supervisor",
+        AgentRole::Supervisor,
+        factory_session,
+    );
+
+    let worker_path = cas_root.join("worktrees").join("alice");
+    repo.add_worktree(&worker_path, "factory/alice");
+    std::fs::write(worker_path.join("delivery.rs"), "pub fn delivered() {}\n").unwrap();
+    run_git(&["add", "delivery.rs"], &worker_path);
+    run_git(&["commit", "-m", "delivery receipt commit"], &worker_path);
+
+    let task_store = open_task_store(&cas_root).expect("task store");
+    let mut task = Task::new(
+        "cas-delivery-integration".to_string(),
+        "Transactional delivery integration".to_string(),
+    );
+    task.status = TaskStatus::InProgress;
+    task.depth = TaskDepth::Light;
+    task.assignee = Some("alice".to_string());
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "remote:github.com/org/delivery".to_string(),
+        target_branch: "main".to_string(),
+    });
+    task_store.add(&task).expect("add delivery task");
+    let receipt = delivery_receipt(&task.id, worker_id, &repo, "alice");
+    submit_and_verify_delivery(
+        &cas_root,
+        &task.id,
+        worker_id,
+        supervisor_id,
+        &receipt,
+    )
+    .await;
+
+    // Simulate interruption after the authorized Git merge but before CAS
+    // persisted its post-Git state. Public retry must reconcile ancestry
+    // without executing another merge or appending duplicate events.
+    run_git(
+        &[
+            "merge",
+            "--no-ff",
+            "factory/alice",
+            "-m",
+            "interrupted external merge",
+        ],
+        &repo.root,
+    );
+    assert_eq!(
+        git_stdout(
+            &repo.root,
+            &["merge-base", "--is-ancestor", &receipt.commit_sha, "main"]
+        ),
+        ""
+    );
+    let _cwd = CwdGuard::enter(&repo.root);
+    let supervisor_service = delivery_service(&cas_root, supervisor_id);
+    let mut merge = coord_req("worktree_merge");
+    merge.id = Some("factory/alice".to_string());
+    merge.task_id = Some(task.id.clone());
+    merge.allow_trunk = Some(true);
+    merge.cleanup = Some(false);
+    let result = supervisor_service
+        .coordination(Parameters(merge))
+        .await
+        .expect("public interrupted-resume merge");
+    assert!(get_text(&result).contains("Merged worktree"));
+    let persisted = task_store.get(&task.id).expect("closed task");
+    assert_eq!(persisted.status, TaskStatus::Closed);
+    let (_, transaction) = cas_store::get_latest_worker_delivery(&cas_root, &task.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(transaction.state, WorkerDeliveryState::Delivered);
+    let events_before =
+        cas_store::list_worker_delivery_events(&cas_root, &transaction.id).unwrap();
+    assert_eq!(events_before.len(), 5);
+
+    let mut retry = coord_req("worktree_merge");
+    retry.id = Some("factory/alice".to_string());
+    retry.task_id = Some(task.id.clone());
+    retry.allow_trunk = Some(true);
+    retry.cleanup = Some(false);
+    let retry_result = supervisor_service
+        .coordination(Parameters(retry))
+        .await
+        .expect("idempotent delivered retry");
+    assert!(get_text(&retry_result).contains("already delivered"));
+    let events_after =
+        cas_store::list_worker_delivery_events(&cas_root, &transaction.id).unwrap();
+    assert_eq!(events_after, events_before);
+}
+
+#[tokio::test]
+async fn transactional_delivery_public_merge_persists_changed_worker_tip_without_git_mutation() {
+    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let home = TempDir::new().expect("temp HOME");
+    let _home = HomeGuard::enter(home.path());
+    let repo = GitRepo::new();
+    run_git(
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:org/delivery.git",
+        ],
+        &repo.root,
+    );
+    let cas_root = init_cas_dir(&repo.root).expect("init CAS");
+    disable_system_a(&cas_root);
+    let worker_id = "stale-worker-session";
+    let supervisor_id = "stale-supervisor-session";
+    register_delivery_agent(
+        &cas_root,
+        worker_id,
+        "bob",
+        AgentRole::Worker,
+        "stale-factory",
+    );
+    register_delivery_agent(
+        &cas_root,
+        supervisor_id,
+        "supervisor",
+        AgentRole::Supervisor,
+        "stale-factory",
+    );
+    let worker_path = cas_root.join("worktrees").join("bob");
+    repo.add_worktree(&worker_path, "factory/bob");
+    std::fs::write(worker_path.join("first.rs"), "pub fn first() {}\n").unwrap();
+    run_git(&["add", "first.rs"], &worker_path);
+    run_git(&["commit", "-m", "receipt tip"], &worker_path);
+
+    let task_store = open_task_store(&cas_root).expect("task store");
+    let mut task = Task::new(
+        "cas-delivery-stale".to_string(),
+        "Stale delivery tip".to_string(),
+    );
+    task.status = TaskStatus::InProgress;
+    task.depth = TaskDepth::Light;
+    task.assignee = Some("bob".to_string());
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "remote:github.com/org/delivery".to_string(),
+        target_branch: "main".to_string(),
+    });
+    task_store.add(&task).expect("add stale task");
+    let receipt = delivery_receipt(&task.id, worker_id, &repo, "bob");
+    submit_and_verify_delivery(
+        &cas_root,
+        &task.id,
+        worker_id,
+        supervisor_id,
+        &receipt,
+    )
+    .await;
+    std::fs::write(worker_path.join("drift.rs"), "pub fn drift() {}\n").unwrap();
+    run_git(&["add", "drift.rs"], &worker_path);
+    run_git(&["commit", "-m", "tip drift after receipt"], &worker_path);
+    let main_before = git_stdout(&repo.root, &["rev-parse", "main"]);
+
+    let _cwd = CwdGuard::enter(&repo.root);
+    let supervisor_service = delivery_service(&cas_root, supervisor_id);
+    let mut merge = coord_req("worktree_merge");
+    merge.id = Some("factory/bob".to_string());
+    merge.task_id = Some(task.id.clone());
+    merge.allow_trunk = Some(true);
+    merge.cleanup = Some(false);
+    let result = supervisor_service
+        .coordination(Parameters(merge))
+        .await
+        .expect("public stale-tip merge response");
+    assert!(get_text(&result).contains("tip_changed"));
+    assert_eq!(git_stdout(&repo.root, &["rev-parse", "main"]), main_before);
+    let (_, transaction) = cas_store::get_latest_worker_delivery(&cas_root, &task.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(transaction.state, WorkerDeliveryState::TipChanged);
+    assert_eq!(
+        cas_store::list_worker_delivery_events(&cas_root, &transaction.id)
+            .unwrap()
+            .len(),
+        3
     );
 }

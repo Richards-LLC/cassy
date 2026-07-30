@@ -38,6 +38,7 @@ pub mod shared_db;
 mod agent_store;
 mod code_store;
 mod commit_link_store;
+mod delivery_store;
 mod entity_store;
 pub mod error;
 mod event_store;
@@ -83,6 +84,11 @@ pub use event_store::{EVENT_SCHEMA, EventStore, SqliteEventStore, record_event_w
 
 // Code store for indexed source code
 pub use code_store::CodeStore;
+pub use delivery_store::{
+    DELIVERY_SCHEMA, build_worker_completion_receipt, create_worker_delivery,
+    get_latest_worker_delivery, list_worker_delivery_events, transition_worker_delivery,
+    transition_worker_delivery_verification_with_conn,
+};
 pub use sqlite_code_store::{CODE_SCHEMA, SqliteCodeStore};
 
 // Entity store for knowledge graph feature

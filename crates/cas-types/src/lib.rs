@@ -35,6 +35,7 @@ pub mod error;
 mod agent;
 mod code_review;
 mod commit_link;
+mod delivery;
 mod dependency;
 mod entity;
 mod entry;
@@ -67,6 +68,10 @@ pub use code_review::{
     review_outcome_shape_hint,
 };
 pub use commit_link::CommitLink;
+pub use delivery::{
+    WorkerCompletionReceipt, WorkerCompletionReceiptInput, WorkerDeliveryEvent,
+    WorkerDeliveryState, WorkerDeliveryTransaction,
+};
 pub use dependency::{Dependency, DependencyType};
 pub use entity::{Entity, EntityMention, EntityType, RelationType, Relationship};
 pub use entry::{BeliefType, Entry, EntryType, MemoryTier, ObservationType};

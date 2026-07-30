@@ -14,7 +14,7 @@ use std::process::Command;
 
 use cas::mcp::{CasCore, CasService};
 use cas::store::{init_cas_dir, open_agent_store, open_task_store};
-use cas::types::{Agent, AgentType, Task, TaskType};
+use cas::types::{Agent, AgentType, Task, TaskType, WorkTarget};
 use cas_mcp::types::CoordinationRequest;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::RawContent;
@@ -416,6 +416,31 @@ struct CwdGuard {
     original: PathBuf,
 }
 
+struct HomeGuard {
+    original: Option<std::ffi::OsString>,
+}
+
+impl HomeGuard {
+    fn enter(path: &Path) -> Self {
+        let original = std::env::var_os("HOME");
+        // SAFETY: every test in this integration-test process that mutates
+        // process state holds merge_cwd_lock for the full mutation lifetime.
+        unsafe { std::env::set_var("HOME", path) };
+        Self { original }
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.original {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+}
+
 impl CwdGuard {
     fn enter(dir: &Path) -> Self {
         let original = std::env::current_dir().expect("current_dir");
@@ -442,6 +467,21 @@ fn run_git(args: &[&str], dir: &Path) {
         args,
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+fn git_stdout(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("git");
+    assert!(
+        out.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
 /// AC: spawn isolate=true creates a real factory worktree regardless of
@@ -496,6 +536,91 @@ async fn test_worktree_merge_succeeds_for_factory_worktree_when_system_a_disable
     assert!(
         !wt_path.exists(),
         "worktree directory should be cleaned up after a successful merge"
+    );
+}
+
+#[tokio::test]
+async fn task_bound_cross_repo_merge_mutates_only_declared_repo() {
+    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let home = TempDir::new().expect("temp HOME");
+    let _home = HomeGuard::enter(home.path());
+
+    let repo_a = GitRepo::new();
+    let repo_b = GitRepo::new();
+    run_git(
+        &["remote", "add", "origin", "git@github.com:org/spawn-a.git"],
+        &repo_a.root,
+    );
+    run_git(
+        &["remote", "add", "origin", "git@github.com:org/work-b.git"],
+        &repo_b.root,
+    );
+    let cas_root_a = init_cas_dir(&repo_a.root).expect("init repo A CAS");
+    let cas_root_b = init_cas_dir(&repo_b.root).expect("init repo B CAS");
+    disable_system_a(&cas_root_a);
+
+    let task_store = open_task_store(&cas_root_a).expect("open repo A task store");
+    let mut task = Task::new("cross-repo-task".to_string(), "Cross repo merge".to_string());
+    task.assignee = Some("alice".to_string());
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "remote:github.com/org/work-b".to_string(),
+        target_branch: "main".to_string(),
+    });
+    task_store.add(&task).expect("add task binding");
+
+    let wt_path = cas_root_b.join("worktrees").join("alice");
+    repo_b.add_worktree(&wt_path, "factory/alice");
+    std::fs::write(wt_path.join("repo-b-work.txt"), "repo B only").unwrap();
+    run_git(&["add", "repo-b-work.txt"], &wt_path);
+    run_git(&["commit", "-m", "repo B work"], &wt_path);
+
+    let a_head_before = git_stdout(&repo_a.root, &["rev-parse", "HEAD"]);
+    let a_index_before = git_stdout(&repo_a.root, &["write-tree"]);
+    let a_status_before = git_stdout(&repo_a.root, &["status", "--porcelain=v1"]);
+    let _cwd = CwdGuard::enter(&repo_a.root);
+
+    let svc = make_service(cas_root_a);
+    let mut req = coord_req("worktree_merge");
+    req.id = Some("factory/alice".to_string());
+    req.task_id = Some(task.id);
+    req.allow_trunk = Some(true);
+    req.cleanup = Some(false);
+    let result = svc
+        .coordination(Parameters(req))
+        .await
+        .expect("task-bound cross-repo merge call");
+    let text = get_text(&result);
+    assert!(
+        text.contains("Merged worktree") && text.contains("task WorkTarget"),
+        "public merge path must use the declared WorkTarget.\nGot:\n{text}"
+    );
+
+    assert!(
+        repo_b.root.join("repo-b-work.txt").exists(),
+        "repo B main checkout must receive the worker change"
+    );
+    assert_eq!(
+        git_stdout(&repo_b.root, &["branch", "--show-current"]),
+        "main"
+    );
+    assert!(
+        !repo_a.root.join("repo-b-work.txt").exists(),
+        "repo A worktree must not receive repo B content"
+    );
+    assert_eq!(
+        git_stdout(&repo_a.root, &["rev-parse", "HEAD"]),
+        a_head_before,
+        "repo A HEAD must remain unchanged"
+    );
+    assert_eq!(
+        git_stdout(&repo_a.root, &["write-tree"]),
+        a_index_before,
+        "repo A index must remain unchanged"
+    );
+    assert_eq!(
+        git_stdout(&repo_a.root, &["status", "--porcelain=v1"]),
+        a_status_before,
+        "repo A working tree must remain unchanged"
     );
 }
 

@@ -205,9 +205,24 @@ impl From<i32> for Priority {
     }
 }
 
-/// Deliverables captured when closing a task
+/// Portable repository binding for lifecycle mutations.
+///
+/// Canonical checkout/common-dir paths are deliberately absent: those are
+/// host-local runtime evidence, not sync-safe task identity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkTarget {
+    pub repo_selector: String,
+    pub target_branch: String,
+}
+
+/// Deliverables and durable lifecycle evidence for a task.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TaskDeliverables {
+    /// Portable repository/branch binding used by close, verification, and
+    /// worktree mutations. Legacy JSON defaults to no explicit binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_target: Option<WorkTarget>,
+
     /// Files changed (excluding deletions)
     #[serde(default)]
     pub files_changed: Vec<String>,
@@ -268,7 +283,8 @@ pub struct TaskDeliverables {
 
 impl TaskDeliverables {
     pub fn is_empty(&self) -> bool {
-        self.files_changed.is_empty()
+        self.work_target.is_none()
+            && self.files_changed.is_empty()
             && self.commit_hash.is_none()
             && self.merge_commit.is_none()
             && self.review_envelope.is_none()
@@ -514,6 +530,12 @@ impl Default for Task {
 #[cfg(test)]
 mod tests {
     use crate::task::*;
+
+    #[test]
+    fn legacy_deliverables_json_defaults_to_no_work_target() {
+        let deliverables: TaskDeliverables = serde_json::from_str("{}").unwrap();
+        assert!(deliverables.work_target.is_none());
+    }
 
     #[test]
     fn test_task_status_from_str() {

@@ -524,7 +524,24 @@ impl CasCore {
         };
         let factory_merge_enforcement =
             std::env::var_os("CAS_FACTORY_MODE").is_some() && has_recorded_merge_evidence;
-        let resolved_close_repo = resolve_close_gate_repo_root(&self.cas_root);
+        // An explicit task work target overrides the factory spawn repo.
+        // Resolve once before any merge/reachability query and reuse it.
+        let declared_repo_context = match task.deliverables.work_target.as_ref() {
+            Some(target) => {
+                match crate::mcp::tools::core::task::repo_context::resolve_repo_context(
+                    &self.cas_root,
+                    target,
+                ) {
+                    Ok(context) => Some(context),
+                    Err(message) => return Ok(Self::tool_error(message)),
+                }
+            }
+            None => None,
+        };
+        let resolved_close_repo = declared_repo_context
+            .as_ref()
+            .map(|context| Ok(context.repo_root.clone()))
+            .unwrap_or_else(|| resolve_close_gate_repo_root(&self.cas_root));
         let close_repo_verified = resolved_close_repo.is_ok();
         let close_project_root = match resolved_close_repo {
             Ok(repo_root) => repo_root,
@@ -541,7 +558,11 @@ impl CasCore {
         // For Epics: Check that all worker branches are merged before verification
         // This ensures epic-level verification runs on the complete merged code
         if task.task_type == TaskType::Epic {
-            let target_branch = match task.branch.clone() {
+            let target_branch = match declared_repo_context
+                .as_ref()
+                .map(|context| context.target_branch.clone())
+                .or_else(|| task.branch.clone())
+            {
                 Some(branch) => branch,
                 None if close_repo_verified => {
                     match resolve_close_gate_default_branch(&close_project_root) {
@@ -554,7 +575,8 @@ impl CasCore {
                 }
                 None => "master".to_string(),
             };
-            let unmerged = check_unmerged_epic_branches(&req.id, &target_branch);
+            let unmerged =
+                check_unmerged_epic_branches(&close_project_root, &req.id, &target_branch);
             if !unmerged.is_empty() {
                 let branch_list = unmerged.join("\n  - ");
                 return Ok(Self::tool_error(format!(
@@ -676,7 +698,9 @@ impl CasCore {
             .ok()
             .flatten()
             .and_then(|p| p.branch);
-        let parent_branch_resolution = if close_repo_verified {
+        let parent_branch_resolution = if let Some(context) = declared_repo_context.as_ref() {
+            Ok(context.target_branch.clone())
+        } else if close_repo_verified {
             resolve_close_parent_branch(
                 worktree_store_parent_branch,
                 epic_parent_branch,

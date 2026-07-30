@@ -1290,12 +1290,41 @@ impl CasCore {
             data: None,
         })?;
 
-        // Repo root: `cas_root` is `<repo>/.cas`, so its parent is the repo
-        // — consistent with close_ops.rs's `close_project_root` and every
-        // other cas_root-anchored lookup in this handler. `cwd` is
-        // process-global on the long-lived MCP server and must not be
-        // trusted to match the intended repo (cas-0938).
-        let cwd = cas_root.parent().unwrap_or(&cas_root).to_path_buf();
+        // Resolve an explicit task target before constructing any git-bound
+        // object. The manager owns preflight, checkout, merge, and cleanup,
+        // so constructing it from the spawn repo would mutate the wrong
+        // checkout even if a later identity-only validation succeeded.
+        let declared_repo_context = match task_id {
+            Some(task_id) => {
+                let task_store = self.open_task_store()?;
+                let task = task_store.get(task_id).map_err(|error| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "worktree_merge cannot load task {task_id} for repository binding: {error}"
+                    )),
+                    data: None,
+                })?;
+                match task.deliverables.work_target.as_ref() {
+                    Some(target) => Some(
+                        crate::mcp::tools::core::task::repo_context::resolve_repo_context(
+                            &self.cas_root,
+                            target,
+                        )
+                        .map_err(|message| McpError {
+                            code: ErrorCode::INVALID_PARAMS,
+                            message: Cow::from(message),
+                            data: None,
+                        })?,
+                    ),
+                    None => None,
+                }
+            }
+            None => None,
+        };
+        let cwd = declared_repo_context
+            .as_ref()
+            .map(|context| context.repo_root.clone())
+            .unwrap_or_else(|| cas_root.parent().unwrap_or(&cas_root).to_path_buf());
 
         let manager_config = WorktreeConfig {
             enabled: wt_config.enabled,
@@ -1350,7 +1379,7 @@ impl CasCore {
                     }
                 })?;
                 let focused = load_validated_focused_epic(&cas_root, assignee);
-                let (parent_branch, target_reason) = resolve_system_b_merge_target(
+                let (resolved_parent_branch, mut target_reason) = resolve_system_b_merge_target(
                     task_store.as_ref(),
                     agent_store.as_ref(),
                     task_id,
@@ -1362,6 +1391,16 @@ impl CasCore {
                             .unwrap_or_else(|| manager.git().detect_default_branch())
                     },
                 )?;
+                let parent_branch = match declared_repo_context.as_ref() {
+                    Some(context) => {
+                        target_reason = format!(
+                            "task WorkTarget {} branch {}",
+                            context.repo_selector, context.target_branch
+                        );
+                        context.target_branch.clone()
+                    }
+                    None => resolved_parent_branch,
+                };
                 (
                     crate::types::Worktree::new(
                         format!("system-b-{assignee}"),
@@ -1374,6 +1413,37 @@ impl CasCore {
                 )
             }
         };
+
+        // Bind this mutation to the task's declared work repository before
+        // merge/reachability checks.
+        if let (Some(task_id), Some(expected)) = (task_id, declared_repo_context.as_ref()) {
+            let actual = crate::mcp::tools::core::task::repo_context::resolve_path_context(
+                &worktree.path,
+                &worktree.parent_branch,
+            )
+            .map_err(|reason| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "⚠️ WORKTREE REPOSITORY MISMATCH\n\n\
+                     Cannot resolve repository identity for {}: {reason}. \
+                     Refusing before merge/reachability checks.",
+                    worktree.path.display()
+                )),
+                data: None,
+            })?;
+            crate::mcp::tools::core::task::repo_context::validate_worktree_binding(
+                task_id,
+                expected,
+                &actual,
+                &worktree.parent_branch,
+                &worktree.path,
+            )
+            .map_err(|message| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(message),
+                data: None,
+            })?;
+        }
 
         // cas-369f: force (dirty) ≠ cleanup (remove). System-B factory
         // workers default to preserving the worktree mid-session.

@@ -246,6 +246,15 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<TaskUpdateRequest>,
     ) -> Result<CallToolResult, McpError> {
+        self.cas_task_update_with_target(req, None, None).await
+    }
+
+    pub(crate) async fn cas_task_update_with_target(
+        &self,
+        req: TaskUpdateRequest,
+        target_repo: Option<&str>,
+        target_branch: Option<&str>,
+    ) -> Result<CallToolResult, McpError> {
         let task_store = self.open_task_store()?;
 
         let mut task = task_store.get(&req.id).map_err(|e| McpError {
@@ -253,6 +262,22 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+        let existing_repo_context = if target_repo.is_none() {
+            match task.deliverables.work_target.as_ref() {
+                Some(target) => Some(
+                    super::repo_context::resolve_repo_context(&self.cas_root, target).map_err(
+                        |message| McpError {
+                            code: ErrorCode::INVALID_PARAMS,
+                            message: Cow::from(message),
+                            data: None,
+                        },
+                    )?,
+                ),
+                None => None,
+            }
+        } else {
+            None
+        };
         let prior_assignee = task.assignee.clone();
 
         let mut changes = Vec::new();
@@ -339,6 +364,45 @@ impl CasCore {
         {
             task.depth = depth;
             changes.push("depth");
+        }
+
+        if target_repo.is_some() || target_branch.is_some() {
+            if let Some(repo) = target_repo {
+                task.deliverables.work_target = super::repo_context::declare_work_target(
+                    &self.cas_root,
+                    Some(repo),
+                    target_branch,
+                )
+                .map_err(|message| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(message),
+                    data: None,
+                })?;
+            } else if let Some(branch) = target_branch {
+                let context = existing_repo_context.as_ref().ok_or_else(|| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "WORK TARGET REJECTED: target_branch requires an existing target_repo binding",
+                    ),
+                    data: None,
+                })?;
+                let branch =
+                    super::repo_context::validate_target_branch(&context.repo_root, branch)
+                        .map_err(|message| McpError {
+                            code: ErrorCode::INVALID_PARAMS,
+                            message: Cow::from(message),
+                            data: None,
+                        })?;
+                let target = task.deliverables.work_target.as_mut().ok_or_else(|| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "WORK TARGET REJECTED: target_branch requires an existing target_repo binding",
+                    ),
+                    data: None,
+                })?;
+                target.target_branch = branch;
+            }
+            changes.push("work_target");
         }
 
         // Track warnings to include in response

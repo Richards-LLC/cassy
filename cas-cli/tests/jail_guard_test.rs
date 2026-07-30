@@ -79,10 +79,17 @@ fn create_jailed_task(dir: &TempDir, task_id: &str) {
     let conn = Connection::open(&db_path).expect("open cas.db");
     let now = "2026-06-26T00:00:00+00:00";
     conn.execute(
+        "INSERT OR REPLACE INTO agents
+         (id, name, agent_type, role, status, registered_at, last_heartbeat)
+         VALUES (?1, 'c496-parent', 'primary', 'standard', 'active', ?2, ?2)",
+        params![C496_SESSION, now],
+    )
+    .expect("insert authenticated parent agent");
+    conn.execute(
         "INSERT INTO tasks (id, title, status, task_type, priority, assignee, \
          pending_verification, created_at, updated_at) \
          VALUES (?1, ?2, 'in_progress', 'task', 0, ?3, 1, ?4, ?4)",
-        params!["c496-test-task-001", task_id, C496_SESSION, now],
+        params!["cas-c496-test-task-001", task_id, C496_SESSION, now],
     )
     .expect("insert jailed task");
 }
@@ -92,7 +99,7 @@ fn rejail_task(dir: &TempDir) {
     let db_path = dir.path().join(".cas/cas.db");
     let conn = Connection::open(&db_path).expect("open cas.db");
     conn.execute(
-        "UPDATE tasks SET pending_verification = 1 WHERE id = 'c496-test-task-001'",
+        "UPDATE tasks SET pending_verification = 1 WHERE id = 'cas-c496-test-task-001'",
         [],
     )
     .expect("rejail task");
@@ -163,7 +170,7 @@ fn c496_agent_tool_task_verifier_bypasses_jail() {
             "Agent",
             serde_json::json!({
                 "subagent_type": "task-verifier",
-                "prompt": "verify this task"
+                "prompt": "verify task cas-c496-test-task-001"
             }),
         ),
         &[],
@@ -183,7 +190,7 @@ fn c496_agent_tool_task_verifier_bypasses_jail() {
             "Task",
             serde_json::json!({
                 "subagent_type": "task-verifier",
-                "prompt": "verify this task"
+                "prompt": "verify task cas-c496-test-task-001"
             }),
         ),
         &[],

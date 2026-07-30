@@ -41,6 +41,13 @@ pub struct VerificationAddRequest {
     #[schemars(description = "Verification type: 'task' (default) or 'epic'")]
     #[serde(default)]
     pub verification_type: Option<String>,
+
+    /// Server-issued one-time capability delivered only to task-verifier.
+    #[schemars(
+        description = "One-time task-verifier capability injected by CAS into the verifier child prompt"
+    )]
+    #[serde(default)]
+    pub verifier_capability: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

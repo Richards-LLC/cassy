@@ -93,7 +93,8 @@ pub use sort::{
 pub use spec::{Spec, SpecStatus, SpecType};
 pub use task::{Priority, Task, TaskDeliverables, TaskDepth, TaskStatus, TaskType, WorkTarget};
 pub use verification::{
-    IssueSeverity, Verification, VerificationIssue, VerificationStatus, VerificationType,
+    IssueSeverity, Verification, VerificationIssue, VerificationProvenance, VerificationStatus,
+    VerificationType, VerifierCapability,
 };
 pub use worktree::{GitContext, Worktree, WorktreeStatus};
 

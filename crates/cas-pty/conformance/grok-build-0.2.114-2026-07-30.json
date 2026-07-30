@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "receipt_id": "grok-build-0.2.114-2026-07-30",
+  "harness": "grok-build",
+  "harness_version": "0.2.114",
+  "observed_default_harness_version": "0.2.117",
+  "validated_at": "2026-07-30",
+  "result": "pass",
+  "checklist": [
+    {
+      "id": "cli_version",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "The retained installed binary reported grok 0.2.114 (0c78503879) [stable] immediately before the isolated run; the host's current default symlink separately reports 0.2.117."
+    },
+    {
+      "id": "noninteractive_permission_bypass",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "The production launch emitted --permission-mode bypassPermissions and the transcript recorded yolo_mode=true."
+    },
+    {
+      "id": "session_uuid",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "PtyConfig emitted a fresh bare UUID through both --session-id and CAS_SESSION_ID; the same ID named the live transcript."
+    },
+    {
+      "id": "model_and_reasoning_effort",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "The production launch emitted grok-4.5 with medium reasoning effort and the assistant transcript recorded both."
+    },
+    {
+      "id": "cwd",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "Both the process cwd and --cwd targeted the disposable repository; prompt_context.json recorded the same working directory."
+    },
+    {
+      "id": "worker_role_rules",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run", "factory-parity"],
+      "detail": "The production --rules payload appeared in system_prompt.txt and drove the worker-only startup/lifecycle contract with the cas__ namespace."
+    },
+    {
+      "id": "persistent_mcp_discovery_and_namespace",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "Persistent config discovered cas serve, connected 11 tools, and the worker invoked cas__coordination and cas__task rather than Claude/Codex aliases."
+    },
+    {
+      "id": "factory_identity_environment",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "Inherited CAS agent, role, factory, session, root, worker CLI, model, and effort environment bound cas serve to the disposable store and registered the expected Grok worker."
+    },
+    {
+      "id": "transcript_and_liveness",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "The session was written under ~/.grok/sessions/*/<session-id>; its post-submit turn_ended event cleared Pane in-flight state through the production liveness resolver."
+    },
+    {
+      "id": "worker_task_edit_commit_lifecycle",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "The worker called whoami, mine, show, start, and notes; wrote the exact probe marker; committed it with the requested subject; and left the disposable repository clean."
+    },
+    {
+      "id": "compatible_hooks_disabled",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "Grok inspect reported every discovered Claude/Cursor-compatible hook disabled, the live run retained CAS role/identity through --rules plus env, and the SessionStart hook canary did not execute."
+    }
+  ],
+  "evidence": [
+    {
+      "id": "live-production-run",
+      "kind": "live_test",
+      "reference": "task:cas-9bd9#2026-07-30-production-run",
+      "summary": "Fresh retained-binary Grok Build 0.2.114 PtyConfig::grok run with target/debug/cas first on PATH, a disposable git repository/CAS_ROOT, compatible hooks disabled, and a 180-second turn cap; all required assertions passed in 19.94 seconds. Session evidence: 1278c76d-a721-4761-9e5b-2bdc59939413."
+    },
+    {
+      "id": "factory-parity",
+      "kind": "test",
+      "reference": "cas-cli/tests/factory_parity_test.rs",
+      "summary": "Machine-readable launch-config parity gate for harness role instructions and MCP tool prefixes."
+    },
+    {
+      "id": "default-version-drift",
+      "kind": "diagnostic",
+      "reference": "task:cas-9bd9#2026-07-30-default-version-drift",
+      "summary": "Validation used the retained authenticated 0.2.114 executable. The host's current default Grok symlink had auto-updated to 0.2.117 and is intentionally not represented as validated by this receipt."
+    }
+  ]
+}

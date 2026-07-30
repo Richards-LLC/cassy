@@ -4,11 +4,9 @@
 //! connects optional upstreams, launches a harness model turn, or spawns a
 //! factory worker.
 
-use std::collections::HashMap;
-use std::fs::OpenOptions;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use cas_pty::{
@@ -16,10 +14,15 @@ use cas_pty::{
 };
 use serde::{Deserialize, Serialize};
 
-const SCHEMA_VERSION: u32 = 1;
+use crate::bounded_process::{BoundedCommandError, Deadline, run_command};
+
+const SCHEMA_VERSION: u32 = 2;
+const RUNTIME_BOUND: Duration = Duration::from_millis(6_500);
+const COLLECTION_BUDGET: Duration = Duration::from_millis(6_000);
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const GIT_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+const KNOWN_REPO_LIMIT: usize = 256;
 const REQUIRED_CAS_TOOLS: [&str; 2] = ["coordination", "task"];
-static VERSION_OUTPUT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -44,6 +47,14 @@ pub enum ComponentState {
     Degraded,
     Missing,
     Critical,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeState {
+    Observed,
+    Unavailable,
+    TimedOut,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -126,11 +137,15 @@ pub struct OptionalUpstreamsPreflight {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct HarnessPreflight {
     pub harness: String,
+    pub required: bool,
     pub state: ComponentState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validated_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_version: Option<String>,
+    pub default_probe: ProbeState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt_observed_default_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub receipt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -149,6 +164,8 @@ pub struct FactoryPreflightReport {
     pub overall: PreflightOverall,
     pub factory_blocked: bool,
     pub runtime_bound_ms: u64,
+    pub runtime_elapsed_ms: u64,
+    pub timed_out_components: Vec<String>,
     pub binary: BinaryPreflight,
     pub repository: RepositoryPreflight,
     pub cas_mcp: CasMcpPreflight,
@@ -197,6 +214,7 @@ struct BinaryFacts {
     source_sha: Option<String>,
     configured_sha: Option<String>,
     configured_sha_invalid: bool,
+    source_probe_timed_out: bool,
     build_date: String,
 }
 
@@ -211,6 +229,8 @@ enum RepositoryFailure {
     Missing,
     Wrong,
     Ambiguous,
+    TimedOut,
+    CandidateLimit,
 }
 
 #[derive(Debug, Clone)]
@@ -236,21 +256,42 @@ struct PreflightFacts {
     mcp: McpFacts,
     proxy: ProxyFacts,
     receipts: Vec<HarnessConformanceReceipt>,
-    default_versions: HashMap<Harness, String>,
+    default_versions: HashMap<Harness, VersionProbe>,
+    required_harnesses: HashSet<Harness>,
+    runtime_elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum VersionProbe {
+    Observed(String),
+    Unavailable,
+    TimedOut,
 }
 
 /// Collect one bounded report. `live_proxy` must be an already-collected
 /// in-memory snapshot; this function never connects an upstream.
 pub fn collect_factory_preflight(
-    project_root: &Path,
+    invocation_root: &Path,
     cas_root: &Path,
     observed_via_mcp: bool,
     live_proxy: Option<ProxySnapshotInput>,
 ) -> FactoryPreflightReport {
-    let default_versions = probe_default_harness_versions();
+    let started = Instant::now();
+    let deadline = Deadline::after(COLLECTION_BUDGET);
+    // `cas_root` is resolved by the CLI/MCP boundary and is authoritative for
+    // project-scoped evidence. `invocation_root` remains separate only for the
+    // repo-binding check, so an explicit --cas-root for another checkout fails
+    // closed instead of normalizing the mismatch away.
+    let project_root = cas_root.parent().unwrap_or(invocation_root);
+    let repo_probe = crate::mcp::tools::core::task::repo_context::BoundedRepoProbe::new(
+        deadline,
+        GIT_PROBE_TIMEOUT,
+        KNOWN_REPO_LIMIT,
+    );
+    let default_versions = probe_default_harness_versions(deadline);
     let facts = PreflightFacts {
-        binary: collect_binary_facts(project_root),
-        repository: collect_repository_facts(project_root, cas_root),
+        binary: collect_binary_facts(project_root, &repo_probe),
+        repository: collect_repository_facts(invocation_root, cas_root, &repo_probe),
         mcp: McpFacts {
             cas_initialized: cas_root.is_dir(),
             configured: cas_mcp_is_configured(project_root),
@@ -260,17 +301,41 @@ pub fn collect_factory_preflight(
         proxy: collect_proxy_facts(cas_root, live_proxy),
         receipts: harness_conformance_receipts().unwrap_or_default(),
         default_versions,
+        required_harnesses: required_harnesses(project_root),
+        runtime_elapsed_ms: started.elapsed().as_millis() as u64,
     };
     build_report(facts)
 }
 
 fn build_report(facts: PreflightFacts) -> FactoryPreflightReport {
     let mut findings = Vec::new();
+    let mut timed_out_components = Vec::new();
+    if facts.binary.source_probe_timed_out {
+        timed_out_components.push("binary.source".to_string());
+    }
+    if matches!(&facts.repository, Err(RepositoryFailure::TimedOut)) {
+        timed_out_components.push("repository".to_string());
+    }
+    timed_out_components.extend(
+        facts
+            .default_versions
+            .iter()
+            .filter_map(|(harness, probe)| {
+                matches!(probe, VersionProbe::TimedOut)
+                    .then(|| format!("harness.{}", harness_name(*harness)))
+            }),
+    );
+    timed_out_components.sort();
     let binary = classify_binary(facts.binary, &mut findings);
     let repository = classify_repository(facts.repository, &mut findings);
     let cas_mcp = classify_mcp(facts.mcp, &mut findings);
     let optional_upstreams = classify_proxy(facts.proxy, &mut findings);
-    let harnesses = classify_harnesses(facts.receipts, facts.default_versions, &mut findings);
+    let harnesses = classify_harnesses(
+        facts.receipts,
+        facts.default_versions,
+        &facts.required_harnesses,
+        &mut findings,
+    );
 
     let factory_blocked = findings
         .iter()
@@ -288,7 +353,9 @@ fn build_report(facts: PreflightFacts) -> FactoryPreflightReport {
         generated_at: chrono::Utc::now().to_rfc3339(),
         overall,
         factory_blocked,
-        runtime_bound_ms: VERSION_PROBE_TIMEOUT.as_millis() as u64 + 4_500,
+        runtime_bound_ms: RUNTIME_BOUND.as_millis() as u64,
+        runtime_elapsed_ms: facts.runtime_elapsed_ms,
+        timed_out_components,
         binary,
         repository,
         cas_mcp,
@@ -305,7 +372,7 @@ fn classify_binary(facts: BinaryFacts, findings: &mut Vec<PreflightFinding>) -> 
         .configured_sha
         .as_deref()
         .or(facts.source_sha.as_deref());
-    let matches = expected.is_some_and(|sha| sha.starts_with(running_clean));
+    let matches = expected.is_some_and(|sha| shas_compatible(sha, running_clean));
 
     let (state, remediation) = if facts.configured_sha_invalid {
         let remediation =
@@ -326,6 +393,18 @@ fn classify_binary(facts: BinaryFacts, findings: &mut Vec<PreflightFinding>) -> 
             "binary.identity_untrusted",
             "binary",
             "Running CAS binary identity is unknown or dirty.",
+            &remediation,
+            None,
+        ));
+        (ComponentState::Stale, Some(remediation))
+    } else if facts.source_probe_timed_out && expected.is_none() {
+        let remediation =
+            "Retry preflight after local Git is responsive, or set CAS_EXPECTED_DEPLOYMENT_SHA."
+                .to_string();
+        findings.push(warning(
+            "binary.source_probe_timed_out",
+            "binary",
+            "CAS source identity did not complete within the shared preflight deadline.",
             &remediation,
             None,
         ));
@@ -366,6 +445,10 @@ fn classify_binary(facts: BinaryFacts, findings: &mut Vec<PreflightFinding>) -> 
     }
 }
 
+fn shas_compatible(left: &str, right: &str) -> bool {
+    valid_sha(left) && valid_sha(right) && (left.starts_with(right) || right.starts_with(left))
+}
+
 fn classify_repository(
     facts: Result<RepositoryFacts, RepositoryFailure>,
     findings: &mut Vec<PreflightFinding>,
@@ -393,6 +476,16 @@ fn classify_repository(
                     "repository.ambiguous",
                     "The canonical repository selector matches multiple host checkouts.",
                     "Remove or re-identify duplicate known-repo entries, then rerun preflight.",
+                ),
+                RepositoryFailure::TimedOut => (
+                    "repository.probe_timed_out",
+                    "Repository identity did not complete within the shared preflight deadline.",
+                    "Make local Git and the host known-repo registry responsive, then rerun preflight.",
+                ),
+                RepositoryFailure::CandidateLimit => (
+                    "repository.candidate_limit",
+                    "The host known-repo registry exceeds the bounded preflight candidate limit.",
+                    "Run `cas known-repos prune-missing --dry-run`, then `cas known-repos prune-missing`; rerun preflight afterward.",
                 ),
             };
             findings.push(critical(code, "repository", message, remediation, None));
@@ -560,33 +653,48 @@ fn classify_proxy(
 
 fn classify_harnesses(
     receipts: Vec<HarnessConformanceReceipt>,
-    default_versions: HashMap<Harness, String>,
+    default_versions: HashMap<Harness, VersionProbe>,
+    required_harnesses: &HashSet<Harness>,
     findings: &mut Vec<PreflightFinding>,
 ) -> Vec<HarnessPreflight> {
     [Harness::ClaudeCode, Harness::CodexCli, Harness::GrokBuild]
         .into_iter()
         .map(|harness| {
             let receipt = receipts.iter().find(|receipt| receipt.harness == harness);
-            let default_version = default_versions.get(&harness).cloned().or_else(|| {
-                receipt.and_then(|receipt| receipt.observed_default_harness_version.clone())
-            });
+            let required = required_harnesses.contains(&harness);
+            let probe = default_versions
+                .get(&harness)
+                .cloned()
+                .unwrap_or(VersionProbe::Unavailable);
+            let (default_version, default_probe) = match probe {
+                VersionProbe::Observed(version) => (Some(version), ProbeState::Observed),
+                VersionProbe::Unavailable => (None, ProbeState::Unavailable),
+                VersionProbe::TimedOut => (None, ProbeState::TimedOut),
+            };
             let harness_name = harness_name(harness).to_string();
             let Some(receipt) = receipt else {
                 let remediation = format!(
                     "Run and persist the typed {harness_name} factory conformance matrix."
                 );
-                findings.push(warning(
-                    "harness.receipt_missing",
-                    &format!("harness.{harness_name}"),
-                    &format!("No typed {harness_name} conformance receipt is available."),
-                    &remediation,
-                    None,
-                ));
+                if required {
+                    findings.push(warning(
+                        "harness.receipt_missing",
+                        &format!("harness.{harness_name}"),
+                        &format!(
+                            "Required {harness_name} has no typed conformance receipt."
+                        ),
+                        &remediation,
+                        None,
+                    ));
+                }
                 return HarnessPreflight {
                     harness: harness_name,
+                    required,
                     state: ComponentState::Missing,
                     validated_version: None,
                     default_version,
+                    default_probe,
+                    receipt_observed_default_version: None,
                     receipt_id: None,
                     receipt_result: None,
                     validated_at: None,
@@ -607,13 +715,15 @@ fn classify_harnesses(
                 let action = format!(
                     "Repair failed required checks and rerun the typed {harness_name} conformance matrix."
                 );
-                findings.push(warning(
-                    "harness.validation_failed",
-                    &format!("harness.{harness_name}"),
-                    &format!("{harness_name} receipt does not pass every required check."),
-                    &action,
-                    Some(receipt.validated_at.clone()),
-                ));
+                if required {
+                    findings.push(warning(
+                        "harness.validation_failed",
+                        &format!("harness.{harness_name}"),
+                        &format!("{harness_name} receipt does not pass every required check."),
+                        &action,
+                        Some(receipt.validated_at.clone()),
+                    ));
+                }
                 remediation = Some(action);
             } else if drift {
                 state = ComponentState::Stale;
@@ -621,36 +731,45 @@ fn classify_harnesses(
                     "Use validated {harness_name} {} or rerun the full matrix for the current default before updating the pin.",
                     receipt.harness_version
                 );
-                findings.push(warning(
-                    "harness.version_drift",
-                    &format!("harness.{harness_name}"),
-                    &format!(
-                        "{harness_name} default version differs from validated version {}.",
-                        receipt.harness_version
-                    ),
-                    &action,
-                    Some(receipt.validated_at.clone()),
-                ));
+                if required {
+                    findings.push(warning(
+                        "harness.version_drift",
+                        &format!("harness.{harness_name}"),
+                        &format!(
+                            "{harness_name} default version differs from validated version {}.",
+                            receipt.harness_version
+                        ),
+                        &action,
+                        Some(receipt.validated_at.clone()),
+                    ));
+                }
                 remediation = Some(action);
             } else if default_missing {
                 state = ComponentState::Stale;
                 let action =
                     format!("Install {harness_name} or make its default binary available on PATH.");
-                findings.push(warning(
-                    "harness.default_unavailable",
-                    &format!("harness.{harness_name}"),
-                    &format!("{harness_name} default version could not be observed."),
-                    &action,
-                    Some(receipt.validated_at.clone()),
-                ));
+                if required {
+                    findings.push(warning(
+                        "harness.default_unavailable",
+                        &format!("harness.{harness_name}"),
+                        &format!("{harness_name} default version could not be observed."),
+                        &action,
+                        Some(receipt.validated_at.clone()),
+                    ));
+                }
                 remediation = Some(action);
             }
 
             HarnessPreflight {
                 harness: harness_name,
+                required,
                 state,
                 validated_version: Some(receipt.harness_version.clone()),
                 default_version,
+                default_probe,
+                receipt_observed_default_version: receipt
+                    .observed_default_harness_version
+                    .clone(),
                 receipt_id: Some(receipt.receipt_id.clone()),
                 receipt_result: Some(match receipt.result {
                     ConformanceStatus::Pass => "pass",
@@ -711,7 +830,12 @@ fn harness_name(harness: Harness) -> &'static str {
     }
 }
 
-fn collect_binary_facts(project_root: &Path) -> BinaryFacts {
+fn collect_binary_facts(
+    project_root: &Path,
+    probe: &crate::mcp::tools::core::task::repo_context::BoundedRepoProbe,
+) -> BinaryFacts {
+    use crate::mcp::tools::core::task::repo_context::BoundedRepoError;
+
     let configured_raw = std::env::var("CAS_EXPECTED_DEPLOYMENT_SHA").ok();
     let configured_sha = configured_raw
         .as_deref()
@@ -721,15 +845,19 @@ fn collect_binary_facts(project_root: &Path) -> BinaryFacts {
     let source_root = std::env::var_os("CAS_SOURCE_DIR")
         .map(PathBuf::from)
         .or_else(|| is_cas_source_checkout(project_root).then(|| project_root.to_path_buf()));
-    let source_sha = source_root
+    let source_result = source_root
         .as_deref()
-        .and_then(|root| git_output(root, &["rev-parse", "HEAD"]))
+        .map(|root| probe.output(root, &["rev-parse", "HEAD"]));
+    let source_probe_timed_out = matches!(&source_result, Some(Err(BoundedRepoError::TimedOut)));
+    let source_sha = source_result
+        .and_then(Result::ok)
         .filter(|sha| valid_sha(sha));
     BinaryFacts {
         running_sha: option_env!("CAS_GIT_HASH").unwrap_or("unknown").to_string(),
         source_sha,
         configured_sha,
         configured_sha_invalid,
+        source_probe_timed_out,
         build_date: option_env!("CAS_BUILD_DATE")
             .unwrap_or("unknown")
             .to_string(),
@@ -746,54 +874,60 @@ fn is_cas_source_checkout(path: &Path) -> bool {
         .is_some_and(|manifest| manifest.lines().any(|line| line.trim() == "name = \"cas\""))
 }
 
-fn git_output(path: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(path)
-        .args(args)
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
 #[cfg(feature = "mcp-server")]
 fn collect_repository_facts(
     project_root: &Path,
     cas_root: &Path,
+    probe: &crate::mcp::tools::core::task::repo_context::BoundedRepoProbe,
 ) -> Result<RepositoryFacts, RepositoryFailure> {
+    use crate::mcp::tools::core::task::repo_context::BoundedRepoError;
     use cas_types::WorkTarget;
 
-    let branch = git_output(project_root, &["symbolic-ref", "--short", "HEAD"])
-        .filter(|branch| !branch.is_empty())
-        .ok_or(RepositoryFailure::Missing)?;
-    let active =
-        crate::mcp::tools::core::task::repo_context::resolve_path_context(project_root, &branch)
-            .map_err(|_| RepositoryFailure::Missing)?;
+    let map_error = |error| match error {
+        BoundedRepoError::TimedOut => RepositoryFailure::TimedOut,
+        BoundedRepoError::CandidateLimit => RepositoryFailure::CandidateLimit,
+        BoundedRepoError::Unavailable => RepositoryFailure::Missing,
+        BoundedRepoError::Ambiguous => RepositoryFailure::Ambiguous,
+    };
+    let branch = probe
+        .output(project_root, &["symbolic-ref", "--short", "HEAD"])
+        .map_err(map_error)?;
+    if branch.is_empty() {
+        return Err(RepositoryFailure::Missing);
+    }
+    let active = crate::mcp::tools::core::task::repo_context::resolve_path_context_bounded(
+        project_root,
+        &branch,
+        probe,
+    )
+    .map_err(map_error)?;
     let cas_project = cas_root.parent().unwrap_or(cas_root);
-    let configured =
-        crate::mcp::tools::core::task::repo_context::resolve_path_context(cas_project, &branch)
-            .map_err(|_| RepositoryFailure::Missing)?;
-    if active.repo_selector != configured.repo_selector {
+    let configured = crate::mcp::tools::core::task::repo_context::resolve_path_context_bounded(
+        cas_project,
+        &branch,
+        probe,
+    )
+    .map_err(map_error)?;
+    if active.repo_selector != configured.repo_selector || active.repo_root != configured.repo_root
+    {
         return Err(RepositoryFailure::Wrong);
     }
     let target = WorkTarget {
         repo_selector: active.repo_selector.clone(),
         target_branch: branch.clone(),
     };
-    match crate::mcp::tools::core::task::repo_context::resolve_repo_context(cas_root, &target) {
+    match crate::mcp::tools::core::task::repo_context::resolve_repo_context_bounded(
+        cas_root, &target, probe,
+    ) {
         Ok(context) if context.repo_selector == active.repo_selector => Ok(RepositoryFacts {
             selector: context.repo_selector,
             target_branch: branch,
         }),
         Ok(_) => Err(RepositoryFailure::Wrong),
-        Err(reason) if reason.contains("AMBIGUOUS WORK TARGET") => {
-            Err(RepositoryFailure::Ambiguous)
-        }
-        Err(_) => Err(RepositoryFailure::Wrong),
+        Err(BoundedRepoError::TimedOut) => Err(RepositoryFailure::TimedOut),
+        Err(BoundedRepoError::CandidateLimit) => Err(RepositoryFailure::CandidateLimit),
+        Err(BoundedRepoError::Ambiguous) => Err(RepositoryFailure::Ambiguous),
+        Err(BoundedRepoError::Unavailable) => Err(RepositoryFailure::Wrong),
     }
 }
 
@@ -801,6 +935,7 @@ fn collect_repository_facts(
 fn collect_repository_facts(
     _project_root: &Path,
     _cas_root: &Path,
+    _probe: &crate::mcp::tools::core::task::repo_context::BoundedRepoProbe,
 ) -> Result<RepositoryFacts, RepositoryFailure> {
     Err(RepositoryFailure::Missing)
 }
@@ -888,95 +1023,68 @@ fn collect_proxy_facts(cas_root: &Path, live: Option<ProxySnapshotInput>) -> Pro
     }
 }
 
-fn probe_default_harness_versions() -> HashMap<Harness, String> {
+fn required_harnesses(project_root: &Path) -> HashSet<Harness> {
+    let config = std::fs::read_to_string(project_root.join(".cas/config.toml"))
+        .ok()
+        .and_then(|raw| toml::from_str::<crate::config::Config>(&raw).ok())
+        .unwrap_or_default();
+    let llm = config.llm();
+    ["supervisor", "worker"]
+        .into_iter()
+        .filter_map(|role| harness_from_config(llm.harness_for_role(role)))
+        .collect()
+}
+
+fn harness_from_config(value: &str) -> Option<Harness> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "claude" | "claude-code" => Some(Harness::ClaudeCode),
+        "codex" | "codex-cli" => Some(Harness::CodexCli),
+        "grok" | "grok-build" => Some(Harness::GrokBuild),
+        _ => None,
+    }
+}
+
+fn probe_default_harness_versions(deadline: Deadline) -> HashMap<Harness, VersionProbe> {
     std::thread::scope(|scope| {
-        let claude = scope.spawn(|| probe_version("claude", VERSION_PROBE_TIMEOUT));
-        let codex = scope.spawn(|| probe_version("codex", VERSION_PROBE_TIMEOUT));
-        let grok = scope.spawn(|| probe_version("grok", VERSION_PROBE_TIMEOUT));
+        let claude = scope.spawn(|| probe_version("claude", deadline));
+        let codex = scope.spawn(|| probe_version("codex", deadline));
+        let grok = scope.spawn(|| probe_version("grok", deadline));
         [
-            (Harness::ClaudeCode, claude.join().ok().flatten()),
-            (Harness::CodexCli, codex.join().ok().flatten()),
-            (Harness::GrokBuild, grok.join().ok().flatten()),
+            (
+                Harness::ClaudeCode,
+                claude.join().unwrap_or(VersionProbe::Unavailable),
+            ),
+            (
+                Harness::CodexCli,
+                codex.join().unwrap_or(VersionProbe::Unavailable),
+            ),
+            (
+                Harness::GrokBuild,
+                grok.join().unwrap_or(VersionProbe::Unavailable),
+            ),
         ]
         .into_iter()
-        .filter_map(|(harness, version)| version.map(|version| (harness, version)))
         .collect()
     })
 }
 
-fn probe_version(program: &str, timeout: Duration) -> Option<String> {
-    probe_command_version(program, &["--version"], timeout)
+fn probe_version(program: &str, deadline: Deadline) -> VersionProbe {
+    probe_command_version(program, &["--version"], deadline)
 }
 
-fn probe_command_version(program: &str, args: &[&str], timeout: Duration) -> Option<String> {
-    let capture = VersionCapture::new()?;
-    let output_file = OpenOptions::new().append(true).open(&capture.path).ok()?;
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        // A regular file keeps a descendant that inherits stdout from holding
-        // a pipe open after the bounded parent has exited.
-        .stdout(Stdio::from(output_file))
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if !status.success() {
-                    return None;
-                }
-                let output = std::fs::read_to_string(&capture.path).ok()?;
-                return parse_version(&output);
-            }
-            Ok(None) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
+fn probe_command_version(program: &str, args: &[&str], deadline: Deadline) -> VersionProbe {
+    match run_command(
+        Command::new(program).args(args),
+        deadline,
+        VERSION_PROBE_TIMEOUT,
+    ) {
+        Ok(output) if output.status.success() => {
+            parse_version(&String::from_utf8_lossy(&output.stdout))
+                .map(VersionProbe::Observed)
+                .unwrap_or(VersionProbe::Unavailable)
         }
-    }
-}
-
-struct VersionCapture {
-    path: PathBuf,
-}
-
-impl VersionCapture {
-    fn new() -> Option<Self> {
-        for _ in 0..8 {
-            let sequence = VERSION_OUTPUT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                ".cas-preflight-version-{}-{sequence}",
-                std::process::id()
-            ));
-            let mut options = OpenOptions::new();
-            options.create_new(true).write(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            if options.open(&path).is_ok() {
-                return Some(Self { path });
-            }
-        }
-        None
-    }
-}
-
-impl Drop for VersionCapture {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        Ok(_) | Err(BoundedCommandError::Io) => VersionProbe::Unavailable,
+        Err(BoundedCommandError::TimedOut) => VersionProbe::TimedOut,
     }
 }
 
@@ -1040,11 +1148,17 @@ pub fn render_factory_preflight_human(report: &FactoryPreflightReport) -> String
     ));
     for harness in &report.harnesses {
         lines.push(format!(
-            "  {}: {} validated={} default={} evidence={}",
+            "  {}: {} required={} validated={} live_default={} probe={} receipt_observed={} evidence={}",
             harness.harness,
             state_label(harness.state),
+            harness.required,
             harness.validated_version.as_deref().unwrap_or("none"),
             harness.default_version.as_deref().unwrap_or("unavailable"),
+            probe_label(harness.default_probe),
+            harness
+                .receipt_observed_default_version
+                .as_deref()
+                .unwrap_or("none"),
             harness.validated_at.as_deref().unwrap_or("none")
         ));
     }
@@ -1058,6 +1172,14 @@ pub fn render_factory_preflight_human(report: &FactoryPreflightReport) -> String
         }));
     }
     lines.join("\n")
+}
+
+fn probe_label(state: ProbeState) -> &'static str {
+    match state {
+        ProbeState::Observed => "observed",
+        ProbeState::Unavailable => "unavailable",
+        ProbeState::TimedOut => "timed_out",
+    }
 }
 
 fn overall_label(overall: PreflightOverall) -> &'static str {
@@ -1115,7 +1237,12 @@ mod tests {
         ];
         let default_versions = receipts
             .iter()
-            .map(|receipt| (receipt.harness, receipt.harness_version.clone()))
+            .map(|receipt| {
+                (
+                    receipt.harness,
+                    VersionProbe::Observed(receipt.harness_version.clone()),
+                )
+            })
             .collect();
         PreflightFacts {
             binary: BinaryFacts {
@@ -1123,6 +1250,7 @@ mod tests {
                 source_sha: Some("abcdef0123456789".to_string()),
                 configured_sha: None,
                 configured_sha_invalid: false,
+                source_probe_timed_out: false,
                 build_date: "2026-07-30".to_string(),
             },
             repository: Ok(RepositoryFacts {
@@ -1143,13 +1271,17 @@ mod tests {
             },
             receipts,
             default_versions,
+            required_harnesses: [Harness::ClaudeCode, Harness::CodexCli, Harness::GrokBuild]
+                .into_iter()
+                .collect(),
+            runtime_elapsed_ms: 12,
         }
     }
 
     #[test]
     fn healthy_report_is_ready_and_unblocked() {
         let report = build_report(healthy_facts());
-        assert_eq!(report.schema_version, 1);
+        assert_eq!(report.schema_version, 2);
         assert_eq!(report.overall, PreflightOverall::Ready);
         assert!(!report.factory_blocked);
         assert!(report.findings.is_empty());
@@ -1166,6 +1298,16 @@ mod tests {
     }
 
     #[test]
+    fn short_and_full_shas_match_symmetrically() {
+        let full = "abcdef0123456789abcdef0123456789abcdef01";
+        assert!(shas_compatible(full, "abcdef0"));
+        assert!(shas_compatible("abcdef0", full));
+        assert!(shas_compatible("abcdef01", "abcdef0"));
+        assert!(!shas_compatible(full, "1234567"));
+        assert!(!shas_compatible("abcdef", full));
+    }
+
+    #[test]
     fn wrong_or_ambiguous_repository_is_critical() {
         for failure in [RepositoryFailure::Wrong, RepositoryFailure::Ambiguous] {
             let mut facts = healthy_facts();
@@ -1174,6 +1316,30 @@ mod tests {
             assert_eq!(report.repository.state, ComponentState::Critical);
             assert!(report.factory_blocked);
         }
+    }
+
+    #[test]
+    fn candidate_limit_names_the_supported_registry_only_recovery() {
+        let mut facts = healthy_facts();
+        facts.repository = Err(RepositoryFailure::CandidateLimit);
+        let report = build_report(facts);
+        let finding = report
+            .findings
+            .iter()
+            .find(|finding| finding.code == "repository.candidate_limit")
+            .expect("candidate-limit finding");
+
+        assert!(report.factory_blocked);
+        assert!(
+            finding
+                .remediation
+                .contains("cas known-repos prune-missing --dry-run")
+        );
+        assert!(
+            finding
+                .remediation
+                .contains("cas known-repos prune-missing")
+        );
     }
 
     #[test]
@@ -1240,9 +1406,10 @@ mod tests {
     #[test]
     fn validated_default_version_drift_is_stale_warning_not_blocker() {
         let mut facts = healthy_facts();
-        facts
-            .default_versions
-            .insert(Harness::GrokBuild, "0.2.117".to_string());
+        facts.default_versions.insert(
+            Harness::GrokBuild,
+            VersionProbe::Observed("0.2.117".to_string()),
+        );
         let report = build_report(facts);
         let grok = report
             .harnesses
@@ -1256,10 +1423,107 @@ mod tests {
     }
 
     #[test]
+    fn receipt_time_observation_never_substitutes_for_live_default() {
+        let mut facts = healthy_facts();
+        facts
+            .default_versions
+            .insert(Harness::CodexCli, VersionProbe::Unavailable);
+        let report = build_report(facts);
+        let codex = report
+            .harnesses
+            .iter()
+            .find(|harness| harness.harness == "codex")
+            .unwrap();
+        assert_eq!(codex.default_version, None);
+        assert_eq!(codex.default_probe, ProbeState::Unavailable);
+        assert_eq!(
+            codex.receipt_observed_default_version.as_deref(),
+            Some("0.146.0")
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.code == "harness.default_unavailable")
+        );
+    }
+
+    #[test]
+    fn configured_role_policy_makes_optional_unvalidated_harnesses_informational() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(".cas")).unwrap();
+        std::fs::write(
+            project.path().join(".cas/config.toml"),
+            "[llm.supervisor]\nharness = \"codex\"\n[llm.worker]\nharness = \"codex\"\n",
+        )
+        .unwrap();
+        let required = required_harnesses(project.path());
+        assert_eq!(required, [Harness::CodexCli].into_iter().collect());
+
+        let mut facts = healthy_facts();
+        facts.required_harnesses = required;
+        facts
+            .receipts
+            .retain(|receipt| receipt.harness == Harness::CodexCli);
+        facts
+            .default_versions
+            .retain(|harness, _| *harness == Harness::CodexCli);
+        let report = build_report(facts);
+        assert_eq!(report.overall, PreflightOverall::Ready);
+        assert!(report.findings.is_empty());
+        assert!(
+            report
+                .harnesses
+                .iter()
+                .find(|harness| harness.harness == "claude")
+                .is_some_and(
+                    |harness| !harness.required && harness.state == ComponentState::Missing
+                )
+        );
+    }
+
+    #[test]
+    fn default_role_policy_requires_real_supervisor_and_worker_harnesses() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(".cas")).unwrap();
+        std::fs::write(project.path().join(".cas/config.toml"), "").unwrap();
+        assert_eq!(
+            required_harnesses(project.path()),
+            [Harness::ClaudeCode, Harness::CodexCli]
+                .into_iter()
+                .collect()
+        );
+    }
+
+    #[test]
+    fn typed_deadline_evidence_has_no_path_or_command_content() {
+        let mut facts = healthy_facts();
+        facts.repository = Err(RepositoryFailure::TimedOut);
+        facts
+            .default_versions
+            .insert(Harness::CodexCli, VersionProbe::TimedOut);
+        let report = build_report(facts);
+        assert_eq!(
+            report.timed_out_components,
+            vec!["harness.codex", "repository"]
+        );
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("repository.probe_timed_out"));
+        for forbidden in ["git -C", "/home/", "CAS_SOURCE_DIR="] {
+            assert!(!json.contains(forbidden), "{forbidden} leaked: {json}");
+        }
+    }
+
+    #[test]
     fn downstream_project_head_is_not_used_as_cas_source_sha() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("Cargo.toml"), "[package]\nname='app'\n").unwrap();
-        let facts = collect_binary_facts(temp.path());
+        let probe = crate::mcp::tools::core::task::repo_context::BoundedRepoProbe::new(
+            Deadline::after(Duration::from_secs(1)),
+            Duration::from_millis(200),
+            8,
+        );
+        let facts = collect_binary_facts(temp.path(), &probe);
         assert_eq!(facts.source_sha, None);
     }
 
@@ -1315,7 +1579,12 @@ mod tests {
         );
         assert!(resolved.is_ok(), "direct resolution failed: {resolved:?}");
 
-        let facts = collect_repository_facts(project.path(), &project.path().join(".cas"));
+        let probe = crate::mcp::tools::core::task::repo_context::BoundedRepoProbe::new(
+            Deadline::after(Duration::from_secs(2)),
+            Duration::from_millis(500),
+            8,
+        );
+        let facts = collect_repository_facts(project.path(), &project.path().join(".cas"), &probe);
         assert!(
             matches!(facts, Ok(RepositoryFacts { ref selector, ref target_branch })
                 if selector == "project:preflight-boundary" && target_branch == "main"),
@@ -1327,8 +1596,12 @@ mod tests {
     #[test]
     fn failed_version_probe_is_killed_within_bound() {
         let started = Instant::now();
-        let result = probe_command_version("sh", &["-c", "sleep 10"], Duration::from_millis(75));
-        assert_eq!(result, None);
+        let result = probe_command_version(
+            "sh",
+            &["-c", "sleep 10"],
+            Deadline::after(Duration::from_millis(75)),
+        );
+        assert_eq!(result, VersionProbe::TimedOut);
         assert!(
             started.elapsed() < Duration::from_secs(1),
             "probe exceeded bound: {:?}",

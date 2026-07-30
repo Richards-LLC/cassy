@@ -387,6 +387,11 @@ mcp__cas__verification action=add task_id=<id> status=rejected verification_type
 
 ## Guidelines
 
+The Task/Agent spawn prompt includes a server-issued
+`CAS_VERIFIER_CAPABILITY`. Pass that value exactly once as
+`verifier_capability` on the final `verification action=add` call. Never print,
+quote, log, or persist the capability, and never reuse it.
+
 1. Check close reason FIRST — compare against the task's acceptance criteria, not a keyword list; reject only if an AC item is described as not done
 2. Check parent epic spec — verify alignment
 3. Be strict on completeness — any placeholder language = reject

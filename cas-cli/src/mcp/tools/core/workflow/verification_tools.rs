@@ -1,4 +1,3 @@
-use crate::harness_policy::worker_harness_from_env;
 use crate::mcp::tools::core::imports::*;
 
 impl CasCore {
@@ -33,6 +32,45 @@ impl CasCore {
             });
         }
 
+        // Resolve authority only from the server's registered caller identity.
+        // Caller-supplied names, models, verifier types, task ownership, harness
+        // labels, and orphan state never grant verification authority.
+        let caller_id = self.get_agent_id()?;
+        let caller = agent_store.get(&caller_id).map_err(|_| McpError {
+            code: ErrorCode::INVALID_REQUEST,
+            message: Cow::from(
+                "Verification requires an authenticated registered CAS session. Anonymous or orphan callers cannot add verification records.",
+            ),
+            data: None,
+        })?;
+        if !caller.is_alive() {
+            return Err(McpError {
+                code: ErrorCode::INVALID_REQUEST,
+                message: Cow::from(
+                    "Verification caller is not an active registered CAS session. Re-register before retrying.",
+                ),
+                data: None,
+            });
+        }
+
+        let uses_verifier_capability = req.verifier_capability.is_some();
+        let supervisor_direct =
+            caller.role == cas_types::AgentRole::Supervisor && !uses_verifier_capability;
+        if !supervisor_direct && !uses_verifier_capability {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "Verification authority rejected for task {}: workers and standard sessions cannot attest their own work.\n\n\
+                     Legitimate paths:\n\
+                       - Spawn a distinct registered task-verifier child; CAS injects a one-time task-scoped capability into that child.\n\
+                       - Ask a registered supervisor to verify directly.\n\n\
+                     Task ownership, assignee/orphan state, harness/model labels, verification_type, and confidence do not grant authority.",
+                    req.task_id
+                )),
+                data: None,
+            });
+        }
+
         // cas-b269: urgent stop halt blocks verification MCP.
         //
         // cas-3894: same owned-task exemption as `task action=close`
@@ -43,101 +81,25 @@ impl CasCore {
         // task-verifier (which calls this endpoint) was as stuck as closing.
         // The exemption only skips the halt flag; it does not fabricate a
         // verification verdict.
-        if let Ok(agent_id) = self.get_agent_id() {
-            if let Ok(agent) = agent_store.get(&agent_id) {
-                let halt_exempt =
-                    crate::mcp::tools::core::task::lifecycle::stale_close_guard::halt_exempt_for_owned_task(
-                        task.status,
-                        task.assignee.as_deref(),
-                        Some(agent.name.as_str()),
-                    );
-                if crate::mcp::tools::core::task::lifecycle::stale_close_guard::agent_task_work_halted(
-                    &agent.metadata,
-                ) && !halt_exempt
-                {
-                    return Err(McpError {
-                        code: ErrorCode::INVALID_PARAMS,
-                        message: Cow::from(
-                            crate::mcp::tools::core::task::lifecycle::stale_close_guard::halt_blocks_task_work_message(
-                                "verification action=add",
-                            ),
-                        ),
-                        data: None,
-                    });
-                }
-            }
-        }
-
-        // Supervisors can usually only verify epics.
-        // Exceptions:
-        // 1. Factory sessions with Codex workers (no subagent support)
-        // 2. Task-verifier subagent running within supervisor context
-        // 3. Supervisor is the task assignee (self-implemented task)
-        // 4. Task assignee is inactive (orphaned task)
-        if let Ok(agent_id) = self.get_agent_id() {
-            if let Ok(agent) = agent_store.get(&agent_id) {
-                let worker_supports_subagents =
-                    worker_harness_from_env().capabilities().supports_subagents;
-                if agent.role == cas_types::AgentRole::Supervisor
-                    && task.task_type != crate::types::TaskType::Epic
-                    && worker_supports_subagents
-                {
-                    // Check if this is a task-verifier subagent context
-                    let is_verifier_subagent = self
-                        .cas_root
-                        .join(".verifier_unjail_marker")
-                        .exists();
-
-                    // Check if supervisor is the task assignee
-                    let supervisor_is_assignee =
-                        task.assignee.as_deref() == Some(agent_id.as_str());
-
-                    // Check if task assignee is inactive (orphaned).
-                    // `unwrap_or(true)` semantics: missing assignee, missing
-                    // agent record, dead agent, or stale heartbeat all count
-                    // as "inactive_or_absent" — the rejection only fires
-                    // when there is a *currently live* assignee.
-                    let assignee_inactive_or_absent = task
-                        .assignee
-                        .as_deref()
-                        .map(|aid| {
-                            agent_store
-                                .get(aid)
-                                .map(|a| !a.is_alive() || a.is_heartbeat_expired(300))
-                                .unwrap_or(true)
-                        })
-                        .unwrap_or(true); // no assignee → treat as orphaned
-
-                    if !is_verifier_subagent
-                        && !supervisor_is_assignee
-                        && !assignee_inactive_or_absent
-                    {
-                        // Safe: assignee_inactive_or_absent is false here,
-                        // which requires task.assignee to be Some(_).
-                        let assignee_id = task.assignee.as_deref().unwrap_or("<unknown>");
-                        return Err(McpError {
-                            code: ErrorCode::INVALID_PARAMS,
-                            message: Cow::from(format!(
-                                "Cannot verify task {task_id}: it has an active assignee ({assignee_id}).\n\n\
-                                Supervisors may verify individual tasks only when:\n\
-                                  - the task has no assignee (orphaned), OR\n\
-                                  - the assignee is inactive (dead session or heartbeat expired >5min ago), OR\n\
-                                  - the supervisor IS the assignee (self-implemented task).\n\n\
-                                Epics may always be verified by supervisors.\n\n\
-                                Remediation:\n\
-                                  - Ask {assignee_id} to verify and close the task themselves:\n\
-                                    mcp__cas__coordination action=message target={assignee_id} message=\"Please verify and close task {task_id}\"\n\
-                                  - Or release their lease and take over:\n\
-                                    mcp__cas__task action=release id={task_id}\n\
-                                  - Or wait for the assignee to disconnect (heartbeat expires after 5min).",
-                                task_id = req.task_id,
-                                assignee_id = assignee_id,
-                            )),
-                            data: None,
-                        });
-                    }
-                }
-            }
+        let halt_exempt =
+            crate::mcp::tools::core::task::lifecycle::stale_close_guard::halt_exempt_for_owned_task(
+                task.status,
+                task.assignee.as_deref(),
+                Some(caller.name.as_str()),
+            );
+        if crate::mcp::tools::core::task::lifecycle::stale_close_guard::agent_task_work_halted(
+            &caller.metadata,
+        ) && !halt_exempt
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(
+                    crate::mcp::tools::core::task::lifecycle::stale_close_guard::halt_blocks_task_work_message(
+                        "verification action=add",
+                    ),
+                ),
+                data: None,
+            });
         }
 
         let id = verification_store.generate_id().map_err(|e| McpError {
@@ -146,7 +108,13 @@ impl CasCore {
             data: None,
         })?;
 
-        let status: VerificationStatus = req.status.parse().unwrap_or(VerificationStatus::Approved);
+        let status: VerificationStatus = req.status.parse().map_err(|_| McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(
+                "Invalid verification status. Expected: approved, rejected, error, or skipped.",
+            ),
+            data: None,
+        })?;
 
         // Parse issues from JSON if provided
         let issues: Vec<VerificationIssue> = if let Some(issues_json) = &req.issues {
@@ -186,11 +154,6 @@ impl CasCore {
             verification.set_duration(duration_ms);
         }
 
-        // Set agent ID if available
-        if let Some(Some(agent_id)) = self.agent_id.get() {
-            verification.set_agent(agent_id.clone());
-        }
-
         // Set verification type if specified (default is Task)
         if let Some(vtype) = &req.verification_type {
             if vtype == "epic" {
@@ -219,6 +182,42 @@ impl CasCore {
                 message: Cow::from(format!("Failed to begin transaction: {e}")),
                 data: None,
             })?;
+
+            if let Some(capability_token) = req.verifier_capability.as_deref() {
+                let capability = cas_store::consume_verifier_capability_with_conn(
+                    &tx,
+                    capability_token,
+                    &req.task_id,
+                    &caller_id,
+                )
+                .map_err(|_| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Verifier capability rejected: it is invalid, expired, consumed, bound to another task/session, or was not issued to a distinct registered task-verifier child.",
+                    ),
+                    data: None,
+                })?;
+                if caller.agent_type != cas_types::AgentType::SubAgent
+                    || caller.parent_id.as_deref() != Some(capability.issuer_agent_id.as_str())
+                    || capability.verifier_agent_id.as_deref() != Some(caller_id.as_str())
+                {
+                    return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(
+                            "Verifier capability rejected: caller is not the distinct registered task-verifier child bound by CAS.",
+                        ),
+                        data: None,
+                    });
+                }
+                verification.set_agent(caller_id.clone());
+                verification.provenance = cas_types::VerificationProvenance::TaskVerifier;
+                verification.capability_id = Some(capability.id);
+                verification.issuer_agent_id = Some(capability.issuer_agent_id);
+            } else {
+                verification.set_agent(caller_id.clone());
+                verification.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+                verification.issuer_agent_id = Some(caller_id.clone());
+            }
 
             cas_store::add_verification_with_conn(&tx, &verification).map_err(|e| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
@@ -266,6 +265,8 @@ impl CasCore {
                 "task_id": req.task_id,
                 "status": status_str,
                 "verification_type": verification.verification_type.to_string(),
+                "provenance": verification.provenance.to_string(),
+                "capability_id": verification.capability_id,
             }));
             // Add session ID if available for linking to the verifying agent
             let event = if let Some(Some(agent_id)) = self.agent_id.get() {
@@ -317,6 +318,10 @@ impl CasCore {
 
         if let Some(agent_id) = &verification.agent_id {
             output.push_str(&format!("Verified by: {agent_id}\n"));
+        }
+        output.push_str(&format!("Provenance: {}\n", verification.provenance));
+        if let Some(capability_id) = &verification.capability_id {
+            output.push_str(&format!("Verifier capability: {capability_id}\n"));
         }
 
         if let Some(duration) = verification.duration_ms {

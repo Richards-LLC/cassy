@@ -1,6 +1,6 @@
+use super::deser;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use super::deser;
 
 /// Unified search, context, and entity operations request
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -360,6 +360,13 @@ pub struct VerificationRequest {
     #[schemars(description = "Verification type: 'task' (default) or 'epic'")]
     #[serde(default)]
     pub verification_type: Option<String>,
+
+    /// Server-issued one-time capability for a registered task-verifier child.
+    #[schemars(
+        description = "One-time task-verifier capability injected by CAS; standard workers cannot mint this"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifier_capability: Option<String>,
 }
 
 /// Unified team operations request
@@ -393,7 +400,9 @@ pub struct FactoryRequest {
     /// target epic, and forwarded from the unified
     /// `CoordinationRequest.id` so callers can write
     /// `mcp__cas__coordination action=epic_status id=cas-754b`.
-    #[schemars(description = "ID for actions that target a specific entity (e.g., epic_id for epic_status)")]
+    #[schemars(
+        description = "ID for actions that target a specific entity (e.g., epic_id for epic_status)"
+    )]
     #[serde(default)]
     pub id: Option<String>,
 

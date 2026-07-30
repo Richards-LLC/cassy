@@ -3,8 +3,9 @@
 //! Stores verification results in SQLite. Verifications are created when
 //! attempting to close a task, with a Haiku subagent reviewing the work.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
@@ -13,7 +14,8 @@ use std::sync::{Arc, Mutex};
 use crate::Result;
 use crate::error::StoreError;
 use cas_types::{
-    IssueSeverity, Verification, VerificationIssue, VerificationStatus, VerificationType,
+    IssueSeverity, Verification, VerificationIssue, VerificationProvenance, VerificationStatus,
+    VerificationType, VerifierCapability,
 };
 
 // Helper to convert lock errors
@@ -32,6 +34,9 @@ CREATE TABLE IF NOT EXISTS verifications (
     task_id TEXT NOT NULL,
     agent_id TEXT,
     verification_type TEXT NOT NULL DEFAULT 'task',
+    provenance TEXT NOT NULL DEFAULT 'legacy',
+    capability_id TEXT,
+    issuer_agent_id TEXT,
     status TEXT NOT NULL DEFAULT 'approved',
     confidence REAL,
     summary TEXT NOT NULL DEFAULT '',
@@ -53,11 +58,35 @@ CREATE TABLE IF NOT EXISTS verification_issues (
     FOREIGN KEY (verification_id) REFERENCES verifications(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS verification_capabilities (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    issuer_agent_id TEXT NOT NULL,
+    verifier_agent_id TEXT,
+    token_hash TEXT NOT NULL,
+    issued_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    bound_at TEXT,
+    consumed_at TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_verifications_task ON verifications(task_id);
 CREATE INDEX IF NOT EXISTS idx_verifications_status ON verifications(status);
 CREATE INDEX IF NOT EXISTS idx_verifications_created ON verifications(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_verification_issues_verification ON verification_issues(verification_id);
+CREATE INDEX IF NOT EXISTS idx_verification_capabilities_task
+    ON verification_capabilities(task_id, consumed_at, expires_at);
 "#;
+
+const VERIFIER_CAPABILITY_TTL_MINUTES: i64 = 30;
+
+/// Newly issued capability. The bearer token exists only in this return value
+/// and must be delivered directly to the verifier child; it is never stored.
+#[derive(Debug, Clone)]
+pub struct IssuedVerifierCapability {
+    pub capability: VerifierCapability,
+    pub token: String,
+}
 
 /// Trait for verification storage operations
 pub trait VerificationStore: Send + Sync {
@@ -127,15 +156,18 @@ impl SqliteVerificationStore {
         let verification_type =
             VerificationType::from_str(&verification_type_str).unwrap_or_default();
 
-        let status_str: String = row.get(4)?;
+        let provenance_str: String = row.get(4)?;
+        let provenance = VerificationProvenance::from_str(&provenance_str).unwrap_or_default();
+
+        let status_str: String = row.get(7)?;
         let status = VerificationStatus::from_str(&status_str).unwrap_or_default();
 
-        let created_at_str: String = row.get(9)?;
+        let created_at_str: String = row.get(12)?;
         let created_at = DateTime::parse_from_rfc3339(&created_at_str)
             .map(|dt| dt.with_timezone(&Utc))
             .unwrap_or_else(|_| Utc::now());
 
-        let files_reviewed_json: String = row.get(7)?;
+        let files_reviewed_json: String = row.get(10)?;
         let files_reviewed: Vec<String> =
             serde_json::from_str(&files_reviewed_json).unwrap_or_default();
 
@@ -144,11 +176,14 @@ impl SqliteVerificationStore {
             task_id: row.get(1)?,
             agent_id: row.get(2)?,
             verification_type,
+            provenance,
+            capability_id: row.get(5)?,
+            issuer_agent_id: row.get(6)?,
             status,
-            confidence: row.get(5)?,
-            summary: row.get(6)?,
+            confidence: row.get(8)?,
+            summary: row.get(9)?,
             files_reviewed,
-            duration_ms: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
+            duration_ms: row.get::<_, Option<i64>>(11)?.map(|v| v as u64),
             created_at,
             issues: Vec::new(), // Issues loaded separately
         })
@@ -237,7 +272,11 @@ impl SqliteVerificationStore {
         Ok(map)
     }
 
-    fn attach_issues_batch(&self, conn: &Connection, verifications: &mut [Verification]) -> Result<()> {
+    fn attach_issues_batch(
+        &self,
+        conn: &Connection,
+        verifications: &mut [Verification],
+    ) -> Result<()> {
         let ids: Vec<&str> = verifications.iter().map(|v| v.id.as_str()).collect();
         let mut map = self.load_issues_batch(conn, &ids)?;
         for v in verifications.iter_mut() {
@@ -287,13 +326,17 @@ pub fn add_verification_with_conn(conn: &Connection, verification: &Verification
 
     conn.execute(
         "INSERT INTO verifications
-         (id, task_id, agent_id, verification_type, status, confidence, summary, files_reviewed, duration_ms, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+         (id, task_id, agent_id, verification_type, provenance, capability_id, issuer_agent_id,
+          status, confidence, summary, files_reviewed, duration_ms, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             verification.id,
             verification.task_id,
             verification.agent_id,
             verification.verification_type.to_string(),
+            verification.provenance.to_string(),
+            verification.capability_id,
+            verification.issuer_agent_id,
             verification.status.to_string(),
             verification.confidence,
             verification.summary,
@@ -341,6 +384,223 @@ pub fn save_verification_issues_with_conn(
     Ok(())
 }
 
+fn capability_token_hash(token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"cas-verifier-capability-v1\0");
+    hasher.update(token.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn constant_time_eq(left: &str, right: &str) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.as_bytes()
+        .iter()
+        .zip(right.as_bytes())
+        .fold(0_u8, |diff, (a, b)| diff | (a ^ b))
+        == 0
+}
+
+fn capability_id_from_token(token: &str) -> Result<&str> {
+    let Some((id, secret)) = token.split_once('.') else {
+        return Err(StoreError::Parse(
+            "malformed verifier capability".to_string(),
+        ));
+    };
+    if !id.starts_with("vcap-")
+        || !id.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+        || secret.len() < 32
+    {
+        return Err(StoreError::Parse(
+            "malformed verifier capability".to_string(),
+        ));
+    }
+    Ok(id)
+}
+
+fn load_capability_with_conn(conn: &Connection, id: &str) -> Result<VerifierCapability> {
+    conn.query_row(
+        "SELECT id, task_id, issuer_agent_id, verifier_agent_id, token_hash,
+                issued_at, expires_at, bound_at, consumed_at
+         FROM verification_capabilities WHERE id = ?1",
+        params![id],
+        |row| {
+            let parse_time = |index| -> rusqlite::Result<DateTime<Utc>> {
+                let value: String = row.get(index)?;
+                DateTime::parse_from_rfc3339(&value)
+                    .map(|time| time.with_timezone(&Utc))
+                    .map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            index,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })
+            };
+            let parse_optional_time = |index| -> rusqlite::Result<Option<DateTime<Utc>>> {
+                let value: Option<String> = row.get(index)?;
+                value
+                    .map(|value| {
+                        DateTime::parse_from_rfc3339(&value)
+                            .map(|time| time.with_timezone(&Utc))
+                            .map_err(|error| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    index,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(error),
+                                )
+                            })
+                    })
+                    .transpose()
+            };
+            Ok(VerifierCapability {
+                id: row.get(0)?,
+                task_id: row.get(1)?,
+                issuer_agent_id: row.get(2)?,
+                verifier_agent_id: row.get(3)?,
+                token_hash: row.get(4)?,
+                issued_at: parse_time(5)?,
+                expires_at: parse_time(6)?,
+                bound_at: parse_optional_time(7)?,
+                consumed_at: parse_optional_time(8)?,
+            })
+        },
+    )
+    .map_err(|error| match error {
+        rusqlite::Error::QueryReturnedNoRows => {
+            StoreError::NotFound("verifier capability".to_string())
+        }
+        other => StoreError::Database(other),
+    })
+}
+
+/// Mint an unbound, one-time verifier capability.
+///
+/// The caller must deliver `token` only to the child task-verifier. The
+/// database stores its domain-separated SHA-256 digest, never the raw value.
+pub fn issue_verifier_capability(
+    cas_dir: &Path,
+    task_id: &str,
+    issuer_agent_id: &str,
+) -> Result<IssuedVerifierCapability> {
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let conn = store.conn.lock().map_err(lock_err)?;
+    let random_id: u128 = rand::random();
+    let random_secret: [u8; 32] = rand::random();
+    let id = format!("vcap-{random_id:032x}");
+    let secret: String = random_secret
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let token = format!("{id}.{secret}");
+    let issued_at = Utc::now();
+    let capability = VerifierCapability {
+        id: id.clone(),
+        task_id: task_id.to_string(),
+        issuer_agent_id: issuer_agent_id.to_string(),
+        verifier_agent_id: None,
+        token_hash: capability_token_hash(&token),
+        issued_at,
+        expires_at: issued_at + Duration::minutes(VERIFIER_CAPABILITY_TTL_MINUTES),
+        bound_at: None,
+        consumed_at: None,
+    };
+    conn.execute(
+        "INSERT INTO verification_capabilities
+         (id, task_id, issuer_agent_id, verifier_agent_id, token_hash, issued_at,
+          expires_at, bound_at, consumed_at)
+         VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, NULL, NULL)",
+        params![
+            capability.id,
+            capability.task_id,
+            capability.issuer_agent_id,
+            capability.token_hash,
+            capability.issued_at.to_rfc3339(),
+            capability.expires_at.to_rfc3339(),
+        ],
+    )?;
+    Ok(IssuedVerifierCapability { capability, token })
+}
+
+/// Bind an issued capability to the distinct registered child session that
+/// receives the task-verifier prompt.
+pub fn bind_verifier_capability(
+    cas_dir: &Path,
+    token: &str,
+    verifier_agent_id: &str,
+) -> Result<VerifierCapability> {
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let conn = store.conn.lock().map_err(lock_err)?;
+    let id = capability_id_from_token(token)?;
+    let capability = load_capability_with_conn(&conn, id)?;
+    if capability.consumed_at.is_some()
+        || capability.verifier_agent_id.is_some()
+        || capability.expires_at <= Utc::now()
+        || !constant_time_eq(&capability.token_hash, &capability_token_hash(token))
+        || verifier_agent_id == capability.issuer_agent_id
+    {
+        return Err(StoreError::Parse(
+            "verifier capability cannot be bound".to_string(),
+        ));
+    }
+    let bound_at = Utc::now();
+    let changed = conn.execute(
+        "UPDATE verification_capabilities
+         SET verifier_agent_id = ?2, bound_at = ?3
+         WHERE id = ?1 AND verifier_agent_id IS NULL AND consumed_at IS NULL
+               AND expires_at > ?3",
+        params![id, verifier_agent_id, bound_at.to_rfc3339()],
+    )?;
+    if changed != 1 {
+        return Err(StoreError::Parse(
+            "verifier capability binding raced or expired".to_string(),
+        ));
+    }
+    load_capability_with_conn(&conn, id)
+}
+
+/// Validate and atomically consume one verifier capability in the caller's
+/// verification transaction.
+pub fn consume_verifier_capability_with_conn(
+    conn: &Connection,
+    token: &str,
+    task_id: &str,
+    verifier_agent_id: &str,
+) -> Result<VerifierCapability> {
+    let id = capability_id_from_token(token)?;
+    let capability = load_capability_with_conn(conn, id)?;
+    if capability.task_id != task_id
+        || capability.verifier_agent_id.as_deref() != Some(verifier_agent_id)
+        || capability.consumed_at.is_some()
+        || capability.expires_at <= Utc::now()
+        || !constant_time_eq(&capability.token_hash, &capability_token_hash(token))
+    {
+        return Err(StoreError::Parse(
+            "verifier capability is invalid, expired, consumed, or bound to another task/session"
+                .to_string(),
+        ));
+    }
+    let consumed_at = Utc::now();
+    let changed = conn.execute(
+        "UPDATE verification_capabilities
+         SET consumed_at = ?2
+         WHERE id = ?1 AND consumed_at IS NULL AND verifier_agent_id = ?3
+               AND task_id = ?4 AND expires_at > ?2",
+        params![id, consumed_at.to_rfc3339(), verifier_agent_id, task_id],
+    )?;
+    if changed != 1 {
+        return Err(StoreError::Parse(
+            "verifier capability was already consumed".to_string(),
+        ));
+    }
+    Ok(capability)
+}
+
 impl VerificationStore for SqliteVerificationStore {
     fn init(&self) -> Result<()> {
         let conn = self.conn.lock().map_err(lock_err)?;
@@ -369,7 +629,11 @@ impl VerificationStore for SqliteVerificationStore {
         let rand: u32 = rand::random();
         // 8 hex chars from nanos + 4 from randomness = 48 bits of
         // collision surface, plenty for in-process use.
-        Ok(format!("ver-{:08x}{:04x}", (nanos as u64) & 0xffff_ffff, rand & 0xffff))
+        Ok(format!(
+            "ver-{:08x}{:04x}",
+            (nanos as u64) & 0xffff_ffff,
+            rand & 0xffff
+        ))
     }
 
     fn add(&self, verification: &Verification) -> Result<()> {
@@ -380,13 +644,17 @@ impl VerificationStore for SqliteVerificationStore {
 
         conn.execute(
             "INSERT INTO verifications
-             (id, task_id, agent_id, verification_type, status, confidence, summary, files_reviewed, duration_ms, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             (id, task_id, agent_id, verification_type, provenance, capability_id, issuer_agent_id,
+              status, confidence, summary, files_reviewed, duration_ms, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 verification.id,
                 verification.task_id,
                 verification.agent_id,
                 verification.verification_type.to_string(),
+                verification.provenance.to_string(),
+                verification.capability_id,
+                verification.issuer_agent_id,
                 verification.status.to_string(),
                 verification.confidence,
                 verification.summary,
@@ -407,8 +675,9 @@ impl VerificationStore for SqliteVerificationStore {
 
         let mut verification = conn
             .query_row(
-                "SELECT id, task_id, agent_id, verification_type, status, confidence, summary,
-                        files_reviewed, duration_ms, created_at
+                "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
+                        issuer_agent_id, status, confidence, summary, files_reviewed, duration_ms,
+                        created_at
                  FROM verifications WHERE id = ?1",
                 params![id],
                 Self::parse_verification,
@@ -431,14 +700,18 @@ impl VerificationStore for SqliteVerificationStore {
 
         let rows = conn.execute(
             "UPDATE verifications SET
-             task_id = ?2, agent_id = ?3, verification_type = ?4, status = ?5, confidence = ?6,
-             summary = ?7, files_reviewed = ?8, duration_ms = ?9, created_at = ?10
+             task_id = ?2, agent_id = ?3, verification_type = ?4, provenance = ?5,
+             capability_id = ?6, issuer_agent_id = ?7, status = ?8, confidence = ?9,
+             summary = ?10, files_reviewed = ?11, duration_ms = ?12, created_at = ?13
              WHERE id = ?1",
             params![
                 verification.id,
                 verification.task_id,
                 verification.agent_id,
                 verification.verification_type.to_string(),
+                verification.provenance.to_string(),
+                verification.capability_id,
+                verification.issuer_agent_id,
                 verification.status.to_string(),
                 verification.confidence,
                 verification.summary,
@@ -475,8 +748,9 @@ impl VerificationStore for SqliteVerificationStore {
         let conn = self.conn.lock().map_err(lock_err)?;
 
         let mut stmt = conn.prepare_cached(
-            "SELECT id, task_id, agent_id, verification_type, status, confidence, summary,
-                    files_reviewed, duration_ms, created_at
+            "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
+                    issuer_agent_id, status, confidence, summary, files_reviewed, duration_ms,
+                    created_at
              FROM verifications WHERE task_id = ?1
              ORDER BY created_at DESC",
         )?;
@@ -496,8 +770,9 @@ impl VerificationStore for SqliteVerificationStore {
 
         let verification = conn
             .query_row(
-                "SELECT id, task_id, agent_id, verification_type, status, confidence, summary,
-                        files_reviewed, duration_ms, created_at
+                "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
+                        issuer_agent_id, status, confidence, summary, files_reviewed, duration_ms,
+                        created_at
                  FROM verifications WHERE task_id = ?1
                  ORDER BY created_at DESC LIMIT 1",
                 params![task_id],
@@ -524,8 +799,9 @@ impl VerificationStore for SqliteVerificationStore {
 
         let verification = conn
             .query_row(
-                "SELECT id, task_id, agent_id, verification_type, status, confidence, summary,
-                        files_reviewed, duration_ms, created_at
+                "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
+                        issuer_agent_id, status, confidence, summary, files_reviewed, duration_ms,
+                        created_at
                  FROM verifications WHERE task_id = ?1 AND verification_type = ?2
                  ORDER BY created_at DESC LIMIT 1",
                 params![task_id, verification_type.to_string()],
@@ -547,8 +823,9 @@ impl VerificationStore for SqliteVerificationStore {
         let conn = self.conn.lock().map_err(lock_err)?;
 
         let mut stmt = conn.prepare_cached(
-            "SELECT id, task_id, agent_id, verification_type, status, confidence, summary,
-                    files_reviewed, duration_ms, created_at
+            "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
+                    issuer_agent_id, status, confidence, summary, files_reviewed, duration_ms,
+                    created_at
              FROM verifications ORDER BY created_at DESC LIMIT ?1",
         )?;
 
@@ -566,8 +843,9 @@ impl VerificationStore for SqliteVerificationStore {
         let conn = self.conn.lock().map_err(lock_err)?;
 
         let mut stmt = conn.prepare_cached(
-            "SELECT id, task_id, agent_id, verification_type, status, confidence, summary,
-                    files_reviewed, duration_ms, created_at
+            "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
+                    issuer_agent_id, status, confidence, summary, files_reviewed, duration_ms,
+                    created_at
              FROM verifications WHERE status = ?1
              ORDER BY created_at DESC",
         )?;
@@ -920,5 +1198,122 @@ mod tests {
 
         let retrieved = store.get("ver-test").unwrap();
         assert_eq!(retrieved.confidence, Some(0.95));
+    }
+
+    #[test]
+    fn verifier_capability_is_hashed_scoped_bound_expiring_and_one_time() {
+        let (_store, dir) = create_test_store();
+        let issued =
+            issue_verifier_capability(dir.path(), "cas-cap-a", "owner-agent").expect("issue");
+
+        assert!(
+            bind_verifier_capability(dir.path(), &issued.token, "owner-agent").is_err(),
+            "issuer/owner must never bind its own capability"
+        );
+        let bound =
+            bind_verifier_capability(dir.path(), &issued.token, "verifier-child").expect("bind");
+        assert_eq!(bound.verifier_agent_id.as_deref(), Some("verifier-child"));
+
+        let conn = Connection::open(dir.path().join("cas.db")).expect("db");
+        assert!(
+            consume_verifier_capability_with_conn(
+                &conn,
+                &issued.token,
+                "cas-cap-b",
+                "verifier-child"
+            )
+            .is_err(),
+            "wrong-task capability use must fail"
+        );
+        assert!(
+            consume_verifier_capability_with_conn(&conn, &issued.token, "cas-cap-a", "owner-agent")
+                .is_err(),
+            "stolen-token use from the owner session must fail"
+        );
+        consume_verifier_capability_with_conn(&conn, &issued.token, "cas-cap-a", "verifier-child")
+            .expect("first correct consumption");
+        assert!(
+            consume_verifier_capability_with_conn(
+                &conn,
+                &issued.token,
+                "cas-cap-a",
+                "verifier-child"
+            )
+            .is_err(),
+            "replayed capability must fail"
+        );
+
+        let persisted: String = conn
+            .query_row(
+                "SELECT id || task_id || issuer_agent_id ||
+                        COALESCE(verifier_agent_id, '') || token_hash ||
+                        issued_at || expires_at || COALESCE(bound_at, '') ||
+                        COALESCE(consumed_at, '')
+                 FROM verification_capabilities WHERE id = ?1",
+                params![issued.capability.id],
+                |row| row.get(0),
+            )
+            .expect("persisted capability");
+        assert!(
+            !persisted.contains(&issued.token),
+            "raw verifier bearer must never be persisted"
+        );
+        assert!(
+            persisted.contains(&capability_token_hash(&issued.token)),
+            "only the domain-separated capability digest should persist"
+        );
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .expect("checkpoint capability writes");
+        for suffix in ["", "-wal", "-shm"] {
+            let path = dir.path().join(format!("cas.db{suffix}"));
+            if let Ok(bytes) = std::fs::read(path) {
+                assert!(
+                    !bytes
+                        .windows(issued.token.len())
+                        .any(|window| window == issued.token.as_bytes()),
+                    "raw capability must not appear in any SQLite payload"
+                );
+            }
+        }
+
+        let expired =
+            issue_verifier_capability(dir.path(), "cas-cap-a", "owner-agent").expect("issue");
+        conn.execute(
+            "UPDATE verification_capabilities SET expires_at = ?2 WHERE id = ?1",
+            params![
+                expired.capability.id,
+                (Utc::now() - Duration::minutes(1)).to_rfc3339()
+            ],
+        )
+        .expect("expire capability");
+        assert!(
+            bind_verifier_capability(dir.path(), &expired.token, "expired-child").is_err(),
+            "expired capability must fail before binding"
+        );
+    }
+
+    #[test]
+    fn legacy_verification_rows_remain_readable_without_new_authority() {
+        let (store, _dir) = create_test_store();
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO verifications
+             (id, task_id, agent_id, verification_type, status, confidence, summary,
+              files_reviewed, duration_ms, created_at)
+             VALUES (?1, ?2, NULL, 'task', 'approved', NULL, ?3, '[]', NULL, ?4)",
+            params![
+                "ver-legacy",
+                "cas-legacy",
+                "pre-provenance row",
+                Utc::now().to_rfc3339()
+            ],
+        )
+        .expect("insert legacy-shaped row");
+        drop(conn);
+
+        let row = store.get("ver-legacy").expect("legacy row readable");
+        assert_eq!(row.provenance, VerificationProvenance::Legacy);
+        assert!(row.capability_id.is_none());
+        assert!(row.issuer_agent_id.is_none());
     }
 }

@@ -517,13 +517,83 @@ pub fn handle_subagent_start(
     input: &HookInput,
     cas_root: Option<&Path>,
 ) -> Result<HookOutput, MemError> {
-    // NOTE: Claude Code fires SubagentStart but doesn't populate subagent_type (always None).
-    // The actual unjailing happens in PreToolUse when Task(task-verifier) is detected.
-    // This handler is kept for potential future use when Claude Code populates the field.
-
     let cas_root = match cas_root {
         Some(root) => root,
         None => return Ok(HookOutput::empty()),
+    };
+
+    // Claude Code commonly omits subagent_type, so the server-minted bearer in
+    // the updated Task/Agent prompt is the authoritative verifier signal. Bind
+    // it to this distinct child session and register that server-side identity
+    // before any verification.add call can consume it.
+    let capability_token = input
+        .subagent_prompt
+        .as_deref()
+        .and_then(verifier_capability_from_prompt);
+    let bound_capability = if let Some(token) = capability_token {
+        let capability =
+            match cas_store::bind_verifier_capability(cas_root, token, &input.session_id) {
+                Ok(capability) => capability,
+                Err(_) => {
+                    return Ok(HookOutput::with_system_context(
+                    "CAS task-verifier authority binding failed; verification will fail closed."
+                        .to_string(),
+                ));
+                }
+            };
+        let agent_store = match open_agent_store(cas_root) {
+            Ok(store) => store,
+            Err(_) => {
+                return Ok(HookOutput::with_system_context(
+                    "CAS agent registry is unavailable; verification will fail closed.".to_string(),
+                ));
+            }
+        };
+        let issuer = match agent_store.get(&capability.issuer_agent_id) {
+            Ok(agent)
+                if matches!(
+                    agent.status,
+                    crate::types::AgentStatus::Active | crate::types::AgentStatus::Idle
+                ) =>
+            {
+                agent
+            }
+            _ => {
+                return Ok(HookOutput::with_system_context(
+                    "CAS verifier issuer is anonymous, orphaned, or inactive; verification will fail closed."
+                        .to_string(),
+                ));
+            }
+        };
+        let existing = agent_store.get(&input.session_id).ok();
+        let mut child = existing.clone().unwrap_or_else(|| {
+            Agent::new_sub_agent(
+                input.session_id.clone(),
+                "task-verifier".to_string(),
+                capability.issuer_agent_id.clone(),
+            )
+        });
+        child.name = "task-verifier".to_string();
+        child.agent_type = crate::types::AgentType::SubAgent;
+        child.role = AgentRole::Standard;
+        child.parent_id = Some(capability.issuer_agent_id.clone());
+        child.factory_session = issuer.factory_session.clone();
+        child.status = crate::types::AgentStatus::Active;
+        child.last_heartbeat = chrono::Utc::now();
+        let registry_result = if existing.is_some() {
+            agent_store.update(&child)
+        } else {
+            agent_store.register(&child)
+        };
+        if registry_result.is_err() {
+            return Ok(HookOutput::with_system_context(
+                "CAS could not register the verifier child; verification will fail closed."
+                    .to_string(),
+            ));
+        }
+        Some(capability)
+    } else {
+        None
     };
 
     // Check if this is a verifier subagent (task-verifier)
@@ -531,7 +601,8 @@ pub fn handle_subagent_start(
         .subagent_type
         .as_ref()
         .map(|st| st == "task-verifier")
-        .unwrap_or(false);
+        .unwrap_or(false)
+        || bound_capability.is_some();
 
     if is_verifier_agent {
         // Clear pending_verification on all tasks to release the jail
@@ -588,6 +659,15 @@ pub fn handle_subagent_start(
     }
 
     Ok(HookOutput::empty())
+}
+
+fn verifier_capability_from_prompt(prompt: &str) -> Option<&str> {
+    prompt.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("CAS_VERIFIER_CAPABILITY=")
+            .map(str::trim)
+            .filter(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))
+    })
 }
 
 #[cfg(test)]
@@ -648,7 +728,9 @@ mod cas_85d9_lease_renewal_tests {
         // Model the same production reclaim-sweep timing as the sibling
         // no-heartbeat test below — must be a no-op here since the
         // heartbeat already pushed `expires_at` well into the future.
-        agent_store.reclaim_expired_leases().expect("reclaim_expired_leases");
+        agent_store
+            .reclaim_expired_leases()
+            .expect("reclaim_expired_leases");
 
         let reopened = cleanup_orphaned_tasks(&cas.root);
         assert_eq!(
@@ -675,7 +757,10 @@ mod cas_85d9_lease_renewal_tests {
         let agent_store = open_agent_store(&cas.root).expect("open_agent_store");
         let task_store = open_task_store(&cas.root).expect("open_task_store");
 
-        let agent = Agent::new("agent-85d9-dead".to_string(), "No Heartbeat Test".to_string());
+        let agent = Agent::new(
+            "agent-85d9-dead".to_string(),
+            "No Heartbeat Test".to_string(),
+        );
         agent_store.register(&agent).expect("register");
 
         let mut task = Task::new("cas-85d9-t2".to_string(), "Abandoned task".to_string());
@@ -699,7 +784,9 @@ mod cas_85d9_lease_renewal_tests {
         // every `worker_status` poll, etc.), so an overdue lease is
         // reclaimed within moments; a standalone test has to trigger that
         // sweep explicitly to model the same production timing.
-        agent_store.reclaim_expired_leases().expect("reclaim_expired_leases");
+        agent_store
+            .reclaim_expired_leases()
+            .expect("reclaim_expired_leases");
 
         let reopened = cleanup_orphaned_tasks(&cas.root);
         assert_eq!(

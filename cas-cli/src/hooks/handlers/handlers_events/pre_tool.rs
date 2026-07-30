@@ -149,10 +149,7 @@ pub fn handle_pre_tool_use(
     // `cas_root` is `Some`, this block is a no-op — we fall through to
     // the normal flow where the post-protection auto-approve still fires.
     // ========================================================================
-    if cas_root.is_none()
-        && is_factory_agent
-        && FACTORY_AUTO_APPROVE_TOOLS.contains(&tool_name)
-    {
+    if cas_root.is_none() && is_factory_agent && FACTORY_AUTO_APPROVE_TOOLS.contains(&tool_name) {
         return Ok(HookOutput::with_pre_tool_permission(
             "allow",
             &format!(
@@ -246,14 +243,15 @@ pub fn handle_pre_tool_use(
             .tool_input
             .as_ref()
             .and_then(|ti| ti.get("action").and_then(|v| v.as_str()));
-        let is_gated = is_codemap_gated_tool_call(
-            tool_name,
-            action,
-            crate::harness_policy::own_tool_prefix(),
-        );
+        let is_gated =
+            is_codemap_gated_tool_call(tool_name, action, crate::harness_policy::own_tool_prefix());
         if is_gated {
-            if let Some(crate::hooks::handlers::handlers_events::CodemapStaleness::SignificantlyStale { total_changes, .. }) =
-                crate::hooks::handlers::handlers_events::check_codemap_freshness(cas_root)
+            if let Some(
+                crate::hooks::handlers::handlers_events::CodemapStaleness::SignificantlyStale {
+                    total_changes,
+                    ..
+                },
+            ) = crate::hooks::handlers::handlers_events::check_codemap_freshness(cas_root)
             {
                 return Ok(HookOutput::with_pre_tool_permission(
                     "deny",
@@ -308,9 +306,10 @@ pub fn handle_pre_tool_use(
                 // releases and the tool call proceeds instead of looping forever.
                 const VERIFICATION_JAIL_TIMEOUT_SECS: i64 = 600;
                 const DISPATCH_SUMMARY_PREFIX: &str = "Dispatch requested";
-                let pending_tasks: Vec<_> =
-                    if let Some(verification_store) = stores.verification().cloned() {
-                        pending_tasks
+                let pending_tasks: Vec<_> = if let Some(verification_store) =
+                    stores.verification().cloned()
+                {
+                    pending_tasks
                             .into_iter()
                             .filter(|t| {
                                 let is_stale = matches!(
@@ -336,9 +335,9 @@ pub fn handle_pre_tool_use(
                                 }
                             })
                             .collect()
-                    } else {
-                        pending_tasks
-                    };
+                } else {
+                    pending_tasks
+                };
 
                 // Check for unjail marker file (backup mechanism)
                 // This marker indicates task-verifier is running and all tools should be allowed
@@ -844,6 +843,83 @@ pub fn handle_pre_tool_use(
         }
     }
 
+    // Mint verifier authority only on the authenticated parent's Task/Agent
+    // spawn path. The raw bearer is injected into the child prompt and is
+    // never persisted; the store keeps only its digest. SubagentStart binds
+    // it to the distinct child session before verification.add can consume it.
+    if matches!(tool_name, "Task" | "Agent")
+        && input
+            .tool_input
+            .as_ref()
+            .and_then(|value| value.get("subagent_type"))
+            .and_then(|value| value.as_str())
+            == Some("task-verifier")
+    {
+        let Some(agent_store) = stores.agents() else {
+            return Ok(HookOutput::with_pre_tool_permission(
+                "deny",
+                "Cannot establish verifier authority: agent registry is unavailable.",
+            ));
+        };
+        let Ok(parent) = agent_store.get(&current_agent_id) else {
+            return Ok(HookOutput::with_pre_tool_permission(
+                "deny",
+                "Cannot establish verifier authority for an anonymous or orphan session.",
+            ));
+        };
+        if !matches!(
+            parent.status,
+            crate::types::AgentStatus::Active | crate::types::AgentStatus::Idle
+        ) {
+            return Ok(HookOutput::with_pre_tool_permission(
+                "deny",
+                "Cannot establish verifier authority for an inactive parent session.",
+            ));
+        }
+
+        let Some(mut updated_input) = input.tool_input.clone() else {
+            return Ok(HookOutput::with_pre_tool_permission(
+                "deny",
+                "task-verifier spawn requires a prompt naming exactly one CAS task.",
+            ));
+        };
+        let prompt = updated_input
+            .get("prompt")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let Some(task_id) = unique_existing_task_id(prompt, stores.tasks()) else {
+            return Ok(HookOutput::with_pre_tool_permission(
+                "deny",
+                "task-verifier prompt must name exactly one existing CAS task ID.",
+            ));
+        };
+        let issued =
+            match cas_store::issue_verifier_capability(cas_root, &task_id, &current_agent_id) {
+                Ok(issued) => issued,
+                Err(_) => {
+                    return Ok(HookOutput::with_pre_tool_permission(
+                        "deny",
+                        "Could not mint task-scoped verifier authority.",
+                    ));
+                }
+            };
+        let child_prompt = format!(
+            "{prompt}\n\n\
+             CAS_VERIFIER_CAPABILITY={}\n\
+             This is a one-time task-scoped verifier capability. Pass it exactly once as \
+             verifier_capability to verification action=add for {task_id}. Never print, log, \
+             quote, or persist it.",
+            issued.token
+        );
+        if let Some(object) = updated_input.as_object_mut() {
+            object.insert(
+                "prompt".to_string(),
+                serde_json::Value::String(child_prompt),
+            );
+        }
+        return Ok(HookOutput::with_pre_tool_updated_input(updated_input));
+    }
+
     // ========================================================================
     // FACTORY MODE: Unconditional auto-approve for filesystem tool families.
     //
@@ -962,15 +1038,15 @@ pub(crate) fn looks_like_git_write_op(cmd: &str) -> bool {
         // Ensure "git" is not a substring of another word (e.g. "config")
         let before_ok = pos == 0 || !rest.as_bytes()[pos - 1].is_ascii_alphanumeric();
         let after_idx = pos + 3;
-        let after_ok = after_idx >= rest.len()
-            || !rest.as_bytes()[after_idx].is_ascii_alphanumeric();
+        let after_ok =
+            after_idx >= rest.len() || !rest.as_bytes()[after_idx].is_ascii_alphanumeric();
         if before_ok && after_ok {
             let after_git = &rest[after_idx..];
             // After "git" there may be flags like -C /path before the subcommand
             // We look for "commit" or "merge" as a word anywhere after "git"
-            return after_git.split_whitespace().any(|tok| {
-                tok == "commit" || tok == "merge"
-            });
+            return after_git
+                .split_whitespace()
+                .any(|tok| tok == "commit" || tok == "merge");
         }
         // Not a word boundary — advance past this occurrence
         rest = &rest[pos + 1..];
@@ -1009,7 +1085,10 @@ pub(crate) fn get_branch_at_cwd(cwd: &str) -> Option<String> {
 /// Switching to a non-protected branch is the only way to unblock.
 pub(crate) fn check_worker_git_commit_scope(cwd: &str) -> Option<String> {
     let clone_path = std::env::var("CAS_CLONE_PATH").ok();
-    let is_isolated = clone_path.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
+    let is_isolated = clone_path
+        .as_deref()
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
 
     // DENY: isolated worker's cwd is outside the assigned worktree.
     // Only applicable when CAS_CLONE_PATH is set.
@@ -1019,8 +1098,8 @@ pub(crate) fn check_worker_git_commit_scope(cwd: &str) -> Option<String> {
         let worktree_path = std::path::Path::new(clone_path);
 
         if !cwd_path.starts_with(worktree_path) {
-            let worker_name = std::env::var("CAS_AGENT_NAME")
-                .unwrap_or_else(|_| "<worker-name>".to_string());
+            let worker_name =
+                std::env::var("CAS_AGENT_NAME").unwrap_or_else(|_| "<worker-name>".to_string());
             return Some(format!(
                 "🚫 WORKER COMMIT GUARD: Your current directory ({cwd}) is outside \
                 your assigned worktree ({clone_path}).\n\n\
@@ -1037,8 +1116,8 @@ pub(crate) fn check_worker_git_commit_scope(cwd: &str) -> Option<String> {
     // Any other named branch — factory/*, feature/*, fix/*, epic/*, etc. — is allowed.
     // Applies to BOTH isolated and non-isolated factory workers (cas-ba04): a worker
     // without CAS_CLONE_PATH running in the shared checkout must not commit to main.
-    let worker_name = std::env::var("CAS_AGENT_NAME")
-        .unwrap_or_else(|_| "<worker-name>".to_string());
+    let worker_name =
+        std::env::var("CAS_AGENT_NAME").unwrap_or_else(|_| "<worker-name>".to_string());
     match get_branch_at_cwd(cwd) {
         None => {
             return Some(format!(
@@ -1128,6 +1207,28 @@ fn is_codemap_gated_tool_call(tool_name: &str, action: Option<&str>, tool_prefix
 /// unlock for a Grok agent recording its own result.
 fn is_own_verification_tool_call(tool_name: &str, tool_prefix: &str) -> bool {
     tool_name == format!("{tool_prefix}verification")
+}
+
+/// Return the single existing CAS task ID named in a verifier prompt.
+///
+/// Ambiguous prompts fail closed: authority must bind to one exact task, not
+/// whichever task ID happens to be encountered first.
+fn unique_existing_task_id(
+    prompt: &str,
+    task_store: Option<&std::sync::Arc<dyn TaskStore>>,
+) -> Option<String> {
+    let store = task_store?;
+    let mut matches = std::collections::BTreeSet::new();
+    for token in prompt.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-')) {
+        if token.starts_with("cas-") && store.get(token).is_ok() {
+            matches.insert(token.to_string());
+        }
+    }
+    if matches.len() == 1 {
+        matches.into_iter().next()
+    } else {
+        None
+    }
 }
 
 /// Auto-route a factory-mode `SendMessage` tool call onto the CAS prompt
@@ -1269,7 +1370,11 @@ fn auto_route_send_message(
          Message delivered to `{target}`. DO NOT retry this SendMessage call.\n\n\
          For future messages, call `{prefix}coordination action=message target=<name> message=\"...\" summary=\"...\"` directly — skip SendMessage."
     );
-    HookOutput::with_pre_tool_permission_and_context("allow", "CAS auto-routed SendMessage", &receipt)
+    HookOutput::with_pre_tool_permission_and_context(
+        "allow",
+        "CAS auto-routed SendMessage",
+        &receipt,
+    )
 }
 
 #[cfg(test)]
@@ -1411,9 +1516,15 @@ mod worker_commit_guard_tests {
         let _env = TestEnvGuard::with_optional_vars(&[("CAS_CLONE_PATH", None)]);
 
         let result = check_worker_git_commit_scope(&p);
-        assert!(result.is_some(), "non-isolated worker on main must be denied (cas-ba04)");
+        assert!(
+            result.is_some(),
+            "non-isolated worker on main must be denied (cas-ba04)"
+        );
         let msg = result.unwrap();
-        assert!(msg.contains("WORKER COMMIT GUARD"), "expected guard msg, got: {msg}");
+        assert!(
+            msg.contains("WORKER COMMIT GUARD"),
+            "expected guard msg, got: {msg}"
+        );
         assert!(msg.contains("main"), "expected 'main' in msg, got: {msg}");
         assert!(
             msg.contains("CAS_CLONE_PATH not set"),
@@ -1469,7 +1580,10 @@ mod worker_commit_guard_tests {
         assert!(msg.contains("WORKER COMMIT GUARD"));
         assert!(msg.contains("main"));
         // Message must include the --no-verify note (cas-7e7b AC)
-        assert!(msg.contains("--no-verify"), "message must explain --no-verify limitation: {msg}");
+        assert!(
+            msg.contains("--no-verify"),
+            "message must explain --no-verify limitation: {msg}"
+        );
     }
 
     #[test]
@@ -1488,7 +1602,10 @@ mod worker_commit_guard_tests {
         let _env = TestEnvGuard::with_optional_vars(&[("CAS_CLONE_PATH", Some(&ps))]);
 
         let result = check_worker_git_commit_scope(&ps);
-        assert!(result.is_none(), "epic/* branch must be allowed now, got: {result:?}");
+        assert!(
+            result.is_none(),
+            "epic/* branch must be allowed now, got: {result:?}"
+        );
     }
 
     #[test]
@@ -1507,7 +1624,10 @@ mod worker_commit_guard_tests {
         let _env = TestEnvGuard::with_optional_vars(&[("CAS_CLONE_PATH", Some(&ps))]);
 
         let result = check_worker_git_commit_scope(&ps);
-        assert!(result.is_none(), "feature/* branch must be allowed, got: {result:?}");
+        assert!(
+            result.is_none(),
+            "feature/* branch must be allowed, got: {result:?}"
+        );
     }
 
     #[test]
@@ -1532,7 +1652,10 @@ mod worker_commit_guard_tests {
         let _env = TestEnvGuard::with_optional_vars(&[("CAS_CLONE_PATH", Some(&ps))]);
 
         let result = check_worker_git_commit_scope(&ps);
-        assert!(result.is_some(), "detached HEAD must be denied, got: {result:?}");
+        assert!(
+            result.is_some(),
+            "detached HEAD must be denied, got: {result:?}"
+        );
         let msg = result.unwrap();
         assert!(msg.contains("WORKER COMMIT GUARD"));
         assert!(msg.contains("detached"));
@@ -1554,7 +1677,10 @@ mod worker_commit_guard_tests {
         let _env = TestEnvGuard::with_optional_vars(&[("CAS_CLONE_PATH", Some(&ps))]);
 
         let result = check_worker_git_commit_scope(&ps);
-        assert!(result.is_none(), "expected allow on factory/worker1 branch, got: {result:?}");
+        assert!(
+            result.is_none(),
+            "expected allow on factory/worker1 branch, got: {result:?}"
+        );
     }
 
     // ── Integration: handle_pre_tool_use for Bash git commit ─────────────
@@ -1577,7 +1703,8 @@ mod worker_commit_guard_tests {
 
         let out = handle_pre_tool_use(&input, None).expect("handler ok");
         let val = serde_json::to_value(&out).unwrap();
-        let decision = val.get("hookSpecificOutput")
+        let decision = val
+            .get("hookSpecificOutput")
             .and_then(|h| h.get("permissionDecision"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
@@ -1609,14 +1736,20 @@ mod worker_commit_guard_tests {
         input.hook_event_name = "PreToolUse".to_string();
         input.tool_name = Some("Bash".to_string());
         input.cwd = ps.clone();
-        input.tool_input = Some(serde_json::json!({"command": "git commit -m 'work on epic branch'"}));
+        input.tool_input =
+            Some(serde_json::json!({"command": "git commit -m 'work on epic branch'"}));
 
         let out = handle_pre_tool_use(&input, None).expect("handler ok");
         let val = serde_json::to_value(&out).unwrap();
-        let decision = val.get("hookSpecificOutput")
+        let decision = val
+            .get("hookSpecificOutput")
             .and_then(|h| h.get("permissionDecision"))
             .and_then(|v| v.as_str());
-        assert_ne!(decision, Some("deny"), "epic/* branch must be allowed now, got: {val}");
+        assert_ne!(
+            decision,
+            Some("deny"),
+            "epic/* branch must be allowed now, got: {val}"
+        );
     }
 
     #[test]
@@ -1646,10 +1779,15 @@ mod worker_commit_guard_tests {
 
         let out = handle_pre_tool_use(&input, None).expect("handler ok");
         let val = serde_json::to_value(&out).unwrap();
-        let decision = val.get("hookSpecificOutput")
+        let decision = val
+            .get("hookSpecificOutput")
             .and_then(|h| h.get("permissionDecision"))
             .and_then(|v| v.as_str());
-        assert_ne!(decision, Some("deny"), "feature/* branch must be allowed, got: {val}");
+        assert_ne!(
+            decision,
+            Some("deny"),
+            "feature/* branch must be allowed, got: {val}"
+        );
     }
 
     #[test]
@@ -1679,7 +1817,8 @@ mod worker_commit_guard_tests {
         let out = handle_pre_tool_use(&input, None).expect("handler ok");
         let val = serde_json::to_value(&out).unwrap();
         // On a factory branch with correct cwd, guard must not deny
-        let decision = val.get("hookSpecificOutput")
+        let decision = val
+            .get("hookSpecificOutput")
             .and_then(|h| h.get("permissionDecision"))
             .and_then(|v| v.as_str());
         assert_ne!(decision, Some("deny"), "expected allow/empty, got: {val}");
@@ -1702,7 +1841,8 @@ mod worker_commit_guard_tests {
 
         let out = handle_pre_tool_use(&input, None).expect("handler ok");
         let val = serde_json::to_value(&out).unwrap();
-        let decision = val.get("hookSpecificOutput")
+        let decision = val
+            .get("hookSpecificOutput")
             .and_then(|h| h.get("permissionDecision"))
             .and_then(|v| v.as_str());
         assert_ne!(decision, Some("deny"), "non-worker must not be denied");
@@ -1795,7 +1935,11 @@ mod worker_commit_guard_tests {
             "mcp__cas__"
         ));
         // Right tool, wrong action.
-        assert!(!is_codemap_gated_tool_call("cas__task", Some("list"), "cas__"));
+        assert!(!is_codemap_gated_tool_call(
+            "cas__task",
+            Some("list"),
+            "cas__"
+        ));
         // Unrelated tool.
         assert!(!is_codemap_gated_tool_call("Bash", Some("create"), "cas__"));
     }
@@ -1813,10 +1957,7 @@ mod worker_commit_guard_tests {
         // The load-bearing regression: previously a 2-way OR that never
         // matched Grok's "cas__verification" — a Grok agent could never
         // unjail itself by recording its own verification result.
-        assert!(is_own_verification_tool_call(
-            "cas__verification",
-            "cas__"
-        ));
+        assert!(is_own_verification_tool_call("cas__verification", "cas__"));
     }
 
     #[test]
@@ -1825,7 +1966,10 @@ mod worker_commit_guard_tests {
             "mcp__cs__verification",
             "cas__"
         ));
-        assert!(!is_own_verification_tool_call("mcp__cas__task", "mcp__cas__"));
+        assert!(!is_own_verification_tool_call(
+            "mcp__cas__task",
+            "mcp__cas__"
+        ));
     }
 
     /// Sanity check that the full `handle_pre_tool_use` entrypoint reaches
@@ -1862,5 +2006,82 @@ mod worker_commit_guard_tests {
             Some("deny"),
             "no CODEMAP.md present → nothing to gate on, must not deny: {val}"
         );
+    }
+
+    #[test]
+    fn task_verifier_spawn_mints_and_binds_child_only_authority() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_FACTORY_MODE", None),
+            ("CAS_SESSION_ID", None),
+            ("CAS_AGENT_ROLE", None),
+        ]);
+        let cas_root = crate::store::init_cas_dir(tmp.path()).expect("init cas");
+        let agent_store = open_agent_store(&cas_root).expect("agent store");
+        let task_store = open_task_store(&cas_root).expect("task store");
+        let parent_id = "registered-parent";
+        agent_store
+            .register(&Agent::new(
+                parent_id.to_string(),
+                "standard-parent".to_string(),
+            ))
+            .expect("register parent");
+        task_store
+            .add(&Task::new(
+                "cas-hook-capability".to_string(),
+                "Hook authority".to_string(),
+            ))
+            .expect("task");
+
+        let mut input = crate::hooks::handlers::HookInput::default();
+        input.hook_event_name = "PreToolUse".to_string();
+        input.session_id = parent_id.to_string();
+        input.cwd = tmp.path().to_string_lossy().to_string();
+        input.tool_name = Some("Agent".to_string());
+        input.tool_input = Some(serde_json::json!({
+            "subagent_type": "task-verifier",
+            "prompt": "Review CAS task cas-hook-capability"
+        }));
+
+        let output = handle_pre_tool_use(&input, Some(&cas_root)).expect("pretool");
+        let value = serde_json::to_value(output).expect("serialize output");
+        let updated_prompt = value["hookSpecificOutput"]["updatedInput"]["prompt"]
+            .as_str()
+            .expect("updated verifier prompt");
+        let token = updated_prompt
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("CAS_VERIFIER_CAPABILITY="))
+            .expect("injected capability");
+        let conn = rusqlite::Connection::open(cas_root.join("cas.db")).expect("db");
+        let persisted_hash: String = conn
+            .query_row(
+                "SELECT token_hash FROM verification_capabilities WHERE task_id = ?1",
+                rusqlite::params!["cas-hook-capability"],
+                |row| row.get(0),
+            )
+            .expect("capability row");
+        assert_ne!(persisted_hash, token, "raw token must not persist");
+
+        let mut child_start = crate::hooks::handlers::HookInput::default();
+        child_start.hook_event_name = "SubagentStart".to_string();
+        child_start.session_id = "registered-verifier-child".to_string();
+        child_start.subagent_prompt = Some(updated_prompt.to_string());
+        crate::hooks::handlers::handle_subagent_start(&child_start, Some(&cas_root))
+            .expect("bind child");
+
+        let child = agent_store
+            .get("registered-verifier-child")
+            .expect("registered child");
+        assert_eq!(child.agent_type, crate::types::AgentType::SubAgent);
+        assert_eq!(child.role, AgentRole::Standard);
+        assert_eq!(child.parent_id.as_deref(), Some(parent_id));
+        let bound_to: String = conn
+            .query_row(
+                "SELECT verifier_agent_id FROM verification_capabilities WHERE task_id = ?1",
+                rusqlite::params!["cas-hook-capability"],
+                |row| row.get(0),
+            )
+            .expect("bound capability");
+        assert_eq!(bound_to, child.id);
     }
 }

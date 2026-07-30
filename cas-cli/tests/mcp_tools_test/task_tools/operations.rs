@@ -1,6 +1,6 @@
 use crate::support::*;
-use cas::mcp::tools::*;
 use cas::mcp::CasCore;
+use cas::mcp::tools::*;
 use cas::store::{open_agent_store, open_event_store};
 use cas::types::EventType;
 use rmcp::handler::server::wrapper::Parameters;
@@ -114,7 +114,10 @@ async fn test_execution_note_null_omitted_from_show() {
     let (_temp, service) = setup_cas();
 
     let created = service
-        .cas_task_create(Parameters(basic_create("Task without execution note", None)))
+        .cas_task_create(Parameters(basic_create(
+            "Task without execution note",
+            None,
+        )))
         .await
         .expect("create should succeed");
     let id = extract_task_id(&extract_text(created))
@@ -176,7 +179,7 @@ async fn test_execution_note_update_sets_value() {
 
     let updated = service
         .cas_task_update(Parameters(TaskUpdateRequest {
-        depth: None,
+            depth: None,
             id: id.clone(),
             title: None,
             notes: None,
@@ -228,7 +231,7 @@ async fn test_execution_note_update_empty_string_clears() {
 
     service
         .cas_task_update(Parameters(TaskUpdateRequest {
-        depth: None,
+            depth: None,
             id: id.clone(),
             title: None,
             notes: None,
@@ -465,7 +468,11 @@ async fn test_task_notes() {
         })
         .expect("real task notes handler should record caller-attributed TaskNoteAdded event");
     assert!(note_event.summary.contains("Task note added (progress)"));
-    assert!(note_event.summary.contains("Making progress on implementation"));
+    assert!(
+        note_event
+            .summary
+            .contains("Making progress on implementation")
+    );
 }
 
 #[tokio::test]
@@ -496,7 +503,9 @@ async fn test_task_notes_succeeds_when_activity_event_recording_fails() {
         .await
         .expect("task_create should succeed");
     let text = extract_text(result);
-    let id = extract_task_id(&text).expect("should have task ID").to_string();
+    let id = extract_task_id(&text)
+        .expect("should have task ID")
+        .to_string();
 
     open_event_store(&cas_dir).expect("event store should initialize");
     let conn = Connection::open(cas_dir.join("cas.db")).expect("open cas db");
@@ -542,7 +551,7 @@ async fn test_task_list() {
     // Create tasks
     for i in 0..3 {
         let req = TaskCreateRequest {
-        depth: None,
+            depth: None,
             title: format!("List task {i}"),
             description: None,
             priority: 2,
@@ -592,7 +601,7 @@ async fn test_task_ready() {
     // Create ready tasks
     for i in 0..3 {
         let req = TaskCreateRequest {
-        depth: None,
+            depth: None,
             title: format!("Ready task {i}"),
             description: None,
             priority: 2,
@@ -640,7 +649,7 @@ async fn test_task_ready_epic_filter() {
     // Create an epic.
     let epic_result = service
         .cas_task_create(Parameters(TaskCreateRequest {
-        depth: None,
+            depth: None,
             title: "Test Epic".to_string(),
             description: None,
             priority: 1,
@@ -666,7 +675,7 @@ async fn test_task_ready_epic_filter() {
     for i in 0..2 {
         service
             .cas_task_create(Parameters(TaskCreateRequest {
-        depth: None,
+                depth: None,
                 title: format!("Epic subtask {i}"),
                 description: None,
                 priority: 2,
@@ -689,7 +698,7 @@ async fn test_task_ready_epic_filter() {
     // Create 1 task NOT under the epic.
     service
         .cas_task_create(Parameters(TaskCreateRequest {
-        depth: None,
+            depth: None,
             title: "Unrelated task".to_string(),
             description: None,
             priority: 2,
@@ -880,7 +889,7 @@ async fn test_task_show_dependency_direction_labels() {
 
     let blocker = service
         .cas_task_create(Parameters(TaskCreateRequest {
-        depth: None,
+            depth: None,
             title: "Direction blocker".to_string(),
             description: None,
             priority: 1,
@@ -904,7 +913,7 @@ async fn test_task_show_dependency_direction_labels() {
 
     let blocked = service
         .cas_task_create(Parameters(TaskCreateRequest {
-        depth: None,
+            depth: None,
             title: "Direction blocked".to_string(),
             description: None,
             priority: 2,
@@ -955,11 +964,17 @@ async fn test_task_show_dependency_direction_labels() {
 
 #[tokio::test]
 async fn test_close_auto_unblocks_blocked_dependents() {
-    let (_temp, service) = setup_cas();
+    let (temp, service) = setup_cas();
+    let cas_dir = temp.path().join(".cas");
+    let agent_store = open_agent_store(&cas_dir).expect("agent store");
+    let session_id = format!("test-session-{}", std::process::id());
+    let mut agent = agent_store.get(&session_id).expect("test agent");
+    agent.role = cas::types::AgentRole::Supervisor;
+    agent_store.update(&agent).expect("mark caller supervisor");
 
     let blocker = service
         .cas_task_create(Parameters(TaskCreateRequest {
-        depth: None,
+            depth: None,
             title: "Auto unblock blocker".to_string(),
             description: None,
             priority: 1,
@@ -983,7 +998,7 @@ async fn test_close_auto_unblocks_blocked_dependents() {
 
     let blocked = service
         .cas_task_create(Parameters(TaskCreateRequest {
-        depth: None,
+            depth: None,
             title: "Auto unblock dependent".to_string(),
             description: None,
             priority: 2,
@@ -1007,7 +1022,7 @@ async fn test_close_auto_unblocks_blocked_dependents() {
 
     let _ = service
         .cas_task_update(Parameters(TaskUpdateRequest {
-        depth: None,
+            depth: None,
             id: blocked_id.clone(),
             title: None,
             notes: None,
@@ -1037,6 +1052,7 @@ async fn test_close_auto_unblocks_blocked_dependents() {
             files_reviewed: None,
             duration_ms: None,
             verification_type: None,
+            verifier_capability: None,
         }))
         .await
         .expect("verification add should succeed");
@@ -1046,9 +1062,10 @@ async fn test_close_auto_unblocks_blocked_dependents() {
             id: blocker_id,
             reason: Some("done".to_string()),
             bypass_code_review: None,
-code_review_findings: None,
+            code_review_findings: None,
             search_manifest: None,
-            commit_receipt: None,        }))
+            commit_receipt: None,
+        }))
         .await
         .expect("task close should succeed");
     let close_text = extract_text(close);
@@ -1077,7 +1094,7 @@ async fn test_task_update_invalid_epic_keeps_original_parent_dependency() {
 
     let epic_1 = service
         .cas_task_create(Parameters(TaskCreateRequest {
-        depth: None,
+            depth: None,
             title: "Epic 1".to_string(),
             description: None,
             priority: 1,
@@ -1101,7 +1118,7 @@ async fn test_task_update_invalid_epic_keeps_original_parent_dependency() {
 
     let subtask = service
         .cas_task_create(Parameters(TaskCreateRequest {
-        depth: None,
+            depth: None,
             title: "Child task".to_string(),
             description: None,
             priority: 2,
@@ -1125,7 +1142,7 @@ async fn test_task_update_invalid_epic_keeps_original_parent_dependency() {
 
     let update_result = service
         .cas_task_update(Parameters(TaskUpdateRequest {
-        depth: None,
+            depth: None,
             id: subtask_id.clone(),
             title: None,
             notes: None,
@@ -1175,7 +1192,7 @@ async fn test_task_update_surfaces_epic_dependency_delete_failure() {
 
     let epic = service
         .cas_task_create(Parameters(TaskCreateRequest {
-        depth: None,
+            depth: None,
             title: "Epic".to_string(),
             description: None,
             priority: 1,
@@ -1199,7 +1216,7 @@ async fn test_task_update_surfaces_epic_dependency_delete_failure() {
 
     let subtask = service
         .cas_task_create(Parameters(TaskCreateRequest {
-        depth: None,
+            depth: None,
             title: "Subtask".to_string(),
             description: None,
             priority: 2,
@@ -1235,7 +1252,7 @@ async fn test_task_update_surfaces_epic_dependency_delete_failure() {
 
     let update_result = service
         .cas_task_update(Parameters(TaskUpdateRequest {
-        depth: None,
+            depth: None,
             id: subtask_id,
             title: None,
             notes: None,
@@ -1824,7 +1841,7 @@ async fn test_release_autorecovers_lease_less_in_progress_task() {
     // (simulating a dead-session orphan where status diverged from lease).
     let created = service
         .cas_task_create(Parameters(TaskCreateRequest {
-        depth: None,
+            depth: None,
             title: "Orphaned in-progress".to_string(),
             description: None,
             priority: 2,
@@ -1848,7 +1865,7 @@ async fn test_release_autorecovers_lease_less_in_progress_task() {
 
     service
         .cas_task_update(Parameters(TaskUpdateRequest {
-        depth: None,
+            depth: None,
             id: id.clone(),
             title: None,
             notes: None,
@@ -1911,7 +1928,7 @@ async fn test_release_still_errors_when_no_lease_and_task_already_open() {
     // there's nothing to recover, surface the underlying error.
     let created = service
         .cas_task_create(Parameters(TaskCreateRequest {
-        depth: None,
+            depth: None,
             title: "Plain open task".to_string(),
             description: None,
             priority: 2,
@@ -1951,7 +1968,7 @@ async fn test_reset_clears_lease_assignee_and_forces_open() {
 
     let created = service
         .cas_task_create(Parameters(TaskCreateRequest {
-        depth: None,
+            depth: None,
             title: "Needs reset".to_string(),
             description: None,
             priority: 1,
@@ -1975,7 +1992,7 @@ async fn test_reset_clears_lease_assignee_and_forces_open() {
 
     service
         .cas_task_update(Parameters(TaskUpdateRequest {
-        depth: None,
+            depth: None,
             id: id.clone(),
             title: None,
             notes: None,
@@ -2033,7 +2050,7 @@ async fn test_reset_refuses_closed_task() {
 
     let created = service
         .cas_task_create(Parameters(TaskCreateRequest {
-        depth: None,
+            depth: None,
             title: "Already closed".to_string(),
             description: None,
             priority: 2,
@@ -2057,7 +2074,7 @@ async fn test_reset_refuses_closed_task() {
 
     service
         .cas_task_update(Parameters(TaskUpdateRequest {
-        depth: None,
+            depth: None,
             id: id.clone(),
             title: None,
             notes: None,
@@ -2098,7 +2115,7 @@ async fn test_show_after_update_reflects_new_status_without_lag() {
 
     let created = service
         .cas_task_create(Parameters(TaskCreateRequest {
-        depth: None,
+            depth: None,
             title: "Status readback".to_string(),
             description: None,
             priority: 2,
@@ -2123,7 +2140,7 @@ async fn test_show_after_update_reflects_new_status_without_lag() {
     // Move to InProgress.
     service
         .cas_task_update(Parameters(TaskUpdateRequest {
-        depth: None,
+            depth: None,
             id: id.clone(),
             title: None,
             notes: None,
@@ -2152,16 +2169,14 @@ async fn test_show_after_update_reflects_new_status_without_lag() {
         .expect("show");
     let text = extract_text(shown);
     assert!(
-        text.contains("InProgress")
-            || text.contains("In Progress")
-            || text.contains("in_progress"),
+        text.contains("InProgress") || text.contains("In Progress") || text.contains("in_progress"),
         "show immediately after update must return InProgress: {text}"
     );
 
     // Now flip back to Open. Show must reflect Open, not a cached InProgress.
     service
         .cas_task_update(Parameters(TaskUpdateRequest {
-        depth: None,
+            depth: None,
             id: id.clone(),
             title: None,
             notes: None,
@@ -2413,7 +2428,9 @@ async fn test_supervisor_force_transfer_live_worker_task() {
     );
 
     // Task notes must contain the audit entry.
-    let task_after = task_store.get(&task_id).expect("task should exist after transfer");
+    let task_after = task_store
+        .get(&task_id)
+        .expect("task should exist after transfer");
     assert!(
         task_after.notes.contains("SUPERVISOR FORCE-TRANSFER"),
         "audit entry must be appended to task notes: {}",
@@ -2469,7 +2486,12 @@ async fn test_non_supervisor_cannot_force_transfer() {
         .to_string();
 
     agent_store
-        .try_claim(&task_id, "other-worker-id", 600, Some("other worker holds lease"))
+        .try_claim(
+            &task_id,
+            "other-worker-id",
+            600,
+            Some("other worker holds lease"),
+        )
         .expect("other worker claim should succeed");
 
     // Register a target agent for the transfer destination.
@@ -2487,7 +2509,9 @@ async fn test_non_supervisor_cannot_force_transfer() {
         note: None,
         supervisor_override: Some(true),
     };
-    let result = worker_core.cas_task_transfer(Parameters(transfer_req)).await;
+    let result = worker_core
+        .cas_task_transfer(Parameters(transfer_req))
+        .await;
 
     // Must return an error (McpError) with a clear rejection message.
     match result {
@@ -2500,9 +2524,7 @@ async fn test_non_supervisor_cannot_force_transfer() {
         }
         Ok(ok) => {
             let text = extract_text(ok);
-            panic!(
-                "expected rejection for non-supervisor override, but got success: {text}"
-            );
+            panic!("expected rejection for non-supervisor override, but got success: {text}");
         }
     }
 }
@@ -2747,9 +2769,7 @@ async fn test_create_rejects_blocked_by_same_as_epic() {
         Ok(ok) => {
             let text = extract_text(ok);
             // Should not succeed
-            panic!(
-                "expected rejection when blocked_by == epic, got success: {text}"
-            );
+            panic!("expected rejection when blocked_by == epic, got success: {text}");
         }
     }
 }
@@ -2785,7 +2805,7 @@ async fn test_task_start_locked_error_includes_worker_name() {
     // Create a task.
     let created = service
         .cas_task_create(Parameters(TaskCreateRequest {
-        depth: None,
+            depth: None,
             title: "Locked task for name-in-error test".to_string(),
             description: None,
             priority: 2,
@@ -2828,10 +2848,7 @@ async fn test_task_start_locked_error_includes_worker_name() {
         msg.contains(BLOCKER_SESSION),
         "error must contain holder's session UUID '{BLOCKER_SESSION}': {msg}"
     );
-    assert!(
-        msg.contains("locked"),
-        "error must mention 'locked': {msg}"
-    );
+    assert!(msg.contains("locked"), "error must mention 'locked': {msg}");
 
     drop(temp);
 }
@@ -2861,8 +2878,7 @@ async fn test_reset_orphaned_task_stale_assignee_succeeds() {
     let mut stale_worker =
         cas::types::Agent::new("stale-worker-8c5a".to_string(), "stale-worker".to_string());
     stale_worker.role = cas::types::AgentRole::Worker;
-    stale_worker.last_heartbeat =
-        chrono::Utc::now() - chrono::Duration::seconds(60);
+    stale_worker.last_heartbeat = chrono::Utc::now() - chrono::Duration::seconds(60);
     agent_store
         .register(&stale_worker)
         .expect("register stale worker");
@@ -2959,7 +2975,9 @@ async fn test_reset_alive_worker_task_without_force_returns_safety_guard() {
     );
 
     // Task must NOT have been mutated — still InProgress with the original assignee.
-    let task_after = task_store.get(&task_id).expect("get task after blocked reset");
+    let task_after = task_store
+        .get(&task_id)
+        .expect("get task after blocked reset");
     assert_eq!(
         task_after.status,
         cas::types::TaskStatus::InProgress,
@@ -3031,7 +3049,9 @@ async fn test_reset_alive_worker_task_with_force_succeeds_and_logs_audit() {
     );
 
     // Task must be Open with assignee cleared.
-    let task_after = task_store.get(&task_id).expect("get task after force reset");
+    let task_after = task_store
+        .get(&task_id)
+        .expect("get task after force reset");
     assert_eq!(
         task_after.status,
         cas::types::TaskStatus::Open,
@@ -3074,8 +3094,7 @@ async fn test_factory_mode_normalizes_session_uuid_assignee_to_display_name() {
     const WORKER_SESSION: &str = "sess-uuid-abcdef-1234";
     const WORKER_NAME: &str = "calm-owl";
 
-    let worker =
-        cas::types::Agent::new(WORKER_SESSION.to_string(), WORKER_NAME.to_string());
+    let worker = cas::types::Agent::new(WORKER_SESSION.to_string(), WORKER_NAME.to_string());
     agent_store.register(&worker).expect("register worker");
 
     // Set CAS_FACTORY_MODE so the normalization branch activates.
@@ -3170,8 +3189,7 @@ async fn test_factory_mode_empty_assignee_clears_without_remapping_to_live_worke
     const WORKER_NAME: &str = "hv-scope";
     const PRIOR_ASSIGNEE: &str = "std-life";
 
-    let worker =
-        cas::types::Agent::new(WORKER_SESSION.to_string(), WORKER_NAME.to_string());
+    let worker = cas::types::Agent::new(WORKER_SESSION.to_string(), WORKER_NAME.to_string());
     agent_store.register(&worker).expect("register worker");
 
     unsafe { std::env::set_var("CAS_FACTORY_MODE", "1") }
@@ -3314,7 +3332,9 @@ async fn test_factory_mode_empty_assignee_clears_without_remapping_to_live_worke
         .expect("whitespace assignee must clear");
     unsafe { std::env::remove_var("CAS_FACTORY_MODE") }
 
-    let after_ws = task_store.get(&task_id).expect("get after whitespace clear");
+    let after_ws = task_store
+        .get(&task_id)
+        .expect("get after whitespace clear");
     assert!(
         after_ws.assignee.is_none(),
         "cas-bf98: whitespace-only assignee must unassign; got {:?}",

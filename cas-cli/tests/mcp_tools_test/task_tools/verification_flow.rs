@@ -8,6 +8,271 @@ use cas::types::{AgentRole, EventType, TaskStatus, Verification, VerificationTyp
 use rmcp::handler::server::wrapper::Parameters;
 use tempfile::TempDir;
 
+#[tokio::test]
+async fn test_worker_main_loop_cannot_self_attest_verification() {
+    let (temp, service) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    let agent_store = open_agent_store(&cas_dir).expect("open agent store");
+    let task_store = open_task_store(&cas_dir).expect("open task store");
+    let verification_store = open_verification_store(&cas_dir).expect("open verification store");
+
+    let worker_id = format!("test-session-{}", std::process::id());
+    let mut worker = agent_store.get(&worker_id).expect("test worker exists");
+    worker.role = AgentRole::Worker;
+    worker.agent_type = cas::types::AgentType::Worker;
+    agent_store.update(&worker).expect("mark caller as worker");
+
+    let created = service
+        .cas_task_create(Parameters(simple_task_req(
+            "Worker self-attestation must fail closed",
+        )))
+        .await
+        .expect("create task");
+    let task_id = extract_task_id(&extract_text(created))
+        .expect("task id")
+        .to_string();
+    service
+        .cas_task_start(Parameters(IdRequest {
+            id: task_id.clone(),
+        }))
+        .await
+        .expect("start task");
+
+    let err = service
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: task_id.clone(),
+            status: "approved".to_string(),
+            summary: "worker main loop claiming its own work passed".to_string(),
+            confidence: Some(0.98),
+            issues: None,
+            files_reviewed: None,
+            duration_ms: None,
+            verification_type: None,
+            verifier_capability: None,
+        }))
+        .await
+        .expect_err("worker main-loop self-attestation must be rejected");
+
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    let message = err.message.to_string();
+    assert!(
+        message.contains("task-verifier") && message.contains("supervisor"),
+        "rejection must explain legitimate verification paths: {message}"
+    );
+    assert!(
+        verification_store
+            .get_latest_for_task(&task_id)
+            .expect("verification lookup")
+            .is_none(),
+        "rejected self-attestation must not persist a verification row"
+    );
+    assert!(
+        !task_store
+            .get(&task_id)
+            .expect("task remains")
+            .pending_verification,
+        "rejected add must not mutate pending_verification"
+    );
+}
+
+#[tokio::test]
+async fn test_task_verifier_capability_is_child_bound_and_replay_safe() {
+    let (temp, parent_service) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    let agent_store = open_agent_store(&cas_dir).expect("agent store");
+    let verification_store = open_verification_store(&cas_dir).expect("verification store");
+    let parent_id = format!("test-session-{}", std::process::id());
+
+    let created = parent_service
+        .cas_task_create(Parameters(simple_task_req("Capability-gated verification")))
+        .await
+        .expect("create task");
+    let task_id = extract_task_id(&extract_text(created))
+        .expect("task id")
+        .to_string();
+
+    let issued = cas_store::issue_verifier_capability(&cas_dir, &task_id, &parent_id)
+        .expect("server issues capability");
+    let child_id = format!("task-verifier-child-{}", std::process::id());
+    cas_store::bind_verifier_capability(&cas_dir, &issued.token, &child_id)
+        .expect("bind capability to child");
+    let mut child = cas::types::Agent::new_sub_agent(
+        child_id.clone(),
+        "task-verifier".to_string(),
+        parent_id.clone(),
+    );
+    child.role = AgentRole::Standard;
+    agent_store
+        .register(&child)
+        .expect("register verifier child");
+
+    let owner_err = parent_service
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: task_id.clone(),
+            status: "approved".to_string(),
+            summary: "owner presenting a stolen child capability".to_string(),
+            confidence: Some(0.9),
+            issues: None,
+            files_reviewed: None,
+            duration_ms: None,
+            verification_type: None,
+            verifier_capability: Some(issued.token.clone()),
+        }))
+        .await
+        .expect_err("owner session cannot use the child's capability");
+    assert_eq!(owner_err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(
+        !owner_err.message.contains(&issued.token),
+        "capability rejection diagnostics must never echo the raw bearer"
+    );
+
+    let child_service = cas::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+    child_service.set_agent_id_for_testing(child_id.clone());
+    child_service
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: task_id.clone(),
+            status: "approved".to_string(),
+            summary: "distinct registered child verified the task".to_string(),
+            confidence: Some(0.95),
+            issues: None,
+            files_reviewed: Some("src/lib.rs".to_string()),
+            duration_ms: Some(12),
+            verification_type: None,
+            verifier_capability: Some(issued.token.clone()),
+        }))
+        .await
+        .expect("bound task-verifier child succeeds once");
+
+    let row = verification_store
+        .get_latest_for_task(&task_id)
+        .expect("lookup")
+        .expect("verification row");
+    assert_eq!(
+        row.provenance,
+        cas::types::VerificationProvenance::TaskVerifier
+    );
+    assert_eq!(row.agent_id.as_deref(), Some(child_id.as_str()));
+    assert_eq!(row.issuer_agent_id.as_deref(), Some(parent_id.as_str()));
+    assert_eq!(
+        row.capability_id.as_deref(),
+        Some(issued.capability.id.as_str())
+    );
+    assert!(
+        !serde_json::to_string(&row)
+            .expect("serialize verification")
+            .contains(&issued.token),
+        "durable verification payload must never contain the raw bearer"
+    );
+    let event_payload = serde_json::to_string(
+        &open_event_store(&cas_dir)
+            .expect("event store")
+            .list_recent(20)
+            .expect("events"),
+    )
+    .expect("serialize events");
+    assert!(
+        !event_payload.contains(&issued.token),
+        "event/audit diagnostics must contain only capability IDs, never the raw bearer"
+    );
+
+    let replay = child_service
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id,
+            status: "approved".to_string(),
+            summary: "replay".to_string(),
+            confidence: None,
+            issues: None,
+            files_reviewed: None,
+            duration_ms: None,
+            verification_type: None,
+            verifier_capability: Some(issued.token),
+        }))
+        .await
+        .expect_err("capability replay must fail");
+    assert_eq!(replay.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(
+        !replay.message.contains(&issued.capability.token_hash),
+        "capability diagnostics must not expose persisted token hashes either"
+    );
+}
+
+#[tokio::test]
+async fn test_spoofed_supervisor_and_codex_claims_do_not_grant_authority() {
+    let (temp, service) = setup_cas();
+    let _env_lock = env_test_lock();
+    let _spoofed_env = ScopedSupervisorEnv::new();
+    let cas_dir = temp.path().join(".cas");
+    let agent_store = open_agent_store(&cas_dir).expect("agent store");
+    let worker_id = format!("test-session-{}", std::process::id());
+    let mut worker = agent_store.get(&worker_id).expect("test caller");
+    worker.name = "Codex".to_string();
+    worker.role = AgentRole::Worker;
+    worker.agent_type = cas::types::AgentType::Worker;
+    agent_store
+        .update(&worker)
+        .expect("persist worker identity");
+
+    let created = service
+        .cas_task_create(Parameters(simple_task_req("Spoof resistance")))
+        .await
+        .expect("create task");
+    let task_id = extract_task_id(&extract_text(created))
+        .expect("task id")
+        .to_string();
+    let err = service
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id,
+            status: "approved".to_string(),
+            summary: "caller claims trusted verifier identity".to_string(),
+            confidence: Some(1.0),
+            issues: None,
+            files_reviewed: None,
+            duration_ms: None,
+            verification_type: Some("epic".to_string()),
+            verifier_capability: None,
+        }))
+        .await
+        .expect_err("environment, Codex name, and epic type cannot spoof authority");
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+}
+
+#[tokio::test]
+async fn test_anonymous_or_orphan_verification_add_fails_closed() {
+    let _env_lock = env_test_lock();
+    let _anonymous_env = ScopedFactoryEnv::apply(&[
+        ("CAS_SESSION_ID", None),
+        ("CAS_AGENT_NAME", None),
+        ("CAS_AGENT_ROLE", Some("supervisor")),
+    ]);
+    let temp = TempDir::new().expect("temp dir");
+    let cas_dir = init_cas_dir(temp.path()).expect("init cas");
+    let task_store = open_task_store(&cas_dir).expect("task store");
+    let task = cas::types::Task::new(
+        "cas-anonymous-verification".to_string(),
+        "Anonymous verifier must fail".to_string(),
+    );
+    task_store.add(&task).expect("task");
+
+    let service = cas::mcp::CasCore::with_daemon(cas_dir, None, None);
+    let err = service
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: task.id,
+            status: "approved".to_string(),
+            summary: "orphan supervisor claim".to_string(),
+            confidence: None,
+            issues: None,
+            files_reviewed: None,
+            duration_ms: None,
+            verification_type: None,
+            verifier_capability: None,
+        }))
+        .await
+        .expect_err("anonymous/orphan caller must fail");
+    assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_REQUEST);
+}
+
 // cas-3bd4: env_test_lock() now lives in `support.rs` so `setup_cas()`
 // can hold it while clearing factory env vars. Tests that need to set
 // `CAS_AGENT_ROLE=supervisor` via `ScopedSupervisorEnv` MUST call
@@ -75,8 +340,9 @@ async fn test_task_close_blocked_without_verification() {
         reason: Some("Completed".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -176,8 +442,9 @@ require_merge_on_epic_close = true
         reason: Some("Done".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -501,8 +768,9 @@ async fn test_merge_required_close_parks_awaiting_merge_and_releases_gate_cas_8d
                 reason: Some("ready for merge".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,            }))
+                search_manifest: None,
+                commit_receipt: None,
+            }))
             .await
             .expect("close A returns"),
     );
@@ -613,8 +881,9 @@ async fn test_merge_required_close_parks_awaiting_merge_and_releases_gate_cas_8d
                 reason: Some("merged and ready to close".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,            }))
+                search_manifest: None,
+                commit_receipt: None,
+            }))
             .await
             .expect("close A after merge returns"),
     );
@@ -748,8 +1017,9 @@ async fn test_a844_merge_conflict_flags_task_and_names_alternative() {
                 reason: Some("ready for merge".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,            }))
+                search_manifest: None,
+                commit_receipt: None,
+            }))
             .await
             .expect("close A returns"),
     );
@@ -913,8 +1183,9 @@ async fn test_a844_clean_divergence_not_flagged_as_conflict() {
                 reason: Some("ready for merge".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,            }))
+                search_manifest: None,
+                commit_receipt: None,
+            }))
             .await
             .expect("close A returns"),
     );
@@ -1047,8 +1318,9 @@ async fn test_repeated_merge_required_close_does_not_duplicate_park_audit_cas_62
         reason: Some("ready for merge".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
 
     let first_close = extract_text(
         service
@@ -1177,7 +1449,12 @@ async fn test_merge_before_first_close_uses_commit_hook_anchor_cas_3d37() {
         assert!(ok, "git {args:?} failed");
     };
     git(&["init", "-q", "-b", "main"]);
-    git(&["remote", "add", "origin", &remote.path().display().to_string()]);
+    git(&[
+        "remote",
+        "add",
+        "origin",
+        &remote.path().display().to_string(),
+    ]);
     std::fs::write(repo.join("seed.txt"), "seed\n").unwrap();
     git(&["add", "seed.txt"]);
     git(&["commit", "-q", "-m", "seed"]);
@@ -1439,8 +1716,9 @@ async fn test_serial_second_task_on_same_branch_does_not_restrand_first_close_ca
                 reason: Some("ready for merge".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,            }))
+                search_manifest: None,
+                commit_receipt: None,
+            }))
             .await
             .expect("first close returns"),
     );
@@ -1508,8 +1786,9 @@ async fn test_serial_second_task_on_same_branch_does_not_restrand_first_close_ca
                 reason: Some("merged and ready to close".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,            }))
+                search_manifest: None,
+                commit_receipt: None,
+            }))
             .await
             .expect("second close returns"),
     );
@@ -1686,8 +1965,9 @@ async fn test_stale_local_epic_ref_falls_back_to_origin_cas_38e2() {
                 reason: Some("merged and pushed to origin".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,            }))
+                search_manifest: None,
+                commit_receipt: None,
+            }))
             .await
             .expect("close returns"),
     );
@@ -1825,8 +2105,9 @@ async fn test_reopened_task_does_not_reuse_stale_anchor_cas_cf64() {
                 reason: Some("ready for merge".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,            }))
+                search_manifest: None,
+                commit_receipt: None,
+            }))
             .await
             .expect("first close returns"),
     );
@@ -1861,8 +2142,9 @@ async fn test_reopened_task_does_not_reuse_stale_anchor_cas_cf64() {
                 reason: Some("merged, closing".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,            }))
+                search_manifest: None,
+                commit_receipt: None,
+            }))
             .await
             .expect("second close returns"),
     );
@@ -1923,8 +2205,9 @@ async fn test_reopened_task_does_not_reuse_stale_anchor_cas_cf64() {
                 reason: Some("reworked, claiming done".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,            }))
+                search_manifest: None,
+                commit_receipt: None,
+            }))
             .await
             .expect("third close returns"),
     );
@@ -2031,8 +2314,9 @@ async fn test_nonepic_task_resolves_default_branch_and_proceeds_when_merged_cas_
         reason: Some("done, merged onto main".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let resp = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -2134,8 +2418,9 @@ async fn test_nonepic_task_with_unmerged_code_is_rejected_not_skipped_cas_cf64()
         reason: Some("claiming done but never merged".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let resp = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -2239,8 +2524,9 @@ async fn test_chore_type_task_with_unmerged_code_is_no_longer_exempt_cas_cf64() 
         reason: Some("claiming done but never merged".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let resp = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -2315,8 +2601,9 @@ async fn test_chore_type_task_with_zero_commits_still_closes_on_notes_cas_cf64()
         reason: Some("resolved via notes, no code needed".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let resp = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -2447,8 +2734,9 @@ enabled = false
         reason: Some("claims to be done".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let resp = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -2479,8 +2767,9 @@ enabled = false
         reason: Some("claims to be done".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let resp = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -2504,8 +2793,9 @@ enabled = false
         reason: Some("Committed and ready".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let resp = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -2631,8 +2921,9 @@ async fn test_task_close_blocks_on_uncommitted_system_b_worker_worktree_cas_4b3f
         reason: Some("done".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let resp = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -2664,8 +2955,9 @@ async fn test_task_close_blocks_on_uncommitted_system_b_worker_worktree_cas_4b3f
         reason: Some("actually done now".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let resp = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -2820,8 +3112,9 @@ enabled = false
                 reason: Some("committed and additive".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,            }))
+                search_manifest: None,
+                commit_receipt: None,
+            }))
             .await
             .expect("close returns"),
     );
@@ -2865,8 +3158,9 @@ enabled = false
                 reason: Some("claims to be additive".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,            }))
+                search_manifest: None,
+                commit_receipt: None,
+            }))
             .await
             .expect("close returns"),
     );
@@ -3011,8 +3305,9 @@ enabled = false
         reason: Some("non-isolated direct CLI flow".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let resp = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -3078,8 +3373,9 @@ enabled = false
         reason: Some("additive-only non-isolated".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let resp = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -3156,8 +3452,9 @@ enabled = false
         reason: Some("done, no files touched".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let resp = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -3257,8 +3554,9 @@ enabled = false
         reason: Some("done, no files touched".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let resp = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -3300,7 +3598,9 @@ enabled = false
     let mut task = cas::types::Task::new(id.clone(), "Someone else's work".to_string());
     task.status = TaskStatus::InProgress;
     task.assignee = Some("someone-else".to_string()); // NOT "test-agent"
-    task_store.add(&task).expect("add task owned by another agent");
+    task_store
+        .add(&task)
+        .expect("add task owned by another agent");
 
     let agent_store = open_agent_store(&cas_dir).expect("open agent store");
     {
@@ -3321,8 +3621,9 @@ enabled = false
         reason: Some("trying to close someone else's task".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     // The halt gate rejects via `Err(McpError)`, not an `Ok` tool-error
     // response — unlike the exempt path, which returns `Ok`. Accept either
     // shape so this test asserts the message content regardless of which
@@ -3385,8 +3686,9 @@ async fn test_epic_close_requires_epic_verification_type() {
         reason: Some("Completed".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -3410,8 +3712,9 @@ async fn test_epic_close_requires_epic_verification_type() {
         reason: Some("Completed".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -3436,8 +3739,9 @@ async fn test_epic_close_requires_epic_verification_type() {
         reason: Some("Completed".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -3509,8 +3813,9 @@ async fn test_task_lifecycle_with_verification() {
         reason: Some("Completed successfully".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -3592,8 +3897,9 @@ async fn test_task_close_blocked_with_rejected_verification() {
         reason: Some("Completed".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -3662,8 +3968,9 @@ async fn test_task_close_runs_verifier_or_skips_cleanly() {
         reason: Some("Completed all acceptance criteria. Deployed to prod.".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -3852,8 +4159,9 @@ async fn test_close_supervisor_owned_epic_uses_owner_closed_wording() {
                 reason: Some("all child tasks complete".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,            }))
+                search_manifest: None,
+                commit_receipt: None,
+            }))
             .await
             .expect("owner should close epic"),
     );
@@ -3947,8 +4255,9 @@ async fn test_close_supervisor_bypass_orphaned_task() {
         reason: Some("verification skipped — assignee inactive".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -4058,8 +4367,9 @@ async fn test_close_supervisor_bypass_ghost_assignee() {
         reason: Some("verification skipped — assignee inactive (ghost agent)".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let response_text = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -4177,8 +4487,9 @@ async fn test_close_supervisor_active_worker_assignee_by_name() {
         reason: Some("worker finished, asking supervisor to close".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let response_text = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -4211,8 +4522,9 @@ async fn test_close_supervisor_active_worker_assignee_by_name() {
         reason: Some("supervisor forced close after alignment".to_string()),
         bypass_code_review: Some(true),
         code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let response_text = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -4325,8 +4637,9 @@ async fn test_close_supervisor_no_bypass_when_assignee_alive() {
         reason: Some("verification skipped — assignee inactive".to_string()),
         bypass_code_review: None,
         code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let response_text = extract_text(
         service
             .cas_task_close(Parameters(close_req))
@@ -4968,7 +5281,8 @@ async fn test_close_auto_escalates_stale_verification_dispatch() {
             bypass_code_review: None,
             code_review_findings: None,
             search_manifest: None,
-            commit_receipt: None,        }))
+            commit_receipt: None,
+        }))
         .await
         .expect("first close returns a result");
 
@@ -4998,7 +5312,8 @@ async fn test_close_auto_escalates_stale_verification_dispatch() {
             bypass_code_review: None,
             code_review_findings: None,
             search_manifest: None,
-            commit_receipt: None,        }))
+            commit_receipt: None,
+        }))
         .await
         .expect("second close returns a result");
     let text = extract_text(result);
@@ -5130,8 +5445,9 @@ async fn test_close_forwards_persisted_review_envelope_after_jail() {
                 reason: Some("worker ran review, retrying close".to_string()),
                 bypass_code_review: None,
                 code_review_findings: Some(clean_envelope.clone()),
-            search_manifest: None,
-            commit_receipt: None,            }))
+                search_manifest: None,
+                commit_receipt: None,
+            }))
             .await
             .expect("close returns"),
     );
@@ -5170,8 +5486,9 @@ async fn test_close_forwards_persisted_review_envelope_after_jail() {
                 reason: Some("closing on worker's behalf; review already passed".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,            }))
+                search_manifest: None,
+                commit_receipt: None,
+            }))
             .await
             .expect("supervisor close returns"),
     );
@@ -5258,16 +5575,11 @@ fn setup_cas_with_supervisor_session() -> (TempDir, cas::mcp::CasCore, String) {
     (temp, core, supervisor_id)
 }
 
-/// Supervisor calls `verification.add` on a task held by a live worker. The
-/// rejection error must:
-///   1. Not echo the old "Supervisors can only verify epics" wording
-///   2. Name the actual rule (active-assignee precondition)
-///   3. Embed the offending assignee id and the task id
-///   4. List the three supervisor exemptions (orphaned / inactive / self)
-///   5. Provide a concrete remediation (release lease) and clarify that
-///      epics may always be verified by supervisors
+/// A registered Supervisor role is server-authenticated external authority,
+/// even when a live worker owns the task. Caller-supplied names and environment
+/// claims are irrelevant; the persisted provenance must reflect the role gate.
 #[tokio::test]
-async fn test_verification_add_supervisor_active_assignee_error_message() {
+async fn test_registered_supervisor_can_verify_live_worker_task() {
     // Per support.rs ordering contract: setup helper FIRST (it briefly
     // grabs the lock to clear factory env vars), then acquire the lock
     // for the test body. std `Mutex` is not re-entrant — reversing the
@@ -5321,86 +5633,36 @@ async fn test_verification_add_supervisor_active_assignee_error_message() {
     task.assignee = Some(worker_id.clone());
     task_store.update(&task).expect("update task");
 
-    // Supervisor attempts to add a verification for the worker's task.
-    let err = service
+    service
         .cas_verification_add(Parameters(VerificationAddRequest {
             task_id: id.clone(),
             status: "approved".to_string(),
-            summary: "supervisor trying to verify behind worker's back".to_string(),
+            summary: "registered supervisor external verification".to_string(),
             confidence: None,
             issues: None,
             files_reviewed: None,
             duration_ms: None,
             verification_type: None,
+            verifier_capability: None,
         }))
         .await
-        .expect_err("verification.add must reject supervisor while worker is alive");
+        .expect("registered supervisor verification should succeed");
 
-    // (0) The error must remain a client-side INVALID_PARAMS, not an
-    //     INTERNAL_ERROR — the latter changes MCP client retry semantics
-    //     and operator-facing surfacing.
-    assert_eq!(
-        err.code,
-        rmcp::model::ErrorCode::INVALID_PARAMS,
-        "rejection must remain a client error, not server error"
-    );
-
-    let msg = err.message.to_string();
-
-    // (1) Old misleading wording must be gone.
-    assert!(
-        !msg.contains("Supervisors can only verify epics, not individual tasks"),
-        "rejection must not use the old misleading wording: {msg}"
-    );
-    // (2) New wording must name the actual rule.
-    assert!(
-        msg.contains("active assignee"),
-        "rejection must describe the active-assignee rule: {msg}"
-    );
-    // (3) Embed task + assignee identifiers so the operator knows *which* task
-    //     and *who* is blocking.
-    assert!(
-        msg.contains(&worker_id),
-        "rejection must include the offending assignee id ({worker_id}): {msg}"
-    );
-    assert!(
-        msg.contains(&id),
-        "rejection must include the task id ({id}): {msg}"
-    );
-    // (4) List the three exemptions.
-    assert!(
-        msg.contains("orphaned"),
-        "rejection must mention the orphaned-task exemption: {msg}"
-    );
-    assert!(
-        msg.contains("inactive"),
-        "rejection must mention the inactive-assignee exemption: {msg}"
-    );
-    assert!(
-        msg.contains("self-implemented") || msg.contains("supervisor IS the assignee"),
-        "rejection must mention the supervisor-is-assignee exemption: {msg}"
-    );
-    // (5) Concrete remediation + epic clarification.
-    assert!(
-        msg.contains("release") || msg.contains("Release"),
-        "rejection must mention the release-lease remediation: {msg}"
-    );
-    assert!(
-        msg.contains("Epics may always be verified"),
-        "rejection must clarify that epics are always verifiable by supervisors: {msg}"
-    );
-
-    // The check is the only thing we touched; the underlying authz behavior
-    // — rejecting the call — must still hold. No verification row should
-    // have been written.
     let verification_store = open_verification_store(&cas_dir).expect("verification store");
     let row = verification_store
         .get_latest_for_task(&id)
-        .expect("verification lookup");
-    assert!(
-        row.is_none(),
-        "rejected verification.add must NOT persist a verification row: {row:?}"
+        .expect("verification lookup")
+        .expect("supervisor verification row");
+    assert_eq!(
+        row.provenance,
+        cas::types::VerificationProvenance::SupervisorDirect
     );
+    assert_eq!(row.agent_id.as_deref(), Some(_supervisor_id.as_str()));
+    assert_eq!(
+        row.issuer_agent_id.as_deref(),
+        Some(_supervisor_id.as_str())
+    );
+    assert!(row.capability_id.is_none());
 }
 
 // =============================================================================
@@ -5535,8 +5797,9 @@ owner = "worker"
         ),
         bypass_code_review: None,
         code_review_findings: Some(CLEAN_ENVELOPE.to_string()),
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -5652,8 +5915,9 @@ owner = "worker"
         reason: Some("Done (hiding P0 via pre_existing=true forgery)".to_string()),
         bypass_code_review: None,
         code_review_findings: Some(P0_RESIDUAL_PRE_EXISTING_TRUE_ENVELOPE.to_string()),
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -5740,8 +6004,9 @@ owner = "worker"
         reason: Some("Done (but has P0 issue)".to_string()),
         bypass_code_review: None,
         code_review_findings: Some(P0_RESIDUAL_ENVELOPE.to_string()),
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -5826,8 +6091,9 @@ owner = "worker"
         reason: Some("Done (but envelope is garbage)".to_string()),
         bypass_code_review: None,
         code_review_findings: Some("{not valid json at all".to_string()),
-            search_manifest: None,
-            commit_receipt: None,    };
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -5928,7 +6194,8 @@ owner = "worker"
             bypass_code_review: None,
             code_review_findings: None,
             search_manifest: None,
-            commit_receipt: None,        }))
+            commit_receipt: None,
+        }))
         .await
         .expect("first close should return a result");
 
@@ -5970,7 +6237,8 @@ owner = "worker"
             bypass_code_review: None,
             code_review_findings: Some(CLEAN_ENVELOPE.to_string()),
             search_manifest: None,
-            commit_receipt: None,        }))
+            commit_receipt: None,
+        }))
         .await
         .expect("second close should return a result");
     let text = extract_text(result);
@@ -6112,7 +6380,8 @@ async fn test_worker_close_succeeds_when_skipped_row_write_fails_option_b() {
             bypass_code_review: None,
             code_review_findings: Some(CLEAN_ENVELOPE.to_string()),
             search_manifest: None,
-            commit_receipt: None,        }))
+            commit_receipt: None,
+        }))
         .await
         .expect("task_close should return a result");
     let text = extract_text(result);
@@ -7028,8 +7297,9 @@ async fn supervisor_self_assignee_close_guidance(supervisor_cli: Option<&str>) -
                 reason: Some("Self-implemented; ready to self-verify".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,            }))
+                search_manifest: None,
+                commit_receipt: None,
+            }))
             .await
             .expect("close returns a result"),
     );
@@ -7122,7 +7392,8 @@ async fn test_timeout_escalation_uses_codex_supervisor_verification_alias_cas_79
             bypass_code_review: None,
             code_review_findings: None,
             search_manifest: None,
-            commit_receipt: None,        }))
+            commit_receipt: None,
+        }))
         .await
         .expect("first close returns a result");
 
@@ -7146,8 +7417,9 @@ async fn test_timeout_escalation_uses_codex_supervisor_verification_alias_cas_79
                 reason: Some("Completed".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,            }))
+                search_manifest: None,
+                commit_receipt: None,
+            }))
             .await
             .expect("second close returns a result"),
     );
@@ -7226,8 +7498,9 @@ async fn test_062d_close_lifecycle_push_to_owning_supervisor() {
                 reason: Some("062d close proof".to_string()),
                 bypass_code_review: Some(true),
                 code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,            }))
+                search_manifest: None,
+                commit_receipt: None,
+            }))
             .await
             .expect("close"),
     );
@@ -7372,8 +7645,9 @@ async fn test_60393_owned_awaiting_merge_recloses_despite_preexisting_halt() {
                 reason: Some("ready for merge".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,            }))
+                search_manifest: None,
+                commit_receipt: None,
+            }))
             .await
             .expect("close A returns"),
     );
@@ -7425,8 +7699,9 @@ async fn test_60393_owned_awaiting_merge_recloses_despite_preexisting_halt() {
                 reason: Some("merged and ready to close".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,            }))
+                search_manifest: None,
+                commit_receipt: None,
+            }))
             .await
             .expect("close A after merge returns"),
     );
@@ -7562,8 +7837,9 @@ async fn test_60393_unmerged_awaiting_merge_still_bounces_merge_required_under_h
                 reason: Some("ready for merge".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,            }))
+                search_manifest: None,
+                commit_receipt: None,
+            }))
             .await
             .expect("close A returns"),
     );
@@ -7591,8 +7867,9 @@ async fn test_60393_unmerged_awaiting_merge_still_bounces_merge_required_under_h
                 reason: Some("retry before merge".to_string()),
                 bypass_code_review: None,
                 code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,            }))
+                search_manifest: None,
+                commit_receipt: None,
+            }))
             .await
             .expect("retry close A returns"),
     );
@@ -7698,7 +7975,8 @@ async fn test_3894_halt_no_longer_blocks_close_of_own_inprogress_task() {
             bypass_code_review: None,
             code_review_findings: None,
             search_manifest: None,
-            commit_receipt: None,        }))
+            commit_receipt: None,
+        }))
         .await
         .expect("halted worker must be able to close its OWN InProgress task (cas-3894)");
     let text = extract_text(close_result);

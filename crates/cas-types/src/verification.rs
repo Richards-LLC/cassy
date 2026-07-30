@@ -42,6 +42,74 @@ impl FromStr for VerificationType {
     }
 }
 
+/// Server-derived authority that produced a verification record.
+///
+/// This is audit provenance, not a caller-selectable authorization hint.
+/// New MCP adds may only produce `TaskVerifier` or `SupervisorDirect`;
+/// `System` is reserved for internal close-flow writes. `Legacy` keeps
+/// pre-provenance rows and payloads readable without granting them authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationProvenance {
+    /// Row predates typed verifier authority.
+    #[default]
+    Legacy,
+    /// Distinct registered task-verifier child holding a one-time capability.
+    TaskVerifier,
+    /// Direct verification by a registered supervisor session.
+    SupervisorDirect,
+    /// Trusted internal close-flow record; never accepted from MCP input.
+    System,
+}
+
+impl fmt::Display for VerificationProvenance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            VerificationProvenance::Legacy => write!(f, "legacy"),
+            VerificationProvenance::TaskVerifier => write!(f, "task_verifier"),
+            VerificationProvenance::SupervisorDirect => write!(f, "supervisor_direct"),
+            VerificationProvenance::System => write!(f, "system"),
+        }
+    }
+}
+
+impl FromStr for VerificationProvenance {
+    type Err = TypeError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "legacy" => Ok(VerificationProvenance::Legacy),
+            "task_verifier" => Ok(VerificationProvenance::TaskVerifier),
+            "supervisor_direct" => Ok(VerificationProvenance::SupervisorDirect),
+            "system" => Ok(VerificationProvenance::System),
+            _ => Err(TypeError::Parse(format!(
+                "invalid verification provenance: {s}"
+            ))),
+        }
+    }
+}
+
+/// Durable server-issued authority for one task-verifier child.
+///
+/// The raw bearer token is never stored here. Only its SHA-256 digest is
+/// persisted. A capability is task-scoped, expires, binds once to a distinct
+/// registered child agent, and may be consumed once.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifierCapability {
+    pub id: String,
+    pub task_id: String,
+    pub issuer_agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifier_agent_id: Option<String>,
+    pub token_hash: String,
+    pub issued_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumed_at: Option<DateTime<Utc>>,
+}
+
 /// Status of a verification
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -218,6 +286,18 @@ pub struct Verification {
     #[serde(default)]
     pub verification_type: VerificationType,
 
+    /// Server-derived verifier authority provenance.
+    #[serde(default)]
+    pub provenance: VerificationProvenance,
+
+    /// One-time verifier capability used for this record, when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_id: Option<String>,
+
+    /// Registered parent session that issued the task-verifier capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer_agent_id: Option<String>,
+
     /// Verification status
     #[serde(default)]
     pub status: VerificationStatus,
@@ -254,6 +334,9 @@ impl Verification {
             task_id,
             agent_id: None,
             verification_type: VerificationType::Task,
+            provenance: VerificationProvenance::System,
+            capability_id: None,
+            issuer_agent_id: None,
             status: VerificationStatus::Approved,
             confidence: None,
             summary: String::new(),
@@ -271,6 +354,9 @@ impl Verification {
             task_id,
             agent_id: None,
             verification_type: VerificationType::Task,
+            provenance: VerificationProvenance::System,
+            capability_id: None,
+            issuer_agent_id: None,
             status: VerificationStatus::Approved,
             confidence: None,
             summary,
@@ -293,6 +379,9 @@ impl Verification {
             task_id,
             agent_id: None,
             verification_type: VerificationType::Task,
+            provenance: VerificationProvenance::System,
+            capability_id: None,
+            issuer_agent_id: None,
             status: VerificationStatus::Rejected,
             confidence: None,
             summary,
@@ -310,6 +399,9 @@ impl Verification {
             task_id,
             agent_id: None,
             verification_type: VerificationType::Task,
+            provenance: VerificationProvenance::System,
+            capability_id: None,
+            issuer_agent_id: None,
             status: VerificationStatus::Error,
             confidence: None,
             summary: error_message,
@@ -327,6 +419,9 @@ impl Verification {
             task_id,
             agent_id: None,
             verification_type: VerificationType::Task,
+            provenance: VerificationProvenance::System,
+            capability_id: None,
+            issuer_agent_id: None,
             status: VerificationStatus::Skipped,
             confidence: None,
             summary: reason,
@@ -392,6 +487,9 @@ impl Default for Verification {
             task_id: String::new(),
             agent_id: None,
             verification_type: VerificationType::Task,
+            provenance: VerificationProvenance::System,
+            capability_id: None,
+            issuer_agent_id: None,
             status: VerificationStatus::Approved,
             confidence: None,
             summary: String::new(),

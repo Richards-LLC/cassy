@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "receipt_id": "codex-cli-0.146.0-2026-07-30",
+  "harness": "codex-cli",
+  "harness_version": "0.146.0",
+  "validated_at": "2026-07-30",
+  "result": "fail",
+  "checklist": [
+    {
+      "id": "cli_version",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "codex --version reported codex-cli 0.146.0 immediately before the isolated run."
+    },
+    {
+      "id": "noninteractive_permission_bypass",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "The real PtyConfig launch emitted --yolo; rollout context recorded approval_policy=never and danger-full-access."
+    },
+    {
+      "id": "model_and_reasoning_effort",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "The real launch emitted --model gpt-5.6-terra and -c model_reasoning_effort=medium; rollout context recorded both values."
+    },
+    {
+      "id": "developer_role_priming",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run", "factory-parity"],
+      "detail": "Worker developer_instructions and startup workflow loaded and drove the expected identity/task startup attempt."
+    },
+    {
+      "id": "inline_tui_and_cwd",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "The production argv emitted --no-alt-screen and the rollout cwd matched the isolated repository."
+    },
+    {
+      "id": "mcp_cs_root_turn",
+      "required": true,
+      "status": "fail",
+      "evidence_refs": ["live-production-run", "focused-bug"],
+      "detail": "The root startup turn found no callable cs coordination/task tools and completed without either required call."
+    },
+    {
+      "id": "mcp_cs_followup_turn",
+      "required": true,
+      "status": "fail",
+      "evidence_refs": ["live-production-run", "native-exec-diagnostic", "focused-bug"],
+      "detail": "The production session could not reach a tool-capable follow-up. A diagnostic codex exec launch exposed both tools, isolating the failure to the interactive effective catalog rather than CAS stdio/env wiring."
+    },
+    {
+      "id": "skills_agents_and_agents_md_discovery",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run", "factory-parity"],
+      "detail": "The isolated worker loaded unique AGENTS.md and project-skill markers; the deterministic launch parity gate covers the synced Codex skill and agent catalogs."
+    },
+    {
+      "id": "factory_identity_environment",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run", "native-exec-diagnostic"],
+      "detail": "Production config assertions covered CAS role/factory/session/model/effort env, and the native diagnostic whoami returned the isolated worker identity."
+    },
+    {
+      "id": "interruption_resume_approval_continuity",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["real-pty-interrupt-proof"],
+      "detail": "The existing real-Codex shipped Mux interrupt-and-inject proof completed the redirected turn and a later normal turn under --yolo."
+    },
+    {
+      "id": "no_low_rollout_token_budget_abort",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run", "real-pty-interrupt-proof"],
+      "detail": "PtyConfig emitted no rollout budget override, and real Codex turns completed without a rollout-token-budget abort."
+    }
+  ],
+  "evidence": [
+    {
+      "id": "live-production-run",
+      "kind": "live_test",
+      "reference": "task:cas-1c66#2026-07-30-production-run",
+      "summary": "Fresh real Codex 0.146.0 PtyConfig::codex run with target/debug/cas first on PATH and disposable project/CAS_ROOT; failed at root cs tool availability."
+    },
+    {
+      "id": "native-exec-diagnostic",
+      "kind": "diagnostic",
+      "reference": "task:cas-1c66#2026-07-30-native-exec",
+      "summary": "Identical isolated cs stdio/env injection through codex exec with code-mode flags disabled successfully called coordination whoami and task mine."
+    },
+    {
+      "id": "factory-parity",
+      "kind": "test",
+      "reference": "cas-cli/tests/factory_parity_test.rs",
+      "summary": "Machine-readable launch-config parity gate for Codex catalogs, role instructions, launch args, effective contract, and MCP prefix."
+    },
+    {
+      "id": "real-pty-interrupt-proof",
+      "kind": "test",
+      "reference": "crates/cas-mux/tests/urgent_interrupt_codex_runtime.rs",
+      "summary": "Real Codex PTY interruption/recovery and post-interrupt reachability proof."
+    },
+    {
+      "id": "focused-bug",
+      "kind": "task",
+      "reference": "task:cas-8c80",
+      "summary": "Focused P1 repair task for missing injected cs tools in the Codex 0.146 interactive code-mode catalog."
+    },
+    {
+      "id": "gabber-deploy-smoke",
+      "kind": "related_task",
+      "reference": "task:cas-ce30",
+      "summary": "Complementary deployed-factory edit/commit smoke; linked rather than duplicated and not used to override this failed receipt."
+    }
+  ]
+}

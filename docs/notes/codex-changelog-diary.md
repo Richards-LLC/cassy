@@ -30,6 +30,10 @@ verify on upgrade) · 🔧 fix shipped · 🏗 EPIC · ⏭ n/a
 
 - **CAS validated against:** Codex CLI **0.128.0** (the `crates/cas-pty/src/pty.rs` effort-approach
   comment pins to 0.128).
+- **0.146 validation attempt:** **FAILED** on 2026-07-30 because the exact interactive
+  `PtyConfig::codex` launch did not expose its injected `cs` MCP tools. The typed receipt is
+  `crates/cas-pty/conformance/codex-cli-0.146.0-2026-07-30.json`; focused repair is tracked by
+  `cas-8c80`. The validated pin therefore remains 0.128.0.
 - **Locally installed:** **0.146.0** (`codex-cli 0.146.0`, checked 2026-07-30).
 - **Latest stable:** **0.146.0** (2026-07-29). **0.147.0** remains prerelease-only (alpha.2 as of
   2026-07-30) — untracked under this diary's stable-only policy.

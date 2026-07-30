@@ -10,7 +10,10 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use cmcp_core::config::{Config, Scope, ServerConfig};
-use cmcp_core::CatalogEntry;
+use cmcp_core::{CatalogEntry, ProxyEngine, UpstreamState};
+
+mod support;
+use support::CasSandbox;
 
 // ── Config round-trip ────────────────────────────────────────────────
 
@@ -155,10 +158,7 @@ fn catalog_entry_serializes_to_json() {
 
     let json = serde_json::to_value(&entry).unwrap();
     assert_eq!(json["name"], "take_screenshot");
-    assert_eq!(
-        json["description"],
-        "Captures a screenshot of the page"
-    );
+    assert_eq!(json["description"], "Captures a screenshot of the page");
     assert!(json["input_schema"]["properties"]["url"].is_object());
 }
 
@@ -198,4 +198,195 @@ fn catalog_entries_by_server_format_compatible_with_cache() {
     assert_eq!(parsed["chrome-devtools"].len(), 2);
     assert!(parsed["chrome-devtools"].contains(&"navigate_page".to_string()));
     assert!(parsed["chrome-devtools"].contains(&"take_screenshot".to_string()));
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connected_upstream_tool_error_then_transport_failure_recovers_once() {
+    let sandbox = CasSandbox::new();
+    let pid_file = sandbox.path().join("proxy-upstream.pid");
+    let script = r#"echo $$ > "$CAS_TEST_PID_FILE"
+exec env \
+  -u CAS_AGENT_ROLE -u CAS_FACTORY_MODE \
+  -u CAS_FACTORY_SUPERVISOR_CLI -u CAS_FACTORY_WORKER_CLI \
+  -u CAS_SESSION_ID -u CAS_FACTORY_SESSION -u CAS_AGENT_ID -u CAS_TASK_ID \
+  "$CAS_TEST_BIN" serve"#;
+    let config = ServerConfig::Stdio {
+        command: "/bin/sh".to_string(),
+        args: vec!["-c".to_string(), script.to_string()],
+        env: HashMap::from([
+            (
+                "CAS_TEST_BIN".to_string(),
+                env!("CARGO_BIN_EXE_cas").to_string(),
+            ),
+            (
+                "CAS_TEST_PID_FILE".to_string(),
+                pid_file.to_string_lossy().into_owned(),
+            ),
+            (
+                "CAS_ROOT".to_string(),
+                sandbox.cas_root().to_string_lossy().into_owned(),
+            ),
+            (
+                "CAS_DIR".to_string(),
+                sandbox.cas_root().to_string_lossy().into_owned(),
+            ),
+            (
+                "CLAUDE_PROJECT_DIR".to_string(),
+                sandbox.path().to_string_lossy().into_owned(),
+            ),
+            (
+                "HOME".to_string(),
+                sandbox.home_dir().to_string_lossy().into_owned(),
+            ),
+            (
+                "XDG_CONFIG_HOME".to_string(),
+                sandbox.xdg_config_home().to_string_lossy().into_owned(),
+            ),
+        ]),
+    };
+    let engine = ProxyEngine::from_configs(HashMap::from([("optional-live".to_string(), config)]))
+        .await
+        .unwrap();
+    assert_eq!(
+        engine.health_snapshot().await.servers[0].state,
+        UpstreamState::Healthy
+    );
+
+    let protocol_error = engine
+        .call_tool(
+            "optional-live",
+            "task",
+            Some(serde_json::Map::from_iter([
+                (
+                    "action".to_string(),
+                    serde_json::Value::String("show".to_string()),
+                ),
+                (
+                    "id".to_string(),
+                    serde_json::Value::String("cas-does-not-exist".to_string()),
+                ),
+            ])),
+        )
+        .await;
+    assert!(protocol_error.is_err());
+    assert_eq!(
+        engine.health_snapshot().await.servers[0].state,
+        UpstreamState::Healthy,
+        "upstream MCP application errors must not degrade transport health"
+    );
+
+    let created = engine
+        .call_tool(
+            "optional-live",
+            "task",
+            Some(serde_json::Map::from_iter([
+                (
+                    "action".to_string(),
+                    serde_json::Value::String("create".to_string()),
+                ),
+                (
+                    "title".to_string(),
+                    serde_json::Value::String("proxy tool error fixture".to_string()),
+                ),
+            ])),
+        )
+        .await
+        .expect("create fixture task through live upstream");
+    let created_text = created["content"][0]["text"].as_str().unwrap();
+    let task_id = created_text
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-')
+        .find(|part| part.starts_with("cas-"))
+        .expect("created task response contains task id");
+    let tool_error = engine
+        .call_tool(
+            "optional-live",
+            "task",
+            Some(serde_json::Map::from_iter([
+                (
+                    "action".to_string(),
+                    serde_json::Value::String("close".to_string()),
+                ),
+                (
+                    "id".to_string(),
+                    serde_json::Value::String(task_id.to_string()),
+                ),
+                (
+                    "completion_receipt".to_string(),
+                    serde_json::Value::String(
+                        serde_json::json!({
+                            "task_id": "cas-wrong",
+                            "worker_agent_id": "worker-test",
+                            "proof_reference": "proof:test",
+                            "scope_summary": "test",
+                            "repo_selector": "project:test",
+                            "source_branch": "factory/test",
+                            "commit_sha": "0000000000000000000000000000000000000000",
+                            "merge_base_sha": "0000000000000000000000000000000000000000",
+                            "target_branch": "main",
+                            "target_sha": "0000000000000000000000000000000000000000"
+                        })
+                        .to_string(),
+                    ),
+                ),
+            ])),
+        )
+        .await
+        .expect("normal upstream tool error remains a protocol success");
+    assert_eq!(tool_error["isError"], true);
+    assert_eq!(
+        engine.health_snapshot().await.servers[0].state,
+        UpstreamState::Healthy,
+        "tool-level isError must not degrade connection health"
+    );
+
+    let pid = std::fs::read_to_string(&pid_file).unwrap();
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-TERM", pid.trim()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let failed = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        tokio::join!(
+            engine.call_tool("optional-live", "task", None),
+            engine.call_tool("optional-live", "task", None)
+        )
+    })
+    .await
+    .expect("dead upstream calls must fail within a bounded interval");
+    assert!(failed.0.is_err());
+    assert!(failed.1.is_err());
+
+    let degraded = engine.health_snapshot().await.servers.remove(0);
+    assert_eq!(degraded.state, UpstreamState::Backoff);
+    assert_eq!(degraded.attempts, 2);
+    assert_eq!(
+        degraded.consecutive_failures, 1,
+        "simultaneous failures from one generation must increment once"
+    );
+    assert_eq!(
+        degraded.last_error_code.as_deref(),
+        Some("connection_failed")
+    );
+    let due = degraded.next_retry_at_ms.unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    tokio::time::sleep(std::time::Duration::from_millis(
+        due.saturating_sub(now).saturating_add(50),
+    ))
+    .await;
+
+    assert_eq!(engine.retry_unhealthy().await, 1);
+    let recovered = engine.health_snapshot().await.servers.remove(0);
+    assert_eq!(recovered.state, UpstreamState::Healthy);
+    assert_eq!(recovered.consecutive_failures, 0);
+    assert_eq!(recovered.next_retry_at_ms, None);
+    assert!(recovered.tool_count > 0);
+    engine.shutdown().await;
 }

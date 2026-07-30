@@ -11,6 +11,7 @@ use rmcp::service::RunningService;
 use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::process::Command;
 use tokio::sync::RwLock;
 
@@ -46,12 +47,16 @@ type McpClientService = RunningService<rmcp::RoleClient, ()>;
 struct ConnectedServer {
     service: McpClientService,
     tools: Vec<Tool>,
+    generation: u64,
+    last_successful_call: AtomicU64,
 }
 
 const RETRY_BASE_SECS: u64 = 5;
 const RETRY_MAX_SECS: u64 = 300;
 const CONNECT_TIMEOUT_SECS: u64 = 15;
 static SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static CONNECTION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static CALL_COMPLETION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// Machine-readable connection state for one optional upstream.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -84,6 +89,24 @@ pub struct ProxyHealthSnapshot {
     pub healthy: usize,
     pub degraded: usize,
     pub servers: Vec<UpstreamHealth>,
+}
+
+impl ProxyHealthSnapshot {
+    /// Normalize every untrusted free-form health field before it crosses a
+    /// JSON, cache, log, or preflight boundary.
+    pub fn sanitized(mut self) -> Self {
+        self.session_id = safe_session_id(&self.session_id);
+        for server in &mut self.servers {
+            server.name = safe_upstream_id(&server.name);
+            server.transport = safe_transport(&server.transport).to_string();
+            server.last_error_code = server
+                .last_error_code
+                .as_deref()
+                .map(safe_error_code)
+                .map(str::to_string);
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +176,7 @@ impl ProxyEngine {
             degraded: servers.len().saturating_sub(healthy),
             servers,
         }
+        .sanitized()
     }
 
     /// Retry due failed upstreams once each. Exponential backoff bounds retries
@@ -165,12 +189,12 @@ impl ProxyEngine {
         let due: Vec<String> = {
             let health = self.health.read().await;
             health
-                .values()
-                .filter(|record| {
+                .iter()
+                .filter(|(_, record)| {
                     record.state != UpstreamState::Healthy
                         && record.next_retry_at_ms.is_some_and(|retry| retry <= now)
                 })
-                .map(|record| record.name.clone())
+                .map(|(name, _)| name.clone())
                 .collect()
         };
         let configs = self.configs.read().await.clone();
@@ -217,7 +241,7 @@ impl ProxyEngine {
                     .or_insert_with(|| initial_health(name, config));
                 record_success(record, tool_count, now);
                 tracing::info!(
-                    upstream = name,
+                    upstream = %safe_upstream_id(name),
                     tool_count,
                     proxy_session = %self.session_id,
                     "MCP upstream connected"
@@ -234,13 +258,13 @@ impl ProxyEngine {
                 };
                 match visibility {
                     FailureVisibility::Error => tracing::error!(
-                        upstream = name,
+                        upstream = %safe_upstream_id(name),
                         error_code = code,
                         proxy_session = %self.session_id,
                         "Optional MCP upstream unavailable; CAS will continue and retry"
                     ),
                     FailureVisibility::Debug => tracing::debug!(
-                        upstream = name,
+                        upstream = %safe_upstream_id(name),
                         error_code = code,
                         proxy_session = %self.session_id,
                         "Optional MCP upstream retry failed"
@@ -406,7 +430,10 @@ impl ProxyEngine {
             if !configs.contains_key(name) {
                 if let Some(removed) = servers.remove(name) {
                     let _ = removed.service.cancel().await;
-                    tracing::info!(upstream = name, "MCP upstream disconnected");
+                    tracing::info!(
+                        upstream = %safe_upstream_id(name),
+                        "MCP upstream disconnected"
+                    );
                 }
                 self.health.write().await.remove(name);
             }
@@ -425,7 +452,10 @@ impl ProxyEngine {
             if servers.contains_key(name) {
                 if let Some(removed) = servers.remove(name) {
                     let _ = removed.service.cancel().await;
-                    tracing::info!(upstream = name, "MCP upstream config changed");
+                    tracing::info!(
+                        upstream = %safe_upstream_id(name),
+                        "MCP upstream config changed"
+                    );
                 }
             }
             self.health
@@ -452,21 +482,23 @@ impl ProxyEngine {
     ) -> Result<Value> {
         use rmcp::model::CallToolRequestParams;
 
-        let servers = self.servers.read().await;
-        let server = servers
-            .get(server_name)
-            .with_context(|| format!("server '{server_name}' not connected"))?;
-
-        let result = server
-            .service
-            .call_tool(CallToolRequestParams {
-                name: tool_name.to_string().into(),
-                arguments,
-                meta: None,
-                task: None,
-            })
+        let result = self
+            .call_upstream(
+                server_name,
+                CallToolRequestParams {
+                    name: tool_name.to_string().into(),
+                    arguments,
+                    meta: None,
+                    task: None,
+                },
+            )
             .await
-            .with_context(|| format!("tool call '{tool_name}' on '{server_name}' failed"))?;
+            .with_context(|| {
+                format!(
+                    "tool call '{tool_name}' on '{}' failed",
+                    safe_upstream_id(server_name)
+                )
+            })?;
 
         serde_json::to_value(result).context("failed to serialize tool result")
     }
@@ -480,12 +512,37 @@ impl ProxyEngine {
     ) -> Result<rmcp::model::CallToolResult> {
         use rmcp::model::CallToolRequestParams;
 
+        self.call_upstream(
+            server_name,
+            CallToolRequestParams {
+                name: tool_name.to_string().into(),
+                arguments,
+                meta: None,
+                task: None,
+            },
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "tool call '{tool_name}' on '{}' failed",
+                safe_upstream_id(server_name)
+            )
+        })
+    }
+
+    async fn call_upstream(
+        &self,
+        server_name: &str,
+        request: rmcp::model::CallToolRequestParams,
+    ) -> Result<rmcp::model::CallToolResult> {
         let servers = self.servers.read().await;
         let server = servers.get(server_name).with_context(|| {
-            let available: Vec<&str> = servers.keys().map(|s| s.as_str()).collect();
+            let mut available: Vec<String> =
+                servers.keys().map(|name| safe_upstream_id(name)).collect();
+            available.sort();
             format!(
                 "server '{}' not connected. Available: {}",
-                server_name,
+                safe_upstream_id(server_name),
                 if available.is_empty() {
                     "(none)".to_string()
                 } else {
@@ -493,17 +550,72 @@ impl ProxyEngine {
                 }
             )
         })?;
+        let generation = server.generation;
+        let result = server.service.call_tool(request).await;
+        let completion = CALL_COMPLETION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        match result {
+            Ok(result) => {
+                server
+                    .last_successful_call
+                    .fetch_max(completion, Ordering::Release);
+                Ok(result)
+            }
+            Err(error) => {
+                drop(servers);
+                if let Some(code) = classify_live_failure(&error) {
+                    self.record_live_failure(server_name, generation, completion, code)
+                        .await;
+                }
+                Err(error.into())
+            }
+        }
+    }
 
-        server
-            .service
-            .call_tool(CallToolRequestParams {
-                name: tool_name.to_string().into(),
-                arguments,
-                meta: None,
-                task: None,
-            })
-            .await
-            .with_context(|| format!("tool call '{tool_name}' on '{server_name}' failed"))
+    async fn record_live_failure(
+        &self,
+        server_name: &str,
+        generation: u64,
+        failure_completion: u64,
+        code: &'static str,
+    ) {
+        let mut servers = self.servers.write().await;
+        let should_remove = servers.get(server_name).is_some_and(|server| {
+            live_failure_applies(
+                server.generation,
+                generation,
+                server.last_successful_call.load(Ordering::Acquire),
+                failure_completion,
+            )
+        });
+        if !should_remove {
+            return;
+        }
+        let removed = servers
+            .remove(server_name)
+            .expect("generation checked immediately before removal");
+        let visibility = {
+            let mut health = self.health.write().await;
+            let Some(record) = health.get_mut(server_name) else {
+                return;
+            };
+            record_failure(record, code, now_ms())
+        };
+        drop(servers);
+        let _ = removed.service.cancel().await;
+        match visibility {
+            FailureVisibility::Error => tracing::error!(
+                upstream = %safe_upstream_id(server_name),
+                error_code = code,
+                proxy_session = %self.session_id,
+                "Optional MCP upstream connection failed after startup; retry scheduled"
+            ),
+            FailureVisibility::Debug => tracing::debug!(
+                upstream = %safe_upstream_id(server_name),
+                error_code = code,
+                proxy_session = %self.session_id,
+                "Optional MCP upstream connection failure already recorded"
+            ),
+        }
     }
 
     /// Gracefully shut down all connected servers.
@@ -511,7 +623,10 @@ impl ProxyEngine {
         let mut servers = self.servers.write().await;
         for (name, server) in servers.drain() {
             if let Err(e) = server.service.cancel().await {
-                eprintln!("[proxy] Error shutting down '{name}': {e}");
+                eprintln!(
+                    "[proxy] Error shutting down '{}': {e}",
+                    safe_upstream_id(&name)
+                );
             }
         }
     }
@@ -536,7 +651,7 @@ fn new_session_id() -> String {
 
 fn initial_health(name: &str, config: &ServerConfig) -> UpstreamHealth {
     UpstreamHealth {
-        name: name.to_string(),
+        name: safe_upstream_id(name),
         transport: transport_name(config).to_string(),
         state: UpstreamState::Degraded,
         attempts: 0,
@@ -608,6 +723,89 @@ fn classify_error(error: &anyhow::Error) -> &'static str {
     }
 }
 
+fn classify_live_failure(error: &rmcp::service::ServiceError) -> Option<&'static str> {
+    use rmcp::service::ServiceError;
+    match error {
+        ServiceError::TransportSend(_)
+        | ServiceError::TransportClosed
+        | ServiceError::UnexpectedResponse => Some("connection_failed"),
+        ServiceError::Timeout { .. } => Some("timeout"),
+        ServiceError::McpError(_) | ServiceError::Cancelled { .. } => None,
+        _ => None,
+    }
+}
+
+fn safe_upstream_id(name: &str) -> String {
+    if is_generated_upstream_id(name) {
+        return name.to_string();
+    }
+    let digest = Sha256::digest(name.as_bytes());
+    format!("upstream-{}", hex_prefix(&digest, 16))
+}
+
+fn safe_session_id(session_id: &str) -> String {
+    if session_id.len() <= 96
+        && session_id.strip_prefix("proxy-").is_some_and(|suffix| {
+            !suffix.is_empty()
+                && suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || byte == b'-')
+        })
+    {
+        session_id.to_string()
+    } else {
+        "proxy-unknown".to_string()
+    }
+}
+
+fn is_generated_upstream_id(name: &str) -> bool {
+    name.strip_prefix("upstream-").is_some_and(|suffix| {
+        suffix.len() == 32
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+fn hex_prefix(bytes: &[u8], take: usize) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(take.saturating_mul(2));
+    for byte in bytes.iter().take(take) {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn safe_transport(transport: &str) -> &'static str {
+    match transport {
+        "stdio" => "stdio",
+        "http" => "http",
+        "sse" => "sse",
+        _ => "unknown",
+    }
+}
+
+fn safe_error_code(code: &str) -> &'static str {
+    match code {
+        "authentication_required" => "authentication_required",
+        "unexpected_content_type" => "unexpected_content_type",
+        "invalid_url" => "invalid_url",
+        "timeout" => "timeout",
+        "connection_failed" => "connection_failed",
+        _ => "unknown",
+    }
+}
+
+fn live_failure_applies(
+    installed_generation: u64,
+    failed_generation: u64,
+    last_successful_call: u64,
+    failure_completion: u64,
+) -> bool {
+    installed_generation == failed_generation && last_successful_call <= failure_completion
+}
+
 /// Connect to a single upstream MCP server and discover its tools.
 async fn connect_server(name: &str, config: &ServerConfig) -> Result<ConnectedServer> {
     use rmcp::service::ServiceExt;
@@ -668,6 +866,8 @@ async fn connect_server(name: &str, config: &ServerConfig) -> Result<ConnectedSe
     Ok(ConnectedServer {
         service,
         tools: tools_result.tools,
+        generation: CONNECTION_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+        last_successful_call: AtomicU64::new(0),
     })
 }
 
@@ -1198,6 +1398,103 @@ mod tests {
                 "UnexpectedContentType: received text/plain body=private"
             )),
             "unexpected_content_type"
+        );
+        assert_eq!(
+            classify_live_failure(&rmcp::service::ServiceError::McpError(
+                rmcp::ErrorData::invalid_params("normal tool failure", None)
+            )),
+            None,
+            "application-level MCP errors are not connection failures"
+        );
+        assert_eq!(
+            classify_live_failure(&rmcp::service::ServiceError::TransportClosed),
+            Some("connection_failed")
+        );
+    }
+
+    #[test]
+    fn unsafe_health_fields_are_cryptographically_pseudonymized_and_allowlisted() {
+        let first_raw = "https://user:token@example.invalid/private";
+        let second_raw = "/home/operator/.config/secret-token";
+        let snapshot = ProxyHealthSnapshot {
+            session_id: "https://token@example.invalid/session".to_string(),
+            generated_at_ms: 1,
+            healthy: 0,
+            degraded: 2,
+            servers: vec![
+                UpstreamHealth {
+                    name: first_raw.to_string(),
+                    transport: "Bearer private".to_string(),
+                    state: UpstreamState::Backoff,
+                    attempts: 1,
+                    consecutive_failures: 1,
+                    tool_count: 0,
+                    last_error_code: Some("token=private\ncontrol".to_string()),
+                    last_attempt_at_ms: Some(1),
+                    next_retry_at_ms: Some(5_001),
+                },
+                UpstreamHealth {
+                    name: second_raw.to_string(),
+                    transport: "http".to_string(),
+                    state: UpstreamState::Backoff,
+                    attempts: 1,
+                    consecutive_failures: 1,
+                    tool_count: 0,
+                    last_error_code: Some("timeout".to_string()),
+                    last_attempt_at_ms: Some(1),
+                    next_retry_at_ms: Some(5_001),
+                },
+            ],
+        }
+        .sanitized();
+
+        assert_ne!(snapshot.servers[0].name, snapshot.servers[1].name);
+        assert_eq!(snapshot.session_id, "proxy-unknown");
+        for server in &snapshot.servers {
+            assert!(is_generated_upstream_id(&server.name));
+            assert_eq!(server.name.len(), "upstream-".len() + 32);
+        }
+        assert_eq!(snapshot.servers[0].transport, "unknown");
+        assert_eq!(
+            snapshot.servers[0].last_error_code.as_deref(),
+            Some("unknown")
+        );
+        assert_eq!(snapshot.servers[1].transport, "http");
+        assert_eq!(
+            snapshot.servers[1].last_error_code.as_deref(),
+            Some("timeout")
+        );
+        assert_eq!(
+            snapshot.clone().sanitized(),
+            snapshot,
+            "sanitization must be idempotent for cached snapshots"
+        );
+        let json = serde_json::to_string(&snapshot).unwrap();
+        for forbidden in [
+            first_raw,
+            second_raw,
+            "Bearer private",
+            "token=private",
+            "control",
+            "https://token@example.invalid/session",
+        ] {
+            assert!(!json.contains(forbidden), "{forbidden:?} leaked: {json}");
+        }
+    }
+
+    #[test]
+    fn live_failure_ordering_respects_generation_and_recorded_success() {
+        assert!(
+            live_failure_applies(7, 7, 10, 11),
+            "same-generation failure after the last success may degrade"
+        );
+        assert!(
+            !live_failure_applies(7, 7, 12, 11),
+            "success recorded before transition lock must suppress stale failure"
+        );
+        assert!(
+            !live_failure_applies(8, 7, 0, 11),
+            "completion from a removed generation cannot affect its replacement"
         );
     }
 

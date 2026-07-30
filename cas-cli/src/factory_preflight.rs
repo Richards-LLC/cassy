@@ -185,6 +185,7 @@ pub struct ProxySnapshotInput {
 #[cfg(feature = "mcp-proxy")]
 impl From<cmcp_core::ProxyHealthSnapshot> for ProxySnapshotInput {
     fn from(snapshot: cmcp_core::ProxyHealthSnapshot) -> Self {
+        let snapshot = snapshot.sanitized();
         Self {
             generated_at_ms: snapshot.generated_at_ms,
             healthy: snapshot.healthy,
@@ -1400,6 +1401,75 @@ mod tests {
         let json = serde_json::to_string(&report).unwrap();
         for forbidden in ["https://", "Bearer ", "token=", "/home/"] {
             assert!(!json.contains(forbidden), "{forbidden} leaked: {json}");
+        }
+    }
+
+    #[cfg(feature = "mcp-proxy")]
+    #[test]
+    fn forged_cached_proxy_health_is_sanitized_before_preflight_json() {
+        let temp = tempfile::tempdir().unwrap();
+        let first_name = "https://user:token@example.invalid/private";
+        let second_name = "/home/operator/.config/secret-token";
+        let forged = cmcp_core::ProxyHealthSnapshot {
+            session_id: "forged-cache".to_string(),
+            generated_at_ms: 42,
+            healthy: 0,
+            degraded: 2,
+            servers: vec![
+                cmcp_core::UpstreamHealth {
+                    name: first_name.to_string(),
+                    transport: "Bearer cache-secret".to_string(),
+                    state: cmcp_core::UpstreamState::Backoff,
+                    attempts: 1,
+                    consecutive_failures: 1,
+                    tool_count: 0,
+                    last_error_code: Some("token=cache-secret\ncontrol".to_string()),
+                    last_attempt_at_ms: Some(40),
+                    next_retry_at_ms: Some(50),
+                },
+                cmcp_core::UpstreamHealth {
+                    name: second_name.to_string(),
+                    transport: "http".to_string(),
+                    state: cmcp_core::UpstreamState::Backoff,
+                    attempts: 1,
+                    consecutive_failures: 1,
+                    tool_count: 0,
+                    last_error_code: Some("timeout".to_string()),
+                    last_attempt_at_ms: Some(40),
+                    next_retry_at_ms: Some(50),
+                },
+            ],
+        };
+        std::fs::write(
+            temp.path().join("proxy_health.json"),
+            serde_json::to_vec(&forged).unwrap(),
+        )
+        .unwrap();
+
+        let mut facts = healthy_facts();
+        facts.proxy = collect_proxy_facts(temp.path(), None);
+        let report = build_report(facts);
+        let servers = &report.optional_upstreams.servers;
+        assert_eq!(servers.len(), 2);
+        assert_ne!(servers[0].name, servers[1].name);
+        for server in servers {
+            assert!(server.name.starts_with("upstream-"));
+            assert_eq!(server.name.len(), "upstream-".len() + 32);
+        }
+        assert_eq!(servers[0].transport, "unknown");
+        assert_eq!(servers[0].last_error_code.as_deref(), Some("unknown"));
+        assert_eq!(servers[1].transport, "http");
+        assert_eq!(servers[1].last_error_code.as_deref(), Some("timeout"));
+
+        let json = serde_json::to_string(&report).unwrap();
+        for forbidden in [
+            first_name,
+            second_name,
+            "Bearer cache-secret",
+            "token=cache-secret",
+            "control",
+        ] {
+            assert!(!json.contains(forbidden), "{forbidden:?} leaked: {json}");
         }
     }
 

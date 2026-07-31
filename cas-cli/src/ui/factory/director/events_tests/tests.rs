@@ -260,6 +260,66 @@ fn test_detect_worker_idle() {
 }
 
 #[test]
+fn test_just_registered_worker_is_suppressed_during_spawn_assignment_window() {
+    let registered_at = chrono::Utc::now();
+    let mut detector =
+        DirectorEventDetector::new(vec!["swift-fox".to_string()], "supervisor".to_string());
+    let mut data = idle_data_for("agent-1", "swift-fox");
+    data.agents[0].registered_at = registered_at;
+    data.agents[0].last_heartbeat = None;
+    detector.initialize(&data);
+
+    let mut saw_idle = false;
+    for offset_secs in [2, 4, 6, 8] {
+        saw_idle |= detector
+            .detect_changes_at(
+                &data,
+                None,
+                registered_at + chrono::Duration::seconds(offset_secs),
+            )
+            .iter()
+            .any(|event| matches!(event, DirectorEvent::WorkerIdle { .. }));
+    }
+
+    assert!(
+        !saw_idle,
+        "a newly registered worker is expected to be taskless during spawn -> assignment"
+    );
+}
+
+#[test]
+fn test_finished_worker_still_emits_once_after_spawn_grace() {
+    let registered_at = chrono::Utc::now() - chrono::Duration::minutes(5);
+    let now = chrono::Utc::now();
+    let mut detector =
+        DirectorEventDetector::new(vec!["swift-fox".to_string()], "supervisor".to_string());
+    let mut working = working_data_for("agent-1", "swift-fox", "task-1", "Finished task");
+    working.agents[0].registered_at = registered_at;
+    detector.initialize(&working);
+
+    let mut idle = idle_data_for("agent-1", "swift-fox");
+    idle.agents[0].registered_at = registered_at;
+    idle.agents[0].last_heartbeat = None;
+    let first = detector.detect_changes_at(&idle, None, now);
+    let second = detector.detect_changes_at(&idle, None, now + chrono::Duration::seconds(2));
+    let third = detector.detect_changes_at(&idle, None, now + chrono::Duration::seconds(4));
+
+    assert!(!first.iter().any(|event| matches!(event, DirectorEvent::WorkerIdle { .. })));
+    assert_eq!(
+        second
+            .iter()
+            .filter(|event| matches!(event, DirectorEvent::WorkerIdle { .. }))
+            .count(),
+        1,
+        "a worker that finished real work must remain actionable after the spawn grace"
+    );
+    assert!(
+        !third.iter().any(|event| matches!(event, DirectorEvent::WorkerIdle { .. })),
+        "the actionable idle signal must still emit exactly once per idle streak"
+    );
+}
+
+#[test]
 fn test_worker_idle_payload_includes_close_rejected_task_state() {
     let mut detector =
         DirectorEventDetector::new(vec!["swift-fox".to_string()], "supervisor".to_string());

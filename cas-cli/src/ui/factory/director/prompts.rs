@@ -2314,6 +2314,83 @@ mod tests {
     }
 
     #[test]
+    fn queued_worker_idle_is_dropped_if_assignment_lands_before_injection() {
+        let event = DirectorEvent::WorkerIdle {
+            worker: "swift-fox".to_string(),
+            active_task: None,
+        };
+        let idle_data = make_data(0);
+        let prompt = generate_prompt(
+            &event,
+            &idle_data,
+            &idle_data,
+            "supervisor",
+            &default_config(),
+            codex(),
+            codex(),
+            &HashSet::new(),
+            None,
+        )
+        .expect("taskless worker should initially enqueue an idle prompt");
+
+        let mut assigned_data = make_data(0);
+        assigned_data.in_progress_tasks = vec![task_with_status(
+            "cas-next",
+            Some("swift-fox"),
+            TaskStatus::InProgress,
+        )];
+        assigned_data.agents[0].current_task = Some("cas-next".to_string());
+
+        assert!(
+            !prompt_is_still_deliverable(&prompt, &assigned_data),
+            "last-mile delivery must drop an already-enqueued WorkerIdle after assignment"
+        );
+    }
+
+    #[test]
+    fn worker_idle_text_distinguishes_never_started_from_finished_and_free() {
+        let event = DirectorEvent::WorkerIdle {
+            worker: "swift-fox".to_string(),
+            active_task: None,
+        };
+        let config = default_config();
+        let never_started = make_data(0);
+        let never_prompt = generate_prompt(
+            &event,
+            &never_started,
+            &never_started,
+            "supervisor",
+            &config,
+            codex(),
+            codex(),
+            &HashSet::new(),
+            None,
+        )
+        .unwrap();
+        assert!(never_prompt.text.contains("has not started a task yet"));
+
+        let mut finished = make_data(0);
+        finished.agents[0].registered_at -= chrono::Duration::minutes(5);
+        finished.agents[0].latest_activity = Some((
+            "closed cas-done".to_string(),
+            chrono::Utc::now() - chrono::Duration::seconds(30),
+        ));
+        let finished_prompt = generate_prompt(
+            &event,
+            &finished,
+            &finished,
+            "supervisor",
+            &config,
+            codex(),
+            codex(),
+            &HashSet::new(),
+            None,
+        )
+        .unwrap();
+        assert!(finished_prompt.text.contains("finished its task and is now free"));
+    }
+
+    #[test]
     fn test_worker_idle_no_ready_tasks() {
         let event = DirectorEvent::WorkerIdle {
             worker: "swift-fox".to_string(),

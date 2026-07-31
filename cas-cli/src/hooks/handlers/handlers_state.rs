@@ -593,22 +593,6 @@ pub fn handle_subagent_start(
         ));
     }
 
-    let capability = match cas_store::bind_server_verifier_handoff(cas_root, &parent_id, child_id) {
-        Ok(capability) => capability,
-        Err(_) => {
-            return Ok(HookOutput::with_system_context(
-                    "CAS task-verifier handoff is missing, ambiguous, expired, or not bound to an active exact dispatch; verification will fail closed."
-                        .to_string(),
-                ));
-        }
-    };
-    if capability.issuer_agent_id != parent_id {
-        return Ok(HookOutput::with_system_context(
-            "CAS task-verifier handoff parent binding is invalid; verification will fail closed."
-                .to_string(),
-        ));
-    }
-
     let existing = agent_store.get(child_id).ok();
     let mut child = existing.clone().unwrap_or_else(|| {
         Agent::new_sub_agent(
@@ -620,19 +604,18 @@ pub fn handle_subagent_start(
     child.name = "task-verifier".to_string();
     child.agent_type = crate::types::AgentType::SubAgent;
     child.role = AgentRole::Standard;
-    child.parent_id = Some(parent_id);
+    child.parent_id = Some(parent_id.clone());
     child.factory_session = issuer.factory_session.clone();
     child.status = crate::types::AgentStatus::Active;
     child.last_heartbeat = chrono::Utc::now();
-    let registry_result = if existing.is_some() {
-        agent_store.update(&child)
-    } else {
-        agent_store.register(&child)
-    };
-    if registry_result.is_err() {
-        return Ok(HookOutput::with_system_context(
-            "CAS could not register the verifier child; verification will fail closed.".to_string(),
-        ));
+    match cas_store::bind_server_verifier_handoff_and_register_child(cas_root, &parent_id, &child) {
+        Ok(_) => {}
+        Err(_) => {
+            return Ok(HookOutput::with_system_context(
+                    "CAS could not atomically register the verifier child and bind its exact active handoff; verification will fail closed."
+                        .to_string(),
+            ));
+        }
     }
 
     Ok(HookOutput::empty())

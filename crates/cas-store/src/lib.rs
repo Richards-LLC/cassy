@@ -101,7 +101,8 @@ pub use loop_store::{LOOP_SCHEMA, LoopStore, SqliteLoopStore};
 // Verification store for task quality gates
 pub use verification_store::{
     IssuedVerifierCapability, SqliteVerificationStore, VERIFICATION_SCHEMA, VerificationStore,
-    add_verification_with_conn, bind_server_verifier_handoff, bind_verifier_capability,
+    add_verification_with_conn, bind_server_verifier_handoff,
+    bind_server_verifier_handoff_and_register_child, bind_verifier_capability,
     cancel_unbound_server_verifier_handoff, claim_verification_dispatch,
     claim_verification_dispatch_bound, consume_server_verifier_handoff_with_conn,
     consume_verifier_capability_with_conn, create_verification_dispatch,

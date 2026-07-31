@@ -294,9 +294,22 @@ fn seed_direct_close_delivery(
         return;
     }
 
+    let mut supervisor = Agent::new(
+        "delivery-supervisor-session".to_string(),
+        "delivery-supervisor".to_string(),
+    );
+    supervisor.role = AgentRole::Supervisor;
+    let agent_store = open_agent_store(cas_root).expect("agent store");
+    agent_store
+        .register(&supervisor)
+        .expect("register delivery supervisor");
+
     let mut verification =
         Verification::new(format!("ver-{task_id}"), task_id.to_string());
-    verification.dispatch_id = Some(dispatch.id);
+    verification.provenance = cas::types::VerificationProvenance::SupervisorDirect;
+    verification.agent_id = Some(supervisor.id.clone());
+    verification.issuer_agent_id = Some(supervisor.id.clone());
+    verification.dispatch_id = Some(dispatch.id.clone());
     verification.status = if state == WorkerDeliveryState::VerificationFailed {
         VerificationStatus::Rejected
     } else {
@@ -307,6 +320,18 @@ fn seed_direct_close_delivery(
         .unwrap()
         .add(&verification)
         .expect("seed verdict");
+    let conn = rusqlite::Connection::open(cas_root.join("cas.db")).expect("db");
+    cas_store::resolve_verification_dispatch_with_conn(
+        &conn,
+        &dispatch.id,
+        &supervisor.id,
+        None,
+        true,
+    )
+    .expect("resolve seeded delivery dispatch");
+    agent_store
+        .unregister(&supervisor.id)
+        .expect("fixture supervisor goes offline after verdict");
 
     if state == WorkerDeliveryState::VerificationFailed {
         cas_store::transition_worker_delivery(

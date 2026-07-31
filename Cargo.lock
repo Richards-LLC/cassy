@@ -1083,12 +1083,12 @@ name = "code-mode-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cas-types",
  "futures",
  "http 1.4.0",
  "rmcp 0.16.0",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "tokio",
  "toml",

@@ -16,7 +16,7 @@ rmcp = { version = "0.16", features = ["client", "transport-child-process", "tra
 futures = "0.3"
 http = "1"
 tracing = "0.1"
-sha2 = "0.10"
+cas-types = { path = "../cas-types" }
 
 [dev-dependencies]
 tempfile = "3.14"

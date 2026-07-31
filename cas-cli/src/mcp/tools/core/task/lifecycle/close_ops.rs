@@ -554,6 +554,35 @@ impl CasCore {
         } else {
             (task.status, task.pending_verification)
         };
+
+        // Receipt/delivery/dispatch persistence is the immutable recovery
+        // boundary, but it is not a completed worker-to-supervisor handoff
+        // until the exact lease generation is gone. Keep task projection
+        // behind this gate so a failed cleanup cannot advertise review-ready
+        // state while the worker still visibly owns the task. An exact retry
+        // reuses the boundary above and reconciles this step idempotently.
+        if let Some(lease_epoch) = lease_epoch {
+            let cleanup_complete = match agent_store.release_lease_if_owner_epoch(
+                &task.id,
+                &caller.id,
+                lease_epoch,
+                "Immutable worker completion receipt accepted for supervisor delivery",
+            ) {
+                Ok(true) => true,
+                // Another concurrent exact submission may have completed the
+                // same release first. Only absence of an active lease makes
+                // that conditional miss a successful reconciliation.
+                Ok(false) => matches!(agent_store.get_lease(&task.id), Ok(None)),
+                Err(_) => false,
+            };
+            if !cleanup_complete {
+                return Ok(Self::tool_error(format!(
+                    "DELIVERY RECEIPT HANDOFF INCOMPLETE\n\nReceipt: {}\nTransaction: {}\nState: {}\n\nThe immutable delivery boundary is safely persisted, but exact task-lease cleanup did not complete, so CAS did not report a clean handoff or advance this invocation's task projection. The lease remains active or could not be verified as released.\n\nRemediation: resolve the lease cleanup failure, then retry the exact same completion_receipt from this worker session. Do not create a replacement receipt. If lease ownership changed, a supervisor must reconcile the task lease before delivery continues.",
+                    receipt.id, transaction.id, transaction.state
+                )));
+            }
+        }
+
         let projection_coherent = was_existing
             && task.status == projected_status
             && task.pending_verification == projected_pending_verification
@@ -575,14 +604,6 @@ impl CasCore {
                 )),
                 data: None,
             })?;
-        }
-        if let Some(lease_epoch) = lease_epoch {
-            let _ = agent_store.release_lease_if_owner_epoch(
-                &task.id,
-                &caller.id,
-                lease_epoch,
-                "Immutable worker completion receipt accepted for supervisor delivery",
-            );
         }
 
         let next = match transaction.state {

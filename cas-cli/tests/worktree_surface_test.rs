@@ -2899,6 +2899,7 @@ async fn completion_receipt_authority_is_exact_active_lease_session() {
     run_git(&["commit", "-m", "receipt authority fixture"], &worker_path);
 
     let task_store = open_task_store(&cas_root).expect("task store");
+    let agent_store = open_agent_store(&cas_root).expect("agent store");
     let mut task = Task::new(
         "cas-receipt-authority".to_string(),
         "Exact receipt lease authority".to_string(),
@@ -2912,8 +2913,7 @@ async fn completion_receipt_authority_is_exact_active_lease_session() {
     });
     task_store.add(&task).expect("add receipt task");
     assert!(matches!(
-        open_agent_store(&cas_root)
-            .unwrap()
+        agent_store
             .try_claim(&task.id, owner_id, 600, Some("exact receipt owner"))
             .unwrap(),
         cas::types::ClaimResult::Success(_)
@@ -3009,6 +3009,169 @@ async fn completion_receipt_authority_is_exact_active_lease_session() {
         .expect("unleased receipt returns a typed rejection");
     assert!(get_text(&unleased).contains("exact active task lease"));
     assert_eq!(durable_close_snapshot(&cas_root), before_unleased);
+
+    // A receipt may establish its immutable recovery boundary before task
+    // projection, but it must never claim a clean handoff while the exact
+    // worker lease is still active. Inject a real SQLite failure into the
+    // public close path, then prove an exact retry reconciles without
+    // duplicating delivery state or touching an unrelated lease.
+    let mut release_failure_task = Task::new(
+        "cas-receipt-release-failure".to_string(),
+        "Receipt lease-release recovery".to_string(),
+    );
+    release_failure_task.status = TaskStatus::InProgress;
+    release_failure_task.depth = TaskDepth::Deep;
+    release_failure_task.assignee = Some("alice".to_string());
+    release_failure_task.deliverables.work_target = task.deliverables.work_target.clone();
+    task_store.add(&release_failure_task).unwrap();
+    assert!(matches!(
+        agent_store
+            .try_claim(
+                &release_failure_task.id,
+                owner_id,
+                600,
+                Some("receipt release failure fixture"),
+            )
+            .unwrap(),
+        cas::types::ClaimResult::Success(_)
+    ));
+    let unrelated_before = agent_store
+        .get_lease(&task.id)
+        .unwrap()
+        .expect("unrelated original task lease");
+    let release_failure_receipt =
+        delivery_receipt(&release_failure_task.id, owner_id, &repo, "alice");
+    {
+        let conn = rusqlite::Connection::open(cas_root.join("cas.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_completion_receipt_lease_release
+             BEFORE UPDATE OF status ON task_leases
+             WHEN OLD.task_id = 'cas-receipt-release-failure'
+              AND OLD.status = 'active' AND NEW.status = 'released'
+             BEGIN
+               SELECT RAISE(ABORT, 'forced completion receipt lease release failure');
+             END;",
+        )
+        .unwrap();
+    }
+    let release_failure = delivery_service(&cas_root, owner_id)
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "close",
+            "id": release_failure_task.id,
+            "reason": "injected lease release failure",
+            "completion_receipt": serde_json::to_string(&release_failure_receipt).unwrap(),
+        }))))
+        .await
+        .expect("lease-release failure is a typed public result");
+    let release_failure_text = get_text(&release_failure);
+    assert!(
+        release_failure_text.contains("DELIVERY RECEIPT HANDOFF INCOMPLETE")
+            && release_failure_text.contains("lease remains active")
+            && release_failure_text.contains("retry the exact same completion_receipt")
+            && !release_failure_text.contains("accepted idempotently"),
+        "failure must report an honest actionable recovery state:\n{release_failure_text}"
+    );
+    let failed_projection = task_store.get(&release_failure_task.id).unwrap();
+    assert_eq!(failed_projection.status, TaskStatus::InProgress);
+    assert!(!failed_projection.pending_verification);
+    assert!(
+        failed_projection
+            .deliverables
+            .factory_branch_anchor
+            .is_none()
+    );
+    let active_failed_lease = agent_store
+        .get_lease(&release_failure_task.id)
+        .unwrap()
+        .expect("failed cleanup must leave its exact lease visibly active");
+    assert_eq!(active_failed_lease.agent_id, owner_id);
+    let unrelated_after_failure = agent_store
+        .get_lease(&task.id)
+        .unwrap()
+        .expect("unrelated lease survives failure");
+    assert_eq!(unrelated_after_failure.agent_id, unrelated_before.agent_id);
+    assert_eq!(unrelated_after_failure.epoch, unrelated_before.epoch);
+    assert_eq!(
+        unrelated_after_failure.expires_at,
+        unrelated_before.expires_at
+    );
+    let (_, failed_transaction) =
+        cas_store::get_latest_worker_delivery(&cas_root, &release_failure_task.id)
+            .unwrap()
+            .expect("immutable receipt boundary remains available for reconciliation");
+    assert_eq!(
+        failed_transaction.state,
+        WorkerDeliveryState::AwaitingVerification
+    );
+    assert_eq!(
+        cas_store::list_worker_delivery_events(&cas_root, &failed_transaction.id)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    {
+        let conn = rusqlite::Connection::open(cas_root.join("cas.db")).unwrap();
+        conn.execute_batch("DROP TRIGGER fail_completion_receipt_lease_release;")
+            .unwrap();
+    }
+    let recovered = delivery_service(&cas_root, owner_id)
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "close",
+            "id": release_failure_task.id,
+            "reason": "exact receipt cleanup retry",
+            "completion_receipt": serde_json::to_string(&release_failure_receipt).unwrap(),
+        }))))
+        .await
+        .expect("exact retry reconciles lease cleanup");
+    assert!(
+        get_text(&recovered).contains("Worker delivery receipt accepted idempotently"),
+        "{}",
+        get_text(&recovered)
+    );
+    assert!(
+        agent_store
+            .get_lease(&release_failure_task.id)
+            .unwrap()
+            .is_none(),
+        "successful reconciliation releases the exact lease"
+    );
+    let recovered_task = task_store.get(&release_failure_task.id).unwrap();
+    assert_eq!(recovered_task.status, TaskStatus::PendingSupervisorReview);
+    assert!(recovered_task.pending_verification);
+    let unrelated_after_recovery = agent_store
+        .get_lease(&task.id)
+        .unwrap()
+        .expect("unrelated lease survives reconciliation");
+    assert_eq!(unrelated_after_recovery.agent_id, unrelated_before.agent_id);
+    assert_eq!(unrelated_after_recovery.epoch, unrelated_before.epoch);
+    assert_eq!(
+        unrelated_after_recovery.expires_at,
+        unrelated_before.expires_at
+    );
+    assert_eq!(
+        cas_store::list_worker_delivery_events(&cas_root, &failed_transaction.id)
+            .unwrap()
+            .len(),
+        1,
+        "reconciliation must not duplicate the delivery event"
+    );
+    let conn = rusqlite::Connection::open(cas_root.join("cas.db")).unwrap();
+    let boundary_counts: (i64, i64, i64) = conn
+        .query_row(
+            "SELECT
+               (SELECT COUNT(*) FROM worker_completion_receipts WHERE task_id = ?1),
+               (SELECT COUNT(*) FROM worker_delivery_transactions WHERE task_id = ?1),
+               (SELECT COUNT(*) FROM verification_dispatches WHERE task_id = ?1)",
+            [&release_failure_task.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        boundary_counts,
+        (1, 1, 1),
+        "reconciliation must not duplicate receipt, delivery, or dispatch"
+    );
 
     let owner_service = delivery_service(&cas_root, owner_id);
     let concurrent_owner_service = delivery_service(&cas_root, owner_id);

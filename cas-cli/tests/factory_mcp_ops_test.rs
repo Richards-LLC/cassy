@@ -329,6 +329,7 @@ fn factory_req(action: &str) -> FactoryRequest {
         target: None,
         message: None,
         force: None,
+        dry_run: None,
         // allow_trunk is CoordinationRequest/worktree_merge only — not FactoryRequest
         clear: None,
         branch: None,
@@ -1919,6 +1920,57 @@ async fn test_gc_report_shows_pending_prompts() {
         text.contains("Pending prompts: 2"),
         "Should show 2 prompts: {text}"
     );
+}
+
+#[tokio::test]
+async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
+    let env = FactoryTestEnv::new();
+    let worker = env.cas_root.join("worktrees/dead-cache-worker");
+    let target = worker.join("target/deps");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("artifact.rlib"), vec![0u8; 64]).unwrap();
+    std::fs::write(worker.join("source.rs"), b"source").unwrap();
+    std::fs::write(
+        env.cas_root.join("config.toml"),
+        "[factory]\ntarget_cache_high_watermark_percent = 1\ntarget_cache_low_watermark_percent = 0\ntarget_cache_min_idle_secs = 0\ntarget_cache_retention_count = 0\n",
+    )
+    .unwrap();
+
+    let report = env
+        .service
+        .factory(Parameters(factory_req("gc_report")))
+        .await
+        .unwrap();
+    let report_text = get_text(&report);
+    assert!(report_text.contains("TARGET_CACHE_STATUS_JSON="), "{report_text}");
+    let machine = report_text
+        .lines()
+        .find_map(|line| line.strip_prefix("TARGET_CACHE_STATUS_JSON="))
+        .expect("machine-readable target-cache status line");
+    let machine: serde_json::Value = serde_json::from_str(machine).expect("valid status JSON");
+    assert_eq!(machine["schema_version"], 1);
+    assert_eq!(machine["dry_run"], true);
+    assert!(
+        report_text.contains(&worker.join("target").display().to_string()),
+        "dry-run must report the exact cache path: {report_text}"
+    );
+    assert!(report_text.contains("bytes=64"), "{report_text}");
+
+    let mut preview = factory_req("gc_cleanup");
+    preview.force = Some(true);
+    let preview = env.service.factory(Parameters(preview)).await.unwrap();
+    let preview_text = get_text(&preview);
+    assert!(preview_text.contains("mode=dry-run"), "{preview_text}");
+    assert!(worker.join("target").exists(), "omitted dry_run must not delete");
+
+    let mut cleanup = factory_req("gc_cleanup");
+    cleanup.force = Some(true);
+    cleanup.dry_run = Some(false);
+    let cleanup = env.service.factory(Parameters(cleanup)).await.unwrap();
+    let cleanup_text = get_text(&cleanup);
+    assert!(cleanup_text.contains("reclaimed_bytes=64"), "{cleanup_text}");
+    assert!(!worker.join("target").exists());
+    assert_eq!(std::fs::read(worker.join("source.rs")).unwrap(), b"source");
 }
 
 // =============================================================================

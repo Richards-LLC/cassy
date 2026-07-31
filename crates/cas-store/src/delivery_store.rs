@@ -312,7 +312,8 @@ pub fn create_worker_delivery_with_dispatch(
 ) -> Result<(WorkerDeliveryTransaction, VerificationDispatch)> {
     let mut conn = open(root)?;
     conn.execute_batch(crate::verification_store::VERIFICATION_SCHEMA)?;
-    let tx = conn.transaction()?;
+    // Dispatch lookup and insertion must share the cross-process write lock.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let boundary = VerificationProofBoundary::delivery(
         receipt.id.clone(),
         worker_delivery_transaction_id(&receipt.id),

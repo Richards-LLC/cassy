@@ -907,8 +907,45 @@ pub fn create_verification_dispatch_bound(
 /// Create an exact dispatch on a caller-owned SQLite transaction.
 ///
 /// This is used to make delivery receipt, transaction, and proof-boundary
-/// intent one atomic persistence step.
+/// intent one atomic persistence step. An autocommit connection is promoted
+/// to an IMMEDIATE transaction here; callers with an existing transaction
+/// must acquire its write lock before invoking this function.
 pub fn create_verification_dispatch_bound_with_conn(
+    conn: &Connection,
+    task_id: &str,
+    requester_agent_id: &str,
+    owner_agent_id: &str,
+    boundary: &VerificationProofBoundary,
+    deadline_at: DateTime<Utc>,
+    supervisor_recovery: bool,
+) -> Result<VerificationDispatch> {
+    if conn.is_autocommit() {
+        let tx = ImmediateTx::new(conn)?;
+        let dispatch = create_verification_dispatch_bound_in_transaction(
+            &tx,
+            task_id,
+            requester_agent_id,
+            owner_agent_id,
+            boundary,
+            deadline_at,
+            supervisor_recovery,
+        )?;
+        tx.commit()?;
+        return Ok(dispatch);
+    }
+
+    create_verification_dispatch_bound_in_transaction(
+        conn,
+        task_id,
+        requester_agent_id,
+        owner_agent_id,
+        boundary,
+        deadline_at,
+        supervisor_recovery,
+    )
+}
+
+fn create_verification_dispatch_bound_in_transaction(
     conn: &Connection,
     task_id: &str,
     requester_agent_id: &str,
@@ -3006,6 +3043,115 @@ mod tests {
         .expect("dispatch");
         assert_eq!(resolved.state, VerificationDispatchState::Resolved);
         assert!(resolved.resolved_at.is_some());
+    }
+
+    #[test]
+    fn concurrent_identical_dispatch_creation_is_cross_connection_idempotent() {
+        use std::sync::{Arc, Barrier};
+
+        let (_store, dir) = create_test_store();
+        let event_schema = Connection::open(dir.path().join("cas.db")).expect("event schema db");
+        event_schema
+            .execute_batch(crate::event_store::EVENT_SCHEMA)
+            .expect("event schema");
+        drop(event_schema);
+        let task_id = "cas-dispatch-concurrent";
+        let boundary = VerificationProofBoundary::delivery(
+            "wcr-dispatch-concurrent".to_string(),
+            "wdt-dispatch-concurrent".to_string(),
+        );
+        let deadline = Utc::now() + Duration::minutes(10);
+        let barrier = Arc::new(Barrier::new(16));
+
+        let outcomes = std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for _ in 0..16 {
+                let db_path = dir.path().join("cas.db");
+                let barrier = Arc::clone(&barrier);
+                let boundary = boundary.clone();
+                handles.push(scope.spawn(move || {
+                    let conn = Connection::open(db_path).expect("independent sqlite connection");
+                    conn.busy_timeout(std::time::Duration::from_secs(10))
+                        .expect("busy timeout");
+                    barrier.wait();
+                    create_verification_dispatch_bound_with_conn(
+                        &conn,
+                        task_id,
+                        "worker-a",
+                        "supervisor-a",
+                        &boundary,
+                        deadline,
+                        false,
+                    )
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("dispatch thread must not panic"))
+                .collect::<Vec<_>>()
+        });
+
+        let dispatches = outcomes
+            .into_iter()
+            .map(|outcome| outcome.expect("identical concurrent retry must converge"))
+            .collect::<Vec<_>>();
+        let dispatch_id = dispatches[0].id.clone();
+        assert!(
+            dispatches.iter().all(|dispatch| dispatch.id == dispatch_id),
+            "all identical callers must receive the same durable dispatch"
+        );
+
+        let conn = Connection::open(dir.path().join("cas.db")).expect("inspect db");
+        let counts = conn
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM verification_dispatches WHERE task_id = ?1),
+                    (SELECT COUNT(*) FROM verification_capabilities WHERE task_id = ?1),
+                    (SELECT COUNT(*) FROM events WHERE entity_id = ?1)",
+                params![task_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .expect("durable dispatch boundary counts");
+        assert_eq!(counts, (1, 0, 0));
+
+        let conflicting = create_verification_dispatch_bound_with_conn(
+            &conn,
+            task_id,
+            "worker-a",
+            "other-supervisor",
+            &boundary,
+            deadline,
+            false,
+        )
+        .expect_err("conflicting owner must remain rejected");
+        assert!(
+            conflicting
+                .to_string()
+                .contains("different verification proof boundary")
+        );
+        let counts_after = conn
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM verification_dispatches WHERE task_id = ?1),
+                    (SELECT COUNT(*) FROM verification_capabilities WHERE task_id = ?1),
+                    (SELECT COUNT(*) FROM events WHERE entity_id = ?1)",
+                params![task_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .expect("post-conflict boundary counts");
+        assert_eq!(counts_after, counts);
     }
 
     #[test]

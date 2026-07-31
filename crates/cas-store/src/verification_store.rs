@@ -1115,22 +1115,37 @@ pub fn timeout_verification_dispatch(
 ) -> Result<Option<VerificationDispatch>> {
     let store = SqliteVerificationStore::open(cas_dir)?;
     let conn = store.conn.lock().map_err(lock_err)?;
-    let changed = conn.execute(
-        "UPDATE verification_dispatches
-         SET state = 'timed_out', resolved_at = ?2
-         WHERE id = (
-             SELECT id FROM verification_dispatches
+    let tx = ImmediateTx::new(&conn)?;
+    let dispatch_id: Option<String> = tx
+        .query_row(
+            "SELECT id FROM verification_dispatches
              WHERE task_id = ?1 AND state IN ('pending', 'claimed')
                    AND deadline_at <= ?2
              ORDER BY requested_at DESC, id DESC
-             LIMIT 1
-         )",
-        params![task_id, now.to_rfc3339()],
-    )?;
-    if changed == 0 {
+             LIMIT 1",
+            params![task_id, now.to_rfc3339()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(dispatch_id) = dispatch_id else {
+        tx.commit()?;
         return Ok(None);
+    };
+    let changed = tx.execute(
+        "UPDATE verification_dispatches
+         SET state = 'timed_out', resolved_at = ?2
+         WHERE id = ?1 AND task_id = ?3 AND state IN ('pending', 'claimed')
+               AND deadline_at <= ?2",
+        params![dispatch_id, now.to_rfc3339(), task_id],
+    )?;
+    if changed != 1 {
+        return Err(StoreError::Parse(
+            "verification dispatch timeout selection raced".to_string(),
+        ));
     }
-    get_latest_verification_dispatch_with_conn(&conn, task_id)
+    let timed_out = get_verification_dispatch_with_conn(&tx, &dispatch_id)?;
+    tx.commit()?;
+    Ok(Some(timed_out))
 }
 
 /// Invalidate a reusable resolved proof cycle when task rework begins.

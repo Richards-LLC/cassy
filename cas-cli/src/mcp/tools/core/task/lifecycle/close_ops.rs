@@ -60,6 +60,14 @@ const ASSIGNEE_STALE_SECS: i64 = 300;
 /// verifier-written Error verdict during auto-escalation.
 const DISPATCH_SUMMARY_PREFIX: &str = "Dispatch requested";
 
+pub(crate) fn required_verification_type(task_type: TaskType) -> VerificationType {
+    if task_type == TaskType::Epic {
+        VerificationType::Epic
+    } else {
+        VerificationType::Task
+    }
+}
+
 fn delivery_audit_text_is_portable(value: &str) -> bool {
     if value.chars().any(char::is_control) {
         return false;
@@ -1569,11 +1577,8 @@ impl CasCore {
             if let Ok(verification_store) = self.open_verification_store() {
                 // Determine verification type and agent based on task type
                 let is_epic = task.task_type == TaskType::Epic;
-                let (verification_type, verifier_agent) = if is_epic {
-                    (VerificationType::Epic, "task-verifier")
-                } else {
-                    (VerificationType::Task, "task-verifier")
-                };
+                let verification_type = required_verification_type(task.task_type);
+                let verifier_agent = "task-verifier";
 
                 // Get the appropriate verification (by type for epics, any for tasks)
                 let task_wide_latest = if is_epic {

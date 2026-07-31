@@ -776,12 +776,15 @@ impl CasCore {
                         .filter(|row| row.dispatch_id.is_none()),
                     _ => None,
                 };
+                let required_verification_type =
+                    super::lifecycle::close_ops::required_verification_type(task.task_type);
                 let authorized = verification.as_ref().is_some_and(|row| {
                     matches!(
                         row.status,
                         cas_types::VerificationStatus::Approved
                             | cas_types::VerificationStatus::Skipped
-                    ) && match dispatch.as_ref() {
+                    ) && row.verification_type == required_verification_type
+                        && match dispatch.as_ref() {
                         Some(dispatch) => {
                             !matches!(row.provenance, cas_types::VerificationProvenance::Legacy)
                                 && row.dispatch_id.as_deref() == Some(dispatch.id.as_str())

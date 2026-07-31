@@ -107,8 +107,9 @@ impl CasCore {
         }
 
         let uses_verifier_capability = req.verifier_capability.is_some();
-        let supervisor_direct =
-            caller.role == cas_types::AgentRole::Supervisor && !uses_verifier_capability;
+        let supervisor_direct = caller.role == cas_types::AgentRole::Supervisor
+            && self.has_server_internal_identity(&caller_id)
+            && !uses_verifier_capability;
         let uses_server_handoff = !uses_verifier_capability
             && caller.role == cas_types::AgentRole::Standard
             && caller.agent_type == cas_types::AgentType::SubAgent

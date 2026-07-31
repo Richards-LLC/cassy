@@ -900,11 +900,15 @@ impl EmbeddedDaemon {
             // PPID is less reliable from the hook, so we skip it for socket-registered agents
             agent.machine_id = Some(Agent::get_or_generate_machine_id());
 
-            // Set role from the event (passed from hook's environment)
-            if let Some(role_str) = agent_role {
-                if let Ok(role) = role_str.parse::<AgentRole>() {
-                    agent.role = role;
-                }
+            // The socket event forwards hook environment and therefore may
+            // bootstrap Worker only. Supervisor/Director authority must come
+            // from a server-created durable row, which the conflict-safe
+            // registration path preserves.
+            if agent_role
+                .as_deref()
+                .is_some_and(|role| role.eq_ignore_ascii_case("worker"))
+            {
+                agent.role = AgentRole::Worker;
             }
 
             apply_factory_worker_metadata(&mut agent, clone_path.as_deref());

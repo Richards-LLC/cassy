@@ -21,6 +21,18 @@ use tracing::{debug, info, warn};
 
 use crate::mcp::daemon::{ActivityTracker, EmbeddedDaemon, EmbeddedDaemonStatus};
 
+/// Provenance of the current in-process agent identity.
+///
+/// This is deliberately not deserializable and never derived from request or
+/// environment fields. Privileged workflow authority may rely on
+/// `ServerInternal`, but never on an identity first established by a public
+/// registration tool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AgentIdentitySource {
+    ServerInternal,
+    PublicRegistration,
+}
+
 /// Core CAS service - provides store access and helper methods
 ///
 /// Supports two-tier storage architecture:
@@ -41,6 +53,8 @@ pub struct CasCore {
     pub(crate) daemon: Option<Arc<EmbeddedDaemon>>,
     /// Agent ID for multi-agent coordination (lazily initialized on first tool call)
     pub(crate) agent_id: OnceLock<Option<String>>,
+    /// Server-side provenance for `agent_id`; absent is always non-authoritative.
+    pub(crate) agent_identity_source: OnceLock<AgentIdentitySource>,
     /// Peer reference for sending MCP notifications (Claude Code 2.1.0+)
     /// Captured on first request, used to notify client of resource changes
     pub(crate) peer: Arc<RwLock<Option<Peer<RoleServer>>>>,
@@ -60,6 +74,53 @@ pub struct CasCore {
 }
 
 impl CasCore {
+    pub(crate) fn bind_agent_identity(
+        &self,
+        agent_id: String,
+        source: AgentIdentitySource,
+    ) -> Result<(), McpError> {
+        if let Some(Some(existing)) = self.agent_id.get()
+            && existing != &agent_id
+        {
+            // Registration is also used to announce another agent to an
+            // already-authenticated server. Preserve that compatible durable
+            // registration path, but never let it replace the server's own
+            // immutable identity or provenance.
+            return Ok(());
+        }
+        let _ = self.agent_id.set(Some(agent_id));
+        let _ = self.agent_identity_source.set(source);
+        Ok(())
+    }
+
+    pub(crate) fn has_server_internal_identity(&self, agent_id: &str) -> bool {
+        self.agent_id
+            .get()
+            .and_then(Option::as_deref)
+            .is_some_and(|bound| bound == agent_id)
+            && self.agent_identity_source.get() == Some(&AgentIdentitySource::ServerInternal)
+    }
+
+    pub(crate) fn ensure_public_registration_target(&self, agent_id: &str) -> Result<(), McpError> {
+        let agent_store = self.open_agent_store()?;
+        if agent_store.get(agent_id).ok().is_some_and(|agent| {
+            matches!(
+                agent.role,
+                crate::types::AgentRole::Supervisor | crate::types::AgentRole::Director
+            )
+        }) && !self.has_server_internal_identity(agent_id)
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(
+                    "Public registration cannot attach to an existing supervisor or director identity.",
+                ),
+                data: None,
+            });
+        }
+        Ok(())
+    }
+
     /// Helper: get cached store or initialize it.
     /// Safe for concurrent access — if two threads race, one wins and the other
     /// gets the canonical instance from `get()`.
@@ -394,7 +455,10 @@ impl CasCore {
                         agent_id = %agent.id,
                         "Found agent by PPID fallback"
                     );
-                    let _ = self.agent_id.set(Some(agent.id.clone()));
+                    self.bind_agent_identity(
+                        agent.id.clone(),
+                        AgentIdentitySource::ServerInternal,
+                    )?;
                     self.ensure_agent_active(&agent.id)?;
                     return Ok(agent.id);
                 }
@@ -508,11 +572,13 @@ impl CasCore {
                 }
                 agent.machine_id = Some(crate::types::Agent::get_or_generate_machine_id());
 
-                // Set role from CAS_AGENT_ROLE env var (set by factory mode)
-                if let Ok(role_str) = std::env::var("CAS_AGENT_ROLE") {
-                    if let Ok(role) = role_str.parse::<crate::types::AgentRole>() {
-                        agent.role = role;
-                    }
+                // Environment is a worker bootstrap hint, never a source of
+                // Supervisor/Director authority.
+                if std::env::var("CAS_AGENT_ROLE")
+                    .ok()
+                    .is_some_and(|role| role.eq_ignore_ascii_case("worker"))
+                {
+                    agent.role = crate::types::AgentRole::Worker;
                 }
                 if agent.role == crate::types::AgentRole::Worker {
                     agent.agent_type = crate::types::AgentType::Worker;
@@ -545,15 +611,22 @@ impl CasCore {
     /// This must be called before other CAS tools can be used.
     /// The session_id becomes the agent's unique identifier.
     ///
-    /// The agent's role is determined from the CAS_AGENT_ROLE environment variable
-    /// (set by factory mode when spawning workers/supervisors).
+    /// This server-internal path may bind an already server-created identity.
+    /// Environment is accepted only as a non-privileged Worker bootstrap hint.
     pub(crate) fn register_agent(
         &self,
         session_id: String,
         name: String,
         parent_id: Option<String>,
     ) -> Result<String, McpError> {
-        self.register_agent_with_hints(session_id, name, parent_id, None, None)
+        self.register_agent_with_hints(
+            session_id,
+            name,
+            parent_id,
+            None,
+            None,
+            AgentIdentitySource::ServerInternal,
+        )
     }
 
     pub(crate) fn register_agent_with_hints(
@@ -563,12 +636,13 @@ impl CasCore {
         parent_id: Option<String>,
         agent_type_hint: Option<crate::types::AgentType>,
         role_hint: Option<crate::types::AgentRole>,
+        source: AgentIdentitySource,
     ) -> Result<String, McpError> {
-        // Set the agent_id in OnceLock (session_id is the canonical ID)
-        let _ = self.agent_id.set(Some(session_id.clone()));
-
         let pid = std::process::id();
         let agent_store = self.open_agent_store()?;
+        if source == AgentIdentitySource::PublicRegistration {
+            self.ensure_public_registration_target(&session_id)?;
+        }
 
         // Create and register the agent
         let mut agent = if let Some(parent) = parent_id {
@@ -590,15 +664,19 @@ impl CasCore {
         }
         agent.machine_id = Some(crate::types::Agent::get_or_generate_machine_id());
 
-        // Set role from CAS_AGENT_ROLE env var (set by factory mode)
-        if let Some(role) = role_hint {
-            agent.role = role;
-        } else if let Ok(role_str) = std::env::var("CAS_AGENT_ROLE") {
-            if let Ok(role) = role_str.parse::<crate::types::AgentRole>() {
+        // Only a typed server-internal call may carry a privileged role.
+        // Public/env registration can establish Standard or Worker only.
+        if source == AgentIdentitySource::ServerInternal {
+            if let Some(role) = role_hint {
                 agent.role = role;
+            } else if std::env::var("CAS_AGENT_ROLE")
+                .ok()
+                .is_some_and(|role| role.eq_ignore_ascii_case("worker"))
+            {
+                agent.role = crate::types::AgentRole::Worker;
             }
-        } else if agent.agent_type == crate::types::AgentType::Worker {
-            // Fallback: worker type implies worker role if env is unavailable.
+        }
+        if agent.agent_type == crate::types::AgentType::Worker {
             agent.role = crate::types::AgentRole::Worker;
         }
 
@@ -621,6 +699,8 @@ impl CasCore {
             message: Cow::from(format!("Failed to register agent: {e}")),
             data: None,
         })?;
+
+        self.bind_agent_identity(session_id.clone(), source)?;
 
         info!(
             agent_id = %session_id,

@@ -1,5 +1,33 @@
 use crate::mcp::tools::core::imports::*;
 
+fn public_registration_hints(
+    agent_type: Option<&str>,
+) -> Result<
+    (
+        Option<crate::types::AgentType>,
+        Option<crate::types::AgentRole>,
+    ),
+    McpError,
+> {
+    let requested_role = agent_type.and_then(|value| value.parse().ok());
+    if matches!(
+        requested_role,
+        Some(crate::types::AgentRole::Supervisor | crate::types::AgentRole::Director)
+    ) {
+        return Err(McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(
+                "Public agent registration cannot request supervisor or director authority.",
+            ),
+            data: None,
+        });
+    }
+    let requested_type = agent_type.and_then(|value| value.parse().ok());
+    let safe_role = (requested_type == Some(crate::types::AgentType::Worker))
+        .then_some(crate::types::AgentRole::Worker);
+    Ok((requested_type, safe_role))
+}
+
 impl CasCore {
     pub async fn cas_agent_register(
         &self,
@@ -14,8 +42,8 @@ impl CasCore {
             data: None,
         })?;
 
-        let requested_agent_type = req.agent_type.parse::<crate::types::AgentType>().ok();
-        let requested_role = req.agent_type.parse::<crate::types::AgentRole>().ok();
+        let (requested_agent_type, requested_role) =
+            public_registration_hints(Some(&req.agent_type))?;
         let agent_name = req.name.clone();
 
         // Use explicit type/role hints when provided.
@@ -25,6 +53,7 @@ impl CasCore {
             req.parent_id,
             requested_agent_type,
             requested_role,
+            crate::mcp::server::AgentIdentitySource::PublicRegistration,
         )?;
 
         // cas-6913: surface any prompt_queue messages that were queued to
@@ -66,21 +95,9 @@ impl CasCore {
             format!("codex-{}-{}", safe_name.trim_matches('-'), ts)
         });
 
-        let requested_agent_type = req
-            .agent_type
-            .as_deref()
-            .and_then(|v| v.parse::<crate::types::AgentType>().ok());
-        let requested_role = req
-            .agent_type
-            .as_deref()
-            .and_then(|v| v.parse::<crate::types::AgentRole>().ok())
-            .or_else(|| {
-                if requested_agent_type == Some(crate::types::AgentType::Worker) {
-                    Some(crate::types::AgentRole::Worker)
-                } else {
-                    None
-                }
-            });
+        let (requested_agent_type, requested_role) =
+            public_registration_hints(req.agent_type.as_deref())?;
+        self.ensure_public_registration_target(&session_id)?;
 
         // Best-effort name hint for session registration
         if let Some(ref name) = req.name {
@@ -88,12 +105,6 @@ impl CasCore {
         } else if std::env::var("CAS_AGENT_NAME").is_err() {
             unsafe { std::env::set_var("CAS_AGENT_NAME", &agent_name) };
         }
-        if let Some(role) = requested_role {
-            unsafe { std::env::set_var("CAS_AGENT_ROLE", role.to_string()) };
-        } else if requested_agent_type == Some(crate::types::AgentType::Worker) {
-            unsafe { std::env::set_var("CAS_AGENT_ROLE", "worker") };
-        }
-
         let cwd = req.cwd.unwrap_or_else(|| {
             self.cas_root
                 .parent()
@@ -124,9 +135,7 @@ impl CasCore {
             // Carry the role explicitly so downstream handlers don't depend on
             // the process-global env mutation above (which races under shared
             // MCP process dispatch).
-            agent_role: requested_role
-                .map(|r| r.to_string())
-                .or_else(|| std::env::var("CAS_AGENT_ROLE").ok()),
+            agent_role: requested_role.map(|r| r.to_string()),
             message: None,
         };
 
@@ -170,33 +179,15 @@ impl CasCore {
 
         // Ensure the agent is registered immediately for subsequent MCP calls (whoami/task/...).
         // In Codex no-hooks mode, relying on PID/session mapping can race.
-        if let Ok(store) = self.open_agent_store() {
-            if let Ok(mut existing) = store.get(&session_id) {
-                // Refresh role/type if session_start provides explicit hints.
-                if let Some(agent_type) = requested_agent_type {
-                    existing.agent_type = agent_type;
-                }
-                if let Some(role) = requested_role {
-                    existing.role = role;
-                } else if requested_agent_type == Some(crate::types::AgentType::Worker) {
-                    existing.role = crate::types::AgentRole::Worker;
-                }
-                crate::mcp::daemon::apply_factory_worker_metadata(&mut existing, None);
-                let _ = store.update(&existing);
-
-                let _ = self.agent_id.set(Some(session_id.clone()));
-                let _ = self.ensure_agent_active(&session_id);
-            } else {
-                // Ignore already-registered races; primary goal is to establish local session identity.
-                let _ = self.register_agent_with_hints(
-                    session_id.clone(),
-                    agent_name.clone(),
-                    None,
-                    requested_agent_type,
-                    requested_role,
-                );
-            }
-        }
+        self.register_agent_with_hints(
+            session_id.clone(),
+            agent_name.clone(),
+            req.parent_id,
+            requested_agent_type,
+            requested_role,
+            crate::mcp::server::AgentIdentitySource::PublicRegistration,
+        )?;
+        let _ = self.ensure_agent_active(&session_id);
 
         let mut response = format!("Session: {session_id}");
         if !context.is_empty() {

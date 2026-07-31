@@ -33,6 +33,7 @@ pub use prompts::{
     revalidate_event_for_delivery_with_focus, with_response_instructions,
     worker_now_has_real_assignment,
 };
+pub(crate) use prompts::prompt_is_still_deliverable;
 // PanelAreas, SidecarFocus, SidecarState, ViewMode, DiffLine, DiffLineType, render, render_with_state are already public in this module
 
 use ratatui::Frame;

@@ -1657,10 +1657,11 @@ impl CasService {
                 true,
             )
         };
+        let host_registry_pids = crate::store::known_repos::host_registry_open_pids();
 
         let mut out = String::from("Factory GC Report\n=================\n");
         out.push_str(&format!(
-            "\nStale agent threshold: {}s\nStale agents: {}\nPending prompts: {}\nActive worktrees: {}\nOrphan worktrees: {}\nOrphan worker process groups: {}\nLive-owned process groups skipped: {}\nUnverifiable process-group records preserved: {}\nStale process-group records: {}\n",
+            "\nStale agent threshold: {}s\nStale agents: {}\nPending prompts: {}\nActive worktrees: {}\nOrphan worktrees: {}\nOrphan worker process groups: {}\nLive-owned process groups skipped: {}\nUnverifiable process-group records preserved: {}\nStale process-group records: {}\nHost-registry open processes: {}\n",
             stale_after,
             stale_agents.len(),
             pending_prompts,
@@ -1670,6 +1671,7 @@ impl CasService {
             live_owned_process_groups.len(),
             unverifiable_process_groups.len(),
             stale_process_group_records,
+            host_registry_pids.len(),
         ));
 
         if !stale_agents.is_empty() {
@@ -1716,6 +1718,18 @@ impl CasService {
                     record.worker_name, record.factory_session, record.pgid,
                 ));
             }
+        }
+        if !host_registry_pids.is_empty() {
+            let db = crate::store::known_repos::host_cas_dir().join("cas.db");
+            out.push_str("\nProcesses with the host registry DB/WAL/SHM open (review for orphaned CAS children):\n");
+            for pid in &host_registry_pids {
+                let command = process_command_line(*pid);
+                out.push_str(&format!("  - PID {pid}: {command}\n"));
+            }
+            out.push_str(&format!(
+                "Inspect exact ownership with `fuser -v {db}` and `ps -o pid,ppid,stat,etime,wchan:20,cmd -p <PID>` before terminating an orphan.\n",
+                db = db.display()
+            ));
         }
 
         match target_cache_report {
@@ -2213,6 +2227,23 @@ impl CasService {
         }
 
         Ok(Self::success(output))
+    }
+}
+
+fn process_command_line(pid: u32) -> String {
+    let Ok(bytes) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+        return "<command unavailable>".to_string();
+    };
+    let command = bytes
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+        .map(|part| String::from_utf8_lossy(part))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if command.is_empty() {
+        "<command unavailable>".to_string()
+    } else {
+        command
     }
 }
 

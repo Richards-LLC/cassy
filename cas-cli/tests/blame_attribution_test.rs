@@ -13,8 +13,16 @@ fn git_cmd(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
 }
 
 /// Helper to run cas commands
-fn cas_cmd() -> assert_cmd::Command {
+fn cas_cmd(dir: &std::path::Path) -> assert_cmd::Command {
     let mut cmd = assert_cmd::Command::new(assert_cmd::cargo::cargo_bin!("cas"));
+    let home = dir.join(".test-home");
+    let xdg = dir.join(".test-xdg-config");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&xdg).unwrap();
+    if let Some(host_home) = std::env::var_os("HOME") {
+        cmd.env("CAS_TEST_PROTECTED_HOME", host_home);
+    }
+    cmd.env("HOME", home).env("XDG_CONFIG_HOME", xdg);
     // Clear CAS_ROOT to prevent env pollution from parent shell
     cmd.env_remove("CAS_ROOT");
     cmd.env("CAS_SKIP_FACTORY_TOOLING", "1");
@@ -32,7 +40,7 @@ fn setup_test_repo() -> TempDir {
     git_cmd(path, &["config", "user.name", "Test User"]);
 
     // Initialize CAS
-    cas_cmd()
+    cas_cmd(path)
         .current_dir(path)
         .args(["init", "--yes"])
         .assert()

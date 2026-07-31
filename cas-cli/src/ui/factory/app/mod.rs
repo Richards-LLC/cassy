@@ -13,7 +13,7 @@ use ratatui::layout::Rect;
 use super::director::{
     DiffLine, DirectorData, DirectorEvent, DirectorEventDetector, DirectorStores,
     MergeAlertFreshness, PanelAreas, Prompt, SidecarFocus, ViewMode, check_merge_alert_freshness,
-    generate_prompt, revalidate_event_for_delivery_with_context,
+    generate_prompt, prompt_is_still_deliverable, revalidate_event_for_delivery_with_context,
     revalidate_event_for_delivery_with_focus,
 };
 use crate::store::open_prompt_queue_store;
@@ -40,6 +40,39 @@ pub(crate) use branch_visibility::truncate_branch_middle;
 use branch_visibility::{
     BranchVisibilityCache, branch_for_worker_title, format_pane_title_with_branch,
 };
+
+/// Stamp the supervisor identity discovered by the trusted factory spawner.
+///
+/// This is deliberately outside every MCP/public registration path: the
+/// factory owns the pane and its generated harness session id, so it can bind
+/// that exact id to privileged supervisor authority without trusting a request
+/// field or `CAS_AGENT_ROLE`. A later MCP auto-registration is idempotent and
+/// preserves the stored role in `SqliteAgentStore::register`.
+fn stamp_trusted_factory_supervisor(
+    agent_store: &dyn crate::store::AgentStore,
+    session_id: &str,
+    supervisor_name: &str,
+    factory_session: &str,
+) -> anyhow::Result<()> {
+    use crate::types::{Agent, AgentRole, AgentStatus};
+
+    match agent_store.get(session_id) {
+        Ok(mut agent) => {
+            agent.name = supervisor_name.to_string();
+            agent.role = AgentRole::Supervisor;
+            agent.status = AgentStatus::Active;
+            agent.factory_session = Some(factory_session.to_string());
+            agent_store.update(&agent)?;
+        }
+        Err(_) => {
+            let mut agent = Agent::new(session_id.to_string(), supervisor_name.to_string());
+            agent.role = AgentRole::Supervisor;
+            agent.factory_session = Some(factory_session.to_string());
+            agent_store.register(&agent)?;
+        }
+    }
+    Ok(())
+}
 
 // Re-export from cas-factory for backward compatibility
 pub use cas_factory::{AutoPromptConfig, EpicState, FactoryConfig};
@@ -851,6 +884,18 @@ impl FactoryApp {
         .unwrap_or_else(|_| self.unfiltered_director_data.clone())
     }
 
+    /// Re-check a taskless WorkerIdle prompt at the narrowest point before
+    /// transport injection. Batch revalidation happens earlier in the tick;
+    /// an assignment may land after that snapshot and before this prompt's
+    /// turn in the delivery loop.
+    pub(crate) fn prompt_is_still_deliverable(&self, prompt: &Prompt) -> bool {
+        if prompt.drop_if_worker_assigned.is_none() {
+            return true;
+        }
+        let data = self.load_unfiltered_director_data_for_delivery();
+        prompt_is_still_deliverable(prompt, &data)
+    }
+
     /// Refresh CAS data from stores and detect state changes
     ///
     /// Returns the detected events. Prompt generation happens later, at
@@ -1332,6 +1377,44 @@ impl FactoryApp {
                     .ok()
                     .map(|dt| dt.with_timezone(&Utc))
             });
+        if let Some(supervisor_session_id) = self
+            .mux
+            .get(&self.supervisor_name)
+            .and_then(|pane| pane.harness_session_id())
+        {
+            match crate::store::open_agent_store(&self.cas_dir) {
+                Ok(agent_store) => {
+                    if let Err(error) = stamp_trusted_factory_supervisor(
+                        agent_store.as_ref(),
+                        &supervisor_session_id,
+                        &self.supervisor_name,
+                        &name,
+                    ) {
+                        tracing::error!(
+                            supervisor = %self.supervisor_name,
+                            session_id = %supervisor_session_id,
+                            factory_session = %name,
+                            error = %error,
+                            "failed to stamp trusted factory supervisor identity"
+                        );
+                    }
+                }
+                Err(error) => tracing::error!(
+                    supervisor = %self.supervisor_name,
+                    session_id = %supervisor_session_id,
+                    factory_session = %name,
+                    error = %error,
+                    "failed to open agent store for trusted supervisor identity"
+                ),
+            }
+        } else {
+            tracing::error!(
+                supervisor = %self.supervisor_name,
+                factory_session = %name,
+                "factory supervisor pane has no harness session id to stamp"
+            );
+        }
+
         self.factory_session = Some(name);
         for worker in self.worker_names.clone() {
             self.track_worker_process_group(&worker);
@@ -2012,8 +2095,46 @@ mod tests {
 
     use super::{
         DirectorData, DirectorEvent, merge_director_data_preserving_git, non_closed_task_ids,
-        queue_codex_worker_intro_prompt, queue_supervisor_intro_prompt, unfiltered_snapshot_from,
+        queue_codex_worker_intro_prompt, queue_supervisor_intro_prompt,
+        stamp_trusted_factory_supervisor, unfiltered_snapshot_from,
     };
+
+    #[test]
+    fn trusted_factory_spawn_stamps_existing_standard_session_as_supervisor() {
+        use crate::store::open_agent_store;
+        use crate::types::{Agent, AgentRole};
+
+        let temp = tempfile::tempdir().unwrap();
+        let cas_root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let store = open_agent_store(&cas_root).unwrap();
+        let standard = Agent::new("spawned-session".to_string(), "wise-viper-85".to_string());
+        store.register(&standard).unwrap();
+
+        stamp_trusted_factory_supervisor(
+            store.as_ref(),
+            "spawned-session",
+            "wise-viper-85",
+            "factory-live",
+        )
+        .unwrap();
+
+        let stamped = store.get("spawned-session").unwrap();
+        assert_eq!(stamped.role, AgentRole::Supervisor);
+        assert_eq!(stamped.factory_session.as_deref(), Some("factory-live"));
+
+        // MCP eager auto-registration later uses register() for the same id;
+        // the store must retain the trusted role instead of reverting it to
+        // AgentRole::Standard.
+        let reregistered = Agent::new(
+            "spawned-session".to_string(),
+            "wise-viper-85".to_string(),
+        );
+        store.register(&reregistered).unwrap();
+        assert_eq!(
+            store.get("spawned-session").unwrap().role,
+            AgentRole::Supervisor
+        );
+    }
 
     /// cas-0263: the Claude launch surface is the queued intro prompt (Claude has
     /// no --rules/developer_instructions flag). This drives the ACTUAL enqueue

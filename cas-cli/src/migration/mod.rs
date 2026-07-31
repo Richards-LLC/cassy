@@ -606,10 +606,8 @@ mod tests {
 
     #[test]
     fn test_migration_dry_run() {
-        // `init_cas_dir` calls `known_repos::register_repo(host_cas_dir)` which
-        // writes to `$HOME/.cas/`. Without `with_temp_home`, concurrent sweep
-        // tests (`worktree::sweep::*`) see the registration and fail. Wrap so
-        // the host registry is isolated to this test's temp HOME.
+        // Keep the temporary HOME because migration tests exercise other
+        // host-scoped paths and must never observe developer state.
         crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
             let temp = home.join("proj");
             std::fs::create_dir_all(&temp).unwrap();

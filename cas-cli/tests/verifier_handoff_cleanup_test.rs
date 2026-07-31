@@ -14,6 +14,14 @@ const DEADLINE: &str = "2099-01-01T00:00:00+00:00";
 
 fn cas_cmd(dir: &TempDir) -> Command {
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("cas");
+    let home = dir.path().join(".test-home");
+    let xdg = dir.path().join(".test-xdg-config");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&xdg).unwrap();
+    if let Some(host_home) = std::env::var_os("HOME") {
+        cmd.env("CAS_TEST_PROTECTED_HOME", host_home);
+    }
+    cmd.env("HOME", home).env("XDG_CONFIG_HOME", xdg);
     cmd.current_dir(dir.path());
     for name in [
         "CAS_ROOT",

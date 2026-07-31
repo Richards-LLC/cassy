@@ -18,7 +18,7 @@ use cas::mcp::tools::{
 };
 use cas::mcp::{CasCore, CasService};
 use cas::store::{
-    init_cas_dir, open_agent_store, open_task_store, open_verification_store, open_worktree_store,
+    open_agent_store, open_task_store, open_verification_store, open_worktree_store,
 };
 use cas::types::{
     Agent, AgentRole, AgentType, Task, TaskDepth, TaskStatus, TaskType, WorkTarget,
@@ -29,6 +29,26 @@ use cas_store::KnownRepoStore;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::RawContent;
 use tempfile::TempDir;
+
+/// Initialize a project fixture while keeping the host-level known-repo
+/// registry inside this test binary's private HOME. Several System-A tests
+/// intentionally exercise registry resolution, so simply suppressing the
+/// registration would make the fixture less realistic.
+fn init_cas_dir(path: &Path) -> anyhow::Result<PathBuf> {
+    use std::sync::OnceLock;
+
+    static TEST_HOME: OnceLock<TempDir> = OnceLock::new();
+    let home = TEST_HOME.get_or_init(|| TempDir::new().expect("isolated worktree test HOME"));
+    unsafe {
+        std::env::set_var("HOME", home.path());
+        std::env::set_var("XDG_CONFIG_HOME", home.path().join("xdg"));
+    }
+
+    let cas_root = cas::store::init_cas_dir(path)?;
+    cas::store::known_repos::ensure_host_schema()?;
+    cas::store::known_repos::register_repo_strict(path)?;
+    Ok(cas_root)
+}
 
 // =============================================================================
 // Test fixtures

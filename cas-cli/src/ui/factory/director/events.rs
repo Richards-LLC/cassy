@@ -70,6 +70,12 @@ pub(crate) fn effective_stall_threshold_secs(
 /// was already working. See task cas-f9e8.
 const IDLE_CONSECUTIVE_TICKS: u32 = 2;
 
+/// A newly registered worker is expected to be taskless while the supervisor
+/// completes the spawn -> assign round trip. Do not begin the normal idle
+/// debounce inside this window; otherwise two fast refreshes can enqueue an
+/// alert before the assignment write lands.
+const SPAWN_ASSIGN_GRACE_SECS: i64 = 10;
+
 /// Events detected from CAS state changes
 #[derive(Debug, Clone)]
 pub enum DirectorEvent {
@@ -1216,6 +1222,11 @@ impl DirectorEventDetector {
                         agent.registered_at
                     }
                 });
+            let registration_age_secs = (now_utc - agent.registered_at).num_seconds();
+            if (0..SPAWN_ASSIGN_GRACE_SECS).contains(&registration_age_secs) {
+                self.consecutive_idle_ticks.remove(&agent.id);
+                continue;
+            }
             let supervisor_message_handles_idle = agent
                 .latest_supervisor_message_at
                 .map(|sent_at| sent_at >= idle_since)

@@ -393,7 +393,10 @@ pub fn revalidate_event_for_delivery_with_context(
                 })
             }
         }
-        DirectorEvent::WorkerIdle { worker, .. } => {
+        DirectorEvent::WorkerIdle {
+            worker,
+            active_task: enqueued_active_task,
+        } => {
             if worker == supervisor_name
                 || live_worker_session_id(unfiltered_data, worker).is_none()
             {
@@ -417,7 +420,7 @@ pub fn revalidate_event_for_delivery_with_context(
                 })
                 .unwrap_or(false);
 
-            if active_task.is_none()
+            if enqueued_active_task.is_none()
                 && worker_has_open_or_in_progress_assignment(unfiltered_data, worker)
             {
                 return None;
@@ -553,8 +556,9 @@ pub struct Prompt {
     pub target: String,
     /// Prompt text to inject
     pub text: String,
-    /// cas-ed6c: `Some(worker)` when this prompt is a `WorkerIdle`-class
-    /// alert about `worker` — threaded down to `deliver_to_worker` so the
+    /// cas-ed6c/cas-38e3: `Some(worker)` when this prompt is a taskless-worker
+    /// alert about `worker` (`WorkerIdle` or `AgentRegistered`) — threaded down
+    /// to `deliver_to_worker` so the
     /// queued inbox row can be tagged for later retraction
     /// (`TeamsManager::prune_stale_idle_alerts`) if the worker gains a real
     /// assignment before the recipient ever reads it. `None` for every
@@ -575,6 +579,21 @@ pub struct Prompt {
     /// prompt kind, including the plain informational (non-merge)
     /// close-rejected idle wording, which still uses `retract_worker`.
     pub retract_task: Option<String>,
+    /// Taskless worker prompts must be checked once more against a
+    /// fresh store snapshot immediately before their PTY/inbox injection.
+    /// This closes the small race after batch revalidation but before the
+    /// transport write. Other prompt kinds do not carry this tag.
+    pub drop_if_worker_assigned: Option<String>,
+}
+
+/// Last-mile predicate for a prompt that has already survived event-level
+/// revalidation. The caller supplies a snapshot loaded immediately before
+/// transport injection, not the earlier batch snapshot.
+pub(crate) fn prompt_is_still_deliverable(prompt: &Prompt, data: &DirectorData) -> bool {
+    prompt
+        .drop_if_worker_assigned
+        .as_deref()
+        .is_none_or(|worker| !worker_now_has_real_assignment(data, worker))
 }
 
 /// Wrap a message with response instructions
@@ -1075,6 +1094,7 @@ pub fn generate_prompt(
                 text: with_response_instructions(&text, supervisor_name, worker_cli),
                 retract_worker: None,
                 retract_task: None,
+                drop_if_worker_assigned: None,
             })
         }
 
@@ -1148,6 +1168,7 @@ pub fn generate_prompt(
                 text: with_response_instructions(&text, worker, supervisor_cli),
                 retract_worker: None,
                 retract_task: None,
+                drop_if_worker_assigned: None,
             })
         }
 
@@ -1170,6 +1191,7 @@ pub fn generate_prompt(
                 text: with_response_instructions(&text, worker, supervisor_cli),
                 retract_worker: None,
                 retract_task: None,
+                drop_if_worker_assigned: None,
             })
         }
 
@@ -1304,12 +1326,27 @@ pub fn generate_prompt(
                     text: with_response_instructions(&text, worker, supervisor_cli),
                     retract_worker,
                     retract_task,
+                    drop_if_worker_assigned: None,
                 });
             }
 
             // Count only truly-dispatchable tasks (Open + unassigned). See
             // `dispatchable_ready_count` for why `ready_tasks.len()` is wrong.
             let ready_count = dispatchable_ready_count(data, gated_task_ids);
+            let idle_summary = if data
+                .agents
+                .iter()
+                .find(|agent| agent.name == *worker)
+                .is_some_and(|agent| agent.latest_activity.is_some())
+            {
+                format!(
+                    "Worker {worker} finished its task and is now free with no assigned tasks."
+                )
+            } else {
+                format!(
+                    "Worker {worker} has not started a task yet and is idle with no assigned tasks."
+                )
+            };
 
             let text = if ready_count > 0 {
                 // D-3 (cas-405f): do NOT embed the snapshot count here.
@@ -1324,7 +1361,7 @@ pub fn generate_prompt(
                 // direct them to the live command instead.
                 //
                 format!(
-                    "Worker {worker} is idle with no assigned tasks.\n\
+                    "{idle_summary}\n\
                      Ready tasks exist — check live: `{supervisor_prefix}task action=ready`\n\
                      Assign work: {supervisor_prefix}task action=update id=<task-id> assignee={worker}"
                 )
@@ -1335,7 +1372,7 @@ pub fn generate_prompt(
                 // epic" advice from a stale snapshot would orphan live open work.
                 // Direct the supervisor to verify with a live query instead.
                 format!(
-                    "Worker {worker} is idle with no assigned tasks.\n\
+                    "{idle_summary}\n\
                      No dispatchable tasks in current snapshot — verify with \
                      `{supervisor_prefix}task action=ready` before acting.\n\
                      If genuinely idle, assign new work or stand down this worker."
@@ -1347,6 +1384,7 @@ pub fn generate_prompt(
                 text: with_response_instructions(&text, worker, supervisor_cli),
                 retract_worker: Some(worker.clone()),
                 retract_task: None,
+                drop_if_worker_assigned: Some(worker.clone()),
             })
         }
 
@@ -1389,6 +1427,7 @@ pub fn generate_prompt(
                     text: with_response_instructions(&text, worker, supervisor_cli),
                     retract_worker: None,
                     retract_task: None,
+                    drop_if_worker_assigned: None,
                 });
             }
 
@@ -1410,6 +1449,7 @@ pub fn generate_prompt(
                     text: with_response_instructions(&text, supervisor_name, worker_cli),
                     retract_worker: None,
                     retract_task: None,
+                    drop_if_worker_assigned: None,
                 })
             } else {
                 // Still stalled after the nudge — escalate to the supervisor.
@@ -1441,6 +1481,7 @@ pub fn generate_prompt(
                     text: with_response_instructions(&text, worker, supervisor_cli),
                     retract_worker: None,
                     retract_task: None,
+                    drop_if_worker_assigned: None,
                 })
             }
         }
@@ -1484,13 +1525,13 @@ pub fn generate_prompt(
             let ready_count = dispatchable_ready_count(data, gated_task_ids);
             let text = if ready_count > 0 {
                 format!(
-                    "Worker {agent_name} is ready and waiting for tasks.\n\
+                    "Worker {agent_name} has registered and is awaiting its first task.\n\
                      Ready tasks exist — check live: `{supervisor_prefix}task action=ready`\n\
                      Assign work: {supervisor_prefix}task action=update id=<task-id> assignee={agent_name}"
                 )
             } else {
                 format!(
-                    "Worker {agent_name} is ready and waiting for tasks.\n\
+                    "Worker {agent_name} has registered and is awaiting its first task.\n\
                      No dispatchable tasks in current snapshot — verify with \
                      `{supervisor_prefix}task action=ready` before acting."
                 )
@@ -1499,8 +1540,9 @@ pub fn generate_prompt(
             Some(Prompt {
                 target: supervisor_name.to_string(),
                 text: with_response_instructions(&text, agent_name, supervisor_cli),
-                retract_worker: None,
+                retract_worker: Some(agent_name.clone()),
                 retract_task: None,
+                drop_if_worker_assigned: Some(agent_name.clone()),
             })
         }
 
@@ -1626,6 +1668,7 @@ pub fn generate_prompt(
                 text,
                 retract_worker: None,
                 retract_task: None,
+                drop_if_worker_assigned: None,
             })
         }
     }
@@ -1790,12 +1833,17 @@ mod tests {
     }
 
     #[test]
-    fn test_delivery_recheck_rerenders_worker_idle_active_task_state() {
+    fn test_delivery_recheck_drops_taskless_idle_after_active_task_assignment() {
         let event = DirectorEvent::WorkerIdle {
             worker: "swift-fox".to_string(),
             active_task: None,
         };
         let mut data = make_data(0);
+        data.in_progress_tasks = vec![task_with_status(
+            "cas-merge",
+            Some("swift-fox"),
+            TaskStatus::AwaitingMerge,
+        )];
         data.agents[0].active_lease = Some(ActiveLeaseSummary {
             task_id: "cas-merge".to_string(),
             task_title: "Merge gated task".to_string(),
@@ -1803,23 +1851,10 @@ mod tests {
             close_rejected_reason: Some("MERGE REQUIRED: commit not on epic".to_string()),
         });
 
-        let rechecked = revalidate_event_for_delivery(&event, &data, "supervisor")
-            .expect("idle event should remain valid with updated active lease payload");
-
-        match rechecked {
-            DirectorEvent::WorkerIdle {
-                active_task: Some(task),
-                ..
-            } => {
-                assert_eq!(task.task_id, "cas-merge");
-                assert_eq!(task.task_status, TaskStatus::AwaitingMerge);
-                assert_eq!(
-                    task.close_rejected_reason.as_deref(),
-                    Some("MERGE REQUIRED: commit not on epic")
-                );
-            }
-            other => panic!("expected WorkerIdle with active task payload, got {other:?}"),
-        }
+        assert!(
+            revalidate_event_for_delivery(&event, &data, "supervisor").is_none(),
+            "an event enqueued while taskless must be dropped when any assignment lands"
+        );
     }
 
     #[test]
@@ -2314,6 +2349,123 @@ mod tests {
     }
 
     #[test]
+    fn queued_worker_idle_is_dropped_if_assignment_lands_before_injection() {
+        let event = DirectorEvent::WorkerIdle {
+            worker: "swift-fox".to_string(),
+            active_task: None,
+        };
+        let idle_data = make_data(0);
+        let prompt = generate_prompt(
+            &event,
+            &idle_data,
+            &idle_data,
+            "supervisor",
+            &default_config(),
+            codex(),
+            codex(),
+            &HashSet::new(),
+            None,
+        )
+        .expect("taskless worker should initially enqueue an idle prompt");
+
+        let mut assigned_data = make_data(0);
+        assigned_data.in_progress_tasks = vec![task_with_status(
+            "cas-next",
+            Some("swift-fox"),
+            TaskStatus::InProgress,
+        )];
+        assigned_data.agents[0].current_task = Some("cas-next".to_string());
+
+        assert!(
+            !prompt_is_still_deliverable(&prompt, &assigned_data),
+            "last-mile delivery must drop an already-enqueued WorkerIdle after assignment"
+        );
+    }
+
+    #[test]
+    fn queued_worker_ready_is_dropped_if_assignment_lands_before_injection() {
+        let event = DirectorEvent::AgentRegistered {
+            agent_id: "sess-id-abc123".to_string(),
+            agent_name: "swift-fox".to_string(),
+        };
+        let idle_data = make_data(0);
+        let prompt = generate_prompt(
+            &event,
+            &idle_data,
+            &idle_data,
+            "supervisor",
+            &default_config(),
+            codex(),
+            codex(),
+            &HashSet::new(),
+            None,
+        )
+        .expect("newly registered taskless worker should enqueue a ready prompt");
+        assert!(prompt.text.contains("awaiting its first task"));
+        assert_eq!(prompt.retract_worker.as_deref(), Some("swift-fox"));
+        assert_eq!(
+            prompt.drop_if_worker_assigned.as_deref(),
+            Some("swift-fox")
+        );
+
+        let mut assigned_data = make_data(0);
+        assigned_data.in_progress_tasks = vec![task_with_status(
+            "cas-next",
+            Some("swift-fox"),
+            TaskStatus::InProgress,
+        )];
+        assigned_data.agents[0].current_task = Some("cas-next".to_string());
+
+        assert!(
+            !prompt_is_still_deliverable(&prompt, &assigned_data),
+            "last-mile delivery must drop an already-enqueued ready alert after assignment"
+        );
+    }
+
+    #[test]
+    fn worker_idle_text_distinguishes_never_started_from_finished_and_free() {
+        let event = DirectorEvent::WorkerIdle {
+            worker: "swift-fox".to_string(),
+            active_task: None,
+        };
+        let config = default_config();
+        let never_started = make_data(0);
+        let never_prompt = generate_prompt(
+            &event,
+            &never_started,
+            &never_started,
+            "supervisor",
+            &config,
+            codex(),
+            codex(),
+            &HashSet::new(),
+            None,
+        )
+        .unwrap();
+        assert!(never_prompt.text.contains("has not started a task yet"));
+
+        let mut finished = make_data(0);
+        finished.agents[0].registered_at -= chrono::Duration::minutes(5);
+        finished.agents[0].latest_activity = Some((
+            "closed cas-done".to_string(),
+            chrono::Utc::now() - chrono::Duration::seconds(30),
+        ));
+        let finished_prompt = generate_prompt(
+            &event,
+            &finished,
+            &finished,
+            "supervisor",
+            &config,
+            codex(),
+            codex(),
+            &HashSet::new(),
+            None,
+        )
+        .unwrap();
+        assert!(finished_prompt.text.contains("finished its task and is now free"));
+    }
+
+    #[test]
     fn test_worker_idle_no_ready_tasks() {
         let event = DirectorEvent::WorkerIdle {
             worker: "swift-fox".to_string(),
@@ -2770,19 +2922,21 @@ mod tests {
     /// `generate_prompt`. Before the cas-627f fix, `active_lease` for a
     /// parked `AwaitingMerge` task resolved to `None` once
     /// `park_task_awaiting_merge` released the lease (confirmed P1,
-    /// docs/reviews/2026-07-07-cas-b646-epic.md) — the event detector's
-    /// `active_task: None` WorkerIdle event would be silently dropped by the
-    /// revalidation step's `worker_has_open_or_in_progress_assignment`
-    /// guard, so the operator never saw this notification at all. This test
-    /// starts from that same `active_task: None` shape the detector
-    /// produces and asserts the notification survives BOTH steps and names
-    /// the task id, the `AwaitingMerge` status, and the close-rejected
-    /// reason.
+    /// docs/reviews/2026-07-07-cas-b646-epic.md). The current detector carries
+    /// that resolved parked-task state in the event. This distinction matters:
+    /// an event enqueued with no task must now be dropped if an assignment
+    /// lands later, while a close-rejected event that already named its parked
+    /// task must survive and remain actionable.
     #[test]
     fn test_worker_idle_awaiting_merge_close_rejected_survives_revalidate_and_names_task() {
         let event = DirectorEvent::WorkerIdle {
             worker: "swift-fox".to_string(),
-            active_task: None,
+            active_task: Some(ActiveLeaseSummary {
+                task_id: "cas-1234".to_string(),
+                task_title: "Fix close gate".to_string(),
+                task_status: TaskStatus::AwaitingMerge,
+                close_rejected_reason: Some("MERGE REQUIRED".to_string()),
+            }),
         };
         let mut data = make_data(0);
         data.in_progress_tasks = vec![TaskSummary {

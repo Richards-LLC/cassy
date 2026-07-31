@@ -168,6 +168,16 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "test subprocess resolved the protected host HOME")]
+    fn host_cas_dir_guard_rejects_protected_test_home() {
+        let mut guard = TestEnvGuard::temp_home();
+        let protected_home = guard.home().to_path_buf();
+        guard.set("CAS_TEST_PROTECTED_HOME", &protected_home);
+
+        let _ = host_cas_dir();
+    }
+
+    #[test]
     fn register_repo_strict_creates_host_dir_and_inserts() {
         TestEnvGuard::run_with_temp_home(|home| {
             let repo = home.join("myproject");

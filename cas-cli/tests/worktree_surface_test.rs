@@ -3034,6 +3034,82 @@ async fn completion_receipt_authority_is_exact_active_lease_session() {
         before_retry,
         "same-session exact-cycle retry must be a durable no-op"
     );
+
+    let supervisor_service = delivery_service(&cas_root, supervisor_id);
+    let verification = supervisor_service
+        .verification(Parameters(verification_req(serde_json::json!({
+            "action": "add",
+            "task_id": task.id,
+            "status": "approved",
+            "summary": "receipt A exact delivery proof approved",
+            "confidence": 1.0,
+            "dispatch_id": dispatch.id,
+        }))))
+        .await
+        .expect("resolve receipt A through the public verification boundary");
+    assert!(get_text(&verification).contains("approved"));
+    let (_, awaiting_merge) = cas_store::get_latest_worker_delivery(&cas_root, &task.id)
+        .unwrap()
+        .expect("receipt A delivery after verdict");
+    assert_eq!(awaiting_merge.state, WorkerDeliveryState::AwaitingMerge);
+
+    let before_awaiting_merge_retry = durable_close_snapshot(&cas_root);
+    let awaiting_merge_retry = owner_service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "close",
+            "id": task.id,
+            "reason": "exact awaiting-merge retry",
+            "completion_receipt": serde_json::to_string(&owner_receipt).unwrap(),
+        }))))
+        .await
+        .expect("exact receipt A retry while AwaitingMerge");
+    assert!(
+        get_text(&awaiting_merge_retry).contains("accepted idempotently")
+            && get_text(&awaiting_merge_retry).contains("State: awaiting_merge")
+    );
+    assert_eq!(
+        durable_close_snapshot(&cas_root),
+        before_awaiting_merge_retry,
+        "same receipt retry must remain a durable no-op in the coherent active cycle"
+    );
+
+    assert!(matches!(
+        open_agent_store(&cas_root)
+            .unwrap()
+            .try_claim(
+                &task.id,
+                owner_id,
+                600,
+                Some("attempt replacement receipt B")
+            )
+            .unwrap(),
+        cas::types::ClaimResult::Success(_)
+    ));
+    let mut replacement_receipt = owner_receipt.clone();
+    replacement_receipt.proof_reference = "proof:replacement-receipt-b".to_string();
+    replacement_receipt.scope_summary = "distinct replacement proof B".to_string();
+    let before_replacement = durable_close_snapshot(&cas_root);
+    let replacement = owner_service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "close",
+            "id": task.id,
+            "reason": "receipt B must not replace active receipt A",
+            "completion_receipt": serde_json::to_string(&replacement_receipt).unwrap(),
+        }))))
+        .await
+        .expect("replacement rejection is a typed public result");
+    let replacement_text = get_text(&replacement);
+    assert!(
+        replacement_text.contains("DELIVERY RECEIPT REJECTED")
+            && replacement_text.contains("distinct proof boundary")
+            && replacement_text.contains("awaiting_merge"),
+        "public receipt B must reject against active receipt A, got:\n{replacement_text}"
+    );
+    assert_eq!(
+        durable_close_snapshot(&cas_root),
+        before_replacement,
+        "replacement receipt B must not mutate task/deliverables/lease/receipt/transaction/event/dispatch/verdict/outbox state"
+    );
 }
 
 async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {

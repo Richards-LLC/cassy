@@ -381,6 +381,15 @@ impl CasCore {
         }
         let receipt =
             cas_store::build_worker_completion_receipt(&input, &caller.name, chrono::Utc::now());
+        if let Some((latest_receipt, latest_transaction)) = latest_delivery.as_ref()
+            && latest_receipt.id != receipt.id
+            && super::proof_scope::delivery_state_locks_scope(latest_transaction.state)
+        {
+            return Ok(Self::tool_error(format!(
+                "DELIVERY RECEIPT REJECTED: task {} already has active delivery proof {} in state {}. The proposed receipt is a distinct proof boundary and cannot replace it. Retry the exact persisted receipt or complete/recover the active delivery cycle first; task, deliverables, lease, receipts, transactions, events, dispatch, verdict, and outbox are unchanged.",
+                task.id, latest_receipt.id, latest_transaction.state
+            )));
+        }
         if retry_receipt_id
             .as_ref()
             .is_some_and(|expected| expected != &receipt.id)

@@ -1,7 +1,9 @@
 use crate::support::*;
 use cas::mcp::tools::*;
 use cas::store::{open_agent_store, open_verification_store};
-use cas::types::{AgentStatus, Verification};
+use cas::types::{
+    Agent, AgentRole, AgentStatus, Verification, VerificationProofBoundary, VerificationProvenance,
+};
 use rmcp::ServerHandler;
 use rmcp::handler::server::wrapper::Parameters;
 use tempfile::TempDir;
@@ -10,6 +12,43 @@ use tempfile::TempDir;
 fn setup_service() -> (TempDir, CasService) {
     let (temp, core) = setup_cas();
     (temp, CasService::new(core, None))
+}
+
+fn add_exact_supervisor_fixture_verdict(cas_dir: &std::path::Path, mut verification: Verification) {
+    const SUPERVISOR_ID: &str = "server-protocol-fixture-supervisor";
+    let agent_store = open_agent_store(cas_dir).expect("agent store");
+    let mut supervisor = Agent::new(SUPERVISOR_ID.to_string(), SUPERVISOR_ID.to_string());
+    supervisor.role = AgentRole::Supervisor;
+    agent_store
+        .register(&supervisor)
+        .expect("register durable fixture supervisor");
+    let dispatch = cas_store::create_verification_dispatch_bound(
+        cas_dir,
+        &verification.task_id,
+        "fixture-requester",
+        SUPERVISOR_ID,
+        &VerificationProofBoundary::task(),
+        chrono::Utc::now() + chrono::Duration::minutes(10),
+        false,
+    )
+    .expect("create exact fixture dispatch");
+    verification.provenance = VerificationProvenance::SupervisorDirect;
+    verification.agent_id = Some(SUPERVISOR_ID.to_string());
+    verification.issuer_agent_id = Some(SUPERVISOR_ID.to_string());
+    verification.dispatch_id = Some(dispatch.id.clone());
+    open_verification_store(cas_dir)
+        .expect("verification store")
+        .add(&verification)
+        .expect("persist exact supervisor verdict");
+    let connection = rusqlite::Connection::open(cas_dir.join("cas.db")).expect("db");
+    cas_store::resolve_verification_dispatch_with_conn(
+        &connection,
+        &dispatch.id,
+        SUPERVISOR_ID,
+        None,
+        true,
+    )
+    .expect("resolve exact fixture dispatch");
 }
 
 #[test]
@@ -406,8 +445,6 @@ async fn test_claim_allowed_with_other_task_pending_verification() {
 async fn test_start_allowed_after_verification_approved() {
     let (temp, service) = setup_cas();
     let cas_dir = temp.path().join(".cas");
-    let verification_store = open_verification_store(&cas_dir).unwrap();
-
     // Create and start first task
     let req = TaskCreateRequest {
         depth: None,
@@ -450,7 +487,7 @@ async fn test_start_allowed_after_verification_approved() {
         first_id.to_string(),
         "All checks passed".to_string(),
     );
-    verification_store.add(&verification).unwrap();
+    add_exact_supervisor_fixture_verdict(&cas_dir, verification);
 
     // Create second task
     let req2 = TaskCreateRequest {

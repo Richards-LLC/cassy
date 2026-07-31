@@ -261,6 +261,46 @@ mod tests {
     use cas_types::{VerificationProofBoundary, WorkerCompletionReceiptInput};
     use tempfile::TempDir;
 
+    const FIXTURE_SUPERVISOR_ID: &str = "proof-scope-fixture-supervisor";
+
+    /// Persist a supervisor-direct verdict with the same exact durable
+    /// authority production derives before calling the generic store. These
+    /// tests exercise proof-scope behavior, not forged-provenance rejection.
+    fn add_exact_supervisor_fixture_verdict(
+        root: &Path,
+        mut verification: cas_types::Verification,
+        dispatch: &VerificationDispatch,
+    ) -> cas_types::Verification {
+        let agent_store = crate::store::open_agent_store(root).expect("agent store");
+        let mut supervisor = cas_types::Agent::new(
+            FIXTURE_SUPERVISOR_ID.to_string(),
+            "proof-scope-fixture-supervisor".to_string(),
+        );
+        supervisor.role = cas_types::AgentRole::Supervisor;
+        agent_store
+            .register(&supervisor)
+            .expect("register durable fixture supervisor");
+
+        verification.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+        verification.agent_id = Some(FIXTURE_SUPERVISOR_ID.to_string());
+        verification.issuer_agent_id = Some(FIXTURE_SUPERVISOR_ID.to_string());
+        verification.dispatch_id = Some(dispatch.id.clone());
+        cas_store::SqliteVerificationStore::open(root)
+            .expect("verification store")
+            .add(&verification)
+            .expect("persist exact supervisor fixture verdict");
+        let conn = rusqlite::Connection::open(root.join("cas.db")).expect("db");
+        cas_store::resolve_verification_dispatch_with_conn(
+            &conn,
+            &dispatch.id,
+            FIXTURE_SUPERVISOR_ID,
+            None,
+            true,
+        )
+        .expect("resolve exact fixture dispatch");
+        verification
+    }
+
     fn empty_update() -> TaskUpdateRequest {
         TaskUpdateRequest {
             id: "cas-scope".to_string(),
@@ -460,7 +500,7 @@ mod tests {
             root.path(),
             &task.id,
             "requester",
-            "owner",
+            FIXTURE_SUPERVISOR_ID,
             &VerificationProofBoundary::task(),
             chrono::Utc::now() + chrono::Duration::minutes(10),
             false,
@@ -490,21 +530,7 @@ mod tests {
             task.id.clone(),
             "approved exact task scope".into(),
         );
-        verification.provenance = cas_types::VerificationProvenance::SupervisorDirect;
-        verification.dispatch_id = Some(dispatch.id.clone());
-        cas_store::SqliteVerificationStore::open(root.path())
-            .unwrap()
-            .add(&verification)
-            .unwrap();
-        let conn = rusqlite::Connection::open(root.path().join("cas.db")).unwrap();
-        cas_store::resolve_verification_dispatch_with_conn(
-            &conn,
-            &dispatch.id,
-            "supervisor",
-            None,
-            true,
-        )
-        .unwrap();
+        verification = add_exact_supervisor_fixture_verdict(root.path(), verification, &dispatch);
 
         let error = guard_task_proof_scope(
             root.path(),
@@ -549,33 +575,19 @@ mod tests {
             root.path(),
             &task.id,
             "requester",
-            "supervisor",
+            FIXTURE_SUPERVISOR_ID,
             &VerificationProofBoundary::task(),
             chrono::Utc::now() + chrono::Duration::minutes(10),
             false,
         )
         .unwrap();
-        let mut verification = cas_types::Verification::rejected(
+        let verification = cas_types::Verification::rejected(
             "ver-rejected-proof".into(),
             task.id.clone(),
             "scope needs rework".into(),
             Vec::new(),
         );
-        verification.provenance = cas_types::VerificationProvenance::SupervisorDirect;
-        verification.dispatch_id = Some(dispatch.id.clone());
-        cas_store::SqliteVerificationStore::open(root.path())
-            .unwrap()
-            .add(&verification)
-            .unwrap();
-        let conn = rusqlite::Connection::open(root.path().join("cas.db")).unwrap();
-        cas_store::resolve_verification_dispatch_with_conn(
-            &conn,
-            &dispatch.id,
-            "supervisor",
-            None,
-            true,
-        )
-        .unwrap();
+        add_exact_supervisor_fixture_verdict(root.path(), verification, &dispatch);
 
         let mut update = empty_update();
         update.acceptance_criteria = Some("corrected scope".into());

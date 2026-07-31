@@ -4523,9 +4523,6 @@ async fn test_task_lifecycle_with_verification() {
     let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
 
-    // Initialize verification store
-    let verification_store = open_verification_store(&cas_dir).unwrap();
-
     // Create task
     let req = TaskCreateRequest {
         depth: None,
@@ -4569,7 +4566,7 @@ async fn test_task_lifecycle_with_verification() {
         id.to_string(),
         "All checks passed".to_string(),
     );
-    verification_store.add(&verification).unwrap();
+    add_exact_supervisor_fixture_verdict(&cas_dir, verification, None);
 
     // Close task - should succeed now with verification
     let close_req = TaskCloseRequest {
@@ -4603,9 +4600,6 @@ async fn test_task_close_blocked_with_rejected_verification() {
     let (temp, service) = setup_cas();
     let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
-
-    // Initialize verification store
-    let verification_store = open_verification_store(&cas_dir).unwrap();
 
     // Create task
     let req = TaskCreateRequest {
@@ -4653,7 +4647,7 @@ async fn test_task_close_blocked_with_rejected_verification() {
         "Found incomplete work".to_string(),
         issues,
     );
-    verification_store.add(&verification).unwrap();
+    add_exact_supervisor_fixture_verdict(&cas_dir, verification, None);
 
     // Try to close task - should be blocked due to rejected verification
     let close_req = TaskCloseRequest {

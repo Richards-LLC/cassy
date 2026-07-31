@@ -1,10 +1,10 @@
 use std::path::Path;
 
 use cas::mcp::{CasCore, CasService};
-use cas::store::{init_cas_dir, open_task_store, open_verification_store};
+use cas::store::{init_cas_dir, open_agent_store, open_task_store, open_verification_store};
 use cas::types::{
-    Task, TaskStatus, TaskType, Verification, VerificationProofBoundary, VerificationProvenance,
-    VerificationType,
+    Agent, AgentRole, Task, TaskStatus, TaskType, Verification, VerificationProofBoundary,
+    VerificationProvenance, VerificationType,
 };
 use cas_mcp::types::TaskRequest;
 use rmcp::handler::server::wrapper::Parameters;
@@ -24,11 +24,19 @@ fn add_task(cas_root: &Path, id: &str, task_type: TaskType) -> Task {
 }
 
 fn add_exact_verdict(cas_root: &Path, task_id: &str, verification_type: VerificationType) {
+    const SUPERVISOR_ID: &str = "fixture-durable-supervisor";
+    let agent_store = open_agent_store(cas_root).expect("agent store");
+    let mut supervisor = Agent::new(SUPERVISOR_ID.to_string(), "fixture-supervisor".to_string());
+    supervisor.role = AgentRole::Supervisor;
+    agent_store
+        .register(&supervisor)
+        .expect("register durable fixture supervisor");
+
     let dispatch = cas_store::create_verification_dispatch_bound(
         cas_root,
         task_id,
         "requester",
-        "supervisor",
+        SUPERVISOR_ID,
         &VerificationProofBoundary::task(),
         chrono::Utc::now() + chrono::Duration::minutes(10),
         false,
@@ -41,6 +49,8 @@ fn add_exact_verdict(cas_root: &Path, task_id: &str, verification_type: Verifica
     );
     verdict.verification_type = verification_type;
     verdict.provenance = VerificationProvenance::SupervisorDirect;
+    verdict.agent_id = Some(SUPERVISOR_ID.to_string());
+    verdict.issuer_agent_id = Some(SUPERVISOR_ID.to_string());
     verdict.dispatch_id = Some(dispatch.id.clone());
     open_verification_store(cas_root)
         .unwrap()
@@ -50,7 +60,7 @@ fn add_exact_verdict(cas_root: &Path, task_id: &str, verification_type: Verifica
     cas_store::resolve_verification_dispatch_with_conn(
         &connection,
         &dispatch.id,
-        "supervisor",
+        SUPERVISOR_ID,
         None,
         true,
     )

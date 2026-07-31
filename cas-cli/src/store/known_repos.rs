@@ -34,9 +34,16 @@ use crate::store::{KnownRepoStore, SqliteKnownRepoStore};
 /// the current directory if the user's home directory cannot be determined,
 /// which should only happen in severely sandboxed test environments.
 pub fn host_cas_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".cas")
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    if let Some(protected_home) = std::env::var_os("CAS_TEST_PROTECTED_HOME")
+        && home == PathBuf::from(&protected_home)
+    {
+        panic!(
+            "test subprocess resolved the protected host HOME at {}; configure the spawned cas command with an isolated HOME",
+            home.display()
+        );
+    }
+    home.join(".cas")
 }
 
 /// Install the known-repo registry and host-local binding schemas on
@@ -154,6 +161,92 @@ pub fn register_repo_strict(repo_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Describe a host-registry failure as an infrastructure problem, including
+/// bounded local process evidence when SQLite reports lock contention.
+pub fn host_registry_write_error(repo_path: &Path, error: &anyhow::Error) -> String {
+    let error_text = error.to_string();
+    let locked = error_text.contains("database is locked")
+        || error_text.contains("database table is locked");
+    let db_path = host_cas_dir().join("cas.db");
+    let holders = locked
+        .then(|| open_holder_pids(&db_path))
+        .unwrap_or_default();
+    let holder_text = if holders.is_empty() {
+        "holding PID could not be identified".to_string()
+    } else {
+        format!(
+            "holding PID{}: {}",
+            if holders.len() == 1 { "" } else { "s" },
+            holders
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+
+    if locked {
+        format!(
+            "HOST REGISTRY UNAVAILABLE: failed to register {} in {}: {error_text}; {holder_text}. Inspect with `fuser -v {db}` and `ps -o pid,ppid,stat,etime,wchan:20,cmd -p <PID>`; stop the owning worker or send SIGTERM, then SIGKILL only if the orphan remains wedged, and retry.",
+            repo_path.display(),
+            db_path.display(),
+            db = db_path.display(),
+        )
+    } else {
+        format!(
+            "HOST REGISTRY UNAVAILABLE: failed to register {} in {}: {error_text}. Check ownership and writability of the host registry, then retry.",
+            repo_path.display(),
+            db_path.display(),
+        )
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn open_holder_pids(db_path: &Path) -> Vec<u32> {
+    let db_path = db_path
+        .canonicalize()
+        .unwrap_or_else(|_| db_path.to_path_buf());
+    let wal_path = PathBuf::from(format!("{}-wal", db_path.display()));
+    let shm_path = PathBuf::from(format!("{}-shm", db_path.display()));
+    let Ok(processes) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut holders = Vec::new();
+    for process in processes.flatten() {
+        let Some(pid) = process
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(fds) = std::fs::read_dir(process.path().join("fd")) else {
+            continue;
+        };
+        let holds_registry = fds.flatten().any(|fd| {
+            std::fs::read_link(fd.path())
+                .is_ok_and(|target| target == db_path || target == wal_path || target == shm_path)
+        });
+        if holds_registry {
+            holders.push(pid);
+        }
+    }
+    holders.sort_unstable();
+    holders.dedup();
+    holders
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_holder_pids(_db_path: &Path) -> Vec<u32> {
+    Vec::new()
+}
+
+/// PIDs with the host registry database, WAL, or shared-memory file open.
+/// Used by `gc_report` to surface CAS children that survived their worker.
+pub(crate) fn host_registry_open_pids() -> Vec<u32> {
+    open_holder_pids(&host_cas_dir().join("cas.db"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,6 +258,16 @@ mod tests {
             let resolved = host_cas_dir();
             assert_eq!(resolved, home.join(".cas"));
         });
+    }
+
+    #[test]
+    #[should_panic(expected = "test subprocess resolved the protected host HOME")]
+    fn host_cas_dir_guard_rejects_protected_test_home() {
+        let mut guard = TestEnvGuard::temp_home();
+        let protected_home = guard.home().to_path_buf();
+        guard.set("CAS_TEST_PROTECTED_HOME", &protected_home);
+
+        let _ = host_cas_dir();
     }
 
     #[test]
@@ -194,6 +297,27 @@ mod tests {
             std::fs::create_dir_all(&repo).unwrap();
             // Schema intentionally not installed.
             register_repo(&repo); // expect no panic, no abort
+        });
+    }
+
+    #[test]
+    fn locked_registry_error_names_holder_pid_and_is_not_input_rejection() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            ensure_host_schema().unwrap();
+            let db_path = home.join(".cas/cas.db");
+            let _open_holder = rusqlite::Connection::open(&db_path).unwrap();
+            let repo = home.join("repo");
+            let message = host_registry_write_error(
+                &repo,
+                &anyhow::anyhow!("database error: database is locked"),
+            );
+
+            assert!(message.starts_with("HOST REGISTRY UNAVAILABLE:"));
+            assert!(!message.contains("WORK TARGET REJECTED"));
+            assert!(message.contains(&format!("holding PID: {}", std::process::id())));
+            assert!(message.contains("fuser -v"));
+            assert!(message.contains("SIGTERM"));
+            assert!(message.contains("SIGKILL"));
         });
     }
 

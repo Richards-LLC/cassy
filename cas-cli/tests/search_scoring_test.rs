@@ -31,6 +31,14 @@ macro_rules! skip_without_embeddings {
 /// Helper to run CAS commands in a temp directory
 fn cas_cmd(dir: &TempDir) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cas"));
+    let home = dir.path().join(".test-home");
+    let xdg = dir.path().join(".test-xdg-config");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&xdg).unwrap();
+    if let Some(host_home) = std::env::var_os("HOME") {
+        cmd.env("CAS_TEST_PROTECTED_HOME", host_home);
+    }
+    cmd.env("HOME", home).env("XDG_CONFIG_HOME", xdg);
     cmd.env("CAS_DIR", dir.path());
     cmd.env("CAS_SKIP_FACTORY_TOOLING", "1");
     cmd.current_dir(dir.path());

@@ -32,6 +32,24 @@ use crate::cli::interactive;
 /// a CPU core indefinitely (see cas-bf06). Opt out via `CAS_INIT_NO_TIMEOUT=1`.
 const INIT_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Record a successfully initialized repository in the host registry.
+///
+/// Keep this host-scoped side effect at the CLI boundary. `init_cas_dir` is
+/// also a public fixture primitive used by integration tests; making that
+/// low-level helper write `~/.cas/cas.db` polluted developer registries and
+/// created cross-test lock contention because integration-test dependencies
+/// are compiled without `cfg(test)`.
+fn register_initialized_repo(cwd: &Path) {
+    if let Err(error) = crate::store::known_repos::ensure_host_schema() {
+        warn!(
+            error = %error,
+            "failed to install host known_repos schema (non-fatal)",
+        );
+        return;
+    }
+    crate::store::known_repos::register_repo(cwd);
+}
+
 /// Spawn a watchdog thread that aborts the process if init runs longer than
 /// `INIT_TIMEOUT`. The watchdog is purely defensive: normal init completes
 /// in well under a second, so reaching the timeout always indicates a bug.
@@ -302,6 +320,7 @@ fn execute_json(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
     }
 
     let cas_dir = init_cas_dir(cwd)?;
+    register_initialized_repo(cwd);
     let config = WizardConfig::with_detected_agents(cwd);
     let config_data = config.to_config();
     let mut hooks_configured = false;
@@ -411,6 +430,7 @@ fn execute_defaults(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
     print_colored("  █▄▄ █▀█ ▄█\n\n", colors::CYAN_BRIGHT)?;
 
     let cas_dir = init_cas_dir(cwd)?;
+    register_initialized_repo(cwd);
 
     // Apply with animation
     let config = WizardConfig::with_detected_agents(cwd);
@@ -460,6 +480,7 @@ fn run_wizard(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
 
     // Initialize .cas directory
     let cas_dir = init_cas_dir(cwd)?;
+    register_initialized_repo(cwd);
     let wizard_config = WizardConfig::with_detected_agents(cwd);
 
     // Confirmation with file summary

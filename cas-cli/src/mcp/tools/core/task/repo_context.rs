@@ -337,10 +337,7 @@ pub(crate) fn declare_work_target(
             .map_err(|reason| format!("WORK TARGET REJECTED: {reason}"))?,
     };
     crate::store::known_repos::register_repo_strict(&repo_root).map_err(|error| {
-        format!(
-            "WORK TARGET REJECTED: failed to register {} in the host known-repo registry: {error}",
-            repo_root.display()
-        )
+        crate::store::known_repos::host_registry_write_error(&repo_root, &error)
     })?;
     Ok(Some(WorkTarget {
         repo_selector,

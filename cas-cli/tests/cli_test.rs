@@ -4,8 +4,16 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
-fn cas_cmd() -> Command {
+fn cas_cmd(root: &std::path::Path) -> Command {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cas"));
+    let home = root.join(".test-home");
+    let xdg = root.join(".test-xdg-config");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&xdg).unwrap();
+    if let Some(host_home) = std::env::var_os("HOME") {
+        cmd.env("CAS_TEST_PROTECTED_HOME", host_home);
+    }
+    cmd.env("HOME", home).env("XDG_CONFIG_HOME", xdg);
     // Clear CAS_ROOT to prevent env pollution from parent shell
     // Tests should use current_dir() for isolation, not inherit env vars
     cmd.env_remove("CAS_ROOT");
@@ -15,7 +23,8 @@ fn cas_cmd() -> Command {
 
 #[test]
 fn test_help() {
-    cas_cmd()
+    let temp = TempDir::new().unwrap();
+    cas_cmd(temp.path())
         .arg("--help")
         .assert()
         .success()
@@ -24,7 +33,8 @@ fn test_help() {
 
 #[test]
 fn test_version() {
-    cas_cmd()
+    let temp = TempDir::new().unwrap();
+    cas_cmd(temp.path())
         .arg("--version")
         .assert()
         .success()
@@ -35,7 +45,7 @@ fn test_version() {
 fn test_init_yes_flag() {
     let temp = TempDir::new().unwrap();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
@@ -52,7 +62,7 @@ fn test_init_yes_flag() {
 fn test_init_json() {
     let temp = TempDir::new().unwrap();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--json"])
         .assert()
@@ -65,14 +75,14 @@ fn test_init_already_initialized() {
     let temp = TempDir::new().unwrap();
 
     // First init
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
         .success();
 
     // Second init without force should inform user
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
@@ -93,7 +103,7 @@ fn test_init_reinit_with_closed_stdin_does_not_hang() {
     let temp = TempDir::new().unwrap();
 
     // First init to make the reinit branch active.
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
@@ -107,6 +117,12 @@ fn test_init_reinit_with_closed_stdin_does_not_hang() {
     let mut child = StdCommand::new(bin)
         .current_dir(&temp)
         .arg("init")
+        .env("HOME", temp.path().join(".test-home"))
+        .env("XDG_CONFIG_HOME", temp.path().join(".test-xdg-config"))
+        .env(
+            "CAS_TEST_PROTECTED_HOME",
+            std::env::var_os("HOME").unwrap_or_default(),
+        )
         .env_remove("CAS_ROOT")
         .env("CAS_SKIP_FACTORY_TOOLING", "1")
         .stdin(Stdio::piped())
@@ -156,14 +172,14 @@ fn test_init_force_reinit() {
     let temp = TempDir::new().unwrap();
 
     // First init
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
         .success();
 
     // Force reinit should succeed
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes", "--force"])
         .assert()
@@ -181,7 +197,7 @@ fn test_init_json_syncs_grok_builtins_when_grok_dir_present() {
     let temp = TempDir::new().unwrap();
     std::fs::create_dir_all(temp.path().join(".grok")).unwrap();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--json"])
         .assert()
@@ -213,14 +229,14 @@ fn test_init_json_already_initialized() {
     let temp = TempDir::new().unwrap();
 
     // First init
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--json"])
         .assert()
         .success();
 
     // Second init in JSON mode
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--json"])
         .assert()
@@ -232,13 +248,13 @@ fn test_init_json_already_initialized() {
 fn test_status() {
     let temp = TempDir::new().unwrap();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
         .success();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .arg("status")
         .assert()
@@ -250,13 +266,13 @@ fn test_status() {
 fn test_status_verbose() {
     let temp = TempDir::new().unwrap();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
         .success();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["status", "-v"])
         .assert()
@@ -268,14 +284,14 @@ fn test_status_verbose() {
 fn test_config() {
     let temp = TempDir::new().unwrap();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
         .success();
 
     // List config
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["config", "list"])
         .assert()
@@ -283,7 +299,7 @@ fn test_config() {
         .stdout(predicate::str::contains("sync.enabled"));
 
     // Get specific value
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["config", "get", "sync.enabled"])
         .assert()
@@ -291,14 +307,14 @@ fn test_config() {
         .stdout(predicate::str::contains("true"));
 
     // Set value
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["config", "set", "sync.min_helpful", "5"])
         .assert()
         .success();
 
     // Verify
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["config", "get", "sync.min_helpful"])
         .assert()
@@ -310,13 +326,13 @@ fn test_config() {
 fn test_doctor() {
     let temp = TempDir::new().unwrap();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
         .success();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .arg("doctor")
         .assert()
@@ -328,7 +344,7 @@ fn test_doctor() {
 fn test_not_initialized_error() {
     let temp = TempDir::new().unwrap();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .arg("status")
         .assert()
@@ -340,14 +356,14 @@ fn test_not_initialized_error() {
 fn test_config_list_offline_no_auth_required() {
     let temp = TempDir::new().unwrap();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
         .success();
 
     // Ensure local config command remains available without login state.
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["config", "list"])
         .assert()
@@ -359,14 +375,14 @@ fn test_config_list_offline_no_auth_required() {
 fn test_status_offline_no_auth_required() {
     let temp = TempDir::new().unwrap();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
         .success();
 
     // Ensure local status command remains available without login state.
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .arg("status")
         .assert()
@@ -379,13 +395,13 @@ fn test_cloud_command_requires_auth() {
     let temp = TempDir::new().unwrap();
     let home = TempDir::new().unwrap();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
         .success();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .env("HOME", home.path())
         .args(["cloud", "status"])
@@ -398,7 +414,7 @@ fn test_cloud_command_requires_auth() {
 fn test_hook_command_session_start() {
     let temp = TempDir::new().unwrap();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
@@ -407,7 +423,7 @@ fn test_hook_command_session_start() {
     // Test SessionStart hook with JSON input
     let input = r#"{"session_id":"test123","cwd":"/test","hook_event_name":"SessionStart"}"#;
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["hook", "SessionStart"])
         .write_stdin(input)
@@ -419,14 +435,14 @@ fn test_hook_command_session_start() {
 fn test_hook_config() {
     let temp = TempDir::new().unwrap();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
         .success();
 
     // Check default hook config
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["config", "get", "hooks.capture_enabled"])
         .assert()
@@ -434,14 +450,14 @@ fn test_hook_config() {
         .stdout(predicate::str::contains("true"));
 
     // Set hook config
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["config", "set", "hooks.capture_enabled", "false"])
         .assert()
         .success();
 
     // Verify it was set
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["config", "get", "hooks.capture_enabled"])
         .assert()
@@ -453,7 +469,7 @@ fn test_hook_config() {
 fn test_hook_post_tool_use() {
     let temp = TempDir::new().unwrap();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
@@ -468,7 +484,7 @@ fn test_hook_post_tool_use() {
         "tool_input": {"file_path": "/test/file.rs", "content": "fn main() {}"}
     }"#;
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["hook", "PostToolUse"])
         .write_stdin(input)
@@ -480,7 +496,7 @@ fn test_hook_post_tool_use() {
 fn test_hook_user_prompt_submit() {
     let temp = TempDir::new().unwrap();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
@@ -494,7 +510,7 @@ fn test_hook_user_prompt_submit() {
         "user_prompt": "Help me write tests"
     }"#;
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["hook", "UserPromptSubmit"])
         .write_stdin(input)
@@ -506,14 +522,14 @@ fn test_hook_user_prompt_submit() {
 fn test_config_list() {
     let temp = TempDir::new().unwrap();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
         .success();
 
     // Test config list
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["config", "list"])
         .assert()
@@ -526,14 +542,14 @@ fn test_config_list() {
 fn test_config_list_json() {
     let temp = TempDir::new().unwrap();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
         .success();
 
     // Test config list with JSON output
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["--json", "config", "list"])
         .assert()
@@ -546,14 +562,14 @@ fn test_config_list_json() {
 fn test_config_get_set() {
     let temp = TempDir::new().unwrap();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
         .success();
 
     // Get a value
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["config", "get", "sync.enabled"])
         .assert()
@@ -561,7 +577,7 @@ fn test_config_get_set() {
         .stdout(predicate::str::contains("true"));
 
     // Set a value
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["config", "set", "sync.enabled", "false"])
         .assert()
@@ -569,7 +585,7 @@ fn test_config_get_set() {
         .stdout(predicate::str::contains("Set sync.enabled"));
 
     // Verify the value was set
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["config", "get", "sync.enabled"])
         .assert()
@@ -581,14 +597,14 @@ fn test_config_get_set() {
 fn test_config_get_unknown_key() {
     let temp = TempDir::new().unwrap();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
         .success();
 
     // Try to get unknown key
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["config", "get", "unknown.key"])
         .assert()
@@ -600,21 +616,21 @@ fn test_config_get_unknown_key() {
 fn test_config_set_validation() {
     let temp = TempDir::new().unwrap();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
         .success();
 
     // Try to set invalid boolean value
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["config", "set", "sync.enabled", "notabool"])
         .assert()
         .failure();
 
     // Try to set invalid integer value
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["config", "set", "hooks.token_budget", "notanumber"])
         .assert()
@@ -625,14 +641,14 @@ fn test_config_set_validation() {
 fn test_config_list_section_filter() {
     let temp = TempDir::new().unwrap();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
         .success();
 
     // Filter by section
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["config", "list", "--section", "hooks"])
         .assert()
@@ -645,21 +661,21 @@ fn test_config_list_section_filter() {
 fn test_config_list_modified() {
     let temp = TempDir::new().unwrap();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
         .success();
 
     // Modify a value
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["config", "set", "hooks.token_budget", "8000"])
         .assert()
         .success();
 
     // List only modified values
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["config", "list", "--modified"])
         .assert()
@@ -672,7 +688,7 @@ fn test_config_list_modified() {
 fn test_config_diff() {
     let temp = TempDir::new().unwrap();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
@@ -680,7 +696,7 @@ fn test_config_diff() {
 
     // After init --yes with defaults, there should be no differences from defaults
     // (mcp.enabled was removed - MCP is always enabled)
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["config", "diff"])
         .assert()
@@ -688,14 +704,14 @@ fn test_config_diff() {
         .stdout(predicate::str::contains("No differences"));
 
     // Modify a value
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["config", "set", "sync.min_helpful", "5"])
         .assert()
         .success();
 
     // Now there should be differences
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["config", "diff"])
         .assert()
@@ -709,14 +725,14 @@ fn test_config_diff() {
 fn test_config_describe() {
     let temp = TempDir::new().unwrap();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
         .success();
 
     // Describe a config key
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["config", "describe", "hooks.token_budget"])
         .assert()
@@ -730,21 +746,21 @@ fn test_config_describe() {
 fn test_config_export_import() {
     let temp = TempDir::new().unwrap();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
         .success();
 
     // Modify a value
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["config", "set", "hooks.token_budget", "6000"])
         .assert()
         .success();
 
     // Export config
-    let export_output = cas_cmd()
+    let export_output = cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["--json", "config", "list"])
         .assert()
@@ -759,13 +775,13 @@ fn test_config_export_import() {
 fn test_doctor_json() {
     let temp = TempDir::new().unwrap();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
         .success();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["doctor", "--json"])
         .assert()
@@ -779,7 +795,7 @@ fn test_doctor_mcp_configured() {
     let temp = TempDir::new().unwrap();
     let cas_root = temp.path().join(".cas");
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
@@ -787,7 +803,7 @@ fn test_doctor_mcp_configured() {
 
     // Doctor should show MCP is configured after init
     // Use CAS_ROOT to isolate from parent project's .cas
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .env("CAS_ROOT", &cas_root)
         .arg("doctor")
@@ -803,7 +819,7 @@ fn test_doctor_mcp_not_configured() {
     let cas_root = temp.path().join(".cas");
 
     // Initialize CAS
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
@@ -814,7 +830,7 @@ fn test_doctor_mcp_not_configured() {
 
     // Doctor should warn about MCP not being configured
     // Use CAS_ROOT to isolate from parent project's .cas
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .env("CAS_ROOT", &cas_root)
         .arg("doctor")
@@ -828,7 +844,7 @@ fn test_doctor_mcp_not_configured() {
 fn test_doctor_fix_initializes_project() {
     let temp = TempDir::new().unwrap();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["doctor", "--fix"])
         .assert()
@@ -841,7 +857,7 @@ fn test_doctor_fix_initializes_project() {
 fn test_doctor_fix_json_before_init_errors() {
     let temp = TempDir::new().unwrap();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["doctor", "--fix", "--json"])
         .assert()
@@ -856,13 +872,13 @@ fn test_bare_factory_flags_are_parsed() {
     let temp = TempDir::new().unwrap();
     let cas_root = temp.path().join(".cas");
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .args(["init", "--yes"])
         .assert()
         .success();
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .env("CAS_ROOT", &cas_root)
         .args(["--new", "-w", "0"])
@@ -878,7 +894,7 @@ fn test_noninteractive_factory_includes_preflight_hints() {
     let temp = TempDir::new().unwrap();
     let cas_root = temp.path().join(".cas");
 
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .env("CAS_ROOT", &cas_root)
         .args(["--new", "-w", "0"])
@@ -895,7 +911,7 @@ fn test_doctor_not_initialized() {
 
     // Doctor on uninitialized directory should show error
     // Use CAS_ROOT pointing to non-existent .cas to prevent finding parent project's .cas
-    cas_cmd()
+    cas_cmd(temp.path())
         .current_dir(&temp)
         .env("CAS_ROOT", temp.path().join(".cas"))
         .arg("doctor")

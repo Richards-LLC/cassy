@@ -409,11 +409,48 @@ pub fn bootstrap_migrations(cas_dir: &Path) -> Result<usize> {
     Ok(bootstrapped)
 }
 
+/// Return the table and column targeted by CAS's static
+/// `ALTER TABLE ... ADD COLUMN ...` migration grammar.
+///
+/// Migration SQL is compiled into the binary rather than supplied by users,
+/// and every additive-column migration uses this unquoted five-token prefix.
+/// Keeping the parser deliberately narrow means unfamiliar ALTER statements
+/// still execute normally instead of being silently skipped.
+fn add_column_target(sql: &str) -> Option<(&str, &str)> {
+    let mut tokens = sql.split_whitespace();
+    let alter = tokens.next()?;
+    let table_keyword = tokens.next()?;
+    let table = tokens.next()?;
+    let add = tokens.next()?;
+    let column_keyword = tokens.next()?;
+    let column = tokens.next()?;
+
+    (alter.eq_ignore_ascii_case("ALTER")
+        && table_keyword.eq_ignore_ascii_case("TABLE")
+        && add.eq_ignore_ascii_case("ADD")
+        && column_keyword.eq_ignore_ascii_case("COLUMN"))
+    .then_some((table, column))
+}
+
+/// Apply one migration statement without re-adding a column that is already
+/// present in a partially migrated database.
+fn apply_migration_statement(conn: &Connection, sql: &str) -> Result<()> {
+    if let Some((table, column)) = add_column_target(sql)
+        && cas_store::shared_db::column_exists(conn, table, column)
+    {
+        return Ok(());
+    }
+    conn.execute(sql, [])?;
+    Ok(())
+}
+
 /// Apply a single migration
 fn apply_migration(conn: &Connection, migration: &Migration) -> Result<()> {
-    // Execute all SQL statements in the migration
+    // Execute all SQL statements in the migration. Each ADD COLUMN statement
+    // is guarded independently because a migration-level detect query cannot
+    // distinguish every possible mixed-schema state.
     for sql in migration.up {
-        conn.execute(sql, [])?;
+        apply_migration_statement(conn, sql)?;
     }
 
     // Record that migration was applied
@@ -1143,6 +1180,188 @@ mod tests {
 
             let second =
                 run_migrations(&cas_dir, false).expect("repeated verifier upgrade must be a no-op");
+            assert_eq!(second.applied_count, 0);
+        });
+    }
+
+    #[test]
+    fn test_multi_alter_migrations_are_individually_idempotent_from_mixed_states() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE worktrees (
+                 id TEXT PRIMARY KEY,
+                 change_id TEXT
+             );
+             CREATE TABLE verifications (
+                 id TEXT PRIMARY KEY,
+                 task_id TEXT NOT NULL,
+                 provenance TEXT NOT NULL DEFAULT 'legacy',
+                 created_at TEXT NOT NULL
+             );
+             CREATE TABLE verification_dispatches (
+                 id TEXT PRIMARY KEY,
+                 receipt_id TEXT
+             );",
+        )
+        .unwrap();
+
+        // Static audit: these are the only migrations with multiple ALTER
+        // statements. Seed one column from each migration, then apply every
+        // statement twice through the production runner helper.
+        let multi_alter_migrations: Vec<&Migration> = MIGRATIONS
+            .iter()
+            .filter(|migration| matches!(migration.id, 130 | 210 | 213))
+            .collect();
+        assert_eq!(multi_alter_migrations.len(), 3);
+        for migration in multi_alter_migrations {
+            for _ in 0..2 {
+                for sql in migration.up {
+                    apply_migration_statement(&conn, sql).unwrap_or_else(|error| {
+                        panic!(
+                            "{} statement must be individually repeat-safe: {sql}: {error}",
+                            migration.name
+                        )
+                    });
+                }
+            }
+        }
+
+        for (table, column) in [
+            ("worktrees", "change_id"),
+            ("worktrees", "workspace_name"),
+            ("worktrees", "has_conflicts"),
+            ("verifications", "provenance"),
+            ("verifications", "capability_id"),
+            ("verifications", "issuer_agent_id"),
+            ("verification_dispatches", "receipt_id"),
+            ("verification_dispatches", "delivery_transaction_id"),
+            ("verification_capabilities", "dispatch_id"),
+            ("verifications", "dispatch_id"),
+        ] {
+            assert!(
+                cas_store::shared_db::column_exists(&conn, table, column),
+                "missing {table}.{column} after mixed-state convergence"
+            );
+        }
+    }
+
+    #[test]
+    fn test_mixed_m213_schema_converges_through_m214_and_is_repeat_safe() {
+        crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
+            let project = home.join("proj");
+            std::fs::create_dir_all(&project).unwrap();
+            crate::store::init_cas_dir(&project).unwrap();
+            let cas_dir = project.join(".cas");
+            let db_path = cas_dir.join("cas.db");
+
+            {
+                let conn = Connection::open(&db_path).unwrap();
+                conn.execute_batch(
+                    "DROP INDEX IF EXISTS idx_verification_capabilities_dispatch;
+                     DROP INDEX IF EXISTS idx_verifications_dispatch;
+                     ALTER TABLE verification_capabilities DROP COLUMN dispatch_id;
+                     ALTER TABLE verifications DROP COLUMN dispatch_id;
+                     DROP TABLE known_repo_bindings;
+                     DELETE FROM cas_migrations WHERE id IN (213, 214);",
+                )
+                .unwrap();
+
+                for column in ["receipt_id", "delivery_transaction_id"] {
+                    assert_eq!(
+                        conn.query_row(
+                            "SELECT COUNT(*) FROM pragma_table_info('verification_dispatches')
+                             WHERE name = ?1",
+                            [column],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .unwrap(),
+                        1,
+                        "live failure shape requires existing dispatch column {column}"
+                    );
+                }
+                for table in ["verification_capabilities", "verifications"] {
+                    assert_eq!(
+                        conn.query_row(
+                            &format!(
+                                "SELECT COUNT(*) FROM pragma_table_info('{table}')
+                                 WHERE name = 'dispatch_id'"
+                            ),
+                            [],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .unwrap(),
+                        0,
+                        "live failure shape requires legacy {table}"
+                    );
+                }
+            }
+
+            let first = run_migrations(&cas_dir, false)
+                .expect("mixed m213 schema must converge instead of duplicating receipt_id");
+            assert!(
+                first
+                    .applied_names
+                    .iter()
+                    .any(|name| name == "verification_proof_boundaries"),
+                "m213 must be applied, not falsely detected: {:?}",
+                first.applied_names
+            );
+            assert!(
+                first
+                    .applied_names
+                    .iter()
+                    .any(|name| name == "known_repo_bindings"),
+                "m214 must run after repaired m213: {:?}",
+                first.applied_names
+            );
+
+            let conn = Connection::open(&db_path).unwrap();
+            for (table, column) in [
+                ("verification_dispatches", "receipt_id"),
+                ("verification_dispatches", "delivery_transaction_id"),
+                ("verification_capabilities", "dispatch_id"),
+                ("verifications", "dispatch_id"),
+            ] {
+                assert_eq!(
+                    conn.query_row(
+                        &format!(
+                            "SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"
+                        ),
+                        [column],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                    1,
+                    "missing converged {table}.{column}"
+                );
+            }
+            for migration_id in [213, 214] {
+                assert_eq!(
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM cas_migrations WHERE id = ?1",
+                        [migration_id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                    1,
+                    "migration {migration_id} must be recorded exactly once"
+                );
+            }
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'table' AND name = 'known_repo_bindings'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+                1,
+                "m214 table must exist after mixed-state repair"
+            );
+            drop(conn);
+
+            let second = run_migrations(&cas_dir, false)
+                .expect("repeated mixed-state repair must be a no-op");
             assert_eq!(second.applied_count, 0);
         });
     }

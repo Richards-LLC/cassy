@@ -1037,6 +1037,57 @@ fn test_serve_fails_fast_on_unreadable_cas_db() {
 }
 
 #[test]
+fn test_serve_starts_degraded_and_warns_when_m213_is_partially_applied() {
+    let sandbox = CasSandbox::new();
+    let db_path = sandbox.cas_root().join("cas.db");
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_verification_capabilities_dispatch;
+             DROP INDEX IF EXISTS idx_verifications_dispatch;
+             ALTER TABLE verification_capabilities DROP COLUMN dispatch_id;
+             ALTER TABLE verifications DROP COLUMN dispatch_id;
+             DELETE FROM cas_migrations WHERE id = 213;",
+        )
+        .unwrap();
+    }
+
+    let mut client = McpTestClient::spawn_capturing_stderr(&sandbox);
+    let response = client.initialize();
+    assert!(
+        response.error.is_none(),
+        "cas serve must start in its documented degraded mode while m213 is pending: {:?}",
+        response.error
+    );
+    let stderr = client.stop_and_read_stderr();
+    assert!(
+        stderr.contains("schema migration(s) pending"),
+        "degraded serve startup must emit the pending-migration warning: {stderr}"
+    );
+    assert!(
+        stderr.contains("cas update --schema-only"),
+        "warning must name the repair command: {stderr}"
+    );
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    for table in ["verification_capabilities", "verifications"] {
+        assert_eq!(
+            conn.query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM pragma_table_info('{table}')
+                     WHERE name = 'dispatch_id'"
+                ),
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0,
+            "cas serve must not silently run m213 for {table}"
+        );
+    }
+}
+
+#[test]
 fn test_serve_logs_actual_tool_list_on_startup() {
     // Companion check: in the happy path, `cas serve` must log the *actual*
     // tool count and tool names, not the historical hard-coded "13 tools"

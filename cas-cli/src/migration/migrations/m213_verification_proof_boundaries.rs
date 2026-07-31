@@ -12,9 +12,9 @@ pub const MIGRATION: Migration = Migration {
         "ALTER TABLE verification_dispatches ADD COLUMN delivery_transaction_id TEXT",
         "ALTER TABLE verification_capabilities ADD COLUMN dispatch_id TEXT",
         "ALTER TABLE verifications ADD COLUMN dispatch_id TEXT",
-        "CREATE INDEX idx_verification_capabilities_dispatch
+        "CREATE INDEX IF NOT EXISTS idx_verification_capabilities_dispatch
             ON verification_capabilities(dispatch_id)",
-        "CREATE INDEX idx_verifications_dispatch
+        "CREATE INDEX IF NOT EXISTS idx_verifications_dispatch
             ON verifications(dispatch_id, created_at DESC)",
     ],
     detect: Some(

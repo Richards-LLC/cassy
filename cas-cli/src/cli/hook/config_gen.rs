@@ -252,8 +252,8 @@ pub(crate) fn get_cas_hooks_config(config: &crate::config::HookConfig) -> serde_
         );
     }
 
-    // SubagentStart for verification jail unjailing (matcher: task-verifier)
-    // async: true - database update only, no blocking decision
+    // SubagentStart binds sealed verifier authority before the child's first
+    // turn. It must remain synchronous so verification cannot race binding.
     if config.stop.enabled {
         hooks.insert(
             "SubagentStart".to_string(),
@@ -264,8 +264,7 @@ pub(crate) fn get_cas_hooks_config(config: &crate::config::HookConfig) -> serde_
                         {
                             "type": "command",
                             "command": "cas hook SubagentStart",
-                            "timeout": 2000,
-                            "async": true
+                            "timeout": 2000
                         }
                     ]
                 }
@@ -306,6 +305,22 @@ pub(crate) fn get_cas_hooks_config(config: &crate::config::HookConfig) -> serde_
                             "type": "command",
                             "command": "cas hook PostToolUse",
                             "timeout": config.post_tool_use.timeout,
+                            "async": true
+                        }
+                    ]
+                }
+            ]),
+        );
+        hooks.insert(
+            "PostToolUseFailure".to_string(),
+            serde_json::json!([
+                {
+                    "matcher": "Task|Agent",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "cas hook PostToolUseFailure",
+                            "timeout": 2000,
                             "async": true
                         }
                     ]
@@ -360,6 +375,22 @@ pub(crate) fn get_cas_hooks_config(config: &crate::config::HookConfig) -> serde_
                             "type": "command",
                             "command": "cas hook PermissionRequest",
                             "timeout": config.permission_request.timeout
+                        }
+                    ]
+                }
+            ]),
+        );
+        hooks.insert(
+            "PermissionDenied".to_string(),
+            serde_json::json!([
+                {
+                    "matcher": "Task|Agent",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "cas hook PermissionDenied",
+                            "timeout": 2000,
+                            "async": true
                         }
                     ]
                 }

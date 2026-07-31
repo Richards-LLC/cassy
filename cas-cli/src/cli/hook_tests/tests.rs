@@ -522,9 +522,11 @@ fn hook_entries_emit_shell_form_command() {
         ("SubagentStart", "cas hook SubagentStart"),
         ("SubagentStop", "cas hook SubagentStop"),
         ("PostToolUse", "cas hook PostToolUse"),
+        ("PostToolUseFailure", "cas hook PostToolUseFailure"),
         ("PreToolUse", "cas hook PreToolUse"),
         ("UserPromptSubmit", "cas hook UserPromptSubmit"),
         ("PermissionRequest", "cas hook PermissionRequest"),
+        ("PermissionDenied", "cas hook PermissionDenied"),
         ("Notification", "cas hook Notification"),
         ("PreCompact", "cas hook PreCompact"),
     ] {
@@ -550,9 +552,11 @@ fn hook_entries_do_not_emit_args_array() {
         "SubagentStart",
         "SubagentStop",
         "PostToolUse",
+        "PostToolUseFailure",
         "PreToolUse",
         "UserPromptSubmit",
         "PermissionRequest",
+        "PermissionDenied",
         "Notification",
         "PreCompact",
     ] {
@@ -602,11 +606,23 @@ fn every_emitted_hook_object_has_command_and_no_args() {
         }
     }
 
-    // 12 events x 1 hook object (cc160 added MessageDisplay), plus the extra
-    // SessionStart staleness entry = 13.
+    // 14 events x 1 hook object (including sealed-handoff terminal cleanup),
+    // plus the extra SessionStart staleness entry = 15.
     assert_eq!(
-        hook_objects, 13,
-        "expected exactly 13 hook objects (12 events + factory check-staleness)"
+        hook_objects, 15,
+        "expected exactly 15 hook objects (14 events + factory check-staleness)"
+    );
+}
+
+#[test]
+fn verifier_subagent_start_binding_is_synchronous() {
+    let config = get_cas_hooks_config(&HookConfig::default());
+    let hook = config["hooks"]["SubagentStart"][0]["hooks"][0]
+        .as_object()
+        .expect("SubagentStart hook object");
+    assert!(
+        hook.get("async").is_none(),
+        "sealed handoff must bind before the verifier child's first turn"
     );
 }
 

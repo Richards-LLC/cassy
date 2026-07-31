@@ -227,6 +227,267 @@ async fn test_task_verifier_capability_is_child_bound_and_replay_safe() {
 }
 
 #[tokio::test]
+async fn test_official_child_uses_server_handoff_without_model_visible_bearer() {
+    let (temp, parent_service) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    let agent_store = open_agent_store(&cas_dir).expect("agent store");
+    let verification_store = open_verification_store(&cas_dir).expect("verification store");
+    let parent_id = format!("test-session-{}", std::process::id());
+
+    let created = parent_service
+        .cas_task_create(Parameters(simple_task_req("Server-side verifier handoff")))
+        .await
+        .expect("create task");
+    let task_id = extract_task_id(&extract_text(created))
+        .expect("task id")
+        .to_string();
+    let dispatch = cas_store::create_verification_dispatch(
+        &cas_dir,
+        &task_id,
+        &parent_id,
+        &parent_id,
+        chrono::Utc::now() + chrono::Duration::minutes(10),
+    )
+    .expect("create exact dispatch");
+
+    let prompt = format!("Review exact CAS task {task_id}");
+    let pre_input = cas::hooks::HookInput {
+        session_id: parent_id.clone(),
+        cwd: temp.path().to_string_lossy().to_string(),
+        hook_event_name: "PreToolUse".to_string(),
+        tool_name: Some("Agent".to_string()),
+        tool_input: Some(serde_json::json!({
+            "subagent_type": "task-verifier",
+            "prompt": prompt,
+        })),
+        tool_use_id: Some("tool-use-public-handoff".to_string()),
+        ..Default::default()
+    };
+    let pre_output =
+        cas::hooks::handle_pre_tool_use(&pre_input, Some(&cas_dir)).expect("PreToolUse");
+    let pre_json = serde_json::to_value(pre_output).expect("serialize PreToolUse");
+    assert_eq!(
+        pre_json,
+        serde_json::json!({}),
+        "PreToolUse must not emit updatedInput, context, or bearer material"
+    );
+    assert_eq!(
+        pre_input
+            .tool_input
+            .as_ref()
+            .and_then(|value| value.get("prompt"))
+            .and_then(|value| value.as_str()),
+        Some(prompt.as_str()),
+        "original model-visible prompt must remain byte-identical"
+    );
+
+    let child_id = format!("official-task-verifier-child-{}", std::process::id());
+    let child_input: cas::hooks::HookInput = serde_json::from_value(serde_json::json!({
+        "session_id": parent_id.clone(),
+        "transcript_path": "/portable/parent.jsonl",
+        "cwd": temp.path(),
+        "permission_mode": "default",
+        "hook_event_name": "SubagentStart",
+        "agent_id": child_id.clone(),
+        "agent_type": "task-verifier"
+    }))
+    .expect("official SubagentStart payload");
+    let child_output =
+        cas::hooks::handle_subagent_start(&child_input, Some(&cas_dir)).expect("SubagentStart");
+    assert_eq!(
+        serde_json::to_value(child_output).expect("serialize SubagentStart"),
+        serde_json::json!({})
+    );
+
+    let child = agent_store.get(&child_id).expect("registered child");
+    assert_eq!(child.agent_type, cas::types::AgentType::SubAgent);
+    assert_eq!(child.role, AgentRole::Standard);
+    assert_eq!(child.parent_id.as_deref(), Some(parent_id.as_str()));
+
+    let ordinary_child_id = format!("ordinary-child-{}", std::process::id());
+    let ordinary_child = cas::types::Agent::new_sub_agent(
+        ordinary_child_id.clone(),
+        "general-purpose".to_string(),
+        parent_id.clone(),
+    );
+    agent_store
+        .register(&ordinary_child)
+        .expect("register ordinary child");
+    let ordinary_child_service = cas::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+    ordinary_child_service.set_agent_id_for_testing(ordinary_child_id);
+    let ordinary_err = ordinary_child_service
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: task_id.clone(),
+            status: "approved".to_string(),
+            summary: "ordinary standard child without authority".to_string(),
+            confidence: None,
+            issues: None,
+            files_reviewed: None,
+            duration_ms: None,
+            verification_type: None,
+            verifier_capability: None,
+            dispatch_id: Some(dispatch.id.clone()),
+        }))
+        .await
+        .expect_err("ordinary standard child omission must fail closed");
+    assert_eq!(ordinary_err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+
+    let child_service = cas::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+    child_service.set_agent_id_for_testing(child_id.clone());
+
+    let wrong_child_id = format!("wrong-task-verifier-child-{}", std::process::id());
+    let wrong_child = cas::types::Agent::new_sub_agent(
+        wrong_child_id.clone(),
+        "task-verifier".to_string(),
+        parent_id.clone(),
+    );
+    agent_store
+        .register(&wrong_child)
+        .expect("register wrong verifier child");
+    let wrong_child_service = cas::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+    wrong_child_service.set_agent_id_for_testing(wrong_child_id);
+    let wrong_child_err = wrong_child_service
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: task_id.clone(),
+            status: "approved".to_string(),
+            summary: "different child attempting sealed authority".to_string(),
+            confidence: None,
+            issues: None,
+            files_reviewed: None,
+            duration_ms: None,
+            verification_type: None,
+            verifier_capability: None,
+            dispatch_id: Some(dispatch.id.clone()),
+        }))
+        .await
+        .expect_err("handoff must be exact-child bound");
+    assert_eq!(wrong_child_err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+
+    let wrong_dispatch_err = child_service
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: task_id.clone(),
+            status: "approved".to_string(),
+            summary: "bound child naming a different dispatch".to_string(),
+            confidence: None,
+            issues: None,
+            files_reviewed: None,
+            duration_ms: None,
+            verification_type: None,
+            verifier_capability: None,
+            dispatch_id: Some("vdisp-wrong-boundary".to_string()),
+        }))
+        .await
+        .expect_err("handoff must be exact-dispatch bound");
+    assert_eq!(
+        wrong_dispatch_err.code,
+        rmcp::model::ErrorCode::INVALID_PARAMS
+    );
+
+    let other_created = parent_service
+        .cas_task_create(Parameters(simple_task_req("Unrelated handoff task")))
+        .await
+        .expect("create unrelated task");
+    let other_task_id = extract_task_id(&extract_text(other_created))
+        .expect("other task id")
+        .to_string();
+    let wrong_task_err = child_service
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: other_task_id,
+            status: "approved".to_string(),
+            summary: "bound child targeting a different task".to_string(),
+            confidence: None,
+            issues: None,
+            files_reviewed: None,
+            duration_ms: None,
+            verification_type: None,
+            verifier_capability: None,
+            dispatch_id: Some(dispatch.id.clone()),
+        }))
+        .await
+        .expect_err("handoff must be exact-task bound");
+    assert_eq!(wrong_task_err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+
+    let mut wrong_parent_child = agent_store.get(&child_id).expect("bound child");
+    wrong_parent_child.parent_id = Some("different-registered-parent".to_string());
+    agent_store
+        .update(&wrong_parent_child)
+        .expect("mutate child parent for negative case");
+    let wrong_parent_err = child_service
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: task_id.clone(),
+            status: "approved".to_string(),
+            summary: "bound child with a different registered parent".to_string(),
+            confidence: None,
+            issues: None,
+            files_reviewed: None,
+            duration_ms: None,
+            verification_type: None,
+            verifier_capability: None,
+            dispatch_id: Some(dispatch.id.clone()),
+        }))
+        .await
+        .expect_err("handoff must be exact-parent bound");
+    assert_eq!(
+        wrong_parent_err.code,
+        rmcp::model::ErrorCode::INVALID_PARAMS
+    );
+    wrong_parent_child.parent_id = Some(parent_id.clone());
+    agent_store
+        .update(&wrong_parent_child)
+        .expect("restore exact bound parent");
+
+    child_service
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: task_id.clone(),
+            status: "approved".to_string(),
+            summary: "official child verified through sealed handoff".to_string(),
+            confidence: Some(0.99),
+            issues: None,
+            files_reviewed: Some("src/lib.rs".to_string()),
+            duration_ms: Some(17),
+            verification_type: None,
+            verifier_capability: None,
+            dispatch_id: Some(dispatch.id.clone()),
+        }))
+        .await
+        .expect("server-bound child verifies without bearer");
+
+    let row = verification_store
+        .get_latest_for_task(&task_id)
+        .expect("verification lookup")
+        .expect("verification row");
+    assert_eq!(
+        row.provenance,
+        cas::types::VerificationProvenance::TaskVerifier
+    );
+    assert_eq!(row.agent_id.as_deref(), Some(child_id.as_str()));
+    assert_eq!(row.dispatch_id.as_deref(), Some(dispatch.id.as_str()));
+    assert!(
+        row.capability_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("vhnd-"))
+    );
+
+    let replay = child_service
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id,
+            status: "approved".to_string(),
+            summary: "replay".to_string(),
+            confidence: None,
+            issues: None,
+            files_reviewed: None,
+            duration_ms: None,
+            verification_type: None,
+            verifier_capability: None,
+            dispatch_id: Some(dispatch.id),
+        }))
+        .await
+        .expect_err("consumed server handoff cannot replay");
+    assert_eq!(replay.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+}
+
+#[tokio::test]
 async fn test_spoofed_supervisor_and_codex_claims_do_not_grant_authority() {
     let (temp, service) = setup_cas();
     let _env_lock = env_test_lock();

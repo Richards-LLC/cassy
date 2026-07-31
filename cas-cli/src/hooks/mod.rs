@@ -77,7 +77,7 @@ pub use handlers::{
     get_session_files, handle_message_display, handle_notification, handle_permission_request,
     handle_post_tool_use, handle_pre_compact, handle_pre_tool_use, handle_session_end,
     handle_session_start, handle_stop, handle_subagent_start, handle_subagent_stop,
-    handle_user_prompt_submit,
+    handle_user_prompt_submit, handle_verifier_spawn_cleanup,
 };
 
 use std::path::PathBuf;
@@ -128,6 +128,9 @@ pub fn handle_hook(event_name: &str, input: HookInput) -> Result<HookOutput, Mem
         "SubagentStart" => handle_subagent_start(&input, cas_root.as_deref()),
         "SubagentStop" => handle_subagent_stop(&input, cas_root.as_deref()),
         "PostToolUse" => handle_post_tool_use(&input, cas_root.as_deref()),
+        "PostToolUseFailure" | "PermissionDenied" => {
+            handle_verifier_spawn_cleanup(&input, cas_root.as_deref())
+        }
         "PreToolUse" => handle_pre_tool_use(&input, cas_root.as_deref()),
         "UserPromptSubmit" => handle_user_prompt_submit(&input, cas_root.as_deref()),
         "PermissionRequest" => handle_permission_request(&input, cas_root.as_deref()),

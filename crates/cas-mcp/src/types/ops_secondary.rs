@@ -361,9 +361,10 @@ pub struct VerificationRequest {
     #[serde(default)]
     pub verification_type: Option<String>,
 
-    /// Server-issued one-time capability for a registered task-verifier child.
+    /// Legacy explicit bearer compatibility. New task-verifier children use
+    /// a sealed server-side handoff and omit this field.
     #[schemars(
-        description = "One-time task-verifier capability injected by CAS; standard workers cannot mint this"
+        description = "Legacy explicit task-verifier bearer; new registered verifier children omit it"
     )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verifier_capability: Option<String>,

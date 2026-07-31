@@ -4,7 +4,7 @@
 //! attempting to close a task, with a Haiku subagent reviewing the work.
 
 use chrono::{DateTime, Duration, Utc};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
@@ -73,6 +73,18 @@ CREATE TABLE IF NOT EXISTS verification_capabilities (
     consumed_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS verification_handoffs (
+    capability_id TEXT PRIMARY KEY,
+    issuer_agent_id TEXT NOT NULL,
+    verifier_agent_id TEXT,
+    tool_use_id_hash TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL,
+    bound_at TEXT,
+    consumed_at TEXT,
+    FOREIGN KEY (capability_id) REFERENCES verification_capabilities(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS verification_dispatches (
     id TEXT PRIMARY KEY,
     task_id TEXT NOT NULL,
@@ -95,6 +107,11 @@ CREATE INDEX IF NOT EXISTS idx_verifications_created ON verifications(created_at
 CREATE INDEX IF NOT EXISTS idx_verification_issues_verification ON verification_issues(verification_id);
 CREATE INDEX IF NOT EXISTS idx_verification_capabilities_task
     ON verification_capabilities(task_id, consumed_at, expires_at);
+CREATE INDEX IF NOT EXISTS idx_verification_handoffs_child
+    ON verification_handoffs(verifier_agent_id, state);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_verification_handoffs_pending_parent
+    ON verification_handoffs(issuer_agent_id)
+    WHERE state = 'pending';
 CREATE INDEX IF NOT EXISTS idx_verification_dispatches_task
     ON verification_dispatches(task_id, requested_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_verification_dispatches_active_task
@@ -103,6 +120,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_verification_dispatches_active_task
 "#;
 
 const VERIFIER_CAPABILITY_TTL_MINUTES: i64 = 30;
+const SERVER_HANDOFF_ID_PREFIX: &str = "vhnd-";
 
 /// Newly issued capability. The bearer token exists only in this return value
 /// and must be delivered directly to the verifier child; it is never stored.
@@ -450,6 +468,32 @@ fn capability_token_hash(token: &str) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+fn verifier_handoff_tool_hash(tool_use_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"cas-verifier-handoff-tool-v1\0");
+    hasher.update(tool_use_id.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn verifier_handoff_secret_hash(secret: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"cas-verifier-handoff-secret-v1\0");
+    hasher.update(secret);
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn is_server_handoff(capability: &VerifierCapability) -> bool {
+    capability.id.starts_with(SERVER_HANDOFF_ID_PREFIX)
 }
 
 fn constant_time_eq(left: &str, right: &str) -> bool {
@@ -956,10 +1000,11 @@ pub fn invalidate_verification_dispatch_for_new_cycle(
     get_latest_verification_dispatch_with_conn(&conn, task_id)
 }
 
-/// Mint an unbound, one-time verifier capability.
+/// Mint an unbound legacy explicit-bearer verifier capability.
 ///
-/// The caller must deliver `token` only to the child task-verifier. The
-/// database stores its domain-separated SHA-256 digest, never the raw value.
+/// Retained only for compatibility with already-integrated explicit-token
+/// clients and regression coverage. Production hook paths must use
+/// [`issue_server_verifier_handoff`] and never release raw bearer material.
 pub fn issue_verifier_capability(
     cas_dir: &Path,
     task_id: &str,
@@ -1015,6 +1060,441 @@ pub fn issue_verifier_capability(
         ],
     )?;
     Ok(IssuedVerifierCapability { capability, token })
+}
+
+/// Create a one-time verifier handoff that never releases bearer material.
+///
+/// The random secret exists only long enough to derive a domain-separated
+/// digest. SubagentStart later binds the unique server-side row by registered
+/// parent and official child identity; no prompt or request value carries
+/// authority.
+pub fn issue_server_verifier_handoff(
+    cas_dir: &Path,
+    task_id: &str,
+    dispatch_id: &str,
+    issuer_agent_id: &str,
+    tool_use_id: &str,
+) -> Result<VerifierCapability> {
+    let secret: [u8; 32] = rand::random();
+    issue_server_verifier_handoff_with_secret(
+        cas_dir,
+        task_id,
+        dispatch_id,
+        issuer_agent_id,
+        tool_use_id,
+        &secret,
+    )
+}
+
+/// Deterministic entropy seam for privacy regressions.
+///
+/// Production callers must use [`issue_server_verifier_handoff`]. This
+/// function still returns only the durable hash-only capability, never
+/// `secret`.
+#[doc(hidden)]
+pub fn issue_server_verifier_handoff_with_secret(
+    cas_dir: &Path,
+    task_id: &str,
+    dispatch_id: &str,
+    issuer_agent_id: &str,
+    tool_use_id: &str,
+    secret: &[u8],
+) -> Result<VerifierCapability> {
+    if tool_use_id.trim().is_empty() || secret.is_empty() {
+        return Err(StoreError::Parse(
+            "verifier handoff requires hook-local correlation and entropy".to_string(),
+        ));
+    }
+
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let mut conn = store.conn.lock().map_err(lock_err)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let now = Utc::now();
+    let now_value = now.to_rfc3339();
+
+    // Failed/cancelled spawns that never reached a terminal hook are recoverable
+    // after expiry. Bound or consumed rows are immutable audit records.
+    let mut expired_stmt = tx.prepare(
+        "SELECT h.capability_id
+         FROM verification_handoffs h
+         JOIN verification_capabilities c ON c.id = h.capability_id
+         WHERE h.state = 'pending' AND c.verifier_agent_id IS NULL
+               AND c.consumed_at IS NULL AND c.expires_at <= ?1",
+    )?;
+    let expired_ids: Vec<String> = expired_stmt
+        .query_map(params![now_value], |row| row.get(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    drop(expired_stmt);
+    for id in expired_ids {
+        tx.execute(
+            "DELETE FROM verification_handoffs WHERE capability_id = ?1 AND state = 'pending'",
+            params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM verification_capabilities
+             WHERE id = ?1 AND verifier_agent_id IS NULL AND consumed_at IS NULL",
+            params![id],
+        )?;
+    }
+
+    let pending_count: i64 = tx.query_row(
+        "SELECT COUNT(*)
+         FROM verification_handoffs h
+         JOIN verification_capabilities c ON c.id = h.capability_id
+         WHERE h.issuer_agent_id = ?1 AND h.state = 'pending'
+               AND c.verifier_agent_id IS NULL AND c.consumed_at IS NULL
+               AND c.expires_at > ?2",
+        params![issuer_agent_id, now_value],
+        |row| row.get(0),
+    )?;
+    if pending_count != 0 {
+        return Err(StoreError::Parse(
+            "another task-verifier spawn is already awaiting SubagentStart for this parent; wait for it to bind or for exact failure cleanup/expiry"
+                .to_string(),
+        ));
+    }
+
+    let dispatch = get_verification_dispatch_with_conn(&tx, dispatch_id)?;
+    if dispatch.task_id != task_id
+        || dispatch.owner_agent_id != issuer_agent_id
+        || dispatch.state != VerificationDispatchState::Pending
+        || dispatch.deadline_at <= now
+    {
+        return Err(StoreError::Parse(
+            "verifier handoff requires the exact active owned dispatch".to_string(),
+        ));
+    }
+
+    let issued_at = now;
+    let expires_at = std::cmp::min(
+        dispatch.deadline_at,
+        issued_at + Duration::minutes(VERIFIER_CAPABILITY_TTL_MINUTES),
+    );
+    let capability = VerifierCapability {
+        id: format!("{SERVER_HANDOFF_ID_PREFIX}{:032x}", rand::random::<u128>()),
+        task_id: task_id.to_string(),
+        dispatch_id: Some(dispatch.id),
+        issuer_agent_id: issuer_agent_id.to_string(),
+        verifier_agent_id: None,
+        token_hash: verifier_handoff_secret_hash(secret),
+        issued_at,
+        expires_at,
+        bound_at: None,
+        consumed_at: None,
+    };
+    tx.execute(
+        "INSERT INTO verification_capabilities
+         (id, task_id, dispatch_id, issuer_agent_id, verifier_agent_id, token_hash,
+          issued_at, expires_at, bound_at, consumed_at)
+         VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, NULL, NULL)",
+        params![
+            capability.id,
+            capability.task_id,
+            capability.dispatch_id,
+            capability.issuer_agent_id,
+            capability.token_hash,
+            capability.issued_at.to_rfc3339(),
+            capability.expires_at.to_rfc3339(),
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO verification_handoffs
+         (capability_id, issuer_agent_id, verifier_agent_id, tool_use_id_hash,
+          state, created_at, bound_at, consumed_at)
+         VALUES (?1, ?2, NULL, ?3, 'pending', ?4, NULL, NULL)",
+        params![
+            capability.id,
+            capability.issuer_agent_id,
+            verifier_handoff_tool_hash(tool_use_id),
+            capability.issued_at.to_rfc3339(),
+        ],
+    )?;
+    tx.commit()?;
+    Ok(capability)
+}
+
+/// Bind the sole live server handoff for one registered parent to the exact
+/// official child and atomically claim its exact dispatch.
+///
+/// There is intentionally no ordering fallback: zero or multiple candidates
+/// fail closed.
+pub fn bind_server_verifier_handoff(
+    cas_dir: &Path,
+    issuer_agent_id: &str,
+    verifier_agent_id: &str,
+) -> Result<VerifierCapability> {
+    if issuer_agent_id.trim().is_empty()
+        || verifier_agent_id.trim().is_empty()
+        || issuer_agent_id == verifier_agent_id
+    {
+        return Err(StoreError::Parse(
+            "verifier handoff requires a distinct registered child".to_string(),
+        ));
+    }
+
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let mut conn = store.conn.lock().map_err(lock_err)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let now = Utc::now();
+    let mut stmt = tx.prepare(
+        "SELECT h.capability_id
+         FROM verification_handoffs h
+         JOIN verification_capabilities c ON c.id = h.capability_id
+         WHERE h.issuer_agent_id = ?1 AND h.state = 'pending'
+               AND c.verifier_agent_id IS NULL AND c.consumed_at IS NULL
+               AND c.expires_at > ?2
+         ORDER BY h.capability_id",
+    )?;
+    let ids: Vec<String> = stmt
+        .query_map(params![issuer_agent_id, now.to_rfc3339()], |row| row.get(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    drop(stmt);
+    if ids.len() != 1 {
+        return Err(StoreError::Parse(
+            "verifier handoff is missing or ambiguous for this registered parent".to_string(),
+        ));
+    }
+
+    let capability = load_capability_with_conn(&tx, &ids[0])?;
+    if !is_server_handoff(&capability) {
+        return Err(StoreError::Parse(
+            "verifier handoff type is invalid".to_string(),
+        ));
+    }
+    let dispatch_id = capability.dispatch_id.as_deref().ok_or_else(|| {
+        StoreError::Parse("verifier handoff has no exact proof boundary".to_string())
+    })?;
+    let dispatch = get_verification_dispatch_with_conn(&tx, dispatch_id)?;
+    if dispatch.task_id != capability.task_id
+        || dispatch.owner_agent_id != issuer_agent_id
+        || dispatch.state != VerificationDispatchState::Pending
+        || dispatch.deadline_at <= now
+    {
+        return Err(StoreError::Parse(
+            "verifier handoff exact dispatch is not active".to_string(),
+        ));
+    }
+
+    let bound_at = now;
+    let changed = tx.execute(
+        "UPDATE verification_capabilities
+         SET verifier_agent_id = ?2, bound_at = ?3
+         WHERE id = ?1 AND verifier_agent_id IS NULL AND consumed_at IS NULL
+               AND expires_at > ?3",
+        params![capability.id, verifier_agent_id, bound_at.to_rfc3339()],
+    )?;
+    if changed != 1 {
+        return Err(StoreError::Parse(
+            "verifier handoff binding raced or expired".to_string(),
+        ));
+    }
+    let handoff_changed = tx.execute(
+        "UPDATE verification_handoffs
+         SET verifier_agent_id = ?2, state = 'bound', bound_at = ?3
+         WHERE capability_id = ?1 AND issuer_agent_id = ?4 AND state = 'pending'
+               AND verifier_agent_id IS NULL",
+        params![
+            capability.id,
+            verifier_agent_id,
+            bound_at.to_rfc3339(),
+            issuer_agent_id,
+        ],
+    )?;
+    if handoff_changed != 1 {
+        return Err(StoreError::Parse(
+            "verifier handoff state binding raced".to_string(),
+        ));
+    }
+    let claimed = tx.execute(
+        "UPDATE verification_dispatches
+         SET verifier_agent_id = ?3, capability_id = ?4, state = 'claimed'
+         WHERE id = ?1 AND owner_agent_id = ?2 AND state = 'pending'
+               AND deadline_at > ?5",
+        params![
+            dispatch.id,
+            issuer_agent_id,
+            verifier_agent_id,
+            capability.id,
+            now.to_rfc3339(),
+        ],
+    )?;
+    if claimed != 1 {
+        return Err(StoreError::Parse(
+            "verifier handoff could not claim its exact dispatch".to_string(),
+        ));
+    }
+    let bound = load_capability_with_conn(&tx, &capability.id)?;
+    tx.commit()?;
+    Ok(bound)
+}
+
+/// Remove one exact failed/cancelled spawn handoff by hook-local tool-use ID.
+///
+/// Bound and consumed rows are immutable and are never selected by this
+/// cleanup path.
+pub fn cancel_unbound_server_verifier_handoff(
+    cas_dir: &Path,
+    issuer_agent_id: &str,
+    tool_use_id: &str,
+) -> Result<bool> {
+    if issuer_agent_id.trim().is_empty() || tool_use_id.trim().is_empty() {
+        return Ok(false);
+    }
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let mut conn = store.conn.lock().map_err(lock_err)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tool_use_id_hash = verifier_handoff_tool_hash(tool_use_id);
+    let mut stmt = tx.prepare(
+        "SELECT h.capability_id
+         FROM verification_handoffs h
+         JOIN verification_capabilities c ON c.id = h.capability_id
+         WHERE h.issuer_agent_id = ?1 AND h.state = 'pending'
+               AND h.verifier_agent_id IS NULL AND c.verifier_agent_id IS NULL
+               AND c.consumed_at IS NULL AND h.tool_use_id_hash = ?2
+         ORDER BY h.capability_id",
+    )?;
+    let ids: Vec<String> = stmt
+        .query_map(params![issuer_agent_id, tool_use_id_hash], |row| row.get(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    drop(stmt);
+    match ids.as_slice() {
+        [] => {
+            tx.commit()?;
+            Ok(false)
+        }
+        [id] => {
+            let handoff_changed = tx.execute(
+                "DELETE FROM verification_handoffs
+                 WHERE capability_id = ?1 AND state = 'pending'
+                       AND verifier_agent_id IS NULL",
+                params![id],
+            )?;
+            let changed = if handoff_changed == 1 {
+                tx.execute(
+                    "DELETE FROM verification_capabilities
+                     WHERE id = ?1 AND verifier_agent_id IS NULL AND consumed_at IS NULL",
+                    params![id],
+                )?
+            } else {
+                0
+            };
+            tx.commit()?;
+            Ok(changed == 1)
+        }
+        _ => Err(StoreError::Parse(
+            "verifier handoff cleanup is ambiguous".to_string(),
+        )),
+    }
+}
+
+/// Inspect the unique bound server handoff for one authenticated child.
+///
+/// The result is used only to select the exact dispatch before the verdict
+/// transaction. Consumption revalidates every field atomically.
+pub fn inspect_bound_server_verifier_handoff(
+    cas_dir: &Path,
+    task_id: &str,
+    verifier_agent_id: &str,
+    dispatch_id: Option<&str>,
+) -> Result<VerifierCapability> {
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let conn = store.conn.lock().map_err(lock_err)?;
+    let mut stmt = conn.prepare(
+        "SELECT h.capability_id
+         FROM verification_handoffs h
+         JOIN verification_capabilities c ON c.id = h.capability_id
+         WHERE h.state = 'bound' AND h.verifier_agent_id = ?2
+               AND c.task_id = ?1 AND c.verifier_agent_id = ?2
+               AND c.consumed_at IS NULL
+               AND (?3 IS NULL OR c.dispatch_id = ?3)
+         ORDER BY h.capability_id",
+    )?;
+    let ids: Vec<String> = stmt
+        .query_map(params![task_id, verifier_agent_id, dispatch_id], |row| {
+            row.get(0)
+        })?
+        .collect::<std::result::Result<_, _>>()?;
+    if ids.len() != 1 {
+        return Err(StoreError::Parse(
+            "bound verifier handoff is missing or ambiguous".to_string(),
+        ));
+    }
+    let capability = load_capability_with_conn(&conn, &ids[0])?;
+    if !is_server_handoff(&capability) {
+        return Err(StoreError::Parse(
+            "bound verifier handoff type is invalid".to_string(),
+        ));
+    }
+    Ok(capability)
+}
+
+/// Atomically consume one exact server-side verifier handoff.
+pub fn consume_server_verifier_handoff_with_conn(
+    conn: &Connection,
+    capability_id: &str,
+    task_id: &str,
+    verifier_agent_id: &str,
+) -> Result<VerifierCapability> {
+    let capability = load_capability_with_conn(conn, capability_id)?;
+    if !is_server_handoff(&capability) {
+        return Err(StoreError::Parse(
+            "verifier handoff type is invalid".to_string(),
+        ));
+    }
+    let dispatch_id = capability.dispatch_id.as_deref().ok_or_else(|| {
+        StoreError::Parse("verifier handoff has no exact proof boundary".to_string())
+    })?;
+    let dispatch = get_verification_dispatch_with_conn(conn, dispatch_id)?;
+    let now = Utc::now();
+    let handoff_valid: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM verification_handoffs
+         WHERE capability_id = ?1 AND issuer_agent_id = ?2
+               AND verifier_agent_id = ?3 AND state = 'bound'
+               AND consumed_at IS NULL",
+        params![capability.id, capability.issuer_agent_id, verifier_agent_id],
+        |row| row.get(0),
+    )?;
+    if capability.task_id != task_id
+        || capability.verifier_agent_id.as_deref() != Some(verifier_agent_id)
+        || capability.consumed_at.is_some()
+        || capability.expires_at <= now
+        || dispatch.task_id != task_id
+        || dispatch.state != VerificationDispatchState::Claimed
+        || dispatch.verifier_agent_id.as_deref() != Some(verifier_agent_id)
+        || dispatch.capability_id.as_deref() != Some(capability.id.as_str())
+        || dispatch.deadline_at <= now
+        || handoff_valid != 1
+    {
+        return Err(StoreError::Parse(
+            "verifier handoff is invalid, expired, consumed, or bound to another task/session"
+                .to_string(),
+        ));
+    }
+    let changed = conn.execute(
+        "UPDATE verification_capabilities
+         SET consumed_at = ?2
+         WHERE id = ?1 AND consumed_at IS NULL AND verifier_agent_id = ?3
+               AND task_id = ?4 AND expires_at > ?2",
+        params![capability.id, now.to_rfc3339(), verifier_agent_id, task_id],
+    )?;
+    if changed != 1 {
+        return Err(StoreError::Parse(
+            "verifier handoff was already consumed".to_string(),
+        ));
+    }
+    let handoff_changed = conn.execute(
+        "UPDATE verification_handoffs
+         SET state = 'consumed', consumed_at = ?2
+         WHERE capability_id = ?1 AND verifier_agent_id = ?3
+               AND state = 'bound' AND consumed_at IS NULL",
+        params![capability.id, now.to_rfc3339(), verifier_agent_id],
+    )?;
+    if handoff_changed != 1 {
+        return Err(StoreError::Parse(
+            "verifier handoff audit consumption raced".to_string(),
+        ));
+    }
+    Ok(capability)
 }
 
 /// Bind an issued capability to the distinct registered child session that
@@ -1857,6 +2337,232 @@ mod tests {
         assert!(
             bind_verifier_capability(dir.path(), &expired.token, "expired-child").is_err(),
             "expired capability must fail before binding"
+        );
+    }
+
+    #[test]
+    fn server_handoff_is_unique_parent_bound_exact_and_secret_free() {
+        let (_store, dir) = create_test_store();
+        let sentinel = b"CAS_SENTINEL_RAW_VERIFIER_CREDENTIAL_6939";
+        let dispatch = create_verification_dispatch(
+            dir.path(),
+            "cas-handoff-a",
+            "parent-agent",
+            "parent-agent",
+            Utc::now() + Duration::minutes(10),
+        )
+        .expect("dispatch");
+        let handoff = issue_server_verifier_handoff_with_secret(
+            dir.path(),
+            "cas-handoff-a",
+            &dispatch.id,
+            "parent-agent",
+            "tool-use-a",
+            sentinel,
+        )
+        .expect("sealed handoff");
+        assert!(handoff.id.starts_with(SERVER_HANDOFF_ID_PREFIX));
+        assert!(
+            !serde_json::to_string(&handoff)
+                .expect("serialize")
+                .contains(std::str::from_utf8(sentinel).unwrap()),
+            "typed handoff must never serialize raw entropy"
+        );
+        assert!(
+            issue_server_verifier_handoff_with_secret(
+                dir.path(),
+                "cas-handoff-a",
+                &dispatch.id,
+                "parent-agent",
+                "tool-use-b",
+                b"other-secret",
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("already awaiting SubagentStart"),
+            "one parent cannot mint a second concurrent unbound handoff"
+        );
+        assert!(
+            bind_server_verifier_handoff(dir.path(), "wrong-parent", "verifier-child").is_err(),
+            "a different parent cannot bind the pending handoff"
+        );
+
+        let bound = bind_server_verifier_handoff(dir.path(), "parent-agent", "verifier-child")
+            .expect("bind exact official child");
+        assert_eq!(bound.id, handoff.id);
+        assert_eq!(bound.verifier_agent_id.as_deref(), Some("verifier-child"));
+        assert!(
+            !cancel_unbound_server_verifier_handoff(dir.path(), "parent-agent", "tool-use-a")
+                .expect("bound cleanup no-op"),
+            "cleanup must never remove a bound audit row"
+        );
+        assert!(
+            inspect_bound_server_verifier_handoff(
+                dir.path(),
+                "cas-handoff-a",
+                "wrong-child",
+                Some(&dispatch.id),
+            )
+            .is_err(),
+            "a different child cannot inspect the bound handoff"
+        );
+        assert!(
+            inspect_bound_server_verifier_handoff(
+                dir.path(),
+                "cas-handoff-other",
+                "verifier-child",
+                Some(&dispatch.id),
+            )
+            .is_err(),
+            "the bound handoff cannot cross task scope"
+        );
+        assert!(
+            inspect_bound_server_verifier_handoff(
+                dir.path(),
+                "cas-handoff-a",
+                "verifier-child",
+                Some("vdisp-wrong"),
+            )
+            .is_err(),
+            "the bound handoff cannot cross dispatch scope"
+        );
+
+        let inspected = inspect_bound_server_verifier_handoff(
+            dir.path(),
+            "cas-handoff-a",
+            "verifier-child",
+            Some(&dispatch.id),
+        )
+        .expect("inspect exact bound handoff");
+        let conn = Connection::open(dir.path().join("cas.db")).expect("db");
+        consume_server_verifier_handoff_with_conn(
+            &conn,
+            &inspected.id,
+            "cas-handoff-a",
+            "verifier-child",
+        )
+        .expect("consume once");
+        assert!(
+            consume_server_verifier_handoff_with_conn(
+                &conn,
+                &inspected.id,
+                "cas-handoff-a",
+                "verifier-child",
+            )
+            .is_err(),
+            "server handoff replay must fail"
+        );
+        drop(conn);
+
+        let sentinel_text = std::str::from_utf8(sentinel).unwrap();
+        for name in ["cas.db", "cas.db-wal", "cas.db-shm"] {
+            let path = dir.path().join(name);
+            if let Ok(bytes) = std::fs::read(&path) {
+                assert!(
+                    !bytes
+                        .windows(sentinel_text.len())
+                        .any(|window| window == sentinel_text.as_bytes()),
+                    "raw sentinel leaked into {}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn server_handoff_cleanup_matches_only_exact_unbound_tool_use() {
+        let (_store, dir) = create_test_store();
+        let dispatch = create_verification_dispatch(
+            dir.path(),
+            "cas-handoff-cleanup",
+            "parent-agent",
+            "parent-agent",
+            Utc::now() + Duration::minutes(10),
+        )
+        .expect("dispatch");
+        issue_server_verifier_handoff_with_secret(
+            dir.path(),
+            "cas-handoff-cleanup",
+            &dispatch.id,
+            "parent-agent",
+            "tool-use-exact",
+            b"cleanup-secret",
+        )
+        .expect("handoff");
+        assert!(
+            !cancel_unbound_server_verifier_handoff(dir.path(), "parent-agent", "tool-use-wrong")
+                .expect("wrong cleanup")
+        );
+        assert!(
+            cancel_unbound_server_verifier_handoff(dir.path(), "parent-agent", "tool-use-exact")
+                .expect("exact cleanup")
+        );
+        assert!(
+            bind_server_verifier_handoff(dir.path(), "parent-agent", "verifier-child").is_err(),
+            "cleaned handoff cannot bind later"
+        );
+        let conn = Connection::open(dir.path().join("cas.db")).expect("db after cleanup");
+        let pending_after_cleanup: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM verification_handoffs WHERE state = 'pending'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pending after cleanup");
+        assert_eq!(
+            pending_after_cleanup, 0,
+            "exact failure cleanup must not leave an orphan pending handoff"
+        );
+        drop(conn);
+
+        let expired = issue_server_verifier_handoff_with_secret(
+            dir.path(),
+            "cas-handoff-cleanup",
+            &dispatch.id,
+            "parent-agent",
+            "tool-use-expired",
+            b"expired-secret",
+        )
+        .expect("expiring handoff");
+        let conn = Connection::open(dir.path().join("cas.db")).expect("db");
+        conn.execute(
+            "UPDATE verification_capabilities SET expires_at = ?2 WHERE id = ?1",
+            params![expired.id, (Utc::now() - Duration::seconds(1)).to_rfc3339()],
+        )
+        .expect("expire handoff");
+        drop(conn);
+        assert!(
+            bind_server_verifier_handoff(dir.path(), "parent-agent", "verifier-child").is_err(),
+            "expired handoff cannot bind"
+        );
+        let replacement = issue_server_verifier_handoff_with_secret(
+            dir.path(),
+            "cas-handoff-cleanup",
+            &dispatch.id,
+            "parent-agent",
+            "tool-use-after-expiry",
+            b"restart-secret",
+        )
+        .expect("expired unbound handoff is reaped before restart-safe issuance");
+        let conn = Connection::open(dir.path().join("cas.db")).expect("db after restart");
+        let (expired_rows, live_pending): (i64, i64) = conn
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM verification_handoffs
+                     WHERE capability_id = ?1),
+                    (SELECT COUNT(*) FROM verification_handoffs
+                     WHERE capability_id = ?2 AND state = 'pending')",
+                params![expired.id, replacement.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("restart handoff state");
+        assert_eq!(
+            expired_rows, 0,
+            "restart/expiry recovery must reap the orphaned pending row"
+        );
+        assert_eq!(
+            live_pending, 1,
+            "restart/expiry recovery must leave exactly the replacement pending"
         );
     }
 

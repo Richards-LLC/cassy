@@ -279,6 +279,7 @@ enabled = false
             "session_id": HOOK_TEST_SESSION_ID,
             "cwd": self.dir().to_string_lossy(),
             "hook_event_name": "PreToolUse",
+            "tool_use_id": format!("hook-test-tool-{}", std::process::id()),
             "tool_name": tool_name,
             "tool_input": tool_input
         });
@@ -368,8 +369,8 @@ enabled = false
             "session_id": HOOK_TEST_SESSION_ID,
             "cwd": self.dir().to_string_lossy(),
             "hook_event_name": "SubagentStart",
-            "subagent_type": subagent_type,
-            "subagent_prompt": "Verify task completion"
+            "agent_id": format!("hook-test-child-{}", std::process::id()),
+            "agent_type": subagent_type
         });
 
         let mut child = Command::new(cas_bin())

@@ -886,13 +886,13 @@ mod tests {
         let conn = Connection::open(&db_path).unwrap();
         assert_eq!(
             conn.query_row(
-                "SELECT COUNT(*) FROM cas_migrations WHERE id = 214",
+                "SELECT COUNT(*) FROM cas_migrations WHERE id = 215",
                 [],
                 |row| row.get::<_, i64>(0)
             )
             .unwrap(),
             1,
-            "m214 must be recorded exactly once across repeated migration runs"
+            "m215 must be recorded exactly once across repeated migration runs"
         );
         assert_eq!(
             conn.query_row(
@@ -904,6 +904,17 @@ mod tests {
             .unwrap(),
             1,
             "m214 host-binding schema must survive repeated migration runs"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'verification_handoffs'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1,
+            "m215 sealed-handoff table must survive repeated migration runs"
         );
     }
 

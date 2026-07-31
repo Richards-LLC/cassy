@@ -8776,3 +8776,210 @@ async fn test_3894_halt_no_longer_blocks_close_of_own_inprogress_task() {
         "the exempt close must actually close the task"
     );
 }
+
+/// cas-da92: embedded absolute paths and separator-obfuscated secrets must be
+/// rejected at the verifier public boundary, so they can reach neither durable
+/// verifier evidence (direct write + update/close persistence) nor any JSON /
+/// diagnostic projection. Portable identifiers must still survive untouched.
+#[tokio::test]
+async fn test_verifier_embedded_paths_and_obfuscated_secrets_never_persist_or_project() {
+    let (temp, service) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        "[verification]\nenabled = true\n",
+    )
+    .expect("enable verification");
+
+    let created = service
+        .cas_task_create(Parameters(simple_task_req("Embedded verifier evidence")))
+        .await
+        .expect("create task");
+    let task_id = extract_task_id(&extract_text(created))
+        .expect("task id")
+        .to_string();
+    service
+        .cas_task_start(Parameters(IdRequest {
+            id: task_id.clone(),
+        }))
+        .await
+        .expect("start task");
+
+    let embedded_path = "/home/operator/private-proof.json";
+    let embedded_drive = r"C:\Users\operator\private-proof.json";
+    let embedded_unc = r"\\build-host\proofs\private-proof.json";
+    let embedded_file_url = "file:///etc/shadow";
+    let obfuscated_bearer = "Bearer\tverifier-secret-material";
+    let obfuscated_key = "token = verifier-secret-material";
+    let obfuscated_akia = "at=AKIAIOSFODNN7EXAMPLE";
+
+    let verification_store = open_verification_store(&cas_dir).expect("verification store");
+    let mut verdict = Verification::approved(
+        "ver-embedded-boundary".to_string(),
+        task_id.clone(),
+        format!("verified; evidence at={embedded_path}"),
+    );
+    verdict.provenance = cas::types::VerificationProvenance::SupervisorDirect;
+    verdict.agent_id = Some("registered-supervisor".to_string());
+    verdict.issuer_agent_id = Some("registered-supervisor".to_string());
+    verdict.issues = vec![cas::types::VerificationIssue::blocking(
+        format!("[proof]({embedded_path})"),
+        Some(12),
+        "security".to_string(),
+        obfuscated_bearer.to_string(),
+        obfuscated_key.to_string(),
+        Some(format!("share={embedded_unc}")),
+    )];
+    verdict.files_reviewed = vec![
+        format!("evidence={embedded_file_url}"),
+        format!("at={embedded_drive}"),
+        obfuscated_akia.to_string(),
+        "src/lib.rs".to_string(),
+    ];
+    verification_store
+        .add(&verdict)
+        .expect("supervisor-direct verdict persists");
+
+    // Durable persistence: the raw SQLite rows must already be redacted, so no
+    // later projection is load-bearing for containment.
+    let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).expect("db");
+    let (stored_summary, stored_files): (String, String) = conn
+        .query_row(
+            "SELECT summary, files_reviewed FROM verifications WHERE id = ?1",
+            rusqlite::params!["ver-embedded-boundary"],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("stored verification row");
+    let (stored_file, stored_code, stored_problem, stored_suggestion): (
+        String,
+        String,
+        String,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT file, code, problem, suggestion FROM verification_issues
+             WHERE verification_id = ?1",
+            rusqlite::params!["ver-embedded-boundary"],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("stored issue row");
+    drop(conn);
+
+    assert_eq!(stored_summary, "[REDACTED_PATH]");
+    assert_eq!(stored_file, "[REDACTED_PATH]");
+    assert_eq!(stored_code, "[REDACTED_SECRET]");
+    assert_eq!(stored_problem, "[REDACTED_SECRET]");
+    assert_eq!(stored_suggestion, "[REDACTED_PATH]");
+    assert!(
+        stored_files.contains("src/lib.rs"),
+        "portable identifier must survive durable persistence: {stored_files}"
+    );
+
+    let row = verification_store
+        .get_latest_for_task(&task_id)
+        .expect("lookup")
+        .expect("verification row");
+    assert_eq!(
+        row.files_reviewed,
+        vec![
+            "[REDACTED_PATH]".to_string(),
+            "[REDACTED_PATH]".to_string(),
+            "[REDACTED_SECRET]".to_string(),
+            "src/lib.rs".to_string(),
+        ]
+    );
+
+    // Update/close persistence: the sanitized verdict still authorizes close,
+    // and the close projection cannot echo the rejected content either.
+    let close_text = extract_text(
+        service
+            .cas_task_update(Parameters(task_status_update(
+                &task_id,
+                Some("closed"),
+                None,
+            )))
+            .await
+            .expect("sanitized verdict authorizes close"),
+    );
+    assert_eq!(
+        open_task_store(&cas_dir)
+            .expect("task store")
+            .get(&task_id)
+            .expect("task")
+            .status,
+        TaskStatus::Closed
+    );
+
+    // JSON + diagnostic projections.
+    let row_payload = serde_json::to_string(&row).expect("serialize verification row");
+    let event_payload = serde_json::to_string(
+        &open_event_store(&cas_dir)
+            .expect("event store")
+            .list_recent(50)
+            .expect("events"),
+    )
+    .expect("serialize events");
+    let show_text = extract_text(
+        service
+            .cas_verification_show(Parameters(VerificationShowRequest {
+                id: "ver-embedded-boundary".to_string(),
+            }))
+            .await
+            .expect("show"),
+    );
+    let list_text = extract_text(
+        service
+            .cas_verification_list(Parameters(VerificationListRequest {
+                task_id: task_id.clone(),
+                limit: Some(10),
+            }))
+            .await
+            .expect("list"),
+    );
+    let latest_text = extract_text(
+        service
+            .cas_verification_latest(Parameters(VerificationListRequest {
+                task_id: task_id.clone(),
+                limit: Some(1),
+            }))
+            .await
+            .expect("latest"),
+    );
+
+    for (surface, payload) in [
+        ("stored_summary", stored_summary),
+        ("stored_files", stored_files),
+        ("close", close_text),
+        ("row_json", row_payload),
+        ("events", event_payload),
+        ("show", show_text.clone()),
+        ("list", list_text),
+        ("latest", latest_text),
+    ] {
+        for unsafe_value in [
+            embedded_path,
+            embedded_drive,
+            embedded_unc,
+            embedded_file_url,
+            "/home/operator",
+            "/etc/shadow",
+            r"C:\Users\operator",
+            r"\\build-host",
+            "verifier-secret-material",
+            "AKIAIOSFODNN7EXAMPLE",
+        ] {
+            assert!(
+                !payload.contains(unsafe_value),
+                "{surface} leaked embedded verifier content: {unsafe_value:?}"
+            );
+        }
+    }
+
+    assert!(
+        show_text.contains("[REDACTED_PATH]")
+            && show_text.contains("[REDACTED_SECRET]")
+            && show_text.contains("src/lib.rs"),
+        "show must render redaction markers while keeping portable identifiers: {show_text}"
+    );
+}

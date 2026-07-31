@@ -21,69 +21,249 @@ const REDACTED_VERIFIER_PATH: &str = "[REDACTED_PATH]";
 const REDACTED_VERIFIER_CONTROL: &str = "[REDACTED_CONTROL]";
 const TRUNCATED_VERIFIER_TEXT: &str = "[TRUNCATED]";
 
-fn verifier_text_contains_secret(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    if [
-        "-----begin private key",
-        "-----begin rsa private key",
-        "-----begin ec private key",
-        "authorization:",
-        "bearer ",
-        "token=",
-        "access_token=",
-        "password=",
-        "secret=",
-        "client_secret=",
-        "api_key=",
-        "apikey=",
-    ]
-    .iter()
-    .any(|marker| lower.contains(marker))
-    {
-        return true;
-    }
+/// Literal secret headers that are unsafe wherever they appear, with no
+/// surrounding token boundary required.
+const VERIFIER_SECRET_PHRASES: &[&str] = &[
+    "-----begin private key",
+    "-----begin rsa private key",
+    "-----begin ec private key",
+];
 
-    if [
-        "vcap-",
-        "sk-",
-        "ghp_",
-        "gho_",
-        "github_pat_",
-        "glpat-",
-        "xoxb-",
-        "xoxp-",
-        "xoxa-",
-        "aiza",
-    ]
-    .iter()
-    .any(|prefix| {
-        lower.match_indices(prefix).any(|(index, _)| {
-            index == 0
-                || lower[..index]
-                    .chars()
-                    .next_back()
-                    .is_none_or(|ch| !ch.is_ascii_alphanumeric() && ch != '_')
+/// Credential-bearing key names. Each is unsafe when followed — across any
+/// amount of ASCII/Unicode whitespace — by an `=` or `:` separator, so
+/// `token=x`, `token =x`, `token :x`, and `token\t= x` are all caught.
+const VERIFIER_SECRET_KEYS: &[&str] = &[
+    "authorization",
+    "token",
+    "access_token",
+    "refresh_token",
+    "password",
+    "passwd",
+    "secret",
+    "client_secret",
+    "api_key",
+    "apikey",
+    "private_key",
+];
+
+/// Vendor credential prefixes that are unsafe at any token boundary.
+const VERIFIER_SECRET_PREFIXES: &[&str] = &[
+    "vcap-",
+    "sk-",
+    "ghp_",
+    "gho_",
+    "github_pat_",
+    "glpat-",
+    "xoxb-",
+    "xoxp-",
+    "xoxa-",
+    "aiza",
+];
+
+/// Minimum alphanumeric run required after an `AKIA` boundary match before it
+/// is treated as an AWS access key id rather than an ordinary word.
+const VERIFIER_AKIA_MIN_RUN: usize = 16;
+
+/// Lowercase a value and collapse every Unicode whitespace form to a single
+/// space.
+///
+/// Marker detection then sees `Bearer\tsecret`, `Bearer\nsecret`, and
+/// `Bearer\u{a0}secret` identically to `Bearer secret`, so separator
+/// obfuscation cannot smuggle an auth marker past the boundary. Scanning
+/// happens over `char`s (not bytes) so multi-byte input cannot desynchronize
+/// the neighbour checks.
+fn verifier_scan_chars(value: &str) -> Vec<char> {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_whitespace() {
+                ' '
+            } else {
+                ch.to_ascii_lowercase()
+            }
         })
-    }) {
-        return true;
-    }
+        .collect()
+}
 
-    value.split_whitespace().any(|token| {
-        let token = token.trim_matches(|ch: char| !ch.is_ascii_alphanumeric());
-        token.len() >= 16 && token.to_ascii_uppercase().starts_with("AKIA")
+/// Characters that continue an identifier, and therefore suppress a token
+/// boundary before them.
+fn is_verifier_identifier_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+/// True when `index` starts a fresh token (string start, or preceded by a
+/// non-identifier character). This is what lets an embedded `at=AKIA...` or
+/// `](C:\...)` be seen while `task-verifier` still does not match `sk-`.
+fn at_verifier_token_boundary(chars: &[char], index: usize) -> bool {
+    index == 0 || !is_verifier_identifier_char(chars[index - 1])
+}
+
+/// True when `needle` occurs at exactly `index`.
+fn verifier_matches_at(chars: &[char], index: usize, needle: &str) -> bool {
+    let mut cursor = index;
+    for expected in needle.chars() {
+        if chars.get(cursor) != Some(&expected) {
+            return false;
+        }
+        cursor += 1;
+    }
+    true
+}
+
+/// True when `key` occurs at `index` and is followed, across any run of
+/// normalized spaces, by an `=` or `:` separator.
+fn verifier_key_has_separator(chars: &[char], index: usize, key: &str) -> bool {
+    if !verifier_matches_at(chars, index, key) {
+        return false;
+    }
+    let mut cursor = index + key.chars().count();
+    while chars.get(cursor) == Some(&' ') {
+        cursor += 1;
+    }
+    matches!(chars.get(cursor), Some('=') | Some(':'))
+}
+
+/// True when a `bearer` boundary match is followed by a separator, i.e. it
+/// introduces a credential value rather than merely ending the text.
+fn verifier_bearer_has_separator(chars: &[char], index: usize) -> bool {
+    matches!(chars.get(index), Some(' ') | Some(':') | Some('='))
+}
+
+/// True when at least `VERIFIER_AKIA_MIN_RUN` alphanumerics run from `index`.
+fn verifier_has_key_id_run(chars: &[char], index: usize) -> bool {
+    let mut run = 0usize;
+    let mut cursor = index;
+    while chars
+        .get(cursor)
+        .is_some_and(|ch| ch.is_ascii_alphanumeric())
+    {
+        run += 1;
+        cursor += 1;
+    }
+    run >= VERIFIER_AKIA_MIN_RUN
+}
+
+fn verifier_text_contains_secret(value: &str) -> bool {
+    let chars = verifier_scan_chars(value);
+
+    (0..chars.len()).any(|index| {
+        if VERIFIER_SECRET_PHRASES
+            .iter()
+            .any(|phrase| verifier_matches_at(&chars, index, phrase))
+        {
+            return true;
+        }
+
+        if !at_verifier_token_boundary(&chars, index) {
+            return false;
+        }
+
+        if verifier_matches_at(&chars, index, "bearer")
+            && verifier_bearer_has_separator(&chars, index + "bearer".len())
+        {
+            return true;
+        }
+
+        if VERIFIER_SECRET_KEYS
+            .iter()
+            .any(|key| verifier_key_has_separator(&chars, index, key))
+        {
+            return true;
+        }
+
+        if VERIFIER_SECRET_PREFIXES
+            .iter()
+            .any(|prefix| verifier_matches_at(&chars, index, prefix))
+        {
+            return true;
+        }
+
+        verifier_matches_at(&chars, index, "akia") && verifier_has_key_id_run(&chars, index)
     })
 }
 
+/// Characters that can begin the first segment of a path body. Requiring one
+/// of these after a root `/` keeps prose like `a / b` out of the path class.
+fn is_verifier_path_body_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '~' | '%' | '+')
+}
+
+/// True when a `/` at this position is a filesystem root rather than a
+/// separator inside a relative path or a URL authority.
+///
+/// Rejects alphanumeric predecessors (`src/main.rs`), a preceding `/`
+/// (`https://host`), and relative-path punctuation (`./x`, `../x`), while
+/// accepting assignment, quoting, and Markdown punctuation (`at=/home/x`,
+/// `"/home/x"`, `](/home/x)`).
+fn is_verifier_unix_root_boundary(prev: Option<char>) -> bool {
+    match prev {
+        None => true,
+        Some(ch) => {
+            !ch.is_ascii_alphanumeric() && !matches!(ch, '/' | '.' | '_' | '-' | '~' | '+' | '%')
+        }
+    }
+}
+
+/// True when `\\host\` begins a UNC share at `index`.
+///
+/// The trailing share separator is required so escaped snippets such as
+/// `"a\\nb"` are not misread as host paths.
+fn is_verifier_unc_share(chars: &[char], index: usize) -> bool {
+    if !(chars.get(index) == Some(&'\\') && chars.get(index + 1) == Some(&'\\')) {
+        return false;
+    }
+    let mut cursor = index + 2;
+    let mut host = 0usize;
+    while chars
+        .get(cursor)
+        .is_some_and(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
+    {
+        host += 1;
+        cursor += 1;
+    }
+    host > 0 && chars.get(cursor) == Some(&'\\')
+}
+
+/// True when a `X:/` or `X:\` drive-letter path begins at `index`.
+///
+/// The boundary requirement keeps `https://` and `12:30` out while still
+/// seeing an embedded `at=C:\Users\operator`.
+fn is_verifier_drive_letter(chars: &[char], index: usize) -> bool {
+    chars.get(index).is_some_and(|ch| ch.is_ascii_alphabetic())
+        && at_verifier_token_boundary(chars, index)
+        && chars.get(index + 1) == Some(&':')
+        && matches!(chars.get(index + 2), Some('/') | Some('\\'))
+}
+
 fn verifier_text_contains_absolute_path(value: &str) -> bool {
-    value.split_whitespace().any(|token| {
-        let token = token.trim_matches(|ch: char| "(),[]{}<>\"'`;".contains(ch));
-        (token.starts_with('/') && !token.starts_with("//"))
-            || token.starts_with("~/")
-            || token.starts_with(r"\\")
-            || token.starts_with("file:///")
-            || (token.len() >= 3
-                && token.as_bytes()[1] == b':'
-                && matches!(token.as_bytes()[2], b'/' | b'\\'))
+    let chars = verifier_scan_chars(value);
+
+    (0..chars.len()).any(|index| {
+        let ch = chars[index];
+        let prev = index.checked_sub(1).map(|prev_index| chars[prev_index]);
+
+        if ch == '/'
+            && is_verifier_unix_root_boundary(prev)
+            && chars
+                .get(index + 1)
+                .copied()
+                .is_some_and(is_verifier_path_body_char)
+        {
+            return true;
+        }
+
+        if ch == '~'
+            && chars.get(index + 1) == Some(&'/')
+            && at_verifier_token_boundary(&chars, index)
+        {
+            return true;
+        }
+
+        if is_verifier_unc_share(&chars, index) || is_verifier_drive_letter(&chars, index) {
+            return true;
+        }
+
+        at_verifier_token_boundary(&chars, index) && verifier_matches_at(&chars, index, "file:/")
     })
 }
 
@@ -1036,5 +1216,148 @@ mod tests {
                 .iter()
                 .all(|issue| issue.problem.len() <= VERIFIER_ISSUE_TEXT_MAX_BYTES)
         );
+    }
+
+    /// cas-da92: absolute host paths must be caught wherever they appear, not
+    /// only when they begin a whitespace-delimited token.
+    #[test]
+    fn verifier_embedded_absolute_paths_are_redacted() {
+        for value in [
+            "at=/home/operator/private.rs",
+            "proof at=/home/operator/private.rs line 12",
+            "see [proof](/home/operator/private.rs) for detail",
+            "<file:///etc/shadow>",
+            "evidence=file:///etc/shadow",
+            "FILE:///etc/shadow",
+            r"at=C:\Users\operator\private.rs",
+            r"[proof](C:/Users/operator/private.rs)",
+            r"share=\\build-host\proofs\private.rs",
+            "home=~/private/proof.json",
+            "path:/etc/passwd",
+            "\"/home/operator/private.rs\"",
+            "{'file': '/home/operator/private.rs'}",
+        ] {
+            assert_eq!(
+                sanitize_verifier_text(value, VERIFIER_ISSUE_TEXT_MAX_BYTES),
+                REDACTED_VERIFIER_PATH,
+                "embedded absolute path was not redacted: {value:?}"
+            );
+        }
+    }
+
+    /// cas-da92: auth markers must survive separator obfuscation across every
+    /// ASCII/Unicode whitespace form.
+    #[test]
+    fn verifier_separator_obfuscated_secrets_are_redacted() {
+        for value in [
+            "Bearer\tsecret-material",
+            "Bearer\nsecret-material",
+            "Bearer\r\nsecret-material",
+            "Bearer\u{a0}secret-material",
+            "Bearer   secret-material",
+            "Bearer: secret-material",
+            "authorization :\tsecret-material",
+            "token = secret-material",
+            "password :\tsecret-material",
+            "api_key\t=\tsecret-material",
+            "client_secret\n= secret-material",
+            "at=AKIAIOSFODNN7EXAMPLE",
+            "creds(AKIAIOSFODNN7EXAMPLE)",
+            "-----BEGIN RSA PRIVATE KEY-----",
+        ] {
+            assert_eq!(
+                sanitize_verifier_text(value, VERIFIER_ISSUE_TEXT_MAX_BYTES),
+                REDACTED_VERIFIER_SECRET,
+                "obfuscated secret was not redacted: {value:?}"
+            );
+        }
+    }
+
+    /// cas-da92: the widened detectors must not swallow portable, benign
+    /// identifiers that verifiers legitimately author.
+    #[test]
+    fn verifier_portable_identifiers_are_not_false_positives() {
+        for value in [
+            "src/main.rs",
+            "crates/cas-types/src/verification.rs:118",
+            "docs/release-notes/2026-07-31-topic-slack.md",
+            "./relative/path.rs",
+            "../sibling/path.rs",
+            "https://example.com/docs/a",
+            "http://example.com/docs/a?q=1",
+            "read/write access is required",
+            "either and/or is fine",
+            "the ratio a / b is unstable",
+            "meeting at 12:30 today",
+            "ver-a1b2 verified cas-1234",
+            "task-verifier found two ordinary findings",
+            "println!(\"line\\nbreak\")",
+            "TODO: add validation for required fields",
+            "AKIA is mentioned without a key id",
+            "100 km/h",
+        ] {
+            assert_eq!(
+                sanitize_verifier_text(value, VERIFIER_ISSUE_TEXT_MAX_BYTES),
+                value,
+                "benign verifier text was falsely redacted: {value:?}"
+            );
+        }
+    }
+
+    /// cas-da92: embedded forms must not reach the serialized workspace that
+    /// persistence and diagnostics both project from.
+    #[test]
+    fn verifier_embedded_forms_never_reach_serialized_workspace() {
+        let mut verification = Verification::rejected(
+            "ver-embedded".to_string(),
+            "cas-embedded".to_string(),
+            "evidence at=/home/operator/private.rs".to_string(),
+            vec![VerificationIssue::blocking(
+                "[proof](/home/operator/private.rs)".to_string(),
+                Some(12),
+                "security".to_string(),
+                "Bearer\tsecret-material".to_string(),
+                "token = secret-material".to_string(),
+                Some(r"share=\\build-host\proofs\private.rs".to_string()),
+            )],
+        );
+        verification.files_reviewed = vec![
+            "evidence=file:///etc/shadow".to_string(),
+            r"at=C:\Users\operator\private.rs".to_string(),
+            "src/lib.rs".to_string(),
+        ];
+
+        verification.sanitize_verifier_authored_content();
+
+        assert_eq!(verification.summary, REDACTED_VERIFIER_PATH);
+        assert_eq!(verification.issues[0].file, REDACTED_VERIFIER_PATH);
+        assert_eq!(verification.issues[0].code, REDACTED_VERIFIER_SECRET);
+        assert_eq!(verification.issues[0].problem, REDACTED_VERIFIER_SECRET);
+        assert_eq!(
+            verification.issues[0].suggestion.as_deref(),
+            Some(REDACTED_VERIFIER_PATH)
+        );
+        assert_eq!(
+            verification.files_reviewed,
+            vec![
+                REDACTED_VERIFIER_PATH.to_string(),
+                REDACTED_VERIFIER_PATH.to_string(),
+                "src/lib.rs".to_string(),
+            ]
+        );
+
+        let serialized = serde_json::to_string(&verification).expect("serialize");
+        for unsafe_value in [
+            "/home/operator",
+            "/etc/shadow",
+            r"C:\Users\operator",
+            r"\\build-host",
+            "secret-material",
+        ] {
+            assert!(
+                !serialized.contains(unsafe_value),
+                "embedded verifier content crossed sanitization: {unsafe_value:?}"
+            );
+        }
     }
 }

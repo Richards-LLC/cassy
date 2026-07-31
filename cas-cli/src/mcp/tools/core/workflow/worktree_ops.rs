@@ -1472,12 +1472,16 @@ impl CasCore {
             })?,
         };
 
-        let (mut worktree, is_system_b, target_reason) = match system_a {
-            Some(wt) => (wt, false, String::new()),
+        let (mut worktree, is_system_b, source_worktree_live, target_reason) = match system_a {
+            Some(wt) => {
+                let source_worktree_live = is_git_worktree(&wt.path);
+                (wt, false, source_worktree_live, String::new())
+            }
             None => {
                 let assignee = id.strip_prefix("factory/").unwrap_or(id);
                 let path = manager.worktree_path_for_worker(assignee);
-                if !is_git_worktree(&path) {
+                let source_worktree_live = is_git_worktree(&path);
+                if !source_worktree_live && transactional_delivery.is_none() {
                     return Err(McpError {
                         code: ErrorCode::INVALID_PARAMS,
                         message: Cow::from(format!(
@@ -1530,14 +1534,19 @@ impl CasCore {
                         path,
                     ),
                     true,
+                    source_worktree_live,
                     target_reason,
                 )
             }
         };
 
         // Bind this mutation to the task's declared work repository before
-        // merge/reachability checks.
-        if let (Some(task_id), Some(expected)) = (task_id, declared_repo_context.as_ref()) {
+        // merge/reachability checks. A cleaned-up source is the sole
+        // exception: immutable receipt and target ancestry are authenticated
+        // below before source-less reconciliation can proceed.
+        if source_worktree_live
+            && let (Some(task_id), Some(expected)) = (task_id, declared_repo_context.as_ref())
+        {
             let actual = crate::mcp::tools::core::task::repo_context::resolve_path_context(
                 &worktree.path,
                 &worktree.parent_branch,
@@ -1564,6 +1573,21 @@ impl CasCore {
                 message: Cow::from(message),
                 data: None,
             })?;
+        }
+
+        // A stale System-A row is not a live worktree. Preserve the legacy
+        // no-receipt failure while transactional delivery continues into the
+        // immutable receipt/ancestry reconciliation below.
+        if !source_worktree_live && transactional_delivery.is_none() {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "Worktree not found: {id} (checked System A worktree store and \
+                     the System B path {})",
+                    worktree.path.display()
+                )),
+                data: None,
+            });
         }
 
         let mut reconciled_delivery = false;
@@ -1687,6 +1711,20 @@ impl CasCore {
             }
         }
 
+        if !source_worktree_live && !reconciled_delivery {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "Worktree not found: {id} (checked System A worktree store and \
+                     the System B path {}). Transactional delivery cannot continue \
+                     without a live source unless the authenticated receipt commit \
+                     is already an ancestor of its declared target.",
+                    worktree.path.display()
+                )),
+                data: None,
+            });
+        }
+
         // cas-369f: force (dirty) ≠ cleanup (remove). System-B factory
         // workers default to preserving the worktree mid-session.
         let do_cleanup =
@@ -1698,7 +1736,14 @@ impl CasCore {
                 &worktree.parent_branch,
             )
         } else {
-            match manager.merge_and_cleanup(&mut worktree, force, do_cleanup) {
+            let merge_result = if transactional_delivery.is_some() {
+                // Persisted delivery state must separate a successful Git
+                // merge from destructive cleanup.
+                manager.merge_preserving_worktree(&mut worktree, force, do_cleanup)
+            } else {
+                manager.merge_and_cleanup(&mut worktree, force, do_cleanup)
+            };
+            match merge_result {
                 Ok(commit) => commit,
                 Err(error) => {
                     if let (Some((_, transaction)), Some(authority)) =
@@ -1796,6 +1841,22 @@ impl CasCore {
                 })?;
             }
 
+            // Cleanup is destructive and follows the durable Merged →
+            // CloseReady transition. If the process stops after removal, the
+            // next call can reconcile the exact receipt from target ancestry;
+            // if it stops before removal, the next call safely retries cleanup.
+            if do_cleanup && source_worktree_live {
+                manager
+                    .cleanup_merged_worktree(&mut worktree)
+                    .map_err(|error| {
+                        worktree_merge_mcp_error(
+                            error,
+                            &worktree.branch,
+                            &worktree.parent_branch,
+                        )
+                    })?;
+            }
+
             if let Some(task_id) = task_id {
                 let close_result = self
                     .cas_task_close(Parameters(TaskCloseRequest {
@@ -1863,17 +1924,19 @@ impl CasCore {
             " Worktree preserved (mid-session merge; pass cleanup=true to remove)."
         };
 
-        let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(
-            &self.cas_root,
-            "worktree_merged",
-            &[
-                ("worktree_id", &worktree.id),
-                ("branch", &worktree.branch),
-                ("target_branch", &worktree.parent_branch),
-                ("commit", merge_commit.as_deref().unwrap_or("none")),
-                ("cleanup", if do_cleanup { "true" } else { "false" }),
-            ],
-        );
+        if !reconciled_delivery {
+            let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(
+                &self.cas_root,
+                "worktree_merged",
+                &[
+                    ("worktree_id", &worktree.id),
+                    ("branch", &worktree.branch),
+                    ("target_branch", &worktree.parent_branch),
+                    ("commit", merge_commit.as_deref().unwrap_or("none")),
+                    ("cleanup", if do_cleanup { "true" } else { "false" }),
+                ],
+            );
+        }
 
         if let Some(close_result) = delivery_close_result {
             // Git and durable delivery state reached CloseReady, but the

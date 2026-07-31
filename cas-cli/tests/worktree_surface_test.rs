@@ -2409,8 +2409,7 @@ async fn submit_and_verify_delivery(
     assert!(get_text(&verification).contains("approved"));
 }
 
-#[tokio::test]
-async fn transactional_delivery_public_interrupted_resume_is_ancestry_gated_and_idempotent() {
+async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
     let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
     let home = TempDir::new().expect("temp HOME");
     let _home = HomeGuard::enter(home.path());
@@ -2426,22 +2425,23 @@ async fn transactional_delivery_public_interrupted_resume_is_ancestry_gated_and_
         "[verification]\nenabled = true\n",
     )
     .expect("enable exact post-merge verification gate");
-    let factory_session = "delivery-factory";
-    let worker_id = "delivery-worker-session";
-    let supervisor_id = "delivery-supervisor-session";
+    let fixture = if system_a { "system-a" } else { "system-b" };
+    let factory_session = format!("delivery-{fixture}-factory");
+    let worker_id = format!("delivery-{fixture}-worker-session");
+    let supervisor_id = format!("delivery-{fixture}-supervisor-session");
     register_delivery_agent(
         &cas_root,
-        worker_id,
+        &worker_id,
         "alice",
         AgentRole::Worker,
-        factory_session,
+        &factory_session,
     );
     register_delivery_agent(
         &cas_root,
-        supervisor_id,
+        &supervisor_id,
         "supervisor",
         AgentRole::Supervisor,
-        factory_session,
+        &factory_session,
     );
 
     let worker_path = cas_root.join("worktrees").join("alice");
@@ -2450,21 +2450,45 @@ async fn transactional_delivery_public_interrupted_resume_is_ancestry_gated_and_
     run_git(&["add", "delivery.rs"], &worker_path);
     run_git(&["commit", "-m", "delivery receipt commit"], &worker_path);
 
+    let worktree_id = format!("{fixture}-delivery-worktree");
+    if system_a {
+        let worktree_store = open_worktree_store(&cas_root).expect("System-A worktree store");
+        worktree_store.init().expect("initialize System-A store");
+        worktree_store
+            .add(&Worktree::new(
+                worktree_id.clone(),
+                "factory/alice".to_string(),
+                "main".to_string(),
+                worker_path.clone(),
+            ))
+            .expect("register System-A delivery worktree");
+    }
+
     let task_store = open_task_store(&cas_root).expect("task store");
     let mut task = Task::new(
-        "cas-delivery-integration".to_string(),
-        "Transactional delivery integration".to_string(),
+        format!("cas-delivery-{fixture}-integration"),
+        format!("Transactional {fixture} delivery integration"),
     );
     task.status = TaskStatus::InProgress;
     task.depth = TaskDepth::Deep;
     task.assignee = Some("alice".to_string());
+    if system_a {
+        task.worktree_id = Some(worktree_id.clone());
+    }
     task.deliverables.work_target = Some(WorkTarget {
         repo_selector: "remote:github.com/org/delivery".to_string(),
         target_branch: "main".to_string(),
     });
     task_store.add(&task).expect("add delivery task");
-    let receipt = delivery_receipt(&task.id, worker_id, &repo, "alice");
-    submit_and_verify_delivery(&cas_root, &task.id, worker_id, supervisor_id, &receipt).await;
+    let receipt = delivery_receipt(&task.id, &worker_id, &repo, "alice");
+    submit_and_verify_delivery(
+        &cas_root,
+        &task.id,
+        &worker_id,
+        &supervisor_id,
+        &receipt,
+    )
+    .await;
 
     // Arm a newer exact task proof cycle after the delivery proof is approved.
     // The post-merge internal close must surface this gate verbatim rather
@@ -2472,8 +2496,8 @@ async fn transactional_delivery_public_interrupted_resume_is_ancestry_gated_and_
     let post_merge_dispatch = cas_store::create_verification_dispatch_bound(
         &cas_root,
         &task.id,
-        supervisor_id,
-        supervisor_id,
+        &supervisor_id,
+        &supervisor_id,
         &cas_types::VerificationProofBoundary::task(),
         chrono::Utc::now() + chrono::Duration::minutes(10),
         false,
@@ -2488,37 +2512,24 @@ async fn transactional_delivery_public_interrupted_resume_is_ancestry_gated_and_
         "the new task proof cycle must be authoritative before merge"
     );
 
-    // Simulate interruption after the authorized Git merge but before CAS
-    // persisted its post-Git state. Public retry must reconcile ancestry
-    // without executing another merge or appending duplicate events.
-    run_git(
-        &[
-            "merge",
-            "--no-ff",
-            "factory/alice",
-            "-m",
-            "interrupted external merge",
-        ],
-        &repo.root,
-    );
-    assert_eq!(
-        git_stdout(
-            &repo.root,
-            &["merge-base", "--is-ancestor", &receipt.commit_sha, "main"]
-        ),
-        ""
-    );
+    // The production merge must persist CloseReady before cleanup removes
+    // the source. The newer close gate then simulates interruption after
+    // cleanup but before Delivered.
     let _cwd = CwdGuard::enter(&repo.root);
-    let supervisor_service = delivery_service(&cas_root, supervisor_id);
+    let supervisor_service = delivery_service(&cas_root, &supervisor_id);
     let mut merge = coord_req("worktree_merge");
-    merge.id = Some("factory/alice".to_string());
+    merge.id = Some(if system_a {
+        worktree_id.clone()
+    } else {
+        "factory/alice".to_string()
+    });
     merge.task_id = Some(task.id.clone());
     merge.allow_trunk = Some(true);
-    merge.cleanup = Some(false);
+    merge.cleanup = Some(true);
     let result = supervisor_service
         .coordination(Parameters(merge))
         .await
-        .expect("public interrupted-resume merge");
+        .expect("public cleanup-before-close-gate merge");
     let gate_text = get_text(&result);
     assert!(
         gate_text.contains("VERIFICATION") && gate_text.contains(&post_merge_dispatch.id),
@@ -2528,6 +2539,33 @@ async fn transactional_delivery_public_interrupted_resume_is_ancestry_gated_and_
         !gate_text.contains("Merged worktree"),
         "a remaining close gate must not be reported as generic merge success"
     );
+    assert!(
+        !worker_path.exists(),
+        "cleanup=true must remove the source before the close gate is returned"
+    );
+    if system_a {
+        let persisted_worktree = open_worktree_store(&cas_root)
+            .expect("reopen System-A store")
+            .get(&worktree_id)
+            .expect("cleanup keeps the durable System-A row");
+        assert_eq!(
+            persisted_worktree.status,
+            cas::types::WorktreeStatus::Removed,
+            "the retained row must not be mistaken for a live source"
+        );
+    }
+    assert!(
+        git_stdout(&repo.root, &["branch", "--list", "factory/alice"]).is_empty(),
+        "cleanup=true must remove the source branch"
+    );
+    assert_eq!(
+        git_stdout(
+            &repo.root,
+            &["merge-base", "--is-ancestor", &receipt.commit_sha, "main"]
+        ),
+        ""
+    );
+    let merged_target_tip = git_stdout(&repo.root, &["rev-parse", "main"]);
     let persisted = task_store.get(&task.id).expect("gated task");
     assert_ne!(persisted.status, TaskStatus::Closed);
     let (_, transaction) = cas_store::get_latest_worker_delivery(&cas_root, &task.id)
@@ -2535,7 +2573,22 @@ async fn transactional_delivery_public_interrupted_resume_is_ancestry_gated_and_
         .unwrap();
     assert_eq!(transaction.state, WorkerDeliveryState::CloseReady);
     let events_before = cas_store::list_worker_delivery_events(&cas_root, &transaction.id).unwrap();
-    assert_eq!(events_before.len(), 4);
+    assert_eq!(
+        events_before
+            .iter()
+            .filter(|event| event.state == WorkerDeliveryState::Merged)
+            .count(),
+        1,
+        "the production merge must persist exactly one Merged transition"
+    );
+    assert_eq!(
+        events_before
+            .iter()
+            .filter(|event| event.state == WorkerDeliveryState::CloseReady)
+            .count(),
+        1,
+        "the post-merge close gate must leave one durable resumable state"
+    );
 
     let gate_clear = supervisor_service
         .verification(Parameters(verification_req(serde_json::json!({
@@ -2556,14 +2609,18 @@ async fn transactional_delivery_public_interrupted_resume_is_ancestry_gated_and_
         .expect("isolate retry from unrelated review gate");
 
     let mut retry = coord_req("worktree_merge");
-    retry.id = Some("factory/alice".to_string());
+    retry.id = Some(if system_a {
+        worktree_id
+    } else {
+        "factory/alice".to_string()
+    });
     retry.task_id = Some(task.id.clone());
     retry.allow_trunk = Some(true);
-    retry.cleanup = Some(false);
+    retry.cleanup = Some(true);
     let retry_result = supervisor_service
         .coordination(Parameters(retry))
         .await
-        .expect("idempotent close-ready retry");
+        .expect("source-less idempotent close-ready retry");
     assert!(
         get_text(&retry_result).contains("Merged worktree"),
         "{}",
@@ -2577,6 +2634,11 @@ async fn transactional_delivery_public_interrupted_resume_is_ancestry_gated_and_
         .unwrap()
         .unwrap();
     assert_eq!(delivered.state, WorkerDeliveryState::Delivered);
+    assert_eq!(
+        git_stdout(&repo.root, &["rev-parse", "main"]),
+        merged_target_tip,
+        "source-less retry must not execute a second Git merge"
+    );
     let events_after = cas_store::list_worker_delivery_events(&cas_root, &transaction.id).unwrap();
     assert_eq!(events_after.len(), events_before.len() + 1);
     assert_eq!(
@@ -2587,6 +2649,16 @@ async fn transactional_delivery_public_interrupted_resume_is_ancestry_gated_and_
         1,
         "resume must not append a second merge event"
     );
+}
+
+#[tokio::test]
+async fn transactional_delivery_public_interrupted_resume_is_ancestry_gated_and_idempotent() {
+    transactional_delivery_cleanup_resume_scenario(false).await;
+}
+
+#[tokio::test]
+async fn transactional_system_a_cleanup_gate_retry_reconciles_without_source_path() {
+    transactional_delivery_cleanup_resume_scenario(true).await;
 }
 
 #[tokio::test]

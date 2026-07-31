@@ -7,7 +7,10 @@
 
 use std::path::Path;
 
-use cas_types::{Task, TaskStatus, VerificationDispatchState, WorkerDeliveryState};
+use cas_types::{
+    Task, TaskStatus, VerificationDispatch, VerificationDispatchState, VerificationProvenance,
+    VerificationStatus, WorkerDeliveryState,
+};
 
 use crate::mcp::tools::TaskUpdateRequest;
 
@@ -49,7 +52,16 @@ impl ProofScopeOperation<'_> {
         supplied!(execution_note);
         supplied!(external_ref);
         supplied!(assignee);
-        supplied!(status);
+        // Closing consumes the exact proof rather than changing what it
+        // reviewed. The direct-close handler applies its verification,
+        // delivery, repository, and hook gates after this scope guard.
+        if request
+            .status
+            .as_deref()
+            .is_some_and(|status| !status.eq_ignore_ascii_case("closed"))
+        {
+            fields.push("status");
+        }
         supplied!(epic);
         supplied!(epic_verification_owner);
         supplied!(depth);
@@ -72,6 +84,44 @@ fn delivery_state_locks_scope(state: WorkerDeliveryState) -> bool {
             | WorkerDeliveryState::Merged
             | WorkerDeliveryState::CloseReady
     )
+}
+
+fn resolved_task_dispatch_remains_close_authoritative(
+    cas_root: &Path,
+    dispatch: &VerificationDispatch,
+) -> Result<bool, String> {
+    let verification = cas_store::get_verification_for_dispatch(cas_root, &dispatch.id)
+        .map_err(|error| format!("exact verification lookup failed: {error}"))?
+        .ok_or_else(|| "resolved task-only dispatch has no exact verdict".to_string())?;
+    Ok(matches!(
+        verification.status,
+        VerificationStatus::Approved | VerificationStatus::Skipped
+    ) && verification.provenance != VerificationProvenance::Legacy
+        && verification.dispatch_id.as_deref() == Some(dispatch.id.as_str()))
+}
+
+/// Return the exact non-delivery proof that still authorizes close for this task.
+///
+/// This is shared with the supervisor-only fresh-scope recovery action so the
+/// rejection predicate and its remediation cannot drift.
+pub(crate) fn close_authoritative_task_proof_dispatch(
+    cas_root: &Path,
+    task_id: &str,
+) -> Result<Option<VerificationDispatch>, String> {
+    let Some(dispatch) = cas_store::get_latest_verification_dispatch(cas_root, task_id)
+        .map_err(|error| format!("exact dispatch lookup failed: {error}"))?
+    else {
+        return Ok(None);
+    };
+    if dispatch.task_id != task_id
+        || dispatch.receipt_id.is_some()
+        || dispatch.delivery_transaction_id.is_some()
+        || dispatch.state != VerificationDispatchState::Resolved
+    {
+        return Ok(None);
+    }
+    resolved_task_dispatch_remains_close_authoritative(cas_root, &dispatch)
+        .map(|authoritative| authoritative.then_some(dispatch))
 }
 
 fn exact_proof_locks_scope(cas_root: &Path, task: &Task) -> Result<bool, String> {
@@ -110,12 +160,15 @@ fn exact_proof_locks_scope(cas_root: &Path, task: &Task) -> Result<bool, String>
                         .to_string(),
                 );
             }
-            Ok(matches!(
-                dispatch.state,
+            match dispatch.state {
                 VerificationDispatchState::Pending
-                    | VerificationDispatchState::Claimed
-                    | VerificationDispatchState::TimedOut
-            ))
+                | VerificationDispatchState::Claimed
+                | VerificationDispatchState::TimedOut => Ok(true),
+                VerificationDispatchState::Resolved => {
+                    resolved_task_dispatch_remains_close_authoritative(cas_root, &dispatch)
+                }
+                VerificationDispatchState::Invalidated => Ok(false),
+            }
         }
         (Some(receipt_id), Some(transaction_id)) => {
             let Some((receipt, transaction)) =
@@ -178,11 +231,21 @@ pub(crate) fn guard_task_proof_scope(
     }
     match exact_proof_locks_scope(cas_root, task) {
         Ok(false) => Ok(()),
-        Ok(true) => Err(format!(
-            "DELIVERY PROOF SCOPE LOCKED: task {} has an active exact verification/delivery proof boundary. Refusing review-relevant update fields [{}]. Append progress with notes only; complete or explicitly recover the exact proof cycle before changing task scope.",
-            task.id,
-            locked_fields.join(", ")
-        )),
+        Ok(true) => {
+            let remediation = match close_authoritative_task_proof_dispatch(cas_root, &task.id) {
+                Ok(Some(_)) => format!(
+                    "To start a fresh reviewed scope without closing, ask a registered supervisor to run `task action=reopen id={} reason=\"invalidate approved proof before rework\"`; then start the task and retry the update.",
+                    task.id
+                ),
+                _ => "Complete or explicitly recover the active exact proof cycle before changing task scope.".to_string(),
+            };
+            Err(format!(
+                "DELIVERY PROOF SCOPE LOCKED: task {} has an active exact verification/delivery proof boundary. Refusing review-relevant update fields [{}]. Append progress with notes only. {}",
+                task.id,
+                locked_fields.join(", "),
+                remediation,
+            ))
+        }
         Err(reason) => Err(format!(
             "DELIVERY PROOF SCOPE LOCKED: task {} exact proof state is inconsistent ({reason}). Refusing review-relevant update fields [{}] rather than reusing or invalidating ambiguous proof.",
             task.id,
@@ -194,6 +257,7 @@ pub(crate) fn guard_task_proof_scope(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cas_store::VerificationStore;
     use cas_types::{VerificationProofBoundary, WorkerCompletionReceiptInput};
     use tempfile::TempDir;
 
@@ -219,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn notes_are_the_only_update_field_exempt_from_scope_locking() {
+    fn notes_and_exact_close_are_exempt_from_scope_locking() {
         let mut notes = empty_update();
         notes.notes = Some("progress".to_string());
         assert!(
@@ -230,6 +294,19 @@ mod tests {
             }
             .locked_fields()
             .is_empty()
+        );
+
+        let mut close = empty_update();
+        close.status = Some("closed".to_string());
+        assert!(
+            ProofScopeOperation::TaskUpdate {
+                request: &close,
+                target_repo_supplied: false,
+                target_branch_supplied: false,
+            }
+            .locked_fields()
+            .is_empty(),
+            "the direct-close handler consumes the exact proof after this guard"
         );
 
         let mut all = empty_update();
@@ -391,6 +468,63 @@ mod tests {
         .unwrap();
         let mut update = empty_update();
         update.acceptance_criteria = Some("changed".into());
+        let pending_error = guard_task_proof_scope(
+            root.path(),
+            &task,
+            ProofScopeOperation::TaskUpdate {
+                request: &update,
+                target_repo_supplied: false,
+                target_branch_supplied: false,
+            },
+        )
+        .unwrap_err();
+        assert!(pending_error.contains("DELIVERY PROOF SCOPE LOCKED"));
+        assert!(pending_error.contains("recover the active exact proof cycle"));
+        assert!(!pending_error.contains("task action=reopen"));
+
+        let dispatch = cas_store::get_latest_verification_dispatch(root.path(), &task.id)
+            .unwrap()
+            .unwrap();
+        let mut verification = cas_types::Verification::approved(
+            "ver-task-proof".into(),
+            task.id.clone(),
+            "approved exact task scope".into(),
+        );
+        verification.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+        verification.dispatch_id = Some(dispatch.id.clone());
+        cas_store::SqliteVerificationStore::open(root.path())
+            .unwrap()
+            .add(&verification)
+            .unwrap();
+        let conn = rusqlite::Connection::open(root.path().join("cas.db")).unwrap();
+        cas_store::resolve_verification_dispatch_with_conn(
+            &conn,
+            &dispatch.id,
+            "supervisor",
+            None,
+            true,
+        )
+        .unwrap();
+
+        let error = guard_task_proof_scope(
+            root.path(),
+            &task,
+            ProofScopeOperation::TaskUpdate {
+                request: &update,
+                target_repo_supplied: false,
+                target_branch_supplied: false,
+            },
+        )
+        .expect_err("an approved resolved verdict must keep its reviewed scope frozen");
+        assert!(error.contains("DELIVERY PROOF SCOPE LOCKED"));
+        assert!(error.contains("task action=reopen"));
+
+        verification.status = VerificationStatus::Skipped;
+        verification.summary = "explicitly skipped exact task scope".into();
+        cas_store::SqliteVerificationStore::open(root.path())
+            .unwrap()
+            .update(&verification)
+            .unwrap();
         assert!(
             guard_task_proof_scope(
                 root.path(),
@@ -402,7 +536,61 @@ mod tests {
                 },
             )
             .unwrap_err()
-            .contains("DELIVERY PROOF SCOPE LOCKED")
+            .contains("task action=reopen"),
+            "an exact nonlegacy skipped verdict remains close-authoritative"
+        );
+    }
+
+    #[test]
+    fn rejected_resolved_task_proof_does_not_strand_rework() {
+        let root = TempDir::new().unwrap();
+        let task = Task::new("cas-rejected-proof".into(), "rejected proof".into());
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            root.path(),
+            &task.id,
+            "requester",
+            "supervisor",
+            &VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(10),
+            false,
+        )
+        .unwrap();
+        let mut verification = cas_types::Verification::rejected(
+            "ver-rejected-proof".into(),
+            task.id.clone(),
+            "scope needs rework".into(),
+            Vec::new(),
+        );
+        verification.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+        verification.dispatch_id = Some(dispatch.id.clone());
+        cas_store::SqliteVerificationStore::open(root.path())
+            .unwrap()
+            .add(&verification)
+            .unwrap();
+        let conn = rusqlite::Connection::open(root.path().join("cas.db")).unwrap();
+        cas_store::resolve_verification_dispatch_with_conn(
+            &conn,
+            &dispatch.id,
+            "supervisor",
+            None,
+            true,
+        )
+        .unwrap();
+
+        let mut update = empty_update();
+        update.acceptance_criteria = Some("corrected scope".into());
+        assert!(
+            guard_task_proof_scope(
+                root.path(),
+                &task,
+                ProofScopeOperation::TaskUpdate {
+                    request: &update,
+                    target_repo_supplied: false,
+                    target_branch_supplied: false,
+                },
+            )
+            .is_ok(),
+            "a rejected verdict cannot authorize close and must not permanently lock rework"
         );
     }
 

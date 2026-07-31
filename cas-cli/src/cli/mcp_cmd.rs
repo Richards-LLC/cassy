@@ -142,6 +142,53 @@ fn load_config(cas_root: &Path) -> Result<Config> {
     Config::load_from(&path)
 }
 
+#[cfg(feature = "mcp-proxy")]
+fn resolve_scoped_mutation_name(
+    requested: &str,
+    scoped_config: &Config,
+    cas_root: &Path,
+) -> Result<Option<(String, String)>> {
+    let project_path = project_config_path(cas_root);
+    let merged = Config::load_merged(project_path.exists().then_some(project_path.as_path()))?;
+    let public_names = cas_types::public_upstream_ids(merged.servers.keys().map(String::as_str));
+    match cas_types::resolve_public_upstream_id(
+        merged.servers.keys().map(String::as_str),
+        requested,
+    ) {
+        cas_types::PublicUpstreamIdResolution::Found {
+            raw_name,
+            public_name,
+        } if scoped_config.servers.contains_key(&raw_name) => Ok(Some((raw_name, public_name))),
+        cas_types::PublicUpstreamIdResolution::Found { .. }
+        | cas_types::PublicUpstreamIdResolution::NotFound
+            if scoped_config.servers.contains_key(requested)
+                && !cas_types::is_generated_public_upstream_id(requested) =>
+        {
+            Ok(Some((
+                requested.to_string(),
+                public_names
+                    .get(requested)
+                    .cloned()
+                    .unwrap_or_else(|| cas_types::public_upstream_id(requested)),
+            )))
+        }
+        cas_types::PublicUpstreamIdResolution::Found { .. }
+        | cas_types::PublicUpstreamIdResolution::NotFound => Ok(None),
+        cas_types::PublicUpstreamIdResolution::Ambiguous => {
+            anyhow::bail!("server identifier is ambiguous; run `cas mcp list` again")
+        }
+    }
+}
+
+#[cfg(feature = "mcp-proxy")]
+fn public_name_after_mutation(raw_name: &str, cas_root: &Path) -> Result<String> {
+    let project_path = project_config_path(cas_root);
+    let merged = Config::load_merged(project_path.exists().then_some(project_path.as_path()))?;
+    cas_types::public_upstream_ids(merged.servers.keys().map(String::as_str))
+        .remove(raw_name)
+        .context("mutated server is missing from the public identity projection")
+}
+
 // ── Add ──────────────────────────────────────────────────────────────
 
 /// Manually parse raw args from `cas mcp add`, matching `claude mcp add` syntax.
@@ -291,10 +338,17 @@ fn execute_add(raw: &[String], cli: &super::Cli, cas_root: &Path) -> Result<()> 
     };
 
     let (mut config, path) = load_config_for_scope(&scope, cas_root)?;
-    let is_update = config.servers.contains_key(&name);
-    config.add_server(name.clone(), server_config);
+    let resolved = resolve_scoped_mutation_name(&name, &config, cas_root)?;
+    let (raw_name, is_update) = match resolved {
+        Some((raw_name, _)) => (raw_name, true),
+        None if cas_types::is_generated_public_upstream_id(&name) => {
+            anyhow::bail!("server identifier was not found; run `cas mcp list` again")
+        }
+        None => (name, false),
+    };
+    config.add_server(raw_name.clone(), server_config);
     config.save_to(&path)?;
-    let public_name = cas_types::public_upstream_id(&name);
+    let public_name = public_name_after_mutation(&raw_name, cas_root)?;
 
     if cli.json {
         println!(
@@ -348,22 +402,23 @@ fn parse_envs(raw: &[String]) -> HashMap<String, String> {
 #[cfg(feature = "mcp-proxy")]
 fn execute_remove(name: &str, scope: &str, cli: &super::Cli, cas_root: &Path) -> Result<()> {
     let (mut config, path) = load_config_for_scope(scope, cas_root)?;
-    let public_name = cas_types::public_upstream_id(name);
-
-    if !config.remove_server(name) {
+    let Some((raw_name, public_name)) = resolve_scoped_mutation_name(name, &config, cas_root)?
+    else {
         if cli.json {
             println!(
                 "{}",
-                serde_json::json!({ "error": format!("Server '{public_name}' not found") })
+                serde_json::json!({ "error": "Server identifier not found" })
             );
         } else {
             let theme = ActiveTheme::default();
             let mut stdout = io::stdout();
             let mut fmt = Formatter::stdout(&mut stdout, theme);
-            StatusLine::warning(format!("Server \"{public_name}\" not found")).render(&mut fmt)?;
+            StatusLine::warning("Server identifier not found").render(&mut fmt)?;
         }
         return Ok(());
-    }
+    };
+
+    debug_assert!(config.remove_server(&raw_name));
 
     config.save_to(&path)?;
 

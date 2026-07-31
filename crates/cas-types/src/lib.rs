@@ -82,7 +82,8 @@ pub use lease::{ClaimResult, LeaseStatus, TaskLease, WorktreeClaimResult, Worktr
 pub use loop_state::{Loop, LoopStatus};
 pub use prompt::{AgentInfo, Message, MessageRole, Prompt};
 pub use public_identifier::{
-    public_tool_id, public_tool_ids, public_upstream_id, public_upstream_ids,
+    PublicUpstreamIdResolution, is_generated_public_upstream_id, public_tool_id, public_tool_ids,
+    public_upstream_id, public_upstream_ids, resolve_public_upstream_id,
 };
 pub use recording::{
     Recording, RecordingAgent, RecordingEvent, RecordingEventType, RecordingQuery,

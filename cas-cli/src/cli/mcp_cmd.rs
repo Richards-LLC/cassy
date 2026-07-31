@@ -142,6 +142,53 @@ fn load_config(cas_root: &Path) -> Result<Config> {
     Config::load_from(&path)
 }
 
+#[cfg(feature = "mcp-proxy")]
+fn resolve_scoped_mutation_name(
+    requested: &str,
+    scoped_config: &Config,
+    cas_root: &Path,
+) -> Result<Option<(String, String)>> {
+    let project_path = project_config_path(cas_root);
+    let merged = Config::load_merged(project_path.exists().then_some(project_path.as_path()))?;
+    let public_names = cas_types::public_upstream_ids(merged.servers.keys().map(String::as_str));
+    match cas_types::resolve_public_upstream_id(
+        merged.servers.keys().map(String::as_str),
+        requested,
+    ) {
+        cas_types::PublicUpstreamIdResolution::Found {
+            raw_name,
+            public_name,
+        } if scoped_config.servers.contains_key(&raw_name) => Ok(Some((raw_name, public_name))),
+        cas_types::PublicUpstreamIdResolution::Found { .. }
+        | cas_types::PublicUpstreamIdResolution::NotFound
+            if scoped_config.servers.contains_key(requested)
+                && !cas_types::is_generated_public_upstream_id(requested) =>
+        {
+            Ok(Some((
+                requested.to_string(),
+                public_names
+                    .get(requested)
+                    .cloned()
+                    .unwrap_or_else(|| cas_types::public_upstream_id(requested)),
+            )))
+        }
+        cas_types::PublicUpstreamIdResolution::Found { .. }
+        | cas_types::PublicUpstreamIdResolution::NotFound => Ok(None),
+        cas_types::PublicUpstreamIdResolution::Ambiguous => {
+            anyhow::bail!("server identifier is ambiguous; run `cas mcp list` again")
+        }
+    }
+}
+
+#[cfg(feature = "mcp-proxy")]
+fn public_name_after_mutation(raw_name: &str, cas_root: &Path) -> Result<String> {
+    let project_path = project_config_path(cas_root);
+    let merged = Config::load_merged(project_path.exists().then_some(project_path.as_path()))?;
+    cas_types::public_upstream_ids(merged.servers.keys().map(String::as_str))
+        .remove(raw_name)
+        .context("mutated server is missing from the public identity projection")
+}
+
 // ── Add ──────────────────────────────────────────────────────────────
 
 /// Manually parse raw args from `cas mcp add`, matching `claude mcp add` syntax.
@@ -291,16 +338,24 @@ fn execute_add(raw: &[String], cli: &super::Cli, cas_root: &Path) -> Result<()> 
     };
 
     let (mut config, path) = load_config_for_scope(&scope, cas_root)?;
-    let is_update = config.servers.contains_key(&name);
-    config.add_server(name.clone(), server_config);
+    let resolved = resolve_scoped_mutation_name(&name, &config, cas_root)?;
+    let (raw_name, is_update) = match resolved {
+        Some((raw_name, _)) => (raw_name, true),
+        None if cas_types::is_generated_public_upstream_id(&name) => {
+            anyhow::bail!("server identifier was not found; run `cas mcp list` again")
+        }
+        None => (name, false),
+    };
+    config.add_server(raw_name.clone(), server_config);
     config.save_to(&path)?;
+    let public_name = public_name_after_mutation(&raw_name, cas_root)?;
 
     if cli.json {
         println!(
             "{}",
             serde_json::json!({
                 "action": if is_update { "updated" } else { "added" },
-                "name": name,
+                "name": public_name,
                 "transport": transport_name,
             })
         );
@@ -309,7 +364,7 @@ fn execute_add(raw: &[String], cli: &super::Cli, cas_root: &Path) -> Result<()> 
         let mut stdout = io::stdout();
         let mut fmt = Formatter::stdout(&mut stdout, theme);
         let verb = if is_update { "Updated" } else { "Added" };
-        StatusLine::success(format!("{verb} server \"{name}\"")).render(&mut fmt)?;
+        StatusLine::success(format!("{verb} server \"{public_name}\"")).render(&mut fmt)?;
         fmt.field("Config", &path.display().to_string())?;
     }
 
@@ -347,34 +402,36 @@ fn parse_envs(raw: &[String]) -> HashMap<String, String> {
 #[cfg(feature = "mcp-proxy")]
 fn execute_remove(name: &str, scope: &str, cli: &super::Cli, cas_root: &Path) -> Result<()> {
     let (mut config, path) = load_config_for_scope(scope, cas_root)?;
-
-    if !config.remove_server(name) {
+    let Some((raw_name, public_name)) = resolve_scoped_mutation_name(name, &config, cas_root)?
+    else {
         if cli.json {
             println!(
                 "{}",
-                serde_json::json!({ "error": format!("Server '{name}' not found") })
+                serde_json::json!({ "error": "Server identifier not found" })
             );
         } else {
             let theme = ActiveTheme::default();
             let mut stdout = io::stdout();
             let mut fmt = Formatter::stdout(&mut stdout, theme);
-            StatusLine::warning(format!("Server \"{name}\" not found")).render(&mut fmt)?;
+            StatusLine::warning("Server identifier not found").render(&mut fmt)?;
         }
         return Ok(());
-    }
+    };
+
+    debug_assert!(config.remove_server(&raw_name));
 
     config.save_to(&path)?;
 
     if cli.json {
         println!(
             "{}",
-            serde_json::json!({ "action": "removed", "name": name })
+            serde_json::json!({ "action": "removed", "name": public_name })
         );
     } else {
         let theme = ActiveTheme::default();
         let mut stdout = io::stdout();
         let mut fmt = Formatter::stdout(&mut stdout, theme);
-        StatusLine::success(format!("Removed server \"{name}\"")).render(&mut fmt)?;
+        StatusLine::success(format!("Removed server \"{public_name}\"")).render(&mut fmt)?;
     }
 
     Ok(())
@@ -393,8 +450,9 @@ const SECRET_REDACTION: &str = "***REDACTED***";
 /// tool-less Codex worker that improvised `cas mcp list --json` leaked a live
 /// GitHub PAT, Neon API key, and Vercel token into its rollout log because of
 /// this. We replace each secret *value* with [`SECRET_REDACTION`] while leaving
-/// keys, server names, commands, args, URLs, and `oauth` visible so the listing
-/// still tells you which server holds which credential.
+/// keys, projected server identities, commands, args, URLs, and `oauth`
+/// visible so the listing still tells you which server holds which credential
+/// without echoing an unsafe raw config key.
 #[cfg(feature = "mcp-proxy")]
 fn redact_server_secrets(value: &mut serde_json::Value) {
     let serde_json::Value::Object(map) = value else {
@@ -442,6 +500,8 @@ fn execute_list(short: bool, show_secrets: bool, cli: &super::Cli, cas_root: &Pa
     }
 
     if cli.json {
+        let public_names =
+            cas_types::public_upstream_ids(config.servers.keys().map(String::as_str));
         let servers: Vec<serde_json::Value> = config
             .servers
             .iter()
@@ -451,7 +511,15 @@ fn execute_list(short: bool, show_secrets: bool, cli: &super::Cli, cas_root: &Pa
                     redact_server_secrets(&mut obj);
                 }
                 if let serde_json::Value::Object(ref mut m) = obj {
-                    m.insert("name".to_string(), serde_json::json!(name));
+                    m.insert(
+                        "name".to_string(),
+                        serde_json::json!(
+                            public_names
+                                .get(name)
+                                .cloned()
+                                .unwrap_or_else(|| cas_types::public_upstream_id(name))
+                        ),
+                    );
                 }
                 obj
             })
@@ -467,6 +535,7 @@ fn execute_list(short: bool, show_secrets: bool, cli: &super::Cli, cas_root: &Pa
     let mut stdout = io::stdout();
     let mut fmt = Formatter::stdout(&mut stdout, theme);
 
+    let public_names = cas_types::public_upstream_ids(config.servers.keys().map(String::as_str));
     let rows: Vec<Vec<String>> = config
         .servers
         .iter()
@@ -485,7 +554,14 @@ fn execute_list(short: bool, show_secrets: bool, cli: &super::Cli, cas_root: &Pa
                     ("stdio", format!("{command}{args_str}"))
                 }
             };
-            vec![name.clone(), transport.to_string(), detail]
+            vec![
+                public_names
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| cas_types::public_upstream_id(name)),
+                transport.to_string(),
+                detail,
+            ]
         })
         .collect();
 
@@ -573,9 +649,15 @@ fn execute_import(
     let mut added = 0usize;
     let mut skipped = 0usize;
     let mut updated = 0usize;
+    let public_discovered =
+        cas_types::public_upstream_ids(discovered.iter().map(|server| server.name.as_str()));
 
     for server in &discovered {
         let exists = config.servers.contains_key(&server.name);
+        let public_name = public_discovered
+            .get(&server.name)
+            .cloned()
+            .unwrap_or_else(|| cas_types::public_upstream_id(&server.name));
 
         let transport_info = match &server.config {
             ServerConfig::Http { url, .. } => format!("http  {url}"),
@@ -589,7 +671,7 @@ fn execute_import(
             if dry_run {
                 fmt.bullet(&format!(
                     "skip  {:<20} {:<12} {} (already exists)",
-                    server.name, server.source, transport_info
+                    public_name, server.source, transport_info
                 ))?;
             }
             skipped += 1;
@@ -597,7 +679,7 @@ fn execute_import(
             if dry_run {
                 fmt.bullet(&format!(
                     "update {:<19} {:<12} {}",
-                    server.name, server.source, transport_info
+                    public_name, server.source, transport_info
                 ))?;
             } else {
                 config.add_server(server.name.clone(), server.config.clone());
@@ -607,7 +689,7 @@ fn execute_import(
             if dry_run {
                 fmt.bullet(&format!(
                     "add   {:<20} {:<12} {}",
-                    server.name, server.source, transport_info
+                    public_name, server.source, transport_info
                 ))?;
             } else {
                 config.add_server(server.name.clone(), server.config.clone());
@@ -629,10 +711,15 @@ fn execute_import(
         config.save_to(&path)?;
 
         if cli.json {
-            let names: Vec<&str> = discovered
+            let names: Vec<String> = discovered
                 .iter()
                 .filter(|s| !config.servers.contains_key(&s.name) || force)
-                .map(|s| s.name.as_str())
+                .map(|server| {
+                    public_discovered
+                        .get(&server.name)
+                        .cloned()
+                        .unwrap_or_else(|| cas_types::public_upstream_id(&server.name))
+                })
                 .collect();
             println!(
                 "{}",
@@ -733,7 +820,11 @@ fn parse_claude_json(path: &Path) -> Result<Vec<ImportedServer>> {
             Ok(Some(server)) => servers.push(server),
             Ok(None) => {}
             Err(e) => {
-                let _ = writeln!(io::stderr(), "  warning: skipping {name}: {e}");
+                let _ = writeln!(
+                    io::stderr(),
+                    "  warning: skipping {}: {e}",
+                    cas_types::public_upstream_id(name)
+                );
             }
         }
     }
@@ -855,7 +946,11 @@ fn parse_codex_toml(path: &Path) -> Result<Vec<ImportedServer>> {
             Ok(Some(server)) => servers.push(server),
             Ok(None) => {}
             Err(e) => {
-                let _ = writeln!(io::stderr(), "  warning: skipping {name}: {e}");
+                let _ = writeln!(
+                    io::stderr(),
+                    "  warning: skipping {}: {e}",
+                    cas_types::public_upstream_id(name)
+                );
             }
         }
     }

@@ -1,5 +1,12 @@
 use crate::mcp::tools::service::imports::*;
 
+#[cfg(feature = "mcp-proxy")]
+fn parse_proxy_health_cache(json: &str) -> serde_json::Result<serde_json::Value> {
+    serde_json::from_str::<cmcp_core::ProxyHealthSnapshot>(json)
+        .map(cmcp_core::ProxyHealthSnapshot::sanitized)
+        .and_then(serde_json::to_value)
+}
+
 impl CasService {
     pub(in crate::mcp::tools::service) async fn system_version(
         &self,
@@ -17,6 +24,21 @@ impl CasService {
 
         Ok(Self::success(
             serde_json::to_string_pretty(&response).unwrap(),
+        ))
+    }
+
+    pub(in crate::mcp::tools::service) async fn system_preflight(
+        &self,
+    ) -> Result<CallToolResult, McpError> {
+        let project_root = self.inner.cas_root.parent().unwrap_or(&self.inner.cas_root);
+        let report = crate::factory_preflight::collect_factory_preflight(
+            project_root,
+            &self.inner.cas_root,
+            true,
+            None,
+        );
+        Ok(Self::success(
+            serde_json::to_string_pretty(&report).unwrap_or_default(),
         ))
     }
 
@@ -305,8 +327,34 @@ impl CasService {
             )
         })?;
 
-        let is_update = config.servers.contains_key(&name);
-        config.add_server(name.clone(), server_config);
+        let (raw_name, is_update) = match cas_types::resolve_public_upstream_id(
+            config.servers.keys().map(String::as_str),
+            &name,
+        ) {
+            cas_types::PublicUpstreamIdResolution::Found { raw_name, .. } => (raw_name, true),
+            cas_types::PublicUpstreamIdResolution::NotFound
+                if config.servers.contains_key(&name)
+                    && !cas_types::is_generated_public_upstream_id(&name) =>
+            {
+                (name, true)
+            }
+            cas_types::PublicUpstreamIdResolution::NotFound
+                if cas_types::is_generated_public_upstream_id(&name) =>
+            {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "Server identifier was not found; run proxy_list again",
+                ));
+            }
+            cas_types::PublicUpstreamIdResolution::NotFound => (name, false),
+            cas_types::PublicUpstreamIdResolution::Ambiguous => {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "Server identifier is ambiguous; run proxy_list again",
+                ));
+            }
+        };
+        config.add_server(raw_name.clone(), server_config);
         config.save_to(&proxy_path).map_err(|e| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
@@ -315,8 +363,16 @@ impl CasService {
         })?;
 
         let verb = if is_update { "Updated" } else { "Added" };
+        let public_name = cas_types::public_upstream_ids(config.servers.keys().map(String::as_str))
+            .remove(&raw_name)
+            .ok_or_else(|| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    "Updated server is missing from the public identity projection",
+                )
+            })?;
         Ok(Self::success(format!(
-            "{verb} MCP server '{name}' ({transport} transport). Restart `cas serve` to connect."
+            "{verb} MCP server '{public_name}' ({transport} transport). Restart `cas serve` to connect."
         )))
     }
 
@@ -342,11 +398,41 @@ impl CasService {
             )
         })?;
 
-        if !config.remove_server(&name) {
-            return Ok(Self::success(format!(
-                "Server '{name}' not found in proxy config"
-            )));
-        }
+        let public_names =
+            cas_types::public_upstream_ids(config.servers.keys().map(String::as_str));
+        let resolved = match cas_types::resolve_public_upstream_id(
+            config.servers.keys().map(String::as_str),
+            &name,
+        ) {
+            cas_types::PublicUpstreamIdResolution::Found {
+                raw_name,
+                public_name,
+            } => Some((raw_name, public_name)),
+            cas_types::PublicUpstreamIdResolution::NotFound
+                if config.servers.contains_key(&name)
+                    && !cas_types::is_generated_public_upstream_id(&name) =>
+            {
+                Some((
+                    name.clone(),
+                    public_names
+                        .get(&name)
+                        .cloned()
+                        .unwrap_or_else(|| cas_types::public_upstream_id(&name)),
+                ))
+            }
+            cas_types::PublicUpstreamIdResolution::NotFound => None,
+            cas_types::PublicUpstreamIdResolution::Ambiguous => {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "Server identifier is ambiguous; run proxy_list again",
+                ));
+            }
+        };
+        let Some((raw_name, public_name)) = resolved else {
+            return Ok(Self::success("Server identifier not found in proxy config"));
+        };
+
+        debug_assert!(config.remove_server(&raw_name));
 
         config.save_to(&proxy_path).map_err(|e| {
             Self::error(
@@ -356,7 +442,7 @@ impl CasService {
         })?;
 
         Ok(Self::success(format!(
-            "Removed MCP server '{name}'. Restart `cas serve` to disconnect."
+            "Removed MCP server '{public_name}'. Restart `cas serve` to disconnect."
         )))
     }
 
@@ -383,13 +469,23 @@ impl CasService {
             ));
         }
 
+        let public_names =
+            cas_types::public_upstream_ids(config.servers.keys().map(String::as_str));
         let servers: Vec<serde_json::Value> = config
             .servers
             .iter()
             .map(|(name, cfg)| {
                 let mut obj = serde_json::to_value(cfg).unwrap_or_default();
                 if let serde_json::Value::Object(ref mut m) = obj {
-                    m.insert("name".to_string(), serde_json::json!(name));
+                    m.insert(
+                        "name".to_string(),
+                        serde_json::json!(
+                            public_names
+                                .get(name)
+                                .cloned()
+                                .unwrap_or_else(|| cas_types::public_upstream_id(name))
+                        ),
+                    );
                 }
                 obj
             })
@@ -404,5 +500,82 @@ impl CasService {
         Ok(Self::success(
             serde_json::to_string_pretty(&response).unwrap_or_default(),
         ))
+    }
+
+    #[cfg(feature = "mcp-proxy")]
+    pub(in crate::mcp::tools::service) async fn system_proxy_health(
+        &self,
+        _req: SystemRequest,
+    ) -> Result<CallToolResult, McpError> {
+        let json = crate::mcp::read_proxy_health_cache(&self.inner.cas_root).map_err(|error| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("MCP proxy health is unavailable: {error}"),
+            )
+        })?;
+        let json = String::from_utf8(json).map_err(|_| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                "MCP proxy health cache is invalid",
+            )
+        })?;
+        let snapshot = parse_proxy_health_cache(&json).map_err(|_| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                "MCP proxy health cache is invalid",
+            )
+        })?;
+
+        Ok(Self::success(
+            serde_json::to_string_pretty(&snapshot).unwrap_or_default(),
+        ))
+    }
+}
+
+#[cfg(all(test, feature = "mcp-proxy"))]
+mod tests {
+    use super::parse_proxy_health_cache;
+
+    #[test]
+    fn forged_cached_health_is_sanitized_before_system_json() {
+        let raw_name = "https://user:token@example.invalid/private";
+        let raw_session = "/home/operator/secret-session";
+        let forged = cmcp_core::ProxyHealthSnapshot {
+            session_id: raw_session.to_string(),
+            generated_at_ms: 42,
+            healthy: 0,
+            degraded: 1,
+            servers: vec![cmcp_core::UpstreamHealth {
+                name: raw_name.to_string(),
+                transport: "Bearer cache-secret".to_string(),
+                state: cmcp_core::UpstreamState::Backoff,
+                attempts: 1,
+                consecutive_failures: 1,
+                tool_count: 0,
+                last_error_code: Some("token=cache-secret\ncontrol".to_string()),
+                last_attempt_at_ms: Some(40),
+                next_retry_at_ms: Some(50),
+            }],
+        };
+        let health = parse_proxy_health_cache(&serde_json::to_string(&forged).unwrap()).unwrap();
+        let json = serde_json::to_string(&health).unwrap();
+
+        assert_eq!(health["session_id"], "proxy-unknown");
+        assert_eq!(health["servers"][0]["transport"], "unknown");
+        assert_eq!(health["servers"][0]["last_error_code"], "unknown");
+        assert!(
+            health["servers"][0]["name"]
+                .as_str()
+                .is_some_and(|name| name.starts_with("upstream-") && name.len() == 41)
+        );
+        for forbidden in [
+            raw_name,
+            raw_session,
+            "Bearer cache-secret",
+            "token=cache-secret",
+            "control",
+        ] {
+            assert!(!json.contains(forbidden), "{forbidden:?} leaked: {json}");
+        }
     }
 }

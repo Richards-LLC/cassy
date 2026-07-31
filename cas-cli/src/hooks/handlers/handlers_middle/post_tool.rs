@@ -30,6 +30,11 @@ fn handle_post_tool_use_with_guardrail(
         None => return Ok(HookOutput::empty()),
     };
 
+    // If Agent/Task returned without a successful SubagentStart bind, remove
+    // only its exact still-unbound sealed handoff. Bound/consumed audit rows
+    // are immutable and this is therefore a no-op after a legitimate spawn.
+    let _ = handle_verifier_spawn_cleanup(input, Some(cas_root));
+
     // Create shared store cache — Config and stores opened once, reused across checks
     let mut stores = ToolHookStores::new(cas_root);
 

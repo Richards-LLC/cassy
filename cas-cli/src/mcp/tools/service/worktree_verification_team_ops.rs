@@ -90,6 +90,8 @@ impl CasService {
             files_reviewed: req.files,
             duration_ms: req.duration_ms,
             verification_type: req.verification_type,
+            verifier_capability: req.verifier_capability,
+            dispatch_id: req.dispatch_id,
         };
         self.inner.cas_verification_add(Parameters(inner_req)).await
     }
@@ -176,7 +178,9 @@ impl CasService {
                 output.push_str("\nUse `team show` for detailed team statistics.");
             } else {
                 output.push_str("No team configured.\n\n");
-                output.push_str("To set a user-wide team default, run `cas cloud team default <slug>`.\n");
+                output.push_str(
+                    "To set a user-wide team default, run `cas cloud team default <slug>`.\n",
+                );
                 output.push_str("For a per-project override, use `cas cloud team set <uuid>`.\n");
                 output.push_str("To view all your teams, visit the CAS Cloud web dashboard.");
             }

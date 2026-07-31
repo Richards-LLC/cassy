@@ -26,8 +26,8 @@ use std::path::{Path, PathBuf};
 use rusqlite::params;
 use tracing::{debug, warn};
 
-use crate::migration::migrations::m199_known_repos;
-use crate::migration::{ensure_migrations_table, Migration};
+use crate::migration::ensure_migrations_table;
+use crate::migration::migrations::{m199_known_repos, m214_known_repo_bindings};
 use crate::store::{KnownRepoStore, SqliteKnownRepoStore};
 
 /// Resolve the host-level `~/.cas/` directory. Falls back to `.cas/` under
@@ -39,14 +39,13 @@ pub fn host_cas_dir() -> PathBuf {
         .join(".cas")
 }
 
-/// Install the known_repos schema on the host `~/.cas/cas.db` and record
-/// the migration in `cas_migrations` so the migration runner does not see
-/// it as pending on the next run.
+/// Install the known-repo registry and host-local binding schemas on
+/// `~/.cas/cas.db`, recording both migrations so the normal runner does not
+/// see them as pending on the next run.
 ///
-/// This is the **only** code path that issues DDL against the host DB.
-/// Safe to call multiple times — idempotent on both the table creation
-/// (`CREATE TABLE IF NOT EXISTS` in the migration) and the
-/// `cas_migrations` insert (skipped when id=199 is already recorded).
+/// This is the **only** code path that issues DDL against the host DB. Safe to
+/// call multiple times — both migrations use idempotent table/index creation,
+/// and already-recorded migration IDs are skipped.
 ///
 /// Intended callers: `cas init` (once per repo, via `init_cas_dir`) and
 /// the `cas known-repos` subcommand itself. Hot startup paths (MCP serve,
@@ -60,43 +59,52 @@ pub fn ensure_host_schema() -> anyhow::Result<()> {
 
     ensure_migrations_table(&conn)?;
 
-    let migration: &Migration = &m199_known_repos::MIGRATION;
-    let already_recorded: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM cas_migrations WHERE id = ?1",
-            params![migration.id],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    if already_recorded > 0 {
-        return Ok(());
-    }
-
-    // Detect whether the table already exists (legacy installs created it
-    // directly before this helper existed). If so, backfill the record;
-    // otherwise apply the migration properly.
-    let detect_query = migration
-        .detect
-        .expect("m199 migration must have a detect query");
-    let table_exists: i64 = conn
-        .query_row(detect_query, [], |row| row.get(0))
-        .unwrap_or(0);
-    if table_exists == 0 {
-        for sql in migration.up {
-            conn.execute(sql, [])?;
+    for migration in [
+        &m199_known_repos::MIGRATION,
+        &m214_known_repo_bindings::MIGRATION,
+    ] {
+        let already_recorded: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM cas_migrations WHERE id = ?1",
+                params![migration.id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if already_recorded > 0 {
+            continue;
         }
-    }
 
-    let ts = if table_exists > 0 {
-        "BOOTSTRAP".to_string()
-    } else {
-        chrono::Utc::now().to_rfc3339()
-    };
-    conn.execute(
-        "INSERT OR IGNORE INTO cas_migrations (id, name, subsystem, applied_at) \
-         VALUES (?1, ?2, ?3, ?4)",
-        params![migration.id, migration.name, migration.subsystem.as_str(), ts],
-    )?;
+        // Detect whether the table already exists (legacy installs created
+        // m199 directly before this helper existed). If so, backfill the
+        // migration record; otherwise apply the migration properly.
+        let detect_query = migration
+            .detect
+            .expect("host known-repo migrations must have detect queries");
+        let schema_exists: i64 = conn
+            .query_row(detect_query, [], |row| row.get(0))
+            .unwrap_or(0);
+        if schema_exists == 0 {
+            for sql in migration.up {
+                conn.execute(sql, [])?;
+            }
+        }
+
+        let ts = if schema_exists > 0 {
+            "BOOTSTRAP".to_string()
+        } else {
+            chrono::Utc::now().to_rfc3339()
+        };
+        conn.execute(
+            "INSERT OR IGNORE INTO cas_migrations (id, name, subsystem, applied_at) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                migration.id,
+                migration.name,
+                migration.subsystem.as_str(),
+                ts
+            ],
+        )?;
+    }
     Ok(())
 }
 
@@ -197,13 +205,17 @@ mod tests {
             let db = home.join(".cas/cas.db");
             let conn = rusqlite::Connection::open(&db).unwrap();
             let id: i64 = conn
-                .query_row(
-                    "SELECT id FROM cas_migrations WHERE id = 199",
-                    [],
-                    |row| row.get(0),
-                )
+                .query_row("SELECT id FROM cas_migrations WHERE id = 199", [], |row| {
+                    row.get(0)
+                })
                 .unwrap();
             assert_eq!(id, 199);
+            let binding_id: i64 = conn
+                .query_row("SELECT id FROM cas_migrations WHERE id = 214", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(binding_id, 214);
 
             // Running twice must not double-insert.
             ensure_host_schema().unwrap();

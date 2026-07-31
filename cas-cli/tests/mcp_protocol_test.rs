@@ -10,9 +10,11 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
-use tempfile::TempDir;
+
+mod support;
+use support::{CasSandbox, assert_command_is_sandboxed};
 
 // ============================================================================
 // MCP Protocol Types
@@ -70,20 +72,12 @@ struct McpTestClient {
 
 impl McpTestClient {
     /// Spawn MCP server (7 meta-tools)
-    fn spawn(cas_dir: &std::path::Path) -> Self {
-        // `cas serve` resolves its store via `find_cas_root()`, which honors an
-        // inherited `CAS_ROOT` BEFORE any cwd-based detection — `CAS_DIR` is not
-        // consulted by serve at all. When the test runner itself was launched
-        // inside a CAS factory worker session, `CAS_ROOT`/`CAS_SESSION_ID` are
-        // inherited and would redirect serve to the live worker DB instead of
-        // this test's freshly-`init`ed temp dir. That live DB may legitimately
-        // lack newer columns (e.g. `depth`), so task-create INSERTs fail with
-        // "table tasks has no column named depth" — a false red unrelated to the
-        // code under test. Scrub all CAS_* vars (matching `init_cas_dir`) so
-        // serve falls back to cwd-based detection and finds `<cas_dir>/.cas`.
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cas"));
-        cmd.arg("serve").current_dir(cas_dir);
-        scrub_cas_env(&mut cmd);
+    fn spawn(sandbox: &CasSandbox) -> Self {
+        Self::spawn_command(sandbox.command())
+    }
+
+    fn spawn_command(mut cmd: Command) -> Self {
+        cmd.arg("serve");
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -100,6 +94,38 @@ impl McpTestClient {
             stdout,
             next_id: 1,
         }
+    }
+
+    fn spawn_capturing_stderr(sandbox: &CasSandbox) -> Self {
+        let mut cmd = sandbox.command();
+        cmd.arg("serve");
+        let mut child = cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Failed to spawn cas serve");
+
+        let stdin = child.stdin.take().expect("Failed to get stdin");
+        let stdout = BufReader::new(child.stdout.take().expect("Failed to get stdout"));
+
+        Self {
+            child,
+            stdin,
+            stdout,
+            next_id: 1,
+        }
+    }
+
+    fn stop_and_read_stderr(&mut self) -> String {
+        let _ = self.child.kill();
+        let mut stderr = String::new();
+        if let Some(mut pipe) = self.child.stderr.take() {
+            pipe.read_to_string(&mut stderr)
+                .expect("read cas serve stderr");
+        }
+        let _ = self.child.wait();
+        stderr
     }
 
     fn send_request(&mut self, method: &str, params: Option<Value>) -> JsonRpcResponse {
@@ -191,47 +217,15 @@ impl Drop for McpTestClient {
     }
 }
 
-/// Strip every CAS_* env var from a child Command builder.
-///
-/// Used so tests that spawn `cas` subprocesses are not redirected to the
-/// live cas.db when the test runner itself was launched inside a CAS factory
-/// worker session (the worker inherits CAS_ROOT, CAS_SESSION_ID, etc.).
-/// Add new CAS_* env vars here as they appear; this is the single source of
-/// truth so a missed update cannot silently re-link tests to live state.
-fn scrub_cas_env(cmd: &mut Command) -> &mut Command {
-    cmd.env_remove("CAS_ROOT")
-        .env_remove("CAS_DIR")
-        .env_remove("CAS_SESSION_ID")
-        .env_remove("CAS_AGENT_NAME")
-        .env_remove("CAS_AGENT_ROLE")
-        .env_remove("CAS_FACTORY_MODE")
-        .env_remove("CAS_CLONE_PATH")
-}
-
-/// Initialize CAS in temp directory
-fn init_cas_dir(dir: &TempDir) {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_cas"));
-    cmd.args(["init", "--yes"]).current_dir(dir.path());
-    scrub_cas_env(&mut cmd);
-    let output = cmd.output().expect("Failed to init cas");
-
-    assert!(
-        output.status.success(),
-        "cas init failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
 // ============================================================================
 // Protocol Tests
 // ============================================================================
 
 #[test]
 fn test_mcp_initialize() {
-    let dir = TempDir::new().unwrap();
-    init_cas_dir(&dir);
+    let sandbox = CasSandbox::new();
 
-    let mut client = McpTestClient::spawn(dir.path());
+    let mut client = McpTestClient::spawn(&sandbox);
     let response = client.initialize();
 
     assert!(response.error.is_none(), "Initialize should succeed");
@@ -248,10 +242,9 @@ fn test_mcp_initialize() {
 
 #[test]
 fn test_mcp_list_tools() {
-    let dir = TempDir::new().unwrap();
-    init_cas_dir(&dir);
+    let sandbox = CasSandbox::new();
 
-    let mut client = McpTestClient::spawn(dir.path());
+    let mut client = McpTestClient::spawn(&sandbox);
     client.initialize();
 
     let response = client.list_tools();
@@ -281,10 +274,9 @@ fn test_mcp_list_tools() {
 
 #[test]
 fn test_mcp_tool_call_remember() {
-    let dir = TempDir::new().unwrap();
-    init_cas_dir(&dir);
+    let sandbox = CasSandbox::new();
 
-    let mut client = McpTestClient::spawn(dir.path());
+    let mut client = McpTestClient::spawn(&sandbox);
     client.initialize();
 
     // Call the memory tool with remember action (meta-tool API)
@@ -320,10 +312,9 @@ fn test_mcp_tool_call_remember() {
 
 #[test]
 fn test_mcp_tool_call_task_create() {
-    let dir = TempDir::new().unwrap();
-    init_cas_dir(&dir);
+    let sandbox = CasSandbox::new();
 
-    let mut client = McpTestClient::spawn(dir.path());
+    let mut client = McpTestClient::spawn(&sandbox);
     client.initialize();
 
     // Create a task (meta-tool API)
@@ -373,11 +364,236 @@ fn test_mcp_tool_call_task_create() {
 }
 
 #[test]
-fn test_mcp_tool_call_search() {
-    let dir = TempDir::new().unwrap();
-    init_cas_dir(&dir);
+fn malformed_verification_issues_never_cross_protocol_logs_or_sqlite() {
+    let sandbox = CasSandbox::new();
+    let raw_capability = "vcap-11111111111111111111111111111111.22222222222222222222222222222222";
+    let raw_path = "/home/verifier/private-proof.json";
+    let raw_pat = "ghp_verifier-authored-secret";
+    let malformed_issues =
+        format!(r#"[{{"file":"{raw_path}","severity":"{raw_capability}","problem":"{raw_pat}""#);
+    let mut client = McpTestClient::spawn_capturing_stderr(&sandbox);
+    client.initialize();
 
-    let mut client = McpTestClient::spawn(dir.path());
+    let response = client.call_tool(
+        "verification",
+        json!({
+            "action": "add",
+            "task_id": "cas-missing",
+            "status": "approved",
+            "summary": "safe summary",
+            "issues": malformed_issues.clone(),
+        }),
+    );
+    let response_text = format!("{response:?}");
+    assert!(
+        response_text.contains("Invalid verification issues")
+            && response_text.contains("input omitted"),
+        "public MCP rejection must be static and actionable: {response_text}"
+    );
+    let stderr = client.stop_and_read_stderr();
+
+    for (surface, payload) in [
+        ("response", response_text.as_str()),
+        ("stderr", stderr.as_str()),
+    ] {
+        for unsafe_value in [raw_capability, raw_path, raw_pat, malformed_issues.as_str()] {
+            assert!(
+                !payload.contains(unsafe_value),
+                "{surface} leaked malformed verifier input: {unsafe_value:?}"
+            );
+        }
+    }
+    assert!(
+        !stderr.contains("Input was:"),
+        "malformed verification diagnostics must not log caller input: {stderr}"
+    );
+
+    for suffix in ["", "-wal", "-shm"] {
+        let path = sandbox.cas_root().join(format!("cas.db{suffix}"));
+        if let Ok(bytes) = std::fs::read(path) {
+            for unsafe_value in [raw_capability, raw_path, raw_pat] {
+                assert!(
+                    !bytes
+                        .windows(unsafe_value.len())
+                        .any(|window| window == unsafe_value.as_bytes()),
+                    "SQLite {suffix} leaked rejected verifier input: {unsafe_value:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_mcp_task_create_cannot_escape_cas_sandbox() {
+    let live_store_sentinel = CasSandbox::new();
+    let sandbox = CasSandbox::new();
+    let live_count_before = live_store_sentinel.task_count();
+
+    // Model a test process launched by a factory worker: both store resolvers
+    // initially point at a live project, along with an arbitrary future CAS_*
+    // variable that a fixed scrub list would miss.
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_cas"));
+    cmd.env("CAS_ROOT", live_store_sentinel.cas_root())
+        .env("CAS_DIR", live_store_sentinel.cas_root())
+        .env("CLAUDE_PROJECT_DIR", live_store_sentinel.path())
+        .env("CAS_FUTURE_TEST_LEAK_VECTOR", "must-be-removed");
+    sandbox.configure_command(&mut cmd);
+    assert_command_is_sandboxed(&cmd, &sandbox);
+    assert!(
+        cmd.get_envs()
+            .all(|(key, value)| key != "CAS_FUTURE_TEST_LEAK_VECTOR" || value.is_none()),
+        "sandbox must remove arbitrary inherited CAS_* variables"
+    );
+
+    let mut client = McpTestClient::spawn_command(cmd);
+    client.initialize();
+    let response = client.call_tool(
+        "task",
+        json!({
+            "action": "create",
+            "title": "Hermetic sandbox escape sentinel"
+        }),
+    );
+    assert!(
+        response.error.is_none(),
+        "sandbox task create should succeed: {:?}",
+        response.error
+    );
+    drop(client);
+
+    assert_eq!(
+        live_store_sentinel.task_count(),
+        live_count_before,
+        "task creation escaped into the live-store sentinel"
+    );
+    assert_eq!(
+        sandbox.task_count(),
+        1,
+        "task must be written into the sandbox store"
+    );
+}
+
+#[test]
+fn test_sandbox_init_and_serve_never_touch_inherited_host_known_repos() {
+    let inherited = tempfile::tempdir().expect("create inherited host sentinel");
+    let host_home = inherited.path().join("home");
+    let host_xdg = inherited.path().join("xdg-config");
+    let host_cas = host_home.join(".cas");
+    std::fs::create_dir_all(&host_cas).unwrap();
+    std::fs::create_dir_all(&host_xdg).unwrap();
+    let host_config_sentinel = host_xdg.join("sentinel.toml");
+    std::fs::write(&host_config_sentinel, b"host-config-must-not-change").unwrap();
+    let host_db = host_cas.join("cas.db");
+    {
+        let conn = rusqlite::Connection::open(&host_db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE known_repos (
+                path TEXT PRIMARY KEY,
+                first_seen_at TEXT NOT NULL,
+                last_touched_at TEXT NOT NULL,
+                touch_count INTEGER NOT NULL DEFAULT 1
+             );
+             INSERT INTO known_repos
+                (path, first_seen_at, last_touched_at, touch_count)
+             VALUES
+                ('/sentinel/host/repo', 'HOST-BEFORE', 'HOST-BEFORE', 41);",
+        )
+        .unwrap();
+    }
+    let host_db_before = std::fs::read(&host_db).unwrap();
+    let host_config_before = std::fs::read(&host_config_sentinel).unwrap();
+
+    // The initializer starts with explicit inherited host paths. CasSandbox
+    // must replace them before launching the normal, non-cfg(test) `cas init`.
+    let sandbox = CasSandbox::new_with_host_environment(&host_home, &host_xdg);
+    assert_eq!(
+        std::fs::read(&host_db).unwrap(),
+        host_db_before,
+        "sandbox init mutated the inherited host known-repo database"
+    );
+    assert_eq!(
+        std::fs::read(&host_config_sentinel).unwrap(),
+        host_config_before,
+        "sandbox init mutated inherited XDG config state"
+    );
+
+    let sandbox_host_db = sandbox.home_dir().join(".cas/cas.db");
+    assert!(
+        sandbox_host_db.is_file(),
+        "sandbox init must create its host registry under sandbox HOME"
+    );
+    let (registered_path, touches_after_init): (String, i64) = {
+        let conn = rusqlite::Connection::open(&sandbox_host_db).unwrap();
+        conn.query_row("SELECT path, touch_count FROM known_repos", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap()
+    };
+    assert_eq!(
+        std::path::PathBuf::from(registered_path)
+            .canonicalize()
+            .unwrap(),
+        sandbox.path().canonicalize().unwrap(),
+        "sandbox init must register only the sandbox project"
+    );
+    assert_eq!(touches_after_init, 1);
+
+    // Prove the same overwrite is applied to the serve path, even when a
+    // caller seeds hostile HOME/XDG values on the command itself.
+    let mut serve = Command::new(env!("CARGO_BIN_EXE_cas"));
+    serve
+        .env("HOME", &host_home)
+        .env("XDG_CONFIG_HOME", &host_xdg);
+    sandbox.configure_command(&mut serve);
+    assert_command_is_sandboxed(&serve, &sandbox);
+    let mut client = McpTestClient::spawn_command(serve);
+    let initialized = client.initialize();
+    assert!(
+        initialized.error.is_none(),
+        "sandbox serve initialization failed: {:?}",
+        initialized.error
+    );
+    drop(client);
+
+    let touches_after_serve: i64 = rusqlite::Connection::open(&sandbox_host_db)
+        .unwrap()
+        .query_row(
+            "SELECT touch_count FROM known_repos WHERE path = ?1",
+            [sandbox.path().canonicalize().unwrap().to_string_lossy()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        touches_after_serve >= 2,
+        "sandbox serve must register/touch the sandbox-local repo"
+    );
+    assert_eq!(
+        std::fs::read(&host_db).unwrap(),
+        host_db_before,
+        "sandbox serve mutated the inherited host known-repo database"
+    );
+    assert_eq!(
+        std::fs::read(&host_config_sentinel).unwrap(),
+        host_config_before,
+        "sandbox serve mutated inherited XDG config state"
+    );
+    let host_row: (String, String, i64) = rusqlite::Connection::open(&host_db)
+        .unwrap()
+        .query_row(
+            "SELECT first_seen_at, last_touched_at, touch_count
+             FROM known_repos WHERE path = '/sentinel/host/repo'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(host_row, ("HOST-BEFORE".into(), "HOST-BEFORE".into(), 41));
+}
+
+#[test]
+fn test_mcp_tool_call_search() {
+    let sandbox = CasSandbox::new();
+
+    let mut client = McpTestClient::spawn(&sandbox);
     client.initialize();
 
     // Add some content first (meta-tool API)
@@ -405,10 +621,9 @@ fn test_mcp_tool_call_search() {
 
 #[test]
 fn test_mcp_tool_call_invalid_arguments() {
-    let dir = TempDir::new().unwrap();
-    init_cas_dir(&dir);
+    let sandbox = CasSandbox::new();
 
-    let mut client = McpTestClient::spawn(dir.path());
+    let mut client = McpTestClient::spawn(&sandbox);
     client.initialize();
 
     // Call with missing required argument (meta-tool API)
@@ -437,10 +652,9 @@ fn test_mcp_tool_call_invalid_arguments() {
 
 #[test]
 fn test_mcp_unknown_tool() {
-    let dir = TempDir::new().unwrap();
-    init_cas_dir(&dir);
+    let sandbox = CasSandbox::new();
 
-    let mut client = McpTestClient::spawn(dir.path());
+    let mut client = McpTestClient::spawn(&sandbox);
     client.initialize();
 
     let response = client.call_tool("nonexistent_tool", json!({}));
@@ -454,10 +668,9 @@ fn test_mcp_unknown_tool() {
 
 #[test]
 fn test_mcp_rule_lifecycle() {
-    let dir = TempDir::new().unwrap();
-    init_cas_dir(&dir);
+    let sandbox = CasSandbox::new();
 
-    let mut client = McpTestClient::spawn(dir.path());
+    let mut client = McpTestClient::spawn(&sandbox);
     client.initialize();
 
     // Create a rule (meta-tool API)
@@ -488,10 +701,9 @@ fn test_mcp_rule_lifecycle() {
 
 #[test]
 fn test_mcp_context() {
-    let dir = TempDir::new().unwrap();
-    init_cas_dir(&dir);
+    let sandbox = CasSandbox::new();
 
-    let mut client = McpTestClient::spawn(dir.path());
+    let mut client = McpTestClient::spawn(&sandbox);
     client.initialize();
 
     // Add some data (meta-tool API)
@@ -535,10 +747,9 @@ fn test_mcp_context() {
 
 #[test]
 fn test_mcp_doctor() {
-    let dir = TempDir::new().unwrap();
-    init_cas_dir(&dir);
+    let sandbox = CasSandbox::new();
 
-    let mut client = McpTestClient::spawn(dir.path());
+    let mut client = McpTestClient::spawn(&sandbox);
     client.initialize();
 
     // Doctor is accessed via system with action: doctor
@@ -559,10 +770,9 @@ fn test_mcp_doctor() {
 
 #[test]
 fn test_mcp_consolidated_memory_tool() {
-    let dir = TempDir::new().unwrap();
-    init_cas_dir(&dir);
+    let sandbox = CasSandbox::new();
 
-    let mut client = McpTestClient::spawn(dir.path());
+    let mut client = McpTestClient::spawn(&sandbox);
     client.initialize();
 
     // Test memory with "remember" action
@@ -584,10 +794,9 @@ fn test_mcp_consolidated_memory_tool() {
 
 #[test]
 fn test_mcp_consolidated_task_tool() {
-    let dir = TempDir::new().unwrap();
-    init_cas_dir(&dir);
+    let sandbox = CasSandbox::new();
 
-    let mut client = McpTestClient::spawn(dir.path());
+    let mut client = McpTestClient::spawn(&sandbox);
     client.initialize();
 
     // Test task with "create" action
@@ -612,10 +821,9 @@ fn test_mcp_consolidated_task_tool() {
 
 #[test]
 fn test_mcp_invalid_json_rpc() {
-    let dir = TempDir::new().unwrap();
-    init_cas_dir(&dir);
+    let sandbox = CasSandbox::new();
 
-    let mut client = McpTestClient::spawn(dir.path());
+    let mut client = McpTestClient::spawn(&sandbox);
     // Must initialize first per MCP protocol
     client.initialize();
 
@@ -636,10 +844,9 @@ fn test_mcp_invalid_json_rpc() {
 
 #[test]
 fn test_mcp_resources_list_changed_capability() {
-    let dir = TempDir::new().unwrap();
-    init_cas_dir(&dir);
+    let sandbox = CasSandbox::new();
 
-    let mut client = McpTestClient::spawn(dir.path());
+    let mut client = McpTestClient::spawn(&sandbox);
     let response = client.initialize();
 
     assert!(response.error.is_none(), "Initialize should succeed");
@@ -671,10 +878,9 @@ fn test_mcp_mutation_with_notifications() {
     // This test verifies that mutations work correctly even with notification code path
     // (notifications are fire-and-forget, so we can't directly verify they were sent,
     // but we verify the mutation succeeds and doesn't crash)
-    let dir = TempDir::new().unwrap();
-    init_cas_dir(&dir);
+    let sandbox = CasSandbox::new();
 
-    let mut client = McpTestClient::spawn(dir.path());
+    let mut client = McpTestClient::spawn(&sandbox);
     client.initialize();
 
     // List resources first (this captures the peer for notifications)
@@ -746,10 +952,8 @@ fn test_mcp_mutation_with_notifications() {
 fn test_serve_fails_fast_on_unreadable_cas_db() {
     use std::os::unix::fs::PermissionsExt;
 
-    let dir = TempDir::new().unwrap();
-    init_cas_dir(&dir);
-
-    let db_path = dir.path().join(".cas").join("cas.db");
+    let sandbox = CasSandbox::new();
+    let db_path = sandbox.cas_root().join("cas.db");
 
     // Restore permissions on exit so TempDir cleanup can proceed even if the
     // assertions below panic. The guard is created BEFORE the chmod so any
@@ -780,13 +984,11 @@ fn test_serve_fails_fast_on_unreadable_cas_db() {
     // Spawn `cas serve` and wait for it to fail. Send NOTHING on stdin —
     // a healthy server would block on the JSON-RPC handshake; a fail-fast
     // server exits on its own.
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_cas"));
+    let mut cmd = sandbox.command();
     cmd.arg("serve")
-        .current_dir(dir.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    scrub_cas_env(&mut cmd);
     let mut child = cmd.spawn().expect("spawn cas serve");
 
     // EACCES is returned synchronously by the very first store open — well
@@ -840,16 +1042,13 @@ fn test_serve_logs_actual_tool_list_on_startup() {
     // tool count and tool names, not the historical hard-coded "13 tools"
     // string. This is what gives a supervisor (or human reading logs) a
     // chance to notice if the registry shrinks unexpectedly.
-    let dir = TempDir::new().unwrap();
-    init_cas_dir(&dir);
+    let sandbox = CasSandbox::new();
 
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_cas"));
+    let mut cmd = sandbox.command();
     cmd.arg("serve")
-        .current_dir(dir.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    scrub_cas_env(&mut cmd);
     let mut child = cmd.spawn().expect("spawn cas serve");
 
     // Poll stderr line-by-line until we see the banner (or a 30s deadline

@@ -73,6 +73,18 @@ impl FactoryTestEnv {
         }
     }
 
+    /// Build a service whose privileged role was registered independently of
+    /// caller-controlled environment/request hints.
+    fn with_server_supervisor() -> Self {
+        let env = Self::with_agent_id("test-supervisor-id");
+        let mut supervisor = Agent::new("test-supervisor-id".to_string(), "supervisor".to_string());
+        supervisor.role = AgentRole::Supervisor;
+        env.agent_store()
+            .register(&supervisor)
+            .expect("register server-created supervisor");
+        env
+    }
+
     fn create_epic(&self, title: &str) -> String {
         let store = self.task_store();
         let id = store.generate_id().expect("generate_id");
@@ -317,6 +329,7 @@ fn factory_req(action: &str) -> FactoryRequest {
         target: None,
         message: None,
         force: None,
+        dry_run: None,
         // allow_trunk is CoordinationRequest/worktree_merge only — not FactoryRequest
         clear: None,
         branch: None,
@@ -1909,6 +1922,57 @@ async fn test_gc_report_shows_pending_prompts() {
     );
 }
 
+#[tokio::test]
+async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
+    let env = FactoryTestEnv::new();
+    let worker = env.cas_root.join("worktrees/dead-cache-worker");
+    let target = worker.join("target/deps");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("artifact.rlib"), vec![0u8; 64]).unwrap();
+    std::fs::write(worker.join("source.rs"), b"source").unwrap();
+    std::fs::write(
+        env.cas_root.join("config.toml"),
+        "[factory]\ntarget_cache_high_watermark_percent = 1\ntarget_cache_low_watermark_percent = 0\ntarget_cache_min_idle_secs = 0\ntarget_cache_retention_count = 0\n",
+    )
+    .unwrap();
+
+    let report = env
+        .service
+        .factory(Parameters(factory_req("gc_report")))
+        .await
+        .unwrap();
+    let report_text = get_text(&report);
+    assert!(report_text.contains("TARGET_CACHE_STATUS_JSON="), "{report_text}");
+    let machine = report_text
+        .lines()
+        .find_map(|line| line.strip_prefix("TARGET_CACHE_STATUS_JSON="))
+        .expect("machine-readable target-cache status line");
+    let machine: serde_json::Value = serde_json::from_str(machine).expect("valid status JSON");
+    assert_eq!(machine["schema_version"], 1);
+    assert_eq!(machine["dry_run"], true);
+    assert!(
+        report_text.contains(&worker.join("target").display().to_string()),
+        "dry-run must report the exact cache path: {report_text}"
+    );
+    assert!(report_text.contains("bytes=64"), "{report_text}");
+
+    let mut preview = factory_req("gc_cleanup");
+    preview.force = Some(true);
+    let preview = env.service.factory(Parameters(preview)).await.unwrap();
+    let preview_text = get_text(&preview);
+    assert!(preview_text.contains("mode=dry-run"), "{preview_text}");
+    assert!(worker.join("target").exists(), "omitted dry_run must not delete");
+
+    let mut cleanup = factory_req("gc_cleanup");
+    cleanup.force = Some(true);
+    cleanup.dry_run = Some(false);
+    let cleanup = env.service.factory(Parameters(cleanup)).await.unwrap();
+    let cleanup_text = get_text(&cleanup);
+    assert!(cleanup_text.contains("reclaimed_bytes=64"), "{cleanup_text}");
+    assert!(!worker.join("target").exists());
+    assert_eq!(std::fs::read(worker.join("source.rs")).unwrap(), b"source");
+}
+
 // =============================================================================
 // gc_cleanup tests
 // =============================================================================
@@ -2388,7 +2452,7 @@ async fn test_126b_target_awaiting_merge_reclose_urgent_does_not_halt() {
         // No factory session → halt fan-out is unfiltered (worker in scope).
         ("CAS_FACTORY_SESSION", None),
     ]);
-    let env = FactoryTestEnv::new();
+    let env = FactoryTestEnv::with_server_supervisor();
     env.register_worker("swift-fox");
     let task_id = env.create_awaiting_merge_task("parked work", "swift-fox");
 
@@ -2424,7 +2488,7 @@ async fn test_126b_other_workers_task_does_not_exempt_target() {
         ("CAS_AGENT_NAME", Some("supervisor")),
         ("CAS_FACTORY_SESSION", None),
     ]);
-    let env = FactoryTestEnv::new();
+    let env = FactoryTestEnv::with_server_supervisor();
     env.register_worker("swift-fox"); // target B
     env.register_worker("brave-otter"); // owner A
     // Parked task belongs to A, not to the target B.
@@ -2451,7 +2515,7 @@ async fn test_126b_ordinary_urgent_still_halts_even_with_parked_task() {
         ("CAS_AGENT_NAME", Some("supervisor")),
         ("CAS_FACTORY_SESSION", None),
     ]);
-    let env = FactoryTestEnv::new();
+    let env = FactoryTestEnv::with_server_supervisor();
     env.register_worker("swift-fox");
     let _parked = env.create_awaiting_merge_task("parked work", "swift-fox");
 
@@ -2481,7 +2545,7 @@ async fn test_126b_close_guidance_without_target_awaiting_task_fails_closed_to_h
         ("CAS_AGENT_NAME", Some("supervisor")),
         ("CAS_FACTORY_SESSION", None),
     ]);
-    let env = FactoryTestEnv::new();
+    let env = FactoryTestEnv::with_server_supervisor();
     env.register_worker("swift-fox");
     // No AwaitingMerge task exists for swift-fox (store returns none → no
     // positive evidence; identical safe outcome to a store read error).

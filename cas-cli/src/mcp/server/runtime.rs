@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -254,20 +255,59 @@ async fn run_server_impl() -> anyhow::Result<()> {
                     "[CAS] Connecting to {} upstream MCP server(s)...",
                     cfg.servers.len()
                 );
+                let snapshot_config = cfg.clone();
                 match cmcp_core::ProxyEngine::from_configs(cfg.servers).await {
                     Ok(engine) => {
                         let count = engine.tool_count().await;
                         eprintln!("[CAS] MCP proxy ready ({count} upstream tools)");
-                        write_proxy_catalog_cache(&cas_root, &engine).await;
+                        if let Err(error) = write_proxy_snapshot_cache_for_config(
+                            &cas_root,
+                            &engine,
+                            &snapshot_config,
+                        )
+                        .await
+                        {
+                            eprintln!("[CAS] Failed to publish MCP proxy state: {error}");
+                        }
                         Some(std::sync::Arc::new(engine))
                     }
                     Err(e) => {
                         eprintln!("[CAS] MCP proxy init failed (continuing without proxy): {e}");
+                        if let Err(error) = write_unavailable_proxy_snapshot_cache(
+                            &cas_root,
+                            Some(&snapshot_config),
+                            ProxySnapshotFailure::EngineStartFailed,
+                        ) {
+                            eprintln!("[CAS] Failed to publish MCP proxy failure state: {error}");
+                        }
                         None
                     }
                 }
             }
-            _ => None,
+            Ok(cfg) => {
+                if let Err(error) = publish_non_live_proxy_snapshot(
+                    &cas_root,
+                    Some(&cfg),
+                    ProxySnapshotState::Empty,
+                    None,
+                ) {
+                    eprintln!("[CAS] Failed to publish empty MCP proxy state: {error}");
+                }
+                None
+            }
+            Err(error) => {
+                eprintln!(
+                    "[CAS] Failed to load MCP proxy config (continuing without proxy): {error}"
+                );
+                if let Err(error) = write_unavailable_proxy_snapshot_cache(
+                    &cas_root,
+                    None,
+                    ProxySnapshotFailure::ConfigInvalid,
+                ) {
+                    eprintln!("[CAS] Failed to publish MCP proxy failure state: {error}");
+                }
+                None
+            }
         }
     };
     #[cfg(not(feature = "mcp-proxy"))]
@@ -361,10 +401,7 @@ const EAGER_INIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(45
 /// This converts the previously silent failure mode (server starts, registry
 /// looks fine to the client, but every tool call later errors) into a loud
 /// startup failure that the parent factory can detect and report.
-fn eager_init_stores(
-    core: &CasCore,
-    cas_root: &std::path::Path,
-) -> anyhow::Result<()> {
+fn eager_init_stores(core: &CasCore, cas_root: &std::path::Path) -> anyhow::Result<()> {
     let start = std::time::Instant::now();
 
     let step = |name: &'static str,
@@ -403,7 +440,9 @@ fn eager_init_stores(
         core.open_entity_store().map(|_| ()).map_err(map_mcp_err)
     })?;
     step("verification_store", &mut || {
-        core.open_verification_store().map(|_| ()).map_err(map_mcp_err)
+        core.open_verification_store()
+            .map(|_| ())
+            .map_err(map_mcp_err)
     })?;
     step("worktree_store", &mut || {
         core.open_worktree_store().map(|_| ()).map_err(map_mcp_err)
@@ -524,37 +563,545 @@ fn release_agent_tasks(cas_root: &std::path::Path, agent_id: &str) -> anyhow::Re
     Ok(())
 }
 
-/// Write the proxy tool catalog to `.cas/proxy_catalog.json` for SessionStart context injection.
-///
-/// Writes a JSON map of `{ server_name: [tool_name, ...] }` which is consumed by
-/// `build_mcp_tools_section` in hooks/context.rs.
+/// Refresh the authoritative proxy snapshot used by SessionStart and health consumers.
 #[cfg(feature = "mcp-proxy")]
 pub async fn write_proxy_catalog_cache(
     cas_root: &std::path::Path,
     engine: &cmcp_core::ProxyEngine,
 ) {
-    let servers = engine.catalog_entries_by_server().await;
-    if servers.is_empty() {
-        return;
+    if let Err(error) = write_proxy_snapshot_cache(cas_root, engine).await {
+        eprintln!("[CAS] Failed to write proxy snapshot cache: {error}");
     }
-    // Convert to the format expected by build_mcp_tools_section: { server: [tool_names] }
-    let simplified: std::collections::HashMap<String, Vec<String>> = servers
+}
+
+#[cfg(feature = "mcp-proxy")]
+const PROXY_CACHE_LOCK: &str = ".proxy_snapshot.lock";
+#[cfg(feature = "mcp-proxy")]
+const PROXY_SNAPSHOT_CACHE: &str = "proxy_snapshot.json";
+#[cfg(feature = "mcp-proxy")]
+const PROXY_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+#[cfg(feature = "mcp-proxy")]
+const MAX_PROXY_SNAPSHOT_BYTES: u64 = 1024 * 1024;
+#[cfg(feature = "mcp-proxy")]
+const PROXY_SNAPSHOT_MAX_AGE_MS: u64 = 120_000;
+
+#[cfg(feature = "mcp-proxy")]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxySnapshotState {
+    Ready,
+    Empty,
+    Unavailable,
+}
+
+#[cfg(feature = "mcp-proxy")]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxySnapshotFailure {
+    ConfigInvalid,
+    EngineStartFailed,
+    EngineReloadFailed,
+}
+
+#[cfg(feature = "mcp-proxy")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ProxySnapshotCache {
+    pub schema_version: u32,
+    pub generation: String,
+    pub generated_at_ms: u64,
+    pub config_fingerprint: Option<String>,
+    pub state: ProxySnapshotState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<ProxySnapshotFailure>,
+    pub catalog: BTreeMap<String, Vec<String>>,
+    pub health: cmcp_core::ProxyHealthSnapshot,
+}
+
+#[cfg(feature = "mcp-proxy")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProxySnapshotReadErrorKind {
+    Missing,
+    Invalid,
+    ConfigInvalid,
+    ConfigMismatch,
+    Unavailable,
+}
+
+#[cfg(feature = "mcp-proxy")]
+#[derive(Debug)]
+pub struct ProxySnapshotReadError {
+    pub kind: ProxySnapshotReadErrorKind,
+}
+
+#[cfg(feature = "mcp-proxy")]
+impl std::fmt::Display for ProxySnapshotReadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self.kind {
+            ProxySnapshotReadErrorKind::Missing => "proxy snapshot is unavailable",
+            ProxySnapshotReadErrorKind::Invalid => "proxy snapshot is invalid",
+            ProxySnapshotReadErrorKind::ConfigInvalid => "proxy configuration is invalid",
+            ProxySnapshotReadErrorKind::ConfigMismatch => "proxy snapshot is stale",
+            ProxySnapshotReadErrorKind::Unavailable => "proxy startup is unavailable",
+        };
+        formatter.write_str(message)
+    }
+}
+
+#[cfg(feature = "mcp-proxy")]
+impl std::error::Error for ProxySnapshotReadError {}
+
+#[cfg(feature = "mcp-proxy")]
+fn with_proxy_cache_lock<T>(
+    cas_root: &std::path::Path,
+    exclusive: bool,
+    operation: impl FnOnce() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    use fs2::FileExt;
+
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(cas_root.join(PROXY_CACHE_LOCK))?;
+    if exclusive {
+        lock.lock_exclusive()?;
+    } else {
+        lock.lock_shared()?;
+    }
+    let result = operation();
+    let unlock_result = FileExt::unlock(&lock);
+    match (result, unlock_result) {
+        (Err(error), _) => Err(error),
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+#[cfg(feature = "mcp-proxy")]
+fn atomic_write_proxy_cache_file(
+    cas_root: &std::path::Path,
+    name: &str,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    atomic_write_proxy_cache_file_with(cas_root, name, bytes, |_| Ok(()))
+}
+
+#[cfg(feature = "mcp-proxy")]
+fn atomic_write_proxy_cache_file_with(
+    cas_root: &std::path::Path,
+    name: &str,
+    bytes: &[u8],
+    before_commit: impl FnOnce(&std::path::Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+    let temp_name = format!(
+        ".{name}.tmp-{}-{}",
+        std::process::id(),
+        TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
+    let temp_path = cas_root.join(temp_name);
+    let final_path = cas_root.join(name);
+    if let Err(error) = std::fs::write(&temp_path, bytes) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
+    }
+    if let Err(error) = before_commit(&temp_path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
+    }
+    std::fs::OpenOptions::new()
+        .read(true)
+        .open(&temp_path)?
+        .sync_all()?;
+    let result = std::fs::rename(&temp_path, final_path);
+    if result.is_err() {
+        let _ = std::fs::remove_file(temp_path);
+    }
+    result
+}
+
+#[cfg(feature = "mcp-proxy")]
+fn publish_proxy_snapshot(
+    cas_root: &std::path::Path,
+    snapshot: &ProxySnapshotCache,
+) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec_pretty(snapshot)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    with_proxy_cache_lock(cas_root, true, || {
+        // This rename is the only authoritative commit point. The historical
+        // two-file projections below are compatibility/forensic artifacts;
+        // production readers never use them as evidence.
+        atomic_write_proxy_cache_file(cas_root, PROXY_SNAPSHOT_CACHE, &bytes)?;
+        if snapshot.state != ProxySnapshotState::Unavailable {
+            let catalog = serde_json::to_vec(&snapshot.catalog)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            let health = serde_json::to_vec_pretty(&snapshot.health)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            // Compatibility projections are best effort and never influence
+            // whether the authoritative commit succeeded.
+            let _ = atomic_write_proxy_cache_file(cas_root, "proxy_catalog.json", &catalog);
+            let _ = atomic_write_proxy_cache_file(cas_root, "proxy_health.json", &health);
+        }
+        Ok(())
+    })
+}
+
+#[cfg(feature = "mcp-proxy")]
+fn now_millis() -> Result<u64, std::time::SystemTimeError> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+}
+
+#[cfg(feature = "mcp-proxy")]
+fn next_proxy_generation(generated_at_ms: u64) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static GENERATION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+    format!(
+        "snapshot-{generated_at_ms}-{}-{}",
+        std::process::id(),
+        GENERATION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+#[cfg(feature = "mcp-proxy")]
+pub fn proxy_config_fingerprint(config: &cmcp_core::config::Config) -> String {
+    use sha2::{Digest, Sha256};
+
+    fn field(hasher: &mut Sha256, label: &[u8], value: &[u8]) {
+        hasher.update((label.len() as u64).to_be_bytes());
+        hasher.update(label);
+        hasher.update((value.len() as u64).to_be_bytes());
+        hasher.update(value);
+    }
+
+    fn sorted_fields(
+        hasher: &mut Sha256,
+        label: &[u8],
+        values: &std::collections::HashMap<String, String>,
+    ) {
+        for (name, value) in values.iter().collect::<BTreeMap<_, _>>() {
+            field(hasher, label, name.as_bytes());
+            field(hasher, b"value", value.as_bytes());
+        }
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"cas.proxy.config.v1\0");
+    for (name, server) in config.servers.iter().collect::<BTreeMap<_, _>>() {
+        field(&mut hasher, b"server", name.as_bytes());
+        match server {
+            cmcp_core::config::ServerConfig::Stdio { command, args, env } => {
+                field(&mut hasher, b"transport", b"stdio");
+                field(&mut hasher, b"command", command.as_bytes());
+                for arg in args {
+                    field(&mut hasher, b"arg", arg.as_bytes());
+                }
+                sorted_fields(&mut hasher, b"env", env);
+            }
+            cmcp_core::config::ServerConfig::Http {
+                url,
+                auth,
+                headers,
+                oauth,
+            } => {
+                field(&mut hasher, b"transport", b"http");
+                field(&mut hasher, b"url", url.as_bytes());
+                field(
+                    &mut hasher,
+                    b"auth",
+                    auth.as_deref().unwrap_or_default().as_bytes(),
+                );
+                sorted_fields(&mut hasher, b"header", headers);
+                field(&mut hasher, b"oauth", if *oauth { b"1" } else { b"0" });
+            }
+            cmcp_core::config::ServerConfig::Sse {
+                url,
+                auth,
+                headers,
+                oauth,
+            } => {
+                field(&mut hasher, b"transport", b"sse");
+                field(&mut hasher, b"url", url.as_bytes());
+                field(
+                    &mut hasher,
+                    b"auth",
+                    auth.as_deref().unwrap_or_default().as_bytes(),
+                );
+                sorted_fields(&mut hasher, b"header", headers);
+                field(&mut hasher, b"oauth", if *oauth { b"1" } else { b"0" });
+            }
+        }
+    }
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+#[cfg(feature = "mcp-proxy")]
+fn load_proxy_config(cas_root: &std::path::Path) -> anyhow::Result<cmcp_core::config::Config> {
+    let proxy_path = cas_root.join("proxy.toml");
+    cmcp_core::config::Config::load_merged(proxy_path.exists().then_some(proxy_path.as_path()))
+}
+
+#[cfg(feature = "mcp-proxy")]
+fn sanitized_catalog(catalog: BTreeMap<String, Vec<String>>) -> BTreeMap<String, Vec<String>> {
+    const MAX_SERVERS: usize = 64;
+    const MAX_TOOLS: usize = 256;
+    let public_servers = cas_types::public_upstream_ids(catalog.keys().map(String::as_str));
+    let mut sanitized = BTreeMap::new();
+    for (raw_server, raw_tools) in catalog.into_iter().take(MAX_SERVERS) {
+        let Some(server) = public_servers.get(&raw_server).cloned() else {
+            continue;
+        };
+        let public_tools = cas_types::public_tool_ids(raw_tools.iter().map(String::as_str));
+        let mut tools = raw_tools
+            .iter()
+            .take(MAX_TOOLS)
+            .filter_map(|tool| public_tools.get(tool).cloned())
+            .collect::<Vec<_>>();
+        tools.sort();
+        tools.dedup();
+        sanitized.insert(server, tools);
+    }
+    sanitized
+}
+
+#[cfg(feature = "mcp-proxy")]
+fn read_proxy_snapshot_manifest(
+    cas_root: &std::path::Path,
+) -> Result<ProxySnapshotCache, ProxySnapshotReadError> {
+    let bytes = with_proxy_cache_lock(cas_root, false, || {
+        let path = cas_root.join(PROXY_SNAPSHOT_CACHE);
+        let metadata = std::fs::metadata(&path)?;
+        if metadata.len() > MAX_PROXY_SNAPSHOT_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "proxy snapshot exceeds the bounded cache size",
+            ));
+        }
+        std::fs::read(path)
+    })
+    .map_err(|error| ProxySnapshotReadError {
+        kind: if error.kind() == std::io::ErrorKind::NotFound {
+            ProxySnapshotReadErrorKind::Missing
+        } else {
+            ProxySnapshotReadErrorKind::Invalid
+        },
+    })?;
+    let mut snapshot: ProxySnapshotCache =
+        serde_json::from_slice(&bytes).map_err(|_| ProxySnapshotReadError {
+            kind: ProxySnapshotReadErrorKind::Invalid,
+        })?;
+    let fingerprint_is_safe = snapshot.config_fingerprint.as_deref().is_none_or(|value| {
+        value.len() == 71
+            && value.starts_with("sha256:")
+            && value[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
+    });
+    if snapshot.schema_version != PROXY_SNAPSHOT_SCHEMA_VERSION
+        || snapshot.generation.len() > 96
+        || !snapshot
+            .generation
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        || snapshot.health.generated_at_ms != snapshot.generated_at_ms
+        || !fingerprint_is_safe
+        || (snapshot.state == ProxySnapshotState::Empty
+            && (!snapshot.catalog.is_empty()
+                || snapshot.health.healthy != 0
+                || snapshot.health.degraded != 0
+                || !snapshot.health.servers.is_empty()))
+        || (snapshot.state == ProxySnapshotState::Unavailable
+            && (!snapshot.catalog.is_empty()
+                || snapshot.health.healthy != 0
+                || snapshot.health.degraded != 0
+                || !snapshot.health.servers.is_empty()
+                || snapshot.failure.is_none()))
+        || (snapshot.state != ProxySnapshotState::Unavailable && snapshot.failure.is_some())
+    {
+        return Err(ProxySnapshotReadError {
+            kind: ProxySnapshotReadErrorKind::Invalid,
+        });
+    }
+    snapshot.catalog = sanitized_catalog(snapshot.catalog);
+    snapshot.health = snapshot.health.sanitized();
+    Ok(snapshot)
+}
+
+#[cfg(feature = "mcp-proxy")]
+pub fn read_proxy_snapshot_cache(
+    cas_root: &std::path::Path,
+) -> Result<ProxySnapshotCache, ProxySnapshotReadError> {
+    let snapshot = read_proxy_snapshot_manifest(cas_root)?;
+    let observed_at_ms = now_millis().map_err(|_| ProxySnapshotReadError {
+        kind: ProxySnapshotReadErrorKind::Invalid,
+    })?;
+    if snapshot.generated_at_ms > observed_at_ms.saturating_add(30_000) {
+        return Err(ProxySnapshotReadError {
+            kind: ProxySnapshotReadErrorKind::Invalid,
+        });
+    }
+    if snapshot.state == ProxySnapshotState::Ready
+        && observed_at_ms.saturating_sub(snapshot.generated_at_ms) > PROXY_SNAPSHOT_MAX_AGE_MS
+    {
+        return Err(ProxySnapshotReadError {
+            kind: ProxySnapshotReadErrorKind::ConfigMismatch,
+        });
+    }
+    let config = load_proxy_config(cas_root).map_err(|_| ProxySnapshotReadError {
+        kind: ProxySnapshotReadErrorKind::ConfigInvalid,
+    })?;
+    if snapshot.config_fingerprint.as_deref() != Some(proxy_config_fingerprint(&config).as_str()) {
+        return Err(ProxySnapshotReadError {
+            kind: ProxySnapshotReadErrorKind::ConfigMismatch,
+        });
+    }
+    if snapshot.state == ProxySnapshotState::Unavailable {
+        return Err(ProxySnapshotReadError {
+            kind: ProxySnapshotReadErrorKind::Unavailable,
+        });
+    }
+    let expected_state = if config.servers.is_empty() {
+        ProxySnapshotState::Empty
+    } else {
+        ProxySnapshotState::Ready
+    };
+    if snapshot.state != expected_state {
+        return Err(ProxySnapshotReadError {
+            kind: ProxySnapshotReadErrorKind::ConfigMismatch,
+        });
+    }
+    Ok(snapshot)
+}
+
+#[cfg(feature = "mcp-proxy")]
+pub fn read_proxy_catalog_cache(cas_root: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    let snapshot = read_proxy_snapshot_cache(cas_root)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))?;
+    serde_json::to_vec(&snapshot.catalog)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+#[cfg(feature = "mcp-proxy")]
+pub fn read_proxy_health_cache(cas_root: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    let snapshot = read_proxy_snapshot_cache(cas_root)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))?;
+    serde_json::to_vec_pretty(&snapshot.health)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+#[cfg(feature = "mcp-proxy")]
+async fn proxy_catalog(engine: &cmcp_core::ProxyEngine) -> BTreeMap<String, Vec<String>> {
+    let servers = engine.catalog_entries_by_server().await;
+    let simplified = servers
         .into_iter()
         .map(|(server, entries)| {
-            let names = entries.into_iter().map(|e| e.name).collect();
+            let names = entries.into_iter().map(|entry| entry.name).collect();
             (server, names)
         })
         .collect();
-    let cache_path = cas_root.join("proxy_catalog.json");
-    match serde_json::to_string(&simplified) {
-        Ok(json) => {
-            if let Err(e) = std::fs::write(&cache_path, json) {
-                eprintln!("[CAS] Failed to write proxy catalog cache: {e}");
-            }
-        }
-        Err(e) => {
-            eprintln!("[CAS] Failed to serialize proxy catalog: {e}");
-        }
+    sanitized_catalog(simplified)
+}
+
+#[cfg(feature = "mcp-proxy")]
+pub async fn write_proxy_snapshot_cache(
+    cas_root: &std::path::Path,
+    engine: &cmcp_core::ProxyEngine,
+) -> anyhow::Result<()> {
+    let config = load_proxy_config(cas_root)?;
+    write_proxy_snapshot_cache_for_config(cas_root, engine, &config).await
+}
+
+#[cfg(feature = "mcp-proxy")]
+pub async fn write_proxy_snapshot_cache_for_config(
+    cas_root: &std::path::Path,
+    engine: &cmcp_core::ProxyEngine,
+    config: &cmcp_core::config::Config,
+) -> anyhow::Result<()> {
+    let health = engine.health_snapshot().await.sanitized();
+    let generated_at_ms = health.generated_at_ms;
+    if generated_at_ms == 0 {
+        anyhow::bail!("proxy snapshot clock is unavailable");
+    }
+    let snapshot = ProxySnapshotCache {
+        schema_version: PROXY_SNAPSHOT_SCHEMA_VERSION,
+        generation: next_proxy_generation(generated_at_ms),
+        generated_at_ms,
+        config_fingerprint: Some(proxy_config_fingerprint(config)),
+        state: if config.servers.is_empty() {
+            ProxySnapshotState::Empty
+        } else {
+            ProxySnapshotState::Ready
+        },
+        failure: None,
+        catalog: proxy_catalog(engine).await,
+        health,
+    };
+    publish_proxy_snapshot(cas_root, &snapshot)?;
+    Ok(())
+}
+
+#[cfg(feature = "mcp-proxy")]
+fn empty_health(generated_at_ms: u64) -> cmcp_core::ProxyHealthSnapshot {
+    cmcp_core::ProxyHealthSnapshot {
+        session_id: format!("proxy-{}-{generated_at_ms}-0", std::process::id()),
+        generated_at_ms,
+        healthy: 0,
+        degraded: 0,
+        servers: Vec::new(),
+    }
+}
+
+#[cfg(feature = "mcp-proxy")]
+fn publish_non_live_proxy_snapshot(
+    cas_root: &std::path::Path,
+    config: Option<&cmcp_core::config::Config>,
+    state: ProxySnapshotState,
+    failure: Option<ProxySnapshotFailure>,
+) -> anyhow::Result<()> {
+    let generated_at_ms = now_millis()?;
+    publish_proxy_snapshot(
+        cas_root,
+        &ProxySnapshotCache {
+            schema_version: PROXY_SNAPSHOT_SCHEMA_VERSION,
+            generation: next_proxy_generation(generated_at_ms),
+            generated_at_ms,
+            config_fingerprint: config.map(proxy_config_fingerprint),
+            state,
+            failure,
+            catalog: BTreeMap::new(),
+            health: empty_health(generated_at_ms),
+        },
+    )?;
+    Ok(())
+}
+
+#[cfg(feature = "mcp-proxy")]
+pub fn write_empty_proxy_snapshot_cache(cas_root: &std::path::Path) -> anyhow::Result<()> {
+    let config = load_proxy_config(cas_root)?;
+    publish_non_live_proxy_snapshot(cas_root, Some(&config), ProxySnapshotState::Empty, None)
+}
+
+#[cfg(feature = "mcp-proxy")]
+pub fn write_unavailable_proxy_snapshot_cache(
+    cas_root: &std::path::Path,
+    config: Option<&cmcp_core::config::Config>,
+    failure: ProxySnapshotFailure,
+) -> anyhow::Result<()> {
+    publish_non_live_proxy_snapshot(
+        cas_root,
+        config,
+        ProxySnapshotState::Unavailable,
+        Some(failure),
+    )
+}
+
+/// Persist credential-free optional-upstream health for factory preflight.
+#[cfg(feature = "mcp-proxy")]
+pub async fn write_proxy_health_cache(cas_root: &std::path::Path, engine: &cmcp_core::ProxyEngine) {
+    if let Err(error) = write_proxy_snapshot_cache(cas_root, engine).await {
+        tracing::debug!(error = %error, "failed to write MCP proxy snapshot cache");
     }
 }
 
@@ -567,6 +1114,217 @@ mod tests {
     use crate::store::init_cas_dir;
     use crate::test_support::TestEnvGuard;
     use tempfile::TempDir;
+
+    #[cfg(feature = "mcp-proxy")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn empty_proxy_state_clears_stale_catalog_and_writes_health() {
+        let tmp = TempDir::new().unwrap();
+        let cas_root = tmp.path();
+        let home = tmp.path().join("home");
+        let config_home = home.join(".config");
+        std::fs::create_dir_all(&config_home).unwrap();
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("HOME", Some(home.to_str().unwrap())),
+            ("XDG_CONFIG_HOME", Some(config_home.to_str().unwrap())),
+        ]);
+        std::fs::write(cas_root.join("proxy_catalog.json"), r#"{"stale":["tool"]}"#).unwrap();
+        std::fs::write(
+            cas_root.join("proxy_health.json"),
+            r#"{"session_id":"proxy-1","generated_at_ms":1,"healthy":1,"degraded":0,"servers":[{"name":"stale","transport":"http","state":"healthy","attempts":1,"consecutive_failures":0,"tool_count":1,"last_error_code":null,"last_attempt_at_ms":1,"next_retry_at_ms":null}]}"#,
+        )
+        .unwrap();
+
+        super::write_empty_proxy_snapshot_cache(cas_root).unwrap();
+
+        let catalog: serde_json::Value =
+            serde_json::from_slice(&super::read_proxy_catalog_cache(cas_root).unwrap()).unwrap();
+        assert_eq!(catalog, serde_json::json!({}));
+
+        let health: serde_json::Value =
+            serde_json::from_slice(&super::read_proxy_health_cache(cas_root).unwrap()).unwrap();
+        assert_eq!(health["healthy"], 0);
+        assert_eq!(health["degraded"], 0);
+        assert!(
+            health["session_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+        );
+        assert_eq!(health["servers"], serde_json::json!([]));
+    }
+
+    #[cfg(feature = "mcp-proxy")]
+    #[test]
+    fn failed_manifest_commit_never_exposes_mixed_compatibility_members() {
+        let tmp = TempDir::new().unwrap();
+        let cas_root = tmp.path();
+        let home = tmp.path().join("home");
+        let config_home = home.join(".config");
+        std::fs::create_dir_all(&config_home).unwrap();
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("HOME", Some(home.to_str().unwrap())),
+            ("XDG_CONFIG_HOME", Some(config_home.to_str().unwrap())),
+        ]);
+        let config = cmcp_core::config::Config::default();
+        super::publish_non_live_proxy_snapshot(
+            cas_root,
+            Some(&config),
+            super::ProxySnapshotState::Empty,
+            None,
+        )
+        .unwrap();
+        let old = super::read_proxy_snapshot_cache(cas_root).unwrap();
+        let mut replacement = old.clone();
+        replacement.generated_at_ms += 1;
+        replacement.generation = super::next_proxy_generation(replacement.generated_at_ms);
+        replacement.health.generated_at_ms = replacement.generated_at_ms;
+        replacement.health.session_id = "proxy-replacement".to_string();
+        let bytes = serde_json::to_vec_pretty(&replacement).unwrap();
+
+        let error = super::with_proxy_cache_lock(cas_root, true, || {
+            // Simulate the historical first member changing before the
+            // authoritative manifest commit is interrupted.
+            std::fs::write(cas_root.join("proxy_catalog.json"), br#"{"new":["tool"]}"#)?;
+            super::atomic_write_proxy_cache_file_with(
+                cas_root,
+                super::PROXY_SNAPSHOT_CACHE,
+                &bytes,
+                |_| Err(std::io::Error::other("injected before manifest commit")),
+            )
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+
+        let observed = super::read_proxy_snapshot_cache(cas_root).unwrap();
+        assert_eq!(observed.generation, old.generation);
+        assert_eq!(observed.health.session_id, old.health.session_id);
+        super::publish_proxy_snapshot(cas_root, &replacement).unwrap();
+        let recovered = super::read_proxy_snapshot_cache(cas_root).unwrap();
+        assert_eq!(recovered.generation, replacement.generation);
+        assert_eq!(recovered.generated_at_ms, replacement.generated_at_ms);
+    }
+
+    #[cfg(feature = "mcp-proxy")]
+    #[test]
+    fn legacy_or_incomplete_members_are_never_authoritative() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("proxy_catalog.json"), r#"{"old":["tool"]}"#).unwrap();
+        std::fs::write(
+            tmp.path().join("proxy_health.json"),
+            r#"{"session_id":"proxy-1","generated_at_ms":1,"healthy":1,"degraded":0,"servers":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            super::read_proxy_snapshot_cache(tmp.path())
+                .unwrap_err()
+                .kind,
+            super::ProxySnapshotReadErrorKind::Missing
+        );
+
+        std::fs::write(
+            tmp.path().join(super::PROXY_SNAPSHOT_CACHE),
+            r#"{"schema_version":1,"generation":"snapshot-incomplete"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            super::read_proxy_snapshot_cache(tmp.path())
+                .unwrap_err()
+                .kind,
+            super::ProxySnapshotReadErrorKind::Invalid
+        );
+    }
+
+    #[cfg(feature = "mcp-proxy")]
+    #[test]
+    fn config_fingerprint_is_deterministic_bounded_and_detects_private_drift() {
+        let mut first = cmcp_core::config::Config::default();
+        first.add_server(
+            "unsafe/name".to_string(),
+            cmcp_core::config::ServerConfig::Http {
+                url: "https://user@example.invalid/private".to_string(),
+                auth: Some("first-secret".to_string()),
+                headers: std::collections::HashMap::from([(
+                    "Authorization".to_string(),
+                    "Bearer first-secret".to_string(),
+                )]),
+                oauth: false,
+            },
+        );
+        let mut second = first.clone();
+        if let Some(cmcp_core::config::ServerConfig::Http { auth, .. }) =
+            second.servers.get_mut("unsafe/name")
+        {
+            *auth = Some("second-secret".to_string());
+        }
+        let first_fingerprint = super::proxy_config_fingerprint(&first);
+        assert_eq!(first_fingerprint, super::proxy_config_fingerprint(&first));
+        assert_eq!(first_fingerprint.len(), 71);
+        assert!(first_fingerprint.starts_with("sha256:"));
+        assert_ne!(first_fingerprint, super::proxy_config_fingerprint(&second));
+        for forbidden in ["unsafe/name", "example.invalid", "first-secret"] {
+            assert!(!first_fingerprint.contains(forbidden));
+        }
+    }
+
+    #[cfg(feature = "mcp-proxy")]
+    #[test]
+    fn expired_or_future_manifest_is_fail_honest_when_configuration_is_unchanged() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let config_home = home.join(".config");
+        std::fs::create_dir_all(&config_home).unwrap();
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("HOME", Some(home.to_str().unwrap())),
+            ("XDG_CONFIG_HOME", Some(config_home.to_str().unwrap())),
+        ]);
+        let mut config = cmcp_core::config::Config::default();
+        config.add_server(
+            "optional".to_string(),
+            cmcp_core::config::ServerConfig::Http {
+                url: "https://example.invalid/mcp".to_string(),
+                auth: None,
+                headers: std::collections::HashMap::new(),
+                oauth: false,
+            },
+        );
+        config.save_to(&tmp.path().join("proxy.toml")).unwrap();
+        super::publish_non_live_proxy_snapshot(
+            tmp.path(),
+            Some(&config),
+            super::ProxySnapshotState::Ready,
+            None,
+        )
+        .unwrap();
+        let mut snapshot = super::read_proxy_snapshot_cache(tmp.path()).unwrap();
+        snapshot.generated_at_ms = super::now_millis()
+            .unwrap()
+            .saturating_sub(super::PROXY_SNAPSHOT_MAX_AGE_MS + 1);
+        snapshot.health.generated_at_ms = snapshot.generated_at_ms;
+        std::fs::write(
+            tmp.path().join(super::PROXY_SNAPSHOT_CACHE),
+            serde_json::to_vec(&snapshot).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            super::read_proxy_snapshot_cache(tmp.path())
+                .unwrap_err()
+                .kind,
+            super::ProxySnapshotReadErrorKind::ConfigMismatch
+        );
+
+        snapshot.generated_at_ms = super::now_millis().unwrap().saturating_add(30_001);
+        snapshot.health.generated_at_ms = snapshot.generated_at_ms;
+        std::fs::write(
+            tmp.path().join(super::PROXY_SNAPSHOT_CACHE),
+            serde_json::to_vec(&snapshot).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            super::read_proxy_snapshot_cache(tmp.path())
+                .unwrap_err()
+                .kind,
+            super::ProxySnapshotReadErrorKind::Invalid
+        );
+    }
 
     /// When CLAUDE_PROJECT_DIR is set to a directory that contains a `.cas/`,
     /// resolve_mcp_serve_root must return that `.cas/` path even if the process

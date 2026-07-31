@@ -3,16 +3,15 @@
 //! Implements handlers for each Claude Code hook event.
 
 use std::path::Path;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::config::Config;
 use crate::error::MemError;
 use crate::otel::OtelContext;
 use crate::store::{
-    RuleStore, SqliteStore, Store, VerificationStore, WorktreeStore, open_agent_store,
+    RuleStore, SqliteStore, Store, WorktreeStore, open_agent_store,
     open_commit_link_store, open_file_change_store, open_loop_store, open_prompt_store,
-    open_rule_store, open_spec_store, open_store, open_task_store, open_verification_store,
-    open_worktree_store,
+    open_rule_store, open_spec_store, open_store, open_task_store, open_worktree_store,
 };
 use crate::tracing::{DevTracer, ToolTrace, TraceTimer};
 use crate::types::RuleStatus;
@@ -103,7 +102,6 @@ pub(crate) struct ToolHookStores<'a> {
     config: Option<Config>,
     task_store: Option<Arc<dyn TaskStore>>,
     agent_store: Option<Arc<dyn AgentStore>>,
-    verification_store: Option<Arc<dyn VerificationStore>>,
     worktree_store: Option<Arc<dyn WorktreeStore>>,
     rule_store: Option<Arc<dyn RuleStore>>,
     spec_store: Option<Arc<dyn SpecStore>>,
@@ -116,7 +114,6 @@ impl<'a> ToolHookStores<'a> {
             config: None,
             task_store: None,
             agent_store: None,
-            verification_store: None,
             worktree_store: None,
             rule_store: None,
             spec_store: None,
@@ -146,14 +143,6 @@ impl<'a> ToolHookStores<'a> {
             self.agent_store = open_agent_store(self.cas_root).ok();
         }
         self.agent_store.as_ref()
-    }
-
-    /// Get the verification store (lazy)
-    pub fn verification(&mut self) -> Option<&Arc<dyn VerificationStore>> {
-        if self.verification_store.is_none() {
-            self.verification_store = open_verification_store(self.cas_root).ok();
-        }
-        self.verification_store.as_ref()
     }
 
     /// Get the worktree store (lazy)
@@ -287,7 +276,9 @@ pub(crate) use handlers_state::{
     cleanup_agent_leases, cleanup_orphaned_tasks, clear_session_files, current_agent_id,
     detect_significant_activity, extract_activity_entity_id, get_exit_blockers, track_session_file,
 };
-pub use handlers_state::{get_session_files, handle_subagent_start, handle_subagent_stop};
+pub use handlers_state::{
+    get_session_files, handle_subagent_start, handle_subagent_stop, handle_verifier_spawn_cleanup,
+};
 
 mod handlers_middle;
 #[cfg(test)]

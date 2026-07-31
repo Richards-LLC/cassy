@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 const CODEX_SUPERVISOR_INSTRUCTIONS: &str = "You are the CAS Factory Supervisor. Coordinate only: plan epics, assign tasks, monitor progress, review/merge. Never implement tasks. Use skills cas-supervisor and cas-codex-supervisor-checklist. Use MCP tools explicitly; no /cas-start, /cas-context, or /cas-end. Worker messages (status/blocker/ready) arrive asynchronously as new injected turns framed 'Message from <sender>: …'. Each is a triage trigger, not a fresh startup: read it, then assign/answer/redirect/merge as appropriate and reply via `mcp__cs__coordination action=message target=<worker>`. MERGE REQUIRED / awaiting_merge / idle-with-close-rejected is always top priority: run `mcp__cs__coordination action=epic_status` (and/or `mcp__cs__task action=list status=awaiting_merge`), merge `factory/<worker>` into the epic branch, then tell the worker to re-close — before free-form user chat. Recovery: to unblock a worker wedged by an urgent-stop/halt or a rejected close, assign it a fresh task or tell it to re-close after the merge — its legitimate `mcp__cs__task action=start` clears the urgent-stop halt. Finishing one round does not mean you are done — remain available to coordinate the next message.";
 
 /// Instructions injected into Codex worker agents via `--config developer_instructions`.
-const CODEX_WORKER_INSTRUCTIONS: &str = "You are a CAS Factory Worker. Always use CAS MCP tools for task lifecycle and coordination. On startup your CAS session is already registered automatically — do NOT call session_start. Just run `mcp__cs__coordination action=whoami` then `mcp__cs__task action=mine`. Work exactly ONE task at a time: choose a single assigned task, run `mcp__cs__task action=show id=<task-id>` then `mcp__cs__task action=start id=<task-id>` before coding, implement it, commit and push your changes, then close it with `mcp__cs__task action=close id=<task-id> reason=\"...\"` (or hand it to the supervisor if close returns verification-required guidance) BEFORE starting any other task. Never start a second task while one is still in progress — the verification jail allows only one unverified in-progress task at a time, so batch-starting tasks will block you. Add progress notes frequently using `mcp__cs__task action=notes id=<task-id> note_type=progress notes=\"...\"`. For blockers, add a blocker note, set `status=blocked`, and message supervisor via `mcp__cs__coordination action=message target=supervisor message=\"...\"`. If close returns verification-required guidance, immediately ask the supervisor to verify/close on your behalf. If close returns MERGE REQUIRED, push your branch and ask the supervisor to merge `factory/<your-name>` into the epic branch, then re-close after the merge lands. Urgent-stop recovery: if an urgent redirect halts your work (WORK HALTED), do not fight it — a legitimate `mcp__cs__task action=start` on your newly-assigned task clears the urgent-stop halt and resumes you; start the assigned task. After closing or handing off a task, stay available — you are not permanently done. The supervisor will send you more work or redirection as new messages. Treat any injected turn framed 'Message from <sender>: …' as an instruction to act on, not noise: read it and follow it. Keep honoring one-task-at-a-time — finish or hand off your current task before starting the next one a message assigns. Do not use /cas-start, /cas-context, or /cas-end. Stay within assigned task scope.";
+const CODEX_WORKER_INSTRUCTIONS: &str = "You are a CAS Factory Worker. Always use CAS MCP tools for task lifecycle and coordination. On startup your CAS session is already registered automatically — do NOT call session_start. Just run `mcp__cs__coordination action=whoami` then `mcp__cs__task action=mine`. Work exactly ONE task at a time: choose a single assigned task, run `mcp__cs__task action=show id=<task-id>` then `mcp__cs__task action=start id=<task-id>` before coding, implement it, commit and push your changes, then close it with `mcp__cs__task action=close id=<task-id> reason=\"...\"` (or hand it to the supervisor if close returns verification-required guidance) BEFORE starting any other task. Never start a second task while one is still in progress — this is the factory coordination policy even though verification waits no longer block unrelated MCP work. Add progress notes frequently using `mcp__cs__task action=notes id=<task-id> note_type=progress notes=\"...\"`. For blockers, add a blocker note, set `status=blocked`, and message supervisor via `mcp__cs__coordination action=message target=supervisor message=\"...\"`. If close returns verification-required guidance, immediately ask the supervisor to verify/close on your behalf. If close returns MERGE REQUIRED, push your branch and ask the supervisor to merge `factory/<your-name>` into the epic branch, then re-close after the merge lands. Urgent-stop recovery: if an urgent redirect halts your work (WORK HALTED), do not fight it — a legitimate `mcp__cs__task action=start` on your newly-assigned task clears the urgent-stop halt and resumes you; start the assigned task. After closing or handing off a task, stay available — you are not permanently done. The supervisor will send you more work or redirection as new messages. Treat any injected turn framed 'Message from <sender>: …' as an instruction to act on, not noise: read it and follow it. Keep honoring one-task-at-a-time — finish or hand off your current task before starting the next one a message assigns. Do not use /cas-start, /cas-context, or /cas-end. Stay within assigned task scope.";
 
 /// Prefix for the Codex worker startup prompt. The worker name is appended at runtime.
 const CODEX_WORKER_STARTUP_PREFIX: &str = "I'm initiating CAS worker startup now: confirm identity, check assigned tasks, then start any assigned task with a progress note. My CAS session is already registered automatically (do NOT call session_start).\n1) Run mcp__cs__coordination action=whoami";
@@ -208,8 +208,8 @@ NOT call session_start. Run `mcp__cas__coordination action=whoami` then `mcp__ca
 action=mine`. Work exactly ONE task at a time: run `mcp__cas__task action=show id=<task-id>` \
 then `mcp__cas__task action=start id=<task-id>` before coding, implement it, commit and push, \
 then close it with `mcp__cas__task action=close id=<task-id> reason=\"...\"` (or hand to the \
-supervisor if close returns verification-required guidance) BEFORE starting any other task — the \
-verification jail allows only one unverified in-progress task at a time. Add progress notes \
+supervisor if close returns verification-required guidance) BEFORE starting any other task — this \
+is the factory coordination policy even though verification waits do not block unrelated work. Add progress notes \
 frequently via `mcp__cas__task action=notes id=<task-id> note_type=progress notes=\"...\"`. For \
 blockers, add a blocker note, set status=blocked, and message supervisor via \
 `mcp__cas__coordination action=message target=supervisor message=\"...\"`. If close returns MERGE \
@@ -576,13 +576,13 @@ impl PtyConfig {
         // integrated for the Codex harness (no .codex/config.toml). Must precede
         // the developer_instructions block but order among `-c` flags is
         // irrelevant to Codex.
-        push_codex_mcp_server_args(&mut args, &session_id, name, role);
+        push_codex_mcp_server_args(&mut args, &session_id, name, role, cas_root);
 
         if let Some(m) = model {
             args.push("--model".to_string());
             args.push(m.to_string());
         }
-        // Codex CLI 0.128.0 has no --effort flag; effort is set via -c TOML override.
+        // Codex CLI 0.146.0 has no --effort flag; effort is set via -c TOML override.
         // Valid values: none, minimal, low, medium, high, xhigh (same vocabulary as Claude).
         // Unlike claude(), we do NOT apply a role-based default when effort is None — Codex
         // CLI's built-in server-side default is acceptable and avoids hard-coding a TOML
@@ -607,7 +607,7 @@ impl PtyConfig {
             let startup_prompt = format!(
                 "{CODEX_WORKER_STARTUP_PREFIX}\n\
                  2) Run mcp__cs__task action=mine\n\
-                 3) If a task is assigned: choose exactly ONE task, run mcp__cs__task action=show then action=start, add a progress note, implement it, commit and push, then close it (or hand to supervisor) BEFORE starting any other task. Never start more than one task at a time — batch-starting collides with the one-unverified-in-progress verification jail.\n\
+                 3) If a task is assigned: choose exactly ONE task, run mcp__cs__task action=show then action=start, add a progress note, implement it, commit and push, then close it (or hand to supervisor) BEFORE starting any other task. Never start more than one task at a time — this is the factory coordination policy even though verification waits do not block unrelated work.\n\
                  4) If no tasks are assigned: send mcp__cs__coordination action=message target=supervisor confirming ready state\n\
                  5) Do NOT message target=cas. Use target=supervisor."
             );
@@ -630,9 +630,10 @@ impl PtyConfig {
     /// Create config for a Grok Build CLI instance (EPIC cas-8888, cas-6569
     /// Phase 2).
     ///
-    /// # Verified against the installed grok 0.2.93 binary (2026-07-09,
-    /// `grok --help` / `grok inspect` / `grok mcp doctor` run live in this
-    /// repo — see task notes for the full transcript)
+    /// # Verified against the retained installed grok 0.2.114 binary
+    /// (2026-07-30; the host's default symlink was already 0.2.117).
+    /// The complete real `PtyConfig::grok` isolated-worker matrix is recorded
+    /// by `grok_factory_contract_runtime` and the typed conformance receipt.
     /// - `-s/--session-id <uuid>`: "Use a specific session UUID for a NEW
     ///   conversation" — same anti-overwrite model as Claude, so (like
     ///   `claude()`) we always generate a fresh uuid rather than Codex's
@@ -847,13 +848,38 @@ fn cargo_build_jobs_for_worker() -> Option<String> {
 /// strings, `["serve"]` becomes a string array. If a project DOES ship a
 /// `.codex/config.toml`, these `-c` overrides simply add the `cs` server on top
 /// — they never remove the project's own entries.
-fn push_codex_mcp_server_args(args: &mut Vec<String>, session_id: &str, name: &str, role: &str) {
+fn push_codex_mcp_server_args(
+    args: &mut Vec<String>,
+    session_id: &str,
+    name: &str,
+    role: &str,
+    cas_root: Option<&PathBuf>,
+) {
+    // cas-8c80: Codex 0.146's interactive code-mode catalog does not project
+    // spawn-injected MCP servers into its nested `exec` tool catalog. Keep code
+    // mode available, but make CAS a direct-only namespace so the native
+    // coordination/task tools remain callable alongside code-mode tools. This
+    // launch override is deliberately scoped to `mcp__cs`; it neither depends
+    // on user config nor disables code mode for other supported namespaces.
+    args.push("-c".to_string());
+    args.push("features.code_mode.direct_only_tool_namespaces=[\"mcp__cs\"]".to_string());
     args.push("-c".to_string());
     args.push("mcp_servers.cs.command=\"cas\"".to_string());
     args.push("-c".to_string());
     args.push("mcp_servers.cs.args=[\"serve\"]".to_string());
     args.push("-c".to_string());
     args.push("mcp_servers.cs.env.CAS_CODEX_FALLBACK_SESSION=\"1\"".to_string());
+    // Codex starts MCP servers with a restricted environment instead of
+    // inheriting arbitrary process variables. Pin the subprocess to the same
+    // store as its factory pane; otherwise isolated worktrees (and the
+    // conformance sandbox) can start `cas serve` against an unrelated or
+    // undiscoverable project and the namespace never reaches the tool catalog.
+    if let Some(root) = cas_root {
+        let root = serde_json::to_string(&root.to_string_lossy())
+            .expect("serializing a filesystem path string cannot fail");
+        args.push("-c".to_string());
+        args.push(format!("mcp_servers.cs.env.CAS_ROOT={root}"));
+    }
     // cas-3522: inject the canonical session id into the `cs` MCP server env so
     // `get_agent_id()` auto-registers the agent on its FIRST tool call — the same
     // env fast-path Claude workers rely on. Codex starts MCP servers with a
@@ -884,18 +910,14 @@ fn push_codex_mcp_server_args(args: &mut Vec<String>, session_id: &str, name: &s
     args.push(format!("mcp_servers.cs.env.CAS_AGENT_ROLE=\"{role}\""));
     // cas-8aaf: inject factory context env vars so the `cs` MCP server
     // knows it is running inside a factory session. Without these, the server
-    // process has CAS_AGENT_ROLE=worker but lacks CAS_FACTORY_MODE, making
-    // `is_factory_worker` false. The result is VERIFICATION_JAIL_BLOCKED with
-    // Task(subagent_type="task-verifier") guidance — an instruction Codex
-    // workers cannot execute. Two downstream fixes are unlocked:
+    // process has CAS_AGENT_ROLE=worker but lacks CAS_FACTORY_MODE. Two
+    // downstream factory-policy selections depend on these values:
     //
-    //   1. CAS_FACTORY_MODE=1: enables is_factory_worker in authorize_agent_action
-    //      and close_ops.rs, so supervisor-owned exemptions fire correctly and
-    //      the jail gives "message supervisor" guidance instead of Task().
+    //   1. CAS_FACTORY_MODE=1: enables factory-worker close/review routing.
     //
     //   2. CAS_FACTORY_WORKER_CLI=codex: makes worker_harness_from_env() return
     //      Codex, which (a) causes verification_required_for_task_type() to
-    //      return false for Codex workers under supervisor-owned review (no jail),
+    //      return false for Codex workers under supervisor-owned review,
     //      (b) makes is_worker_without_subagents_from_env() true, and (c) selects
     //      mcp__cs__coordination (not mcp__cas__coordination) in guidance text.
     args.push("-c".to_string());
@@ -1712,6 +1734,39 @@ mod tests {
             all_args.contains("mcp_servers.cs.env.CAS_CODEX_FALLBACK_SESSION=\"1\""),
             "codex worker must inject CAS_CODEX_FALLBACK_SESSION env; got: {all_args}"
         );
+        assert!(
+            all_args.contains("features.code_mode.direct_only_tool_namespaces=[\"mcp__cs\"]"),
+            "codex worker must project CAS as a direct-only namespace; got: {all_args}"
+        );
+        assert!(
+            !all_args.contains("features.code_mode.enabled=false")
+                && !all_args.contains("code_mode=false"),
+            "CAS projection must not disable Codex code mode; got: {all_args}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pty_config_codex_pins_cas_mcp_server_to_factory_root() {
+        let _e = ScopedEnv::new();
+        let root = PathBuf::from("/tmp/cas root with spaces");
+        let config = PtyConfig::codex(
+            "test-worker",
+            "worker",
+            PathBuf::from("/tmp"),
+            Some(&root),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            config
+                .args
+                .iter()
+                .any(|arg| arg == "mcp_servers.cs.env.CAS_ROOT=\"/tmp/cas root with spaces\""),
+            "Codex's restricted MCP environment must receive the pane's CAS_ROOT"
+        );
     }
 
     /// cas-bbc2: the supervisor is equally self-contained — a Codex supervisor
@@ -1739,8 +1794,8 @@ mod tests {
     }
 
     /// cas-bbc2 AC#3: the Codex worker startup prompt must drive a single-task
-    /// loop (start exactly one task at a time), not the old batch-start wording
-    /// that collides with the one-unverified-in-progress verification jail.
+    /// loop (start exactly one task at a time), preserving factory coordination
+    /// policy without claiming verification blocks unrelated work.
     #[tokio::test]
     async fn test_pty_config_codex_worker_single_task_loop() {
         let _e = ScopedEnv::new();
@@ -1893,11 +1948,9 @@ mod tests {
     /// CAS_FACTORY_WORKER_CLI=codex so the MCP server's is_factory_worker check
     /// fires and worker_harness_from_env() returns Codex. Without these env vars
     /// the `cs` server doesn't know it is inside a factory session:
-    ///   - CAS_FACTORY_MODE absent → is_factory_worker=false → VERIFICATION_JAIL_BLOCKED
-    ///     returns Task(subagent_type="task-verifier") guidance Codex cannot execute.
+    ///   - CAS_FACTORY_MODE absent → factory close/review routing is wrong.
     ///   - CAS_FACTORY_WORKER_CLI absent → worker_harness_from_env() defaults to
-    ///     Claude → verification_required_for_task_type() returns true → jail fires
-    ///     even under supervisor-owned review (where it must NOT fire for Codex).
+    ///     Claude → verification_required_for_task_type() returns the wrong policy.
     #[tokio::test]
     async fn test_pty_config_codex_worker_injects_factory_mode_and_worker_cli_cas_8aaf() {
         let _e = ScopedEnv::new();
@@ -2537,8 +2590,8 @@ mod tests {
         );
         // The CAS MCP server injection (cas-bbc2) always emits `-c` flags, so we
         // can no longer assert the total absence of `-c`. Instead assert that the
-        // only `-c` overrides present are the MCP server ones — none configure
-        // reasoning effort.
+        // only `-c` overrides present are the MCP server and direct namespace
+        // projection ones — none configure reasoning effort.
         let c_values: Vec<&String> = config
             .args
             .windows(2)
@@ -2546,8 +2599,11 @@ mod tests {
             .map(|w| &w[1])
             .collect();
         assert!(
-            c_values.iter().all(|v| v.starts_with("mcp_servers.cs.")),
-            "with effort=None the only -c overrides should be the cas MCP server injection; got: {c_values:?}"
+            c_values.iter().all(|v| {
+                v.starts_with("mcp_servers.cs.")
+                    || *v == "features.code_mode.direct_only_tool_namespaces=[\"mcp__cs\"]"
+            }),
+            "with effort=None the only -c overrides should be the cas MCP server injection and direct namespace projection; got: {c_values:?}"
         );
     }
 

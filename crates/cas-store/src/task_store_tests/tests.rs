@@ -82,6 +82,16 @@ fn closed_to_non_closed_update_clears_only_the_factory_branch_anchor() {
     task.status = TaskStatus::Closed;
     task.deliverables.factory_branch_anchor = Some("old-close-sha".to_string());
     task.deliverables.parked_branch = Some("factory/worker".to_string());
+    task.deliverables.work_target = Some(cas_types::WorkTarget {
+        repo_selector: "remote:github.com/org/repo".to_string(),
+        target_branch: "main".to_string(),
+    });
+    task.deliverables.pre_close_hook = Some(cas_types::PreCloseHookEvidence {
+        repo_selector: "remote:github.com/org/repo".to_string(),
+        target_branch: "main".to_string(),
+        worktree_branch: Some("factory/worker".to_string()),
+        task_tip: Some("old-close-sha".to_string()),
+    });
     store.add(&task).unwrap();
 
     task.status = TaskStatus::Blocked;
@@ -97,6 +107,24 @@ fn closed_to_non_closed_update_clears_only_the_factory_branch_anchor() {
         reopened.deliverables.parked_branch.as_deref(),
         Some("factory/worker"),
         "branch identity remains useful for diagnostics and matches cas_task_reopen"
+    );
+    assert_eq!(
+        reopened
+            .deliverables
+            .work_target
+            .as_ref()
+            .map(|target| target.repo_selector.as_str()),
+        Some("remote:github.com/org/repo"),
+        "close-cycle updates must preserve the durable work target"
+    );
+    assert_eq!(
+        reopened
+            .deliverables
+            .pre_close_hook
+            .as_ref()
+            .and_then(|evidence| evidence.task_tip.as_deref()),
+        Some("old-close-sha"),
+        "task updates must not overwrite portable hook audit evidence"
     );
 }
 

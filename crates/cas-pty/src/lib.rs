@@ -42,9 +42,14 @@
 //! }
 //! ```
 
+pub mod conformance;
 mod error;
 mod pty;
 
+pub use conformance::{
+    ConformanceCheck, ConformanceEvidence, ConformanceStatus, Harness, HarnessConformanceReceipt,
+    codex_0146_conformance_receipt, grok_02114_conformance_receipt, harness_conformance_receipts,
+};
 pub use error::{Error, Result};
 pub use pty::{
     ContractRole, claude_supervisor_contract, claude_worker_contract, missing_contract_elements,

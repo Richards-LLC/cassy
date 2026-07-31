@@ -522,9 +522,11 @@ fn hook_entries_emit_shell_form_command() {
         ("SubagentStart", "cas hook SubagentStart"),
         ("SubagentStop", "cas hook SubagentStop"),
         ("PostToolUse", "cas hook PostToolUse"),
+        ("PostToolUseFailure", "cas hook PostToolUseFailure"),
         ("PreToolUse", "cas hook PreToolUse"),
         ("UserPromptSubmit", "cas hook UserPromptSubmit"),
         ("PermissionRequest", "cas hook PermissionRequest"),
+        ("PermissionDenied", "cas hook PermissionDenied"),
         ("Notification", "cas hook Notification"),
         ("PreCompact", "cas hook PreCompact"),
     ] {
@@ -550,9 +552,11 @@ fn hook_entries_do_not_emit_args_array() {
         "SubagentStart",
         "SubagentStop",
         "PostToolUse",
+        "PostToolUseFailure",
         "PreToolUse",
         "UserPromptSubmit",
         "PermissionRequest",
+        "PermissionDenied",
         "Notification",
         "PreCompact",
     ] {
@@ -602,11 +606,23 @@ fn every_emitted_hook_object_has_command_and_no_args() {
         }
     }
 
-    // 12 events x 1 hook object (cc160 added MessageDisplay), plus the extra
-    // SessionStart staleness entry = 13.
+    // 14 events x 1 hook object (including sealed-handoff terminal cleanup),
+    // plus the extra SessionStart staleness entry = 15.
     assert_eq!(
-        hook_objects, 13,
-        "expected exactly 13 hook objects (12 events + factory check-staleness)"
+        hook_objects, 15,
+        "expected exactly 15 hook objects (14 events + factory check-staleness)"
+    );
+}
+
+#[test]
+fn verifier_subagent_start_binding_is_synchronous() {
+    let config = get_cas_hooks_config(&HookConfig::default());
+    let hook = config["hooks"]["SubagentStart"][0]["hooks"][0]
+        .as_object()
+        .expect("SubagentStart hook object");
+    assert!(
+        hook.get("async").is_none(),
+        "sealed handoff must bind before the verifier child's first turn"
     );
 }
 
@@ -716,4 +732,195 @@ fn legacy_forms_still_detected_and_stripped() {
         shell_form.get("hooks").is_none(),
         "all shell-form CAS hooks should be removed, leaving no hooks key"
     );
+}
+
+// ---------------------------------------------------------------------------
+// cas-fda1 — sealed verifier handoff hook installation is an ATOMIC
+// configuration invariant.
+//
+// PreToolUse is the only route that can issue a sealed task-verifier handoff.
+// SubagentStart binds it; PostToolUseFailure and PermissionDenied are the two
+// terminal cleanup routes for a still-unbound handoff. Before this fix those
+// three hung off `stop.enabled`, `post_tool_use.enabled`, and
+// `permission_request.enabled` — flags independent of `pre_tool_use.enabled` —
+// so valid configurations could issue a handoff that could never bind or be
+// cleaned up, wedging every later verifier spawn until expiry.
+// ---------------------------------------------------------------------------
+
+/// Build a HookConfig with the four independent flags that used to gate the
+/// sealed-handoff lifecycle set explicitly. Everything else stays at default.
+fn matrix_config(
+    pre_tool_use: bool,
+    stop: bool,
+    post_tool_use: bool,
+    permission_request: bool,
+) -> HookConfig {
+    let mut config = HookConfig::default();
+    config.pre_tool_use.enabled = pre_tool_use;
+    config.stop.enabled = stop;
+    config.post_tool_use.enabled = post_tool_use;
+    config.permission_request.enabled = permission_request;
+    config
+}
+
+fn event_installed(config: &serde_json::Value, event: &str) -> bool {
+    config
+        .get("hooks")
+        .and_then(|hooks| hooks.get(event))
+        .is_some()
+}
+
+/// Every one of the 2^4 independent flag combinations must satisfy the
+/// invariant: a configuration that installs handoff issuance also installs
+/// synchronous SubagentStart binding AND both cleanup routes — or installs no
+/// issuance at all (fail-closed, since no handoff can then exist).
+#[test]
+fn sealed_handoff_lifecycle_is_atomic_across_full_flag_matrix() {
+    let mut checked = 0usize;
+    for pre_tool_use in [false, true] {
+        for stop in [false, true] {
+            for post_tool_use in [false, true] {
+                for permission_request in [false, true] {
+                    let hook_config =
+                        matrix_config(pre_tool_use, stop, post_tool_use, permission_request);
+                    let config = get_cas_hooks_config(&hook_config);
+                    let combo = format!(
+                        "pre_tool_use={pre_tool_use} stop={stop} \
+                         post_tool_use={post_tool_use} permission_request={permission_request}"
+                    );
+
+                    let issuance = event_installed(&config, "PreToolUse");
+                    assert_eq!(
+                        issuance, pre_tool_use,
+                        "[{combo}] PreToolUse issuance must track pre_tool_use.enabled"
+                    );
+
+                    for terminal in ["SubagentStart", "PostToolUseFailure", "PermissionDenied"] {
+                        assert_eq!(
+                            event_installed(&config, terminal),
+                            issuance,
+                            "[{combo}] {terminal} must be installed exactly when handoff \
+                             issuance is installed — an unbindable/uncleanable handoff \
+                             wedges verifier spawn until expiry"
+                        );
+                    }
+
+                    if issuance {
+                        // Binding must stay synchronous: verification must not
+                        // race the bind of the child's authority.
+                        assert!(
+                            config["hooks"]["SubagentStart"][0]["hooks"][0]
+                                .get("async")
+                                .is_none(),
+                            "[{combo}] SubagentStart binding must remain synchronous"
+                        );
+                        // Both cleanup routes must target the Agent spawn tools.
+                        for cleanup in ["PostToolUseFailure", "PermissionDenied"] {
+                            assert_eq!(
+                                config["hooks"][cleanup][0]["matcher"].as_str(),
+                                Some("Task|Agent"),
+                                "[{combo}] {cleanup} must match the Agent spawn tools"
+                            );
+                        }
+                        // SubagentStart binds only the verifier child.
+                        assert_eq!(
+                            config["hooks"]["SubagentStart"][0]["matcher"].as_str(),
+                            Some("task-verifier"),
+                            "[{combo}] SubagentStart must bind only task-verifier children"
+                        );
+                    }
+
+                    checked += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(checked, 16, "all 2^4 flag combinations must be covered");
+}
+
+/// The precise pre-fix wedge: issuance on, `stop` off. This configuration used
+/// to emit PreToolUse without SubagentStart, minting handoffs that could never
+/// bind.
+#[test]
+fn issuance_without_stop_still_installs_binding_and_cleanup() {
+    let config = get_cas_hooks_config(&matrix_config(true, false, false, false));
+
+    assert!(event_installed(&config, "PreToolUse"));
+    assert!(
+        event_installed(&config, "SubagentStart"),
+        "stop.enabled=false must no longer strip sealed-handoff binding"
+    );
+    assert!(
+        event_installed(&config, "PostToolUseFailure"),
+        "post_tool_use.enabled=false must no longer strip failed-spawn cleanup"
+    );
+    assert!(
+        event_installed(&config, "PermissionDenied"),
+        "permission_request.enabled=false must no longer strip denied-spawn cleanup"
+    );
+
+    // The co-gated group must not drag in the unrelated hooks owned by those
+    // other flags.
+    assert!(!event_installed(&config, "Stop"));
+    assert!(!event_installed(&config, "SubagentStop"));
+    assert!(!event_installed(&config, "PostToolUse"));
+    assert!(!event_installed(&config, "PermissionRequest"));
+}
+
+/// With issuance disabled the whole lifecycle group is absent — fail-closed,
+/// not half-installed.
+#[test]
+fn disabled_issuance_installs_no_handoff_lifecycle_hooks() {
+    let config = get_cas_hooks_config(&matrix_config(false, true, true, true));
+
+    for event in [
+        "PreToolUse",
+        "SubagentStart",
+        "PostToolUseFailure",
+        "PermissionDenied",
+    ] {
+        assert!(
+            !event_installed(&config, event),
+            "{event} must be absent when no handoff can be issued"
+        );
+    }
+
+    // Hooks genuinely owned by the still-enabled flags remain installed.
+    assert!(event_installed(&config, "Stop"));
+    assert!(event_installed(&config, "SubagentStop"));
+    assert!(event_installed(&config, "PostToolUse"));
+    assert!(event_installed(&config, "PermissionRequest"));
+}
+
+/// Non-lifecycle hooks must keep tracking their own independent flags — the
+/// co-gating must not have coupled anything beyond the handoff lifecycle.
+#[test]
+fn unrelated_hooks_still_track_their_own_flags() {
+    for stop in [false, true] {
+        for post_tool_use in [false, true] {
+            for permission_request in [false, true] {
+                let config =
+                    get_cas_hooks_config(&matrix_config(true, stop, post_tool_use, permission_request));
+                let combo =
+                    format!("stop={stop} post_tool_use={post_tool_use} permission_request={permission_request}");
+
+                assert_eq!(event_installed(&config, "Stop"), stop, "[{combo}] Stop");
+                assert_eq!(
+                    event_installed(&config, "SubagentStop"),
+                    stop,
+                    "[{combo}] SubagentStop"
+                );
+                assert_eq!(
+                    event_installed(&config, "PostToolUse"),
+                    post_tool_use,
+                    "[{combo}] PostToolUse"
+                );
+                assert_eq!(
+                    event_installed(&config, "PermissionRequest"),
+                    permission_request,
+                    "[{combo}] PermissionRequest"
+                );
+            }
+        }
+    }
 }

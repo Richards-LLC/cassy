@@ -98,24 +98,33 @@ fn slugify_for_branch(title: &str) -> String {
 /// matching remote branches exist.
 ///
 /// Returns a list of unmerged branch names, or empty if all merged.
-fn check_unmerged_epic_branches(epic_id: &str, target_branch: &str) -> Vec<String> {
+fn check_unmerged_epic_branches(
+    repo_path: &std::path::Path,
+    epic_id: &str,
+    target_branch: &str,
+) -> Vec<String> {
     use std::collections::HashSet;
 
     let remote_branches = list_git_branches(
-        None,
+        Some(repo_path),
         &["branch", "-r", "--list", &format!("origin/{epic_id}/*")],
     );
     if !remote_branches.is_empty() {
-        let mut merged: HashSet<String> =
-            list_git_branches(None, &["branch", "-r", "--merged", target_branch])
-                .into_iter()
-                .collect();
+        let mut merged: HashSet<String> = list_git_branches(
+            Some(repo_path),
+            &["branch", "-r", "--merged", target_branch],
+        )
+        .into_iter()
+        .collect();
 
         if merged.is_empty() && !target_branch.starts_with("origin/") {
             let fallback_branch = format!("origin/{target_branch}");
-            merged = list_git_branches(None, &["branch", "-r", "--merged", &fallback_branch])
-                .into_iter()
-                .collect();
+            merged = list_git_branches(
+                Some(repo_path),
+                &["branch", "-r", "--merged", &fallback_branch],
+            )
+            .into_iter()
+            .collect();
         }
 
         return remote_branches
@@ -124,13 +133,16 @@ fn check_unmerged_epic_branches(epic_id: &str, target_branch: &str) -> Vec<Strin
             .collect();
     }
 
-    let local_branches = list_git_branches(None, &["branch", "--list", &format!("{epic_id}/*")]);
+    let local_branches = list_git_branches(
+        Some(repo_path),
+        &["branch", "--list", &format!("{epic_id}/*")],
+    );
     if local_branches.is_empty() {
         return vec![];
     }
 
     let merged_local: HashSet<String> =
-        list_git_branches(None, &["branch", "--merged", target_branch])
+        list_git_branches(Some(repo_path), &["branch", "--merged", target_branch])
             .into_iter()
             .collect();
 

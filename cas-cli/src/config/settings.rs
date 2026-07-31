@@ -159,6 +159,25 @@ pub struct FactoryConfig {
     /// mode. Default `false`: fall back to Claude with a loud warning.
     #[serde(default)]
     pub strict_cli: bool,
+
+    /// Filesystem usage percentage that surfaces factory Cargo cache pressure.
+    /// This is intentionally below ENOSPC so operators have time to inspect a
+    /// dry-run and reclaim stale, regenerable `target/` trees.
+    #[serde(default = "default_target_cache_high_watermark_percent")]
+    pub target_cache_high_watermark_percent: u8,
+
+    /// Cleanup stops once projected filesystem usage reaches this percentage.
+    #[serde(default = "default_target_cache_low_watermark_percent")]
+    pub target_cache_low_watermark_percent: u8,
+
+    /// A cache with a write newer than this many seconds is never reclaimed.
+    #[serde(default = "default_target_cache_min_idle_secs")]
+    pub target_cache_min_idle_secs: u64,
+
+    /// Number of the newest otherwise-stale worker caches retained as warm
+    /// build caches even while the filesystem is above the high watermark.
+    #[serde(default = "default_target_cache_retention_count")]
+    pub target_cache_retention_count: usize,
 }
 
 /// Durable staging configuration for large generated artifacts.
@@ -207,6 +226,22 @@ fn default_stall_threshold_secs() -> u64 {
     cas_factory::DEFAULT_STALL_THRESHOLD_SECS
 }
 
+fn default_target_cache_high_watermark_percent() -> u8 {
+    85
+}
+
+fn default_target_cache_low_watermark_percent() -> u8 {
+    75
+}
+
+fn default_target_cache_min_idle_secs() -> u64 {
+    60 * 60
+}
+
+fn default_target_cache_retention_count() -> usize {
+    1
+}
+
 impl Default for FactoryConfig {
     fn default() -> Self {
         Self {
@@ -218,6 +253,11 @@ impl Default for FactoryConfig {
             stall_threshold_secs: default_stall_threshold_secs(),
             epic_base_branch: None,
             strict_cli: false,
+            target_cache_high_watermark_percent:
+                default_target_cache_high_watermark_percent(),
+            target_cache_low_watermark_percent: default_target_cache_low_watermark_percent(),
+            target_cache_min_idle_secs: default_target_cache_min_idle_secs(),
+            target_cache_retention_count: default_target_cache_retention_count(),
         }
     }
 }
@@ -917,6 +957,22 @@ mod tests {
         );
         assert_eq!(fc.epic_base_branch, FactoryConfig::default().epic_base_branch);
         assert_eq!(fc.epic_base_branch, None);
+        assert_eq!(fc.target_cache_high_watermark_percent, 85);
+        assert_eq!(fc.target_cache_low_watermark_percent, 75);
+        assert_eq!(fc.target_cache_min_idle_secs, 3600);
+        assert_eq!(fc.target_cache_retention_count, 1);
+    }
+
+    #[test]
+    fn factory_target_cache_policy_is_configurable() {
+        let toml_str = "[factory]\ntarget_cache_high_watermark_percent = 90\ntarget_cache_low_watermark_percent = 70\ntarget_cache_min_idle_secs = 7200\ntarget_cache_retention_count = 2\n";
+        let parsed: std::collections::HashMap<String, FactoryConfig> =
+            toml::from_str(toml_str).expect("valid toml");
+        let fc = parsed.get("factory").expect("section present");
+        assert_eq!(fc.target_cache_high_watermark_percent, 90);
+        assert_eq!(fc.target_cache_low_watermark_percent, 70);
+        assert_eq!(fc.target_cache_min_idle_secs, 7200);
+        assert_eq!(fc.target_cache_retention_count, 2);
     }
 
     /// cas-9829: `stall_threshold_secs` defaults to a few minutes

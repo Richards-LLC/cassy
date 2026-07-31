@@ -1,7 +1,7 @@
-use crate::harness_policy::is_worker_without_subagents_from_env;
 use crate::mcp::tools::core::imports::*;
 
 pub(crate) mod close_ops;
+pub(crate) mod proof_scope;
 pub(crate) mod stale_close_guard;
 pub(crate) mod supervisor_push;
 
@@ -42,6 +42,15 @@ impl CasCore {
     pub async fn cas_task_create(
         &self,
         Parameters(req): Parameters<TaskCreateRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.cas_task_create_with_target(req, None, None).await
+    }
+
+    pub(crate) async fn cas_task_create_with_target(
+        &self,
+        req: TaskCreateRequest,
+        target_repo: Option<&str>,
+        target_branch: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
         let task_store = self.open_task_store()?;
 
@@ -115,6 +124,13 @@ impl CasCore {
                 data: None,
             })?
             .unwrap_or_default();
+        let work_target =
+            super::repo_context::declare_work_target(&self.cas_root, target_repo, target_branch)
+                .map_err(|message| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(message),
+                    data: None,
+                })?;
 
         let now = chrono::Utc::now();
         // cas-9fff: in factory mode, stamp the creating agent as
@@ -165,7 +181,10 @@ impl CasCore {
             external_ref: req.external_ref,
             content_hash: None,
             branch: None,
-            deliverables: crate::types::TaskDeliverables::default(),
+            deliverables: crate::types::TaskDeliverables {
+                work_target,
+                ..Default::default()
+            },
             team_id: None,
             worktree_id: None,
             pending_verification: false,
@@ -219,8 +238,22 @@ impl CasCore {
         {
             use crate::worktree::GitOperations;
 
-            // Get project root (parent of .cas directory)
-            let project_root = self.cas_root.parent().unwrap_or(&self.cas_root);
+            let declared_context = match task.deliverables.work_target.as_ref() {
+                Some(target) => Some(
+                    super::repo_context::resolve_repo_context(&self.cas_root, target).map_err(
+                        |message| McpError {
+                            code: ErrorCode::INVALID_PARAMS,
+                            message: Cow::from(message),
+                            data: None,
+                        },
+                    )?,
+                ),
+                None => None,
+            };
+            let project_root = declared_context
+                .as_ref()
+                .map(|context| context.repo_root.as_path())
+                .unwrap_or_else(|| self.cas_root.parent().unwrap_or(&self.cas_root));
 
             // Try to create epic branch using git operations directly
             // This works regardless of whether worktrees are enabled
@@ -231,7 +264,10 @@ impl CasCore {
                     let branch_name = format!("epic/{}-{}", slugify_for_branch(&task.title), id);
                     // Base epic branches on the configured trunk, never on
                     // the caller's incidental HEAD (cas-dc28).
-                    let trunk = git_ops.detect_default_branch();
+                    let trunk = declared_context
+                        .as_ref()
+                        .map(|context| context.target_branch.clone())
+                        .unwrap_or_else(|| git_ops.detect_default_branch());
                     let trunk_sha = git_ops.ref_sha(&trunk).unwrap_or_default();
                     let sha_preview = &trunk_sha[..trunk_sha.len().min(8)];
                     match git_ops.create_branch_from(&branch_name, &trunk) {
@@ -401,6 +437,16 @@ impl CasCore {
             ));
         }
 
+        if let Some(target) = task.deliverables.work_target.as_ref() {
+            super::repo_context::resolve_repo_context(&self.cas_root, target).map_err(
+                |message| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(message),
+                    data: None,
+                },
+            )?;
+        }
+
         // cas-a844/cas-5054: a genuinely conflicted parked branch is unfinished
         // work, so its assigned worker may resume it. A clean AwaitingMerge
         // task remains worker-complete and must stay parked for the supervisor.
@@ -443,41 +489,6 @@ impl CasCore {
         // Auto-claim the task with a lease
         let agent_id = self.get_agent_id()?;
 
-        // Check if agent has pending verification (blocks starting new tasks).
-        // Pass None so all leases are evaluated — start intentionally blocks
-        // across all unverified tasks, not just the one being started.
-        if let Some((blocked_task_id, blocked_task_title)) =
-            self.check_pending_verification(&agent_id, None)?
-        {
-            // Allow if starting the same task that's blocking (resuming work)
-            if blocked_task_id != req.id {
-                let is_worker_without_subagents = is_worker_without_subagents_from_env();
-
-                return Ok(Self::tool_error(format!(
-                    "🚫 VERIFICATION PENDING\n\n\
-                    You have an unverified task: [{}] {}\n\n\
-                    Before starting new work, complete verification:\n\
-                    {}\n\n\
-                    Use `cas_task_show` with id={} to see task details.",
-                    blocked_task_id,
-                    blocked_task_title,
-                    if is_worker_without_subagents {
-                        format!(
-                            "1. Ask supervisor to verify task {blocked_task_id} (task-verifier or direct mcp__cs__verification)\n\
-                            2. Fix any issues found\n\
-                            3. Ask supervisor to close the task once verification is approved"
-                        )
-                    } else {
-                        format!(
-                            "1. Spawn the 'task-verifier' agent with task_id={blocked_task_id}\n\
-                            2. Fix any issues found\n\
-                            3. Once verified, close the task and start new work"
-                        )
-                    },
-                    blocked_task_id
-                )));
-            }
-        }
         let agent_store = self.open_agent_store()?;
 
         // Check agent role for supervisor/worker-specific logic

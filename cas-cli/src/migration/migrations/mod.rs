@@ -184,6 +184,13 @@ mod m205_agents_factory_session_index;
 mod m206_spawn_queue_add_task_id;
 mod m207_task_lease_history_add_reason;
 mod m208_prompt_queue_recipient_seen_create_table;
+mod m209_retrieval_feedback_create_tables;
+mod m210_verifier_authority;
+mod m211_verification_dispatches;
+mod m212_worker_delivery_transactions;
+mod m213_verification_proof_boundaries;
+pub mod m214_known_repo_bindings;
+mod m215_verifier_server_handoffs;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -377,6 +384,16 @@ pub const MIGRATIONS: &[Migration] = &[
     m207_task_lease_history_add_reason::MIGRATION,
     // Register worker inbox per-recipient seen state (cas-337e)
     m208_prompt_queue_recipient_seen_create_table::MIGRATION,
+    // Versioned retrieval identity and explicit outcome feedback (cas-aeac)
+    m209_retrieval_feedback_create_tables::MIGRATION,
+    // Typed verifier provenance and one-time child capabilities (cas-941b)
+    m210_verifier_authority::MIGRATION,
+    // Explicit task-scoped verification dispatch ownership and recovery (cas-08ca)
+    m211_verification_dispatches::MIGRATION,
+    m212_worker_delivery_transactions::MIGRATION,
+    m213_verification_proof_boundaries::MIGRATION,
+    m214_known_repo_bindings::MIGRATION,
+    m215_verifier_server_handoffs::MIGRATION,
 ];
 
 #[cfg(test)]

@@ -41,6 +41,21 @@ pub struct VerificationAddRequest {
     #[schemars(description = "Verification type: 'task' (default) or 'epic'")]
     #[serde(default)]
     pub verification_type: Option<String>,
+
+    /// Legacy explicit bearer compatibility. New task-verifier children use
+    /// a sealed server-side handoff and omit this field.
+    #[schemars(
+        description = "Legacy explicit task-verifier bearer; new registered verifier children omit it and use their server-bound handoff"
+    )]
+    #[serde(default)]
+    pub verifier_capability: Option<String>,
+
+    /// Exact dispatch to resolve. Required for supervisor-direct verdicts.
+    #[schemars(
+        description = "Exact durable verification dispatch ID; required for supervisor-direct add"
+    )]
+    #[serde(default)]
+    pub dispatch_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

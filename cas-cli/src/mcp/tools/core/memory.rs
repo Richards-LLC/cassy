@@ -269,6 +269,7 @@ impl CasCore {
             activity,
             daemon,
             agent_id: std::sync::OnceLock::new(),
+            agent_identity_source: std::sync::OnceLock::new(),
             peer: std::sync::Arc::new(std::sync::RwLock::new(None)),
             cached_store: std::sync::OnceLock::new(),
             cached_rule_store: std::sync::OnceLock::new(),
@@ -293,7 +294,11 @@ impl CasCore {
     /// In production, the agent_id is discovered lazily via daemon socket query.
     /// In tests, there's no daemon, so we pre-set the agent_id directly.
     pub fn set_agent_id_for_testing(&self, agent_id: String) {
-        let _ = self.agent_id.set(Some(agent_id));
+        self.bind_agent_identity(
+            agent_id,
+            crate::mcp::server::AgentIdentitySource::ServerInternal,
+        )
+        .expect("test identity must bind exactly once");
     }
 
     // ========================================================================

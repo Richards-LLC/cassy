@@ -93,6 +93,60 @@ pub fn occurrence_from_updated_at(updated_at: DateTime<Utc>) -> String {
     updated_at.to_rfc3339()
 }
 
+/// Build the durable half of one lifecycle occurrence before a task mutation.
+///
+/// Closed-task reopen uses this value inside the same SQLite transaction as
+/// the task/proof/dependency changes. Prompt delivery remains the recoverable
+/// outbox step performed by [`emit_task_lifecycle_transition`] after commit.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_task_lifecycle_outbox(
+    agent_store: &dyn AgentStore,
+    task_id: &str,
+    task_title: &str,
+    old_status: TaskStatus,
+    new_status: TaskStatus,
+    actor: &str,
+    reason: Option<&str>,
+    kind: LifecycleTransition,
+    occurrence_id: &str,
+) -> Option<cas_store::TaskReopenLifecycleOutbox> {
+    let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
+    let supervisor = resolve_owning_supervisor(agent_store, factory_session.as_deref())?;
+    let transition_key = transition_key(
+        task_id,
+        old_status,
+        new_status,
+        factory_session.as_deref(),
+        kind,
+        occurrence_id,
+    );
+    let now = Utc::now();
+    let payload = json!({
+        "task_id": task_id,
+        "title": task_title,
+        "old_status": old_status.to_string(),
+        "new_status": new_status.to_string(),
+        "actor": actor,
+        "reason": reason,
+        "transition": kind.as_event_type(),
+        "factory_session": factory_session,
+        "supervisor_id": supervisor.agent_id,
+        "supervisor_name": supervisor.name,
+        "occurrence_id": occurrence_id,
+        "transition_key": transition_key,
+        "timestamp": now.to_rfc3339(),
+    })
+    .to_string();
+    let actor_is_owning_supervisor = actor == supervisor.agent_id || actor == supervisor.name;
+    Some(cas_store::TaskReopenLifecycleOutbox {
+        supervisor_id: supervisor.agent_id,
+        payload,
+        priority: kind.priority(),
+        transition_key,
+        prompt_delivered_at: actor_is_owning_supervisor.then_some(now),
+    })
+}
+
 /// Stable prompt_queue dedupe key for one durable lifecycle notification (cas-ecff).
 pub fn lifecycle_prompt_dedupe_key(notification_id: i64) -> String {
     format!("lifecycle-outbox:{notification_id}")

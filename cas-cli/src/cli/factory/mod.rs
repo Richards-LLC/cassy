@@ -356,6 +356,13 @@ pub struct KillAllArgs {
 /// Internal factory subcommands (hidden from help)
 #[derive(Subcommand, Debug, Clone)]
 pub enum FactoryCommands {
+    /// Run the bounded unified factory readiness report without spawning workers
+    Preflight {
+        /// Explicit CAS root (.cas directory)
+        #[arg(long)]
+        cas_root: Option<std::path::PathBuf>,
+    },
+
     /// Run as a factory daemon (internal use)
     #[command(hide = true)]
     Daemon {
@@ -698,6 +705,9 @@ pub enum FactoryCommands {
 pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>) -> Result<()> {
     if let Some(ref cmd) = args.command {
         return match cmd {
+            FactoryCommands::Preflight {
+                cas_root: sub_cas_root,
+            } => execute_unified_preflight(cli, sub_cas_root.as_deref().or(cas_root)),
             FactoryCommands::Daemon {
                 session,
                 cwd,
@@ -1246,6 +1256,26 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
     }
 }
 
+fn execute_unified_preflight(cli: &Cli, cas_root: Option<&std::path::Path>) -> Result<()> {
+    let project_root = std::env::current_dir()?;
+    let default_cas_root = project_root.join(".cas");
+    let cas_root = cas_root.unwrap_or(&default_cas_root);
+    let report =
+        crate::factory_preflight::collect_factory_preflight(&project_root, cas_root, false, None);
+    if cli.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "{}",
+            crate::factory_preflight::render_factory_preflight_human(&report)
+        );
+    }
+    if report.factory_blocked {
+        anyhow::bail!("factory preflight found critical blockers");
+    }
+    Ok(())
+}
+
 /// Attach to an existing factory session (local or remote via SSH)
 pub fn execute_attach(args: &AttachArgs) -> Result<()> {
     if let Some(ref remote_target) = args.remote {
@@ -1451,6 +1481,32 @@ fn preflight_factory_launch(
             None
         }
     };
+
+    if let Some(cas_root) = resolved_cas_root.as_deref() {
+        let config = Config::load(cas_root).unwrap_or_default();
+        let policy = crate::factory_target_cache::TargetCachePolicy::from(config.factory());
+        match crate::factory_target_cache::capacity_status(cwd, policy) {
+            Ok(capacity) if capacity.pressure => {
+                let warning = format!(
+                    "Cargo target-cache disk pressure: filesystem is {}% used (factory high watermark {}%, low watermark {}%). Run coordination gc_report, review TARGET_CACHE_STATUS_JSON, then explicitly run gc_cleanup force=true dry_run=false.",
+                    capacity.used_percent,
+                    capacity.high_watermark_percent,
+                    capacity.low_watermark_percent,
+                );
+                if args.workers > 0 {
+                    failures.push(format!(
+                        "{warning} Worker launch is blocked before builds can reach ENOSPC; start supervisor-only with --workers 0 to inspect and reclaim."
+                    ));
+                } else {
+                    notices.push(warning);
+                }
+            }
+            Ok(_) => {}
+            Err(error) => notices.push(format!(
+                "Cargo target-cache capacity probe unavailable (cleanup will fail closed): {error}"
+            )),
+        }
+    }
 
     let claude_installed = is_claude_installed();
     let grok_installed = is_grok_installed();

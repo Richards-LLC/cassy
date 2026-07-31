@@ -273,6 +273,42 @@ mod tests {
     }
 
     #[test]
+    fn work_target_roundtrips_in_sync_payload_without_host_paths() {
+        let (temp, store) = create_test_store();
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        let mut task = Task::new("task-target".to_string(), "Cross repo".to_string());
+        task.deliverables.work_target = Some(crate::types::WorkTarget {
+            repo_selector: "remote:github.com/org/repo".to_string(),
+            target_branch: "master".to_string(),
+        });
+        task.deliverables.pre_close_hook = Some(crate::types::PreCloseHookEvidence {
+            repo_selector: "remote:github.com/org/repo".to_string(),
+            target_branch: "master".to_string(),
+            worktree_branch: Some("factory/worker".to_string()),
+            task_tip: Some("0123456789abcdef".to_string()),
+        });
+        store.add(&task).unwrap();
+
+        let pending = queue.pending(10, 5).unwrap();
+        let payload = pending[0].payload.as_deref().unwrap();
+        assert!(payload.contains("remote:github.com/org/repo"));
+        assert!(!payload.contains(temp.path().to_string_lossy().as_ref()));
+        let roundtrip: Task = serde_json::from_str(payload).unwrap();
+        assert_eq!(
+            roundtrip
+                .deliverables
+                .work_target
+                .as_ref()
+                .unwrap()
+                .target_branch,
+            "master"
+        );
+        let evidence = roundtrip.deliverables.pre_close_hook.as_ref().unwrap();
+        assert_eq!(evidence.worktree_branch.as_deref(), Some("factory/worker"));
+        assert_eq!(evidence.task_tip.as_deref(), Some("0123456789abcdef"));
+    }
+
+    #[test]
     fn test_delete_queues_sync() {
         let (temp, store) = create_test_store();
         let queue = SyncQueue::open(temp.path()).unwrap();

@@ -23,6 +23,7 @@ compile_error!(
 // Core modules
 pub mod agent_id;
 pub mod async_runtime;
+mod bounded_process;
 pub mod bridge;
 pub mod builtins;
 pub mod cli;
@@ -33,6 +34,8 @@ pub mod daemon;
 pub mod duplicate_check;
 pub mod error;
 pub mod extraction;
+pub mod factory_preflight;
+pub mod factory_target_cache;
 pub mod harness_policy;
 pub mod hooks;
 pub mod hybrid_search;

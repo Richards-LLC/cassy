@@ -1639,6 +1639,25 @@ impl CasService {
             .filter(|wt| !Path::new(&wt.path).exists())
             .collect();
 
+        let target_cache_report = {
+            let config = crate::config::Config::load(&self.inner.cas_root).unwrap_or_default();
+            let policy = crate::factory_target_cache::TargetCachePolicy::from(config.factory());
+            let live_roots = live_target_cache_worktrees(agent_store.as_ref());
+            let known_roots = known_target_cache_worktrees(
+                &self.inner.cas_root,
+                &config,
+                agent_store.as_ref(),
+                worktree_store.as_ref(),
+            );
+            crate::factory_target_cache::inspect(
+                &self.inner.cas_root,
+                policy,
+                &known_roots,
+                &live_roots,
+                true,
+            )
+        };
+
         let mut out = String::from("Factory GC Report\n=================\n");
         out.push_str(&format!(
             "\nStale agent threshold: {}s\nStale agents: {}\nPending prompts: {}\nActive worktrees: {}\nOrphan worktrees: {}\nOrphan worker process groups: {}\nLive-owned process groups skipped: {}\nUnverifiable process-group records preserved: {}\nStale process-group records: {}\n",
@@ -1697,6 +1716,36 @@ impl CasService {
                     record.worker_name, record.factory_session, record.pgid,
                 ));
             }
+        }
+
+        match target_cache_report {
+            Ok(report) => {
+                out.push_str(&format!(
+                    "\nCargo target cache pressure:\n  filesystem used: {}% (high {}%, low {}%)\n  pressure: {}\n  exact cache bytes: {}\n  selected reclaimable bytes: {}\n",
+                    report.filesystem.used_percent,
+                    report.filesystem.high_watermark_percent,
+                    report.filesystem.low_watermark_percent,
+                    report.filesystem.pressure,
+                    report.candidate_bytes,
+                    report.selected_bytes,
+                ));
+                for cache in &report.caches {
+                    out.push_str(&format!(
+                        "  - {} bytes={} state={:?} reason={}\n",
+                        cache.path.display(),
+                        cache.bytes,
+                        cache.disposition,
+                        cache.reason,
+                    ));
+                }
+                out.push_str(&format!(
+                    "TARGET_CACHE_STATUS_JSON={}\n",
+                    report.machine_json()
+                ));
+            }
+            Err(error) => out.push_str(&format!(
+                "\nCargo target cache pressure: unavailable (fail-closed; no cache cleanup): {error}\n"
+            )),
         }
 
         // Task cas-a9ab: surface uncommitted files in the main worktree as
@@ -1940,6 +1989,7 @@ impl CasService {
             )
         })?;
         let live_workers = live_factory_workers(agent_store.as_ref());
+        let live_target_cache_roots = live_target_cache_worktrees(agent_store.as_ref());
         let (
             orphan_process_groups,
             live_owned_process_groups,
@@ -2082,6 +2132,41 @@ impl CasService {
         let stale_skill_markers_removed =
             cleanup_stale_skill_markers(&self.inner.cas_root, SKILL_MARKER_MAX_AGE);
 
+        // Target-cache reclamation has a stricter destructive gate than the
+        // legacy GC actions: both force=true AND dry_run=false must be
+        // explicit. Existing `gc_cleanup force=true` calls remain preview-only
+        // for Cargo artifacts instead of unexpectedly deleting warm caches.
+        let target_cache_mutation_authorized =
+            req.force.unwrap_or(false) && req.dry_run == Some(false);
+        let target_cache_result = {
+            let config = crate::config::Config::load(&self.inner.cas_root).unwrap_or_default();
+            let policy = crate::factory_target_cache::TargetCachePolicy::from(config.factory());
+            let known_roots = known_target_cache_worktrees(
+                &self.inner.cas_root,
+                &config,
+                agent_store.as_ref(),
+                worktree_store.as_ref(),
+            );
+            crate::factory_target_cache::inspect(
+                &self.inner.cas_root,
+                policy,
+                &known_roots,
+                &live_target_cache_roots,
+                !target_cache_mutation_authorized,
+            )
+            .and_then(|mut report| {
+                if target_cache_mutation_authorized {
+                    crate::factory_target_cache::cleanup_selected(
+                        &self.inner.cas_root,
+                        &mut report,
+                        policy,
+                        &live_target_cache_roots,
+                    )?;
+                }
+                Ok(report)
+            })
+        };
+
         let mut output = format!(
             "Factory GC cleanup complete.\n\nStale agents marked: {stale_marked}\nDead agent records purged: {dead_agent_records_purged}\nOrphan worktrees marked removed: {orphan_marked_removed}\nOrphan worker process groups reaped: {orphan_process_groups_reaped}\nLive-owned process groups skipped: {live_owned_process_groups_skipped}\nUnverifiable process-group records preserved: {}\nStale process-group records removed: {stale_process_group_records_removed}\nPrompt queue entries expired: {expired_prompts}\nPrompt queue entries cleared: {cleared_prompts}\nStale skill markers removed: {stale_skill_markers_removed}",
             unverifiable_process_groups.len(),
@@ -2098,6 +2183,34 @@ impl CasService {
                 output.push_str(&format!("\n  - {error}"));
             }
         }
+        match target_cache_result {
+            Ok(report) => {
+                output.push_str(&format!(
+                    "\n\nCargo target caches: mode={} candidates={} bytes={} selected_bytes={} reclaimed_bytes={}",
+                    if report.dry_run { "dry-run" } else { "cleanup" },
+                    report.caches.len(),
+                    report.candidate_bytes,
+                    report.selected_bytes,
+                    report.reclaimed_bytes,
+                ));
+                for cache in &report.caches {
+                    output.push_str(&format!(
+                        "\n  - {} bytes={} state={:?} reason={}",
+                        cache.path.display(),
+                        cache.bytes,
+                        cache.disposition,
+                        cache.reason,
+                    ));
+                }
+                output.push_str(&format!(
+                    "\nTARGET_CACHE_STATUS_JSON={}",
+                    report.machine_json()
+                ));
+            }
+            Err(error) => output.push_str(&format!(
+                "\n\nCargo target caches: unavailable (fail-closed; none deleted): {error}"
+            )),
+        }
 
         Ok(Self::success(output))
     }
@@ -2109,6 +2222,49 @@ fn live_factory_workers(
     agent_store: &dyn cas_store::AgentStore,
 ) -> LiveFactoryWorkers {
     live_factory_workers_from_agents(agent_store.list(None).unwrap_or_default())
+}
+
+fn live_target_cache_worktrees(agent_store: &dyn cas_store::AgentStore) -> Vec<std::path::PathBuf> {
+    agent_store
+        .list(None)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|agent| {
+            crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness(agent)
+                .is_live()
+        })
+        .filter_map(|agent| agent.metadata.get("clone_path").map(std::path::PathBuf::from))
+        .collect()
+}
+
+fn known_target_cache_worktrees(
+    cas_root: &std::path::Path,
+    config: &crate::config::Config,
+    agent_store: &dyn cas_store::AgentStore,
+    worktree_store: &dyn cas_store::WorktreeStore,
+) -> Vec<std::path::PathBuf> {
+    let mut roots = std::collections::HashSet::new();
+    roots.extend(
+        agent_store
+            .list(None)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|agent| agent.metadata.get("clone_path").map(std::path::PathBuf::from)),
+    );
+    roots.extend(
+        worktree_store
+            .list()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|worktree| worktree.path),
+    );
+    if let Some(repo_root) = cas_root.parent() {
+        let configured_base = config.worktrees().resolve_base_path(repo_root);
+        if let Ok(entries) = std::fs::read_dir(configured_base) {
+            roots.extend(entries.flatten().map(|entry| entry.path()));
+        }
+    }
+    roots.into_iter().collect()
 }
 
 fn live_factory_workers_from_agents(

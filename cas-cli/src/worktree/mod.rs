@@ -32,6 +32,7 @@ pub mod git;
 mod manager;
 pub mod salvage;
 pub mod sweep;
+pub mod target_lock;
 
 pub use external_symlinks::{scan_external_symlinks_into, ExternalSymlink};
 pub use git::{GitError, GitOperations};

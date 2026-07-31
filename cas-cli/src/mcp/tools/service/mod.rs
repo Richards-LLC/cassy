@@ -16,9 +16,9 @@
 //! - mcp_execute: Execute tool calls across connected upstream MCP servers
 
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ErrorCode};
 #[cfg(feature = "mcp-proxy")]
 use rmcp::model::Content;
+use rmcp::model::{CallToolResult, ErrorCode};
 use rmcp::{ErrorData as McpError, tool, tool_router};
 
 use crate::mcp::server::CasCore;
@@ -162,6 +162,17 @@ impl CasService {
             .collect()
     }
 
+    /// Names compiled into this build without opening a store or starting an
+    /// MCP server. Factory preflight uses this as local tool-availability
+    /// evidence; an active MCP invocation separately records live observation.
+    pub fn registered_tool_names_for_build() -> Vec<String> {
+        Self::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.into_owned())
+            .collect()
+    }
+
     #[allow(dead_code)]
     fn success(text: impl Into<String>) -> CallToolResult {
         CasCore::success(text)
@@ -203,10 +214,6 @@ impl CasService {
                     | "opinion_weaken"
                     | "opinion_contradict"
             );
-
-            // Verification jail check
-            this.inner
-                .authorize_agent_action("memory", &action, is_mutating, None)?;
 
             let result = match req.action.as_str() {
                 "remember" => this.memory_remember(req).await,
@@ -277,32 +284,6 @@ impl CasService {
                     | "reset"
                     | "transfer"
             );
-
-            // Verification jail check.
-            // cas-a3ca: for task.close, scope the jail to only the requested
-            // task so an unrelated in-progress task cannot block closing a
-            // separately verified task.
-            let close_task_id = if action == "close" {
-                req.id.as_deref()
-            } else {
-                None
-            };
-            if let Err(error) =
-                this.inner
-                    .authorize_agent_action("task", &action, is_mutating, close_task_id)
-            {
-                let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(
-                    &this.inner.cas_root,
-                    "error",
-                    &[
-                        ("tool", "task"),
-                        ("action", &action),
-                        ("task_id", &event_task_id),
-                        ("message", error.message.as_ref()),
-                    ],
-                );
-                return Err(error);
-            }
 
             let result = match req.action.as_str() {
                 "create" => this.task_create(req).await,
@@ -379,10 +360,6 @@ impl CasService {
                 "create" | "update" | "delete" | "helpful" | "harmful" | "sync"
             );
 
-            // Verification jail check
-            this.inner
-                .authorize_agent_action("rule", &action, is_mutating, None)?;
-
             let result = match req.action.as_str() {
                 "create" => this.rule_create(req).await,
                 "show" => this.rule_show(req).await,
@@ -434,10 +411,6 @@ impl CasService {
                 req.action.as_str(),
                 "create" | "update" | "delete" | "enable" | "disable" | "sync" | "use"
             );
-
-            // Verification jail check
-            this.inner
-                .authorize_agent_action("skill", &action, is_mutating, None)?;
 
             let result = match req.action.as_str() {
                 "create" => this.skill_create(req).await,
@@ -701,7 +674,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Search and context operations. Actions: search (BM25 full-text), context (session context), context_for_subagent, observe (record observation), entity_list, entity_show, entity_extract, code_search (search code symbols), code_show (show symbol details), grep, blame."
+        description = "Search and context operations. Actions: search (BM25 full-text), retrieval_feedback (explicit retrieval outcome), retrieval_metrics (offline outcome aggregation), context (session context), context_for_subagent, observe (record observation), entity_list, entity_show, entity_extract, code_search (search code symbols), code_show (show symbol details), grep, blame."
     )]
     pub async fn search(
         &self,
@@ -712,6 +685,8 @@ impl CasService {
             let action = req.action.clone();
             let result = match req.action.as_str() {
                 "search" => this.search_impl(req).await,
+                "retrieval_feedback" => this.retrieval_feedback_impl(req).await,
+                "retrieval_metrics" => this.retrieval_metrics_impl().await,
                 "context" => this.context_impl(req).await,
                 "context_for_subagent" => this.context_for_subagent_impl(req).await,
                 "observe" => this.observe_impl(req).await,
@@ -725,7 +700,7 @@ impl CasService {
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Unknown search action: {}. Valid: search, context, context_for_subagent, observe, entity_list, entity_show, entity_extract, code_search, code_show, grep, blame",
+                        "Unknown search action: {}. Valid: search, retrieval_feedback, retrieval_metrics, context, context_for_subagent, observe, entity_list, entity_show, entity_extract, code_search, code_show, grep, blame",
                         req.action
                     ),
                 )),
@@ -744,7 +719,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "System operations. Actions: version (CAS version info), doctor (diagnostics), stats, info (system info), reindex (BM25 index), maintenance_run, maintenance_status, config_docs (full config reference), config_search (search configs by query), report_cas_bug (submit CAS bug to GitHub - ANONYMIZE DATA: remove paths, credentials, proprietary code before submitting), proxy_add (add upstream MCP server), proxy_remove (remove server), proxy_list (list servers)."
+        description = "System operations. Actions: version (CAS version info), preflight (bounded unified factory readiness report), doctor (diagnostics), stats, info (system info), reindex (BM25 index), maintenance_run, maintenance_status, config_docs (full config reference), config_search (search configs by query), report_cas_bug (submit CAS bug to GitHub - ANONYMIZE DATA: remove paths, credentials, proprietary code before submitting), proxy_add (add upstream MCP server), proxy_remove (remove server), proxy_list (list servers), proxy_health (credential-free upstream health/backoff state)."
     )]
     pub async fn system(
         &self,
@@ -762,6 +737,7 @@ impl CasService {
             let action = req.action.clone();
             let result = match req.action.as_str() {
                 "version" => this.system_version().await,
+                "preflight" => this.system_preflight().await,
                 "doctor" => this.system_doctor(req).await,
                 "stats" => this.system_stats(req).await,
                 "info" => this.system_info(req).await,
@@ -777,12 +753,14 @@ impl CasService {
                 "proxy_remove" => this.system_proxy_remove(req).await,
                 #[cfg(feature = "mcp-proxy")]
                 "proxy_list" => this.system_proxy_list(req).await,
+                #[cfg(feature = "mcp-proxy")]
+                "proxy_health" => this.system_proxy_health(req).await,
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Unknown system action: {}. Valid: version, doctor, stats, info, reindex, maintenance_run, maintenance_status, config_docs, config_search, report_cas_bug{}",
+                        "Unknown system action: {}. Valid: version, preflight, doctor, stats, info, reindex, maintenance_run, maintenance_status, config_docs, config_search, report_cas_bug{}",
                         req.action,
-                        if cfg!(feature = "mcp-proxy") { ", proxy_add, proxy_remove, proxy_list" } else { "" }
+                        if cfg!(feature = "mcp-proxy") { ", proxy_add, proxy_remove, proxy_list, proxy_health" } else { "" }
                     ),
                 )),
             };
@@ -881,26 +859,6 @@ impl CasService {
         let this = self.clone();
         panic_catch::dispatch_with_catch("pattern", async move {
             let action = req.action.clone();
-            let is_mutating = matches!(
-                req.action.as_str(),
-                "create"
-                    | "update"
-                    | "archive"
-                    | "adopt"
-                    | "helpful"
-                    | "harmful"
-                    | "team_create_suggestion"
-                    | "team_share"
-                    | "team_adopt"
-                    | "team_dismiss"
-                    | "team_recommend"
-                    | "team_archive_suggestion"
-            );
-
-            // Verification jail check
-            this.inner
-                .authorize_agent_action("pattern", &action, is_mutating, None)?;
-
             let result = match req.action.as_str() {
                 "create" => this.pattern_create(req).await,
                 "list" => this.pattern_list(req).await,
@@ -962,10 +920,6 @@ impl CasService {
                     | "unlink"
                     | "sync"
             );
-
-            // Verification jail check
-            this.inner
-                .authorize_agent_action("spec", &action, is_mutating, None)?;
 
             let result = match req.action.as_str() {
                 "create" => this.spec_create(req).await,
@@ -1152,8 +1106,8 @@ impl CasService {
 // Implementation methods - delegate to inner CasService
 // ============================================================================
 
-mod agent_search_system;
 pub(crate) mod agent_liveness;
+mod agent_search_system;
 mod core;
 pub(crate) mod factory_ops;
 mod factory_remind;
@@ -1214,6 +1168,85 @@ mod tests {
                 names.iter().any(|n| n == required),
                 "missing canonical tool '{required}' in registry: {names:?}"
             );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn active_system_preflight_is_live_mcp_evidence_without_project_registration() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = TempDir::new().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "git@example.invalid:org/preflight.git",
+            ])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        std::fs::create_dir(dir.path().join(".cas")).unwrap();
+        std::fs::write(
+            dir.path().join(".cas/config.toml"),
+            "[project]\ncanonical_id = \"mcp-preflight-test\"\n",
+        )
+        .unwrap();
+        assert!(!dir.path().join(".mcp.json").exists());
+
+        let core = CasCore::with_daemon(dir.path().join(".cas"), None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let svc = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let svc = CasService::new(core);
+        let req: SystemRequest = serde_json::from_value(serde_json::json!({
+            "action": "preflight"
+        }))
+        .unwrap();
+        let started = std::time::Instant::now();
+        let result = svc.system(Parameters(req)).await.unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(7),
+            "MCP preflight exceeded its advertised runtime bound: {:?}",
+            started.elapsed()
+        );
+        let text = result
+            .content
+            .into_iter()
+            .filter_map(|content| match content.raw {
+                rmcp::model::RawContent::Text(text) => Some(text.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let report: crate::factory_preflight::FactoryPreflightReport =
+            serde_json::from_str(&text).unwrap();
+
+        assert_eq!(report.schema_version, 2);
+        assert!(report.runtime_elapsed_ms < report.runtime_bound_ms);
+        assert!(report.cas_mcp.observed_via_mcp);
+        assert!(!report.cas_mcp.configured);
+        assert_eq!(
+            report.cas_mcp.state,
+            crate::factory_preflight::ComponentState::Ready
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|finding| finding.code != "cas_mcp.registration_missing")
+        );
+        for forbidden in [
+            dir.path().to_string_lossy().as_ref(),
+            "git -C",
+            "Bearer ",
+            "token=",
+        ] {
+            assert!(!text.contains(forbidden), "{forbidden} leaked: {text}");
         }
     }
 }

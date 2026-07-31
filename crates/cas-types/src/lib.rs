@@ -35,6 +35,7 @@ pub mod error;
 mod agent;
 mod code_review;
 mod commit_link;
+mod delivery;
 mod dependency;
 mod entity;
 mod entry;
@@ -42,7 +43,9 @@ mod event;
 mod file_change;
 mod lease;
 mod loop_state;
+mod preview;
 mod prompt;
+mod public_identifier;
 mod recording;
 mod rule;
 mod scope;
@@ -51,7 +54,6 @@ mod session;
 mod skill;
 mod sort;
 mod spec;
-mod preview;
 mod task;
 mod verification;
 mod worktree;
@@ -67,6 +69,10 @@ pub use code_review::{
     review_outcome_shape_hint,
 };
 pub use commit_link::CommitLink;
+pub use delivery::{
+    WorkerCompletionReceipt, WorkerCompletionReceiptInput, WorkerDeliveryEvent,
+    WorkerDeliveryState, WorkerDeliveryTransaction,
+};
 pub use dependency::{Dependency, DependencyType};
 pub use entity::{Entity, EntityMention, EntityType, RelationType, Relationship};
 pub use entry::{BeliefType, Entry, EntryType, MemoryTier, ObservationType};
@@ -75,6 +81,10 @@ pub use file_change::{ChangeType, FileChange};
 pub use lease::{ClaimResult, LeaseStatus, TaskLease, WorktreeClaimResult, WorktreeLease};
 pub use loop_state::{Loop, LoopStatus};
 pub use prompt::{AgentInfo, Message, MessageRole, Prompt};
+pub use public_identifier::{
+    PublicUpstreamIdResolution, is_generated_public_upstream_id, public_tool_id, public_tool_ids,
+    public_upstream_id, public_upstream_ids, resolve_public_upstream_id,
+};
 pub use recording::{
     Recording, RecordingAgent, RecordingEvent, RecordingEventType, RecordingQuery,
 };
@@ -91,9 +101,14 @@ pub use sort::{
     TaskSortOptions,
 };
 pub use spec::{Spec, SpecStatus, SpecType};
-pub use task::{Priority, Task, TaskDeliverables, TaskDepth, TaskStatus, TaskType};
+pub use task::{
+    PreCloseHookEvidence, Priority, Task, TaskDeliverables, TaskDepth, TaskStatus, TaskType,
+    WorkTarget,
+};
 pub use verification::{
-    IssueSeverity, Verification, VerificationIssue, VerificationStatus, VerificationType,
+    IssueSeverity, Verification, VerificationDispatch, VerificationDispatchState,
+    VerificationIssue, VerificationProofBoundary, VerificationProvenance,
+    VerificationRecoveryAction, VerificationStatus, VerificationType, VerifierCapability,
 };
 pub use worktree::{GitContext, Worktree, WorktreeStatus};
 

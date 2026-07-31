@@ -129,6 +129,11 @@ pub struct EmbeddedDaemon {
     /// Last known mtime of .cas/proxy.toml for change detection
     #[cfg(feature = "mcp-proxy")]
     proxy_config_mtime: std::sync::Mutex<Option<std::time::SystemTime>>,
+    /// Last successful authoritative snapshot refresh. Healthy proxies still
+    /// republish periodically so stopped servers cannot leave indefinitely
+    /// fresh-looking evidence behind.
+    #[cfg(feature = "mcp-proxy")]
+    proxy_snapshot_refreshed_at: std::sync::Mutex<Option<std::time::Instant>>,
     /// Agent ID for heartbeat (set after registration)
     agent_id: RwLock<Option<String>>,
     /// PID → session ID mapping for hooks to look up their session
@@ -174,6 +179,8 @@ impl EmbeddedDaemon {
             proxy: RwLock::new(None),
             #[cfg(feature = "mcp-proxy")]
             proxy_config_mtime: std::sync::Mutex::new(None),
+            #[cfg(feature = "mcp-proxy")]
+            proxy_snapshot_refreshed_at: std::sync::Mutex::new(None),
             agent_id: RwLock::new(None),
             pid_sessions: RwLock::new(std::collections::HashMap::new()),
         }
@@ -197,14 +204,40 @@ impl EmbeddedDaemon {
                 }
             }
         }
+        if let Ok(mut guard) = self.proxy_snapshot_refreshed_at.lock() {
+            *guard = Some(std::time::Instant::now());
+        }
         let mut proxy_guard = self.proxy.write().await;
         *proxy_guard = Some(proxy);
+    }
+
+    #[cfg(feature = "mcp-proxy")]
+    fn proxy_snapshot_refresh_due(&self) -> bool {
+        self.proxy_snapshot_refreshed_at
+            .lock()
+            .ok()
+            .and_then(|guard| *guard)
+            .is_none_or(|last| last.elapsed() >= std::time::Duration::from_secs(30))
+    }
+
+    #[cfg(feature = "mcp-proxy")]
+    fn mark_proxy_snapshot_refreshed(&self) {
+        if let Ok(mut guard) = self.proxy_snapshot_refreshed_at.lock() {
+            *guard = Some(std::time::Instant::now());
+        }
     }
 
     /// Check if proxy.toml has changed since last check, reload if so
     #[cfg(feature = "mcp-proxy")]
     async fn check_proxy_config_reload(&self) {
         let proxy_path = self.config.cas_root.join("proxy.toml");
+        let proxy = {
+            let proxy_guard = self.proxy.read().await;
+            proxy_guard.as_ref().cloned()
+        };
+        let Some(proxy) = proxy else {
+            return;
+        };
 
         // Check mtime
         let new_mtime = match std::fs::metadata(&proxy_path) {
@@ -220,6 +253,17 @@ impl EmbeddedDaemon {
         };
 
         if !changed {
+            let retried = proxy.retry_unhealthy().await > 0;
+            if retried || self.proxy_snapshot_refresh_due() {
+                match crate::mcp::server::write_proxy_snapshot_cache(&self.config.cas_root, &proxy)
+                    .await
+                {
+                    Ok(()) => self.mark_proxy_snapshot_refreshed(),
+                    Err(error) => {
+                        eprintln!("[CAS] Failed to publish MCP proxy state: {error}");
+                    }
+                }
+            }
             return;
         }
 
@@ -227,12 +271,6 @@ impl EmbeddedDaemon {
         if let Ok(mut guard) = self.proxy_config_mtime.lock() {
             *guard = new_mtime;
         }
-
-        // Reload proxy config
-        let proxy_guard = self.proxy.read().await;
-        let Some(proxy) = proxy_guard.as_ref() else {
-            return;
-        };
 
         eprintln!("[CAS] Proxy config changed, reloading...");
 
@@ -245,22 +283,55 @@ impl EmbeddedDaemon {
         match cfg {
             Ok(cfg) => {
                 let server_count = cfg.servers.len();
+                let snapshot_config = cfg.clone();
                 match proxy.reload(cfg.servers).await {
                     Ok(()) => {
                         let tool_count = proxy.tool_count().await;
                         eprintln!(
                             "[CAS] Proxy reloaded ({server_count} server(s), {tool_count} tools)"
                         );
-                        crate::mcp::server::write_proxy_catalog_cache(&self.config.cas_root, proxy)
-                            .await;
+                        match crate::mcp::server::write_proxy_snapshot_cache_for_config(
+                            &self.config.cas_root,
+                            &proxy,
+                            &snapshot_config,
+                        )
+                        .await
+                        {
+                            Ok(()) => self.mark_proxy_snapshot_refreshed(),
+                            Err(error) => {
+                                eprintln!("[CAS] Failed to publish MCP proxy state: {error}");
+                            }
+                        }
                     }
                     Err(e) => {
                         eprintln!("[CAS] Proxy reload failed: {e}");
+                        match crate::mcp::server::write_unavailable_proxy_snapshot_cache(
+                            &self.config.cas_root,
+                            Some(&snapshot_config),
+                            crate::mcp::server::ProxySnapshotFailure::EngineReloadFailed,
+                        ) {
+                            Ok(()) => self.mark_proxy_snapshot_refreshed(),
+                            Err(error) => {
+                                eprintln!(
+                                    "[CAS] Failed to publish MCP proxy failure state: {error}"
+                                );
+                            }
+                        }
                     }
                 }
             }
             Err(e) => {
                 eprintln!("[CAS] Failed to load proxy config: {e}");
+                match crate::mcp::server::write_unavailable_proxy_snapshot_cache(
+                    &self.config.cas_root,
+                    None,
+                    crate::mcp::server::ProxySnapshotFailure::ConfigInvalid,
+                ) {
+                    Ok(()) => self.mark_proxy_snapshot_refreshed(),
+                    Err(error) => {
+                        eprintln!("[CAS] Failed to publish MCP proxy failure state: {error}");
+                    }
+                }
             }
         }
     }
@@ -829,11 +900,15 @@ impl EmbeddedDaemon {
             // PPID is less reliable from the hook, so we skip it for socket-registered agents
             agent.machine_id = Some(Agent::get_or_generate_machine_id());
 
-            // Set role from the event (passed from hook's environment)
-            if let Some(role_str) = agent_role {
-                if let Ok(role) = role_str.parse::<AgentRole>() {
-                    agent.role = role;
-                }
+            // The socket event forwards hook environment and therefore may
+            // bootstrap Worker only. Supervisor/Director authority must come
+            // from a server-created durable row, which the conflict-safe
+            // registration path preserves.
+            if agent_role
+                .as_deref()
+                .is_some_and(|role| role.eq_ignore_ascii_case("worker"))
+            {
+                agent.role = AgentRole::Worker;
             }
 
             apply_factory_worker_metadata(&mut agent, clone_path.as_deref());

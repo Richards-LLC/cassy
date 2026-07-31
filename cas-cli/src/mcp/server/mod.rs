@@ -10,18 +10,28 @@ use rmcp::service::Peer;
 use rmcp::service::RoleServer;
 
 use crate::config::Config;
-use crate::harness_policy::{verification_required_for_task_type, worker_coordination_tool};
 use crate::store::{
     AgentStore, EntityStore, RuleStore, SkillStore, Store, TaskStore, VerificationStore,
     WorktreeStore, open_agent_store, open_entity_store, open_rule_store, open_skill_store,
     open_store, open_task_store, open_verification_store, open_worktree_store,
 };
-use crate::types::TaskStatus;
 use cas_core::SearchIndex;
 use cas_core::{SkillSyncer, Syncer};
 use tracing::{debug, info, warn};
 
 use crate::mcp::daemon::{ActivityTracker, EmbeddedDaemon, EmbeddedDaemonStatus};
+
+/// Provenance of the current in-process agent identity.
+///
+/// This is deliberately not deserializable and never derived from request or
+/// environment fields. Privileged workflow authority may rely on
+/// `ServerInternal`, but never on an identity first established by a public
+/// registration tool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AgentIdentitySource {
+    ServerInternal,
+    PublicRegistration,
+}
 
 /// Core CAS service - provides store access and helper methods
 ///
@@ -43,6 +53,8 @@ pub struct CasCore {
     pub(crate) daemon: Option<Arc<EmbeddedDaemon>>,
     /// Agent ID for multi-agent coordination (lazily initialized on first tool call)
     pub(crate) agent_id: OnceLock<Option<String>>,
+    /// Server-side provenance for `agent_id`; absent is always non-authoritative.
+    pub(crate) agent_identity_source: OnceLock<AgentIdentitySource>,
     /// Peer reference for sending MCP notifications (Claude Code 2.1.0+)
     /// Captured on first request, used to notify client of resource changes
     pub(crate) peer: Arc<RwLock<Option<Peer<RoleServer>>>>,
@@ -62,6 +74,53 @@ pub struct CasCore {
 }
 
 impl CasCore {
+    pub(crate) fn bind_agent_identity(
+        &self,
+        agent_id: String,
+        source: AgentIdentitySource,
+    ) -> Result<(), McpError> {
+        if let Some(Some(existing)) = self.agent_id.get()
+            && existing != &agent_id
+        {
+            // Registration is also used to announce another agent to an
+            // already-authenticated server. Preserve that compatible durable
+            // registration path, but never let it replace the server's own
+            // immutable identity or provenance.
+            return Ok(());
+        }
+        let _ = self.agent_id.set(Some(agent_id));
+        let _ = self.agent_identity_source.set(source);
+        Ok(())
+    }
+
+    pub(crate) fn has_server_internal_identity(&self, agent_id: &str) -> bool {
+        self.agent_id
+            .get()
+            .and_then(Option::as_deref)
+            .is_some_and(|bound| bound == agent_id)
+            && self.agent_identity_source.get() == Some(&AgentIdentitySource::ServerInternal)
+    }
+
+    pub(crate) fn ensure_public_registration_target(&self, agent_id: &str) -> Result<(), McpError> {
+        let agent_store = self.open_agent_store()?;
+        if agent_store.get(agent_id).ok().is_some_and(|agent| {
+            matches!(
+                agent.role,
+                crate::types::AgentRole::Supervisor | crate::types::AgentRole::Director
+            )
+        }) && !self.has_server_internal_identity(agent_id)
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(
+                    "Public registration cannot attach to an existing supervisor or director identity.",
+                ),
+                data: None,
+            });
+        }
+        Ok(())
+    }
+
     /// Helper: get cached store or initialize it.
     /// Safe for concurrent access — if two threads race, one wins and the other
     /// gets the canonical instance from `get()`.
@@ -396,7 +455,10 @@ impl CasCore {
                         agent_id = %agent.id,
                         "Found agent by PPID fallback"
                     );
-                    let _ = self.agent_id.set(Some(agent.id.clone()));
+                    self.bind_agent_identity(
+                        agent.id.clone(),
+                        AgentIdentitySource::ServerInternal,
+                    )?;
                     self.ensure_agent_active(&agent.id)?;
                     return Ok(agent.id);
                 }
@@ -412,6 +474,57 @@ impl CasCore {
                 })
             }
         }
+    }
+
+    /// Resolve the authenticated CAS session without registering or reviving
+    /// it. Security-sensitive proof submission uses this read-only variant so
+    /// a dead or unknown caller can be rejected before any durable mutation.
+    pub(crate) fn get_registered_agent_id_read_only(&self) -> Result<String, McpError> {
+        if let Some(Some(id)) = self.agent_id.get() {
+            return Ok(id.clone());
+        }
+
+        let candidate = std::env::var("CAS_SESSION_ID")
+            .ok()
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty())
+            .or_else(|| {
+                crate::agent_id::read_session_for_mcp(&self.cas_root)
+                    .ok()
+                    .filter(|id| !id.is_empty())
+            });
+        let agent_store = self.open_agent_store()?;
+        let id = if let Some(id) = candidate {
+            agent_store.get(&id).map_err(|_| McpError {
+                code: ErrorCode::INVALID_REQUEST,
+                message: Cow::from(
+                    "Authenticated CAS session is not registered; receipt submission cannot auto-register it.",
+                ),
+                data: None,
+            })?;
+            id
+        } else {
+            let cc_pid = crate::agent_id::get_cc_pid_for_mcp();
+            agent_store
+                .get_by_cc_pid(cc_pid)
+                .map_err(|error| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!(
+                        "Failed to resolve registered CAS session read-only: {error}"
+                    )),
+                    data: None,
+                })?
+                .map(|agent| agent.id)
+                .ok_or_else(|| McpError {
+                    code: ErrorCode::INVALID_REQUEST,
+                    message: Cow::from(
+                        "Receipt submission requires an already registered authenticated CAS session.",
+                    ),
+                    data: None,
+                })?
+        };
+        let _ = self.agent_id.set(Some(id.clone()));
+        Ok(id)
     }
 
     /// Ensure agent is active, reviving if necessary
@@ -459,11 +572,13 @@ impl CasCore {
                 }
                 agent.machine_id = Some(crate::types::Agent::get_or_generate_machine_id());
 
-                // Set role from CAS_AGENT_ROLE env var (set by factory mode)
-                if let Ok(role_str) = std::env::var("CAS_AGENT_ROLE") {
-                    if let Ok(role) = role_str.parse::<crate::types::AgentRole>() {
-                        agent.role = role;
-                    }
+                // Environment is a worker bootstrap hint, never a source of
+                // Supervisor/Director authority.
+                if std::env::var("CAS_AGENT_ROLE")
+                    .ok()
+                    .is_some_and(|role| role.eq_ignore_ascii_case("worker"))
+                {
+                    agent.role = crate::types::AgentRole::Worker;
                 }
                 if agent.role == crate::types::AgentRole::Worker {
                     agent.agent_type = crate::types::AgentType::Worker;
@@ -496,15 +611,22 @@ impl CasCore {
     /// This must be called before other CAS tools can be used.
     /// The session_id becomes the agent's unique identifier.
     ///
-    /// The agent's role is determined from the CAS_AGENT_ROLE environment variable
-    /// (set by factory mode when spawning workers/supervisors).
+    /// This server-internal path may bind an already server-created identity.
+    /// Environment is accepted only as a non-privileged Worker bootstrap hint.
     pub(crate) fn register_agent(
         &self,
         session_id: String,
         name: String,
         parent_id: Option<String>,
     ) -> Result<String, McpError> {
-        self.register_agent_with_hints(session_id, name, parent_id, None, None)
+        self.register_agent_with_hints(
+            session_id,
+            name,
+            parent_id,
+            None,
+            None,
+            AgentIdentitySource::ServerInternal,
+        )
     }
 
     pub(crate) fn register_agent_with_hints(
@@ -514,12 +636,13 @@ impl CasCore {
         parent_id: Option<String>,
         agent_type_hint: Option<crate::types::AgentType>,
         role_hint: Option<crate::types::AgentRole>,
+        source: AgentIdentitySource,
     ) -> Result<String, McpError> {
-        // Set the agent_id in OnceLock (session_id is the canonical ID)
-        let _ = self.agent_id.set(Some(session_id.clone()));
-
         let pid = std::process::id();
         let agent_store = self.open_agent_store()?;
+        if source == AgentIdentitySource::PublicRegistration {
+            self.ensure_public_registration_target(&session_id)?;
+        }
 
         // Create and register the agent
         let mut agent = if let Some(parent) = parent_id {
@@ -541,15 +664,19 @@ impl CasCore {
         }
         agent.machine_id = Some(crate::types::Agent::get_or_generate_machine_id());
 
-        // Set role from CAS_AGENT_ROLE env var (set by factory mode)
-        if let Some(role) = role_hint {
-            agent.role = role;
-        } else if let Ok(role_str) = std::env::var("CAS_AGENT_ROLE") {
-            if let Ok(role) = role_str.parse::<crate::types::AgentRole>() {
+        // Only a typed server-internal call may carry a privileged role.
+        // Public/env registration can establish Standard or Worker only.
+        if source == AgentIdentitySource::ServerInternal {
+            if let Some(role) = role_hint {
                 agent.role = role;
+            } else if std::env::var("CAS_AGENT_ROLE")
+                .ok()
+                .is_some_and(|role| role.eq_ignore_ascii_case("worker"))
+            {
+                agent.role = crate::types::AgentRole::Worker;
             }
-        } else if agent.agent_type == crate::types::AgentType::Worker {
-            // Fallback: worker type implies worker role if env is unavailable.
+        }
+        if agent.agent_type == crate::types::AgentType::Worker {
             agent.role = crate::types::AgentRole::Worker;
         }
 
@@ -572,6 +699,8 @@ impl CasCore {
             message: Cow::from(format!("Failed to register agent: {e}")),
             data: None,
         })?;
+
+        self.bind_agent_identity(session_id.clone(), source)?;
 
         info!(
             agent_id = %session_id,
@@ -599,269 +728,7 @@ impl CasCore {
         Ok(session_id)
     }
 
-    /// Check if a tool action is authorized for the current agent.
-    ///
-    /// Enforces verification jail: when an agent has pending_verification=true
-    /// on any leased task, mutating operations are blocked.
-    ///
-    /// Policy:
-    /// - Non-mutating operations: always allowed
-    /// - Verification tool: always allowed (escape hatch from jail)
-    /// - Agent tool: always allowed (needed for communication/coordination)
-    /// - System/factory/team/worktree tools: always allowed (infrastructure)
-    /// - Task notes: allowed even when jailed (progress reporting)
-    /// - All other mutating operations: blocked when jailed
-    ///
-    /// Returns Ok(()) if allowed, or Err with VERIFICATION_JAIL_BLOCKED code if blocked.
-    ///
-    /// `close_task_id`: when `Some(id)`, scopes the verification-jail check to
-    /// only the task being closed. Unrelated tasks held by the same agent will
-    /// not block this close (cas-a3ca). Pass `None` for all other mutations —
-    /// those still enforce the full any-unverified-task jail.
-    pub(crate) fn authorize_agent_action(
-        &self,
-        tool: &str,
-        action: &str,
-        is_mutating: bool,
-        close_task_id: Option<&str>,
-    ) -> Result<(), McpError> {
-        if !is_mutating {
-            return Ok(());
-        }
-
-        // Infrastructure/coordination tools are exempt from jail
-        match tool {
-            "verification" | "agent" | "system" | "factory" | "team" | "worktree" => return Ok(()),
-            _ => {}
-        }
-
-        // Task notes and release are allowed in jail
-        // - notes: progress/blocker reporting
-        // - release: escape hatch to release an accidentally claimed task
-        if tool == "task" && (action == "notes" || action == "release") {
-            return Ok(());
-        }
-
-        // Supervisors are exempt from verification jail — their job is coordination
-        // (assigning tasks, creating tasks, managing deps) which must not be blocked
-        if crate::harness_policy::is_supervisor_from_env() {
-            return Ok(());
-        }
-
-        // Factory workers are exempt for most mutations — they may have
-        // multiple tasks and must continue working while one awaits
-        // verification. However, `task.close` itself is NOT exempt: that's
-        // the one call where the jail must still fire, because close is
-        // what triggers verifier dispatch. Exempting close here was the
-        // bba6fbf regression that broke dispatch for factory workers
-        // entirely — close_ops.rs emits instructional text but has no
-        // forcing function, so the verifier subagent never gets spawned.
-        // Narrowing the exemption restores the lever for the one action
-        // that needs it while preserving the mutation-cascade fix that
-        // bba6fbf correctly addressed.
-        let is_factory_worker = std::env::var("CAS_AGENT_ROLE")
-            .map(|r| r.eq_ignore_ascii_case("worker"))
-            .unwrap_or(false)
-            && std::env::var("CAS_FACTORY_MODE").is_ok();
-        if is_factory_worker && !(tool == "task" && action == "close") {
-            return Ok(());
-        }
-
-        // cas-8edb: under `[code_review] owner = "supervisor"` (the default
-        // since cas-865b / v2.13.0), the worker's `task.close` is a pure
-        // transition operation — it routes the task to
-        // `PendingSupervisorReview` and the supervisor owns review at
-        // cherry-pick. The legacy verification jail was the lever that
-        // forced workers to dispatch `task-verifier` themselves; under the
-        // new ownership model that lever has no target to act on. Jailing
-        // a worker here just deadlocks every clean close because workers
-        // do not submit a `ReviewOutcome` envelope under owner=supervisor,
-        // so close_ops's self-cert path cannot fire either.
-        //
-        // The downstream gate (close_ops::cas_task_close) still enforces
-        // every other invariant the close must satisfy — lightweight
-        // structural lint, factory-branch merge-state, epic subtask
-        // receipts, additive-only enforcement — so this exemption only
-        // bypasses the verification-jail lever, not the rest of the close
-        // pipeline.
-        if is_factory_worker && tool == "task" && action == "close" {
-            let cr_config = self.load_config();
-            let supervisor_owned = cr_config
-                .code_review
-                .as_ref()
-                .map(|cr| cr.supervisor_owned())
-                .unwrap_or_else(|| crate::config::CodeReviewConfig::default().supervisor_owned());
-            if supervisor_owned {
-                return Ok(());
-            }
-        }
-
-        // Check if agent is jailed
-        let agent_id = match self.get_agent_id() {
-            Ok(id) => id,
-            Err(_) => return Ok(()), // No agent registered = no jail enforcement
-        };
-
-        match self.check_pending_verification(&agent_id, close_task_id)? {
-            Some((task_id, task_title)) => {
-                // cas-778a: factory workers cannot spawn task-verifier themselves
-                // (it's an internal agent). Give them the correct escalation path
-                // (forward to supervisor) instead of an impossible instruction.
-                // Non-worker callers (supervisors, non-factory contexts) retain
-                // the existing Task() spawn suggestion which is correct for them.
-                //
-                // cas-8aaf: the coordination tool alias differs by harness.
-                // Claude workers use mcp__cas__coordination, Codex workers use
-                // mcp__cs__coordination. worker_coordination_tool() reads
-                // CAS_FACTORY_WORKER_CLI (injected by the PTY spawn) to select
-                // the right alias so the suggestion is executable by this worker.
-                let guidance = if is_factory_worker {
-                    let coord_tool = worker_coordination_tool();
-                    format!(
-                        "Message supervisor via: \
-                         {coord_tool} action=message target=supervisor \
-                         summary=\"Ready to close {task_id}\" \
-                         message=\"Task {task_id} requires verification before close. \
-                         Please run verification (task-verifier for task {task_id}) \
-                         and close on my behalf if approved.\""
-                    )
-                } else {
-                    format!(
-                        "Use the Task tool to spawn a task-verifier subagent: \
-                         Task(subagent_type=\"task-verifier\", prompt=\"Verify task {task_id}\")."
-                    )
-                };
-                Err(McpError {
-                    code: ErrorCode::INVALID_REQUEST,
-                    message: Cow::from(format!(
-                        "VERIFICATION_JAIL_BLOCKED: Mutating operation {tool}.{action} blocked. \
-                         Task {task_id} ({task_title}) requires verification before any mutations \
-                         are allowed. {guidance}"
-                    )),
-                    data: None,
-                })
-            }
-            None => Ok(()),
-        }
-    }
-
-    /// Check if an agent has any tasks with pending verification.
-    ///
-    /// Returns `Some((task_id, task_title))` if the agent has an in-progress task
-    /// that requires verification but hasn't been verified yet.
-    /// Returns `None` if the agent can proceed.
-    ///
-    /// `close_task_id`: when `Some(id)`, only the named task is evaluated —
-    /// unrelated tasks leased by the same agent are skipped. This scopes the
-    /// jail check for `task.close id=X` to X itself so that a different
-    /// in-progress task (unverified) cannot block closing an already-verified
-    /// task (cas-a3ca).
-    pub(crate) fn check_pending_verification(
-        &self,
-        agent_id: &str,
-        close_task_id: Option<&str>,
-    ) -> Result<Option<(String, String)>, McpError> {
-        let config = self.load_config();
-
-        if !config.verification_enabled() {
-            return Ok(None);
-        }
-
-        let agent_store = self.open_agent_store()?;
-        let task_store = self.open_task_store()?;
-
-        // Get agent's active leases
-        let leases = agent_store
-            .list_agent_leases(agent_id)
-            .map_err(|e| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!("Failed to list agent leases: {e}")),
-                data: None,
-            })?;
-
-        // Check each leased task
-        for lease in leases {
-            // Only check active leases
-            if lease.status != crate::types::LeaseStatus::Active {
-                continue;
-            }
-
-            // cas-a3ca: when called for a specific task.close, only evaluate
-            // the task being closed. An unrelated in-progress task (e.g. task B
-            // started after task A was verified) must not block closing task A.
-            // The jail scopes to the requested task; other tasks' verification
-            // state is irrelevant to whether THIS task can be closed.
-            if let Some(target_id) = close_task_id {
-                if lease.task_id != target_id {
-                    continue;
-                }
-            }
-
-            // Get the task
-            let task = match task_store.get(&lease.task_id) {
-                Ok(t) => t,
-                Err(_) => continue, // Task may have been deleted
-            };
-
-            // Only check in-progress tasks (not open or closed)
-            if task.status != TaskStatus::InProgress {
-                continue;
-            }
-
-            // cas-6a99: a task awaiting WORKTREE MERGE (its close was merge-gated
-            // because the branch isn't merged yet) is "work complete, awaiting
-            // supervisor merge" — NOT actively-verifying. The worker cannot resolve
-            // it (the merge is the supervisor's job), so it must not jail them from
-            // starting unrelated/bundled work. This is distinct from the verification
-            // jail (`pending_verification`), which still blocks correctly below.
-            if task.pending_worktree_merge {
-                continue;
-            }
-
-            // cas-33eb: a depth=light task never jails the agent — skipping the
-            // verification machinery is the whole point of "speed mode" (mirrors
-            // the close_ops.rs `depth_light` short-circuit from cas-6538).
-            // Without this, a SOLO (non-factory) user who starts then closes a
-            // light task still hits VERIFICATION_JAIL_BLOCKED at this dispatch
-            // layer, because the factory-worker / supervisor exemptions in
-            // `authorize_agent_action` do not apply to them.
-            if task.depth == crate::types::TaskDepth::Light {
-                continue;
-            }
-
-            // Skip task types where current harness policy bypasses verification.
-            if !verification_required_for_task_type(task.task_type) {
-                continue;
-            }
-
-            // Check if task has approved verification
-            if let Ok(verification_store) = self.open_verification_store() {
-                match verification_store.get_latest_for_task(&task.id) {
-                    Ok(Some(v))
-                        if v.status == crate::types::VerificationStatus::Approved
-                            || v.status == crate::types::VerificationStatus::Skipped =>
-                    {
-                        // Approved or explicitly skipped (supervisor bypass
-                        // during orphaned-task close) — not jailing. See
-                        // cas-82d6: close_ops writes a Skipped row when
-                        // closing via the assignee-inactive bypass so that
-                        // downstream workers aren't trapped by a task that
-                        // has no verification record at all.
-                        continue;
-                    }
-                    Ok(_) | Err(_) => {
-                        // No verification or not approved - this task is blocking
-                        return Ok(Some((task.id.clone(), task.title.clone())));
-                    }
-                }
-            }
-        }
-
-        Ok(None)
-    }
-
-    /// Auto-claim a task when verification is required/failed
-    /// This ensures the Stop hook can block exit for unverified tasks
+    /// Auto-claim the exact task whose close is awaiting verification.
     pub(crate) fn auto_claim_for_verification(
         &self,
         task_id: &str,
@@ -882,8 +749,8 @@ impl CasCore {
         ) {
             Ok(crate::types::ClaimResult::Success(_))
             | Ok(crate::types::ClaimResult::AlreadyClaimed { .. }) => {
-                // Claimed successfully or already claimed - ensure task is in_progress
-                // so check_pending_verification finds it
+                // Claimed successfully or already claimed - keep the task in
+                // progress until its own close transition is resolved.
                 if let Ok(mut task) = task_store.get(task_id) {
                     if task.status == crate::types::TaskStatus::Open {
                         task.status = crate::types::TaskStatus::InProgress;
@@ -981,4 +848,10 @@ mod runtime;
 
 pub use runtime::run_server;
 #[cfg(feature = "mcp-proxy")]
-pub use runtime::write_proxy_catalog_cache;
+pub use runtime::{
+    ProxySnapshotCache, ProxySnapshotFailure, ProxySnapshotReadError, ProxySnapshotReadErrorKind,
+    ProxySnapshotState, proxy_config_fingerprint, read_proxy_catalog_cache,
+    read_proxy_health_cache, read_proxy_snapshot_cache, write_empty_proxy_snapshot_cache,
+    write_proxy_catalog_cache, write_proxy_health_cache, write_proxy_snapshot_cache,
+    write_proxy_snapshot_cache_for_config, write_unavailable_proxy_snapshot_cache,
+};

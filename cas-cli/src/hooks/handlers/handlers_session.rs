@@ -55,11 +55,15 @@ pub fn handle_session_start(
                 crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, cc_pid);
                 agent.machine_id = Some(Agent::get_or_generate_machine_id());
 
-                // Set role from environment
-                if let Some(ref role_str) = agent_role {
-                    if let Ok(role) = role_str.parse::<AgentRole>() {
-                        agent.role = role;
-                    }
+                // Hook environment is a worker bootstrap hint, not a source
+                // of Supervisor/Director authority. Privileged agents must
+                // already have a server-created durable row; ON CONFLICT
+                // preserves that role without trusting this value.
+                if agent_role
+                    .as_deref()
+                    .is_some_and(|role| role.eq_ignore_ascii_case("worker"))
+                {
+                    agent.role = AgentRole::Worker;
                 }
 
                 // Store clone path in metadata for factory workers

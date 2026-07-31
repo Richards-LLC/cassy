@@ -476,114 +476,145 @@ pub fn handle_subagent_stop(
     _input: &HookInput,
     cas_root: Option<&Path>,
 ) -> Result<HookOutput, MemError> {
-    let cas_root = match cas_root {
-        Some(root) => root,
-        None => return Ok(HookOutput::empty()),
-    };
+    if cas_root.is_none() {
+        return Ok(HookOutput::empty());
+    }
 
     // NOTE: Do NOT call cleanup_subagent_leases or any agent cleanup here!
     // The session_id is the parent's, not the subagent's.
 
-    // Clean up verifier marker file if present
-    // This file is created when task-verifier is spawned and allows its tool calls
-    let marker_path = cas_root.join(".verifier_unjail_marker");
-    if marker_path.exists() {
-        let _ = std::fs::remove_file(&marker_path);
-        debug!("[VERIFICATION JAIL] cleaned up verifier marker file (subagent completed)");
-
-        // Send subagent completed activity event (for supervisor visibility)
-        // Note: subagent_type may not be populated, but we know it's task-verifier from the marker
-        #[cfg(feature = "mcp-server")]
-        {
-            let subagent_type = _input.subagent_type.as_deref().unwrap_or("task-verifier");
-            let event = crate::mcp::socket::DaemonEvent::WorkerActivity {
-                session_id: _input.session_id.clone(),
-                event_type: "worker_subagent_completed".to_string(),
-                description: format!("{subagent_type} completed"),
-                entity_id: Some(subagent_type.to_string()),
-            };
-            let _ = crate::mcp::socket::send_event(cas_root, &event);
-        }
-    }
-
     Ok(HookOutput::empty())
 }
 
-/// Handle SubagentStart hook - unjail for task-verifier
+/// Remove only the exact still-unbound verifier handoff for a failed, denied,
+/// or completed-without-SubagentStart Agent tool call.
+///
+/// The hook-local tool_use_id is hashed inside the store. Bound and consumed
+/// audit rows are never eligible for cleanup.
+pub fn handle_verifier_spawn_cleanup(
+    input: &HookInput,
+    cas_root: Option<&Path>,
+) -> Result<HookOutput, MemError> {
+    let Some(cas_root) = cas_root else {
+        return Ok(HookOutput::empty());
+    };
+    if !matches!(input.tool_name.as_deref(), Some("Task" | "Agent"))
+        || input
+            .tool_input
+            .as_ref()
+            .and_then(|value| value.get("subagent_type"))
+            .and_then(|value| value.as_str())
+            != Some("task-verifier")
+    {
+        return Ok(HookOutput::empty());
+    }
+    let Some(tool_use_id) = input
+        .tool_use_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(HookOutput::empty());
+    };
+    let parent_id = current_agent_id(input);
+    let _ = cas_store::cancel_unbound_server_verifier_handoff(cas_root, &parent_id, tool_use_id);
+    Ok(HookOutput::empty())
+}
+
+/// Handle SubagentStart hook - bind task-verifier authority.
 ///
 /// Called when a Claude Code subagent (Task tool call) is about to start.
-/// If the subagent is task-verifier, clear pending_verification to release the jail.
+/// A verifier spawn claims only the named task's durable dispatch. It never
+/// clears `pending_verification`; only a legitimate verdict may resolve that
+/// exact task transition.
 pub fn handle_subagent_start(
     input: &HookInput,
     cas_root: Option<&Path>,
 ) -> Result<HookOutput, MemError> {
-    // NOTE: Claude Code fires SubagentStart but doesn't populate subagent_type (always None).
-    // The actual unjailing happens in PreToolUse when Task(task-verifier) is detected.
-    // This handler is kept for potential future use when Claude Code populates the field.
-
     let cas_root = match cas_root {
         Some(root) => root,
         None => return Ok(HookOutput::empty()),
     };
 
-    // Check if this is a verifier subagent (task-verifier)
-    let is_verifier_agent = input
-        .subagent_type
-        .as_ref()
-        .map(|st| st == "task-verifier")
-        .unwrap_or(false);
+    // Official SubagentStart carries the parent session plus distinct child
+    // agent_id/agent_type, but no Agent prompt or PreToolUse tool_use_id. Bind
+    // only the sole durable sealed handoff for this exact registered parent.
+    if input.agent_type.as_deref() != Some("task-verifier") {
+        return Ok(HookOutput::empty());
+    }
 
-    if is_verifier_agent {
-        // Clear pending_verification on all tasks to release the jail
-        if let Ok(task_store) = open_task_store(cas_root) {
-            if let Ok(tasks) = task_store.list(None) {
-                let current_agent_id = current_agent_id(input);
-                let agent_task_ids: std::collections::HashSet<String> =
-                    if let Ok(agent_store) = open_agent_store(cas_root) {
-                        agent_store
-                            .list_agent_leases(&current_agent_id)
-                            .ok()
-                            .map(|leases| leases.into_iter().map(|l| l.task_id).collect())
-                            .unwrap_or_default()
-                    } else {
-                        std::collections::HashSet::new()
-                    };
+    let parent_id = current_agent_id(input);
+    let child_id = match input
+        .agent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && *id != parent_id)
+    {
+        Some(child_id) => child_id,
+        None => {
+            return Ok(HookOutput::with_system_context(
+                "CAS task-verifier authority binding failed: SubagentStart did not provide a distinct official child agent_id."
+                    .to_string(),
+            ));
+        }
+    };
+    let agent_store = match open_agent_store(cas_root) {
+        Ok(store) => store,
+        Err(_) => {
+            return Ok(HookOutput::with_system_context(
+                "CAS agent registry is unavailable; verification will fail closed.".to_string(),
+            ));
+        }
+    };
+    let issuer = match agent_store.get(&parent_id) {
+        Ok(agent)
+            if matches!(
+                agent.status,
+                crate::types::AgentStatus::Active | crate::types::AgentStatus::Idle
+            ) =>
+        {
+            agent
+        }
+        _ => {
+            return Ok(HookOutput::with_system_context(
+                "CAS verifier issuer is anonymous, orphaned, or inactive; verification will fail closed."
+                    .to_string(),
+            ));
+        }
+    };
+    if let Ok(existing) = agent_store.get(child_id)
+        && (existing.agent_type != crate::types::AgentType::SubAgent
+            || existing.role != AgentRole::Standard
+            || existing.parent_id.as_deref() != Some(parent_id.as_str()))
+    {
+        return Ok(HookOutput::with_system_context(
+            "CAS verifier child identity conflicts with an existing registered session; verification will fail closed."
+                .to_string(),
+        ));
+    }
 
-                let pending_tasks: Vec<_> = tasks
-                    .iter()
-                    .filter(|t| {
-                        if !t.pending_verification {
-                            return false;
-                        }
-                        if agent_task_ids.contains(&t.id) {
-                            return true;
-                        }
-                        if t.task_type == TaskType::Epic {
-                            if let Some(ref owner) = t.epic_verification_owner {
-                                return owner == &current_agent_id;
-                            }
-                        }
-                        if let Some(ref assignee) = t.assignee {
-                            return assignee == &current_agent_id;
-                        }
-                        false
-                    })
-                    .collect();
-
-                if !pending_tasks.is_empty() {
-                    let task_ids: Vec<_> = pending_tasks.iter().map(|t| t.id.as_str()).collect();
-                    for task in &pending_tasks {
-                        let mut task_to_update = (*task).clone();
-                        task_to_update.pending_verification = false;
-                        task_to_update.updated_at = chrono::Utc::now();
-                        let _ = task_store.update(&task_to_update);
-                    }
-                    eprintln!(
-                        "cas: SubagentStart unjailing (tasks: {})",
-                        task_ids.join(", ")
-                    );
-                }
-            }
+    let existing = agent_store.get(child_id).ok();
+    let mut child = existing.clone().unwrap_or_else(|| {
+        Agent::new_sub_agent(
+            child_id.to_string(),
+            "task-verifier".to_string(),
+            parent_id.clone(),
+        )
+    });
+    child.name = "task-verifier".to_string();
+    child.agent_type = crate::types::AgentType::SubAgent;
+    child.role = AgentRole::Standard;
+    child.parent_id = Some(parent_id.clone());
+    child.factory_session = issuer.factory_session.clone();
+    child.status = crate::types::AgentStatus::Active;
+    child.last_heartbeat = chrono::Utc::now();
+    match cas_store::bind_server_verifier_handoff_and_register_child(cas_root, &parent_id, &child) {
+        Ok(_) => {}
+        Err(_) => {
+            return Ok(HookOutput::with_system_context(
+                    "CAS could not atomically register the verifier child and bind its exact active handoff; verification will fail closed."
+                        .to_string(),
+            ));
         }
     }
 
@@ -648,7 +679,9 @@ mod cas_85d9_lease_renewal_tests {
         // Model the same production reclaim-sweep timing as the sibling
         // no-heartbeat test below — must be a no-op here since the
         // heartbeat already pushed `expires_at` well into the future.
-        agent_store.reclaim_expired_leases().expect("reclaim_expired_leases");
+        agent_store
+            .reclaim_expired_leases()
+            .expect("reclaim_expired_leases");
 
         let reopened = cleanup_orphaned_tasks(&cas.root);
         assert_eq!(
@@ -675,7 +708,10 @@ mod cas_85d9_lease_renewal_tests {
         let agent_store = open_agent_store(&cas.root).expect("open_agent_store");
         let task_store = open_task_store(&cas.root).expect("open_task_store");
 
-        let agent = Agent::new("agent-85d9-dead".to_string(), "No Heartbeat Test".to_string());
+        let agent = Agent::new(
+            "agent-85d9-dead".to_string(),
+            "No Heartbeat Test".to_string(),
+        );
         agent_store.register(&agent).expect("register");
 
         let mut task = Task::new("cas-85d9-t2".to_string(), "Abandoned task".to_string());
@@ -699,7 +735,9 @@ mod cas_85d9_lease_renewal_tests {
         // every `worker_status` poll, etc.), so an overdue lease is
         // reclaimed within moments; a standalone test has to trigger that
         // sweep explicitly to model the same production timing.
-        agent_store.reclaim_expired_leases().expect("reclaim_expired_leases");
+        agent_store
+            .reclaim_expired_leases()
+            .expect("reclaim_expired_leases");
 
         let reopened = cleanup_orphaned_tasks(&cas.root);
         assert_eq!(

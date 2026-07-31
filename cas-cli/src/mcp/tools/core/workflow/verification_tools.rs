@@ -1,4 +1,3 @@
-use crate::harness_policy::worker_harness_from_env;
 use crate::mcp::tools::core::imports::*;
 
 impl CasCore {
@@ -6,6 +5,47 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<VerificationAddRequest>,
     ) -> Result<CallToolResult, McpError> {
+        // Validate and sanitize caller-authored content before opening stores,
+        // inspecting one-time authority, or applying expiry transitions.
+        // This makes malformed issues failure-atomic even when the named
+        // capability or dispatch is expired.
+        let issues: Vec<VerificationIssue> = if let Some(issues_json) = &req.issues {
+            if issues_json.len() > 512 * 1024 {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Invalid verification issues: expected a bounded JSON array of issue objects; input omitted.",
+                    ),
+                    data: None,
+                });
+            }
+            serde_json::from_str(issues_json).map_err(|_| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(
+                    "Invalid verification issues: expected a bounded JSON array of issue objects; input omitted.",
+                ),
+                data: None,
+            })?
+        } else {
+            Vec::new()
+        };
+        let files_reviewed: Vec<String> = req
+            .files_reviewed
+            .as_deref()
+            .map(|files| {
+                files
+                    .split(',')
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut authored_content = Verification::new(String::new(), req.task_id.clone());
+        authored_content.summary = req.summary.clone();
+        authored_content.issues = issues;
+        authored_content.files_reviewed = files_reviewed;
+        authored_content.sanitize_verifier_authored_content();
+
         let verification_store = self.open_verification_store()?;
         let task_store = self.open_task_store()?;
         let agent_store = self.open_agent_store()?;
@@ -16,6 +56,18 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+
+        if let Some(target) = task.deliverables.work_target.as_ref() {
+            crate::mcp::tools::core::task::repo_context::resolve_repo_context(
+                &self.cas_root,
+                target,
+            )
+            .map_err(|message| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(message),
+                data: None,
+            })?;
+        }
 
         // cas-b269: refuse verification against an already-closed task so
         // stale post-close guidance cannot restart the verify/re-close loop.
@@ -33,6 +85,223 @@ impl CasCore {
             });
         }
 
+        // Resolve authority only from the server's registered caller identity.
+        // Caller-supplied names, models, verifier types, task ownership, harness
+        // labels, and orphan state never grant verification authority.
+        let caller_id = self.get_agent_id()?;
+        let caller = agent_store.get(&caller_id).map_err(|_| McpError {
+            code: ErrorCode::INVALID_REQUEST,
+            message: Cow::from(
+                "Verification requires an authenticated registered CAS session. Anonymous or orphan callers cannot add verification records.",
+            ),
+            data: None,
+        })?;
+        if !caller.is_alive() {
+            return Err(McpError {
+                code: ErrorCode::INVALID_REQUEST,
+                message: Cow::from(
+                    "Verification caller is not an active registered CAS session. Re-register before retrying.",
+                ),
+                data: None,
+            });
+        }
+
+        let uses_verifier_capability = req.verifier_capability.is_some();
+        let supervisor_direct = caller.role == cas_types::AgentRole::Supervisor
+            && self.has_server_internal_identity(&caller_id)
+            && !uses_verifier_capability;
+        let uses_server_handoff = !uses_verifier_capability
+            && caller.role == cas_types::AgentRole::Standard
+            && caller.agent_type == cas_types::AgentType::SubAgent
+            && caller.name == "task-verifier"
+            && caller
+                .parent_id
+                .as_deref()
+                .is_some_and(|parent_id| parent_id != caller_id);
+        if !supervisor_direct && !uses_verifier_capability && !uses_server_handoff {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "Verification authority rejected for task {}: workers and standard sessions cannot attest their own work.\n\n\
+                     Legitimate paths:\n\
+                       - Spawn a distinct registered task-verifier child; CAS binds one sealed server-side handoff to its official child identity.\n\
+                       - Ask a registered supervisor to verify directly.\n\n\
+                     Task ownership, assignee/orphan state, harness/model labels, verification_type, and confidence do not grant authority.",
+                    req.task_id
+                )),
+                data: None,
+            });
+        }
+        let mut bound_server_handoff = None;
+        let requested_dispatch_id = if let Some(capability_token) =
+            req.verifier_capability.as_deref()
+        {
+            let capability = cas_store::inspect_verifier_capability(
+                &self.cas_root,
+                capability_token,
+            )
+            .map_err(|_| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from("Verifier capability rejected: it is malformed or unknown."),
+                data: None,
+            })?;
+            let dispatch_id = capability.dispatch_id.clone().ok_or_else(|| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(
+                    "Verifier capability rejected: legacy authority has no exact proof boundary.",
+                ),
+                data: None,
+            })?;
+            if req
+                .dispatch_id
+                .as_deref()
+                .is_some_and(|id| id != dispatch_id)
+            {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Verifier capability rejected: request names a different dispatch.",
+                    ),
+                    data: None,
+                });
+            }
+            let dispatch = cas_store::get_verification_dispatch(&self.cas_root, &dispatch_id)
+                .map_err(|_| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Verifier capability rejected: its exact dispatch is unavailable.",
+                    ),
+                    data: None,
+                })?;
+            if capability.task_id != req.task_id || dispatch.task_id != req.task_id {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Verifier capability rejected: exact dispatch belongs to another task.",
+                    ),
+                    data: None,
+                });
+            }
+            if dispatch.deadline_at <= chrono::Utc::now() {
+                let timed_out = cas_store::timeout_verification_dispatch(
+                    &self.cas_root,
+                    &req.task_id,
+                    chrono::Utc::now(),
+                )
+                .map_err(|_| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Verifier capability rejected: exact timeout transition could not be persisted; retry with current dispatch state.",
+                    ),
+                    data: None,
+                })?
+                .ok_or_else(|| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Verifier capability rejected: dispatch changed before exact timeout persistence; retry with current dispatch state.",
+                    ),
+                    data: None,
+                })?;
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "Verifier capability rejected: exact dispatch {} expired and was marked timed_out; registered-supervisor recovery must name this dispatch.",
+                        timed_out.id
+                    )),
+                    data: None,
+                });
+            }
+            dispatch_id
+        } else if uses_server_handoff {
+            let capability = cas_store::inspect_bound_server_verifier_handoff(
+                &self.cas_root,
+                &req.task_id,
+                &caller_id,
+                req.dispatch_id.as_deref(),
+            )
+            .map_err(|_| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(
+                    "Verifier handoff rejected: no unique unconsumed server-side authority is bound to this registered child and task.",
+                ),
+                data: None,
+            })?;
+            if caller.parent_id.as_deref() != Some(capability.issuer_agent_id.as_str()) {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Verifier handoff rejected: registered child parent does not match the server-bound issuer.",
+                    ),
+                    data: None,
+                });
+            }
+            let dispatch_id = capability.dispatch_id.clone().ok_or_else(|| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(
+                    "Verifier handoff rejected: authority has no exact proof boundary.",
+                ),
+                data: None,
+            })?;
+            let dispatch = cas_store::get_verification_dispatch(&self.cas_root, &dispatch_id)
+                .map_err(|_| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Verifier handoff rejected: its exact dispatch is unavailable.",
+                    ),
+                    data: None,
+                })?;
+            if capability.task_id != req.task_id || dispatch.task_id != req.task_id {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Verifier handoff rejected: exact dispatch belongs to another task.",
+                    ),
+                    data: None,
+                });
+            }
+            if capability.expires_at <= chrono::Utc::now()
+                || dispatch.deadline_at <= chrono::Utc::now()
+            {
+                let timed_out = cas_store::timeout_verification_dispatch(
+                    &self.cas_root,
+                    &req.task_id,
+                    chrono::Utc::now(),
+                )
+                .map_err(|_| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Verifier handoff rejected: exact timeout transition could not be persisted; retry with current dispatch state.",
+                    ),
+                    data: None,
+                })?
+                .ok_or_else(|| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Verifier handoff rejected: dispatch changed before exact timeout persistence; retry with current dispatch state.",
+                    ),
+                    data: None,
+                })?;
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "Verifier handoff rejected: exact dispatch {} expired and was marked timed_out; registered-supervisor recovery must name this dispatch.",
+                        timed_out.id
+                    )),
+                    data: None,
+                });
+            }
+            bound_server_handoff = Some(capability);
+            dispatch_id
+        } else {
+            req.dispatch_id.clone().ok_or_else(|| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(
+                    "Registered supervisor-direct verification must name the exact dispatch_id it resolves.",
+                ),
+                data: None,
+            })?
+        };
+
         // cas-b269: urgent stop halt blocks verification MCP.
         //
         // cas-3894: same owned-task exemption as `task action=close`
@@ -43,101 +312,25 @@ impl CasCore {
         // task-verifier (which calls this endpoint) was as stuck as closing.
         // The exemption only skips the halt flag; it does not fabricate a
         // verification verdict.
-        if let Ok(agent_id) = self.get_agent_id() {
-            if let Ok(agent) = agent_store.get(&agent_id) {
-                let halt_exempt =
-                    crate::mcp::tools::core::task::lifecycle::stale_close_guard::halt_exempt_for_owned_task(
-                        task.status,
-                        task.assignee.as_deref(),
-                        Some(agent.name.as_str()),
-                    );
-                if crate::mcp::tools::core::task::lifecycle::stale_close_guard::agent_task_work_halted(
-                    &agent.metadata,
-                ) && !halt_exempt
-                {
-                    return Err(McpError {
-                        code: ErrorCode::INVALID_PARAMS,
-                        message: Cow::from(
-                            crate::mcp::tools::core::task::lifecycle::stale_close_guard::halt_blocks_task_work_message(
-                                "verification action=add",
-                            ),
-                        ),
-                        data: None,
-                    });
-                }
-            }
-        }
-
-        // Supervisors can usually only verify epics.
-        // Exceptions:
-        // 1. Factory sessions with Codex workers (no subagent support)
-        // 2. Task-verifier subagent running within supervisor context
-        // 3. Supervisor is the task assignee (self-implemented task)
-        // 4. Task assignee is inactive (orphaned task)
-        if let Ok(agent_id) = self.get_agent_id() {
-            if let Ok(agent) = agent_store.get(&agent_id) {
-                let worker_supports_subagents =
-                    worker_harness_from_env().capabilities().supports_subagents;
-                if agent.role == cas_types::AgentRole::Supervisor
-                    && task.task_type != crate::types::TaskType::Epic
-                    && worker_supports_subagents
-                {
-                    // Check if this is a task-verifier subagent context
-                    let is_verifier_subagent = self
-                        .cas_root
-                        .join(".verifier_unjail_marker")
-                        .exists();
-
-                    // Check if supervisor is the task assignee
-                    let supervisor_is_assignee =
-                        task.assignee.as_deref() == Some(agent_id.as_str());
-
-                    // Check if task assignee is inactive (orphaned).
-                    // `unwrap_or(true)` semantics: missing assignee, missing
-                    // agent record, dead agent, or stale heartbeat all count
-                    // as "inactive_or_absent" — the rejection only fires
-                    // when there is a *currently live* assignee.
-                    let assignee_inactive_or_absent = task
-                        .assignee
-                        .as_deref()
-                        .map(|aid| {
-                            agent_store
-                                .get(aid)
-                                .map(|a| !a.is_alive() || a.is_heartbeat_expired(300))
-                                .unwrap_or(true)
-                        })
-                        .unwrap_or(true); // no assignee → treat as orphaned
-
-                    if !is_verifier_subagent
-                        && !supervisor_is_assignee
-                        && !assignee_inactive_or_absent
-                    {
-                        // Safe: assignee_inactive_or_absent is false here,
-                        // which requires task.assignee to be Some(_).
-                        let assignee_id = task.assignee.as_deref().unwrap_or("<unknown>");
-                        return Err(McpError {
-                            code: ErrorCode::INVALID_PARAMS,
-                            message: Cow::from(format!(
-                                "Cannot verify task {task_id}: it has an active assignee ({assignee_id}).\n\n\
-                                Supervisors may verify individual tasks only when:\n\
-                                  - the task has no assignee (orphaned), OR\n\
-                                  - the assignee is inactive (dead session or heartbeat expired >5min ago), OR\n\
-                                  - the supervisor IS the assignee (self-implemented task).\n\n\
-                                Epics may always be verified by supervisors.\n\n\
-                                Remediation:\n\
-                                  - Ask {assignee_id} to verify and close the task themselves:\n\
-                                    mcp__cas__coordination action=message target={assignee_id} message=\"Please verify and close task {task_id}\"\n\
-                                  - Or release their lease and take over:\n\
-                                    mcp__cas__task action=release id={task_id}\n\
-                                  - Or wait for the assignee to disconnect (heartbeat expires after 5min).",
-                                task_id = req.task_id,
-                                assignee_id = assignee_id,
-                            )),
-                            data: None,
-                        });
-                    }
-                }
-            }
+        let halt_exempt =
+            crate::mcp::tools::core::task::lifecycle::stale_close_guard::halt_exempt_for_owned_task(
+                task.status,
+                task.assignee.as_deref(),
+                Some(caller.name.as_str()),
+            );
+        if crate::mcp::tools::core::task::lifecycle::stale_close_guard::agent_task_work_halted(
+            &caller.metadata,
+        ) && !halt_exempt
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(
+                    crate::mcp::tools::core::task::lifecycle::stale_close_guard::halt_blocks_task_work_message(
+                        "verification action=add",
+                    ),
+                ),
+                data: None,
+            });
         }
 
         let id = verification_store.generate_id().map_err(|e| McpError {
@@ -146,49 +339,24 @@ impl CasCore {
             data: None,
         })?;
 
-        let status: VerificationStatus = req.status.parse().unwrap_or(VerificationStatus::Approved);
-
-        // Parse issues from JSON if provided
-        let issues: Vec<VerificationIssue> = if let Some(issues_json) = &req.issues {
-            match serde_json::from_str(issues_json) {
-                Ok(parsed) => parsed,
-                Err(e) => {
-                    eprintln!(
-                        "[CAS] Warning: Failed to parse issues JSON: {e}. Input was: {issues_json}"
-                    );
-                    Vec::new()
-                }
-            }
-        } else {
-            Vec::new()
-        };
-
-        // Parse files reviewed
-        let files_reviewed: Vec<String> = req
-            .files_reviewed
-            .map(|f| {
-                f.split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
+        let status: VerificationStatus = req.status.parse().map_err(|_| McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(
+                "Invalid verification status. Expected: approved, rejected, error, or skipped.",
+            ),
+            data: None,
+        })?;
 
         let mut verification = Verification::new(id.clone(), req.task_id.clone());
         verification.status = status;
-        verification.summary = req.summary;
-        verification.issues = issues;
-        verification.files_reviewed = files_reviewed;
+        verification.summary = authored_content.summary;
+        verification.issues = authored_content.issues;
+        verification.files_reviewed = authored_content.files_reviewed;
         if let Some(confidence) = req.confidence {
             verification.set_confidence(confidence);
         }
         if let Some(duration_ms) = req.duration_ms {
             verification.set_duration(duration_ms);
-        }
-
-        // Set agent ID if available
-        if let Some(Some(agent_id)) = self.agent_id.get() {
-            verification.set_agent(agent_id.clone());
         }
 
         // Set verification type if specified (default is Task)
@@ -198,8 +366,9 @@ impl CasCore {
             }
         }
 
-        // Atomic unjail: persist verification record and clear pending_verification
-        // in the same SQLite transaction. If any step fails, both roll back.
+        // Atomically persist the verdict, resolve any active exact-task
+        // dispatch, and clear that task's pending transition. If any step
+        // fails, all authority and lifecycle writes roll back.
         {
             let db_path = self.cas_root.join("cas.db");
             let conn = rusqlite::Connection::open(&db_path).map_err(|e| McpError {
@@ -220,11 +389,174 @@ impl CasCore {
                 data: None,
             })?;
 
+            let dispatch = if let Some(capability_token) = req.verifier_capability.as_deref() {
+                let capability = cas_store::consume_verifier_capability_with_conn(
+                    &tx,
+                    capability_token,
+                    &req.task_id,
+                    &caller_id,
+                )
+                .map_err(|_| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Verifier capability rejected: it is invalid, expired, consumed, bound to another task/session, or was not issued to a distinct registered task-verifier child.",
+                    ),
+                    data: None,
+                })?;
+                if caller.agent_type != cas_types::AgentType::SubAgent
+                    || caller.parent_id.as_deref() != Some(capability.issuer_agent_id.as_str())
+                    || capability.verifier_agent_id.as_deref() != Some(caller_id.as_str())
+                {
+                    return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(
+                            "Verifier capability rejected: caller is not the distinct registered task-verifier child bound by CAS.",
+                        ),
+                        data: None,
+                    });
+                }
+                verification.set_agent(caller_id.clone());
+                verification.provenance = cas_types::VerificationProvenance::TaskVerifier;
+                verification.capability_id = Some(capability.id);
+                verification.dispatch_id = Some(requested_dispatch_id.clone());
+                verification.issuer_agent_id = Some(capability.issuer_agent_id);
+                cas_store::get_verification_dispatch_with_conn(&tx, &requested_dispatch_id)
+                    .map_err(|_| McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(
+                            "Verifier capability rejected: exact dispatch is unavailable.",
+                        ),
+                        data: None,
+                    })?
+            } else if let Some(bound_handoff) = bound_server_handoff.as_ref() {
+                let capability = cas_store::consume_server_verifier_handoff_with_conn(
+                    &tx,
+                    &bound_handoff.id,
+                    &req.task_id,
+                    &caller_id,
+                )
+                .map_err(|_| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Verifier handoff rejected: it is invalid, expired, consumed, bound to another task/session, or no longer claims the exact dispatch.",
+                    ),
+                    data: None,
+                })?;
+                if caller.agent_type != cas_types::AgentType::SubAgent
+                    || caller.role != cas_types::AgentRole::Standard
+                    || caller.name != "task-verifier"
+                    || caller.parent_id.as_deref() != Some(capability.issuer_agent_id.as_str())
+                    || capability.verifier_agent_id.as_deref() != Some(caller_id.as_str())
+                {
+                    return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(
+                            "Verifier handoff rejected: caller is not the distinct registered task-verifier child bound by CAS.",
+                        ),
+                        data: None,
+                    });
+                }
+                verification.set_agent(caller_id.clone());
+                verification.provenance = cas_types::VerificationProvenance::TaskVerifier;
+                verification.capability_id = Some(capability.id);
+                verification.dispatch_id = Some(requested_dispatch_id.clone());
+                verification.issuer_agent_id = Some(capability.issuer_agent_id);
+                cas_store::get_verification_dispatch_with_conn(&tx, &requested_dispatch_id)
+                    .map_err(|_| McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(
+                            "Verifier handoff rejected: exact dispatch is unavailable.",
+                        ),
+                        data: None,
+                    })?
+            } else {
+                verification.set_agent(caller_id.clone());
+                verification.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+                verification.dispatch_id = Some(requested_dispatch_id.clone());
+                verification.issuer_agent_id = Some(caller_id.clone());
+                cas_store::get_verification_dispatch_with_conn(&tx, &requested_dispatch_id)
+                    .map_err(|_| McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(
+                            "Supervisor-direct verification rejected: named dispatch is unavailable.",
+                        ),
+                        data: None,
+                    })?
+            };
+            if dispatch.task_id != req.task_id {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Verification rejected: named dispatch belongs to another task.",
+                    ),
+                    data: None,
+                });
+            }
+
             cas_store::add_verification_with_conn(&tx, &verification).map_err(|e| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
                 message: Cow::from(format!("Failed to add verification: {e}")),
                 data: None,
             })?;
+
+            cas_store::resolve_verification_dispatch_with_conn(
+                &tx,
+                &dispatch.id,
+                &caller_id,
+                verification.capability_id.as_deref(),
+                supervisor_direct,
+            )
+            .map_err(|_| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(
+                    "Verification dispatch resolution rejected: caller is not the bound verifier or a registered supervisor-direct authority.",
+                ),
+                data: None,
+            })?;
+
+            let approved_delivery = matches!(
+                verification.status,
+                VerificationStatus::Approved | VerificationStatus::Skipped
+            );
+            if let Some(delivery_transaction_id) = dispatch.delivery_transaction_id.as_deref()
+                && cas_store::transition_worker_delivery_verification_with_conn(
+                    &tx,
+                    delivery_transaction_id,
+                    &verification.id,
+                    approved_delivery,
+                    &caller_id,
+                )
+                .map_err(|e| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!(
+                        "Failed to advance transactional worker delivery: {e}"
+                    )),
+                    data: None,
+                })?
+                .is_some()
+            {
+                tx.execute(
+                    "UPDATE tasks
+                     SET status = ?2, pending_verification = 0, updated_at = ?3
+                     WHERE id = ?1 AND status = 'pending_supervisor_review'",
+                    rusqlite::params![
+                        req.task_id,
+                        if approved_delivery {
+                            "awaiting_merge"
+                        } else {
+                            "blocked"
+                        },
+                        chrono::Utc::now().to_rfc3339(),
+                    ],
+                )
+                .map_err(|e| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!(
+                        "Failed to project delivery verification state: {e}"
+                    )),
+                    data: None,
+                })?;
+            }
 
             if task.pending_verification {
                 cas_store::clear_pending_verification_with_conn(&tx, &req.task_id).map_err(
@@ -266,6 +598,9 @@ impl CasCore {
                 "task_id": req.task_id,
                 "status": status_str,
                 "verification_type": verification.verification_type.to_string(),
+                "provenance": verification.provenance.to_string(),
+                "capability_id": verification.capability_id,
+                "dispatch_id": verification.dispatch_id,
             }));
             // Add session ID if available for linking to the verifying agent
             let event = if let Some(Some(agent_id)) = self.agent_id.get() {
@@ -296,11 +631,12 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         let verification_store = self.open_verification_store()?;
 
-        let verification = verification_store.get(&req.id).map_err(|e| McpError {
+        let mut verification = verification_store.get(&req.id).map_err(|e| McpError {
             code: ErrorCode::INVALID_PARAMS,
             message: Cow::from(format!("Verification not found: {e}")),
             data: None,
         })?;
+        verification.sanitize_verifier_authored_content();
 
         let mut output = format!(
             "Verification: {}\n{}\n\nTask: {}\nStatus: {}\nSummary: {}\n",
@@ -317,6 +653,10 @@ impl CasCore {
 
         if let Some(agent_id) = &verification.agent_id {
             output.push_str(&format!("Verified by: {agent_id}\n"));
+        }
+        output.push_str(&format!("Provenance: {}\n", verification.provenance));
+        if let Some(capability_id) = &verification.capability_id {
+            output.push_str(&format!("Verifier capability: {capability_id}\n"));
         }
 
         if let Some(duration) = verification.duration_ms {
@@ -379,7 +719,7 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         let verification_store = self.open_verification_store()?;
 
-        let verifications =
+        let mut verifications =
             verification_store
                 .get_for_task(&req.task_id)
                 .map_err(|e| McpError {
@@ -387,6 +727,9 @@ impl CasCore {
                     message: Cow::from(format!("Failed to list verifications: {e}")),
                     data: None,
                 })?;
+        for verification in &mut verifications {
+            verification.sanitize_verifier_authored_content();
+        }
 
         if verifications.is_empty() {
             return Ok(Self::success(format!(
@@ -445,7 +788,8 @@ impl CasCore {
                 message: Cow::from(format!("Failed to get verification: {e}")),
                 data: None,
             })? {
-            Some(v) => {
+            Some(mut v) => {
+                v.sanitize_verifier_authored_content();
                 let status_icon = match v.status {
                     VerificationStatus::Approved => "✅",
                     VerificationStatus::Rejected => "❌",

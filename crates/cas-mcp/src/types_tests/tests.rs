@@ -222,19 +222,15 @@ fn test_coordination_request_count_null() {
 
 #[test]
 fn test_task_duration_secs_as_string() {
-    let req: TaskRequest = serde_json::from_str(
-        r#"{"action": "claim", "id": "t1", "duration_secs": "900"}"#,
-    )
-    .unwrap();
+    let req: TaskRequest =
+        serde_json::from_str(r#"{"action": "claim", "id": "t1", "duration_secs": "900"}"#).unwrap();
     assert_eq!(req.duration_secs, Some(900));
 }
 
 #[test]
 fn test_task_duration_secs_as_int() {
-    let req: TaskRequest = serde_json::from_str(
-        r#"{"action": "claim", "id": "t1", "duration_secs": 600}"#,
-    )
-    .unwrap();
+    let req: TaskRequest =
+        serde_json::from_str(r#"{"action": "claim", "id": "t1", "duration_secs": 600}"#).unwrap();
     assert_eq!(req.duration_secs, Some(600));
 }
 
@@ -253,29 +249,33 @@ fn test_task_duration_secs_absent() {
 
 #[test]
 fn test_agent_stale_threshold_as_string() {
-    let req: AgentRequest = serde_json::from_str(
-        r#"{"action": "cleanup", "stale_threshold_secs": "3600"}"#,
-    )
-    .unwrap();
+    let req: AgentRequest =
+        serde_json::from_str(r#"{"action": "cleanup", "stale_threshold_secs": "3600"}"#).unwrap();
     assert_eq!(req.stale_threshold_secs, Some(3600));
 }
 
 #[test]
 fn test_coordination_notification_id_as_string() {
-    let req: CoordinationRequest = serde_json::from_str(
-        r#"{"action": "queue_ack", "notification_id": "42"}"#,
-    )
-    .unwrap();
+    let req: CoordinationRequest =
+        serde_json::from_str(r#"{"action": "queue_ack", "notification_id": "42"}"#).unwrap();
     assert_eq!(req.notification_id, Some(42));
 }
 
 #[test]
 fn test_factory_older_than_secs_as_string() {
-    let req: FactoryRequest = serde_json::from_str(
-        r#"{"action": "gc_cleanup", "older_than_secs": "7200"}"#,
-    )
-    .unwrap();
+    let req: FactoryRequest =
+        serde_json::from_str(r#"{"action": "gc_cleanup", "older_than_secs": "7200"}"#).unwrap();
     assert_eq!(req.older_than_secs, Some(7200));
+}
+
+#[test]
+fn test_coordination_maps_target_cache_dry_run_to_factory_request() {
+    let req: CoordinationRequest =
+        serde_json::from_str(r#"{"action":"gc_cleanup","force":true,"dry_run":false}"#)
+            .unwrap();
+    let factory = req.to_factory_request();
+    assert_eq!(factory.force, Some(true));
+    assert_eq!(factory.dry_run, Some(false));
 }
 
 #[test]
@@ -298,28 +298,22 @@ fn test_factory_remind_fields_as_string() {
 
 #[test]
 fn test_agent_max_iterations_as_string() {
-    let req: AgentRequest = serde_json::from_str(
-        r#"{"action": "loop_start", "max_iterations": "10"}"#,
-    )
-    .unwrap();
+    let req: AgentRequest =
+        serde_json::from_str(r#"{"action": "loop_start", "max_iterations": "10"}"#).unwrap();
     assert_eq!(req.max_iterations, Some(10));
 }
 
 #[test]
 fn test_agent_max_iterations_as_int() {
-    let req: AgentRequest = serde_json::from_str(
-        r#"{"action": "loop_start", "max_iterations": 5}"#,
-    )
-    .unwrap();
+    let req: AgentRequest =
+        serde_json::from_str(r#"{"action": "loop_start", "max_iterations": 5}"#).unwrap();
     assert_eq!(req.max_iterations, Some(5));
 }
 
 #[test]
 fn test_agent_max_iterations_null() {
-    let req: AgentRequest = serde_json::from_str(
-        r#"{"action": "loop_start", "max_iterations": null}"#,
-    )
-    .unwrap();
+    let req: AgentRequest =
+        serde_json::from_str(r#"{"action": "loop_start", "max_iterations": null}"#).unwrap();
     assert_eq!(req.max_iterations, None);
 }
 
@@ -331,10 +325,8 @@ fn test_agent_max_iterations_absent() {
 
 #[test]
 fn test_coordination_max_iterations_as_string() {
-    let req: CoordinationRequest = serde_json::from_str(
-        r#"{"action": "loop_start", "max_iterations": "20"}"#,
-    )
-    .unwrap();
+    let req: CoordinationRequest =
+        serde_json::from_str(r#"{"action": "loop_start", "max_iterations": "20"}"#).unwrap();
     assert_eq!(req.max_iterations, Some(20));
 }
 
@@ -342,22 +334,19 @@ fn test_coordination_max_iterations_as_string() {
 
 #[test]
 fn test_memory_limit_as_string() {
-    let req: MemoryRequest =
-        serde_json::from_str(r#"{"action": "list", "limit": "50"}"#).unwrap();
+    let req: MemoryRequest = serde_json::from_str(r#"{"action": "list", "limit": "50"}"#).unwrap();
     assert_eq!(req.limit, Some(50));
 }
 
 #[test]
 fn test_memory_limit_as_int() {
-    let req: MemoryRequest =
-        serde_json::from_str(r#"{"action": "list", "limit": 25}"#).unwrap();
+    let req: MemoryRequest = serde_json::from_str(r#"{"action": "list", "limit": 25}"#).unwrap();
     assert_eq!(req.limit, Some(25));
 }
 
 #[test]
 fn test_memory_limit_null() {
-    let req: MemoryRequest =
-        serde_json::from_str(r#"{"action": "list", "limit": null}"#).unwrap();
+    let req: MemoryRequest = serde_json::from_str(r#"{"action": "list", "limit": null}"#).unwrap();
     assert_eq!(req.limit, None);
 }
 
@@ -369,38 +358,32 @@ fn test_memory_limit_absent() {
 
 #[test]
 fn test_task_limit_as_string() {
-    let req: TaskRequest =
-        serde_json::from_str(r#"{"action": "list", "limit": "100"}"#).unwrap();
+    let req: TaskRequest = serde_json::from_str(r#"{"action": "list", "limit": "100"}"#).unwrap();
     assert_eq!(req.limit, Some(100));
 }
 
 #[test]
 fn test_rule_limit_as_string() {
-    let req: RuleRequest =
-        serde_json::from_str(r#"{"action": "list", "limit": "10"}"#).unwrap();
+    let req: RuleRequest = serde_json::from_str(r#"{"action": "list", "limit": "10"}"#).unwrap();
     assert_eq!(req.limit, Some(10));
 }
 
 #[test]
 fn test_skill_limit_as_string() {
-    let req: SkillRequest =
-        serde_json::from_str(r#"{"action": "list", "limit": "15"}"#).unwrap();
+    let req: SkillRequest = serde_json::from_str(r#"{"action": "list", "limit": "15"}"#).unwrap();
     assert_eq!(req.limit, Some(15));
 }
 
 #[test]
 fn test_spec_limit_as_string() {
-    let req: SpecRequest =
-        serde_json::from_str(r#"{"action": "list", "limit": "20"}"#).unwrap();
+    let req: SpecRequest = serde_json::from_str(r#"{"action": "list", "limit": "20"}"#).unwrap();
     assert_eq!(req.limit, Some(20));
 }
 
 #[test]
 fn test_search_max_tokens_as_string() {
-    let req: SearchContextRequest = serde_json::from_str(
-        r#"{"action": "context", "max_tokens": "4096"}"#,
-    )
-    .unwrap();
+    let req: SearchContextRequest =
+        serde_json::from_str(r#"{"action": "context", "max_tokens": "4096"}"#).unwrap();
     assert_eq!(req.max_tokens, Some(4096));
 }
 
@@ -426,24 +409,46 @@ fn test_search_line_range_as_string() {
 
 #[test]
 fn test_search_limit_as_string() {
+    let req: SearchContextRequest =
+        serde_json::from_str(r#"{"action": "search", "query": "test", "limit": "30"}"#).unwrap();
+    assert_eq!(req.limit, Some(30));
+    assert_eq!(req.provenance_version, None);
+    assert_eq!(req.query_id, None);
+    assert_eq!(req.outcome, None);
+}
+
+#[test]
+fn test_retrieval_feedback_fields_are_additive_and_typed() {
     let req: SearchContextRequest = serde_json::from_str(
-        r#"{"action": "search", "query": "test", "limit": "30"}"#,
+        r#"{
+            "action": "retrieval_feedback",
+            "query_id": "qry-123",
+            "result_id": "cas-abcd",
+            "outcome": "corrected",
+            "actor_id": "worker-1",
+            "session_id": "session-1",
+            "correction_ref": "cas-ef01",
+            "provenance_version": "1"
+        }"#,
     )
     .unwrap();
-    assert_eq!(req.limit, Some(30));
+    assert_eq!(req.provenance_version, Some(1));
+    assert_eq!(req.query_id.as_deref(), Some("qry-123"));
+    assert_eq!(req.result_id.as_deref(), Some("cas-abcd"));
+    assert_eq!(req.outcome.as_deref(), Some("corrected"));
+    assert_eq!(req.actor_id.as_deref(), Some("worker-1"));
+    assert_eq!(req.correction_ref.as_deref(), Some("cas-ef01"));
 }
 
 #[test]
 fn test_team_limit_as_string() {
-    let req: TeamRequest =
-        serde_json::from_str(r#"{"action": "list", "limit": "5"}"#).unwrap();
+    let req: TeamRequest = serde_json::from_str(r#"{"action": "list", "limit": "5"}"#).unwrap();
     assert_eq!(req.limit, Some(5));
 }
 
 #[test]
 fn test_pattern_limit_as_string() {
-    let req: PatternRequest =
-        serde_json::from_str(r#"{"action": "list", "limit": "8"}"#).unwrap();
+    let req: PatternRequest = serde_json::from_str(r#"{"action": "list", "limit": "8"}"#).unwrap();
     assert_eq!(req.limit, Some(8));
 }
 
@@ -458,28 +463,23 @@ fn test_coordination_limit_as_string() {
 
 #[test]
 fn test_verification_duration_ms_as_string() {
-    let req: VerificationRequest = serde_json::from_str(
-        r#"{"action": "add", "task_id": "t1", "duration_ms": "1500"}"#,
-    )
-    .unwrap();
+    let req: VerificationRequest =
+        serde_json::from_str(r#"{"action": "add", "task_id": "t1", "duration_ms": "1500"}"#)
+            .unwrap();
     assert_eq!(req.duration_ms, Some(1500));
 }
 
 #[test]
 fn test_verification_duration_ms_as_int() {
-    let req: VerificationRequest = serde_json::from_str(
-        r#"{"action": "add", "task_id": "t1", "duration_ms": 2000}"#,
-    )
-    .unwrap();
+    let req: VerificationRequest =
+        serde_json::from_str(r#"{"action": "add", "task_id": "t1", "duration_ms": 2000}"#).unwrap();
     assert_eq!(req.duration_ms, Some(2000));
 }
 
 #[test]
 fn test_verification_duration_ms_null() {
-    let req: VerificationRequest = serde_json::from_str(
-        r#"{"action": "add", "task_id": "t1", "duration_ms": null}"#,
-    )
-    .unwrap();
+    let req: VerificationRequest =
+        serde_json::from_str(r#"{"action": "add", "task_id": "t1", "duration_ms": null}"#).unwrap();
     assert_eq!(req.duration_ms, None);
 }
 
@@ -488,14 +488,23 @@ fn test_verification_duration_ms_absent() {
     let req: VerificationRequest =
         serde_json::from_str(r#"{"action": "add", "task_id": "t1"}"#).unwrap();
     assert_eq!(req.duration_ms, None);
+    assert_eq!(req.verifier_capability, None);
+    assert_eq!(req.dispatch_id, None);
+    let serialized = serde_json::to_value(&req).unwrap();
+    assert!(
+        serialized.get("verifier_capability").is_none(),
+        "legacy request serialization must omit the additive capability field"
+    );
+    assert!(
+        serialized.get("dispatch_id").is_none(),
+        "legacy request serialization must omit the additive dispatch field"
+    );
 }
 
 #[test]
 fn test_verification_limit_as_string() {
-    let req: VerificationRequest = serde_json::from_str(
-        r#"{"action": "list", "task_id": "t1", "limit": "10"}"#,
-    )
-    .unwrap();
+    let req: VerificationRequest =
+        serde_json::from_str(r#"{"action": "list", "task_id": "t1", "limit": "10"}"#).unwrap();
     assert_eq!(req.limit, Some(10));
 }
 
@@ -503,19 +512,15 @@ fn test_verification_limit_as_string() {
 
 #[test]
 fn test_execute_max_length_as_string() {
-    let req: ExecuteRequest = serde_json::from_str(
-        r#"{"code": "return 1;", "max_length": "5000"}"#,
-    )
-    .unwrap();
+    let req: ExecuteRequest =
+        serde_json::from_str(r#"{"code": "return 1;", "max_length": "5000"}"#).unwrap();
     assert_eq!(req.max_length, Some(5000));
 }
 
 #[test]
 fn test_execute_max_length_as_int() {
-    let req: ExecuteRequest = serde_json::from_str(
-        r#"{"code": "return 1;", "max_length": 10000}"#,
-    )
-    .unwrap();
+    let req: ExecuteRequest =
+        serde_json::from_str(r#"{"code": "return 1;", "max_length": 10000}"#).unwrap();
     assert_eq!(req.max_length, Some(10000));
 }
 
@@ -523,10 +528,8 @@ fn test_execute_max_length_as_int() {
 
 #[test]
 fn test_empty_string_coerces_to_none() {
-    let req: TaskRequest = serde_json::from_str(
-        r#"{"action": "list", "priority": "", "limit": ""}"#,
-    )
-    .unwrap();
+    let req: TaskRequest =
+        serde_json::from_str(r#"{"action": "list", "priority": "", "limit": ""}"#).unwrap();
     assert_eq!(req.priority, None);
     assert_eq!(req.limit, None);
 }

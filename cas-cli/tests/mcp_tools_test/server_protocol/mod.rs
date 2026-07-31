@@ -1,7 +1,9 @@
 use crate::support::*;
 use cas::mcp::tools::*;
 use cas::store::{open_agent_store, open_verification_store};
-use cas::types::{AgentStatus, Verification};
+use cas::types::{
+    Agent, AgentRole, AgentStatus, Verification, VerificationProofBoundary, VerificationProvenance,
+};
 use rmcp::ServerHandler;
 use rmcp::handler::server::wrapper::Parameters;
 use tempfile::TempDir;
@@ -10,6 +12,43 @@ use tempfile::TempDir;
 fn setup_service() -> (TempDir, CasService) {
     let (temp, core) = setup_cas();
     (temp, CasService::new(core, None))
+}
+
+fn add_exact_supervisor_fixture_verdict(cas_dir: &std::path::Path, mut verification: Verification) {
+    const SUPERVISOR_ID: &str = "server-protocol-fixture-supervisor";
+    let agent_store = open_agent_store(cas_dir).expect("agent store");
+    let mut supervisor = Agent::new(SUPERVISOR_ID.to_string(), SUPERVISOR_ID.to_string());
+    supervisor.role = AgentRole::Supervisor;
+    agent_store
+        .register(&supervisor)
+        .expect("register durable fixture supervisor");
+    let dispatch = cas_store::create_verification_dispatch_bound(
+        cas_dir,
+        &verification.task_id,
+        "fixture-requester",
+        SUPERVISOR_ID,
+        &VerificationProofBoundary::task(),
+        chrono::Utc::now() + chrono::Duration::minutes(10),
+        false,
+    )
+    .expect("create exact fixture dispatch");
+    verification.provenance = VerificationProvenance::SupervisorDirect;
+    verification.agent_id = Some(SUPERVISOR_ID.to_string());
+    verification.issuer_agent_id = Some(SUPERVISOR_ID.to_string());
+    verification.dispatch_id = Some(dispatch.id.clone());
+    open_verification_store(cas_dir)
+        .expect("verification store")
+        .add(&verification)
+        .expect("persist exact supervisor verdict");
+    let connection = rusqlite::Connection::open(cas_dir.join("cas.db")).expect("db");
+    cas_store::resolve_verification_dispatch_with_conn(
+        &connection,
+        &dispatch.id,
+        SUPERVISOR_ID,
+        None,
+        true,
+    )
+    .expect("resolve exact fixture dispatch");
 }
 
 #[test]
@@ -182,11 +221,11 @@ async fn test_all_store_types_accessible() {
 }
 
 // ========================================================================
-// Pending Verification Blocking Tests
+// Task-scoped verification isolation tests
 // ========================================================================
 
 #[tokio::test]
-async fn test_start_blocked_with_pending_verification() {
+async fn test_start_allowed_with_other_task_pending_verification() {
     let (_temp, service) = setup_cas();
 
     // Create and start first task
@@ -230,9 +269,10 @@ async fn test_start_blocked_with_pending_verification() {
         id: first_id.to_string(),
         reason: Some("Completed".to_string()),
         bypass_code_review: None,
-code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        code_review_findings: None,
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -271,7 +311,7 @@ code_review_findings: None,
     let text = extract_text(result);
     let second_id = extract_task_id(&text).expect("should have second task ID");
 
-    // Try to start second task - should be BLOCKED due to pending verification
+    // Starting unrelated task B remains available while A's close is pending.
     let start_req2 = IdRequest {
         id: second_id.to_string(),
     };
@@ -282,17 +322,13 @@ code_review_findings: None,
 
     let text = extract_text(result);
     assert!(
-        text.contains("VERIFICATION PENDING"),
-        "Start should be blocked: {text}"
-    );
-    assert!(
-        text.contains(first_id),
-        "Should mention blocking task: {text}"
+        !text.contains("VERIFICATION PENDING"),
+        "Task A must not block starting task B: {text}"
     );
 }
 
 #[tokio::test]
-async fn test_claim_blocked_with_pending_verification() {
+async fn test_claim_allowed_with_other_task_pending_verification() {
     let (temp, service) = setup_cas();
     let cas_dir = temp.path().join(".cas");
 
@@ -337,9 +373,10 @@ async fn test_claim_blocked_with_pending_verification() {
         id: first_id.to_string(),
         reason: Some("Completed".to_string()),
         bypass_code_review: None,
-code_review_findings: None,
-            search_manifest: None,
-            commit_receipt: None,    };
+        code_review_findings: None,
+        search_manifest: None,
+        commit_receipt: None,
+    };
     let result = service
         .cas_task_close(Parameters(close_req))
         .await
@@ -386,7 +423,7 @@ code_review_findings: None,
     let text = extract_text(result);
     let second_id = extract_task_id(&text).expect("should have second task ID");
 
-    // Try to claim second task - should be BLOCKED due to pending verification
+    // Claiming unrelated task B remains available while A's close is pending.
     let claim_req = TaskClaimRequest {
         task_id: second_id.to_string(),
         duration_secs: 600,
@@ -399,12 +436,8 @@ code_review_findings: None,
 
     let text = extract_text(result);
     assert!(
-        text.contains("VERIFICATION PENDING"),
-        "Claim should be blocked: {text}"
-    );
-    assert!(
-        text.contains(first_id),
-        "Should mention blocking task: {text}"
+        !text.contains("VERIFICATION PENDING"),
+        "Task A must not block claiming task B: {text}"
     );
 }
 
@@ -412,8 +445,6 @@ code_review_findings: None,
 async fn test_start_allowed_after_verification_approved() {
     let (temp, service) = setup_cas();
     let cas_dir = temp.path().join(".cas");
-    let verification_store = open_verification_store(&cas_dir).unwrap();
-
     // Create and start first task
     let req = TaskCreateRequest {
         depth: None,
@@ -456,7 +487,7 @@ async fn test_start_allowed_after_verification_approved() {
         first_id.to_string(),
         "All checks passed".to_string(),
     );
-    verification_store.add(&verification).unwrap();
+    add_exact_supervisor_fixture_verdict(&cas_dir, verification);
 
     // Create second task
     let req2 = TaskCreateRequest {

@@ -252,27 +252,6 @@ pub(crate) fn get_cas_hooks_config(config: &crate::config::HookConfig) -> serde_
         );
     }
 
-    // SubagentStart for verification jail unjailing (matcher: task-verifier)
-    // async: true - database update only, no blocking decision
-    if config.stop.enabled {
-        hooks.insert(
-            "SubagentStart".to_string(),
-            serde_json::json!([
-                {
-                    "matcher": "task-verifier",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": "cas hook SubagentStart",
-                            "timeout": 2000,
-                            "async": true
-                        }
-                    ]
-                }
-            ]),
-        );
-    }
-
     // SubagentStop uses stop timeout
     // async: true - marker file cleanup only
     if config.stop.enabled {
@@ -326,6 +305,80 @@ pub(crate) fn get_cas_hooks_config(config: &crate::config::HookConfig) -> serde_
                             "type": "command",
                             "command": "cas hook PreToolUse",
                             "timeout": config.pre_tool_use.timeout
+                        }
+                    ]
+                }
+            ]),
+        );
+
+        // Sealed verifier handoff lifecycle — ONE atomic installation unit
+        // (cas-fda1). PreToolUse (immediately above) is the only route that can
+        // issue a sealed task-verifier handoff, so every terminal route for that
+        // handoff must be installed by the same condition:
+        //
+        //   * SubagentStart          — binds the sole unbound handoff to the
+        //                              official distinct child agent_id.
+        //   * PostToolUseFailure     — cancels the exact still-unbound handoff
+        //                              when the Agent spawn fails.
+        //   * PermissionDenied       — same cancellation for a denied spawn.
+        //
+        // These previously hung off `stop.enabled`, `post_tool_use.enabled`, and
+        // `permission_request.enabled` respectively. Because those flags are
+        // independent of `pre_tool_use.enabled`, valid configurations could issue
+        // a handoff that could never bind or be cleaned up; `pre_tool.rs` then
+        // denies every later spawn with "already awaiting SubagentStart" until
+        // the handoff expires, wedging verification. Co-gating here makes the
+        // invariant structural: issuance installed => binding + both cleanup
+        // routes installed; issuance absent => the whole group is absent, which
+        // is fail-closed because no handoff can exist to bind or leak.
+        //
+        // All three handlers are pure handoff-lifecycle: each returns an empty
+        // output unless the event is a `task-verifier` Task/Agent spawn, so
+        // co-gating adds no behavior outside this lifecycle.
+
+        // Must remain synchronous so verification cannot race binding.
+        hooks.insert(
+            "SubagentStart".to_string(),
+            serde_json::json!([
+                {
+                    "matcher": "task-verifier",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "cas hook SubagentStart",
+                            "timeout": 2000
+                        }
+                    ]
+                }
+            ]),
+        );
+        hooks.insert(
+            "PostToolUseFailure".to_string(),
+            serde_json::json!([
+                {
+                    "matcher": "Task|Agent",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "cas hook PostToolUseFailure",
+                            "timeout": 2000,
+                            "async": true
+                        }
+                    ]
+                }
+            ]),
+        );
+        hooks.insert(
+            "PermissionDenied".to_string(),
+            serde_json::json!([
+                {
+                    "matcher": "Task|Agent",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "cas hook PermissionDenied",
+                            "timeout": 2000,
+                            "async": true
                         }
                     ]
                 }

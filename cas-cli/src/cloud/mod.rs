@@ -33,7 +33,7 @@ pub use config::{
     maybe_mark_personal_scope_notice, personal_scope_notice_for_configs, resolve_canonical_id,
     set_canonical_id_in_config_toml, should_adopt_canonical_id,
 };
-pub(crate) use config::{default_endpoint, is_acceptable_endpoint, user_level_cloud_json_path};
+pub(crate) use config::{default_endpoint, is_acceptable_endpoint, normalize_git_remote_url, user_level_cloud_json_path};
 // T2: /api/me fetch helpers — `pub` so integration tests can call them directly.
 pub use me::{FetchTeamsOutcome, fetch_and_cache_teams, fetch_and_cache_teams_inner,
     teams_cache_stale};

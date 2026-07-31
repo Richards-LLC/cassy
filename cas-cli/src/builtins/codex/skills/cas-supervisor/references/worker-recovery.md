@@ -144,9 +144,9 @@ Workers fail in production. These are recurring observed failure modes and their
 5. Spawn a fresh worker with a clean context.
 6. Reassign the task. If the task involves iterative test-fix loops, add guidance to the assignment: "periodically commit working state" so partial progress survives if degradation recurs.
 
-### Verification Jail Deadlock
+### Legacy Verification Jail Deadlock (stale binary)
 
-**Signature:** Worker reports `VERIFICATION_JAIL_BLOCKED` and cannot close tasks or use tools. The jail check fires agent-wide — one task's pending verification blocks ALL tool usage across all tasks for that worker.
+**Signature:** A worker cannot use unrelated tools or work on another task while one task awaits verification. Current CAS gates only the named task's close/update-to-closed transition, so this symptom proves the running binary is stale.
 
 **Note:** Factory workers are exempt from verification jail as of commit `bba6fbf`. If this failure mode appears, the running CAS binary is older than that fix.
 

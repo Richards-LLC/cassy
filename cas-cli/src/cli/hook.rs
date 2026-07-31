@@ -53,12 +53,16 @@ pub enum HookCommand {
     SubagentStop,
     /// Handle PostToolUse hook event
     PostToolUse,
+    /// Handle PostToolUseFailure hook event (sealed verifier handoff cleanup)
+    PostToolUseFailure,
     /// Handle PreToolUse hook event (auto-approval)
     PreToolUse,
     /// Handle UserPromptSubmit hook event
     UserPromptSubmit,
     /// Handle PermissionRequest hook event (smart auto-approve)
     PermissionRequest,
+    /// Handle PermissionDenied hook event (sealed verifier handoff cleanup)
+    PermissionDenied,
     /// Handle Notification hook event (external alerts)
     Notification,
     /// Handle PreCompact hook event (context preservation)
@@ -91,9 +95,11 @@ pub fn execute(args: &HookArgs, cli: &Cli) -> anyhow::Result<()> {
         HookCommand::SubagentStart => execute_event("SubagentStart", cli),
         HookCommand::SubagentStop => execute_event("SubagentStop", cli),
         HookCommand::PostToolUse => execute_event("PostToolUse", cli),
+        HookCommand::PostToolUseFailure => execute_event("PostToolUseFailure", cli),
         HookCommand::PreToolUse => execute_event("PreToolUse", cli),
         HookCommand::UserPromptSubmit => execute_event("UserPromptSubmit", cli),
         HookCommand::PermissionRequest => execute_event("PermissionRequest", cli),
+        HookCommand::PermissionDenied => execute_event("PermissionDenied", cli),
         HookCommand::Notification => execute_event("Notification", cli),
         HookCommand::PreCompact => execute_event("PreCompact", cli),
         HookCommand::MessageDisplay => execute_event("MessageDisplay", cli),

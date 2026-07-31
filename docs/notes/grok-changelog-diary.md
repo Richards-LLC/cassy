@@ -34,32 +34,35 @@ dependency, verify on upgrade) · 🔧 fix shipped · 🏗 EPIC · ⏭ n/a
 
 ## Version status
 
-- **CAS validated against:** Grok Build **0.2.93** (comment on
-  `crates/cas-pty/src/pty.rs` `PtyConfig::grok`, verified live 2026-07-09 via
-  `grok --help` / `grok inspect` / `grok mcp doctor`).
-- **Locally installed:** **0.2.114** (`grok 0.2.114 (0c78503879) [stable]`, checked
-  2026-07-30).
-- **Latest versioned local changelog evidence:** **0.2.112** (2026-07-24). The
-  current `~/.grok/CHANGELOG.md` contains only a **0.2.112** section. The current
+- **CAS validated against:** retained Grok Build **0.2.114**
+  (`grok 0.2.114 (0c78503879) [stable]`), verified live 2026-07-30 through the
+  complete isolated `PtyConfig::grok` worker matrix and recorded in the typed
+  `grok-build-0.2.114-2026-07-30` conformance receipt.
+- **Current default symlink:** **0.2.117**
+  (`grok 0.2.117 (f1c0609308) [stable]`, checked 2026-07-30). The validated
+  retained 0.2.114 executable remains installed separately. The typed receipt
+  records this mismatch so unified preflight can surface it as stale/warn rather
+  than silently treating 0.2.117 as validated.
+- **Latest versioned local changelog evidence:** **0.2.114** (2026-07-29). The
+  current `~/.grok/CHANGELOG.md` contains **0.2.113–0.2.114** sections. The current
   `~/.grok/CHANGELOG.json` is a flat item list with no version or date fields; its
   items are therefore only **current-install evidence**, not grounds to assign
-  history to 0.2.113–0.2.114 or another guessed release. Earlier host snapshots
+  history to 0.2.115–0.2.117 or another guessed release. Earlier host snapshots
   captured the evidence-backed **0.2.100–0.2.101** and **0.2.104–0.2.106** entries
   retained below. Versions **0.2.102–0.2.103**, **0.2.107–0.2.111**, and
-  **0.2.113–0.2.114** have no attributable notes on the available local surfaces
+  **0.2.115–0.2.117** have no attributable notes on the available local surfaces
   and remain explicit source gaps. **0.2.100** remains the diary's evidence-backed
   **seed floor**.
-- **Gap:** ~21 patch versions between the validated pin (0.2.93) and locally
-  installed 0.2.114; the newest versioned changelog evidence trails the install by
-  two patches. Entries below are a *changelog triage pass*, not a
-  re-run of the 0.2.93 live verification. Upgrade-time re-verification of the full
-  touchpoint checklist remains the trigger for promoting any 👀 to a task.
+- **Gap:** the validated binary is **three patches behind** the current default
+  symlink (0.2.114 vs 0.2.117), and versioned changelog evidence also ends at
+  0.2.114. The 0.2.114 touchpoint checklist is a completed live validation;
+  0.2.115–0.2.117 remain unvalidated source gaps.
 
 ## CAS ↔ Grok touchpoints (what a release can break)
 
 The load-bearing surface is `crates/cas-pty/src/pty.rs::PtyConfig::grok` (approx.
 lines 423–580; instructions constants near top of file). Ground truth is that
-code + its "Verified against … 0.2.93" block — re-read it on upgrade rather than
+code + its "Verified against … 0.2.114" block — re-read it on upgrade rather than
 trusting this diary alone.
 
 ### CLI flags (spawn args)
@@ -70,7 +73,7 @@ trusting this diary alone.
 - **`--session-id <uuid>`** — fresh UUID per *new* conversation (anti-overwrite
   model, same family as Claude; not Codex's `codex-<name>-<uuid>` prefix). Phase 4
   transcript resolution keys on this exact value. Doc comment also notes short form
-  `-s/--session-id` on the 0.2.93 binary.
+  `-s/--session-id` on the validated 0.2.114 binary.
 - **`-m` / `--model <MODEL>`** — optional model pin when the factory requests one.
 - **`--reasoning-effort <EFFORT>`** (alias `--effort` on the verified binary) —
   vocabulary minimal/low/medium/high/xhigh via `Effort::as_claude_arg()` (no
@@ -125,8 +128,8 @@ At minimum, `PtyConfig::grok` sets:
 
 | Grok version | Headline | CAS verdict | Pointer |
 |--------------|----------|-------------|---------|
-| 0.2.114 | Missing from available versioned local changelog evidence | — (no attributable evidence) | this doc |
-| 0.2.113 | Missing from available versioned local changelog evidence | — (no attributable evidence) | this doc |
+| 0.2.114 | Session deletion · no-free-thread startup crash fix · full CAS factory matrix | ✅ | this doc |
+| 0.2.113 | MCP enable/disable · SessionEnd · auth/process/session reliability · instant cold start | 👀 / ✅ / ⏭ | this doc |
 | 0.2.112 | Version policy · env/provider config · session/resume/transcripts · MCP/subagents · hooks/workflows/background lifecycle | 👀 / ✅ / ⏭ | this doc |
 | 0.2.111 | Missing from available versioned local changelog evidence | — (no attributable evidence) | this doc |
 | 0.2.110 | Missing from available versioned local changelog evidence | — (no attributable evidence) | this doc |
@@ -140,25 +143,45 @@ At minimum, `PtyConfig::grok` sets:
 | 0.2.102 | Missing from installed local changelog | — (no evidence) | this doc |
 | 0.2.101 | **grok inspect** multi-harness compatibility settings · TUI refresh cadence · queue/status/subagent polish · rate-limit copy | 👀 / ✅ / ⏭ | this doc |
 | 0.2.100 | **Session picker + welcome resume** across Claude/Codex/Cursor · web-fetch artifacts · queue/multiline Enter · pane-closed resume crash · hooks honor disabled-at-start · long-turn status markers | 👀 / ✅ / ⏭ | this doc |
-| *(seed floor)* | No evidence-backed versions before 0.2.100; current host changelog contains only 0.2.112 | — | — |
+| *(seed floor)* | No evidence-backed versions before 0.2.100 in retained host snapshots | — | — |
 
 ---
 
 ## Entries
 
-### 0.2.114 — missing from the available versioned local changelog
+### 0.2.114 — session deletion and startup thread-exhaustion fix
 
-Reviewed 2026-07-30. The host binary is **0.2.114**, but
-`~/.grok/CHANGELOG.md` contains only a 0.2.112 section. The flat
-`~/.grok/CHANGELOG.json` has no version or date fields, so its current-install
-items cannot be attributed to 0.2.114. No release items, date, or CAS verdict are
-reconstructed from the installed version or neighboring release.
+Reviewed and validated 2026-07-30. Source: the versioned
+**0.2.114 — 2026-07-29** section in `~/.grok/CHANGELOG.md`, plus the complete
+live CAS factory matrix against the retained authenticated 0.2.114 executable.
 
-### 0.2.113 — missing from the available versioned local changelog
+- **`/delete` removes the current session after confirmation.** → ⏭ **n/a.**
+  CAS launches fresh UUID sessions and does not invoke Grok's destructive
+  session command.
+- **Startup no longer crashes when the host has no free threads.** → ✅
+  **operational reliability win.** The real isolated worker launched and
+  completed its CAS lifecycle under the production PTY configuration.
+- **CAS factory contract:** → ✅ permission bypass, session UUID, model/effort,
+  cwd, `--rules`, persistent `cas__*` MCP discovery, inherited identity, Grok
+  transcript/liveness, task/edit/commit lifecycle, and hooks-disabled posture
+  all passed. Typed evidence:
+  `crates/cas-pty/conformance/grok-build-0.2.114-2026-07-30.json`.
 
-Reviewed 2026-07-30. Neither `~/.grok/CHANGELOG.md` nor the unversioned,
-flat `~/.grok/CHANGELOG.json` attributes notes to 0.2.113. The 0.2.112 section
-below does not fill this gap, and no history is inferred from its date.
+### 0.2.113 — MCP controls and lifecycle reliability
+
+Reviewed 2026-07-30. Source: the versioned **0.2.113 — 2026-07-28** section in
+`~/.grok/CHANGELOG.md`.
+
+- **MCP servers can be enabled/disabled from the CLI; invalid entries no longer
+  block startup.** → 👀 / ✅. Persistent CAS discovery remains load-bearing and
+  passed with 11 tools; operators can still disable `cas`, so preflight must
+  report discovery health rather than assume configuration presence.
+- **SessionEnd runs in TUI/headless sessions; session registry, auth sharing,
+  subprocess cleanup, shell output, and cold-start behavior were hardened.**
+  → ✅ operational wins. CAS continues to use `--rules` plus inherited env, not
+  SessionStart stdout, for worker identity and role context.
+- Remaining plan/clipboard/background-task/TUI changes are ⏭ Grok-owned UX and
+  do not alter the CAS launch contract.
 
 ### 0.2.112 — version policy · env/MCP/hooks · session and workflow lifecycle
 
@@ -412,19 +435,14 @@ changelog; no pre-0.2.100 entries inventable from this host.
 
 ## Backlog of opportunities (not required, tracked)
 
-- **0.2.93 → 0.2.114 upgrade validation:** re-run the live checklist that pinned 0.2.93
-  (`grok --help` flags, `grok inspect`, `grok mcp doctor`, factory spawn smoke):
-  `--permission-mode bypassPermissions`, `--session-id`, `-m` / `--reasoning-effort`,
-  `--cwd`, `--rules`, MCP discovery of `cas` without per-spawn `-c`, env inheritance
-  into `cas serve`, tools as `cas__*`, transcripts under `~/.grok/sessions/*`.
-- **Validated-pin comment bump:** after a successful factory smoke on 0.2.114, update
-  the `PtyConfig::grok` "Verified against … 0.2.93" comment (and this diary's Version
-  status) so the pin tracks reality.
+- **0.2.115–0.2.117 validation:** the default symlink is newer than the retained,
+  validated 0.2.114 binary. Re-run the complete live checklist before advancing
+  the typed receipt or validated pin.
 - **Changelog history depth:** find an authoritative release surface for the missing
-  0.2.102–0.2.103, 0.2.107–0.2.111, and 0.2.113–0.2.114 notes, plus any
-  pre-0.2.100 history, before backfilling them. The current local Markdown contains
-  only 0.2.112, and its companion JSON is unversioned; keep every gap and the
-  0.2.100 evidence-backed seed floor explicit until attributable sources exist.
+  0.2.102–0.2.103, 0.2.107–0.2.111, and 0.2.115–0.2.117 notes, plus any
+  pre-0.2.100 history, before backfilling them. The companion JSON remains
+  unversioned; keep every gap and the 0.2.100 evidence-backed seed floor explicit
+  until attributable sources exist.
 - **SessionStart stdout:** if a future Grok release starts delivering SessionStart
   stdout like Claude, re-evaluate whether `--rules` remains the sole context path or
   becomes defense-in-depth (would be a deliberate EPIC, not a silent drop of `--rules`).

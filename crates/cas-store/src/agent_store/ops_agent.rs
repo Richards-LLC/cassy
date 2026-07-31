@@ -9,7 +9,7 @@ use cas_types::{
     RecordingEventType,
 };
 use chrono::Utc;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 /// cas-85d9: renewal window applied to a live agent's active task leases on
 /// every heartbeat (see the long comment in `agent_heartbeat` for why this
@@ -18,6 +18,83 @@ use rusqlite::{OptionalExtension, params};
 /// keeps its leases continuously fresh well inside this window, while a
 /// worker that stops heartbeating still lets the lease expire naturally.
 const TASK_LEASE_HEARTBEAT_RENEWAL_SECS: i64 = DEFAULT_LEASE_DURATION_SECS;
+
+pub(crate) fn register_agent_with_conn(conn: &Connection, agent: &Agent) -> Result<()> {
+    let metadata_json = serde_json::to_string(&agent.metadata).unwrap_or_else(|_| "{}".to_string());
+    let env_factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
+    let factory_session = agent
+        .factory_session
+        .as_deref()
+        .or(env_factory_session.as_deref());
+    let existed = conn
+        .query_row(
+            "SELECT 1 FROM agents WHERE id = ?1",
+            params![agent.id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+
+    // Use INSERT ... ON CONFLICT for idempotent registration.
+    // This allows SessionStart hook and MCP to both register without conflict.
+    // On conflict (re-registration), we preserve startup_confirmed so that a
+    // live agent that re-registers doesn't get falsely detected as failed-startup.
+    conn.execute(
+        "INSERT INTO agents (id, name, agent_type, role, status, pid, ppid, cc_session_id, parent_id,
+         machine_id, registered_at, last_heartbeat, active_tasks, metadata, pid_starttime, factory_session, startup_confirmed)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 0)
+         ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            agent_type = agents.agent_type,
+            role = agents.role,
+            status = excluded.status,
+            pid = excluded.pid,
+            ppid = excluded.ppid,
+            cc_session_id = excluded.cc_session_id,
+            parent_id = excluded.parent_id,
+            machine_id = excluded.machine_id,
+            last_heartbeat = excluded.last_heartbeat,
+            active_tasks = excluded.active_tasks,
+            metadata = excluded.metadata,
+            pid_starttime = excluded.pid_starttime,
+            factory_session = COALESCE(excluded.factory_session, factory_session)",
+        params![
+            agent.id,
+            agent.name,
+            agent.agent_type.to_string(),
+            agent.role.to_string(),
+            agent.status.to_string(),
+            agent.pid,
+            agent.ppid,
+            agent.cc_session_id,
+            agent.parent_id,
+            agent.machine_id,
+            agent.registered_at.to_rfc3339(),
+            agent.last_heartbeat.to_rfc3339(),
+            agent.active_tasks,
+            metadata_json,
+            agent.pid_starttime.map(|v| v as i64),
+            factory_session,
+        ],
+    )?;
+
+    if !existed {
+        // Record event for sidecar activity feed
+        let event = Event::new(
+            EventType::AgentRegistered,
+            EventEntityType::Agent,
+            &agent.id,
+            format!("Agent registered: {}", agent.name),
+        )
+        .with_session(agent.cc_session_id.as_deref().unwrap_or(&agent.id));
+        let _ = record_event_with_conn(conn, &event); // Best-effort, don't fail on event recording
+
+        // Capture event for recording playback
+        let _ = capture_agent_event(conn, RecordingEventType::AgentJoined, &agent.id, None);
+    }
+
+    Ok(())
+}
 
 impl SqliteAgentStore {
     pub(crate) fn agent_init(&self) -> Result<()> {
@@ -28,82 +105,7 @@ impl SqliteAgentStore {
     pub(crate) fn agent_register(&self, agent: &Agent) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
             let conn = self.lock_conn()?;
-            let metadata_json =
-                serde_json::to_string(&agent.metadata).unwrap_or_else(|_| "{}".to_string());
-            let env_factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
-            let factory_session = agent
-                .factory_session
-                .as_deref()
-                .or(env_factory_session.as_deref());
-            let existed = conn
-                .query_row(
-                    "SELECT 1 FROM agents WHERE id = ?1",
-                    params![agent.id],
-                    |_| Ok(()),
-                )
-                .optional()?
-                .is_some();
-
-            // Use INSERT ... ON CONFLICT for idempotent registration.
-            // This allows SessionStart hook and MCP to both register without conflict.
-            // On conflict (re-registration), we preserve startup_confirmed so that a
-            // live agent that re-registers doesn't get falsely detected as failed-startup.
-            conn.execute(
-            "INSERT INTO agents (id, name, agent_type, role, status, pid, ppid, cc_session_id, parent_id,
-             machine_id, registered_at, last_heartbeat, active_tasks, metadata, pid_starttime, factory_session, startup_confirmed)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 0)
-             ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                agent_type = excluded.agent_type,
-                role = excluded.role,
-                status = excluded.status,
-                pid = excluded.pid,
-                ppid = excluded.ppid,
-                cc_session_id = excluded.cc_session_id,
-                parent_id = excluded.parent_id,
-                machine_id = excluded.machine_id,
-                last_heartbeat = excluded.last_heartbeat,
-                active_tasks = excluded.active_tasks,
-                metadata = excluded.metadata,
-                pid_starttime = excluded.pid_starttime,
-                factory_session = COALESCE(excluded.factory_session, factory_session)",
-            params![
-                agent.id,
-                agent.name,
-                agent.agent_type.to_string(),
-                agent.role.to_string(),
-                agent.status.to_string(),
-                agent.pid,
-                agent.ppid,
-                agent.cc_session_id,
-                agent.parent_id,
-                agent.machine_id,
-                agent.registered_at.to_rfc3339(),
-                agent.last_heartbeat.to_rfc3339(),
-                agent.active_tasks,
-                metadata_json,
-                agent.pid_starttime.map(|v| v as i64),
-                factory_session,
-            ],
-        )?;
-
-            if !existed {
-                // Record event for sidecar activity feed
-                let event = Event::new(
-                    EventType::AgentRegistered,
-                    EventEntityType::Agent,
-                    &agent.id,
-                    format!("Agent registered: {}", agent.name),
-                )
-                .with_session(agent.cc_session_id.as_deref().unwrap_or(&agent.id));
-                let _ = record_event_with_conn(&conn, &event); // Best-effort, don't fail on event recording
-
-                // Capture event for recording playback
-                let _ =
-                    capture_agent_event(&conn, RecordingEventType::AgentJoined, &agent.id, None);
-            }
-
-            Ok(())
+            register_agent_with_conn(&conn, agent)
         }) // with_write_retry
     }
     pub(crate) fn agent_get(&self, id: &str) -> Result<Agent> {

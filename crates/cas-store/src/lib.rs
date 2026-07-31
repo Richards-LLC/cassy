@@ -38,6 +38,7 @@ pub mod shared_db;
 mod agent_store;
 mod code_store;
 mod commit_link_store;
+mod delivery_store;
 mod entity_store;
 pub mod error;
 mod event_store;
@@ -50,6 +51,7 @@ mod prompt_store;
 mod recording_store;
 mod recording_text_store;
 mod reminder_store;
+mod retrieval_store;
 mod skill_store;
 mod spawn_queue_store;
 mod spec_store;
@@ -82,6 +84,13 @@ pub use event_store::{EVENT_SCHEMA, EventStore, SqliteEventStore, record_event_w
 
 // Code store for indexed source code
 pub use code_store::CodeStore;
+pub use delivery_store::{
+    DELIVERY_SCHEMA, build_worker_completion_receipt, create_worker_delivery,
+    create_worker_delivery_with_dispatch, create_worker_delivery_with_dispatch_for_lease,
+    get_latest_worker_delivery,
+    get_worker_delivery_by_receipt, list_worker_delivery_events, transition_worker_delivery,
+    transition_worker_delivery_verification_with_conn, worker_delivery_transaction_id,
+};
 pub use sqlite_code_store::{CODE_SCHEMA, SqliteCodeStore};
 
 // Entity store for knowledge graph feature
@@ -92,15 +101,29 @@ pub use loop_store::{LOOP_SCHEMA, LoopStore, SqliteLoopStore};
 
 // Verification store for task quality gates
 pub use verification_store::{
-    SqliteVerificationStore, VERIFICATION_SCHEMA, VerificationStore, add_verification_with_conn,
-    save_verification_issues_with_conn,
+    IssuedVerifierCapability, SqliteVerificationStore, VERIFICATION_SCHEMA, VerificationStore,
+    add_system_verification, add_verification_with_conn, bind_server_verifier_handoff,
+    bind_server_verifier_handoff_and_register_child, bind_verifier_capability,
+    cancel_unbound_server_verifier_handoff, claim_verification_dispatch,
+    claim_verification_dispatch_bound, consume_server_verifier_handoff_with_conn,
+    consume_verifier_capability_with_conn, create_verification_dispatch,
+    create_verification_dispatch_bound, create_verification_dispatch_bound_with_conn,
+    get_latest_verification_dispatch, get_latest_verification_dispatch_with_conn,
+    get_verification_dispatch, get_verification_dispatch_with_conn, get_verification_for_dispatch,
+    inspect_bound_server_verifier_handoff, inspect_verifier_capability,
+    invalidate_verification_dispatch_and_reopen_task_exact,
+    invalidate_verification_dispatch_for_new_cycle, issue_server_verifier_handoff,
+    issue_server_verifier_handoff_with_secret, issue_verifier_capability,
+    resolve_verification_dispatch_with_conn, save_verification_issues_with_conn,
+    reopen_closed_task_atomic, timeout_verification_dispatch, update_system_verification,
+    ParentDependencyUpdate, TaskReopenLifecycleOutbox,
 };
 
 // Worktree store for git worktree tracking
 pub use worktree_store::{SqliteWorktreeStore, WORKTREE_SCHEMA, WorktreeStore};
 
 mod known_repo_store;
-pub use known_repo_store::{KnownRepo, KnownRepoStore, SqliteKnownRepoStore};
+pub use known_repo_store::{KnownRepo, KnownRepoBinding, KnownRepoStore, SqliteKnownRepoStore};
 
 // Recording store for terminal recording metadata
 pub use recording_store::{
@@ -120,15 +143,22 @@ pub use supervisor_queue_store::{
 // Prompt queue store for supervisor → worker communication
 // (includes enqueue outcomes for message dedup and cas-ecff lifecycle outbox)
 pub use prompt_queue_store::{
-    DeliveryStage, EnqueueIdempotentResult, EnqueueOutcome, MessageDeliveryReport,
-    MessageStatus, ObservationStatus, PROMPT_RETRY_MAX_AGE_SECS, PendingReason,
-    PromptQueueStore, PromptRetryDisposition, QueuedPrompt, SqlitePromptQueueStore,
+    DeliveryStage, EnqueueIdempotentResult, EnqueueOutcome, MessageDeliveryReport, MessageStatus,
+    ObservationStatus, PROMPT_RETRY_MAX_AGE_SECS, PendingReason, PromptQueueStore,
+    PromptRetryDisposition, QueuedPrompt, SqlitePromptQueueStore,
 };
 
 // Reminder store for supervisor "Remind Me" feature
 pub use reminder_store::{
     Reminder, ReminderExpiryOutcome, ReminderStatus, ReminderStore, ReminderTriggerType,
     SqliteReminderStore, expire_stale_bounded,
+};
+
+// Retrieval provenance and explicit outcome feedback
+pub use retrieval_store::{
+    DEFAULT_RETRIEVAL_POLICY, RETRIEVAL_SCHEMA, RETRIEVAL_SCHEMA_STATEMENTS, RetrievalAggregate,
+    RetrievalHitIdentity, RetrievalOutcome, RetrievalOutcomeEvent, RetrievalQuery, RetrievalStore,
+    SqliteRetrievalStore,
 };
 
 // Spawn queue store for worker lifecycle commands

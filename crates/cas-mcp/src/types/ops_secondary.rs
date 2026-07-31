@@ -1,13 +1,13 @@
+use super::deser;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use super::deser;
 
 /// Unified search, context, and entity operations request
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct SearchContextRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'search', 'context', 'context_for_subagent', 'observe', 'entity_list', 'entity_show', 'entity_extract', 'code_search', 'code_show', 'grep', 'blame'"
+        description = "Action: 'search', 'retrieval_feedback', 'retrieval_metrics', 'context', 'context_for_subagent', 'observe', 'entity_list', 'entity_show', 'entity_extract', 'code_search', 'code_show', 'grep', 'blame'"
     )]
     pub action: String,
 
@@ -15,6 +15,37 @@ pub struct SearchContextRequest {
     #[schemars(description = "Search query")]
     #[serde(default)]
     pub query: Option<String>,
+
+    /// Opt into a versioned structured search response with provenance.
+    /// Omit for the legacy text response. Currently only version 1 is supported.
+    #[schemars(description = "Structured provenance response version for search (currently: 1)")]
+    #[serde(default, deserialize_with = "deser::option_usize")]
+    pub provenance_version: Option<usize>,
+
+    /// Retrieval query identity returned by a provenance search.
+    #[schemars(description = "Query ID returned by a provenance search")]
+    #[serde(default)]
+    pub query_id: Option<String>,
+
+    /// Retrieval result identity receiving an explicit outcome.
+    #[schemars(description = "Result ID from the identified provenance search")]
+    #[serde(default)]
+    pub result_id: Option<String>,
+
+    /// Explicit retrieval outcome.
+    #[schemars(description = "Outcome: 'used', 'helpful', 'ignored', 'corrected', or 'harmful'")]
+    #[serde(default)]
+    pub outcome: Option<String>,
+
+    /// Actor recording explicit retrieval feedback. Stored only as a hash.
+    #[schemars(description = "Actor identity for feedback attribution (stored as a hash)")]
+    #[serde(default)]
+    pub actor_id: Option<String>,
+
+    /// Optional opaque ID of the correcting entry/rule/task/code record.
+    #[schemars(description = "Opaque correction record ID (required for corrected outcomes)")]
+    #[serde(default)]
+    pub correction_ref: Option<String>,
 
     /// Document type filter: entry, task, rule, skill, code_symbol, code_file
     #[schemars(
@@ -172,7 +203,7 @@ pub struct SearchContextRequest {
 pub struct SystemRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'version', 'doctor', 'stats', 'info', 'reindex', 'maintenance_run', 'maintenance_status', 'config_docs', 'config_search', 'report_cas_bug', 'proxy_add', 'proxy_remove', 'proxy_list'"
+        description = "Action: 'version', 'preflight', 'doctor', 'stats', 'info', 'reindex', 'maintenance_run', 'maintenance_status', 'config_docs', 'config_search', 'report_cas_bug', 'proxy_add', 'proxy_remove', 'proxy_list', 'proxy_health'"
     )]
     pub action: String,
 
@@ -329,6 +360,19 @@ pub struct VerificationRequest {
     #[schemars(description = "Verification type: 'task' (default) or 'epic'")]
     #[serde(default)]
     pub verification_type: Option<String>,
+
+    /// Legacy explicit bearer compatibility. New task-verifier children use
+    /// a sealed server-side handoff and omit this field.
+    #[schemars(
+        description = "Legacy explicit task-verifier bearer; new registered verifier children omit it"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifier_capability: Option<String>,
+
+    /// Exact dispatch to resolve (required for supervisor-direct add).
+    #[schemars(description = "Exact durable verification dispatch ID")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_id: Option<String>,
 }
 
 /// Unified team operations request
@@ -362,7 +406,9 @@ pub struct FactoryRequest {
     /// target epic, and forwarded from the unified
     /// `CoordinationRequest.id` so callers can write
     /// `mcp__cas__coordination action=epic_status id=cas-754b`.
-    #[schemars(description = "ID for actions that target a specific entity (e.g., epic_id for epic_status)")]
+    #[schemars(
+        description = "ID for actions that target a specific entity (e.g., epic_id for epic_status)"
+    )]
     #[serde(default)]
     pub id: Option<String>,
 
@@ -405,6 +451,11 @@ pub struct FactoryRequest {
     )]
     #[serde(default)]
     pub force: Option<bool>,
+
+    /// Preview target-cache reclamation without deleting artifacts.
+    #[schemars(description = "gc_cleanup: preview exact target-cache candidates and bytes without deleting them (target-cache cleanup defaults to dry-run unless explicitly false)")]
+    #[serde(default)]
+    pub dry_run: Option<bool>,
 
     /// Clear the pinned epic focus for focus_epic
     #[schemars(description = "Clear the pinned epic focus (focus_epic only)")]
@@ -774,8 +825,8 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub orphans: Option<bool>,
 
-    /// Preview cleanup without making changes (for worktree_cleanup)
-    #[schemars(description = "Preview cleanup without making changes")]
+    /// Preview cleanup without making changes.
+    #[schemars(description = "Preview cleanup without making changes (worktree_cleanup; gc_cleanup target caches default to preview unless explicitly false)")]
     #[serde(default)]
     pub dry_run: Option<bool>,
 }
@@ -843,6 +894,7 @@ impl CoordinationRequest {
             target: self.target.clone(),
             message: self.message.clone(),
             force: self.force,
+            dry_run: self.dry_run,
             clear: self.clear,
             branch: self.branch.clone(),
             older_than_secs: self.older_than_secs,

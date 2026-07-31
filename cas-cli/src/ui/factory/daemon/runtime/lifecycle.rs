@@ -487,6 +487,15 @@ impl FactoryDaemon {
 
                     // Inject prompts (config already checked in generate_prompt)
                     for prompt in prompts {
+                        if !self.app.prompt_is_still_deliverable(&prompt) {
+                            tracing::info!(
+                                target: "cas::coordination",
+                                stage = "drop_stale_worker_idle_before_injection",
+                                worker = prompt.drop_if_worker_assigned.as_deref().unwrap_or(""),
+                                "dropped WorkerIdle because assignment landed after batch revalidation"
+                            );
+                            continue;
+                        }
                         // cas-f9e8 telemetry: measure director prompt
                         // injection latency from the start of this refresh
                         // tick to the completion of the inbox write. This

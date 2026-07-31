@@ -53,7 +53,9 @@ fn make_agent(id: &str, name: &str, current_task: Option<&str>) -> AgentSummary 
         id: id.to_string(),
         name: name.to_string(),
         status: AgentStatus::Active,
-        registered_at: chrono::Utc::now(),
+        // Most detector tests model an established worker. Spawn-window tests
+        // override this explicitly with a fresh registration timestamp.
+        registered_at: chrono::Utc::now() - chrono::Duration::minutes(5),
         current_task: current_task.map(String::from),
         latest_activity: None,
         last_heartbeat: Some(chrono::Utc::now()),
@@ -268,6 +270,7 @@ fn test_just_registered_worker_is_suppressed_during_spawn_assignment_window() {
     data.agents[0].registered_at = registered_at;
     data.agents[0].last_heartbeat = None;
     detector.initialize(&data);
+    let base_instant = std::time::Instant::now();
 
     let mut saw_idle = false;
     for offset_secs in [2, 4, 6, 8] {
@@ -275,6 +278,7 @@ fn test_just_registered_worker_is_suppressed_during_spawn_assignment_window() {
             .detect_changes_at(
                 &data,
                 None,
+                base_instant + std::time::Duration::from_secs(offset_secs as u64),
                 registered_at + chrono::Duration::seconds(offset_secs),
             )
             .iter()
@@ -300,9 +304,20 @@ fn test_finished_worker_still_emits_once_after_spawn_grace() {
     let mut idle = idle_data_for("agent-1", "swift-fox");
     idle.agents[0].registered_at = registered_at;
     idle.agents[0].last_heartbeat = None;
-    let first = detector.detect_changes_at(&idle, None, now);
-    let second = detector.detect_changes_at(&idle, None, now + chrono::Duration::seconds(2));
-    let third = detector.detect_changes_at(&idle, None, now + chrono::Duration::seconds(4));
+    let base_instant = std::time::Instant::now();
+    let first = detector.detect_changes_at(&idle, None, base_instant, now);
+    let second = detector.detect_changes_at(
+        &idle,
+        None,
+        base_instant + std::time::Duration::from_secs(2),
+        now + chrono::Duration::seconds(2),
+    );
+    let third = detector.detect_changes_at(
+        &idle,
+        None,
+        base_instant + std::time::Duration::from_secs(4),
+        now + chrono::Duration::seconds(4),
+    );
 
     assert!(!first.iter().any(|event| matches!(event, DirectorEvent::WorkerIdle { .. })));
     assert_eq!(
@@ -1420,7 +1435,7 @@ fn long_backoff_supervisor_message_does_not_permanently_suppress_worker_idle() {
     );
     detector.initialize(&data);
     let clock = Instant::now();
-    let utc = chrono::Utc::now() + chrono::Duration::seconds(1);
+    let utc = worker_summary.registered_at + chrono::Duration::seconds(11);
 
     let tick_1 = detector.detect_changes_at(&data, None, clock, utc);
     assert!(
@@ -1754,7 +1769,7 @@ fn make_agent_active(
         id: id.to_string(),
         name: name.to_string(),
         status: AgentStatus::Active,
-        registered_at: base_utc,
+        registered_at: base_utc - CDuration::minutes(5),
         current_task: None, // task-less between turns
         latest_activity: Some((
             "tool_call".to_string(),

@@ -30,3 +30,12 @@ Treat every idle notification as unverified: query `task list status=in_progress
 - Suppress WorkerIdle for workers whose registration is younger than that threshold — a just-spawned worker is expected to be taskless.
 - Re-validate at delivery time: drop the notification if the worker has acquired a task between enqueue and delivery.
 - Distinguish "never had a task" from "finished a task and is now free" in the message text, so the genuinely-actionable case is separable at a glance.
+
+
+---
+
+## Resolution (2026-07-31, cas-38e3)
+
+Fixed and merged in epic cas-8c9c at commit `f88b2af6`.
+
+Fixed at delivery time, not tick time. Both paired emitters covered (WorkerIdle and AgentRegistered) after live evidence showed the phantom fires twice per worker. Adds a 10s spawn grace, a drop_if_worker_assigned re-check against a fresh snapshot immediately before PTY injection, and retraction of queued alerts. Also fixed a latent shadowing defect where the revalidation compared the live active_task instead of the enqueued one.

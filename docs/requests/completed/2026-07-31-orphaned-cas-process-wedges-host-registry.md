@@ -113,3 +113,12 @@ ps -o pid,ppid,stat,etime,wchan:20,cmd -p <pid>   # confirm it is orphaned
 ```
 
 If PPID is `systemd --user` and elapsed time is long, the owning worker is gone and the process is safe to kill. `SIGTERM` first; `SIGKILL` if wedged in `get_signal`.
+
+
+---
+
+## Resolution (2026-07-31, cas-f0ce)
+
+Fixed and merged in epic cas-8c9c at commit `d91e7d4b`.
+
+Root cause was wider than filed: init_cas_dir performed host-registry DDL under cfg(not(test)), which is TRUE when the lib compiles as a dependency of an integration-test binary. Registration moved to the three real cas init CLI paths; HOME isolated across 11 fixtures (3 more than the report identified); protected-HOME guard, lock-holder diagnostics and orphan reaping added. busy_timeout untouched.

@@ -50,3 +50,12 @@ Additionally: `message` returned `enqueued`/`delivered` semantics without surfac
 ## Secondary observation (same session, lower severity)
 
 `epic_status` and the close guard evaluate merge state against the **epic branch** even when the project's convention is to land all work directly on `main`. With work correctly merged to `main`, epic-child closes were still rejected, and the guard is explicitly bypass-immune. Workaround was to fast-forward every `epic/*` branch to `main` after each merge so the commits became reachable. Worth considering a project-level setting for main-only repos, or letting the guard accept reachability from the task's configured `target_branch`.
+
+
+---
+
+## Resolution (2026-07-31, cas-ae2f)
+
+Fixed and merged in epic cas-8c9c at commit `e3959af6`.
+
+Trusted factory spawn now stamps the supervisor pane's harness session id as AgentRole::Supervisor, and CAS_SUPERVISOR_NAME is mirrored into Codex's restricted cs MCP env. The mod.rs:667 privilege boundary is unchanged; public/env registration still cannot self-assign a privileged role.

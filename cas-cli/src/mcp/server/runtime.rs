@@ -1318,6 +1318,7 @@ mod tests {
             serde_json::to_vec(&snapshot).unwrap(),
         )
         .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
         assert_eq!(
             super::read_proxy_snapshot_cache(tmp.path())
                 .unwrap_err()

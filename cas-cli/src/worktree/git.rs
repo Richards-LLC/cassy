@@ -324,6 +324,148 @@ impl GitOperations {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
+    /// Canonical identity of the repository this instance operates on
+    /// (cas-0a21).
+    ///
+    /// Resolves the git *common* directory — shared by the main checkout and
+    /// every linked worktree — and canonicalizes it so symlinked or
+    /// differently-spelled paths to one repository collapse to one identity.
+    /// Two `GitOperations` pointed at the same repository through different
+    /// paths therefore serialize against each other, while genuinely distinct
+    /// repositories never contend.
+    pub fn canonical_repo_key(&self) -> Result<PathBuf> {
+        let output = Command::new("git")
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .current_dir(&self.repo_root)
+            .output()?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+        let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if raw.is_empty() {
+            return Err(GitError::NotAGitRepo);
+        }
+        let path = PathBuf::from(raw);
+        // Canonicalize when possible; a non-canonicalizable path is still a
+        // usable (if less aggressive) identity, so don't fail the merge.
+        Ok(path.canonicalize().unwrap_or(path))
+    }
+
+    /// Resolve `refname` to a full commit SHA, or `None` when it does not
+    /// resolve. Used as the compare-and-swap read of the delivery target.
+    pub fn resolve_commit(&self, refname: &str) -> Option<String> {
+        let output = Command::new("git")
+            .args(["rev-parse", "--verify", &format!("{refname}^{{commit}}")])
+            .current_dir(&self.repo_root)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        (!sha.is_empty()).then_some(sha)
+    }
+
+    /// First parent of `commit`, i.e. the commit the merge was actually
+    /// rooted at. `None` for a root commit or an unresolvable ref.
+    ///
+    /// Ancestry is not sufficient to prove a delivery merged the reviewed
+    /// target: a merge that swept in concurrent commits still leaves the
+    /// receipt commit an ancestor of the new tip. First-parent identity is
+    /// the invariant that actually pins the topology (cas-0a21).
+    pub fn first_parent(&self, commit: &str) -> Option<String> {
+        self.resolve_commit(&format!("{commit}^1"))
+    }
+
+    /// Expand `refname` to its fully-qualified form (`main` ->
+    /// `refs/heads/main`).
+    ///
+    /// `git update-ref` performs **no** DWIM expansion: passing a bare branch
+    /// name creates a literal `.git/<name>` ref instead of updating the
+    /// branch. Every compare-and-swap must therefore qualify the ref first.
+    pub fn full_ref_name(&self, refname: &str) -> Option<String> {
+        let output = Command::new("git")
+            .args(["rev-parse", "--symbolic-full-name", refname])
+            .current_dir(&self.repo_root)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let full = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        (!full.is_empty()).then_some(full)
+    }
+
+    /// Atomically move `refname` from `expected_old` to `new_value` using
+    /// git's own compare-and-swap (`update-ref <ref> <new> <old>`).
+    ///
+    /// Git rejects the update if the ref is not exactly at `expected_old`, so
+    /// this can never clobber a concurrent writer. `refname` is qualified
+    /// first — see [`Self::full_ref_name`].
+    pub fn compare_and_swap_ref(
+        &self,
+        refname: &str,
+        new_value: &str,
+        expected_old: &str,
+    ) -> Result<()> {
+        let qualified = self
+            .full_ref_name(refname)
+            .unwrap_or_else(|| refname.to_string());
+        let output = Command::new("git")
+            .args(["update-ref", &qualified, new_value, expected_old])
+            .current_dir(&self.repo_root)
+            .output()?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Roll `branch` back from `expected_tip` to `new_tip`, atomically and
+    /// without leaving the shared checkout dirty (cas-0a21).
+    ///
+    /// Used to undo a delivery merge that Git completed but that turned out
+    /// not to be rooted at the reviewed target. The ref move is a
+    /// compare-and-swap, so a third writer that moved the ref again is never
+    /// clobbered — the rollback simply declines.
+    ///
+    /// When HEAD is attached to `branch` (it is, right after the merge
+    /// checkout), moving the ref alone would leave the index and working tree
+    /// describing the discarded merge and poison the *next* merge's
+    /// dirty-tree gate. The index/worktree are therefore realigned to the
+    /// rolled-back HEAD.
+    pub fn rollback_branch_to(
+        &self,
+        branch: &str,
+        new_tip: &str,
+        expected_tip: &str,
+    ) -> Result<()> {
+        self.compare_and_swap_ref(branch, new_tip, expected_tip)?;
+
+        let head_ref = self.full_ref_name("HEAD");
+        let branch_ref = self.full_ref_name(branch);
+        let head_is_on_branch = matches!(
+            (head_ref.as_deref(), branch_ref.as_deref()),
+            (Some(head), Some(target)) if head == target
+        );
+        if head_is_on_branch {
+            let output = Command::new("git")
+                .args(["reset", "--hard", "HEAD"])
+                .current_dir(&self.repo_root)
+                .output()?;
+            if !output.status.success() {
+                return Err(GitError::CommandFailed(
+                    String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Check if the repository has any commits
     pub fn has_commits(&self) -> Result<bool> {
         let output = Command::new("git")

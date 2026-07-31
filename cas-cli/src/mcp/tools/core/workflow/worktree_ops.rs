@@ -59,9 +59,12 @@ fn classify_delivery_merge_preflight(
         ));
     }
     if !target_tip_matches {
+        // cas-0a21: target drift is a *tip* change, not a generic staleness.
+        // The typed TipChanged state is what tells a supervisor this is
+        // recoverable by re-reviewing against the new tip.
         return Err((
-            WorkerDeliveryState::Stale,
-            "target_changed",
+            WorkerDeliveryState::TipChanged,
+            "target_tip_changed",
             "target branch tip changed after receipt submission",
         ));
     }
@@ -1592,9 +1595,39 @@ impl CasCore {
 
         let mut reconciled_delivery = false;
         let mut delivery_close_result = None;
+        // cas-0a21: held from before the target tip is first read until after
+        // the post-merge delivery state is durable, so no other CAS-mediated
+        // merge can move this repository's target ref inside the window.
+        // Bound to the function scope so it releases on every exit path.
+        let _delivery_target_lock;
         if let (Some((receipt, transaction)), Some(authority)) =
             (transactional_delivery.as_ref(), delivery_authority.as_ref())
         {
+            let canonical_repo =
+                manager
+                    .git()
+                    .canonical_repo_key()
+                    .map_err(|error| McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!(
+                            "Transactional delivery cannot resolve canonical repository \
+                             identity for the merge target: {error}"
+                        )),
+                        data: None,
+                    })?;
+            _delivery_target_lock = crate::worktree::target_lock::lock_delivery_target(
+                &cas_root,
+                &canonical_repo,
+                &receipt.target_branch,
+            )
+            .map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!(
+                    "Transactional delivery could not acquire the target-ref lock: {error}"
+                )),
+                data: None,
+            })?;
+
             let fail = |state: cas_types::WorkerDeliveryState,
                         code: &'static str,
                         detail: String|
@@ -1736,6 +1769,42 @@ impl CasCore {
                 &worktree.parent_branch,
             )
         } else {
+            // cas-0a21: final compare-and-swap read of the target ref, taken
+            // under the target lock immediately before Git runs. Any drift
+            // that landed since preflight is refused here, so the common case
+            // never reaches Git at all and needs no rollback.
+            if let (Some((receipt, transaction)), Some(authority)) =
+                (transactional_delivery.as_ref(), delivery_authority.as_ref())
+            {
+                let live_target = manager.git().resolve_commit(&receipt.target_branch);
+                if live_target.as_deref() != Some(receipt.target_sha.as_str()) {
+                    let _ = cas_store::transition_worker_delivery(
+                        &cas_root,
+                        &transaction.id,
+                        &[
+                            cas_types::WorkerDeliveryState::AwaitingMerge,
+                            cas_types::WorkerDeliveryState::MergeAuthorized,
+                        ],
+                        cas_types::WorkerDeliveryState::TipChanged,
+                        &authority.agent_id,
+                        Some(&authority.agent_id),
+                        None,
+                        None,
+                        Some((
+                            "target_tip_changed",
+                            "target ref moved after preflight; no merge was attempted",
+                        )),
+                    );
+                    return Ok(Self::tool_error(
+                        "TRANSACTIONAL DELIVERY tip_changed: the target ref moved between \
+                         preflight and merge.\n\nNo merge was attempted and no delivery was \
+                         recorded. Re-review the worker commit against the new target tip, \
+                         then retry."
+                            .to_string(),
+                    ));
+                }
+            }
+
             let merge_result = if transactional_delivery.is_some() {
                 // Persisted delivery state must separate a successful Git
                 // merge from destructive cleanup.
@@ -1802,6 +1871,69 @@ impl CasCore {
                     ),
                     data: None,
                 });
+            }
+
+            // cas-0a21: ancestry alone cannot prove the merge was rooted at
+            // the *reviewed* target — a merge that swept in a concurrent
+            // commit still leaves the receipt commit an ancestor of the new
+            // tip. Only first-parent identity pins the topology. This is the
+            // check that catches drift landing inside the merge itself, which
+            // the target lock cannot prevent (a non-CAS actor can always move
+            // the ref).
+            //
+            // `reconciled_delivery` resumes are exempt: they intentionally
+            // observe an already-merged history rather than creating one.
+            if !reconciled_delivery {
+                let first_parent = manager.git().first_parent(&target_tip);
+                if first_parent.as_deref() != Some(receipt.target_sha.as_str()) {
+                    // Undo exactly our merge and nothing else: reset the
+                    // target to the merge's own first parent via git's
+                    // compare-and-swap. That preserves the concurrent actor's
+                    // commit — resetting to receipt.target_sha would destroy
+                    // it. If the CAS fails, the ref moved again; leave it
+                    // alone and report rather than clobber a third writer.
+                    let rollback = first_parent.as_deref().map(|parent| {
+                        manager.git().rollback_branch_to(
+                            &receipt.target_branch,
+                            parent,
+                            &target_tip,
+                        )
+                    });
+                    let rolled_back = matches!(rollback, Some(Ok(())));
+                    let _ = cas_store::transition_worker_delivery(
+                        &cas_root,
+                        &transaction.id,
+                        &[
+                            cas_types::WorkerDeliveryState::AwaitingMerge,
+                            cas_types::WorkerDeliveryState::MergeAuthorized,
+                        ],
+                        cas_types::WorkerDeliveryState::TipChanged,
+                        &authority.agent_id,
+                        Some(&authority.agent_id),
+                        None,
+                        None,
+                        Some((
+                            "target_tip_changed",
+                            if rolled_back {
+                                "target ref moved during the merge; the merge was rolled back"
+                            } else {
+                                "target ref moved during the merge; automatic rollback was declined"
+                            },
+                        )),
+                    );
+                    return Ok(Self::tool_error(format!(
+                        "TRANSACTIONAL DELIVERY tip_changed: the target ref moved during the \
+                         merge, so the resulting merge was not rooted at the reviewed target.\n\n\
+                         {}\n\nNo delivery was recorded. Re-review the worker commit against \
+                         the new target tip, then retry.",
+                        if rolled_back {
+                            "The merge has been rolled back; the concurrent commit was preserved."
+                        } else {
+                            "The merge could NOT be rolled back automatically because the target \
+                             moved again. Inspect the target branch before retrying."
+                        }
+                    )));
+                }
             }
             if transaction.state != cas_types::WorkerDeliveryState::CloseReady {
                 cas_store::transition_worker_delivery(
@@ -2143,12 +2275,12 @@ mod tests {
                 .0,
             cas_types::WorkerDeliveryState::TipChanged
         );
-        assert_eq!(
-            classify_delivery_merge_preflight(true, true, false, true, false, true)
-                .unwrap_err()
-                .1,
-            "target_changed"
-        );
+        // cas-0a21: target drift is typed as a recoverable tip change.
+        let target_drift = classify_delivery_merge_preflight(true, true, false, true, false, true)
+            .unwrap_err();
+        assert_eq!(target_drift.0, cas_types::WorkerDeliveryState::TipChanged);
+        assert!(target_drift.0.is_recoverable_failure());
+        assert_eq!(target_drift.1, "target_tip_changed");
         assert_eq!(
             classify_delivery_merge_preflight(true, true, false, true, true, false)
                 .unwrap_err()

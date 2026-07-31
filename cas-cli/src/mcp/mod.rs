@@ -51,7 +51,10 @@ pub use server::CasCore;
 pub use server::run_server;
 #[cfg(feature = "mcp-proxy")]
 pub use server::{
-    read_proxy_catalog_cache, read_proxy_health_cache, write_empty_proxy_snapshot_cache,
+    ProxySnapshotCache, ProxySnapshotFailure, ProxySnapshotReadError, ProxySnapshotReadErrorKind,
+    ProxySnapshotState, proxy_config_fingerprint, read_proxy_catalog_cache,
+    read_proxy_health_cache, read_proxy_snapshot_cache, write_empty_proxy_snapshot_cache,
     write_proxy_catalog_cache, write_proxy_health_cache, write_proxy_snapshot_cache,
+    write_proxy_snapshot_cache_for_config, write_unavailable_proxy_snapshot_cache,
 };
 pub use tools::CasService;

@@ -128,12 +128,22 @@ pub struct ProxyEngine {
     session_id: String,
 }
 
+fn validate_configs(configs: &HashMap<String, ServerConfig>) -> Result<()> {
+    if configs.values().any(
+        |config| matches!(config, ServerConfig::Stdio { command, .. } if command.trim().is_empty()),
+    ) {
+        anyhow::bail!("stdio proxy command must not be empty");
+    }
+    Ok(())
+}
+
 impl ProxyEngine {
     /// Create a proxy engine by connecting to all configured upstream servers.
     ///
     /// Connection failures are logged and skipped — the engine starts with
     /// whatever servers connected successfully.
     pub async fn from_configs(configs: HashMap<String, ServerConfig>) -> Result<Self> {
+        validate_configs(&configs)?;
         Self::from_configs_with_timeout(configs, Duration::from_secs(CONNECT_TIMEOUT_SECS)).await
     }
 
@@ -459,6 +469,7 @@ impl ProxyEngine {
     /// - Reconnects servers whose config changed
     /// - Leaves unchanged servers connected
     pub async fn reload(&self, configs: HashMap<String, ServerConfig>) -> Result<()> {
+        validate_configs(&configs)?;
         let mut servers = self.servers.write().await;
         let old_configs = self.configs.read().await.clone();
         let old_public_names = public_upstream_ids(old_configs.keys().map(String::as_str));
@@ -1169,6 +1180,24 @@ mod tests {
             },
             server,
         )
+    }
+
+    #[tokio::test]
+    async fn invalid_stdio_command_fails_start_and_reload_before_mutation() {
+        let invalid = HashMap::from([(
+            "unsafe/server".to_string(),
+            ServerConfig::Stdio {
+                command: "   ".to_string(),
+                args: vec!["--token=secret".to_string()],
+                env: HashMap::from([("TOKEN".to_string(), "secret".to_string())]),
+            },
+        )]);
+        assert!(ProxyEngine::from_configs(invalid.clone()).await.is_err());
+
+        let engine = ProxyEngine::from_configs(HashMap::new()).await.unwrap();
+        assert!(engine.reload(invalid).await.is_err());
+        assert_eq!(engine.tool_count().await, 0);
+        assert!(engine.health_snapshot().await.servers.is_empty());
     }
 
     #[test]

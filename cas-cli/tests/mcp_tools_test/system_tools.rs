@@ -160,8 +160,40 @@ fn proxy_health_request() -> SystemRequest {
 
 #[cfg(feature = "mcp-proxy")]
 #[tokio::test]
-async fn system_proxy_health_prefers_the_active_proxy_snapshot() {
-    let (_temp, core) = setup_cas();
+async fn system_proxy_health_uses_the_authoritative_snapshot_with_an_active_proxy() {
+    let (temp, core) = setup_cas();
+    let cas_root = temp.path().join(".cas");
+    let config = cmcp_core::config::Config::load_merged(None).unwrap();
+    let state = if config.servers.is_empty() {
+        cas::mcp::ProxySnapshotState::Empty
+    } else {
+        cas::mcp::ProxySnapshotState::Ready
+    };
+    let generated_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let snapshot = cas::mcp::ProxySnapshotCache {
+        schema_version: 1,
+        generation: "snapshot-authoritative-1".to_string(),
+        generated_at_ms,
+        config_fingerprint: Some(cas::mcp::proxy_config_fingerprint(&config)),
+        state,
+        failure: None,
+        catalog: std::collections::BTreeMap::new(),
+        health: cmcp_core::ProxyHealthSnapshot {
+            session_id: "proxy-1-42-0".to_string(),
+            generated_at_ms,
+            healthy: 0,
+            degraded: 0,
+            servers: Vec::new(),
+        },
+    };
+    std::fs::write(
+        cas_root.join("proxy_snapshot.json"),
+        serde_json::to_vec(&snapshot).unwrap(),
+    )
+    .unwrap();
     let proxy = cmcp_core::ProxyEngine::from_configs(Default::default())
         .await
         .unwrap();
@@ -205,9 +237,40 @@ async fn system_proxy_health_cache_fallback_is_sanitized() {
             next_retry_at_ms: Some(50),
         }],
     };
+    let mut config = cmcp_core::config::Config::default();
+    config.add_server(
+        raw_name.to_string(),
+        cmcp_core::config::ServerConfig::Http {
+            url: "https://example.invalid/mcp".to_string(),
+            auth: None,
+            headers: std::collections::HashMap::new(),
+            oauth: false,
+        },
+    );
+    let cas_root = temp.path().join(".cas");
+    config.save_to(&cas_root.join("proxy.toml")).unwrap();
+    let merged =
+        cmcp_core::config::Config::load_merged(Some(&cas_root.join("proxy.toml"))).unwrap();
+    let generated_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let snapshot = cas::mcp::ProxySnapshotCache {
+        schema_version: 1,
+        generation: "snapshot-forged-1".to_string(),
+        generated_at_ms,
+        config_fingerprint: Some(cas::mcp::proxy_config_fingerprint(&merged)),
+        state: cas::mcp::ProxySnapshotState::Ready,
+        failure: None,
+        catalog: std::collections::BTreeMap::new(),
+        health: cmcp_core::ProxyHealthSnapshot {
+            generated_at_ms,
+            ..forged
+        },
+    };
     std::fs::write(
-        temp.path().join(".cas/proxy_health.json"),
-        serde_json::to_vec(&forged).unwrap(),
+        cas_root.join("proxy_snapshot.json"),
+        serde_json::to_vec(&snapshot).unwrap(),
     )
     .unwrap();
     let service = CasService::new(core, None);
@@ -241,18 +304,15 @@ async fn system_proxy_health_cache_fallback_is_sanitized() {
 #[tokio::test]
 async fn system_proxy_health_cache_errors_have_stable_public_contracts() {
     for (cache, expected_prefix) in [
-        (
-            None,
-            "MCP proxy health is unavailable (no active proxy and no cache):",
-        ),
+        (None, "MCP proxy health is unavailable:"),
         (
             Some(b"{not-json".as_slice()),
-            "MCP proxy health cache is invalid:",
+            "MCP proxy health is unavailable:",
         ),
     ] {
         let (temp, core) = setup_cas();
         if let Some(cache) = cache {
-            std::fs::write(temp.path().join(".cas/proxy_health.json"), cache).unwrap();
+            std::fs::write(temp.path().join(".cas/proxy_snapshot.json"), cache).unwrap();
         }
         let service = CasService::new(core, None);
         let error = service

@@ -646,13 +646,18 @@ pub(crate) fn validate_worktree_binding(
     actual_branch: &str,
     worktree_path: &Path,
 ) -> Result<(), String> {
-    if actual.repo_selector == expected.repo_selector && actual_branch == expected.target_branch {
+    if actual.repo_selector == expected.repo_selector
+        && actual.repo_root == expected.repo_root
+        && actual.git_common_dir == expected.git_common_dir
+        && actual_branch == expected.target_branch
+    {
         return Ok(());
     }
     Err(format!(
         "⚠️ WORKTREE REPOSITORY MISMATCH\n\n\
          Task {task_id} targets repository `{}` branch `{}`, but worktree {} \
-         resolves to repository `{}` branch `{actual_branch}`. Refusing before \
+         resolves to repository `{}` branch `{actual_branch}` with a different \
+         canonical host-local root/common-dir identity. Refusing before \
          merge/reachability checks.",
         expected.repo_selector,
         expected.target_branch,
@@ -1326,7 +1331,7 @@ mod tests {
     }
 
     #[test]
-    fn worktree_binding_rejects_repo_or_branch_mismatch_before_merge() {
+    fn worktree_binding_rejects_repo_clone_or_branch_mismatch_before_merge() {
         let expected = RepoContext {
             repo_selector: "remote:github.com/org/work".to_string(),
             repo_root: PathBuf::from("/runtime/work"),
@@ -1348,6 +1353,42 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("before merge/reachability checks"));
+
+        let wrong_clone = RepoContext {
+            repo_selector: expected.repo_selector.clone(),
+            repo_root: PathBuf::from("/runtime/work-clone"),
+            git_common_dir: PathBuf::from("/runtime/work-clone/.git"),
+            target_branch: expected.target_branch.clone(),
+        };
+        assert!(
+            validate_worktree_binding(
+                "cas-x",
+                &expected,
+                &wrong_clone,
+                "master",
+                Path::new("/runtime/work-clone/wt")
+            )
+            .is_err(),
+            "a portable selector is not sufficient identity for one live clone"
+        );
+
+        let linked_worktree = RepoContext {
+            repo_selector: expected.repo_selector.clone(),
+            repo_root: expected.repo_root.clone(),
+            git_common_dir: expected.git_common_dir.clone(),
+            target_branch: expected.target_branch.clone(),
+        };
+        assert!(
+            validate_worktree_binding(
+                "cas-x",
+                &expected,
+                &linked_worktree,
+                "master",
+                Path::new("/runtime/linked-worktree")
+            )
+            .is_ok(),
+            "git_layout canonicalizes linked worktrees to their main root/common-dir identity"
+        );
 
         assert!(
             validate_worktree_binding(

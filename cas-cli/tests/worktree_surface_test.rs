@@ -14,10 +14,12 @@ use std::process::Command;
 
 use cas::mcp::tools::{TaskCloseRequest, TaskUpdateRequest};
 use cas::mcp::{CasCore, CasService};
-use cas::store::{init_cas_dir, open_agent_store, open_task_store, open_worktree_store};
+use cas::store::{
+    init_cas_dir, open_agent_store, open_task_store, open_verification_store, open_worktree_store,
+};
 use cas::types::{
     Agent, AgentRole, AgentType, Task, TaskDepth, TaskStatus, TaskType, WorkTarget,
-    WorkerCompletionReceiptInput, WorkerDeliveryState, Worktree,
+    Verification, VerificationStatus, WorkerCompletionReceiptInput, WorkerDeliveryState, Worktree,
 };
 use cas_mcp::types::{CoordinationRequest, TaskRequest, VerificationRequest};
 use cas_store::KnownRepoStore;
@@ -186,6 +188,270 @@ fn close_update_request(id: String) -> TaskUpdateRequest {
         epic_verification_owner: None,
         depth: None,
     }
+}
+
+fn durable_close_snapshot(cas_root: &Path) -> Vec<(String, Vec<Vec<String>>)> {
+    const TABLES: &[&str] = &[
+        "tasks",
+        "worker_completion_receipts",
+        "worker_delivery_transactions",
+        "worker_delivery_events",
+        "verification_dispatches",
+        "verifications",
+        "verification_issues",
+        "events",
+        "task_leases",
+        "task_lease_history",
+        "supervisor_queue",
+        "prompt_queue",
+    ];
+    let conn = rusqlite::Connection::open(cas_root.join("cas.db")).unwrap();
+    TABLES
+        .iter()
+        .map(|table| {
+            let exists = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                    [table],
+                    |row| row.get::<_, bool>(0),
+                )
+                .unwrap();
+            if !exists {
+                return ((*table).to_string(), Vec::new());
+            }
+            let mut statement = conn
+                .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
+                .unwrap();
+            let column_count = statement.column_count();
+            let rows = statement
+                .query_map([], |row| {
+                    (0..column_count)
+                        .map(|index| {
+                            use rusqlite::types::ValueRef;
+                            Ok(match row.get_ref(index)? {
+                                ValueRef::Null => "null".to_string(),
+                                ValueRef::Integer(value) => format!("i:{value}"),
+                                ValueRef::Real(value) => format!("f:{:016x}", value.to_bits()),
+                                ValueRef::Text(value) => {
+                                    format!("t:{}", String::from_utf8_lossy(value))
+                                }
+                                ValueRef::Blob(value) => format!(
+                                    "b:{}",
+                                    value
+                                        .iter()
+                                        .map(|byte| format!("{byte:02x}"))
+                                        .collect::<String>()
+                                ),
+                            })
+                        })
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            ((*table).to_string(), rows)
+        })
+        .collect()
+}
+
+fn seed_direct_close_delivery(
+    cas_root: &Path,
+    task_id: &str,
+    state: WorkerDeliveryState,
+) {
+    let input = WorkerCompletionReceiptInput {
+        task_id: task_id.to_string(),
+        worker_agent_id: "delivery-worker-session".to_string(),
+        repo_selector: "remote:github.com/org/direct-close".to_string(),
+        source_branch: "factory/delivery-worker".to_string(),
+        commit_sha: "a".repeat(40),
+        merge_base_sha: "b".repeat(40),
+        target_branch: "main".to_string(),
+        target_sha: "c".repeat(40),
+        proof_reference: "proof:direct-close-state".to_string(),
+        scope_summary: "direct close delivery-state fixture".to_string(),
+    };
+    let receipt = cas_store::build_worker_completion_receipt(
+        &input,
+        "delivery-worker",
+        chrono::Utc::now(),
+    );
+    let (mut transaction, dispatch) = cas_store::create_worker_delivery_with_dispatch(
+        cas_root,
+        &receipt,
+        WorkerDeliveryState::AwaitingVerification,
+        "delivery-worker-session",
+        "delivery-supervisor-session",
+        chrono::Utc::now() + chrono::Duration::minutes(10),
+    )
+    .expect("seed delivery");
+    if state == WorkerDeliveryState::AwaitingVerification {
+        return;
+    }
+
+    let mut verification =
+        Verification::new(format!("ver-{task_id}"), task_id.to_string());
+    verification.dispatch_id = Some(dispatch.id);
+    verification.status = if state == WorkerDeliveryState::VerificationFailed {
+        VerificationStatus::Rejected
+    } else {
+        VerificationStatus::Approved
+    };
+    verification.summary = format!("fixture verdict for {state}");
+    open_verification_store(cas_root)
+        .unwrap()
+        .add(&verification)
+        .expect("seed verdict");
+
+    if state == WorkerDeliveryState::VerificationFailed {
+        cas_store::transition_worker_delivery(
+            cas_root,
+            &transaction.id,
+            &[WorkerDeliveryState::AwaitingVerification],
+            state,
+            "delivery-supervisor-session",
+            Some("delivery-supervisor-session"),
+            Some(&verification.id),
+            None,
+            Some(("verification_failed", "fixture rejected")),
+        )
+        .expect("seed failed delivery");
+        return;
+    }
+
+    for next in [
+        WorkerDeliveryState::AwaitingMerge,
+        WorkerDeliveryState::MergeAuthorized,
+        WorkerDeliveryState::Merged,
+        WorkerDeliveryState::CloseReady,
+        WorkerDeliveryState::Delivered,
+    ] {
+        let current = transaction.state;
+        let merge_sha = "dddddddddddddddddddddddddddddddddddddddd";
+        transaction = cas_store::transition_worker_delivery(
+            cas_root,
+            &transaction.id,
+            &[current],
+            next,
+            "delivery-supervisor-session",
+            Some("delivery-supervisor-session"),
+            Some(&verification.id),
+            (next == WorkerDeliveryState::Merged).then_some(merge_sha),
+            None,
+        )
+        .expect("advance delivery fixture");
+        if next == state {
+            return;
+        }
+    }
+    panic!("unsupported direct-close delivery fixture state {state}");
+}
+
+async fn exercise_direct_close_delivery_state(
+    state: WorkerDeliveryState,
+    expect_close: bool,
+) {
+    let project = TempDir::new().expect("direct-close project");
+    let cas_root = init_cas_dir(project.path()).expect("init direct-close CAS");
+    let task_store = open_task_store(&cas_root).expect("task store");
+    let task_id = format!("direct-close-{state}");
+    let mut task = Task::new(task_id.clone(), format!("Direct close in {state}"));
+    task.status = TaskStatus::InProgress;
+    task.depth = TaskDepth::Light;
+    task.assignee = Some("delivery-worker".to_string());
+    task_store.add(&task).expect("add direct-close task");
+    register_delivery_agent(
+        &cas_root,
+        "delivery-worker-session",
+        "delivery-worker",
+        AgentRole::Worker,
+        "direct-close-factory",
+    );
+    let agent_store = open_agent_store(&cas_root).expect("agent store");
+    agent_store
+        .try_claim(
+            &task.id,
+            "delivery-worker-session",
+            600,
+            Some("direct-close fixture"),
+        )
+        .expect("seed active task lease");
+    seed_direct_close_delivery(&cas_root, &task.id, state);
+
+    let task_before = task_store.get(&task.id).expect("task before close");
+    let snapshot_before = durable_close_snapshot(&cas_root);
+    let core = CasCore::with_daemon(cas_root.clone(), None, None);
+    core.set_agent_id_for_testing("delivery-worker-session".to_string());
+    let result = core
+        .cas_task_update(Parameters(close_update_request(task.id.clone())))
+        .await;
+
+    if !expect_close {
+        let text = result
+            .expect_err("non-Delivered direct close must fail")
+            .message
+            .to_string();
+        assert!(
+            text.contains("DELIVERY CLOSE BLOCKED")
+                && text.contains(&state.to_string())
+                && text.contains("Remediation:"),
+            "non-Delivered state must return typed actionable guidance:\n{text}"
+        );
+        assert_eq!(
+            durable_close_snapshot(&cas_root),
+            snapshot_before,
+            "rejected direct close in {state} mutated task, receipt/transaction/events, dispatch/verdict, hook, lease, or lifecycle outbox"
+        );
+        return;
+    }
+
+    let text = get_text(&result.expect("Delivered direct close response"));
+    assert!(text.contains("Updated task"), "{text}");
+    let task_after = task_store.get(&task.id).expect("closed task");
+    assert_eq!(task_after.status, TaskStatus::Closed);
+    assert_eq!(
+        serde_json::to_value(&task_after.deliverables).unwrap(),
+        serde_json::to_value(&task_before.deliverables).unwrap()
+    );
+    assert_eq!(task_after.assignee, task_before.assignee);
+    let snapshot_after = durable_close_snapshot(&cas_root);
+    for (table, before_rows) in &snapshot_before {
+        if matches!(table.as_str(), "tasks" | "events") {
+            continue;
+        }
+        let after_rows = snapshot_after
+            .iter()
+            .find_map(|(after_table, rows)| (after_table == table).then_some(rows))
+            .unwrap();
+        assert_eq!(
+            after_rows, before_rows,
+            "Delivered direct close unexpectedly mutated {table}"
+        );
+    }
+    let events_before = snapshot_before
+        .iter()
+        .find_map(|(table, rows)| (table == "events").then_some(rows))
+        .unwrap();
+    let events_after = snapshot_after
+        .iter()
+        .find_map(|(table, rows)| (table == "events").then_some(rows))
+        .unwrap();
+    assert_eq!(
+        events_after.len(),
+        events_before.len() + 1
+    );
+    assert!(
+        events_after
+            .last()
+            .unwrap()
+            .iter()
+            .any(|value| value == "t:task_completed"),
+        "Delivered direct close must emit only the normal task completion event"
+    );
+    let (_, transaction) = cas_store::get_latest_worker_delivery(&cas_root, &task.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(transaction.state, WorkerDeliveryState::Delivered);
 }
 
 // =============================================================================
@@ -1009,7 +1275,7 @@ async fn task_bound_system_a_merge_rejects_same_selector_worktree_from_wrong_clo
 }
 
 #[tokio::test]
-async fn update_to_closed_runs_hook_in_declared_task_worktree_and_records_path_free_evidence() {
+async fn update_to_closed_rejects_unmerged_task_without_mutation_then_closes_after_merge() {
     let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
     let home = TempDir::new().expect("temp HOME");
     let _home = HomeGuard::enter(home.path());
@@ -1057,10 +1323,51 @@ async fn update_to_closed_runs_hook_in_declared_task_worktree_and_records_path_f
     });
     task_store.add(&task).expect("add task");
 
-    let core = CasCore::with_daemon(cas_root_a, None, None);
+    let task_before = serde_json::to_value(task_store.get(&task.id).unwrap()).unwrap();
+    let durable_counts = || {
+        let conn = rusqlite::Connection::open(cas_root_a.join("cas.db")).unwrap();
+        [
+            "worker_completion_receipts",
+            "worker_delivery_transactions",
+            "worker_delivery_events",
+            "verification_dispatches",
+            "verifications",
+            "events",
+            "supervisor_queue",
+        ]
+        .map(|table| {
+            conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+        })
+    };
+    let counts_before = durable_counts();
+    let core = CasCore::with_daemon(cas_root_a.clone(), None, None);
+    let rejected = core
+        .cas_task_update(Parameters(close_update_request(task.id.clone())))
+        .await
+        .expect("merge-gated update response");
+    let rejected_text = get_text(&rejected);
+    assert!(
+        rejected_text.contains("MERGE REQUIRED"),
+        "update-to-closed must enforce the normal task merge gate:\n{rejected_text}"
+    );
+    assert_eq!(
+        serde_json::to_value(task_store.get(&task.id).unwrap()).unwrap(),
+        task_before,
+        "failed direct close must not park, stamp hook evidence, change status/anchor, or update timestamps"
+    );
+    assert_eq!(
+        durable_counts(),
+        counts_before,
+        "failed direct close must not create delivery, verification, event, or lifecycle-outbox state"
+    );
+
+    run_git(&["merge", "--no-ff", "factory/frontend"], &repo_b.root);
     core.cas_task_update(Parameters(close_update_request(task.id.clone())))
         .await
-        .expect("update-to-closed must use frontend context");
+        .expect("merged update-to-closed must use frontend context");
 
     let persisted = task_store.get(&task.id).expect("persisted task");
     assert_eq!(persisted.status, cas::types::TaskStatus::Closed);
@@ -1078,6 +1385,56 @@ async fn update_to_closed_runs_hook_in_declared_task_worktree_and_records_path_f
     let json = serde_json::to_string(&persisted.deliverables).unwrap();
     assert!(!json.contains(home.path().to_string_lossy().as_ref()));
     assert!(!json.contains(unrelated_path.to_string_lossy().as_ref()));
+}
+
+#[tokio::test]
+async fn update_to_closed_preserves_legacy_non_git_non_factory_path() {
+    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let home = TempDir::new().expect("temp HOME");
+    let _home = HomeGuard::enter(home.path());
+    let project = TempDir::new().expect("non-git project");
+    let cas_root = init_cas_dir(project.path()).expect("init non-git CAS");
+    let task_store = open_task_store(&cas_root).expect("task store");
+    let mut task = Task::new(
+        "legacy-update-close".to_string(),
+        "Legacy non-git close".to_string(),
+    );
+    task.depth = TaskDepth::Light;
+    task.assignee = Some("legacy-worker".to_string());
+    task_store.add(&task).expect("add legacy task");
+
+    let core = CasCore::with_daemon(cas_root, None, None);
+    let result = core
+        .cas_task_update(Parameters(close_update_request(task.id.clone())))
+        .await
+        .expect("legacy direct close");
+    assert!(
+        get_text(&result).contains("Updated task"),
+        "{}",
+        get_text(&result)
+    );
+    let persisted = task_store.get(&task.id).expect("persisted legacy task");
+    assert_eq!(persisted.status, TaskStatus::Closed);
+    assert!(
+        persisted.deliverables.pre_close_hook.is_none(),
+        "legacy task without WorkTarget keeps the existing no-hook path"
+    );
+}
+
+#[tokio::test]
+async fn update_to_closed_rejects_every_incomplete_or_failed_delivery_without_mutation() {
+    for state in [
+        WorkerDeliveryState::AwaitingVerification,
+        WorkerDeliveryState::CloseReady,
+        WorkerDeliveryState::VerificationFailed,
+    ] {
+        exercise_direct_close_delivery_state(state, false).await;
+    }
+}
+
+#[tokio::test]
+async fn update_to_closed_accepts_delivered_transaction_without_replaying_delivery() {
+    exercise_direct_close_delivery_state(WorkerDeliveryState::Delivered, true).await;
 }
 
 #[tokio::test]
@@ -2792,10 +3149,8 @@ async fn pending_delivery_proof_rejects_review_scope_update_but_allows_notes() {
         .await
         .expect_err("public update-to-closed must be rejected");
     assert!(
-        update_to_closed
-            .message
-            .contains("DELIVERY PROOF SCOPE LOCKED"),
-        "update-to-closed must use the same early proof-scope guard"
+        update_to_closed.message.contains("DELIVERY CLOSE BLOCKED"),
+        "update-to-closed must use the more specific early delivery-state guard"
     );
     assert_eq!(
         serde_json::to_value(task_store.get(&task.id).unwrap()).unwrap(),

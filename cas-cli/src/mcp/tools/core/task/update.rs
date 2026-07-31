@@ -262,6 +262,19 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+        if req
+            .status
+            .as_deref()
+            .is_some_and(|status| status.eq_ignore_ascii_case("closed"))
+            && task.status != TaskStatus::Closed
+            && let Err(message) = self.guard_direct_update_close_delivery_state(&task)
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(message),
+                data: None,
+            });
+        }
         if let Err(message) = super::lifecycle::proof_scope::guard_task_proof_scope(
             &self.cas_root,
             &task,
@@ -707,6 +720,7 @@ impl CasCore {
 
         // cas-062d: track status transition for supervisor lifecycle push.
         let mut lifecycle_status_change: Option<(TaskStatus, TaskStatus)> = None;
+        let mut direct_close_hook_evidence = None;
         if let Some(status_str) = req.status {
             use std::str::FromStr;
             let new_status =
@@ -787,6 +801,52 @@ impl CasCore {
                         )),
                         data: None,
                     });
+                }
+            }
+            if new_status == TaskStatus::Closed && task.status != TaskStatus::Closed {
+                let close_repo_context = match task.deliverables.work_target.as_ref() {
+                    Some(_) if existing_repo_context.is_some() => existing_repo_context.clone(),
+                    Some(target) => Some(
+                        super::repo_context::resolve_repo_context(&self.cas_root, target).map_err(
+                            |message| McpError {
+                                code: ErrorCode::INVALID_PARAMS,
+                                message: Cow::from(message),
+                                data: None,
+                            },
+                        )?,
+                    ),
+                    None => None,
+                };
+                if let Some(context) = close_repo_context.as_ref() {
+                    let worker_worktree = self
+                        .resolve_worker_worktree_path(&task, Some(context))
+                        .map_err(|message| McpError {
+                            code: ErrorCode::INVALID_PARAMS,
+                            message: Cow::from(message),
+                            data: None,
+                        })?;
+                    direct_close_hook_evidence = Some(
+                        super::lifecycle::close_ops::run_declared_pre_close_hook(
+                            &task,
+                            context,
+                            worker_worktree.as_deref(),
+                            None,
+                        )
+                        .map_err(|message| McpError {
+                            code: ErrorCode::INVALID_PARAMS,
+                            message: Cow::from(format!(
+                                "PRE-CLOSE HOOK FAILED for task update status=closed: {message}"
+                            )),
+                            data: None,
+                        })?,
+                    );
+                }
+                if let Err(message) = self.guard_direct_update_close_merge_state(
+                    task_store.as_ref(),
+                    &task,
+                    close_repo_context.as_ref(),
+                ) {
+                    return Ok(Self::tool_error(message));
                 }
             }
             if task.status == TaskStatus::Closed && new_status != TaskStatus::Closed {
@@ -877,37 +937,7 @@ impl CasCore {
             return Ok(Self::success("No changes specified"));
         }
 
-        if matches!(
-            lifecycle_status_change,
-            Some((old, TaskStatus::Closed)) if old != TaskStatus::Closed
-        ) && let Some(target) = task.deliverables.work_target.as_ref()
-        {
-            let context = super::repo_context::resolve_repo_context(&self.cas_root, target)
-                .map_err(|message| McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(message),
-                    data: None,
-                })?;
-            let worker_worktree = self
-                .resolve_worker_worktree_path(&task, Some(&context))
-                .map_err(|message| McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(message),
-                    data: None,
-                })?;
-            let evidence = super::lifecycle::close_ops::run_declared_pre_close_hook(
-                &task,
-                &context,
-                worker_worktree.as_deref(),
-                None,
-            )
-            .map_err(|message| McpError {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!(
-                    "PRE-CLOSE HOOK FAILED for task update status=closed: {message}"
-                )),
-                data: None,
-            })?;
+        if let Some(evidence) = direct_close_hook_evidence {
             task.deliverables.pre_close_hook = Some(evidence);
         }
 

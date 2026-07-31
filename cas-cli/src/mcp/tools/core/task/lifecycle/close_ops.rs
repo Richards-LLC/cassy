@@ -703,6 +703,143 @@ impl CasCore {
         }
     }
 
+    /// Reject direct `task update status=closed` while an immutable delivery
+    /// transaction still owns the task's close lifecycle.
+    ///
+    /// This is deliberately read-only: direct update may recognize an already
+    /// Delivered transaction, but it must not advance, repair, or fail one.
+    /// Those transitions belong to the transactional delivery path.
+    pub(crate) fn guard_direct_update_close_delivery_state(
+        &self,
+        task: &Task,
+    ) -> Result<(), String> {
+        let Some((_, transaction)) =
+            cas_store::get_latest_worker_delivery(&self.cas_root, &task.id).map_err(|error| {
+                format!(
+                    "DELIVERY CLOSE CHECK FAILED: could not inspect the task's immutable delivery state: {error}"
+                )
+            })?
+        else {
+            return Ok(());
+        };
+
+        if transaction.state == cas_types::WorkerDeliveryState::Delivered {
+            return Ok(());
+        }
+
+        let remediation = match transaction.state {
+            cas_types::WorkerDeliveryState::AwaitingVerification => {
+                "Record the exact-task delivery verdict through verification, then resume delivery through supervisor worktree_merge."
+            }
+            cas_types::WorkerDeliveryState::AwaitingMerge
+            | cas_types::WorkerDeliveryState::MergeAuthorized
+            | cas_types::WorkerDeliveryState::Merged
+            | cas_types::WorkerDeliveryState::CloseReady => {
+                "A registered supervisor must resume this immutable delivery with worktree_merge and its task_id."
+            }
+            cas_types::WorkerDeliveryState::VerificationFailed
+            | cas_types::WorkerDeliveryState::Conflict
+            | cas_types::WorkerDeliveryState::Stale
+            | cas_types::WorkerDeliveryState::RepoMismatch
+            | cas_types::WorkerDeliveryState::TipChanged => {
+                "Correct the recorded delivery failure, produce fresh proof, and submit a new immutable completion receipt."
+            }
+            cas_types::WorkerDeliveryState::Delivered => unreachable!(),
+        };
+        Err(format!(
+            "DELIVERY CLOSE BLOCKED\n\nTask {} has immutable delivery transaction {} in state {}. Direct task update cannot advance or bypass the delivery state machine.\n\nRemediation: {}",
+            task.id, transaction.id, transaction.state, remediation
+        ))
+    }
+
+    /// Apply the normal task-close merge predicate to direct
+    /// `task update status=closed` without performing close's parking,
+    /// lifecycle-push, event, anchor, or lease side effects.
+    ///
+    /// The update handler resolves a declared RepoContext once and passes it
+    /// here for both this gate and the later task-owned pre-close hook.
+    pub(crate) fn guard_direct_update_close_merge_state(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+        declared_repo_context: Option<&super::super::repo_context::RepoContext>,
+    ) -> Result<(), String> {
+        if task.task_type == TaskType::Epic || task.assignee.is_none() {
+            return Ok(());
+        }
+
+        let has_recorded_merge_evidence = task.worktree_id.is_some()
+            || task.deliverables.factory_branch_anchor.is_some()
+            || task.deliverables.parked_branch.is_some()
+            || task
+                .assignee
+                .as_deref()
+                .and_then(|assignee| resolve_system_b_worktree_path(&self.cas_root, assignee))
+                .is_some();
+        let factory_merge_enforcement =
+            std::env::var_os("CAS_FACTORY_MODE").is_some() && has_recorded_merge_evidence;
+        let resolved_repo = declared_repo_context
+            .map(|context| Ok(context.repo_root.clone()))
+            .unwrap_or_else(|| resolve_close_gate_repo_root(&self.cas_root));
+        let close_repo_verified = resolved_repo.is_ok();
+        let close_project_root = match resolved_repo {
+            Ok(repo_root) => repo_root,
+            Err(message) if factory_merge_enforcement => return Err(message),
+            Err(_) => self
+                .cas_root
+                .parent()
+                .unwrap_or(&self.cas_root)
+                .to_path_buf(),
+        };
+
+        let worktree_store_parent_branch = task.worktree_id.as_deref().and_then(|wt_id| {
+            self.open_worktree_store()
+                .ok()
+                .and_then(|store| store.get(wt_id).ok())
+                .map(|wt| wt.parent_branch.clone())
+        });
+        let epic_parent_branch = task_store
+            .get_parent_epic(&task.id)
+            .ok()
+            .flatten()
+            .and_then(|parent| parent.branch);
+        let parent_branch_resolution = if let Some(context) = declared_repo_context {
+            Ok(context.target_branch.clone())
+        } else if close_repo_verified {
+            resolve_close_parent_branch(
+                worktree_store_parent_branch,
+                epic_parent_branch,
+                &close_project_root,
+            )
+        } else {
+            Ok(worktree_store_parent_branch
+                .or(epic_parent_branch)
+                .unwrap_or_else(|| "main".to_string()))
+        };
+        let resolved_parent_branch = match parent_branch_resolution {
+            Ok(branch) => branch,
+            Err(message) if factory_merge_enforcement => return Err(message),
+            Err(_) => "main".to_string(),
+        };
+        let req = TaskCloseRequest {
+            id: task.id.clone(),
+            reason: None,
+            bypass_code_review: None,
+            code_review_findings: None,
+            search_manifest: None,
+            commit_receipt: None,
+        };
+        match run_factory_branch_merge_gate(
+            task,
+            &req,
+            &resolved_parent_branch,
+            &close_project_root,
+        ) {
+            MergeStateGateOutcome::Proceed => Ok(()),
+            MergeStateGateOutcome::Reject(message) => Err(message),
+        }
+    }
+
     pub async fn cas_task_close(
         &self,
         params: Parameters<TaskCloseRequest>,

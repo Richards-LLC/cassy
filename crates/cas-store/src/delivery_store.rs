@@ -573,14 +573,48 @@ pub fn transition_worker_delivery_verification_with_conn(
     let Some(current) = current else {
         return Ok(None);
     };
+    if current.state != WorkerDeliveryState::AwaitingVerification {
+        return Ok(None);
+    }
+    let exact_binding: i64 = conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1
+            FROM verifications v
+            JOIN verification_dispatches d ON d.id = v.dispatch_id
+            JOIN worker_completion_receipts r ON r.id = d.receipt_id
+            WHERE v.id = ?1
+              AND v.task_id = ?2
+              AND v.agent_id = ?3
+              AND d.task_id = ?2
+              AND d.receipt_id = ?4
+              AND d.delivery_transaction_id = ?5
+              AND d.state = 'resolved'
+              AND r.id = ?4
+              AND r.task_id = ?2
+              AND ((?6 = 1 AND v.status = 'approved')
+                   OR (?6 = 0 AND v.status IN ('rejected', 'error')))
+        )",
+        params![
+            verification_id,
+            current.task_id,
+            actor_agent_id,
+            current.receipt_id,
+            current.id,
+            approved as i64,
+        ],
+        |row| row.get(0),
+    )?;
+    if exact_binding != 1 {
+        return Err(StoreError::Parse(
+            "delivery verification is not bound to the exact receipt, transaction, task, and verifier"
+                .to_string(),
+        ));
+    }
     let target = if approved {
         WorkerDeliveryState::AwaitingMerge
     } else {
         WorkerDeliveryState::VerificationFailed
     };
-    if current.state != WorkerDeliveryState::AwaitingVerification {
-        return Ok(None);
-    }
     let now = Utc::now();
     let changed = conn.execute(
         "UPDATE worker_delivery_transactions

@@ -1828,7 +1828,9 @@ impl CasCore {
                              verdict manually."
                         );
                         timeout_row.created_at = chrono::Utc::now();
-                        if let Err(e) = verification_store.update(&timeout_row) {
+                        if let Err(e) =
+                            cas_store::update_system_verification(&self.cas_root, &timeout_row)
+                        {
                             tracing::warn!(task_id = %req.id, error = %e, "failed to update verification timeout row");
                         }
 
@@ -1949,6 +1951,8 @@ impl CasCore {
                                             .to_string(),
                                     );
                                     skipped_row.verification_type = verification_type;
+                                    skipped_row.provenance =
+                                        cas_types::VerificationProvenance::System;
                                     // cas-eeab (Item 6): cache get_agent_id() once to avoid
                                     // the double-call that existed between the row assignment
                                     // and the gap-event emission on the add() failure path.
@@ -1956,7 +1960,10 @@ impl CasCore {
                                     if let Some(ref aid) = maybe_agent_id {
                                         skipped_row.agent_id = Some(aid.clone());
                                     }
-                                    if let Err(e) = verification_store.add(&skipped_row) {
+                                    if let Err(e) = cas_store::add_system_verification(
+                                        &self.cas_root,
+                                        &skipped_row,
+                                    ) {
                                         tracing::warn!(
                                             task_id = %req.id,
                                             error = %e,
@@ -2134,7 +2141,10 @@ impl CasCore {
                                          This row will be superseded by the subagent's verdict.",
                                         dispatch.id, req.id
                                     );
-                                    if let Err(e) = verification_store.add(&dispatch_row) {
+                                    if let Err(e) = cas_store::add_system_verification(
+                                        &self.cas_root,
+                                        &dispatch_row,
+                                    ) {
                                         tracing::warn!(task_id = %req.id, error = %e, "failed to persist verification dispatch row");
                                     }
                                 }
@@ -2945,10 +2955,11 @@ impl CasCore {
                         } else {
                             VerificationType::Task
                         };
+                        row.provenance = cas_types::VerificationProvenance::System;
                         if let Ok(agent_id) = self.get_agent_id() {
                             row.agent_id = Some(agent_id);
                         }
-                        if let Err(e) = verification_store.add(&row) {
+                        if let Err(e) = cas_store::add_system_verification(&self.cas_root, &row) {
                             tracing::warn!(task_id = %req.id, error = %e, "failed to persist verification skip row");
                         }
                     }

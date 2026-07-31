@@ -102,7 +102,7 @@ pub use loop_store::{LOOP_SCHEMA, LoopStore, SqliteLoopStore};
 // Verification store for task quality gates
 pub use verification_store::{
     IssuedVerifierCapability, SqliteVerificationStore, VERIFICATION_SCHEMA, VerificationStore,
-    add_verification_with_conn, bind_server_verifier_handoff,
+    add_system_verification, add_verification_with_conn, bind_server_verifier_handoff,
     bind_server_verifier_handoff_and_register_child, bind_verifier_capability,
     cancel_unbound_server_verifier_handoff, claim_verification_dispatch,
     claim_verification_dispatch_bound, consume_server_verifier_handoff_with_conn,
@@ -115,7 +115,7 @@ pub use verification_store::{
     invalidate_verification_dispatch_for_new_cycle, issue_server_verifier_handoff,
     issue_server_verifier_handoff_with_secret, issue_verifier_capability,
     resolve_verification_dispatch_with_conn, save_verification_issues_with_conn,
-    timeout_verification_dispatch,
+    timeout_verification_dispatch, update_system_verification,
 };
 
 // Worktree store for git worktree tracking

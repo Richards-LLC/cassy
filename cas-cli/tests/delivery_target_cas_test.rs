@@ -295,6 +295,18 @@ async fn arm_delivery(slug: &str, repo_host: &str) -> DeliveryFixture {
         target_branch: "main".to_string(),
     });
     task_store.add(&task).expect("add task");
+    assert!(matches!(
+        open_agent_store(&cas_root)
+            .expect("agent store")
+            .try_claim(
+                &task.id,
+                &worker_id,
+                600,
+                Some("transactional delivery target CAS"),
+            )
+            .expect("claim delivery task"),
+        cas::types::ClaimResult::Success(_)
+    ));
 
     let receipt = WorkerCompletionReceiptInput {
         task_id: task.id.clone(),
@@ -415,7 +427,10 @@ async fn delivery_merge_refuses_target_drift_before_merge_as_recoverable_tip_cha
     // A concurrent actor commits on the reviewed target after approval.
     std::fs::write(fixture.repo.root.join("concurrent.txt"), "concurrent\n").unwrap();
     run_git(&["add", "concurrent.txt"], &fixture.repo.root);
-    run_git(&["commit", "-m", "concurrent target commit"], &fixture.repo.root);
+    run_git(
+        &["commit", "-m", "concurrent target commit"],
+        &fixture.repo.root,
+    );
     let drifted = git_stdout(&fixture.repo.root, &["rev-parse", "main"]);
     assert_ne!(drifted, fixture.receipt.target_sha);
 
@@ -453,7 +468,10 @@ async fn delivery_merge_refuses_target_drift_injected_between_preflight_and_merg
     let fixture = arm_delivery("driftduring", "drift-during").await;
 
     let reviewed = fixture.receipt.target_sha.clone();
-    assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "main"]), reviewed);
+    assert_eq!(
+        git_stdout(&fixture.repo.root, &["rev-parse", "main"]),
+        reviewed
+    );
     fixture.repo.arm_post_checkout_drift("cas0a21drift");
 
     let _cwd = CwdGuard::enter(&fixture.repo.root);
@@ -483,7 +501,10 @@ async fn delivery_merge_refuses_target_drift_injected_between_preflight_and_merg
         git_stdout(&fixture.repo.root, &["rev-parse", "main^{commit}"]),
         "target tip must resolve to a commit"
     );
-    let parents = git_stdout(&fixture.repo.root, &["rev-list", "--parents", "-n", "1", "main"]);
+    let parents = git_stdout(
+        &fixture.repo.root,
+        &["rev-list", "--parents", "-n", "1", "main"],
+    );
     assert_eq!(
         parents.split_whitespace().count(),
         2,
@@ -515,7 +536,10 @@ async fn concurrent_deliveries_in_independent_repositories_remain_independent() 
     // Drift only the FIRST repository's target.
     std::fs::write(first.repo.root.join("concurrent.txt"), "concurrent\n").unwrap();
     run_git(&["add", "concurrent.txt"], &first.repo.root);
-    run_git(&["commit", "-m", "concurrent target commit"], &first.repo.root);
+    run_git(
+        &["commit", "-m", "concurrent target commit"],
+        &first.repo.root,
+    );
 
     let cwd = CwdGuard::enter(&first.repo.root);
     let first_output = run_merge(&first).await;

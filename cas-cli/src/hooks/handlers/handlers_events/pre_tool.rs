@@ -546,9 +546,9 @@ pub fn handle_pre_tool_use(
     }
 
     // Mint verifier authority only on the authenticated parent's Task/Agent
-    // spawn path. The raw bearer is injected into the child prompt and is
-    // never persisted; the store keeps only its digest. SubagentStart binds
-    // it to the distinct child session before verification.add can consume it.
+    // spawn path. Authority stays entirely server-side: this hook leaves the
+    // model-visible prompt/input byte-for-byte unchanged, while SubagentStart
+    // binds the sole sealed handoff to the official distinct child agent_id.
     if matches!(tool_name, "Task" | "Agent")
         && input
             .tool_input
@@ -579,13 +579,13 @@ pub fn handle_pre_tool_use(
             ));
         }
 
-        let Some(mut updated_input) = input.tool_input.clone() else {
+        let Some(tool_input) = input.tool_input.as_ref() else {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
                 "task-verifier spawn requires a prompt naming exactly one CAS task.",
             ));
         };
-        let prompt = updated_input
+        let prompt = tool_input
             .get("prompt")
             .and_then(|value| value.as_str())
             .unwrap_or_default();
@@ -595,7 +595,7 @@ pub fn handle_pre_tool_use(
                 "task-verifier prompt must name exactly one existing CAS task ID.",
             ));
         };
-        match cas_store::get_latest_verification_dispatch(cas_root, &task_id) {
+        let dispatch_id = match cas_store::get_latest_verification_dispatch(cas_root, &task_id) {
             Ok(Some(dispatch))
                 if matches!(
                     dispatch.state,
@@ -615,6 +615,7 @@ pub fn handle_pre_tool_use(
                         "This task's verification dispatch deadline has elapsed; use the recorded recovery path.",
                     ));
                 }
+                dispatch.id
             }
             Ok(_) => {
                 return Ok(HookOutput::with_pre_tool_permission(
@@ -628,32 +629,41 @@ pub fn handle_pre_tool_use(
                     "Could not validate task-scoped verification dispatch authority.",
                 ));
             }
-        }
-        let issued =
-            match cas_store::issue_verifier_capability(cas_root, &task_id, &current_agent_id) {
-                Ok(issued) => issued,
-                Err(_) => {
+        };
+        let Some(tool_use_id) = input
+            .tool_use_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
+            return Ok(HookOutput::with_pre_tool_permission(
+                "deny",
+                "Cannot establish verifier authority: PreToolUse did not provide tool_use_id correlation.",
+            ));
+        };
+        match issue_hook_verifier_handoff(
+            cas_root,
+            &task_id,
+            &dispatch_id,
+            &current_agent_id,
+            tool_use_id,
+        ) {
+            Ok(_) => {}
+            Err(error) => {
+                let message = error.to_string();
+                if message.contains("already awaiting SubagentStart") {
                     return Ok(HookOutput::with_pre_tool_permission(
                         "deny",
-                        "Could not mint task-scoped verifier authority.",
+                        "Another task-verifier spawn is already awaiting SubagentStart for this parent. Wait for it to bind, or retry after the failed spawn is cleaned up or expires.",
                     ));
                 }
-            };
-        let child_prompt = format!(
-            "{prompt}\n\n\
-             CAS_VERIFIER_CAPABILITY={}\n\
-             This is a one-time task-scoped verifier capability. Pass it exactly once as \
-             verifier_capability to verification action=add for {task_id}. Never print, log, \
-             quote, or persist it.",
-            issued.token
-        );
-        if let Some(object) = updated_input.as_object_mut() {
-            object.insert(
-                "prompt".to_string(),
-                serde_json::Value::String(child_prompt),
-            );
+                return Ok(HookOutput::with_pre_tool_permission(
+                    "deny",
+                    "Could not establish server-side task-verifier authority for the exact dispatch.",
+                ));
+            }
         }
-        return Ok(HookOutput::with_pre_tool_updated_input(updated_input));
+        return Ok(HookOutput::empty());
     }
 
     // ========================================================================
@@ -953,6 +963,52 @@ fn unique_existing_task_id(
     } else {
         None
     }
+}
+
+fn issue_hook_verifier_handoff(
+    cas_root: &Path,
+    task_id: &str,
+    dispatch_id: &str,
+    issuer_agent_id: &str,
+    tool_use_id: &str,
+) -> cas_store::Result<cas_types::VerifierCapability> {
+    #[cfg(test)]
+    if let Some(secret) = TEST_VERIFIER_HANDOFF_SECRET.with(|slot| slot.borrow().as_ref().cloned())
+    {
+        return cas_store::issue_server_verifier_handoff_with_secret(
+            cas_root,
+            task_id,
+            dispatch_id,
+            issuer_agent_id,
+            tool_use_id,
+            &secret,
+        );
+    }
+    cas_store::issue_server_verifier_handoff(
+        cas_root,
+        task_id,
+        dispatch_id,
+        issuer_agent_id,
+        tool_use_id,
+    )
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_VERIFIER_HANDOFF_SECRET: std::cell::RefCell<Option<Vec<u8>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn with_test_verifier_handoff_secret<T>(secret: &[u8], f: impl FnOnce() -> T) -> T {
+    TEST_VERIFIER_HANDOFF_SECRET.with(|slot| {
+        *slot.borrow_mut() = Some(secret.to_vec());
+    });
+    let result = f();
+    TEST_VERIFIER_HANDOFF_SECRET.with(|slot| {
+        *slot.borrow_mut() = None;
+    });
+    result
 }
 
 /// Auto-route a factory-mode `SendMessage` tool call onto the CAS prompt
@@ -1705,7 +1761,7 @@ mod worker_commit_guard_tests {
     }
 
     #[test]
-    fn task_verifier_spawn_mints_and_binds_child_only_authority() {
+    fn task_verifier_spawn_uses_secret_free_server_handoff() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_FACTORY_MODE", None),
@@ -1734,6 +1790,7 @@ mod worker_commit_guard_tests {
         input.session_id = parent_id.to_string();
         input.cwd = tmp.path().to_string_lossy().to_string();
         input.tool_name = Some("Agent".to_string());
+        input.tool_use_id = Some("tool-use-verifier-6939".to_string());
         input.tool_input = Some(serde_json::json!({
             "subagent_type": "task-verifier",
             "prompt": "Review CAS task cas-hook-capability"
@@ -1757,24 +1814,98 @@ mod worker_commit_guard_tests {
         )
         .expect("create proof-cycle dispatch");
 
-        let output = handle_pre_tool_use(&input, Some(&cas_root)).expect("pretool");
+        let mut missing_tool_use = input.clone();
+        missing_tool_use.tool_use_id = None;
+        let missing_output =
+            handle_pre_tool_use(&missing_tool_use, Some(&cas_root)).expect("missing correlation");
+        assert_eq!(
+            serde_json::to_value(missing_output).expect("serialize missing correlation")["hookSpecificOutput"]
+                ["permissionDecision"],
+            "deny",
+            "missing official PreToolUse tool_use_id must fail closed"
+        );
+
+        let sentinel = b"CAS_SENTINEL_RAW_VERIFIER_CREDENTIAL_6939";
+        let output = with_test_verifier_handoff_secret(sentinel, || {
+            handle_pre_tool_use(&input, Some(&cas_root)).expect("pretool")
+        });
         let value = serde_json::to_value(output).expect("serialize output");
-        let updated_prompt = value["hookSpecificOutput"]["updatedInput"]["prompt"]
-            .as_str()
-            .expect("updated verifier prompt");
-        let token = updated_prompt
-            .lines()
-            .find_map(|line| line.trim().strip_prefix("CAS_VERIFIER_CAPABILITY="))
-            .expect("injected capability");
+        assert_eq!(
+            value,
+            serde_json::json!({}),
+            "successful verifier spawn must not emit updatedInput or context"
+        );
+        let original_input = serde_json::to_string(&input.tool_input).expect("serialize input");
+        let sentinel_text = std::str::from_utf8(sentinel).expect("utf8 sentinel");
+        assert!(!original_input.contains(sentinel_text));
+        assert!(!value.to_string().contains(sentinel_text));
+
+        let mut concurrent = input.clone();
+        concurrent.tool_use_id = Some("tool-use-concurrent-6939".to_string());
+        let concurrent_output =
+            handle_pre_tool_use(&concurrent, Some(&cas_root)).expect("concurrent spawn denial");
+        let concurrent_json =
+            serde_json::to_value(concurrent_output).expect("serialize concurrent denial");
+        assert_eq!(
+            concurrent_json["hookSpecificOutput"]["permissionDecision"],
+            "deny"
+        );
+        assert!(
+            concurrent_json["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("already awaiting SubagentStart")),
+            "concurrent denial must be actionable: {concurrent_json}"
+        );
+        assert!(!concurrent_json.to_string().contains(sentinel_text));
+
         let conn = rusqlite::Connection::open(cas_root.join("cas.db")).expect("db");
-        let persisted_hash: String = conn
+        let (persisted_hash, tool_use_id_hash): (String, String) = conn
             .query_row(
-                "SELECT token_hash FROM verification_capabilities WHERE task_id = ?1",
+                "SELECT c.token_hash, h.tool_use_id_hash
+                 FROM verification_capabilities c
+                 JOIN verification_handoffs h ON h.capability_id = c.id
+                 WHERE c.task_id = ?1",
                 rusqlite::params!["cas-hook-capability"],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("capability row");
-        assert_ne!(persisted_hash, token, "raw token must not persist");
+        assert!(!persisted_hash.contains(sentinel_text));
+        assert!(!tool_use_id_hash.contains(sentinel_text));
+
+        let wrong_type: crate::hooks::handlers::HookInput =
+            serde_json::from_value(serde_json::json!({
+                "hook_event_name": "SubagentStart",
+                "session_id": parent_id,
+                "agent_id": "wrong-type-child",
+                "agent_type": "Explore",
+                "cwd": cas_root.clone(),
+            }))
+            .expect("wrong-type payload");
+        crate::hooks::handlers::handle_subagent_start(&wrong_type, Some(&cas_root))
+            .expect("wrong type ignored");
+        assert!(
+            agent_store.get("wrong-type-child").is_err(),
+            "non-verifier child must never claim the sealed handoff"
+        );
+
+        let missing_child: crate::hooks::handlers::HookInput =
+            serde_json::from_value(serde_json::json!({
+                "hook_event_name": "SubagentStart",
+                "session_id": parent_id,
+                "agent_type": "task-verifier",
+                "cwd": cas_root.clone(),
+            }))
+            .expect("missing-child payload");
+        let missing_child_output =
+            crate::hooks::handlers::handle_subagent_start(&missing_child, Some(&cas_root))
+                .expect("missing child denial");
+        assert!(
+            serde_json::to_value(missing_child_output)
+                .expect("serialize missing child denial")
+                .get("systemMessage")
+                .is_some(),
+            "missing official child agent_id must fail closed"
+        );
 
         let child_start: crate::hooks::handlers::HookInput =
             serde_json::from_value(serde_json::json!({
@@ -1784,12 +1915,17 @@ mod worker_commit_guard_tests {
                 "agent_type": "task-verifier",
                 "agent_transcript_path": "/portable/child.jsonl",
                 "cwd": cas_root,
-                "permission_mode": "default",
-                "prompt": updated_prompt,
+                "permission_mode": "default"
             }))
             .expect("deserialize official production-shaped SubagentStart payload");
-        crate::hooks::handlers::handle_subagent_start(&child_start, Some(&cas_root))
-            .expect("bind child");
+        let child_output =
+            crate::hooks::handlers::handle_subagent_start(&child_start, Some(&cas_root))
+                .expect("bind child");
+        assert_eq!(
+            serde_json::to_value(child_output).expect("serialize child output"),
+            serde_json::json!({}),
+            "successful bind must not inject model-visible context"
+        );
 
         let child = agent_store
             .get("registered-verifier-child")
@@ -1805,5 +1941,111 @@ mod worker_commit_guard_tests {
             )
             .expect("bound capability");
         assert_eq!(bound_to, child.id);
+
+        let parent_transcript = tmp.path().join("parent.jsonl");
+        let child_transcript = tmp.path().join("child.jsonl");
+        std::fs::write(&parent_transcript, format!("{original_input}\n{value}\n"))
+            .expect("parent transcript fixture");
+        std::fs::write(
+            &child_transcript,
+            serde_json::to_string(&child).expect("child session payload"),
+        )
+        .expect("child transcript fixture");
+        let mut pending = vec![tmp.path().to_path_buf()];
+        while let Some(path) = pending.pop() {
+            if path.is_dir() {
+                pending.extend(
+                    std::fs::read_dir(&path)
+                        .expect("scan observable surfaces")
+                        .filter_map(|entry| entry.ok().map(|entry| entry.path())),
+                );
+            } else if let Ok(bytes) = std::fs::read(&path) {
+                assert!(
+                    !bytes
+                        .windows(sentinel.len())
+                        .any(|window| window == sentinel),
+                    "raw sentinel leaked into observable/persisted surface {}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn verifier_spawn_terminal_cleanup_is_exact_and_unbound_only() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_FACTORY_MODE", None),
+            ("CAS_SESSION_ID", None),
+            ("CAS_AGENT_ROLE", None),
+        ]);
+        let cas_root = crate::store::init_cas_dir(tmp.path()).expect("init cas");
+        let agent_store = open_agent_store(&cas_root).expect("agent store");
+        let task_store = open_task_store(&cas_root).expect("task store");
+        let parent_id = "cleanup-parent";
+        agent_store
+            .register(&Agent::new(
+                parent_id.to_string(),
+                "cleanup-parent".to_string(),
+            ))
+            .expect("register parent");
+        task_store
+            .add(&Task::new(
+                "cas-hook-cleanup".to_string(),
+                "Hook cleanup".to_string(),
+            ))
+            .expect("task");
+        cas_store::create_verification_dispatch(
+            &cas_root,
+            "cas-hook-cleanup",
+            parent_id,
+            parent_id,
+            chrono::Utc::now() + chrono::Duration::minutes(10),
+        )
+        .expect("dispatch");
+
+        let mut input = crate::hooks::handlers::HookInput {
+            session_id: parent_id.to_string(),
+            cwd: tmp.path().to_string_lossy().to_string(),
+            hook_event_name: "PreToolUse".to_string(),
+            tool_name: Some("Agent".to_string()),
+            tool_input: Some(serde_json::json!({
+                "subagent_type": "task-verifier",
+                "prompt": "Review cas-hook-cleanup",
+            })),
+            tool_use_id: Some("tool-use-cleanup".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(
+                handle_pre_tool_use(&input, Some(&cas_root)).expect("issue handoff")
+            )
+            .expect("serialize"),
+            serde_json::json!({})
+        );
+
+        let mut wrong = input.clone();
+        wrong.hook_event_name = "PermissionDenied".to_string();
+        wrong.tool_use_id = Some("tool-use-wrong".to_string());
+        crate::hooks::handlers::handle_verifier_spawn_cleanup(&wrong, Some(&cas_root))
+            .expect("wrong cleanup no-op");
+        let conn = rusqlite::Connection::open(cas_root.join("cas.db")).expect("db");
+        let pending: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM verification_handoffs WHERE state = 'pending'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pending count");
+        assert_eq!(pending, 1, "wrong tool_use_id must not remove the handoff");
+        drop(conn);
+        input.hook_event_name = "PostToolUseFailure".to_string();
+        crate::hooks::handlers::handle_verifier_spawn_cleanup(&input, Some(&cas_root))
+            .expect("exact failure cleanup");
+        assert!(
+            cas_store::bind_server_verifier_handoff(&cas_root, parent_id, "child-after-failure")
+                .is_err(),
+            "exact failed-spawn cleanup must remove the still-unbound handoff"
+        );
     }
 }

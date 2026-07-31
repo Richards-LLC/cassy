@@ -486,6 +486,41 @@ pub fn handle_subagent_stop(
     Ok(HookOutput::empty())
 }
 
+/// Remove only the exact still-unbound verifier handoff for a failed, denied,
+/// or completed-without-SubagentStart Agent tool call.
+///
+/// The hook-local tool_use_id is hashed inside the store. Bound and consumed
+/// audit rows are never eligible for cleanup.
+pub fn handle_verifier_spawn_cleanup(
+    input: &HookInput,
+    cas_root: Option<&Path>,
+) -> Result<HookOutput, MemError> {
+    let Some(cas_root) = cas_root else {
+        return Ok(HookOutput::empty());
+    };
+    if !matches!(input.tool_name.as_deref(), Some("Task" | "Agent"))
+        || input
+            .tool_input
+            .as_ref()
+            .and_then(|value| value.get("subagent_type"))
+            .and_then(|value| value.as_str())
+            != Some("task-verifier")
+    {
+        return Ok(HookOutput::empty());
+    }
+    let Some(tool_use_id) = input
+        .tool_use_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(HookOutput::empty());
+    };
+    let parent_id = current_agent_id(input);
+    let _ = cas_store::cancel_unbound_server_verifier_handoff(cas_root, &parent_id, tool_use_id);
+    Ok(HookOutput::empty())
+}
+
 /// Handle SubagentStart hook - bind task-verifier authority.
 ///
 /// Called when a Claude Code subagent (Task tool call) is about to start.
@@ -501,142 +536,106 @@ pub fn handle_subagent_start(
         None => return Ok(HookOutput::empty()),
     };
 
-    // Claude Code commonly omits subagent_type, so the server-minted bearer in
-    // the updated Task/Agent prompt is the authoritative verifier signal. Bind
-    // it to this distinct child session and register that server-side identity
-    // before any verification.add call can consume it.
-    let capability_token = input
-        .subagent_prompt
+    // Official SubagentStart carries the parent session plus distinct child
+    // agent_id/agent_type, but no Agent prompt or PreToolUse tool_use_id. Bind
+    // only the sole durable sealed handoff for this exact registered parent.
+    if input.agent_type.as_deref() != Some("task-verifier") {
+        return Ok(HookOutput::empty());
+    }
+
+    let parent_id = current_agent_id(input);
+    let child_id = match input
+        .agent_id
         .as_deref()
-        .and_then(verifier_capability_from_prompt);
-    if let Some(token) = capability_token {
-        let child_id = match input
-            .agent_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|id| !id.is_empty() && *id != input.session_id)
-        {
-            Some(child_id) => child_id,
-            None => {
-                return Ok(HookOutput::with_system_context(
-                    "CAS task-verifier authority binding failed: SubagentStart did not provide a distinct child agent_id."
-                        .to_string(),
-                ));
-            }
-        };
-        let capability = match cas_store::bind_verifier_capability(cas_root, token, child_id) {
-            Ok(capability) => capability,
-            Err(_) => {
-                return Ok(HookOutput::with_system_context(
-                    "CAS task-verifier authority binding failed; verification will fail closed."
-                        .to_string(),
-                ));
-            }
-        };
-        let agent_store = match open_agent_store(cas_root) {
-            Ok(store) => store,
-            Err(_) => {
-                return Ok(HookOutput::with_system_context(
-                    "CAS agent registry is unavailable; verification will fail closed.".to_string(),
-                ));
-            }
-        };
-        let issuer = match agent_store.get(&capability.issuer_agent_id) {
-            Ok(agent)
-                if matches!(
-                    agent.status,
-                    crate::types::AgentStatus::Active | crate::types::AgentStatus::Idle
-                ) =>
-            {
-                agent
-            }
-            _ => {
-                return Ok(HookOutput::with_system_context(
-                    "CAS verifier issuer is anonymous, orphaned, or inactive; verification will fail closed."
-                        .to_string(),
-                ));
-            }
-        };
-        let existing = agent_store.get(child_id).ok();
-        let mut child = existing.clone().unwrap_or_else(|| {
-            Agent::new_sub_agent(
-                child_id.to_string(),
-                "task-verifier".to_string(),
-                capability.issuer_agent_id.clone(),
-            )
-        });
-        child.name = "task-verifier".to_string();
-        child.agent_type = crate::types::AgentType::SubAgent;
-        child.role = AgentRole::Standard;
-        child.parent_id = Some(capability.issuer_agent_id.clone());
-        child.factory_session = issuer.factory_session.clone();
-        child.status = crate::types::AgentStatus::Active;
-        child.last_heartbeat = chrono::Utc::now();
-        let registry_result = if existing.is_some() {
-            agent_store.update(&child)
-        } else {
-            agent_store.register(&child)
-        };
-        if registry_result.is_err() {
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && *id != parent_id)
+    {
+        Some(child_id) => child_id,
+        None => {
             return Ok(HookOutput::with_system_context(
-                "CAS could not register the verifier child; verification will fail closed."
+                "CAS task-verifier authority binding failed: SubagentStart did not provide a distinct official child agent_id."
                     .to_string(),
             ));
         }
-        match capability
-            .dispatch_id
-            .as_deref()
-            .ok_or(())
-            .and_then(|dispatch_id| {
-                cas_store::get_verification_dispatch(cas_root, dispatch_id).map_err(|_| ())
-            }) {
-            Ok(dispatch)
-                if matches!(
-                    dispatch.state,
-                    cas_types::VerificationDispatchState::Pending
-                        | cas_types::VerificationDispatchState::Claimed
-                ) =>
-            {
-                if dispatch.owner_agent_id != capability.issuer_agent_id {
-                    return Ok(HookOutput::with_system_context(
-                        "CAS verification dispatch is owned by another registered session; verification will fail closed."
-                            .to_string(),
-                    ));
-                }
-                if cas_store::claim_verification_dispatch_bound(
-                    cas_root,
-                    &dispatch.id,
-                    &capability.issuer_agent_id,
-                    child_id,
-                    &capability.id,
-                )
-                .is_err()
-                {
-                    return Ok(HookOutput::with_system_context(
-                        "CAS verification dispatch could not be claimed; verification will fail closed."
-                            .to_string(),
-                    ));
-                }
-            }
-            Ok(_) | Err(_) => {
-                return Ok(HookOutput::with_system_context(
-                    "CAS verification dispatch state is unavailable; verification will fail closed."
+    };
+    let agent_store = match open_agent_store(cas_root) {
+        Ok(store) => store,
+        Err(_) => {
+            return Ok(HookOutput::with_system_context(
+                "CAS agent registry is unavailable; verification will fail closed.".to_string(),
+            ));
+        }
+    };
+    let issuer = match agent_store.get(&parent_id) {
+        Ok(agent)
+            if matches!(
+                agent.status,
+                crate::types::AgentStatus::Active | crate::types::AgentStatus::Idle
+            ) =>
+        {
+            agent
+        }
+        _ => {
+            return Ok(HookOutput::with_system_context(
+                "CAS verifier issuer is anonymous, orphaned, or inactive; verification will fail closed."
+                    .to_string(),
+            ));
+        }
+    };
+    if let Ok(existing) = agent_store.get(child_id)
+        && (existing.agent_type != crate::types::AgentType::SubAgent
+            || existing.role != AgentRole::Standard
+            || existing.parent_id.as_deref() != Some(parent_id.as_str()))
+    {
+        return Ok(HookOutput::with_system_context(
+            "CAS verifier child identity conflicts with an existing registered session; verification will fail closed."
+                .to_string(),
+        ));
+    }
+
+    let capability = match cas_store::bind_server_verifier_handoff(cas_root, &parent_id, child_id) {
+        Ok(capability) => capability,
+        Err(_) => {
+            return Ok(HookOutput::with_system_context(
+                    "CAS task-verifier handoff is missing, ambiguous, expired, or not bound to an active exact dispatch; verification will fail closed."
                         .to_string(),
                 ));
-            }
         }
+    };
+    if capability.issuer_agent_id != parent_id {
+        return Ok(HookOutput::with_system_context(
+            "CAS task-verifier handoff parent binding is invalid; verification will fail closed."
+                .to_string(),
+        ));
+    }
+
+    let existing = agent_store.get(child_id).ok();
+    let mut child = existing.clone().unwrap_or_else(|| {
+        Agent::new_sub_agent(
+            child_id.to_string(),
+            "task-verifier".to_string(),
+            parent_id.clone(),
+        )
+    });
+    child.name = "task-verifier".to_string();
+    child.agent_type = crate::types::AgentType::SubAgent;
+    child.role = AgentRole::Standard;
+    child.parent_id = Some(parent_id);
+    child.factory_session = issuer.factory_session.clone();
+    child.status = crate::types::AgentStatus::Active;
+    child.last_heartbeat = chrono::Utc::now();
+    let registry_result = if existing.is_some() {
+        agent_store.update(&child)
+    } else {
+        agent_store.register(&child)
+    };
+    if registry_result.is_err() {
+        return Ok(HookOutput::with_system_context(
+            "CAS could not register the verifier child; verification will fail closed.".to_string(),
+        ));
     }
 
     Ok(HookOutput::empty())
-}
-
-fn verifier_capability_from_prompt(prompt: &str) -> Option<&str> {
-    prompt.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("CAS_VERIFIER_CAPABILITY=")
-            .map(str::trim)
-            .filter(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))
-    })
 }
 
 #[cfg(test)]

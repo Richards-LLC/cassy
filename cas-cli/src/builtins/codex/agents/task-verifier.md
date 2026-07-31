@@ -333,10 +333,10 @@ One rule per category per rejection. Rules start as Draft.
 
 ## Guidelines
 
-The Task/Agent spawn prompt includes a server-issued
-`CAS_VERIFIER_CAPABILITY`. Pass that value exactly once as
-`verifier_capability` on the final `verification action=add` call. Never print,
-quote, log, or persist the capability, and never reuse it.
+CAS binds one sealed verifier handoff to this registered child server-side.
+Do not look for, request, or pass `verifier_capability`; omit that field on the
+final `verification action=add` call. If CAS rejects the handoff, fail closed
+and report the generic recovery guidance instead of fabricating authority.
 
 1. Check close reason FIRST — reject immediately if it admits incomplete work
 2. Check parent epic spec — verify alignment

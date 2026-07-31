@@ -68,13 +68,21 @@ impl CasCore {
         let uses_verifier_capability = req.verifier_capability.is_some();
         let supervisor_direct =
             caller.role == cas_types::AgentRole::Supervisor && !uses_verifier_capability;
-        if !supervisor_direct && !uses_verifier_capability {
+        let uses_server_handoff = !uses_verifier_capability
+            && caller.role == cas_types::AgentRole::Standard
+            && caller.agent_type == cas_types::AgentType::SubAgent
+            && caller.name == "task-verifier"
+            && caller
+                .parent_id
+                .as_deref()
+                .is_some_and(|parent_id| parent_id != caller_id);
+        if !supervisor_direct && !uses_verifier_capability && !uses_server_handoff {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
                 message: Cow::from(format!(
                     "Verification authority rejected for task {}: workers and standard sessions cannot attest their own work.\n\n\
                      Legitimate paths:\n\
-                       - Spawn a distinct registered task-verifier child; CAS injects a one-time task-scoped capability into that child.\n\
+                       - Spawn a distinct registered task-verifier child; CAS binds one sealed server-side handoff to its official child identity.\n\
                        - Ask a registered supervisor to verify directly.\n\n\
                      Task ownership, assignee/orphan state, harness/model labels, verification_type, and confidence do not grant authority.",
                     req.task_id
@@ -82,6 +90,7 @@ impl CasCore {
                 data: None,
             });
         }
+        let mut bound_server_handoff = None;
         let requested_dispatch_id = if let Some(capability_token) =
             req.verifier_capability.as_deref()
         {
@@ -146,6 +155,72 @@ impl CasCore {
                     data: None,
                 });
             }
+            dispatch_id
+        } else if uses_server_handoff {
+            let capability = cas_store::inspect_bound_server_verifier_handoff(
+                &self.cas_root,
+                &req.task_id,
+                &caller_id,
+                req.dispatch_id.as_deref(),
+            )
+            .map_err(|_| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(
+                    "Verifier handoff rejected: no unique unconsumed server-side authority is bound to this registered child and task.",
+                ),
+                data: None,
+            })?;
+            if caller.parent_id.as_deref() != Some(capability.issuer_agent_id.as_str()) {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Verifier handoff rejected: registered child parent does not match the server-bound issuer.",
+                    ),
+                    data: None,
+                });
+            }
+            let dispatch_id = capability.dispatch_id.clone().ok_or_else(|| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(
+                    "Verifier handoff rejected: authority has no exact proof boundary.",
+                ),
+                data: None,
+            })?;
+            let dispatch = cas_store::get_verification_dispatch(&self.cas_root, &dispatch_id)
+                .map_err(|_| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Verifier handoff rejected: its exact dispatch is unavailable.",
+                    ),
+                    data: None,
+                })?;
+            if capability.task_id != req.task_id || dispatch.task_id != req.task_id {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Verifier handoff rejected: exact dispatch belongs to another task.",
+                    ),
+                    data: None,
+                });
+            }
+            if capability.expires_at <= chrono::Utc::now()
+                || dispatch.deadline_at <= chrono::Utc::now()
+            {
+                let _ = cas_store::timeout_verification_dispatch(
+                    &self.cas_root,
+                    &req.task_id,
+                    chrono::Utc::now(),
+                );
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "Verifier handoff rejected: exact dispatch {} expired and was marked timed_out; registered-supervisor recovery must name this dispatch.",
+                        dispatch.id
+                    )),
+                    data: None,
+                });
+            }
+            bound_server_handoff = Some(capability);
             dispatch_id
         } else {
             req.dispatch_id.clone().ok_or_else(|| McpError {
@@ -306,6 +381,47 @@ impl CasCore {
                         code: ErrorCode::INVALID_PARAMS,
                         message: Cow::from(
                             "Verifier capability rejected: exact dispatch is unavailable.",
+                        ),
+                        data: None,
+                    })?
+            } else if let Some(bound_handoff) = bound_server_handoff.as_ref() {
+                let capability = cas_store::consume_server_verifier_handoff_with_conn(
+                    &tx,
+                    &bound_handoff.id,
+                    &req.task_id,
+                    &caller_id,
+                )
+                .map_err(|_| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Verifier handoff rejected: it is invalid, expired, consumed, bound to another task/session, or no longer claims the exact dispatch.",
+                    ),
+                    data: None,
+                })?;
+                if caller.agent_type != cas_types::AgentType::SubAgent
+                    || caller.role != cas_types::AgentRole::Standard
+                    || caller.name != "task-verifier"
+                    || caller.parent_id.as_deref() != Some(capability.issuer_agent_id.as_str())
+                    || capability.verifier_agent_id.as_deref() != Some(caller_id.as_str())
+                {
+                    return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(
+                            "Verifier handoff rejected: caller is not the distinct registered task-verifier child bound by CAS.",
+                        ),
+                        data: None,
+                    });
+                }
+                verification.set_agent(caller_id.clone());
+                verification.provenance = cas_types::VerificationProvenance::TaskVerifier;
+                verification.capability_id = Some(capability.id);
+                verification.dispatch_id = Some(requested_dispatch_id.clone());
+                verification.issuer_agent_id = Some(capability.issuer_agent_id);
+                cas_store::get_verification_dispatch_with_conn(&tx, &requested_dispatch_id)
+                    .map_err(|_| McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(
+                            "Verifier handoff rejected: exact dispatch is unavailable.",
                         ),
                         data: None,
                     })?

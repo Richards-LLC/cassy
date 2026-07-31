@@ -101,15 +101,18 @@ pub use loop_store::{LOOP_SCHEMA, LoopStore, SqliteLoopStore};
 // Verification store for task quality gates
 pub use verification_store::{
     IssuedVerifierCapability, SqliteVerificationStore, VERIFICATION_SCHEMA, VerificationStore,
-    add_verification_with_conn, bind_verifier_capability, claim_verification_dispatch,
-    claim_verification_dispatch_bound, consume_verifier_capability_with_conn,
-    create_verification_dispatch, create_verification_dispatch_bound,
-    create_verification_dispatch_bound_with_conn, get_latest_verification_dispatch,
-    get_latest_verification_dispatch_with_conn, get_verification_dispatch,
-    get_verification_dispatch_with_conn, get_verification_for_dispatch,
-    inspect_verifier_capability, invalidate_verification_dispatch_for_new_cycle,
-    issue_verifier_capability, resolve_verification_dispatch_with_conn,
-    save_verification_issues_with_conn, timeout_verification_dispatch,
+    add_verification_with_conn, bind_server_verifier_handoff, bind_verifier_capability,
+    cancel_unbound_server_verifier_handoff, claim_verification_dispatch,
+    claim_verification_dispatch_bound, consume_server_verifier_handoff_with_conn,
+    consume_verifier_capability_with_conn, create_verification_dispatch,
+    create_verification_dispatch_bound, create_verification_dispatch_bound_with_conn,
+    get_latest_verification_dispatch, get_latest_verification_dispatch_with_conn,
+    get_verification_dispatch, get_verification_dispatch_with_conn, get_verification_for_dispatch,
+    inspect_bound_server_verifier_handoff, inspect_verifier_capability,
+    invalidate_verification_dispatch_for_new_cycle, issue_server_verifier_handoff,
+    issue_server_verifier_handoff_with_secret, issue_verifier_capability,
+    resolve_verification_dispatch_with_conn, save_verification_issues_with_conn,
+    timeout_verification_dispatch,
 };
 
 // Worktree store for git worktree tracking

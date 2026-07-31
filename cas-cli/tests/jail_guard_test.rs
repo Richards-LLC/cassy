@@ -72,15 +72,24 @@ fn create_jailed_task(dir: &TempDir, task_id: &str) {
 /// Run `cas hook PreToolUse` with the given JSON input and extra env vars.
 /// Returns the full stdout of the hook process.
 fn run_hook(dir: &TempDir, input: &serde_json::Value, env: &[(&str, &str)]) -> String {
+    run_hook_event(dir, "PreToolUse", input, env)
+}
+
+fn run_hook_event(
+    dir: &TempDir,
+    event: &str,
+    input: &serde_json::Value,
+    env: &[(&str, &str)],
+) -> String {
     let mut cmd = cas_cmd(dir);
-    cmd.args(["hook", "PreToolUse"]);
+    cmd.args(["hook", event]);
     for (k, v) in env {
         cmd.env(k, v);
     }
     let out = cmd
         .write_stdin(serde_json::to_string(input).unwrap())
         .output()
-        .expect("hook PreToolUse must not panic");
+        .expect("hook command must not panic");
     String::from_utf8_lossy(&out.stdout).to_string()
 }
 
@@ -89,6 +98,7 @@ fn pre_tool_input(tool_name: &str, tool_input: serde_json::Value) -> serde_json:
         "session_id": C496_SESSION,
         "cwd": "/test",
         "hook_event_name": "PreToolUse",
+        "tool_use_id": format!("jail-guard-tool-{}", std::process::id()),
         "tool_name": tool_name,
         "tool_input": tool_input,
     })
@@ -114,22 +124,23 @@ fn pending_verification_allows_unrelated_and_verifier_hooks() {
          Hook output: {read_out}"
     );
 
-    let agent_out = run_hook(
-        &dir,
-        &pre_tool_input(
-            "Agent",
-            serde_json::json!({
-                "subagent_type": "task-verifier",
-                "prompt": "verify task cas-c496-test-task-001"
-            }),
-        ),
-        &[],
+    let agent_input = pre_tool_input(
+        "Agent",
+        serde_json::json!({
+            "subagent_type": "task-verifier",
+            "prompt": "verify task cas-c496-test-task-001"
+        }),
     );
+    let agent_out = run_hook(&dir, &agent_input, &[]);
     assert!(
         !agent_out.contains("deny"),
         "Agent(task-verifier) must not be denied.\n\
          Hook output: {agent_out}"
     );
+    let mut failed_agent_input = agent_input;
+    failed_agent_input["hook_event_name"] =
+        serde_json::Value::String("PostToolUseFailure".to_string());
+    run_hook_event(&dir, "PostToolUseFailure", &failed_agent_input, &[]);
 
     let task_out = run_hook(
         &dir,

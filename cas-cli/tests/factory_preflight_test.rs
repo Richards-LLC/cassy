@@ -210,7 +210,10 @@ fn json_cli_is_bounded_deterministic_and_warnings_exit_zero() {
     assert_eq!(report["cas_mcp"]["configured"], true);
     assert_eq!(report["cas_mcp"]["observed_via_mcp"], false);
     assert_eq!(report["cas_mcp"]["state"], "ready");
-    assert_eq!(report["optional_upstreams"]["state"], "ready");
+    assert_eq!(report["optional_upstreams"]["state"], "degraded");
+    assert!(report["findings"].as_array().unwrap().iter().any(|finding| {
+        finding["code"] == "optional_upstreams.health_missing"
+    }));
     assert_eq!(
         report["harnesses"]
             .as_array()

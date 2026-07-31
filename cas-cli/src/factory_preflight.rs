@@ -248,7 +248,15 @@ struct ProxyFacts {
     configured: usize,
     invalid_config: bool,
     snapshot: Option<ProxySnapshotInput>,
-    invalid_snapshot: bool,
+    evidence_failure: Option<ProxyEvidenceFailure>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProxyEvidenceFailure {
+    Missing,
+    Invalid,
+    Stale,
+    Unavailable,
 }
 
 #[derive(Debug, Clone)]
@@ -593,28 +601,31 @@ fn classify_proxy(
     }
 
     let Some(snapshot) = facts.snapshot else {
-        if facts.configured == 0 && !facts.invalid_snapshot {
-            return OptionalUpstreamsPreflight {
-                state: ComponentState::Ready,
-                configured: 0,
-                healthy: 0,
-                degraded: 0,
-                generated_at_ms: None,
-                servers: Vec::new(),
-                remediation: None,
-            };
-        }
         let remediation =
             "Restart `cas serve` to regenerate credential-free optional-upstream health."
                 .to_string();
+        let (code, summary) = match facts.evidence_failure {
+            Some(ProxyEvidenceFailure::Invalid) => (
+                "optional_upstreams.health_invalid",
+                "Optional upstream health evidence is invalid.",
+            ),
+            Some(ProxyEvidenceFailure::Stale) => (
+                "optional_upstreams.health_stale",
+                "Optional upstream health evidence does not match current configuration.",
+            ),
+            Some(ProxyEvidenceFailure::Unavailable) => (
+                "optional_upstreams.startup_unavailable",
+                "Optional upstream startup did not produce usable health evidence.",
+            ),
+            _ => (
+                "optional_upstreams.health_missing",
+                "Optional upstream health evidence is unavailable.",
+            ),
+        };
         findings.push(warning(
-            if facts.invalid_snapshot {
-                "optional_upstreams.health_invalid"
-            } else {
-                "optional_upstreams.health_missing"
-            },
+            code,
             "optional_upstreams",
-            "Optional upstream health evidence is unavailable.",
+            summary,
             &remediation,
             None,
         ));
@@ -990,39 +1001,39 @@ fn collect_proxy_facts(cas_root: &Path, live: Option<ProxySnapshotInput>) -> Pro
     #[cfg(feature = "mcp-proxy")]
     {
         let proxy_path = cas_root.join("proxy.toml");
-        let (configured, invalid_config) = if proxy_path.exists() {
-            match cmcp_core::config::Config::load_from(&proxy_path) {
-                Ok(config) => (config.servers.len(), false),
-                Err(_) => (0, true),
-            }
-        } else {
-            (0, false)
+        let _ = live;
+        let (configured, invalid_config) = match cmcp_core::config::Config::load_merged(
+            proxy_path.exists().then_some(proxy_path.as_path()),
+        ) {
+            Ok(config) => (config.servers.len(), false),
+            Err(_) => (0, true),
         };
-        if live.is_some() {
-            return ProxyFacts {
-                configured,
-                invalid_config,
-                snapshot: live,
-                invalid_snapshot: false,
-            };
-        }
-        let health_path = cas_root.join("proxy_health.json");
-        let (snapshot, invalid_snapshot) = if health_path.exists() {
-            match crate::mcp::read_proxy_health_cache(cas_root)
-                .ok()
-                .and_then(|raw| serde_json::from_slice::<cmcp_core::ProxyHealthSnapshot>(&raw).ok())
-            {
-                Some(snapshot) => (Some(snapshot.into()), false),
-                None => (None, true),
+        let (snapshot, evidence_failure) = match crate::mcp::read_proxy_snapshot_cache(cas_root) {
+            Ok(snapshot) => (Some(snapshot.health.into()), None),
+            Err(error) => {
+                use crate::mcp::ProxySnapshotReadErrorKind as Kind;
+                let failure = match error.kind {
+                    Kind::Missing => ProxyEvidenceFailure::Missing,
+                    Kind::Invalid => ProxyEvidenceFailure::Invalid,
+                    Kind::ConfigInvalid => {
+                        return ProxyFacts {
+                            configured,
+                            invalid_config: true,
+                            snapshot: None,
+                            evidence_failure: Some(ProxyEvidenceFailure::Invalid),
+                        };
+                    }
+                    Kind::ConfigMismatch => ProxyEvidenceFailure::Stale,
+                    Kind::Unavailable => ProxyEvidenceFailure::Unavailable,
+                };
+                (None, Some(failure))
             }
-        } else {
-            (None, false)
         };
         ProxyFacts {
             configured,
             invalid_config,
             snapshot,
-            invalid_snapshot,
+            evidence_failure,
         }
     }
     #[cfg(not(feature = "mcp-proxy"))]
@@ -1032,7 +1043,7 @@ fn collect_proxy_facts(cas_root: &Path, live: Option<ProxySnapshotInput>) -> Pro
             configured: 0,
             invalid_config: false,
             snapshot: None,
-            invalid_snapshot: false,
+            evidence_failure: Some(ProxyEvidenceFailure::Missing),
         }
     }
 }
@@ -1280,8 +1291,13 @@ mod tests {
             proxy: ProxyFacts {
                 configured: 0,
                 invalid_config: false,
-                snapshot: None,
-                invalid_snapshot: false,
+                snapshot: Some(ProxySnapshotInput {
+                    generated_at_ms: 42,
+                    healthy: 0,
+                    degraded: 0,
+                    servers: Vec::new(),
+                }),
+                evidence_failure: None,
             },
             receipts,
             default_versions,
@@ -1390,7 +1406,7 @@ mod tests {
         facts.proxy = ProxyFacts {
             configured: 1,
             invalid_config: false,
-            invalid_snapshot: false,
+            evidence_failure: None,
             snapshot: Some(ProxySnapshotInput {
                 generated_at_ms: 42,
                 healthy: 0,
@@ -1453,9 +1469,42 @@ mod tests {
                 },
             ],
         };
+        let mut config = cmcp_core::config::Config::default();
+        for name in [first_name, second_name] {
+            config.add_server(
+                name.to_string(),
+                cmcp_core::config::ServerConfig::Http {
+                    url: "https://example.invalid/mcp".to_string(),
+                    auth: None,
+                    headers: std::collections::HashMap::new(),
+                    oauth: false,
+                },
+            );
+        }
+        config.save_to(&temp.path().join("proxy.toml")).unwrap();
+        let merged =
+            cmcp_core::config::Config::load_merged(Some(temp.path().join("proxy.toml").as_path()))
+                .unwrap();
+        let generated_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let snapshot = crate::mcp::ProxySnapshotCache {
+            schema_version: 1,
+            generation: "snapshot-forged-1".to_string(),
+            generated_at_ms,
+            config_fingerprint: Some(crate::mcp::proxy_config_fingerprint(&merged)),
+            state: crate::mcp::ProxySnapshotState::Ready,
+            failure: None,
+            catalog: std::collections::BTreeMap::new(),
+            health: cmcp_core::ProxyHealthSnapshot {
+                generated_at_ms,
+                ..forged
+            },
+        };
         std::fs::write(
-            temp.path().join("proxy_health.json"),
-            serde_json::to_vec(&forged).unwrap(),
+            temp.path().join("proxy_snapshot.json"),
+            serde_json::to_vec(&snapshot).unwrap(),
         )
         .unwrap();
 

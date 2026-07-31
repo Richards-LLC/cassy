@@ -33,3 +33,16 @@ fn every_init_fixture_overrides_home_for_spawned_cas_children() {
         "cas init fixtures must override HOME before spawning the production cas binary; missing: {missing:?}"
     );
 }
+
+#[test]
+fn low_level_init_helper_has_no_host_registry_side_effect() {
+    let source =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/store/detect.rs"))
+            .expect("read store/detect.rs");
+
+    assert!(
+        !source.contains("known_repos::ensure_host_schema")
+            && !source.contains("known_repos::register_repo"),
+        "init_cas_dir is used directly by integration fixtures and must not resolve or write the host registry"
+    );
+}

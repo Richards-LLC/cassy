@@ -562,6 +562,7 @@ impl SqliteAgentStore {
 }
 
 mod ops_agent;
+pub(crate) use ops_agent::register_agent_with_conn;
 mod ops_coordination;
 mod ops_task_leases;
 mod ops_worktree;

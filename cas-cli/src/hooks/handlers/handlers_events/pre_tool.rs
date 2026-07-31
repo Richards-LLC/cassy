@@ -1907,6 +1907,167 @@ mod worker_commit_guard_tests {
             "missing official child agent_id must fail closed"
         );
 
+        let other_parent_id = "unrelated-registered-parent";
+        agent_store
+            .register(&Agent::new(
+                other_parent_id.to_string(),
+                "unrelated-parent".to_string(),
+            ))
+            .expect("register unrelated parent");
+        task_store
+            .add(&Task::new(
+                "cas-hook-unrelated".to_string(),
+                "Unrelated hook authority".to_string(),
+            ))
+            .expect("unrelated task");
+        cas_store::create_verification_dispatch_bound(
+            &cas_root,
+            "cas-hook-unrelated",
+            other_parent_id,
+            other_parent_id,
+            &cas_types::VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(10),
+            false,
+        )
+        .expect("create unrelated dispatch");
+        let mut other_pre_tool = input.clone();
+        other_pre_tool.session_id = other_parent_id.to_string();
+        other_pre_tool.tool_use_id = Some("tool-use-unrelated-6939".to_string());
+        other_pre_tool.tool_input = Some(serde_json::json!({
+            "subagent_type": "task-verifier",
+            "prompt": "Review CAS task cas-hook-unrelated"
+        }));
+        assert_eq!(
+            serde_json::to_value(
+                handle_pre_tool_use(&other_pre_tool, Some(&cas_root))
+                    .expect("issue unrelated handoff")
+            )
+            .expect("serialize unrelated issuance"),
+            serde_json::json!({})
+        );
+        let other_child_start: crate::hooks::handlers::HookInput =
+            serde_json::from_value(serde_json::json!({
+                "hook_event_name": "SubagentStart",
+                "session_id": other_parent_id,
+                "agent_id": "unrelated-verifier-child",
+                "agent_type": "task-verifier",
+                "cwd": cas_root,
+            }))
+            .expect("unrelated production-shaped child payload");
+        assert_eq!(
+            serde_json::to_value(
+                crate::hooks::handlers::handle_subagent_start(&other_child_start, Some(&cas_root))
+                    .expect("bind unrelated child")
+            )
+            .expect("serialize unrelated child output"),
+            serde_json::json!({})
+        );
+        let unrelated_before: (String, String, String, String) = conn
+            .query_row(
+                "SELECT c.id, h.state, d.id, d.state
+                 FROM verification_capabilities c
+                 JOIN verification_handoffs h ON h.capability_id = c.id
+                 JOIN verification_dispatches d ON d.id = c.dispatch_id
+                 WHERE c.task_id = ?1 AND c.verifier_agent_id = ?2
+                       AND d.verifier_agent_id = ?2",
+                rusqlite::params!["cas-hook-unrelated", "unrelated-verifier-child"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("snapshot unrelated bound authority");
+        assert_eq!(unrelated_before.1, "bound");
+        assert_eq!(unrelated_before.3, "claimed");
+
+        conn.execute_batch(
+            "CREATE TRIGGER fail_verifier_child_registration
+             BEFORE INSERT ON agents
+             WHEN NEW.id = 'failed-verifier-child'
+             BEGIN
+                 SELECT RAISE(FAIL, 'injected verifier child registry failure');
+             END;",
+        )
+        .expect("install registry failure injection");
+        let failed_child_start: crate::hooks::handlers::HookInput =
+            serde_json::from_value(serde_json::json!({
+                "hook_event_name": "SubagentStart",
+                "session_id": parent_id,
+                "agent_id": "failed-verifier-child",
+                "agent_type": "task-verifier",
+                "cwd": cas_root,
+            }))
+            .expect("failed production-shaped child payload");
+        let failed_child_output =
+            crate::hooks::handlers::handle_subagent_start(&failed_child_start, Some(&cas_root))
+                .expect("failure-atomic child denial");
+        let failed_child_json =
+            serde_json::to_value(failed_child_output).expect("serialize child denial");
+        assert!(
+            failed_child_json.get("systemMessage").is_some(),
+            "registry failure must fail closed: {failed_child_json}"
+        );
+        assert!(!failed_child_json.to_string().contains(sentinel_text));
+        assert!(
+            agent_store.get("failed-verifier-child").is_err(),
+            "failed registry write must not leave a child row"
+        );
+        let failed_flow_state: (
+            Option<String>,
+            Option<String>,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT c.verifier_agent_id, h.verifier_agent_id, h.state,
+                        d.verifier_agent_id, d.capability_id, d.state
+                 FROM verification_capabilities c
+                 JOIN verification_handoffs h ON h.capability_id = c.id
+                 JOIN verification_dispatches d ON d.id = c.dispatch_id
+                 WHERE c.task_id = ?1",
+                rusqlite::params!["cas-hook-capability"],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .expect("failure-atomic authority state");
+        assert_eq!(
+            failed_flow_state,
+            (
+                None,
+                None,
+                "pending".to_string(),
+                None,
+                None,
+                "pending".to_string()
+            ),
+            "registry failure must roll back capability, handoff, and dispatch together"
+        );
+        let unrelated_after: (String, String, String, String) = conn
+            .query_row(
+                "SELECT c.id, h.state, d.id, d.state
+                 FROM verification_capabilities c
+                 JOIN verification_handoffs h ON h.capability_id = c.id
+                 JOIN verification_dispatches d ON d.id = c.dispatch_id
+                 WHERE c.task_id = ?1 AND c.verifier_agent_id = ?2
+                       AND d.verifier_agent_id = ?2",
+                rusqlite::params!["cas-hook-unrelated", "unrelated-verifier-child"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("reload unrelated authority");
+        assert_eq!(
+            unrelated_after, unrelated_before,
+            "rollback for one exact flow must not mutate another bound flow"
+        );
+        conn.execute_batch("DROP TRIGGER fail_verifier_child_registration")
+            .expect("remove registry failure injection");
+
         let child_start: crate::hooks::handlers::HookInput =
             serde_json::from_value(serde_json::json!({
                 "hook_event_name": "SubagentStart",
@@ -1941,6 +2102,16 @@ mod worker_commit_guard_tests {
             )
             .expect("bound capability");
         assert_eq!(bound_to, child.id);
+        let replay_output =
+            crate::hooks::handlers::handle_subagent_start(&child_start, Some(&cas_root))
+                .expect("replayed child start denial");
+        assert!(
+            serde_json::to_value(replay_output)
+                .expect("serialize replay denial")
+                .get("systemMessage")
+                .is_some(),
+            "an already-bound handoff must remain one-time"
+        );
 
         let parent_transcript = tmp.path().join("parent.jsonl");
         let child_transcript = tmp.path().join("child.jsonl");

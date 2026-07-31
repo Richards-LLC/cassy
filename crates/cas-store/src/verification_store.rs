@@ -12,11 +12,13 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use crate::Result;
+use crate::agent_store::register_agent_with_conn;
 use crate::error::StoreError;
 use cas_types::{
-    IssueSeverity, Verification, VerificationDispatch, VerificationDispatchState,
-    VerificationIssue, VerificationProofBoundary, VerificationProvenance,
-    VerificationRecoveryAction, VerificationStatus, VerificationType, VerifierCapability,
+    Agent, AgentRole, AgentStatus, AgentType, IssueSeverity, Verification, VerificationDispatch,
+    VerificationDispatchState, VerificationIssue, VerificationProofBoundary,
+    VerificationProvenance, VerificationRecoveryAction, VerificationStatus, VerificationType,
+    VerifierCapability,
 };
 
 // Helper to convert lock errors
@@ -1236,6 +1238,84 @@ pub fn bind_server_verifier_handoff(
     issuer_agent_id: &str,
     verifier_agent_id: &str,
 ) -> Result<VerifierCapability> {
+    validate_distinct_verifier_child(issuer_agent_id, verifier_agent_id)?;
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let mut conn = store.conn.lock().map_err(lock_err)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let bound = bind_server_verifier_handoff_with_conn(&tx, issuer_agent_id, verifier_agent_id)?;
+    tx.commit()?;
+    Ok(bound)
+}
+
+/// Bind and claim one exact server handoff together with registration of its
+/// official verifier child. Agent and verification state share one SQLite
+/// connection, so a registry failure rolls back every authority transition.
+pub fn bind_server_verifier_handoff_and_register_child(
+    cas_dir: &Path,
+    issuer_agent_id: &str,
+    child: &Agent,
+) -> Result<VerifierCapability> {
+    validate_distinct_verifier_child(issuer_agent_id, &child.id)?;
+    if child.name != "task-verifier"
+        || child.agent_type != AgentType::SubAgent
+        || child.role != AgentRole::Standard
+        || child.parent_id.as_deref() != Some(issuer_agent_id)
+        || child.status != AgentStatus::Active
+    {
+        return Err(StoreError::Parse(
+            "verifier handoff requires the exact official task-verifier child identity".to_string(),
+        ));
+    }
+
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let mut conn = store.conn.lock().map_err(lock_err)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+    let issuer_status: Option<String> = tx
+        .query_row(
+            "SELECT status FROM agents WHERE id = ?1",
+            params![issuer_agent_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if !issuer_status.as_deref().is_some_and(|status| {
+        matches!(
+            status.parse::<AgentStatus>(),
+            Ok(AgentStatus::Active | AgentStatus::Idle)
+        )
+    }) {
+        return Err(StoreError::Parse(
+            "verifier handoff issuer is not an active registered parent".to_string(),
+        ));
+    }
+
+    let existing_identity: Option<(String, String, Option<String>)> = tx
+        .query_row(
+            "SELECT agent_type, role, parent_id FROM agents WHERE id = ?1",
+            params![child.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    if existing_identity
+        .as_ref()
+        .is_some_and(|(agent_type, role, parent_id)| {
+            agent_type.parse::<AgentType>().ok() != Some(AgentType::SubAgent)
+                || role.parse::<AgentRole>().ok() != Some(AgentRole::Standard)
+                || parent_id.as_deref() != Some(issuer_agent_id)
+        })
+    {
+        return Err(StoreError::Parse(
+            "verifier child identity conflicts with an existing registered session".to_string(),
+        ));
+    }
+
+    let bound = bind_server_verifier_handoff_with_conn(&tx, issuer_agent_id, &child.id)?;
+    register_agent_with_conn(&tx, child)?;
+    tx.commit()?;
+    Ok(bound)
+}
+
+fn validate_distinct_verifier_child(issuer_agent_id: &str, verifier_agent_id: &str) -> Result<()> {
     if issuer_agent_id.trim().is_empty()
         || verifier_agent_id.trim().is_empty()
         || issuer_agent_id == verifier_agent_id
@@ -1244,12 +1324,16 @@ pub fn bind_server_verifier_handoff(
             "verifier handoff requires a distinct registered child".to_string(),
         ));
     }
+    Ok(())
+}
 
-    let store = SqliteVerificationStore::open(cas_dir)?;
-    let mut conn = store.conn.lock().map_err(lock_err)?;
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+fn bind_server_verifier_handoff_with_conn(
+    conn: &Connection,
+    issuer_agent_id: &str,
+    verifier_agent_id: &str,
+) -> Result<VerifierCapability> {
     let now = Utc::now();
-    let mut stmt = tx.prepare(
+    let mut stmt = conn.prepare(
         "SELECT h.capability_id
          FROM verification_handoffs h
          JOIN verification_capabilities c ON c.id = h.capability_id
@@ -1268,16 +1352,16 @@ pub fn bind_server_verifier_handoff(
         ));
     }
 
-    let capability = load_capability_with_conn(&tx, &ids[0])?;
-    if !is_server_handoff(&capability) {
+    let capability = load_capability_with_conn(conn, &ids[0])?;
+    if !is_server_handoff(&capability) || capability.issuer_agent_id != issuer_agent_id {
         return Err(StoreError::Parse(
-            "verifier handoff type is invalid".to_string(),
+            "verifier handoff type or issuer binding is invalid".to_string(),
         ));
     }
     let dispatch_id = capability.dispatch_id.as_deref().ok_or_else(|| {
         StoreError::Parse("verifier handoff has no exact proof boundary".to_string())
     })?;
-    let dispatch = get_verification_dispatch_with_conn(&tx, dispatch_id)?;
+    let dispatch = get_verification_dispatch_with_conn(conn, dispatch_id)?;
     if dispatch.task_id != capability.task_id
         || dispatch.owner_agent_id != issuer_agent_id
         || dispatch.state != VerificationDispatchState::Pending
@@ -1289,7 +1373,7 @@ pub fn bind_server_verifier_handoff(
     }
 
     let bound_at = now;
-    let changed = tx.execute(
+    let changed = conn.execute(
         "UPDATE verification_capabilities
          SET verifier_agent_id = ?2, bound_at = ?3
          WHERE id = ?1 AND verifier_agent_id IS NULL AND consumed_at IS NULL
@@ -1301,7 +1385,7 @@ pub fn bind_server_verifier_handoff(
             "verifier handoff binding raced or expired".to_string(),
         ));
     }
-    let handoff_changed = tx.execute(
+    let handoff_changed = conn.execute(
         "UPDATE verification_handoffs
          SET verifier_agent_id = ?2, state = 'bound', bound_at = ?3
          WHERE capability_id = ?1 AND issuer_agent_id = ?4 AND state = 'pending'
@@ -1318,7 +1402,7 @@ pub fn bind_server_verifier_handoff(
             "verifier handoff state binding raced".to_string(),
         ));
     }
-    let claimed = tx.execute(
+    let claimed = conn.execute(
         "UPDATE verification_dispatches
          SET verifier_agent_id = ?3, capability_id = ?4, state = 'claimed'
          WHERE id = ?1 AND owner_agent_id = ?2 AND state = 'pending'
@@ -1336,9 +1420,7 @@ pub fn bind_server_verifier_handoff(
             "verifier handoff could not claim its exact dispatch".to_string(),
         ));
     }
-    let bound = load_capability_with_conn(&tx, &capability.id)?;
-    tx.commit()?;
-    Ok(bound)
+    load_capability_with_conn(conn, &capability.id)
 }
 
 /// Remove one exact failed/cancelled spawn handoff by hook-local tool-use ID.

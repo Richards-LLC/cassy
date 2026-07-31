@@ -805,7 +805,6 @@ impl CasCore {
             }
             if new_status == TaskStatus::Closed && task.status != TaskStatus::Closed {
                 let close_repo_context = match task.deliverables.work_target.as_ref() {
-                    Some(_) if existing_repo_context.is_some() => existing_repo_context.clone(),
                     Some(target) => Some(
                         super::repo_context::resolve_repo_context(&self.cas_root, target).map_err(
                             |message| McpError {

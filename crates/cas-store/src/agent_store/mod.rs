@@ -224,6 +224,25 @@ pub trait AgentStore: Send + Sync {
     /// Release any lease on a task (regardless of owner), recording why it was released.
     fn release_lease_for_task(&self, task_id: &str, reason: &str) -> Result<bool>;
 
+    /// Release only the exact lease generation previously authorized by the
+    /// caller. Returns false if ownership or epoch changed before release.
+    fn release_lease_if_owner_epoch(
+        &self,
+        task_id: &str,
+        agent_id: &str,
+        epoch: u64,
+        _reason: &str,
+    ) -> Result<bool> {
+        let Some(lease) = self.get_lease(task_id)? else {
+            return Ok(false);
+        };
+        if lease.agent_id != agent_id || lease.epoch != epoch {
+            return Ok(false);
+        }
+        self.release_lease(task_id, agent_id)?;
+        Ok(true)
+    }
+
     /// Renew a task lease
     fn renew_lease(&self, task_id: &str, agent_id: &str, duration_secs: i64) -> Result<()>;
 

@@ -192,6 +192,7 @@ fn close_update_request(id: String) -> TaskUpdateRequest {
 
 fn durable_close_snapshot(cas_root: &Path) -> Vec<(String, Vec<Vec<String>>)> {
     const TABLES: &[&str] = &[
+        "agents",
         "tasks",
         "worker_completion_receipts",
         "worker_delivery_transactions",
@@ -2738,6 +2739,15 @@ async fn submit_and_verify_delivery(
     supervisor_id: &str,
     receipt: &WorkerCompletionReceiptInput,
 ) {
+    let agent_store = open_agent_store(cas_root).expect("delivery agent store");
+    if agent_store.get_lease(task_id).unwrap().is_none() {
+        assert!(matches!(
+            agent_store
+                .try_claim(task_id, worker_id, 600, Some("delivery fixture lease"))
+                .unwrap(),
+            cas::types::ClaimResult::Success(_)
+        ));
+    }
     let worker_service = delivery_service(cas_root, worker_id);
     let close = worker_service
         .task(Parameters(task_req(serde_json::json!({
@@ -2785,6 +2795,245 @@ async fn submit_and_verify_delivery(
         .await
         .expect("public verification add");
     assert!(get_text(&verification).contains("approved"));
+}
+
+#[tokio::test]
+async fn completion_receipt_authority_is_exact_active_lease_session() {
+    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let home = TempDir::new().expect("temp HOME");
+    let _home = HomeGuard::enter(home.path());
+    let repo = GitRepo::new();
+    run_git(
+        &["remote", "add", "origin", "git@github.com:org/delivery.git"],
+        &repo.root,
+    );
+    let cas_root = init_cas_dir(&repo.root).expect("init CAS");
+    disable_system_a(&cas_root);
+    std::fs::write(
+        cas_root.join("config.toml"),
+        "[worktrees]\nenabled = false\n[verification]\nenabled = true\n",
+    )
+    .unwrap();
+
+    let factory_session = "receipt-authority-factory";
+    let owner_id = "receipt-owner-session";
+    let duplicate_id = "receipt-duplicate-session";
+    let wrong_id = "receipt-wrong-session";
+    let dead_id = "receipt-dead-session";
+    let unleased_id = "receipt-unleased-session";
+    let supervisor_id = "receipt-supervisor-session";
+    register_delivery_agent(
+        &cas_root,
+        owner_id,
+        "alice",
+        AgentRole::Worker,
+        factory_session,
+    );
+    register_delivery_agent(
+        &cas_root,
+        duplicate_id,
+        "alice",
+        AgentRole::Worker,
+        factory_session,
+    );
+    register_delivery_agent(
+        &cas_root,
+        wrong_id,
+        "mallory",
+        AgentRole::Worker,
+        factory_session,
+    );
+    register_delivery_agent(
+        &cas_root,
+        dead_id,
+        "alice",
+        AgentRole::Worker,
+        factory_session,
+    );
+    register_delivery_agent(
+        &cas_root,
+        unleased_id,
+        "orphan",
+        AgentRole::Worker,
+        factory_session,
+    );
+    register_delivery_agent(
+        &cas_root,
+        supervisor_id,
+        "supervisor",
+        AgentRole::Supervisor,
+        factory_session,
+    );
+    let worker_path = cas_root.join("worktrees").join("alice");
+    repo.add_worktree(&worker_path, "factory/alice");
+    std::fs::write(worker_path.join("authority.rs"), "pub fn authority() {}\n").unwrap();
+    run_git(&["add", "authority.rs"], &worker_path);
+    run_git(&["commit", "-m", "receipt authority fixture"], &worker_path);
+
+    let task_store = open_task_store(&cas_root).expect("task store");
+    let mut task = Task::new(
+        "cas-receipt-authority".to_string(),
+        "Exact receipt lease authority".to_string(),
+    );
+    task.status = TaskStatus::InProgress;
+    task.depth = TaskDepth::Deep;
+    task.assignee = Some("alice".to_string());
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "remote:github.com/org/delivery".to_string(),
+        target_branch: "main".to_string(),
+    });
+    task_store.add(&task).expect("add receipt task");
+    assert!(matches!(
+        open_agent_store(&cas_root)
+            .unwrap()
+            .try_claim(&task.id, owner_id, 600, Some("exact receipt owner"))
+            .unwrap(),
+        cas::types::ClaimResult::Success(_)
+    ));
+
+    let owner_receipt = delivery_receipt(&task.id, owner_id, &repo, "alice");
+    for (caller_id, mut claimed_receipt, label) in [
+        (
+            duplicate_id,
+            delivery_receipt(&task.id, duplicate_id, &repo, "alice"),
+            "duplicate-name peer",
+        ),
+        (
+            wrong_id,
+            delivery_receipt(&task.id, wrong_id, &repo, "alice"),
+            "wrong worker",
+        ),
+        (
+            dead_id,
+            delivery_receipt(&task.id, dead_id, &repo, "alice"),
+            "dead worker",
+        ),
+    ] {
+        // Keep every field otherwise production-valid. A self-declared worker
+        // id is consistency metadata, never the authority source.
+        claimed_receipt.worker_agent_id = caller_id.to_string();
+        if caller_id == dead_id {
+            open_agent_store(&cas_root)
+                .unwrap()
+                .mark_stale(dead_id)
+                .expect("mark receipt caller stale before a fresh MCP request");
+        }
+        // Completion proof authentication is deliberately read-only: unlike
+        // normal MCP activity, it must not revive a stale session.
+        let service = delivery_service(&cas_root, caller_id);
+        let before = durable_close_snapshot(&cas_root);
+        let result = service
+            .task(Parameters(task_req(serde_json::json!({
+                "action": "close",
+                "id": task.id,
+                "reason": label,
+                "completion_receipt": serde_json::to_string(&claimed_receipt).unwrap(),
+            }))))
+            .await
+            .expect("authority rejection is a typed tool result");
+        let result_text = get_text(&result);
+        assert!(
+            result_text.contains("DELIVERY RECEIPT REJECTED")
+                && result_text.contains("exact active task lease"),
+            "{label} needs lease-authority remediation, got:\n{result_text}"
+        );
+        assert_eq!(
+            durable_close_snapshot(&cas_root),
+            before,
+            "{label} mutated task/agent/lease/delivery/dispatch/verdict/event/outbox state"
+        );
+    }
+
+    let before_malformed = durable_close_snapshot(&cas_root);
+    let malformed = delivery_service(&cas_root, duplicate_id)
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "close",
+            "id": task.id,
+            "reason": "authority must precede receipt parsing",
+            "completion_receipt": "not-json",
+        }))))
+        .await
+        .expect("unauthorized malformed receipt returns a typed rejection");
+    let malformed_text = get_text(&malformed);
+    assert!(malformed_text.contains("exact active task lease"));
+    assert!(!malformed_text.contains("valid WorkerCompletionReceiptInput JSON"));
+    assert_eq!(durable_close_snapshot(&cas_root), before_malformed);
+
+    let mut unleased_task = Task::new(
+        "cas-receipt-unleased".to_string(),
+        "Unleased receipt caller".to_string(),
+    );
+    unleased_task.status = TaskStatus::InProgress;
+    unleased_task.depth = TaskDepth::Deep;
+    unleased_task.assignee = Some("orphan".to_string());
+    unleased_task.deliverables.work_target = task.deliverables.work_target.clone();
+    task_store.add(&unleased_task).unwrap();
+    let unleased_receipt = delivery_receipt(&unleased_task.id, unleased_id, &repo, "alice");
+    let before_unleased = durable_close_snapshot(&cas_root);
+    let unleased = delivery_service(&cas_root, unleased_id)
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "close",
+            "id": unleased_task.id,
+            "reason": "no lease is not authority",
+            "completion_receipt": serde_json::to_string(&unleased_receipt).unwrap(),
+        }))))
+        .await
+        .expect("unleased receipt returns a typed rejection");
+    assert!(get_text(&unleased).contains("exact active task lease"));
+    assert_eq!(durable_close_snapshot(&cas_root), before_unleased);
+
+    let owner_service = delivery_service(&cas_root, owner_id);
+    let accepted = owner_service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "close",
+            "id": task.id,
+            "reason": "exact lease owner handoff",
+            "completion_receipt": serde_json::to_string(&owner_receipt).unwrap(),
+        }))))
+        .await
+        .expect("exact lease owner receipt");
+    assert!(
+        get_text(&accepted).contains("Worker delivery receipt accepted idempotently"),
+        "{}",
+        get_text(&accepted)
+    );
+    let (stored_receipt, transaction) = cas_store::get_latest_worker_delivery(&cas_root, &task.id)
+        .unwrap()
+        .expect("lease-authorized delivery");
+    assert_eq!(stored_receipt.worker_agent_id, owner_id);
+    assert_eq!(transaction.state, WorkerDeliveryState::AwaitingVerification);
+    let dispatch = cas_store::get_latest_verification_dispatch(&cas_root, &task.id)
+        .unwrap()
+        .expect("receipt dispatch");
+    assert_eq!(
+        dispatch.owner_agent_id, supervisor_id,
+        "exact lease guard must preserve supervisor-owned verification routing"
+    );
+    assert!(
+        open_agent_store(&cas_root)
+            .unwrap()
+            .get_lease(&task.id)
+            .unwrap()
+            .is_none(),
+        "accepted handoff releases the exact original lease"
+    );
+
+    let before_retry = durable_close_snapshot(&cas_root);
+    let retry = owner_service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "close",
+            "id": task.id,
+            "reason": "same-session exact-cycle retry",
+            "completion_receipt": serde_json::to_string(&owner_receipt).unwrap(),
+        }))))
+        .await
+        .expect("same-session exact receipt retry");
+    assert!(get_text(&retry).contains("accepted idempotently"));
+    assert_eq!(
+        durable_close_snapshot(&cas_root),
+        before_retry,
+        "same-session exact-cycle retry must be a durable no-op"
+    );
 }
 
 async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {

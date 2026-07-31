@@ -255,6 +255,43 @@ impl SqliteAgentStore {
         }
         }) // with_write_retry
     }
+    pub(crate) fn lease_release_lease_if_owner_epoch(
+        &self,
+        task_id: &str,
+        agent_id: &str,
+        epoch: u64,
+        reason: &str,
+    ) -> Result<bool> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = self.lock_conn()?;
+            let tx = ImmediateTx::new(&conn)?;
+            let changed = tx.execute(
+                "UPDATE task_leases SET status = 'released'
+                 WHERE task_id = ?1 AND agent_id = ?2 AND status = 'active' AND epoch = ?3",
+                params![task_id, agent_id, epoch as i64],
+            )?;
+            if changed == 0 {
+                tx.commit()?;
+                return Ok(false);
+            }
+            tx.execute(
+                "UPDATE agents SET active_tasks = MAX(0, active_tasks - 1) WHERE id = ?1",
+                params![agent_id],
+            )?;
+            Self::log_lease_event(
+                &tx,
+                task_id,
+                agent_id,
+                "released",
+                epoch,
+                None,
+                None,
+                Some(reason),
+            )?;
+            tx.commit()?;
+            Ok(true)
+        })
+    }
     pub(crate) fn lease_renew_lease(
         &self,
         task_id: &str,

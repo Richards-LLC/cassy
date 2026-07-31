@@ -542,6 +542,54 @@ fn test_mark_stale_releases_leases() {
 }
 
 #[test]
+fn release_lease_if_owner_epoch_never_releases_replacement_generation() {
+    let (_temp, store) = create_test_store();
+    for (id, name) in [("lease-owner", "owner"), ("lease-replacement", "replacement")] {
+        store
+            .register(&Agent::new(id.to_string(), name.to_string()))
+            .unwrap();
+    }
+
+    let ClaimResult::Success(original) = store
+        .try_claim("task-generation", "lease-owner", 600, None)
+        .unwrap()
+    else {
+        panic!("original lease must be claimed")
+    };
+    store
+        .release_lease("task-generation", "lease-owner")
+        .unwrap();
+    let ClaimResult::Success(replacement) = store
+        .try_claim("task-generation", "lease-replacement", 600, None)
+        .unwrap()
+    else {
+        panic!("replacement lease must be claimed")
+    };
+
+    assert!(!store
+        .release_lease_if_owner_epoch(
+            "task-generation",
+            "lease-owner",
+            original.epoch,
+            "stale completion handoff",
+        )
+        .unwrap());
+    assert_eq!(
+        store.get_lease("task-generation").unwrap().unwrap().agent_id,
+        "lease-replacement"
+    );
+    assert!(store
+        .release_lease_if_owner_epoch(
+            "task-generation",
+            "lease-replacement",
+            replacement.epoch,
+            "exact completion handoff",
+        )
+        .unwrap());
+    assert!(store.get_lease("task-generation").unwrap().is_none());
+}
+
+#[test]
 fn test_agent_get_handles_legacy_text_active_tasks() {
     let (temp, store) = create_test_store();
 

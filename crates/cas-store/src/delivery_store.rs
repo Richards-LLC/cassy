@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::str::FromStr;
@@ -324,6 +324,73 @@ pub fn create_worker_delivery_with_dispatch(
     Ok((transaction, dispatch))
 }
 
+/// Atomically revalidate the exact active task-lease generation before
+/// persisting a new receipt, delivery transaction, or verification dispatch.
+pub fn create_worker_delivery_with_dispatch_for_lease(
+    root: &Path,
+    receipt: &WorkerCompletionReceipt,
+    state: WorkerDeliveryState,
+    actor_agent_id: &str,
+    expected_lease_epoch: u64,
+    owner_agent_id: &str,
+    deadline_at: DateTime<Utc>,
+) -> Result<(WorkerDeliveryTransaction, VerificationDispatch)> {
+    let mut conn = open(root)?;
+    conn.execute_batch(crate::agent_store::AGENT_SCHEMA)?;
+    conn.execute_batch(crate::verification_store::VERIFICATION_SCHEMA)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let authority = tx
+        .query_row(
+            "SELECT l.agent_id, l.epoch, l.expires_at, a.role, a.status
+             FROM task_leases l
+             JOIN agents a ON a.id = l.agent_id
+             WHERE l.task_id = ?1 AND l.status = 'active'",
+            params![receipt.task_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let valid = authority.is_some_and(|(agent_id, epoch, expires_at, role, status)| {
+        receipt.worker_agent_id == actor_agent_id
+            && agent_id == actor_agent_id
+            && epoch == expected_lease_epoch as i64
+            && role == "worker"
+            && matches!(status.as_str(), "active" | "idle")
+            && DateTime::parse_from_rfc3339(&expires_at)
+                .map(|expires| expires.with_timezone(&Utc) > Utc::now())
+                .unwrap_or(false)
+    });
+    if !valid {
+        return Err(StoreError::Parse(
+            "exact active task lease changed, expired, or no longer belongs to the authenticated worker session"
+                .to_string(),
+        ));
+    }
+    let boundary = VerificationProofBoundary::delivery(
+        receipt.id.clone(),
+        worker_delivery_transaction_id(&receipt.id),
+    );
+    let dispatch = crate::verification_store::create_verification_dispatch_bound_with_conn(
+        &tx,
+        &receipt.task_id,
+        actor_agent_id,
+        owner_agent_id,
+        &boundary,
+        deadline_at,
+        false,
+    )?;
+    let transaction = create_worker_delivery_with_conn(&tx, receipt, state, actor_agent_id)?;
+    tx.commit()?;
+    Ok((transaction, dispatch))
+}
+
 pub fn worker_delivery_transaction_id(receipt_id: &str) -> String {
     receipt_id.replacen("wcr-", "wdt-", 1)
 }
@@ -584,6 +651,8 @@ pub fn list_worker_delivery_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{AgentStore, SqliteAgentStore};
+    use cas_types::{Agent, AgentRole, ClaimResult};
     use tempfile::TempDir;
 
     fn input() -> WorkerCompletionReceiptInput {
@@ -598,6 +667,96 @@ mod tests {
             target_sha: "c".repeat(40),
             proof_reference: "proof:workspace-1".into(),
             scope_summary: "bounded delivery change".into(),
+        }
+    }
+
+    fn register_worker(store: &SqliteAgentStore, id: &str, name: &str) {
+        let mut agent = Agent::new(id.to_string(), name.to_string());
+        agent.role = AgentRole::Worker;
+        store.register(&agent).unwrap();
+    }
+
+    fn delivery_boundary_counts(root: &Path, receipt_id: &str) -> (i64, i64, i64) {
+        let conn = open(root).unwrap();
+        conn.execute_batch(crate::verification_store::VERIFICATION_SCHEMA)
+            .unwrap();
+        let receipts = conn
+            .query_row(
+                "SELECT COUNT(*) FROM worker_completion_receipts WHERE id = ?1",
+                params![receipt_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let deliveries = conn
+            .query_row(
+                "SELECT COUNT(*) FROM worker_delivery_transactions WHERE receipt_id = ?1",
+                params![receipt_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let dispatches = conn
+            .query_row(
+                "SELECT COUNT(*) FROM verification_dispatches WHERE task_id = 'cas-delivery'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        (receipts, deliveries, dispatches)
+    }
+
+    #[test]
+    fn receipt_write_revalidates_expired_and_replaced_lease_generation_atomically() {
+        for scenario in ["expired", "replaced", "dead"] {
+            let root = TempDir::new().unwrap();
+            let store = SqliteAgentStore::open(root.path()).unwrap();
+            store.init().unwrap();
+            register_worker(&store, "worker-session", "worker");
+            register_worker(&store, "replacement-session", "worker");
+
+            let duration = if scenario == "expired" { -1 } else { 600 };
+            let ClaimResult::Success(original) = store
+                .try_claim("cas-delivery", "worker-session", duration, Some(scenario))
+                .unwrap()
+            else {
+                panic!("fixture lease must be claimed")
+            };
+            if scenario == "replaced" {
+                store
+                    .release_lease("cas-delivery", "worker-session")
+                    .unwrap();
+                assert!(matches!(
+                    store
+                        .try_claim(
+                            "cas-delivery",
+                            "replacement-session",
+                            600,
+                            Some("replacement race"),
+                        )
+                        .unwrap(),
+                    ClaimResult::Success(_)
+                ));
+            } else if scenario == "dead" {
+                store.mark_stale("worker-session").unwrap();
+            }
+
+            let receipt = build_worker_completion_receipt(&input(), "worker", Utc::now());
+            let before = delivery_boundary_counts(root.path(), &receipt.id);
+            let error = create_worker_delivery_with_dispatch_for_lease(
+                root.path(),
+                &receipt,
+                WorkerDeliveryState::AwaitingVerification,
+                "worker-session",
+                original.epoch,
+                "verifier-owner",
+                Utc::now() + chrono::Duration::minutes(10),
+            )
+            .expect_err("stale lease authority must fail closed");
+            assert!(error.to_string().contains("exact active task lease"));
+            assert_eq!(
+                delivery_boundary_counts(root.path(), &receipt.id),
+                before,
+                "{scenario} authority persisted receipt, transaction, or dispatch"
+            );
         }
     }
 

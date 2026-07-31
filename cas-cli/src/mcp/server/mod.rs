@@ -412,6 +412,57 @@ impl CasCore {
         }
     }
 
+    /// Resolve the authenticated CAS session without registering or reviving
+    /// it. Security-sensitive proof submission uses this read-only variant so
+    /// a dead or unknown caller can be rejected before any durable mutation.
+    pub(crate) fn get_registered_agent_id_read_only(&self) -> Result<String, McpError> {
+        if let Some(Some(id)) = self.agent_id.get() {
+            return Ok(id.clone());
+        }
+
+        let candidate = std::env::var("CAS_SESSION_ID")
+            .ok()
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty())
+            .or_else(|| {
+                crate::agent_id::read_session_for_mcp(&self.cas_root)
+                    .ok()
+                    .filter(|id| !id.is_empty())
+            });
+        let agent_store = self.open_agent_store()?;
+        let id = if let Some(id) = candidate {
+            agent_store.get(&id).map_err(|_| McpError {
+                code: ErrorCode::INVALID_REQUEST,
+                message: Cow::from(
+                    "Authenticated CAS session is not registered; receipt submission cannot auto-register it.",
+                ),
+                data: None,
+            })?;
+            id
+        } else {
+            let cc_pid = crate::agent_id::get_cc_pid_for_mcp();
+            agent_store
+                .get_by_cc_pid(cc_pid)
+                .map_err(|error| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!(
+                        "Failed to resolve registered CAS session read-only: {error}"
+                    )),
+                    data: None,
+                })?
+                .map(|agent| agent.id)
+                .ok_or_else(|| McpError {
+                    code: ErrorCode::INVALID_REQUEST,
+                    message: Cow::from(
+                        "Receipt submission requires an already registered authenticated CAS session.",
+                    ),
+                    data: None,
+                })?
+        };
+        let _ = self.agent_id.set(Some(id.clone()));
+        Ok(id)
+    }
+
     /// Ensure agent is active, reviving if necessary
     ///
     /// Called from get_agent_id() to auto-revive stale/shutdown agents on MCP tool use.

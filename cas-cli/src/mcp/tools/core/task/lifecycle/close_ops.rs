@@ -254,6 +254,67 @@ impl CasCore {
         task: &mut cas_types::Task,
         task_store: &dyn cas_store::TaskStore,
     ) -> Result<CallToolResult, McpError> {
+        // Authority is server-derived before parsing or consulting any
+        // caller-supplied receipt identity. A new receipt requires the exact
+        // live task lease; an already persisted same-session receipt may be
+        // retried idempotently after the handoff released that lease.
+        let caller_id = match self.get_registered_agent_id_read_only() {
+            Ok(id) => id,
+            Err(_) => {
+                return Ok(Self::tool_error(
+                    "DELIVERY RECEIPT REJECTED: an already registered authenticated CAS worker holding the exact active task lease is required.",
+                ));
+            }
+        };
+        let agent_store = self.open_agent_store()?;
+        let caller = match agent_store.get(&caller_id) {
+            Ok(caller) => caller,
+            Err(_) => {
+                return Ok(Self::tool_error(
+                    "DELIVERY RECEIPT REJECTED: authenticated session is not an active registered CAS worker holding the exact active task lease.",
+                ));
+            }
+        };
+        if caller.role != cas_types::AgentRole::Worker || !caller.is_alive() {
+            return Ok(Self::tool_error(
+                "DELIVERY RECEIPT REJECTED: only a live authenticated worker session holding the exact active task lease may submit a new receipt.",
+            ));
+        }
+        let lease = agent_store.get_lease(&task.id).map_err(|error| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!(
+                "Failed to inspect exact active task lease before receipt acceptance: {error}"
+            )),
+            data: None,
+        })?;
+        let lease = lease.filter(|lease| lease.expires_at > chrono::Utc::now());
+        let latest_delivery = cas_store::get_latest_worker_delivery(&self.cas_root, &task.id)
+            .map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!(
+                    "Failed to inspect existing worker delivery boundary: {error}"
+                )),
+                data: None,
+            })?;
+        let (lease_epoch, retry_receipt_id) = match lease {
+            Some(lease) if lease.agent_id == caller.id => (Some(lease.epoch), None),
+            Some(_) => {
+                return Ok(Self::tool_error(
+                    "DELIVERY RECEIPT REJECTED: authenticated caller does not hold the exact active task lease. Assignment/display-name and request identity fields are non-authoritative; use the lease-owning worker session.",
+                ));
+            }
+            None => match latest_delivery.as_ref() {
+                Some((receipt, _)) if receipt.worker_agent_id == caller.id => {
+                    (None, Some(receipt.id.clone()))
+                }
+                _ => {
+                    return Ok(Self::tool_error(
+                        "DELIVERY RECEIPT REJECTED: no exact active task lease belongs to the authenticated caller. A new receipt requires the lease-owning worker session; only that same session may retry its already-persisted exact receipt.",
+                    ));
+                }
+            },
+        };
+
         let input: cas_types::WorkerCompletionReceiptInput = serde_json::from_str(raw_receipt)
             .map_err(|error| McpError {
                 code: ErrorCode::INVALID_PARAMS,
@@ -299,28 +360,9 @@ impl CasCore {
             ));
         }
 
-        let caller_id = self.get_agent_id().map_err(|_| McpError {
-            code: ErrorCode::INVALID_REQUEST,
-            message: Cow::from(
-                "Delivery receipt submission requires an authenticated registered CAS worker.",
-            ),
-            data: None,
-        })?;
-        let agent_store = self.open_agent_store()?;
-        let caller = agent_store.get(&caller_id).map_err(|_| McpError {
-            code: ErrorCode::INVALID_REQUEST,
-            message: Cow::from(
-                "Delivery receipt submission requires an active registered CAS worker.",
-            ),
-            data: None,
-        })?;
-        if caller.role != cas_types::AgentRole::Worker
-            || !caller.is_alive()
-            || input.worker_agent_id != caller.id
-            || task.assignee.as_deref() != Some(caller.name.as_str())
-        {
+        if input.worker_agent_id != caller.id {
             return Ok(Self::tool_error(
-                "DELIVERY RECEIPT REJECTED: only the active registered worker assigned to this task may submit its own receipt; request identity claims do not grant authority.",
+                "DELIVERY RECEIPT REJECTED: receipt worker_agent_id must match the authenticated lease-owning worker session; request identity claims never grant authority.",
             ));
         }
         let expected_source = format!("factory/{}", caller.name);
@@ -331,6 +373,14 @@ impl CasCore {
         }
         let receipt =
             cas_store::build_worker_completion_receipt(&input, &caller.name, chrono::Utc::now());
+        if retry_receipt_id
+            .as_ref()
+            .is_some_and(|expected| expected != &receipt.id)
+        {
+            return Ok(Self::tool_error(
+                "DELIVERY RECEIPT REJECTED: authenticated caller has no active task lease and the proposed receipt is not its already-persisted exact proof boundary. Reclaim/start the task before submitting new proof.",
+            ));
+        }
         let existing_delivery =
             cas_store::get_worker_delivery_by_receipt(&self.cas_root, &receipt.id).map_err(
                 |error| McpError {
@@ -430,17 +480,24 @@ impl CasCore {
             cas_store::worker_delivery_transaction_id(&receipt.id),
         );
         let owner_id = self.verification_dispatch_owner(&caller.id)?;
+        let was_existing = existing_delivery.is_some();
         let transaction = if let Some((_, transaction)) = existing_delivery {
             transaction
         } else {
             // The immutable receipt, delivery transaction, and exact dispatch
             // are one SQLite intent transaction. Receipt B therefore cannot
             // persist if active dispatch A rejects the new boundary.
-            cas_store::create_worker_delivery_with_dispatch(
+            let Some(lease_epoch) = lease_epoch else {
+                return Ok(Self::tool_error(
+                    "DELIVERY RECEIPT REJECTED: a new immutable receipt requires the authenticated caller's exact active task lease.",
+                ));
+            };
+            cas_store::create_worker_delivery_with_dispatch_for_lease(
                 &self.cas_root,
                 &receipt,
                 initial_state,
                 &caller.id,
+                lease_epoch,
                 &owner_id,
                 chrono::Utc::now() + chrono::Duration::seconds(VERIFICATION_DISPATCH_TIMEOUT_SECS),
             )
@@ -454,7 +511,9 @@ impl CasCore {
             })?
         };
 
-        if transaction.state == cas_types::WorkerDeliveryState::AwaitingVerification {
+        let (projected_status, projected_pending_verification) = if transaction.state
+            == cas_types::WorkerDeliveryState::AwaitingVerification
+        {
             // Exact retries validate and recover only their own boundary.
             cas_store::create_verification_dispatch_bound(
                 &self.cas_root,
@@ -472,27 +531,42 @@ impl CasCore {
                 )),
                 data: None,
             })?;
-            task.pending_verification = true;
-            task.status = TaskStatus::PendingSupervisorReview;
+            (TaskStatus::PendingSupervisorReview, true)
         } else if transaction.state == cas_types::WorkerDeliveryState::AwaitingMerge {
-            task.pending_verification = false;
-            task.status = TaskStatus::AwaitingMerge;
+            (TaskStatus::AwaitingMerge, false)
+        } else {
+            (task.status, task.pending_verification)
+        };
+        let projection_coherent = was_existing
+            && task.status == projected_status
+            && task.pending_verification == projected_pending_verification
+            && task.deliverables.pre_close_hook.as_ref() == Some(&hook_evidence)
+            && task.deliverables.factory_branch_anchor.as_deref()
+                == Some(input.commit_sha.as_str())
+            && task.deliverables.parked_branch.as_deref() == Some(input.source_branch.as_str());
+        if !projection_coherent {
+            task.status = projected_status;
+            task.pending_verification = projected_pending_verification;
+            task.deliverables.pre_close_hook = Some(hook_evidence);
+            task.deliverables.factory_branch_anchor = Some(input.commit_sha.clone());
+            task.deliverables.parked_branch = Some(input.source_branch.clone());
+            task.updated_at = chrono::Utc::now();
+            task_store.update(task).map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!(
+                    "Failed to project worker delivery state onto task: {error}"
+                )),
+                data: None,
+            })?;
         }
-        task.deliverables.pre_close_hook = Some(hook_evidence);
-        task.deliverables.factory_branch_anchor = Some(input.commit_sha.clone());
-        task.deliverables.parked_branch = Some(input.source_branch.clone());
-        task.updated_at = chrono::Utc::now();
-        task_store.update(task).map_err(|error| McpError {
-            code: ErrorCode::INTERNAL_ERROR,
-            message: Cow::from(format!(
-                "Failed to project worker delivery state onto task: {error}"
-            )),
-            data: None,
-        })?;
-        let _ = agent_store.release_lease_for_task(
-            &task.id,
-            "Immutable worker completion receipt accepted for supervisor delivery",
-        );
+        if let Some(lease_epoch) = lease_epoch {
+            let _ = agent_store.release_lease_if_owner_epoch(
+                &task.id,
+                &caller.id,
+                lease_epoch,
+                "Immutable worker completion receipt accepted for supervisor delivery",
+            );
+        }
 
         let next = match transaction.state {
             cas_types::WorkerDeliveryState::AwaitingVerification => {

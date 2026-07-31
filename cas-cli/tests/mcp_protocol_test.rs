@@ -10,7 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
 
 mod support;
@@ -94,6 +94,38 @@ impl McpTestClient {
             stdout,
             next_id: 1,
         }
+    }
+
+    fn spawn_capturing_stderr(sandbox: &CasSandbox) -> Self {
+        let mut cmd = sandbox.command();
+        cmd.arg("serve");
+        let mut child = cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Failed to spawn cas serve");
+
+        let stdin = child.stdin.take().expect("Failed to get stdin");
+        let stdout = BufReader::new(child.stdout.take().expect("Failed to get stdout"));
+
+        Self {
+            child,
+            stdin,
+            stdout,
+            next_id: 1,
+        }
+    }
+
+    fn stop_and_read_stderr(&mut self) -> String {
+        let _ = self.child.kill();
+        let mut stderr = String::new();
+        if let Some(mut pipe) = self.child.stderr.take() {
+            pipe.read_to_string(&mut stderr)
+                .expect("read cas serve stderr");
+        }
+        let _ = self.child.wait();
+        stderr
     }
 
     fn send_request(&mut self, method: &str, params: Option<Value>) -> JsonRpcResponse {
@@ -329,6 +361,66 @@ fn test_mcp_tool_call_task_create() {
         content_text.contains("MCP Protocol Test Task") || content_text.contains("cas-"),
         "Task list should include our task"
     );
+}
+
+#[test]
+fn malformed_verification_issues_never_cross_protocol_logs_or_sqlite() {
+    let sandbox = CasSandbox::new();
+    let raw_capability = "vcap-11111111111111111111111111111111.22222222222222222222222222222222";
+    let raw_path = "/home/verifier/private-proof.json";
+    let raw_pat = "ghp_verifier-authored-secret";
+    let malformed_issues =
+        format!(r#"[{{"file":"{raw_path}","severity":"{raw_capability}","problem":"{raw_pat}""#);
+    let mut client = McpTestClient::spawn_capturing_stderr(&sandbox);
+    client.initialize();
+
+    let response = client.call_tool(
+        "verification",
+        json!({
+            "action": "add",
+            "task_id": "cas-missing",
+            "status": "approved",
+            "summary": "safe summary",
+            "issues": malformed_issues.clone(),
+        }),
+    );
+    let response_text = format!("{response:?}");
+    assert!(
+        response_text.contains("Invalid verification issues")
+            && response_text.contains("input omitted"),
+        "public MCP rejection must be static and actionable: {response_text}"
+    );
+    let stderr = client.stop_and_read_stderr();
+
+    for (surface, payload) in [
+        ("response", response_text.as_str()),
+        ("stderr", stderr.as_str()),
+    ] {
+        for unsafe_value in [raw_capability, raw_path, raw_pat, malformed_issues.as_str()] {
+            assert!(
+                !payload.contains(unsafe_value),
+                "{surface} leaked malformed verifier input: {unsafe_value:?}"
+            );
+        }
+    }
+    assert!(
+        !stderr.contains("Input was:"),
+        "malformed verification diagnostics must not log caller input: {stderr}"
+    );
+
+    for suffix in ["", "-wal", "-shm"] {
+        let path = sandbox.cas_root().join(format!("cas.db{suffix}"));
+        if let Ok(bytes) = std::fs::read(path) {
+            for unsafe_value in [raw_capability, raw_path, raw_pat] {
+                assert!(
+                    !bytes
+                        .windows(unsafe_value.len())
+                        .any(|window| window == unsafe_value.as_bytes()),
+                    "SQLite {suffix} leaked rejected verifier input: {unsafe_value:?}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

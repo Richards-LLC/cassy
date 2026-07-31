@@ -5,6 +5,47 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<VerificationAddRequest>,
     ) -> Result<CallToolResult, McpError> {
+        // Validate and sanitize caller-authored content before opening stores,
+        // inspecting one-time authority, or applying expiry transitions.
+        // This makes malformed issues failure-atomic even when the named
+        // capability or dispatch is expired.
+        let issues: Vec<VerificationIssue> = if let Some(issues_json) = &req.issues {
+            if issues_json.len() > 512 * 1024 {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Invalid verification issues: expected a bounded JSON array of issue objects; input omitted.",
+                    ),
+                    data: None,
+                });
+            }
+            serde_json::from_str(issues_json).map_err(|_| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(
+                    "Invalid verification issues: expected a bounded JSON array of issue objects; input omitted.",
+                ),
+                data: None,
+            })?
+        } else {
+            Vec::new()
+        };
+        let files_reviewed: Vec<String> = req
+            .files_reviewed
+            .as_deref()
+            .map(|files| {
+                files
+                    .split(',')
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut authored_content = Verification::new(String::new(), req.task_id.clone());
+        authored_content.summary = req.summary.clone();
+        authored_content.issues = issues;
+        authored_content.files_reviewed = files_reviewed;
+        authored_content.sanitize_verifier_authored_content();
+
         let verification_store = self.open_verification_store()?;
         let task_store = self.open_task_store()?;
         let agent_store = self.open_agent_store()?;
@@ -277,37 +318,11 @@ impl CasCore {
             data: None,
         })?;
 
-        // Parse issues from JSON if provided
-        let issues: Vec<VerificationIssue> = if let Some(issues_json) = &req.issues {
-            match serde_json::from_str(issues_json) {
-                Ok(parsed) => parsed,
-                Err(e) => {
-                    eprintln!(
-                        "[CAS] Warning: Failed to parse issues JSON: {e}. Input was: {issues_json}"
-                    );
-                    Vec::new()
-                }
-            }
-        } else {
-            Vec::new()
-        };
-
-        // Parse files reviewed
-        let files_reviewed: Vec<String> = req
-            .files_reviewed
-            .map(|f| {
-                f.split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
-
         let mut verification = Verification::new(id.clone(), req.task_id.clone());
         verification.status = status;
-        verification.summary = req.summary;
-        verification.issues = issues;
-        verification.files_reviewed = files_reviewed;
+        verification.summary = authored_content.summary;
+        verification.issues = authored_content.issues;
+        verification.files_reviewed = authored_content.files_reviewed;
         if let Some(confidence) = req.confidence {
             verification.set_confidence(confidence);
         }
@@ -587,11 +602,12 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         let verification_store = self.open_verification_store()?;
 
-        let verification = verification_store.get(&req.id).map_err(|e| McpError {
+        let mut verification = verification_store.get(&req.id).map_err(|e| McpError {
             code: ErrorCode::INVALID_PARAMS,
             message: Cow::from(format!("Verification not found: {e}")),
             data: None,
         })?;
+        verification.sanitize_verifier_authored_content();
 
         let mut output = format!(
             "Verification: {}\n{}\n\nTask: {}\nStatus: {}\nSummary: {}\n",
@@ -674,7 +690,7 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         let verification_store = self.open_verification_store()?;
 
-        let verifications =
+        let mut verifications =
             verification_store
                 .get_for_task(&req.task_id)
                 .map_err(|e| McpError {
@@ -682,6 +698,9 @@ impl CasCore {
                     message: Cow::from(format!("Failed to list verifications: {e}")),
                     data: None,
                 })?;
+        for verification in &mut verifications {
+            verification.sanitize_verifier_authored_content();
+        }
 
         if verifications.is_empty() {
             return Ok(Self::success(format!(
@@ -740,7 +759,8 @@ impl CasCore {
                 message: Cow::from(format!("Failed to get verification: {e}")),
                 data: None,
             })? {
-            Some(v) => {
+            Some(mut v) => {
+                v.sanitize_verifier_authored_content();
                 let status_icon = match v.status {
                     VerificationStatus::Approved => "✅",
                     VerificationStatus::Rejected => "❌",

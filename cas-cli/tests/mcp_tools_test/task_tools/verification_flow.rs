@@ -94,7 +94,7 @@ async fn test_task_verifier_capability_is_child_bound_and_replay_safe() {
         .expect("task id")
         .to_string();
 
-    let _dispatch = cas_store::create_verification_dispatch(
+    let dispatch = cas_store::create_verification_dispatch(
         &cas_dir,
         &task_id,
         &parent_id,
@@ -148,14 +148,96 @@ async fn test_task_verifier_capability_is_child_bound_and_replay_safe() {
 
     let child_service = cas::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
     child_service.set_agent_id_for_testing(child_id.clone());
-    child_service
+    let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).expect("db");
+    conn.execute(
+        "UPDATE verification_dispatches SET deadline_at = ?2 WHERE id = ?1",
+        rusqlite::params![
+            dispatch.id,
+            (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339(),
+        ],
+    )
+    .expect("expire dispatch before malformed request");
+    drop(conn);
+    let malformed_issues = format!(
+        r#"[{{"file":"src/lib.rs","severity":"{}","category":"security""#,
+        issued.token
+    );
+    let malformed = child_service
         .cas_verification_add(Parameters(VerificationAddRequest {
             task_id: task_id.clone(),
             status: "approved".to_string(),
-            summary: "distinct registered child verified the task".to_string(),
+            summary: "malformed issue retry".to_string(),
             confidence: Some(0.95),
-            issues: None,
-            files_reviewed: Some("src/lib.rs".to_string()),
+            issues: Some(malformed_issues.clone()),
+            files_reviewed: None,
+            duration_ms: Some(12),
+            verification_type: None,
+            verifier_capability: Some(issued.token.clone()),
+            dispatch_id: None,
+        }))
+        .await
+        .expect_err("malformed issues must reject before capability consumption");
+    assert_eq!(malformed.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert_eq!(
+        malformed.message,
+        "Invalid verification issues: expected a bounded JSON array of issue objects; input omitted."
+    );
+    assert!(!malformed.message.contains(&issued.token));
+    assert!(!malformed.message.contains(&malformed_issues));
+    assert!(
+        verification_store
+            .get_latest_for_task(&task_id)
+            .expect("lookup after malformed issues")
+            .is_none(),
+        "malformed issues must not persist a verification"
+    );
+    assert!(
+        cas_store::inspect_verifier_capability(&cas_dir, &issued.token)
+            .expect("capability remains inspectable")
+            .consumed_at
+            .is_none(),
+        "malformed issues must reject before consuming one-time authority"
+    );
+    assert_eq!(
+        cas_store::get_verification_dispatch(&cas_dir, &dispatch.id)
+            .expect("dispatch after malformed issues")
+            .state,
+        cas::types::VerificationDispatchState::Claimed,
+        "malformed issues must reject before an expired dispatch is durably timed out"
+    );
+    let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).expect("db");
+    conn.execute(
+        "UPDATE verification_dispatches SET deadline_at = ?2 WHERE id = ?1",
+        rusqlite::params![
+            dispatch.id,
+            (chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339(),
+        ],
+    )
+    .expect("restore dispatch deadline for valid retry");
+    drop(conn);
+
+    let raw_path = "/home/verifier/private-proof.json";
+    let raw_pat = "ghp_verifier-authored-secret";
+    let raw_control = "\u{1b}[31mverifier-control";
+    let raw_password = "password=verifier-secret";
+    let issues = serde_json::json!([{
+        "file": raw_path,
+        "line": 12,
+        "severity": "blocking",
+        "category": "security",
+        "code": raw_pat,
+        "problem": raw_control,
+        "suggestion": raw_password,
+    }])
+    .to_string();
+    let result = child_service
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: task_id.clone(),
+            status: "approved".to_string(),
+            summary: format!("distinct child verified with {}", issued.token),
+            confidence: Some(0.95),
+            issues: Some(issues),
+            files_reviewed: Some(format!("{raw_path},src/lib.rs")),
             duration_ms: Some(12),
             verification_type: None,
             verifier_capability: Some(issued.token.clone()),
@@ -163,6 +245,7 @@ async fn test_task_verifier_capability_is_child_bound_and_replay_safe() {
         }))
         .await
         .expect("bound task-verifier child succeeds once");
+    let result_text = extract_text(result);
 
     let row = verification_store
         .get_latest_for_task(&task_id)
@@ -178,12 +261,19 @@ async fn test_task_verifier_capability_is_child_bound_and_replay_safe() {
         row.capability_id.as_deref(),
         Some(issued.capability.id.as_str())
     );
-    assert!(
-        !serde_json::to_string(&row)
-            .expect("serialize verification")
-            .contains(&issued.token),
-        "durable verification payload must never contain the raw bearer"
+    assert_eq!(row.summary, "[REDACTED_SECRET]");
+    assert_eq!(row.issues[0].file, "[REDACTED_PATH]");
+    assert_eq!(row.issues[0].code, "[REDACTED_SECRET]");
+    assert_eq!(row.issues[0].problem, "[REDACTED_CONTROL]");
+    assert_eq!(
+        row.issues[0].suggestion.as_deref(),
+        Some("[REDACTED_SECRET]")
     );
+    assert_eq!(
+        row.files_reviewed,
+        vec!["[REDACTED_PATH]".to_string(), "src/lib.rs".to_string()]
+    );
+    let row_payload = serde_json::to_string(&row).expect("serialize verification");
     let event_payload = serde_json::to_string(
         &open_event_store(&cas_dir)
             .expect("event store")
@@ -191,10 +281,76 @@ async fn test_task_verifier_capability_is_child_bound_and_replay_safe() {
             .expect("events"),
     )
     .expect("serialize events");
-    assert!(
-        !event_payload.contains(&issued.token),
-        "event/audit diagnostics must contain only capability IDs, never the raw bearer"
+    let show_text = extract_text(
+        child_service
+            .cas_verification_show(Parameters(VerificationShowRequest { id: row.id.clone() }))
+            .await
+            .expect("show sanitized verification"),
     );
+    let list_text = extract_text(
+        child_service
+            .cas_verification_list(Parameters(VerificationListRequest {
+                task_id: task_id.clone(),
+                limit: Some(10),
+            }))
+            .await
+            .expect("list sanitized verification"),
+    );
+    let latest_text = extract_text(
+        child_service
+            .cas_verification_latest(Parameters(VerificationListRequest {
+                task_id: task_id.clone(),
+                limit: Some(1),
+            }))
+            .await
+            .expect("latest sanitized verification"),
+    );
+    for (surface, payload) in [
+        ("result", result_text.as_str()),
+        ("row", row_payload.as_str()),
+        ("event", event_payload.as_str()),
+        ("show", show_text.as_str()),
+        ("list", list_text.as_str()),
+        ("latest", latest_text.as_str()),
+    ] {
+        for unsafe_value in [
+            issued.token.as_str(),
+            raw_path,
+            raw_pat,
+            raw_control,
+            raw_password,
+            "verifier-secret",
+        ] {
+            assert!(
+                !payload.contains(unsafe_value),
+                "{surface} leaked verifier-authored content: {unsafe_value:?}"
+            );
+        }
+    }
+    let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).expect("db");
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .expect("checkpoint verification writes");
+    drop(conn);
+    for suffix in ["", "-wal", "-shm"] {
+        let path = cas_dir.join(format!("cas.db{suffix}"));
+        if let Ok(bytes) = std::fs::read(path) {
+            for unsafe_value in [
+                issued.token.as_str(),
+                raw_path,
+                raw_pat,
+                raw_control,
+                raw_password,
+                "verifier-secret",
+            ] {
+                assert!(
+                    !bytes
+                        .windows(unsafe_value.len())
+                        .any(|window| window == unsafe_value.as_bytes()),
+                    "SQLite {suffix} leaked verifier-authored content: {unsafe_value:?}"
+                );
+            }
+        }
+    }
     assert_eq!(
         cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
             .expect("dispatch lookup")
@@ -224,6 +380,90 @@ async fn test_task_verifier_capability_is_child_bound_and_replay_safe() {
         !replay.message.contains(&issued.capability.token_hash),
         "capability diagnostics must not expose persisted token hashes either"
     );
+}
+
+#[tokio::test]
+async fn test_legacy_unsafe_verification_rows_are_sanitized_on_public_reads() {
+    let (temp, service) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    let raw_capability = "vcap-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let raw_path = "/home/legacy/private-proof.json";
+    let raw_pat = "ghp_legacy-verifier-secret";
+    let raw_control = "\u{1b}[31mlegacy-control";
+    let _verification_store =
+        open_verification_store(&cas_dir).expect("initialize verification schema");
+    let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).expect("db");
+    conn.execute(
+        "INSERT INTO verifications
+         (id, task_id, agent_id, verification_type, status, confidence, summary,
+          files_reviewed, duration_ms, created_at)
+         VALUES (?1, ?2, NULL, 'task', 'rejected', NULL, ?3, ?4, NULL, ?5)",
+        rusqlite::params![
+            "ver-legacy-private",
+            "cas-legacy-private",
+            format!("legacy row contains {raw_capability}"),
+            serde_json::json!([raw_path, "src/lib.rs"]).to_string(),
+            chrono::Utc::now().to_rfc3339(),
+        ],
+    )
+    .expect("insert legacy verification");
+    conn.execute(
+        "INSERT INTO verification_issues
+         (verification_id, file, line, severity, category, code, problem, suggestion)
+         VALUES (?1, ?2, 7, 'blocking', 'security', ?3, ?4, 'password=legacy-secret')",
+        rusqlite::params!["ver-legacy-private", raw_path, raw_pat, raw_control],
+    )
+    .expect("insert legacy issue");
+    drop(conn);
+
+    let show = extract_text(
+        service
+            .cas_verification_show(Parameters(VerificationShowRequest {
+                id: "ver-legacy-private".to_string(),
+            }))
+            .await
+            .expect("show legacy verification"),
+    );
+    let list = extract_text(
+        service
+            .cas_verification_list(Parameters(VerificationListRequest {
+                task_id: "cas-legacy-private".to_string(),
+                limit: Some(10),
+            }))
+            .await
+            .expect("list legacy verification"),
+    );
+    let latest = extract_text(
+        service
+            .cas_verification_latest(Parameters(VerificationListRequest {
+                task_id: "cas-legacy-private".to_string(),
+                limit: Some(1),
+            }))
+            .await
+            .expect("latest legacy verification"),
+    );
+
+    assert!(show.contains("[REDACTED_SECRET]"));
+    assert!(show.contains("[REDACTED_PATH]"));
+    assert!(show.contains("[REDACTED_CONTROL]"));
+    assert!(show.contains("src/lib.rs"));
+    assert!(list.contains("[REDACTED_SECRET]"));
+    assert!(latest.contains("[REDACTED_SECRET]"));
+    for (surface, payload) in [("show", show), ("list", list), ("latest", latest)] {
+        for unsafe_value in [
+            raw_capability,
+            raw_path,
+            raw_pat,
+            raw_control,
+            "legacy-secret",
+        ] {
+            assert!(
+                !payload.contains(unsafe_value),
+                "{surface} leaked legacy verifier content: {unsafe_value:?}"
+            );
+        }
+    }
 }
 
 #[tokio::test]

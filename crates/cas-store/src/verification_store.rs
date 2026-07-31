@@ -24,6 +24,17 @@ fn lock_err<T>(_: std::sync::PoisonError<T>) -> StoreError {
     StoreError::Parse("Failed to acquire lock".to_string())
 }
 
+fn sanitized_verification_for_write(verification: &Verification) -> Verification {
+    let mut sanitized = verification.clone();
+    if matches!(
+        sanitized.provenance,
+        VerificationProvenance::TaskVerifier | VerificationProvenance::SupervisorDirect
+    ) {
+        sanitized.sanitize_verifier_authored_content();
+    }
+    sanitized
+}
+
 /// SQLite DDL for the `verifications` and `verification_issues` tables.
 ///
 /// Re-exported via `cas_store::VERIFICATION_SCHEMA` so the migration runner in
@@ -395,6 +406,7 @@ pub fn get_verification_for_dispatch(
 /// Caller is responsible for managing the transaction. Does not save issues -
 /// call `save_verification_issues_with_conn` separately.
 pub fn add_verification_with_conn(conn: &Connection, verification: &Verification) -> Result<()> {
+    let verification = sanitized_verification_for_write(verification);
     let files_reviewed_json =
         serde_json::to_string(&verification.files_reviewed).unwrap_or_else(|_| "[]".to_string());
 
@@ -422,7 +434,7 @@ pub fn add_verification_with_conn(conn: &Connection, verification: &Verification
     )?;
 
     // Save issues inline
-    save_verification_issues_with_conn(conn, verification)?;
+    save_verification_issues_with_conn(conn, &verification)?;
 
     Ok(())
 }
@@ -432,6 +444,7 @@ pub fn save_verification_issues_with_conn(
     conn: &Connection,
     verification: &Verification,
 ) -> Result<()> {
+    let verification = sanitized_verification_for_write(verification);
     conn.execute(
         "DELETE FROM verification_issues WHERE verification_id = ?1",
         params![verification.id],
@@ -1651,6 +1664,7 @@ impl VerificationStore for SqliteVerificationStore {
 
     fn add(&self, verification: &Verification) -> Result<()> {
         let conn = self.conn.lock().map_err(lock_err)?;
+        let verification = sanitized_verification_for_write(verification);
 
         let files_reviewed_json = serde_json::to_string(&verification.files_reviewed)
             .unwrap_or_else(|_| "[]".to_string());
@@ -1679,7 +1693,7 @@ impl VerificationStore for SqliteVerificationStore {
         )?;
 
         // Save issues
-        self.save_issues(&conn, verification)?;
+        self.save_issues(&conn, &verification)?;
 
         Ok(())
     }
@@ -1708,6 +1722,7 @@ impl VerificationStore for SqliteVerificationStore {
 
     fn update(&self, verification: &Verification) -> Result<()> {
         let conn = self.conn.lock().map_err(lock_err)?;
+        let verification = sanitized_verification_for_write(verification);
 
         let files_reviewed_json = serde_json::to_string(&verification.files_reviewed)
             .unwrap_or_else(|_| "[]".to_string());
@@ -1742,7 +1757,7 @@ impl VerificationStore for SqliteVerificationStore {
         }
 
         // Update issues
-        self.save_issues(&conn, verification)?;
+        self.save_issues(&conn, &verification)?;
 
         Ok(())
     }
@@ -2760,6 +2775,64 @@ mod tests {
                 .state,
             VerificationDispatchState::Pending
         );
+    }
+
+    #[test]
+    fn verifier_authored_payload_is_sanitized_at_every_write_boundary() {
+        let (store, dir) = create_test_store();
+        let raw_capability =
+            "vcap-fedcba9876543210fedcba9876543210.abcdef0123456789abcdef0123456789";
+        let raw_path = "/home/verifier/private-proof.json";
+        let raw_secret = "ghp_verifier-authored-secret";
+        let raw_control = "\u{1b}[31mverifier-control";
+        let mut verification = Verification::rejected(
+            "ver-private".to_string(),
+            "cas-private".to_string(),
+            format!("Approved using {raw_capability}"),
+            vec![VerificationIssue::blocking(
+                raw_path.to_string(),
+                Some(12),
+                "security".to_string(),
+                raw_secret.to_string(),
+                raw_control.to_string(),
+                Some("password=verifier-secret".to_string()),
+            )],
+        );
+        verification.provenance = VerificationProvenance::TaskVerifier;
+        verification.files_reviewed = vec![raw_path.to_string(), "src/lib.rs".to_string()];
+
+        store.add(&verification).expect("add unsafe verification");
+
+        let row = store.get("ver-private").expect("read sanitized row");
+        let serialized = serde_json::to_string(&row).expect("serialize row");
+        assert!(serialized.contains("[REDACTED_SECRET]"));
+        assert!(serialized.contains("[REDACTED_PATH]"));
+        assert!(serialized.contains("[REDACTED_CONTROL]"));
+        assert!(serialized.contains("src/lib.rs"));
+
+        let conn = store.conn.lock().expect("db");
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .expect("checkpoint");
+        drop(conn);
+        for suffix in ["", "-wal", "-shm"] {
+            let path = dir.path().join(format!("cas.db{suffix}"));
+            if let Ok(bytes) = std::fs::read(path) {
+                for unsafe_value in [
+                    raw_capability,
+                    raw_path,
+                    raw_secret,
+                    raw_control,
+                    "verifier-secret",
+                ] {
+                    assert!(
+                        !bytes
+                            .windows(unsafe_value.len())
+                            .any(|window| window == unsafe_value.as_bytes()),
+                        "unsafe verifier content reached SQLite {suffix}: {unsafe_value:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

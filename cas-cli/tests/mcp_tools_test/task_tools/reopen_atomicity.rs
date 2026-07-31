@@ -57,14 +57,16 @@ impl ClosedFixture {
         let cas_dir = temp.path().join(".cas");
         let task_store = open_task_store(&cas_dir).expect("task store");
         let agent_store = open_agent_store(&cas_dir).expect("agent store");
-        let current_id = format!("test-session-{}", std::process::id());
-        let mut supervisor = agent_store.get(&current_id).expect("setup agent");
+        let supervisor_id = format!("reopen-supervisor-{suffix}-{}", std::process::id());
+        let mut supervisor = cas::types::Agent::new(
+            supervisor_id.clone(),
+            format!("reopen-supervisor-{suffix}"),
+        );
         supervisor.role = AgentRole::Supervisor;
         supervisor.factory_session = Some("atomic-reopen-session".to_string());
-        supervisor.heartbeat();
         agent_store
             .register(&supervisor)
-            .expect("promote supervisor");
+            .expect("register exact proof supervisor");
         open_supervisor_queue_store(&cas_dir).expect("supervisor outbox schema");
         open_event_store(&cas_dir).expect("event schema");
         open_recording_store(&cas_dir).expect("recording schema");
@@ -104,8 +106,8 @@ impl ClosedFixture {
         let dispatch = cas_store::create_verification_dispatch_bound(
             &cas_dir,
             &task.id,
-            &current_id,
-            &current_id,
+            &supervisor_id,
+            &supervisor_id,
             &VerificationProofBoundary::task(),
             Utc::now() + Duration::minutes(10),
             false,
@@ -119,14 +121,14 @@ impl ClosedFixture {
         );
         verdict.provenance = VerificationProvenance::SupervisorDirect;
         verdict.dispatch_id = Some(dispatch.id.clone());
-        verdict.agent_id = Some(current_id.clone());
-        verdict.issuer_agent_id = Some(current_id.clone());
+        verdict.agent_id = Some(supervisor_id.clone());
+        verdict.issuer_agent_id = Some(supervisor_id.clone());
         verification_store.add(&verdict).expect("durable verdict");
         let conn = Connection::open(cas_dir.join("cas.db")).expect("db");
         cas_store::resolve_verification_dispatch_with_conn(
             &conn,
             &dispatch.id,
-            &current_id,
+            &supervisor_id,
             None,
             true,
         )

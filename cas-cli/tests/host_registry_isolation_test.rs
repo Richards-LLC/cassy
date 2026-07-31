@@ -9,6 +9,7 @@ const INIT_FIXTURES: &[&str] = &[
     "hooks_test/mod.rs",
     "jail_guard_test.rs",
     "loop_test.rs",
+    "search_scoring_test.rs",
     "verification_test.rs",
     "verifier_handoff_cleanup_test.rs",
 ];

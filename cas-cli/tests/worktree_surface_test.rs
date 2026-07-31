@@ -258,16 +258,17 @@ fn seed_direct_close_delivery(
     cas_root: &Path,
     task_id: &str,
     state: WorkerDeliveryState,
+    commit_sha: &str,
 ) {
     let input = WorkerCompletionReceiptInput {
         task_id: task_id.to_string(),
         worker_agent_id: "delivery-worker-session".to_string(),
         repo_selector: "remote:github.com/org/direct-close".to_string(),
         source_branch: "factory/delivery-worker".to_string(),
-        commit_sha: "a".repeat(40),
-        merge_base_sha: "b".repeat(40),
+        commit_sha: commit_sha.to_string(),
+        merge_base_sha: commit_sha.to_string(),
         target_branch: "main".to_string(),
-        target_sha: "c".repeat(40),
+        target_sha: commit_sha.to_string(),
         proof_reference: "proof:direct-close-state".to_string(),
         scope_summary: "direct close delivery-state fixture".to_string(),
     };
@@ -351,14 +352,19 @@ async fn exercise_direct_close_delivery_state(
     state: WorkerDeliveryState,
     expect_close: bool,
 ) {
-    let project = TempDir::new().expect("direct-close project");
-    let cas_root = init_cas_dir(project.path()).expect("init direct-close CAS");
+    let project = GitRepo::new();
+    run_git(&["branch", "factory/delivery-worker"], &project.root);
+    let commit_sha = git_stdout(&project.root, &["rev-parse", "main"]);
+    let cas_root = init_cas_dir(&project.root).expect("init direct-close CAS");
     let task_store = open_task_store(&cas_root).expect("task store");
     let task_id = format!("direct-close-{state}");
     let mut task = Task::new(task_id.clone(), format!("Direct close in {state}"));
     task.status = TaskStatus::InProgress;
     task.depth = TaskDepth::Light;
     task.assignee = Some("delivery-worker".to_string());
+    if state == WorkerDeliveryState::Delivered {
+        task.deliverables.factory_branch_anchor = Some(commit_sha.clone());
+    }
     task_store.add(&task).expect("add direct-close task");
     register_delivery_agent(
         &cas_root,
@@ -376,7 +382,7 @@ async fn exercise_direct_close_delivery_state(
             Some("direct-close fixture"),
         )
         .expect("seed active task lease");
-    seed_direct_close_delivery(&cas_root, &task.id, state);
+    seed_direct_close_delivery(&cas_root, &task.id, state, &commit_sha);
 
     let task_before = task_store.get(&task.id).expect("task before close");
     let snapshot_before = durable_close_snapshot(&cas_root);
@@ -2747,6 +2753,21 @@ async fn submit_and_verify_delivery(
         "{}",
         get_text(&close)
     );
+    let retry = worker_service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "close",
+            "id": task_id,
+            "reason": "exact active-cycle retry",
+            "completion_receipt": serde_json::to_string(receipt).unwrap(),
+        }))))
+        .await
+        .expect("same-cycle receipt retry");
+    assert!(
+        get_text(&retry).contains("Worker delivery receipt accepted idempotently")
+            && get_text(&retry).contains("State: awaiting_verification"),
+        "an exact retry must remain supported inside its original active proof cycle:\n{}",
+        get_text(&retry)
+    );
     let dispatch = cas_store::get_latest_verification_dispatch(cas_root, task_id)
         .expect("verification dispatch lookup")
         .expect("receipt-bound verification dispatch");
@@ -3006,6 +3027,104 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
         1,
         "resume must not append a second merge event"
     );
+
+    if !system_a {
+        let delivered_task = task_store.get(&task.id).expect("delivered task");
+        assert_eq!(
+            delivered_task.deliverables.factory_branch_anchor.as_deref(),
+            Some(receipt.commit_sha.as_str()),
+            "the original coherent delivery cycle must retain its exact commit anchor"
+        );
+
+        let reopen = {
+            let _role = VarGuard::set("CAS_AGENT_ROLE", "supervisor");
+            supervisor_service
+                .task(Parameters(task_req(serde_json::json!({
+                    "action": "reopen",
+                    "id": task.id,
+                    "reason": "new proof cycle after delivered rework",
+                }))))
+                .await
+                .expect("public supervisor reopen")
+        };
+        assert!(get_text(&reopen).contains("Reopened task"), "{}", get_text(&reopen));
+        let reopened = task_store.get(&task.id).expect("reopened task");
+        assert_eq!(reopened.status, TaskStatus::Open);
+        assert!(
+            reopened.deliverables.factory_branch_anchor.is_none(),
+            "reopen must clear the prior delivery anchor"
+        );
+        assert_eq!(
+            cas_store::get_verification_dispatch(&cas_root, &post_merge_dispatch.id)
+                .expect("reopened dispatch")
+                .state,
+            cas_types::VerificationDispatchState::Invalidated,
+            "reopen must invalidate the old resolved proof authority"
+        );
+
+        let worker_service = delivery_service(&cas_root, &worker_id);
+        let started = worker_service
+            .task(Parameters(task_req(serde_json::json!({
+                "action": "start",
+                "id": task.id,
+            }))))
+            .await
+            .expect("start reopened delivery task");
+        assert!(get_text(&started).contains("Started task"), "{}", get_text(&started));
+        assert!(
+            open_agent_store(&cas_root)
+                .expect("agent store")
+                .list_active_leases()
+                .expect("active leases")
+                .iter()
+                .any(|lease| lease.task_id == task.id && lease.agent_id == worker_id),
+            "the reopened proof cycle must have its own active worker lease"
+        );
+
+        let before_replay = durable_close_snapshot(&cas_root);
+        let replay = worker_service
+            .task(Parameters(task_req(serde_json::json!({
+                "action": "close",
+                "id": task.id,
+                "reason": "stale terminal receipt replay",
+                "completion_receipt": serde_json::to_string(&receipt).unwrap(),
+            }))))
+            .await
+            .expect("stale receipt returns a typed tool rejection");
+        let replay_text = get_text(&replay);
+        assert!(
+            replay_text.contains("DELIVERY RECEIPT REJECTED")
+                && replay_text.contains("terminal Delivered proof cycle")
+                && replay_text.contains("fresh cycle-bound receipt"),
+            "reopened receipt replay needs typed actionable guidance:\n{replay_text}"
+        );
+        assert_eq!(
+            durable_close_snapshot(&cas_root),
+            before_replay,
+            "stale Delivered replay mutated the reopened task, deliverables, lease, receipt/transaction/events, dispatch/verdict, or lifecycle outbox"
+        );
+
+        let direct_close = worker_service
+            .task(Parameters(task_req(serde_json::json!({
+                "action": "update",
+                "id": task.id,
+                "status": "closed",
+            }))))
+            .await
+            .expect_err("stale Delivered evidence must not authorize a later direct close");
+        let direct_close_text = direct_close.message.to_string();
+        assert!(
+            direct_close_text.contains("DELIVERY CLOSE BLOCKED")
+                && direct_close_text.contains("prior proof cycle")
+                && direct_close_text.contains("fresh immutable completion receipt"),
+            "later close needs cycle-specific remediation:\n{direct_close_text}"
+        );
+        assert_eq!(
+            durable_close_snapshot(&cas_root),
+            before_replay,
+            "later close reused stale terminal delivery evidence or mutated the new proof cycle"
+        );
+    }
 }
 
 #[tokio::test]

@@ -329,6 +329,30 @@ impl CasCore {
                 "DELIVERY RECEIPT REJECTED: source branch must be the registered worker branch `{expected_source}`."
             )));
         }
+        let receipt =
+            cas_store::build_worker_completion_receipt(&input, &caller.name, chrono::Utc::now());
+        let existing_delivery =
+            cas_store::get_worker_delivery_by_receipt(&self.cas_root, &receipt.id).map_err(
+                |error| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!(
+                        "Failed to inspect worker delivery receipt: {error}"
+                    )),
+                    data: None,
+                },
+            )?;
+        if existing_delivery
+            .as_ref()
+            .is_some_and(|(_, transaction)| {
+                transaction.state == cas_types::WorkerDeliveryState::Delivered
+                    && task.status != TaskStatus::Closed
+            })
+        {
+            return Ok(Self::tool_error(format!(
+                "DELIVERY RECEIPT REJECTED: receipt {} belongs to a terminal Delivered proof cycle, but task {} has been reopened. Submit a fresh cycle-bound receipt after completing and proving the new work. Task, deliverables, lease, delivery, dispatch, verdict, and events are unchanged.",
+                receipt.id, task.id
+            )));
+        }
         let target = match task.deliverables.work_target.as_ref() {
             Some(target) => target,
             None => {
@@ -401,18 +425,6 @@ impl CasCore {
         // Exact retries return the existing transaction (which may already
         // have advanced); genuinely new receipts always await a new verdict.
         let initial_state = cas_types::WorkerDeliveryState::AwaitingVerification;
-        let receipt =
-            cas_store::build_worker_completion_receipt(&input, &caller.name, chrono::Utc::now());
-        let existing_delivery =
-            cas_store::get_worker_delivery_by_receipt(&self.cas_root, &receipt.id).map_err(
-                |error| McpError {
-                    code: ErrorCode::INTERNAL_ERROR,
-                    message: Cow::from(format!(
-                        "Failed to inspect worker delivery receipt: {error}"
-                    )),
-                    data: None,
-                },
-            )?;
         let delivery_boundary = cas_types::VerificationProofBoundary::delivery(
             receipt.id.clone(),
             cas_store::worker_delivery_transaction_id(&receipt.id),
@@ -707,13 +719,15 @@ impl CasCore {
     /// transaction still owns the task's close lifecycle.
     ///
     /// This is deliberately read-only: direct update may recognize an already
-    /// Delivered transaction, but it must not advance, repair, or fail one.
-    /// Those transitions belong to the transactional delivery path.
+    /// Delivered transaction only while the task retains that exact cycle's
+    /// commit anchor. Reopen clears the anchor, so terminal evidence cannot
+    /// authorize a later cycle. This guard must not advance, repair, or fail a
+    /// transaction; those transitions belong to the delivery path.
     pub(crate) fn guard_direct_update_close_delivery_state(
         &self,
         task: &Task,
     ) -> Result<(), String> {
-        let Some((_, transaction)) =
+        let Some((receipt, transaction)) =
             cas_store::get_latest_worker_delivery(&self.cas_root, &task.id).map_err(|error| {
                 format!(
                     "DELIVERY CLOSE CHECK FAILED: could not inspect the task's immutable delivery state: {error}"
@@ -724,7 +738,15 @@ impl CasCore {
         };
 
         if transaction.state == cas_types::WorkerDeliveryState::Delivered {
-            return Ok(());
+            if task.deliverables.factory_branch_anchor.as_deref()
+                == Some(receipt.commit_sha.as_str())
+            {
+                return Ok(());
+            }
+            return Err(format!(
+                "DELIVERY CLOSE BLOCKED\n\nTask {} was reopened after immutable delivery transaction {} reached Delivered. The terminal receipt belongs to the prior proof cycle and cannot authorize this close.\n\nRemediation: complete the reopened work and submit a fresh immutable completion receipt for the new cycle.",
+                task.id, transaction.id
+            ));
         }
 
         let remediation = match transaction.state {

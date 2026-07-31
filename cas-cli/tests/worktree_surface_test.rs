@@ -14,10 +14,10 @@ use std::process::Command;
 
 use cas::mcp::tools::{TaskCloseRequest, TaskUpdateRequest};
 use cas::mcp::{CasCore, CasService};
-use cas::store::{init_cas_dir, open_agent_store, open_task_store};
+use cas::store::{init_cas_dir, open_agent_store, open_task_store, open_worktree_store};
 use cas::types::{
     Agent, AgentRole, AgentType, Task, TaskDepth, TaskStatus, TaskType, WorkTarget,
-    WorkerCompletionReceiptInput, WorkerDeliveryState,
+    WorkerCompletionReceiptInput, WorkerDeliveryState, Worktree,
 };
 use cas_mcp::types::{CoordinationRequest, TaskRequest, VerificationRequest};
 use cas_store::KnownRepoStore;
@@ -857,6 +857,155 @@ async fn task_bound_merge_uses_persisted_binding_for_duplicate_live_clones() {
         git_stdout(&repo_a.root, &["status", "--porcelain=v1"]),
         a_status_before
     );
+}
+
+#[tokio::test]
+async fn task_bound_system_a_merge_rejects_same_selector_worktree_from_wrong_clone() {
+    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let home = TempDir::new().expect("temp HOME");
+    let _home = HomeGuard::enter(home.path());
+
+    let repo_a = GitRepo::new();
+    let repo_b = GitRepo::new();
+    for repo in [&repo_a, &repo_b] {
+        run_git(
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:org/shared-system-a.git",
+            ],
+            &repo.root,
+        );
+    }
+    let cas_root_a = init_cas_dir(&repo_a.root).expect("init clone A CAS");
+    let cas_root_b = init_cas_dir(&repo_b.root).expect("init clone B CAS");
+
+    let selector = "remote:github.com/org/shared-system-a";
+    let known_repos = cas::store::known_repos::open_host_known_repo_store().unwrap();
+    known_repos
+        .bind(
+            selector,
+            &repo_b.root,
+            &repo_b.root.join(".git").canonicalize().unwrap(),
+        )
+        .unwrap();
+    drop(known_repos);
+
+    let wrong_path = cas_root_a.join("worktrees").join("wrong-alice");
+    repo_a.add_worktree(&wrong_path, "factory/alice");
+    std::fs::write(wrong_path.join("clone-a-only.txt"), "wrong clone").unwrap();
+    run_git(&["add", "clone-a-only.txt"], &wrong_path);
+    run_git(&["commit", "-m", "wrong clone work"], &wrong_path);
+
+    let intended_path = cas_root_b.join("worktrees").join("alice");
+    repo_b.add_worktree(&intended_path, "factory/alice");
+    std::fs::write(
+        intended_path.join("clone-b-only.txt"),
+        "declared clone work",
+    )
+    .unwrap();
+    run_git(&["add", "clone-b-only.txt"], &intended_path);
+    run_git(&["commit", "-m", "declared clone work"], &intended_path);
+
+    let worktree_store = open_worktree_store(&cas_root_a).expect("worktree store");
+    worktree_store.init().expect("initialize worktree store");
+    let worktree_id = "system-a-wrong-clone".to_string();
+    let wrong_worktree = Worktree::new(
+        worktree_id.clone(),
+        "factory/alice".to_string(),
+        "main".to_string(),
+        wrong_path.clone(),
+    );
+    worktree_store
+        .add(&wrong_worktree)
+        .expect("record wrong-clone System-A worktree");
+
+    let task_store = open_task_store(&cas_root_a).expect("task store");
+    let mut task = Task::new(
+        "same-selector-wrong-clone".to_string(),
+        "Reject wrong clone before merge".to_string(),
+    );
+    task.assignee = Some("alice".to_string());
+    task.worktree_id = Some(worktree_id.clone());
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: selector.to_string(),
+        target_branch: "main".to_string(),
+    });
+    task_store.add(&task).expect("add bound task");
+
+    let repo_snapshot = |repo: &Path| {
+        (
+            git_stdout(repo, &["rev-parse", "HEAD"]),
+            git_stdout(repo, &["write-tree"]),
+            git_stdout(repo, &["status", "--porcelain=v1"]),
+            git_stdout(repo, &["worktree", "list", "--porcelain"]),
+        )
+    };
+    let a_before = repo_snapshot(&repo_a.root);
+    let b_before = repo_snapshot(&repo_b.root);
+    let wrong_before = repo_snapshot(&wrong_path);
+    let intended_before = repo_snapshot(&intended_path);
+    let task_before = serde_json::to_value(task_store.get(&task.id).unwrap()).unwrap();
+    let worktree_before = serde_json::to_value(worktree_store.get(&worktree_id).unwrap()).unwrap();
+    assert!(
+        cas_store::get_latest_worker_delivery(&cas_root_a, &task.id)
+            .unwrap()
+            .is_none()
+    );
+
+    let svc = make_service(cas_root_a.clone());
+    let mut req = coord_req("worktree_merge");
+    req.id = Some(worktree_id.clone());
+    req.task_id = Some(task.id.clone());
+    req.allow_trunk = Some(true);
+    req.force = Some(true);
+    req.cleanup = Some(true);
+    let error = svc
+        .coordination(Parameters(req))
+        .await
+        .expect_err("same-selector wrong-clone worktree must fail closed")
+        .to_string();
+    assert!(
+        error.contains("WORKTREE REPOSITORY MISMATCH")
+            && error.contains("before merge/reachability checks"),
+        "wrong clone must be rejected at the identity boundary, got:\n{error}"
+    );
+
+    assert_eq!(repo_snapshot(&repo_a.root), a_before, "repo A changed");
+    assert_eq!(repo_snapshot(&repo_b.root), b_before, "repo B changed");
+    assert_eq!(
+        repo_snapshot(&wrong_path),
+        wrong_before,
+        "wrong-clone worker worktree changed"
+    );
+    assert_eq!(
+        repo_snapshot(&intended_path),
+        intended_before,
+        "declared-clone worker worktree changed"
+    );
+    assert!(wrong_path.exists());
+    assert!(intended_path.exists());
+    assert_eq!(
+        serde_json::to_value(task_store.get(&task.id).unwrap()).unwrap(),
+        task_before,
+        "task changed before rejection"
+    );
+    assert_eq!(
+        serde_json::to_value(worktree_store.get(&worktree_id).unwrap()).unwrap(),
+        worktree_before,
+        "System-A record changed before rejection"
+    );
+    assert!(
+        cas_store::get_latest_worker_delivery(&cas_root_a, &task.id)
+            .unwrap()
+            .is_none(),
+        "rejection created delivery state"
+    );
+    let portable = serde_json::to_string(&task_store.get(&task.id).unwrap().deliverables).unwrap();
+    assert!(!portable.contains(home.path().to_string_lossy().as_ref()));
+    assert!(!portable.contains("repo_root"));
+    assert!(!portable.contains("git_common_dir"));
 }
 
 #[tokio::test]

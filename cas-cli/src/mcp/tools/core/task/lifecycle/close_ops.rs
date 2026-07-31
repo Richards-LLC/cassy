@@ -1022,7 +1022,7 @@ impl CasCore {
                 ) =>
             {
                 if dispatch.deadline_at <= chrono::Utc::now() {
-                    cas_store::timeout_verification_dispatch(
+                    let timed_out = cas_store::timeout_verification_dispatch(
                         &self.cas_root,
                         &req.id,
                         chrono::Utc::now(),
@@ -1032,6 +1032,13 @@ impl CasCore {
                         message: Cow::from(format!(
                             "Failed to persist exact verification timeout: {error}"
                         )),
+                        data: None,
+                    })?
+                    .ok_or_else(|| McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(
+                            "Exact verification timeout changed before persistence; retry close.",
+                        ),
                         data: None,
                     })?;
                     let mut timed_out_task = task.clone();
@@ -1049,7 +1056,7 @@ impl CasCore {
                     let sup_ver = supervisor_verification_tool();
                     return Ok(Self::tool_error(format!(
                         "⚠️ VERIFICATION TIMED OUT\n\nTask {} exact dispatch {} requires named registered-supervisor recovery before close.\n\nRecord the direct recovery verdict with {sup_ver} action=add task_id={} dispatch_id={} status=approved summary=\"...\", then retry close.",
-                        req.id, dispatch.id, req.id, dispatch.id
+                        req.id, timed_out.id, req.id, timed_out.id
                     )));
                 }
                 return Ok(Self::tool_error(format!(
@@ -1661,14 +1668,25 @@ impl CasCore {
                     )
                     && dispatch.deadline_at <= now
                 {
-                    cas_store::timeout_verification_dispatch(&self.cas_root, &req.id, now)
-                        .map_err(|error| McpError {
-                            code: ErrorCode::INTERNAL_ERROR,
-                            message: Cow::from(format!(
-                                "Failed to persist verification timeout: {error}"
-                            )),
-                            data: None,
-                        })?;
+                    let timed_out = cas_store::timeout_verification_dispatch(
+                        &self.cas_root,
+                        &req.id,
+                        now,
+                    )
+                    .map_err(|error| McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!(
+                            "Failed to persist verification timeout: {error}"
+                        )),
+                        data: None,
+                    })?
+                    .ok_or_else(|| McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(
+                            "Exact verification timeout changed before persistence; retry close.",
+                        ),
+                        data: None,
+                    })?;
                     let mut task_to_update = task.clone();
                     task_to_update.pending_verification = false;
                     task_to_update.updated_at = now;
@@ -1687,7 +1705,7 @@ impl CasCore {
                             "Verification dispatch timed out: supervisor recovery required",
                         );
                     }
-                    let elapsed_mins = (now - dispatch.requested_at).num_seconds() / 60;
+                    let elapsed_mins = (now - timed_out.requested_at).num_seconds() / 60;
                     let sup_ver = supervisor_verification_tool();
                     return Ok(Self::tool_error(format!(
                         "⚠️ VERIFICATION TIMED OUT\n\n\
@@ -1695,7 +1713,7 @@ impl CasCore {
                          Only this task's dispatch was marked timed_out and its lease released.\n\n\
                          Recovery ({}): a registered supervisor must re-dispatch a task-verifier \
                          or record a direct verdict with {sup_ver}, then retry this task's close.",
-                        req.id, elapsed_mins, dispatch.id, dispatch.recovery_action
+                        req.id, elapsed_mins, timed_out.id, timed_out.recovery_action
                     )));
                 }
 

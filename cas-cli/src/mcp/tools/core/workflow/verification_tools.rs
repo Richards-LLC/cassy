@@ -183,16 +183,30 @@ impl CasCore {
                 });
             }
             if dispatch.deadline_at <= chrono::Utc::now() {
-                let _ = cas_store::timeout_verification_dispatch(
+                let timed_out = cas_store::timeout_verification_dispatch(
                     &self.cas_root,
                     &req.task_id,
                     chrono::Utc::now(),
-                );
+                )
+                .map_err(|_| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Verifier capability rejected: exact timeout transition could not be persisted; retry with current dispatch state.",
+                    ),
+                    data: None,
+                })?
+                .ok_or_else(|| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Verifier capability rejected: dispatch changed before exact timeout persistence; retry with current dispatch state.",
+                    ),
+                    data: None,
+                })?;
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(format!(
                         "Verifier capability rejected: exact dispatch {} expired and was marked timed_out; registered-supervisor recovery must name this dispatch.",
-                        dispatch.id
+                        timed_out.id
                     )),
                     data: None,
                 });
@@ -248,16 +262,30 @@ impl CasCore {
             if capability.expires_at <= chrono::Utc::now()
                 || dispatch.deadline_at <= chrono::Utc::now()
             {
-                let _ = cas_store::timeout_verification_dispatch(
+                let timed_out = cas_store::timeout_verification_dispatch(
                     &self.cas_root,
                     &req.task_id,
                     chrono::Utc::now(),
-                );
+                )
+                .map_err(|_| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Verifier handoff rejected: exact timeout transition could not be persisted; retry with current dispatch state.",
+                    ),
+                    data: None,
+                })?
+                .ok_or_else(|| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "Verifier handoff rejected: dispatch changed before exact timeout persistence; retry with current dispatch state.",
+                    ),
+                    data: None,
+                })?;
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(format!(
                         "Verifier handoff rejected: exact dispatch {} expired and was marked timed_out; registered-supervisor recovery must name this dispatch.",
-                        dispatch.id
+                        timed_out.id
                     )),
                     data: None,
                 });

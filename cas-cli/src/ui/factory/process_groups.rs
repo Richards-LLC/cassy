@@ -476,4 +476,60 @@ mod tests {
             "leaderless synthetic child must be terminated"
         );
     }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn reap_kills_leaderless_cas_named_child_holding_registry_file() {
+        use std::os::unix::process::CommandExt;
+        use std::process::Command;
+
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("cas.db");
+        fs::write(&db_path, b"sentinel").unwrap();
+        let child_pid_path = temp.path().join("cas-child.pid");
+        let script = format!(
+            "bash -c 'exec -a cas sleep 300' 9>>\"$DB_PATH\" & echo $! > '{}'; sleep 0.25",
+            child_pid_path.display()
+        );
+        let mut command = Command::new("bash");
+        command.args(["-c", &script]).env("DB_PATH", &db_path);
+        // SAFETY: isolate the synthetic worker lane from cargo's group.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut leader = command.spawn().unwrap();
+        let pgid = leader.id();
+        let record = track(temp.path(), "cas-worker", "dead-factory", pgid).unwrap();
+
+        assert!(leader.wait().unwrap().success());
+        let child_pid: u32 = fs::read_to_string(&child_pid_path)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let child_holds_db = fs::read_dir(format!("/proc/{child_pid}/fd"))
+            .unwrap()
+            .flatten()
+            .any(|fd| fs::read_link(fd.path()).is_ok_and(|target| target == db_path));
+        assert!(
+            child_holds_db,
+            "precondition: cas-named orphan must hold the registry file open"
+        );
+        assert!(is_live(&record));
+
+        assert_eq!(
+            reap(temp.path(), &record).await.unwrap(),
+            ReapOutcome::Reaped
+        );
+        assert!(
+            !crate::mcp::daemon::pid_alive(child_pid)
+                || process_state_and_group(child_pid).is_some_and(|(state, _)| state == 'Z'),
+            "worker teardown must kill a CAS child holding the registry"
+        );
+    }
 }

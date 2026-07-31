@@ -12,7 +12,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use cas::mcp::tools::{TaskCloseRequest, TaskUpdateRequest};
+use cas::mcp::tools::{
+    AgentRegisterRequest, SessionStartRequest, TaskCloseRequest, TaskUpdateRequest,
+    VerificationAddRequest,
+};
 use cas::mcp::{CasCore, CasService};
 use cas::store::{
     init_cas_dir, open_agent_store, open_task_store, open_verification_store, open_worktree_store,
@@ -3889,6 +3892,317 @@ async fn resolved_task_proof_freezes_scope_until_supervisor_starts_a_fresh_cycle
     let changed = task_store.get(&fresh.id).unwrap();
     assert_eq!(changed.acceptance_criteria, "second-cycle acceptance");
     assert_ne!(changed.status, TaskStatus::Closed);
+}
+
+#[tokio::test]
+async fn public_registration_cannot_mint_or_capture_supervisor_verification_authority() {
+    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let home = TempDir::new().expect("temp HOME");
+    let _home = HomeGuard::enter(home.path());
+    let cas_root = init_cas_dir(home.path()).expect("init CAS");
+    let agent_store = open_agent_store(&cas_root).expect("agent store");
+    let task_store = open_task_store(&cas_root).expect("task store");
+
+    let trusted_supervisor_id = "server-created-supervisor";
+    register_delivery_agent(
+        &cas_root,
+        trusted_supervisor_id,
+        "supervisor",
+        AgentRole::Supervisor,
+        "registration-authority-factory",
+    );
+    register_delivery_agent(
+        &cas_root,
+        "worker-owner",
+        "worker-owner",
+        AgentRole::Worker,
+        "registration-authority-factory",
+    );
+
+    let mut task = Task::new(
+        "cas-public-registration-proof".to_string(),
+        "Public registration cannot mint proof authority".to_string(),
+    );
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("worker-owner".to_string());
+    task.pending_verification = true;
+    task_store.add(&task).expect("task");
+    let dispatch = cas_store::create_verification_dispatch_bound(
+        &cas_root,
+        &task.id,
+        "worker-owner",
+        trusted_supervisor_id,
+        &cas_types::VerificationProofBoundary::task(),
+        chrono::Utc::now() + chrono::Duration::minutes(10),
+        false,
+    )
+    .expect("exact dispatch");
+
+    // A public caller controls request fields, display name, and its process
+    // environment. Registration may establish an ordinary session, but those
+    // hints must carry zero supervisor_direct authority.
+    let public = CasCore::with_daemon(cas_root.clone(), None, None);
+    {
+        let _role = VarGuard::set("CAS_AGENT_ROLE", "supervisor");
+        public
+            .cas_agent_register(Parameters(AgentRegisterRequest {
+                name: "supervisor".to_string(),
+                agent_type: "primary".to_string(),
+                session_id: Some("public-env-supervisor".to_string()),
+                parent_id: None,
+            }))
+            .await
+            .expect("ordinary public registration remains supported");
+    }
+    assert_eq!(
+        agent_store
+            .get("public-env-supervisor")
+            .expect("registered public agent")
+            .role,
+        AgentRole::Standard,
+        "environment and display-name hints cannot mint a supervisor row"
+    );
+
+    let before_denial = durable_close_snapshot(&cas_root);
+    let denied = public
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: task.id.clone(),
+            status: "approved".to_string(),
+            summary: "caller-controlled supervisor claim".to_string(),
+            confidence: None,
+            issues: None,
+            files_reviewed: None,
+            duration_ms: None,
+            verification_type: None,
+            verifier_capability: None,
+            dispatch_id: Some(dispatch.id.clone()),
+        }))
+        .await
+        .expect_err("publicly registered identity cannot verify directly");
+    assert!(denied.message.contains("authority rejected"));
+    assert_eq!(
+        durable_close_snapshot(&cas_root),
+        before_denial,
+        "denied public authority must not mutate task, dispatch, verdict, event, or queue state"
+    );
+
+    let mut session_task = Task::new(
+        "cas-public-session-start-proof".to_string(),
+        "Public session_start cannot mint proof authority".to_string(),
+    );
+    session_task.status = TaskStatus::InProgress;
+    session_task.assignee = Some("worker-owner".to_string());
+    session_task.pending_verification = true;
+    task_store.add(&session_task).expect("session task");
+    let session_dispatch = cas_store::create_verification_dispatch_bound(
+        &cas_root,
+        &session_task.id,
+        "worker-owner",
+        trusted_supervisor_id,
+        &cas_types::VerificationProofBoundary::task(),
+        chrono::Utc::now() + chrono::Duration::minutes(10),
+        false,
+    )
+    .expect("session exact dispatch");
+    let public_session = CasCore::with_daemon(cas_root.clone(), None, None);
+    {
+        let _role = VarGuard::set("CAS_AGENT_ROLE", "supervisor");
+        public_session
+            .cas_agent_session_start(Parameters(SessionStartRequest {
+                session_id: Some("public-session-env-supervisor".to_string()),
+                name: Some("supervisor".to_string()),
+                agent_type: Some("primary".to_string()),
+                parent_id: None,
+                permission_mode: None,
+                cwd: None,
+                limit: Some(1),
+            }))
+            .await
+            .expect("ordinary public session_start remains supported");
+    }
+    assert_eq!(
+        agent_store
+            .get("public-session-env-supervisor")
+            .expect("public session agent")
+            .role,
+        AgentRole::Standard,
+        "session_start environment/name hints cannot mint supervisor"
+    );
+    let before_session_denial = durable_close_snapshot(&cas_root);
+    public_session
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: session_task.id.clone(),
+            status: "approved".to_string(),
+            summary: "session_start supervisor spoof".to_string(),
+            confidence: None,
+            issues: None,
+            files_reviewed: None,
+            duration_ms: None,
+            verification_type: None,
+            verifier_capability: None,
+            dispatch_id: Some(session_dispatch.id.clone()),
+        }))
+        .await
+        .expect_err("public session_start identity cannot verify directly");
+    assert_eq!(
+        durable_close_snapshot(&cas_root),
+        before_session_denial,
+        "denied session_start spoof must not mutate proof state"
+    );
+
+    // An existing Worker row also cannot be elevated by ON CONFLICT
+    // re-registration, even with a privileged environment claim.
+    register_delivery_agent(
+        &cas_root,
+        "existing-worker-registration",
+        "worker",
+        AgentRole::Worker,
+        "registration-authority-factory",
+    );
+    let worker_reregister = CasCore::with_daemon(cas_root.clone(), None, None);
+    {
+        let _role = VarGuard::set("CAS_AGENT_ROLE", "supervisor");
+        worker_reregister
+            .cas_agent_register(Parameters(AgentRegisterRequest {
+                name: "supervisor".to_string(),
+                agent_type: "primary".to_string(),
+                session_id: Some("existing-worker-registration".to_string()),
+                parent_id: None,
+            }))
+            .await
+            .expect("worker re-registration is idempotent");
+    }
+    let worker = agent_store
+        .get("existing-worker-registration")
+        .expect("worker remains registered");
+    assert_eq!(worker.role, AgentRole::Worker);
+    assert_eq!(worker.agent_type, AgentType::Worker);
+    let mut worker_task = Task::new(
+        "cas-worker-reregister-proof".to_string(),
+        "Worker re-registration cannot mint proof authority".to_string(),
+    );
+    worker_task.status = TaskStatus::InProgress;
+    worker_task.assignee = Some("worker-owner".to_string());
+    worker_task.pending_verification = true;
+    task_store.add(&worker_task).expect("worker proof task");
+    let worker_dispatch = cas_store::create_verification_dispatch_bound(
+        &cas_root,
+        &worker_task.id,
+        "worker-owner",
+        trusted_supervisor_id,
+        &cas_types::VerificationProofBoundary::task(),
+        chrono::Utc::now() + chrono::Duration::minutes(10),
+        false,
+    )
+    .expect("worker exact dispatch");
+    let before_worker_denial = durable_close_snapshot(&cas_root);
+    worker_reregister
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: worker_task.id.clone(),
+            status: "approved".to_string(),
+            summary: "worker re-registration supervisor spoof".to_string(),
+            confidence: None,
+            issues: None,
+            files_reviewed: None,
+            duration_ms: None,
+            verification_type: None,
+            verifier_capability: None,
+            dispatch_id: Some(worker_dispatch.id.clone()),
+        }))
+        .await
+        .expect_err("re-registered worker cannot verify directly");
+    assert_eq!(
+        durable_close_snapshot(&cas_root),
+        before_worker_denial,
+        "denied worker upgrade must not mutate proof state"
+    );
+
+    // Explicit privileged request claims fail before any row can be created.
+    let explicit_register = CasCore::with_daemon(cas_root.clone(), None, None);
+    let error = explicit_register
+        .cas_agent_register(Parameters(AgentRegisterRequest {
+            name: "supervisor".to_string(),
+            agent_type: "supervisor".to_string(),
+            session_id: Some("explicit-public-supervisor".to_string()),
+            parent_id: None,
+        }))
+        .await
+        .expect_err("public supervisor role claim must be rejected");
+    assert!(
+        error
+            .message
+            .contains("cannot request supervisor or director")
+    );
+    assert!(agent_store.get("explicit-public-supervisor").is_err());
+
+    let explicit_session = CasCore::with_daemon(cas_root.clone(), None, None);
+    let error = explicit_session
+        .cas_agent_session_start(Parameters(SessionStartRequest {
+            session_id: Some("explicit-public-director".to_string()),
+            name: Some("director".to_string()),
+            agent_type: Some("director".to_string()),
+            parent_id: None,
+            permission_mode: None,
+            cwd: None,
+            limit: None,
+        }))
+        .await
+        .expect_err("public director role claim must be rejected");
+    assert!(
+        error
+            .message
+            .contains("cannot request supervisor or director")
+    );
+    assert!(agent_store.get("explicit-public-director").is_err());
+
+    // Public attachment to a pre-existing privileged row is not an
+    // authentication mechanism and must be rejected without role drift.
+    let impersonator = CasCore::with_daemon(cas_root.clone(), None, None);
+    impersonator
+        .cas_agent_register(Parameters(AgentRegisterRequest {
+            name: "supervisor".to_string(),
+            agent_type: "primary".to_string(),
+            session_id: Some(trusted_supervisor_id.to_string()),
+            parent_id: None,
+        }))
+        .await
+        .expect_err("public caller cannot capture a privileged durable row");
+    assert_eq!(
+        agent_store
+            .get(trusted_supervisor_id)
+            .expect("trusted supervisor")
+            .role,
+        AgentRole::Supervisor
+    );
+
+    // The independently server-bound supervisor can still recover the exact
+    // dispatch denied above.
+    let trusted = delivery_service(&cas_root, trusted_supervisor_id);
+    trusted
+        .verification(Parameters(verification_req(serde_json::json!({
+            "action": "add",
+            "task_id": task.id,
+            "status": "approved",
+            "summary": "server-authenticated supervisor recovery",
+            "dispatch_id": dispatch.id,
+        }))))
+        .await
+        .expect("server-created supervisor retains exact recovery");
+    assert_eq!(
+        cas_store::get_verification_dispatch(&cas_root, &dispatch.id)
+            .unwrap()
+            .state,
+        cas_types::VerificationDispatchState::Resolved
+    );
+    let verification = open_verification_store(&cas_root)
+        .unwrap()
+        .get_latest_for_task(&task.id)
+        .unwrap()
+        .expect("trusted supervisor verdict");
+    assert_eq!(
+        verification.provenance,
+        cas_types::VerificationProvenance::SupervisorDirect
+    );
 }
 
 #[tokio::test]

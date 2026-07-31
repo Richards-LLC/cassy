@@ -73,6 +73,18 @@ impl FactoryTestEnv {
         }
     }
 
+    /// Build a service whose privileged role was registered independently of
+    /// caller-controlled environment/request hints.
+    fn with_server_supervisor() -> Self {
+        let env = Self::with_agent_id("test-supervisor-id");
+        let mut supervisor = Agent::new("test-supervisor-id".to_string(), "supervisor".to_string());
+        supervisor.role = AgentRole::Supervisor;
+        env.agent_store()
+            .register(&supervisor)
+            .expect("register server-created supervisor");
+        env
+    }
+
     fn create_epic(&self, title: &str) -> String {
         let store = self.task_store();
         let id = store.generate_id().expect("generate_id");
@@ -2388,7 +2400,7 @@ async fn test_126b_target_awaiting_merge_reclose_urgent_does_not_halt() {
         // No factory session → halt fan-out is unfiltered (worker in scope).
         ("CAS_FACTORY_SESSION", None),
     ]);
-    let env = FactoryTestEnv::new();
+    let env = FactoryTestEnv::with_server_supervisor();
     env.register_worker("swift-fox");
     let task_id = env.create_awaiting_merge_task("parked work", "swift-fox");
 
@@ -2424,7 +2436,7 @@ async fn test_126b_other_workers_task_does_not_exempt_target() {
         ("CAS_AGENT_NAME", Some("supervisor")),
         ("CAS_FACTORY_SESSION", None),
     ]);
-    let env = FactoryTestEnv::new();
+    let env = FactoryTestEnv::with_server_supervisor();
     env.register_worker("swift-fox"); // target B
     env.register_worker("brave-otter"); // owner A
     // Parked task belongs to A, not to the target B.
@@ -2451,7 +2463,7 @@ async fn test_126b_ordinary_urgent_still_halts_even_with_parked_task() {
         ("CAS_AGENT_NAME", Some("supervisor")),
         ("CAS_FACTORY_SESSION", None),
     ]);
-    let env = FactoryTestEnv::new();
+    let env = FactoryTestEnv::with_server_supervisor();
     env.register_worker("swift-fox");
     let _parked = env.create_awaiting_merge_task("parked work", "swift-fox");
 
@@ -2481,7 +2493,7 @@ async fn test_126b_close_guidance_without_target_awaiting_task_fails_closed_to_h
         ("CAS_AGENT_NAME", Some("supervisor")),
         ("CAS_FACTORY_SESSION", None),
     ]);
-    let env = FactoryTestEnv::new();
+    let env = FactoryTestEnv::with_server_supervisor();
     env.register_worker("swift-fox");
     // No AwaitingMerge task exists for swift-fox (store returns none → no
     // positive evidence; identical safe outcome to a store read error).

@@ -45,8 +45,8 @@ pub(crate) fn register_agent_with_conn(conn: &Connection, agent: &Agent) -> Resu
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 0)
          ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
-            agent_type = excluded.agent_type,
-            role = excluded.role,
+            agent_type = agents.agent_type,
+            role = agents.role,
             status = excluded.status,
             pid = excluded.pid,
             ppid = excluded.ppid,

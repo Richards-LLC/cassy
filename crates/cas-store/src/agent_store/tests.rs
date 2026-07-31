@@ -1,6 +1,6 @@
 use crate::AgentStore;
 use crate::agent_store::SqliteAgentStore;
-use cas_types::{Agent, AgentStatus, ClaimResult};
+use cas_types::{Agent, AgentRole, AgentStatus, AgentType, ClaimResult};
 use chrono::{Duration, Utc};
 use rusqlite::params;
 use tempfile::TempDir;
@@ -1089,6 +1089,28 @@ fn test_re_registration_preserves_startup_confirmed() {
     assert!(
         failed.is_empty(),
         "Confirmed agent must not appear as failed startup after re-registration"
+    );
+}
+
+#[test]
+fn test_re_registration_preserves_role_and_agent_type_authority() {
+    let (_temp, store) = create_test_store();
+    let mut worker = Agent::new("agent-authority".to_string(), "worker".to_string());
+    worker.role = AgentRole::Worker;
+    worker.agent_type = AgentType::Worker;
+    store.register(&worker).unwrap();
+
+    let mut forged = Agent::new("agent-authority".to_string(), "supervisor".to_string());
+    forged.role = AgentRole::Supervisor;
+    forged.agent_type = AgentType::Primary;
+    store.register(&forged).unwrap();
+
+    let persisted = store.get("agent-authority").unwrap();
+    assert_eq!(persisted.role, AgentRole::Worker);
+    assert_eq!(persisted.agent_type, AgentType::Worker);
+    assert_eq!(
+        persisted.name, "supervisor",
+        "non-authority metadata still refreshes"
     );
 }
 

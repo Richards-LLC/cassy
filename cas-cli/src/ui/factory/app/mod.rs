@@ -13,7 +13,7 @@ use ratatui::layout::Rect;
 use super::director::{
     DiffLine, DirectorData, DirectorEvent, DirectorEventDetector, DirectorStores,
     MergeAlertFreshness, PanelAreas, Prompt, SidecarFocus, ViewMode, check_merge_alert_freshness,
-    generate_prompt, revalidate_event_for_delivery_with_context,
+    generate_prompt, prompt_is_still_deliverable, revalidate_event_for_delivery_with_context,
     revalidate_event_for_delivery_with_focus,
 };
 use crate::store::open_prompt_queue_store;
@@ -882,6 +882,18 @@ impl FactoryApp {
             self.director_stores.as_ref(),
         )
         .unwrap_or_else(|_| self.unfiltered_director_data.clone())
+    }
+
+    /// Re-check a taskless WorkerIdle prompt at the narrowest point before
+    /// transport injection. Batch revalidation happens earlier in the tick;
+    /// an assignment may land after that snapshot and before this prompt's
+    /// turn in the delivery loop.
+    pub(crate) fn prompt_is_still_deliverable(&self, prompt: &Prompt) -> bool {
+        if prompt.drop_if_worker_assigned.is_none() {
+            return true;
+        }
+        let data = self.load_unfiltered_director_data_for_delivery();
+        prompt_is_still_deliverable(prompt, &data)
     }
 
     /// Refresh CAS data from stores and detect state changes

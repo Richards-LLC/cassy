@@ -8,24 +8,33 @@
 use assert_cmd::Command;
 use cas_tui_test::{PtyRunner, PtyRunnerConfig, WaitExt, screen};
 use predicates::prelude::*;
+use std::path::Path;
 use std::time::Duration;
 use tempfile::TempDir;
 
-fn cas_cmd() -> Command {
+fn cas_cmd(dir: &Path) -> Command {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cas"));
+    let home = dir.join(".test-home");
+    let xdg = dir.join(".test-xdg-config");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&xdg).unwrap();
+    if let Some(host_home) = std::env::var_os("HOME") {
+        cmd.env("CAS_TEST_PROTECTED_HOME", host_home);
+    }
+    cmd.env("HOME", home).env("XDG_CONFIG_HOME", xdg);
     cmd.env_remove("CAS_ROOT");
     cmd.env("CAS_SKIP_FACTORY_TOOLING", "1");
     cmd
 }
 
 fn cas_in_dir(dir: &TempDir) -> Command {
-    let mut cmd = cas_cmd();
+    let mut cmd = cas_cmd(dir.path());
     cmd.current_dir(dir);
     cmd
 }
 
 fn init_cas(dir: &TempDir) {
-    cas_cmd()
+    cas_cmd(dir.path())
         .current_dir(dir)
         .args(["init", "--yes"])
         .assert()
@@ -130,7 +139,8 @@ fn doctor_piped_content() {
 
 #[test]
 fn version_piped_no_ansi() {
-    let output = cas_cmd()
+    let temp = TempDir::new().unwrap();
+    let output = cas_cmd(temp.path())
         .arg("--version")
         .output()
         .expect("failed to run cas --version");
@@ -148,7 +158,8 @@ fn version_piped_no_ansi() {
 
 #[test]
 fn help_piped_no_ansi() {
-    let output = cas_cmd()
+    let temp = TempDir::new().unwrap();
+    let output = cas_cmd(temp.path())
         .arg("--help")
         .output()
         .expect("failed to run cas --help");
@@ -209,10 +220,19 @@ fn cas_bin_path() -> String {
 
 fn pty_cas_in_dir(dir: &TempDir, args: &[&str]) -> PtyRunner {
     let bin = cas_bin_path();
-    let config = PtyRunnerConfig::with_size(80, 24)
+    let home = dir.path().join(".test-home");
+    let xdg = dir.path().join(".test-xdg-config");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&xdg).unwrap();
+    let mut config = PtyRunnerConfig::with_size(80, 24)
+        .env("HOME", home.to_string_lossy())
+        .env("XDG_CONFIG_HOME", xdg.to_string_lossy())
         .env("CAS_SKIP_FACTORY_TOOLING", "1")
         .env_remove("CAS_ROOT")
         .cwd(dir.path());
+    if let Some(host_home) = std::env::var_os("HOME") {
+        config = config.env("CAS_TEST_PROTECTED_HOME", host_home.to_string_lossy());
+    }
     let mut runner = PtyRunner::with_config(config);
     runner.spawn(&bin, args).unwrap();
     runner

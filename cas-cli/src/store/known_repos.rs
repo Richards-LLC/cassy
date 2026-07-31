@@ -34,9 +34,16 @@ use crate::store::{KnownRepoStore, SqliteKnownRepoStore};
 /// the current directory if the user's home directory cannot be determined,
 /// which should only happen in severely sandboxed test environments.
 pub fn host_cas_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".cas")
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    if let Some(protected_home) = std::env::var_os("CAS_TEST_PROTECTED_HOME")
+        && home == PathBuf::from(&protected_home)
+    {
+        panic!(
+            "test subprocess resolved the protected host HOME at {}; configure the spawned cas command with an isolated HOME",
+            home.display()
+        );
+    }
+    home.join(".cas")
 }
 
 /// Install the known-repo registry and host-local binding schemas on

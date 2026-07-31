@@ -19,6 +19,14 @@ const C496_SESSION: &str = "c496-0000-test-session-0000-000000000001";
 /// Factory variables are removed so each test controls its own environment.
 fn cas_cmd(dir: &TempDir) -> Command {
     let mut cmd = Command::cargo_bin("cas").expect("cas binary must be built");
+    let home = dir.path().join(".test-home");
+    let xdg = dir.path().join(".test-xdg-config");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&xdg).unwrap();
+    if let Some(host_home) = std::env::var_os("HOME") {
+        cmd.env("CAS_TEST_PROTECTED_HOME", host_home);
+    }
+    cmd.env("HOME", home).env("XDG_CONFIG_HOME", xdg);
     cmd.current_dir(dir.path());
     // Prevent parent factory-worker env from leaking into test subprocesses.
     cmd.env_remove("CAS_ROOT");

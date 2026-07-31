@@ -22,6 +22,7 @@ impl CasInstance {
     /// Create a new CAS command configured for this instance
     pub fn cas_cmd(&self) -> Command {
         let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cas"));
+        configure_isolated_home(&mut cmd, self.temp_dir.path());
         cmd.current_dir(self.temp_dir.path());
         cmd.env("CAS_DIR", &self.cas_dir);
         // Clear CAS_ROOT to prevent env pollution from parent shell
@@ -249,6 +250,7 @@ pub fn new_cas_instance() -> CasInstance {
 
     // Initialize CAS (this now runs migrations automatically)
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cas"));
+    configure_isolated_home(&mut cmd, temp_dir.path());
     cmd.current_dir(temp_dir.path());
     // Clear CAS_ROOT to prevent env pollution from parent shell
     cmd.env_remove("CAS_ROOT");
@@ -262,6 +264,17 @@ pub fn new_cas_instance() -> CasInstance {
     );
 
     CasInstance { temp_dir, cas_dir }
+}
+
+fn configure_isolated_home(cmd: &mut Command, root: &std::path::Path) {
+    let home = root.join(".test-home");
+    let xdg = root.join(".test-xdg-config");
+    std::fs::create_dir_all(&home).expect("create isolated test HOME");
+    std::fs::create_dir_all(&xdg).expect("create isolated test XDG_CONFIG_HOME");
+    if let Some(host_home) = std::env::var_os("HOME") {
+        cmd.env("CAS_TEST_PROTECTED_HOME", host_home);
+    }
+    cmd.env("HOME", home).env("XDG_CONFIG_HOME", xdg);
 }
 
 /// Create a CAS instance with sample data preloaded

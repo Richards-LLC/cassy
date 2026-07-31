@@ -7,6 +7,20 @@ use sha2::{Digest, Sha256};
 const UPSTREAM_PREFIX: &str = "upstream-";
 const TOOL_PREFIX: &str = "tool-";
 
+/// Resolution of one public upstream identifier against a complete config.
+///
+/// Raw names are returned only to the internal caller and must never be
+/// rendered in public output or errors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublicUpstreamIdResolution {
+    Found {
+        raw_name: String,
+        public_name: String,
+    },
+    NotFound,
+    Ambiguous,
+}
+
 /// Project one configured upstream name into a bounded public identity.
 ///
 /// Simple operator names remain readable. Names that could carry paths, URLs,
@@ -27,6 +41,33 @@ pub fn public_upstream_ids<'a>(
     names: impl IntoIterator<Item = &'a str>,
 ) -> BTreeMap<String, String> {
     public_ids(names, UPSTREAM_PREFIX, 64, false)
+}
+
+/// Resolve a displayed upstream identity through the same collision-aware
+/// projection used by list, catalog, and health surfaces.
+pub fn resolve_public_upstream_id<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+    requested: &str,
+) -> PublicUpstreamIdResolution {
+    let mut matches = public_upstream_ids(names)
+        .into_iter()
+        .filter(|(_, public)| public == requested);
+    let Some((raw_name, public_name)) = matches.next() else {
+        return PublicUpstreamIdResolution::NotFound;
+    };
+    if matches.next().is_some() {
+        return PublicUpstreamIdResolution::Ambiguous;
+    }
+    PublicUpstreamIdResolution::Found {
+        raw_name,
+        public_name,
+    }
+}
+
+/// Whether a request occupies CAS's generated public upstream namespace.
+/// Unresolved values in this namespace must not be persisted as new raw keys.
+pub fn is_generated_public_upstream_id(name: &str) -> bool {
+    is_generated_public_id(name, UPSTREAM_PREFIX) || name.starts_with("upstream-collision-")
 }
 
 /// Project a complete tool-name set and deterministically disambiguate any
@@ -233,5 +274,35 @@ mod tests {
                 .collect::<Vec<_>>(),
             first.values().cloned().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn resolver_uses_complete_collision_aware_projection_and_reserves_generated_ids() {
+        let unsafe_name = "https://token@example.invalid/private";
+        let forged_base = public_upstream_id(unsafe_name);
+        let projected = public_upstream_ids([unsafe_name, forged_base.as_str()]);
+
+        for raw in [unsafe_name, forged_base.as_str()] {
+            assert_eq!(
+                resolve_public_upstream_id(
+                    [unsafe_name, forged_base.as_str()],
+                    projected[raw].as_str()
+                ),
+                PublicUpstreamIdResolution::Found {
+                    raw_name: raw.to_string(),
+                    public_name: projected[raw].clone(),
+                }
+            );
+        }
+        assert_eq!(
+            resolve_public_upstream_id([unsafe_name, forged_base.as_str()], &forged_base),
+            PublicUpstreamIdResolution::NotFound
+        );
+        assert!(is_generated_public_upstream_id(&forged_base));
+        assert!(is_generated_public_upstream_id(&format!(
+            "upstream-disambiguated-{}",
+            "a".repeat(64)
+        )));
+        assert!(!is_generated_public_upstream_id("safe-server"));
     }
 }

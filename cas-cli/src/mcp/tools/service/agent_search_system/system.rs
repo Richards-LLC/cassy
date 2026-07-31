@@ -327,8 +327,34 @@ impl CasService {
             )
         })?;
 
-        let is_update = config.servers.contains_key(&name);
-        config.add_server(name.clone(), server_config);
+        let (raw_name, is_update) = match cas_types::resolve_public_upstream_id(
+            config.servers.keys().map(String::as_str),
+            &name,
+        ) {
+            cas_types::PublicUpstreamIdResolution::Found { raw_name, .. } => (raw_name, true),
+            cas_types::PublicUpstreamIdResolution::NotFound
+                if config.servers.contains_key(&name)
+                    && !cas_types::is_generated_public_upstream_id(&name) =>
+            {
+                (name, true)
+            }
+            cas_types::PublicUpstreamIdResolution::NotFound
+                if cas_types::is_generated_public_upstream_id(&name) =>
+            {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "Server identifier was not found; run proxy_list again",
+                ));
+            }
+            cas_types::PublicUpstreamIdResolution::NotFound => (name, false),
+            cas_types::PublicUpstreamIdResolution::Ambiguous => {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "Server identifier is ambiguous; run proxy_list again",
+                ));
+            }
+        };
+        config.add_server(raw_name.clone(), server_config);
         config.save_to(&proxy_path).map_err(|e| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
@@ -337,7 +363,14 @@ impl CasService {
         })?;
 
         let verb = if is_update { "Updated" } else { "Added" };
-        let public_name = cas_types::public_upstream_id(&name);
+        let public_name = cas_types::public_upstream_ids(config.servers.keys().map(String::as_str))
+            .remove(&raw_name)
+            .ok_or_else(|| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    "Updated server is missing from the public identity projection",
+                )
+            })?;
         Ok(Self::success(format!(
             "{verb} MCP server '{public_name}' ({transport} transport). Restart `cas serve` to connect."
         )))
@@ -365,12 +398,41 @@ impl CasService {
             )
         })?;
 
-        let public_name = cas_types::public_upstream_id(&name);
-        if !config.remove_server(&name) {
-            return Ok(Self::success(format!(
-                "Server '{public_name}' not found in proxy config"
-            )));
-        }
+        let public_names =
+            cas_types::public_upstream_ids(config.servers.keys().map(String::as_str));
+        let resolved = match cas_types::resolve_public_upstream_id(
+            config.servers.keys().map(String::as_str),
+            &name,
+        ) {
+            cas_types::PublicUpstreamIdResolution::Found {
+                raw_name,
+                public_name,
+            } => Some((raw_name, public_name)),
+            cas_types::PublicUpstreamIdResolution::NotFound
+                if config.servers.contains_key(&name)
+                    && !cas_types::is_generated_public_upstream_id(&name) =>
+            {
+                Some((
+                    name.clone(),
+                    public_names
+                        .get(&name)
+                        .cloned()
+                        .unwrap_or_else(|| cas_types::public_upstream_id(&name)),
+                ))
+            }
+            cas_types::PublicUpstreamIdResolution::NotFound => None,
+            cas_types::PublicUpstreamIdResolution::Ambiguous => {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "Server identifier is ambiguous; run proxy_list again",
+                ));
+            }
+        };
+        let Some((raw_name, public_name)) = resolved else {
+            return Ok(Self::success("Server identifier not found in proxy config"));
+        };
+
+        debug_assert!(config.remove_server(&raw_name));
 
         config.save_to(&proxy_path).map_err(|e| {
             Self::error(

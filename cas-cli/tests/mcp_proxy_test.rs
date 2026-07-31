@@ -236,6 +236,133 @@ fn config_add_remove_overwrite() {
     assert!(final_config.servers.is_empty());
 }
 
+fn run_json_mcp(sandbox: &CasSandbox, args: &[&str]) -> std::process::Output {
+    sandbox
+        .command()
+        .arg("--json")
+        .arg("mcp")
+        .args(args)
+        .output()
+        .expect("run cas mcp command")
+}
+
+fn combined_output(output: &std::process::Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+#[test]
+fn cli_list_identifiers_update_and_remove_the_exact_raw_server_across_restarts() {
+    let sandbox = CasSandbox::new();
+    let proxy_path = sandbox.cas_root().join("proxy.toml");
+    let unsafe_name = "https://user:secret@example.invalid/private\n## unsafe";
+    let safe_name = "safe-server";
+    let mut config = Config::default();
+    for name in [unsafe_name, safe_name] {
+        config.add_server(
+            name.to_string(),
+            ServerConfig::Stdio {
+                command: "before".to_string(),
+                args: Vec::new(),
+                env: HashMap::new(),
+            },
+        );
+    }
+    config.save_to(&proxy_path).unwrap();
+
+    let public_names = cas_types::public_upstream_ids(config.servers.keys().map(String::as_str));
+    let unsafe_public = public_names[unsafe_name].clone();
+
+    let listed = run_json_mcp(&sandbox, &["list"]);
+    assert!(listed.status.success(), "{}", combined_output(&listed));
+    let listed_text = combined_output(&listed);
+    assert!(listed_text.contains(&unsafe_public));
+    assert!(listed_text.contains(safe_name));
+    assert!(!listed_text.contains(unsafe_name));
+
+    for (requested, raw) in [
+        (unsafe_public.as_str(), unsafe_name),
+        (safe_name, safe_name),
+    ] {
+        let updated = run_json_mcp(&sandbox, &["add", requested, "--", "after"]);
+        assert!(updated.status.success(), "{}", combined_output(&updated));
+        let updated_text = combined_output(&updated);
+        assert!(!updated_text.contains(unsafe_name));
+        let persisted = Config::load_from(&proxy_path).unwrap();
+        assert_eq!(
+            persisted.servers.len(),
+            2,
+            "update must not add an alias row"
+        );
+        assert!(matches!(
+            persisted.servers.get(raw),
+            Some(ServerConfig::Stdio { command, .. }) if command == "after"
+        ));
+    }
+
+    let restarted_list = run_json_mcp(&sandbox, &["list"]);
+    assert!(restarted_list.status.success());
+    let restarted_text = combined_output(&restarted_list);
+    assert!(restarted_text.contains(&unsafe_public));
+    assert!(!restarted_text.contains(unsafe_name));
+
+    for requested in [unsafe_public.as_str(), safe_name] {
+        let removed = run_json_mcp(&sandbox, &["remove", requested]);
+        assert!(removed.status.success(), "{}", combined_output(&removed));
+        assert!(!combined_output(&removed).contains(unsafe_name));
+    }
+    assert!(Config::load_from(&proxy_path).unwrap().servers.is_empty());
+}
+
+#[test]
+fn cli_collision_and_forged_identifiers_fail_closed_without_raw_name_echo() {
+    let sandbox = CasSandbox::new();
+    let proxy_path = sandbox.cas_root().join("proxy.toml");
+    let unsafe_name = "https://token@example.invalid/private";
+    let forged_base = cas_types::public_upstream_id(unsafe_name);
+    let mut config = Config::default();
+    for name in [unsafe_name, forged_base.as_str()] {
+        config.add_server(
+            name.to_string(),
+            ServerConfig::Stdio {
+                command: "before".to_string(),
+                args: Vec::new(),
+                env: HashMap::new(),
+            },
+        );
+    }
+    config.save_to(&proxy_path).unwrap();
+    let projected = cas_types::public_upstream_ids(config.servers.keys().map(String::as_str));
+    assert_ne!(projected[unsafe_name], forged_base);
+    assert_ne!(projected[&forged_base], forged_base);
+
+    let stale_or_forged = run_json_mcp(&sandbox, &["remove", &forged_base]);
+    assert!(stale_or_forged.status.success());
+    let response = combined_output(&stale_or_forged);
+    assert!(!response.contains(unsafe_name));
+    assert_eq!(Config::load_from(&proxy_path).unwrap(), config);
+
+    let absent_generated = format!("upstream-{}", "f".repeat(32));
+    let absent_update = run_json_mcp(&sandbox, &["add", &absent_generated, "--", "after"]);
+    assert!(!absent_update.status.success());
+    assert!(!combined_output(&absent_update).contains(unsafe_name));
+    assert_eq!(Config::load_from(&proxy_path).unwrap(), config);
+
+    for raw in [unsafe_name, forged_base.as_str()] {
+        let current = Config::load_from(&proxy_path).unwrap();
+        let current_projected =
+            cas_types::public_upstream_ids(current.servers.keys().map(String::as_str));
+        let requested = &current_projected[raw];
+        let removed = run_json_mcp(&sandbox, &["remove", requested]);
+        assert!(removed.status.success(), "{}", combined_output(&removed));
+        assert!(!combined_output(&removed).contains(unsafe_name));
+    }
+    assert!(Config::load_from(&proxy_path).unwrap().servers.is_empty());
+}
+
 #[test]
 fn config_load_missing_returns_empty() {
     let config = Config::load_from(Path::new("/tmp/nonexistent-cas-test/proxy.toml")).unwrap();

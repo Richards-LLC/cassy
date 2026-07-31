@@ -2734,6 +2734,32 @@ async fn test_real_factory_codex_worker_can_message_supervisor_alias() {
     assert_eq!(prompts[0].target, "cosmic-bear-43");
 }
 
+#[tokio::test]
+async fn test_worker_unresolvable_message_target_fails_without_enqueue() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "worker"),
+        ("CAS_AGENT_NAME", "swift-fox"),
+        ("CAS_SUPERVISOR_NAME", "cosmic-bear-43"),
+    ]);
+    let env = FactoryTestEnv::new();
+    env.register_supervisor("cosmic-bear-43");
+
+    let request = coord_msg("message", "typo-supervisor", "must not queue", None);
+    let error = env
+        .service
+        .coordination(Parameters(request))
+        .await
+        .expect_err("unresolvable worker target must fail at call time");
+    assert!(
+        error.message.contains("Workers can only message their supervisor"),
+        "unexpected error: {error:?}"
+    );
+    assert!(
+        env.prompt_queue().peek_all(10).expect("peek").is_empty(),
+        "failed sends must not leave a queued row"
+    );
+}
+
 /// cas-c061: exact-content dedup is an observable send outcome. Reusing the
 /// existing row ID must not be reported as a newly queued message.
 #[tokio::test]

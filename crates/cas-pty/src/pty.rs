@@ -576,7 +576,14 @@ impl PtyConfig {
         // integrated for the Codex harness (no .codex/config.toml). Must precede
         // the developer_instructions block but order among `-c` flags is
         // irrelevant to Codex.
-        push_codex_mcp_server_args(&mut args, &session_id, name, role, cas_root);
+        push_codex_mcp_server_args(
+            &mut args,
+            &session_id,
+            name,
+            role,
+            cas_root,
+            supervisor_name,
+        );
 
         if let Some(m) = model {
             args.push("--model".to_string());
@@ -854,6 +861,7 @@ fn push_codex_mcp_server_args(
     name: &str,
     role: &str,
     cas_root: Option<&PathBuf>,
+    supervisor_name: Option<&str>,
 ) {
     // cas-8c80: Codex 0.146's interactive code-mode catalog does not project
     // spawn-injected MCP servers into its nested `exec` tool catalog. Keep code
@@ -908,6 +916,16 @@ fn push_codex_mcp_server_args(
     args.push(format!("mcp_servers.cs.env.CAS_AGENT_NAME=\"{name}\""));
     args.push("-c".to_string());
     args.push(format!("mcp_servers.cs.env.CAS_AGENT_ROLE=\"{role}\""));
+    // cas-ae2f: Codex does not inherit the pane's arbitrary process env into
+    // its MCP subprocess. The factory spawner already supplies the owning
+    // supervisor name to worker PtyConfig; mirror that trusted spawn datum
+    // into `cs` so the documented logical `target=supervisor` route resolves.
+    if let Some(supervisor_name) = supervisor_name {
+        args.push("-c".to_string());
+        args.push(format!(
+            "mcp_servers.cs.env.CAS_SUPERVISOR_NAME=\"{supervisor_name}\""
+        ));
+    }
     // cas-8aaf: inject factory context env vars so the `cs` MCP server
     // knows it is running inside a factory session. Without these, the server
     // process has CAS_AGENT_ROLE=worker but lacks CAS_FACTORY_MODE. Two

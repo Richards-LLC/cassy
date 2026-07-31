@@ -10,6 +10,123 @@ use std::str::FromStr;
 
 use crate::error::TypeError;
 
+const VERIFIER_SUMMARY_MAX_BYTES: usize = 4_096;
+const VERIFIER_ISSUE_FILE_MAX_BYTES: usize = 512;
+const VERIFIER_ISSUE_CATEGORY_MAX_BYTES: usize = 128;
+const VERIFIER_ISSUE_TEXT_MAX_BYTES: usize = 4_096;
+const VERIFIER_FILES_REVIEWED_MAX: usize = 256;
+const VERIFIER_ISSUES_MAX: usize = 128;
+const REDACTED_VERIFIER_SECRET: &str = "[REDACTED_SECRET]";
+const REDACTED_VERIFIER_PATH: &str = "[REDACTED_PATH]";
+const REDACTED_VERIFIER_CONTROL: &str = "[REDACTED_CONTROL]";
+const TRUNCATED_VERIFIER_TEXT: &str = "[TRUNCATED]";
+
+fn verifier_text_contains_secret(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    if [
+        "-----begin private key",
+        "-----begin rsa private key",
+        "-----begin ec private key",
+        "authorization:",
+        "bearer ",
+        "token=",
+        "access_token=",
+        "password=",
+        "secret=",
+        "client_secret=",
+        "api_key=",
+        "apikey=",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        return true;
+    }
+
+    if [
+        "vcap-",
+        "sk-",
+        "ghp_",
+        "gho_",
+        "github_pat_",
+        "glpat-",
+        "xoxb-",
+        "xoxp-",
+        "xoxa-",
+        "aiza",
+    ]
+    .iter()
+    .any(|prefix| {
+        lower.match_indices(prefix).any(|(index, _)| {
+            index == 0
+                || lower[..index]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|ch| !ch.is_ascii_alphanumeric() && ch != '_')
+        })
+    }) {
+        return true;
+    }
+
+    value.split_whitespace().any(|token| {
+        let token = token.trim_matches(|ch: char| !ch.is_ascii_alphanumeric());
+        token.len() >= 16 && token.to_ascii_uppercase().starts_with("AKIA")
+    })
+}
+
+fn verifier_text_contains_absolute_path(value: &str) -> bool {
+    value.split_whitespace().any(|token| {
+        let token = token.trim_matches(|ch: char| "(),[]{}<>\"'`;".contains(ch));
+        (token.starts_with('/') && !token.starts_with("//"))
+            || token.starts_with("~/")
+            || token.starts_with(r"\\")
+            || token.starts_with("file:///")
+            || (token.len() >= 3
+                && token.as_bytes()[1] == b':'
+                && matches!(token.as_bytes()[2], b'/' | b'\\'))
+    })
+}
+
+fn verifier_text_contains_unsafe_control(value: &str) -> bool {
+    value.chars().any(|ch| {
+        (ch.is_control() && !matches!(ch, '\n' | '\t'))
+            || matches!(
+                ch,
+                '\u{200b}'
+                    | '\u{200c}'
+                    | '\u{200d}'
+                    | '\u{202a}'..='\u{202e}'
+                    | '\u{2066}'..='\u{2069}'
+                    | '\u{feff}'
+            )
+    })
+}
+
+fn truncate_verifier_text(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+
+    let keep = max_bytes.saturating_sub(TRUNCATED_VERIFIER_TEXT.len());
+    let mut end = keep.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{}", &value[..end], TRUNCATED_VERIFIER_TEXT)
+}
+
+fn sanitize_verifier_text(value: &str, max_bytes: usize) -> String {
+    if verifier_text_contains_secret(value) {
+        REDACTED_VERIFIER_SECRET.to_string()
+    } else if verifier_text_contains_absolute_path(value) {
+        REDACTED_VERIFIER_PATH.to_string()
+    } else if verifier_text_contains_unsafe_control(value) {
+        REDACTED_VERIFIER_CONTROL.to_string()
+    } else {
+        truncate_verifier_text(value, max_bytes)
+    }
+}
+
 /// Type of verification (task-level or epic-level)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -626,6 +743,34 @@ impl Verification {
     pub fn set_confidence(&mut self, confidence: f32) {
         self.confidence = Some(confidence.clamp(0.0, 1.0));
     }
+
+    /// Sanitize only caller-authored verifier payload fields.
+    ///
+    /// Server-derived identity, authority, dispatch, status, confidence, and
+    /// timestamp fields are intentionally untouched. Clean text remains
+    /// byte-for-byte identical; unsafe or oversized text is replaced or
+    /// truncated deterministically before persistence or diagnostics.
+    pub fn sanitize_verifier_authored_content(&mut self) {
+        self.summary = sanitize_verifier_text(&self.summary, VERIFIER_SUMMARY_MAX_BYTES);
+
+        self.issues.truncate(VERIFIER_ISSUES_MAX);
+        for issue in &mut self.issues {
+            issue.file = sanitize_verifier_text(&issue.file, VERIFIER_ISSUE_FILE_MAX_BYTES);
+            issue.category =
+                sanitize_verifier_text(&issue.category, VERIFIER_ISSUE_CATEGORY_MAX_BYTES);
+            issue.code = sanitize_verifier_text(&issue.code, VERIFIER_ISSUE_TEXT_MAX_BYTES);
+            issue.problem = sanitize_verifier_text(&issue.problem, VERIFIER_ISSUE_TEXT_MAX_BYTES);
+            issue.suggestion = issue
+                .suggestion
+                .as_deref()
+                .map(|value| sanitize_verifier_text(value, VERIFIER_ISSUE_TEXT_MAX_BYTES));
+        }
+
+        self.files_reviewed.truncate(VERIFIER_FILES_REVIEWED_MAX);
+        for file in &mut self.files_reviewed {
+            *file = sanitize_verifier_text(file, VERIFIER_ISSUE_FILE_MAX_BYTES);
+        }
+    }
 }
 
 impl Default for Verification {
@@ -764,5 +909,132 @@ mod tests {
 
         v.set_confidence(-0.5); // Should clamp to 0.0
         assert_eq!(v.confidence, Some(0.0));
+    }
+
+    #[test]
+    fn verifier_authored_safe_content_is_byte_compatible() {
+        let mut verification = Verification::rejected(
+            "ver-safe".to_string(),
+            "cas-safe".to_string(),
+            "REJECTED: task-verifier found two ordinary findings\n\nPlease fix both.".to_string(),
+            vec![VerificationIssue::blocking(
+                "src/main.rs".to_string(),
+                Some(42),
+                "todo_comment".to_string(),
+                "// TODO: validate".to_string(),
+                "Function lacks input validation".to_string(),
+                Some("Add validation for required fields.".to_string()),
+            )],
+        );
+        verification.files_reviewed = vec!["src/main.rs".to_string(), "tests/api.rs".to_string()];
+        let before = serde_json::to_vec(&verification).expect("serialize safe verification");
+
+        verification.sanitize_verifier_authored_content();
+
+        assert_eq!(
+            serde_json::to_vec(&verification).expect("serialize sanitized verification"),
+            before
+        );
+    }
+
+    #[test]
+    fn verifier_authored_unsafe_content_is_redacted_and_bounded() {
+        let raw_capability =
+            "vcap-0123456789abcdef0123456789abcdef.0123456789abcdef0123456789abcdef";
+        let mut verification = Verification::rejected(
+            "ver-unsafe".to_string(),
+            "cas-unsafe".to_string(),
+            format!("approved with {raw_capability}"),
+            vec![
+                VerificationIssue::blocking(
+                    "/home/operator/private.rs".to_string(),
+                    Some(7),
+                    "security".to_string(),
+                    "Authorization: Bearer private-value".to_string(),
+                    "control\u{1b}[31msequence".to_string(),
+                    Some("password=hunter2".to_string()),
+                ),
+                VerificationIssue::warning(
+                    "src/lib.rs".to_string(),
+                    "x".repeat(VERIFIER_ISSUE_CATEGORY_MAX_BYTES + 40),
+                    "p".repeat(VERIFIER_ISSUE_TEXT_MAX_BYTES + 40),
+                ),
+            ],
+        );
+        verification.files_reviewed = vec![
+            r"C:\Users\operator\private.rs".to_string(),
+            "src/lib.rs".to_string(),
+        ];
+        verification.sanitize_verifier_authored_content();
+
+        assert_eq!(verification.summary, REDACTED_VERIFIER_SECRET);
+        assert_eq!(verification.issues[0].file, REDACTED_VERIFIER_PATH);
+        assert_eq!(verification.issues[0].code, REDACTED_VERIFIER_SECRET);
+        assert_eq!(verification.issues[0].problem, REDACTED_VERIFIER_CONTROL);
+        assert_eq!(
+            verification.issues[0].suggestion.as_deref(),
+            Some(REDACTED_VERIFIER_SECRET)
+        );
+        assert_eq!(verification.files_reviewed[0], REDACTED_VERIFIER_PATH);
+        assert_eq!(verification.files_reviewed[1], "src/lib.rs");
+        assert!(verification.issues[1].category.len() <= VERIFIER_ISSUE_CATEGORY_MAX_BYTES);
+        assert!(verification.issues[1].problem.len() <= VERIFIER_ISSUE_TEXT_MAX_BYTES);
+
+        let serialized = serde_json::to_string(&verification).expect("serialize");
+        for unsafe_value in [
+            raw_capability,
+            "/home/operator",
+            r"C:\Users\operator",
+            "private-value",
+            "hunter2",
+            "\u{1b}",
+        ] {
+            assert!(
+                !serialized.contains(unsafe_value),
+                "unsafe verifier content crossed sanitization: {unsafe_value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn verifier_authored_clean_collection_and_text_bounds_are_utf8_safe() {
+        let mut verification = Verification::approved(
+            "ver-bounded".to_string(),
+            "cas-bounded".to_string(),
+            "é".repeat(VERIFIER_SUMMARY_MAX_BYTES),
+        );
+        verification.issues = (0..VERIFIER_ISSUES_MAX + 10)
+            .map(|index| {
+                VerificationIssue::warning(
+                    format!("src/file-{index}.rs"),
+                    "style".to_string(),
+                    "p".repeat(VERIFIER_ISSUE_TEXT_MAX_BYTES + 10),
+                )
+            })
+            .collect();
+        verification.files_reviewed = (0..VERIFIER_FILES_REVIEWED_MAX + 10)
+            .map(|index| format!("src/file-{index}.rs"))
+            .collect();
+
+        verification.sanitize_verifier_authored_content();
+
+        assert_eq!(verification.issues.len(), VERIFIER_ISSUES_MAX);
+        assert_eq!(
+            verification.files_reviewed.len(),
+            VERIFIER_FILES_REVIEWED_MAX
+        );
+        assert!(verification.summary.len() <= VERIFIER_SUMMARY_MAX_BYTES);
+        assert!(
+            verification
+                .summary
+                .is_char_boundary(verification.summary.len())
+        );
+        assert!(verification.summary.ends_with(TRUNCATED_VERIFIER_TEXT));
+        assert!(
+            verification
+                .issues
+                .iter()
+                .all(|issue| issue.problem.len() <= VERIFIER_ISSUE_TEXT_MAX_BYTES)
+        );
     }
 }

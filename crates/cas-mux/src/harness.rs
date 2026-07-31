@@ -33,18 +33,21 @@ impl SupervisorCli {
                 supports_hooks: true,
                 supports_subagents: true,
                 supports_textbox_submit: true,
+                requires_bracketed_paste_injection: false,
                 tool_prefix: "mcp__cas__",
             },
             Self::Codex => HarnessCapabilities {
                 supports_hooks: false,
                 supports_subagents: false,
                 supports_textbox_submit: false,
+                requires_bracketed_paste_injection: true,
                 tool_prefix: "mcp__cs__",
             },
             Self::Grok => HarnessCapabilities {
                 supports_hooks: true,
                 supports_subagents: true,
                 supports_textbox_submit: true,
+                requires_bracketed_paste_injection: false,
                 tool_prefix: "cas__",
             },
         }
@@ -94,7 +97,59 @@ pub struct HarnessCapabilities {
     /// gets an active `pane_bytes_received` quiescence poll instead of a
     /// guessed constant.
     pub supports_textbox_submit: bool,
+    /// Whether PTY prompt injection must wrap the payload in explicit
+    /// bracketed-paste delimiters (`ESC[200~` … `ESC[201~`) before the
+    /// trailing CR that submits it (cas-5fff).
+    ///
+    /// Codex's TUI runs a **paste-burst detector** over unframed input: a
+    /// single large write is classified as a paste that is still arriving, so
+    /// the CR that follows is consumed as the paste's terminator (inserted as
+    /// a newline) instead of being read as an Enter keypress. The payload is
+    /// left in the composer as an unsubmitted draft and every later message
+    /// types more text into that same stuck draft — the exact "delivered but
+    /// no turn ever starts" signature reported in cas-5fff.
+    ///
+    /// Live-measured against `codex` 0.146.0 through this crate's own
+    /// `Mux`/`Pane` code (`tests/nonurgent_idle_codex_runtime.rs`):
+    /// - ~78-byte single-line payload + CR → submits.
+    /// - 1045-byte payload + CR → swallowed, draft left in the composer.
+    /// - Same 1045 bytes with every newline replaced by a space → **also**
+    ///   swallowed, so the trigger is burst SIZE, not newlines.
+    /// - Sending the CR at confirmed output quiescence (measured at +375ms,
+    ///   i.e. *earlier* than the old blind 500ms settle) → still swallowed,
+    ///   so this is NOT a settle-timing race and cannot be tuned away.
+    /// - Same payload wrapped in `ESC[200~`…`ESC[201~` + CR → submits, and
+    ///   the model replies.
+    ///
+    /// Declaring the paste's end removes the ambiguity, which is why this is a
+    /// deterministic fix rather than a longer guess. `false` for Claude and
+    /// Grok: both have a real textbox submit and were never implicated (their
+    /// injection bytes stay byte-for-byte unchanged).
+    pub requires_bracketed_paste_injection: bool,
     pub tool_prefix: &'static str,
+}
+
+/// Bracketed-paste start sequence (`ESC[200~`).
+pub const PASTE_START: &[u8] = b"\x1b[200~";
+/// Bracketed-paste end sequence (`ESC[201~`).
+pub const PASTE_END: &[u8] = b"\x1b[201~";
+
+/// Build the exact byte payload written to a PTY for a prompt injection,
+/// excluding the trailing submit CR (cas-5fff).
+///
+/// Pure and exhaustively unit-testable so the framing contract can't drift
+/// between the normal and urgent injection paths, both of which funnel
+/// through `Pane::inject_prompt`.
+pub fn injection_payload_bytes(harness: SupervisorCli, text: &str) -> Vec<u8> {
+    if harness.capabilities().requires_bracketed_paste_injection {
+        let mut out = Vec::with_capacity(text.len() + PASTE_START.len() + PASTE_END.len());
+        out.extend_from_slice(PASTE_START);
+        out.extend_from_slice(text.as_bytes());
+        out.extend_from_slice(PASTE_END);
+        out
+    } else {
+        text.as_bytes().to_vec()
+    }
 }
 
 #[cfg(test)]
@@ -157,6 +212,70 @@ mod tests {
         let codex = SupervisorCli::Codex.capabilities();
         assert!(!codex.supports_hooks && !codex.supports_subagents && !codex.supports_textbox_submit);
         assert_eq!(codex.tool_prefix, "mcp__cs__");
+    }
+
+    /// cas-5fff: only Codex needs bracketed-paste framing. Pinned explicitly
+    /// because getting this wrong is silent — an unframed Codex injection
+    /// still "succeeds" at the PTY layer and simply never starts a turn.
+    #[test]
+    fn only_codex_requires_bracketed_paste_injection() {
+        assert!(
+            SupervisorCli::Codex
+                .capabilities()
+                .requires_bracketed_paste_injection
+        );
+        assert!(
+            !SupervisorCli::Claude
+                .capabilities()
+                .requires_bracketed_paste_injection
+        );
+        assert!(
+            !SupervisorCli::Grok
+                .capabilities()
+                .requires_bracketed_paste_injection
+        );
+    }
+
+    /// cas-5fff: Codex payloads are wrapped; Claude/Grok stay byte-for-byte
+    /// identical to the pre-fix bytes (AC5 — no behavior change off Codex).
+    #[test]
+    fn injection_payload_is_bracketed_only_for_codex() {
+        let text = "Message from supervisor: re-close cas-ae2f\n\nSecond paragraph.";
+
+        let codex = injection_payload_bytes(SupervisorCli::Codex, text);
+        assert!(codex.starts_with(PASTE_START), "codex payload must open the paste");
+        assert!(codex.ends_with(PASTE_END), "codex payload must close the paste");
+        assert_eq!(
+            &codex[PASTE_START.len()..codex.len() - PASTE_END.len()],
+            text.as_bytes(),
+            "the payload between the delimiters must be untouched"
+        );
+
+        for bare in [SupervisorCli::Claude, SupervisorCli::Grok] {
+            assert_eq!(
+                injection_payload_bytes(bare, text),
+                text.as_bytes(),
+                "{bare:?} injection bytes must be unchanged by the cas-5fff fix"
+            );
+        }
+    }
+
+    /// The delimiters must be the real terminal sequences — a typo here would
+    /// be injected verbatim into the worker's prompt and, worse, would restore
+    /// the original swallow.
+    #[test]
+    fn bracketed_paste_delimiters_are_the_standard_sequences() {
+        assert_eq!(PASTE_START, b"\x1b[200~");
+        assert_eq!(PASTE_END, b"\x1b[201~");
+    }
+
+    /// Empty payloads must not gain delimiters-only noise beyond the framing
+    /// itself, and must not panic on the slice arithmetic above.
+    #[test]
+    fn injection_payload_handles_empty_text() {
+        let codex = injection_payload_bytes(SupervisorCli::Codex, "");
+        assert_eq!(codex.len(), PASTE_START.len() + PASTE_END.len());
+        assert!(injection_payload_bytes(SupervisorCli::Claude, "").is_empty());
     }
 
     /// cas-7f6f: Grok cancels with Ctrl+C; Claude/Codex keep Esc.

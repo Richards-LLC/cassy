@@ -538,6 +538,38 @@ mod tests {
     /// the idle nudge should fire for exactly the shapes where the primary
     /// channel is TeamsInbox (Claude recipient, teams active) and never for
     /// any Pty-delivered shape (Codex/Grok always, or Claude without teams).
+    ///
+    /// # cas-5fff re-audit — what was and was NOT wrong here
+    ///
+    /// cas-5fff was filed on the theory that this assertion encoded the wrong
+    /// assumption and that the idle nudge needed to be extended to Codex.
+    /// Measuring first (live, against `codex` 0.146.0, see
+    /// `crates/cas-mux/tests/nonurgent_idle_codex_runtime.rs`) showed the
+    /// opposite: **this assertion is correct and is deliberately kept.**
+    ///
+    /// A Codex recipient is already `Pty`-delivered by the primary call, so
+    /// nudging would type the same text into the pane a second time — which,
+    /// given the actual defect, would have appended a *second* copy of the
+    /// message into the very draft that was already stuck in the composer,
+    /// making the wedge worse rather than better. Routing was never the fault.
+    ///
+    /// The real defect was one layer down, in `Pane::inject_prompt`: the PTY
+    /// write landed in full and only the trailing CR was lost, because Codex's
+    /// paste-burst detector consumed it as the terminator of an unframed
+    /// large write. The message was in the pane the whole time, as an
+    /// unsubmitted draft. Fixed by framing Codex injections as an explicit
+    /// bracketed paste.
+    ///
+    /// What cas-893c actually got wrong was not this test but its AC3
+    /// **negative result** — "the Codex PTY path is NOT the cause", "don't
+    /// re-suspect the Codex PTY injection mechanism itself". That was measured
+    /// against an interactive **bash** stand-in because `codex` wasn't
+    /// installed in that sandbox, and it was then stated as a general
+    /// conclusion. bash accepts a bare write-then-CR; a full-screen TUI with a
+    /// paste-burst detector does not. The conclusion was true of the stand-in
+    /// and false of the real binary, and it steered three months of
+    /// investigation away from the actual line. A harness-behavior claim is
+    /// only as good as the harness it was measured against.
     #[test]
     fn idle_nudge_fires_only_for_claude_teams_recipients() {
         for harness in [SupervisorCli::Claude, SupervisorCli::Codex, SupervisorCli::Grok] {
@@ -550,6 +582,24 @@ mod tests {
                     "harness={harness:?} teams_active={teams_active} channel={channel:?}"
                 );
             }
+        }
+    }
+
+    /// cas-5fff, stated as its own executable assertion so the reasoning above
+    /// can't be lost to a doc-comment edit: a Codex recipient must reach the
+    /// PTY exactly ONCE per message. Double-typing an idle Codex pane is not a
+    /// harmless retry — before the `inject_prompt` framing fix it compounded
+    /// the stuck-draft wedge, and after it, it would submit the message twice.
+    #[test]
+    fn codex_recipient_is_never_double_typed_by_the_idle_nudge() {
+        for teams_active in [true, false] {
+            let channel = choose_channel(SupervisorCli::Codex, teams_active);
+            assert_eq!(channel, DeliveryChannel::Pty);
+            assert!(
+                !idle_nudge_applies(channel),
+                "an idle Codex worker already got the message over the PTY; a nudge \
+                 would type it a second time (teams_active={teams_active})"
+            );
         }
     }
 

@@ -1005,22 +1005,6 @@ pub fn invalidate_verification_dispatch_for_new_cycle(
     Ok(Some(dispatch))
 }
 
-/// Invalidate one exact reusable proof cycle for explicit fresh-scope recovery.
-///
-/// Selecting by dispatch ID prevents a concurrent newer task cycle from being
-/// invalidated by recovery guidance that named an older reviewed scope.
-pub fn invalidate_verification_dispatch_for_new_cycle_exact(
-    cas_dir: &Path,
-    dispatch_id: &str,
-) -> Result<VerificationDispatch> {
-    let store = SqliteVerificationStore::open(cas_dir)?;
-    let conn = store.conn.lock().map_err(lock_err)?;
-    let tx = ImmediateTx::new(&conn)?;
-    let dispatch = invalidate_verification_dispatch_for_new_cycle_with_conn(&tx, dispatch_id)?;
-    tx.commit()?;
-    Ok(dispatch)
-}
-
 /// Atomically invalidate one exact reviewed scope and reopen its task.
 ///
 /// The task compare-and-set is intentionally in the same `BEGIN IMMEDIATE`
@@ -2870,24 +2854,6 @@ mod tests {
     #[test]
     fn exact_proof_cycle_invalidation_cannot_touch_a_superseded_dispatch() {
         let (_store, dir) = create_test_store();
-        let first = create_verification_dispatch(
-            dir.path(),
-            "cas-invalidate-exact",
-            "worker",
-            "supervisor",
-            Utc::now() + Duration::minutes(10),
-        )
-        .expect("first dispatch");
-        let conn = Connection::open(dir.path().join("cas.db")).expect("db");
-        resolve_verification_dispatch_with_conn(&conn, &first.id, "supervisor", None, true)
-            .expect("resolve first");
-        drop(conn);
-
-        let invalidated =
-            invalidate_verification_dispatch_for_new_cycle_exact(dir.path(), &first.id)
-                .expect("invalidate exact latest proof");
-        assert_eq!(invalidated.state, VerificationDispatchState::Invalidated);
-
         let resolved = create_verification_dispatch(
             dir.path(),
             "cas-invalidate-race",

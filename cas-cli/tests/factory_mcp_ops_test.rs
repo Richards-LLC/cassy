@@ -26,6 +26,7 @@ use cas::types::{
     Agent, AgentStatus, Event, EventEntityType, EventType, Task, TaskStatus, TaskType,
 };
 use cas_mcp::types::{CoordinationRequest, FactoryRequest};
+use cas_mux::{Mux, MuxConfig, SupervisorCli};
 use cas_types::AgentRole;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::RawContent;
@@ -2671,6 +2672,66 @@ async fn test_worker_response_confirms_consumed_supervisor_message() {
         cas_store::DeliveryStage::Confirmed,
         "the recipient's response must confirm its consumed instruction"
     );
+}
+
+/// cas-ae2f AC1/AC2: exercise the real factory spawn configuration through the
+/// public coordination handler. This is intentionally wider than a resolver
+/// unit test: the supervisor identity must cross the Codex PTY -> MCP env
+/// boundary before a worker can address the logical `supervisor` alias.
+#[tokio::test]
+async fn test_real_factory_codex_worker_can_message_supervisor_alias() {
+    let mux_config = MuxConfig {
+        cwd: PathBuf::from("/tmp/test"),
+        workers: 1,
+        worker_names: vec!["swift-fox".to_string()],
+        supervisor_name: "cosmic-bear-43".to_string(),
+        factory_session: Some("factory-message-e2e".to_string()),
+        include_director: false,
+        supervisor_cli: SupervisorCli::Codex,
+        worker_cli: SupervisorCli::Codex,
+        ..MuxConfig::default()
+    };
+    let configs = Mux::factory_pane_configs(&mux_config);
+    let worker_config = &configs
+        .iter()
+        .find(|(name, _)| name == "swift-fox")
+        .expect("spawned worker config")
+        .1;
+    let supervisor_override = worker_config
+        .args
+        .iter()
+        .find_map(|arg| {
+            arg.strip_prefix("mcp_servers.cs.env.CAS_SUPERVISOR_NAME=\"")
+                .and_then(|value| value.strip_suffix('"'))
+        })
+        .expect("factory spawn must inject supervisor identity into Codex cs MCP env");
+
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "worker"),
+        ("CAS_AGENT_NAME", "swift-fox"),
+        ("CAS_FACTORY_SESSION", "factory-message-e2e"),
+        ("CAS_SUPERVISOR_NAME", supervisor_override),
+    ]);
+    let env = FactoryTestEnv::new();
+    env.register_supervisor_in_session("cosmic-bear-43", "factory-message-e2e");
+
+    let request = coord_msg(
+        "message",
+        "supervisor",
+        "factory spawn-to-message behavior proof",
+        None,
+    );
+    let result = env
+        .service
+        .coordination(Parameters(request))
+        .await
+        .expect("worker must resolve and enqueue to supervisor alias");
+    let text = get_text(&result);
+    assert!(text.contains("To: cosmic-bear-43"), "{text}");
+
+    let prompts = env.prompt_queue().peek_all(10).expect("peek messages");
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts[0].target, "cosmic-bear-43");
 }
 
 /// cas-c061: exact-content dedup is an observable send outcome. Reusing the

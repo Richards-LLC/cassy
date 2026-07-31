@@ -130,6 +130,40 @@ fn factory_pane_configs_propagates_factory_session_to_process_and_codex_mcp_env(
 }
 
 #[test]
+fn factory_pane_configs_propagates_supervisor_name_to_codex_worker_mcp_env() {
+    let config = MuxConfig {
+        cwd: PathBuf::from("/tmp/test"),
+        workers: 1,
+        worker_names: vec!["codex-worker".to_string()],
+        supervisor_name: "codex-supervisor".to_string(),
+        include_director: false,
+        supervisor_cli: SupervisorCli::Codex,
+        worker_cli: SupervisorCli::Codex,
+        ..MuxConfig::default()
+    };
+
+    let configs = Mux::factory_pane_configs(&config);
+    let worker = configs
+        .iter()
+        .find(|(name, _)| name == "codex-worker")
+        .expect("worker pane config");
+
+    assert_eq!(
+        env_value(&worker.1, "CAS_SUPERVISOR_NAME"),
+        Some("codex-supervisor"),
+        "worker process env must know the owning supervisor"
+    );
+    assert!(
+        worker
+            .1
+            .args
+            .contains(&"mcp_servers.cs.env.CAS_SUPERVISOR_NAME=\"codex-supervisor\"".to_string()),
+        "Codex starts cs with a restricted environment, so the owning supervisor name must be an explicit MCP env override; args={:?}",
+        worker.1.args
+    );
+}
+
+#[test]
 fn build_add_worker_config_propagates_factory_session_for_dynamic_spawns() {
     let mut mux = Mux::factory(MuxConfig {
         cwd: PathBuf::from("/tmp/test"),

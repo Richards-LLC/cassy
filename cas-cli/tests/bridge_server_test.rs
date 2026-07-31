@@ -4,9 +4,16 @@ use std::io::{BufRead, BufReader};
 
 #[test]
 fn bridge_server_smoke() {
+    let home = tempfile::tempdir().expect("isolated bridge HOME");
     let cas_bin = assert_cmd::cargo::cargo_bin!("cas");
     let mut child = std::process::Command::new(cas_bin)
         .args(["bridge", "serve", "--json", "--port", "0"])
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env(
+            "CAS_TEST_PROTECTED_HOME",
+            std::env::var_os("HOME").unwrap_or_default(),
+        )
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()

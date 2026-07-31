@@ -4,6 +4,7 @@ use std::path::Path;
 
 const INIT_FIXTURES: &[&str] = &[
     "blame_attribution_test.rs",
+    "cli_test.rs",
     "component_output_test.rs",
     "fixtures/cas_instance.rs",
     "hooks_test/mod.rs",

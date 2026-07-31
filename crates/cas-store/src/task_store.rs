@@ -130,6 +130,62 @@ impl SqliteTaskStore {
         serde_json::to_string(deliverables).unwrap_or_else(|_| "{}".to_string())
     }
 
+    pub(crate) fn reopen_exact_with_conn(
+        conn: &Connection,
+        task: &Task,
+        expected_status: TaskStatus,
+        expected_updated_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let rows = conn.execute(
+            "UPDATE tasks SET title = ?1, description = ?2, design = ?3,
+             acceptance_criteria = ?4, notes = ?5, status = ?6, priority = ?7,
+             task_type = ?8, assignee = ?9, labels = ?10, updated_at = ?11,
+             closed_at = ?12, close_reason = ?13, external_ref = ?14, content_hash = ?15,
+             branch = ?16, worktree_id = ?17,
+             pending_verification = ?18, pending_worktree_merge = ?19,
+             epic_verification_owner = ?20, team_id = ?21, deliverables = ?22,
+             demo_statement = ?23, execution_note = ?24, share = ?25, depth = ?26
+             WHERE id = ?27 AND status = ?28 AND updated_at = ?29",
+            params![
+                task.title,
+                task.description,
+                task.design,
+                task.acceptance_criteria,
+                task.notes,
+                task.status.to_string(),
+                task.priority.0,
+                task.task_type.to_string(),
+                task.assignee,
+                Self::labels_to_string(&task.labels),
+                task.updated_at.to_rfc3339(),
+                task.closed_at.map(|t| t.to_rfc3339()),
+                task.close_reason,
+                task.external_ref,
+                task.content_hash,
+                task.branch,
+                task.worktree_id,
+                if task.pending_verification { 1 } else { 0 },
+                if task.pending_worktree_merge { 1 } else { 0 },
+                task.epic_verification_owner,
+                task.team_id,
+                Self::deliverables_to_string(&task.deliverables),
+                task.demo_statement,
+                task.execution_note,
+                task.share.as_ref().map(|s| s.to_string()),
+                task.depth.to_string(),
+                task.id,
+                expected_status.to_string(),
+                expected_updated_at.to_rfc3339(),
+            ],
+        )?;
+        if rows != 1 {
+            return Err(StoreError::Parse(
+                "exact task reopen raced with another task mutation".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Generate a hash-based ID like cas-a1b2
     fn generate_hash_id(&self) -> Result<String> {
         use std::collections::hash_map::DefaultHasher;

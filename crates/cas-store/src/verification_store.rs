@@ -41,6 +41,85 @@ fn sanitized_verification_for_write(verification: &Verification) -> Verification
     sanitized
 }
 
+fn validate_verification_authority_with_conn(
+    conn: &Connection,
+    verification: &Verification,
+    allow_resolved: bool,
+) -> Result<()> {
+    let fail =
+        || StoreError::Parse("verification provenance lacks exact durable authority".to_string());
+    match verification.provenance {
+        VerificationProvenance::Legacy => {
+            if verification.capability_id.is_some()
+                || verification.dispatch_id.is_some()
+                || verification.issuer_agent_id.is_some()
+            {
+                return Err(fail());
+            }
+            Ok(())
+        }
+        VerificationProvenance::System => Err(fail()),
+        VerificationProvenance::SupervisorDirect => {
+            let agent_id = verification.agent_id.as_deref().ok_or_else(fail)?;
+            let issuer_id = verification.issuer_agent_id.as_deref().ok_or_else(fail)?;
+            let dispatch_id = verification.dispatch_id.as_deref().ok_or_else(fail)?;
+            if agent_id != issuer_id || verification.capability_id.is_some() {
+                return Err(fail());
+            }
+            let valid: i64 = conn.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM agents a
+                    JOIN verification_dispatches d ON d.id = ?2
+                    WHERE a.id = ?1 AND a.role = 'supervisor'
+                      AND a.status IN ('active', 'idle')
+                      AND d.task_id = ?3
+                      AND d.state IN ('pending', 'claimed', 'timed_out', 'resolved')
+                      AND (?4 = 1 OR d.state != 'resolved')
+                )",
+                params![
+                    agent_id,
+                    dispatch_id,
+                    verification.task_id,
+                    allow_resolved as i64
+                ],
+                |row| row.get(0),
+            )?;
+            if valid == 1 { Ok(()) } else { Err(fail()) }
+        }
+        VerificationProvenance::TaskVerifier => {
+            let agent_id = verification.agent_id.as_deref().ok_or_else(fail)?;
+            let issuer_id = verification.issuer_agent_id.as_deref().ok_or_else(fail)?;
+            let dispatch_id = verification.dispatch_id.as_deref().ok_or_else(fail)?;
+            let capability_id = verification.capability_id.as_deref().ok_or_else(fail)?;
+            let valid: i64 = conn.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM verification_capabilities c
+                    JOIN verification_dispatches d ON d.id = c.dispatch_id
+                    JOIN agents issuer ON issuer.id = c.issuer_agent_id
+                    WHERE c.id = ?1 AND c.task_id = ?2 AND c.dispatch_id = ?3
+                      AND c.issuer_agent_id = ?4 AND c.verifier_agent_id = ?5
+                      AND c.consumed_at IS NOT NULL
+                      AND d.task_id = ?2 AND d.verifier_agent_id = ?5
+                      AND d.capability_id = ?1
+                      AND d.state IN ('claimed', 'resolved')
+                      AND (?6 = 1 OR d.state != 'resolved')
+                      AND issuer.status IN ('active', 'idle')
+                )",
+                params![
+                    capability_id,
+                    verification.task_id,
+                    dispatch_id,
+                    issuer_id,
+                    agent_id,
+                    allow_resolved as i64
+                ],
+                |row| row.get(0),
+            )?;
+            if valid == 1 { Ok(()) } else { Err(fail()) }
+        }
+    }
+}
+
 /// SQLite DDL for the `verifications` and `verification_issues` tables.
 ///
 /// Re-exported via `cas_store::VERIFICATION_SCHEMA` so the migration runner in
@@ -411,8 +490,7 @@ pub fn get_verification_for_dispatch(
 ///
 /// Caller is responsible for managing the transaction. Does not save issues -
 /// call `save_verification_issues_with_conn` separately.
-pub fn add_verification_with_conn(conn: &Connection, verification: &Verification) -> Result<()> {
-    let verification = sanitized_verification_for_write(verification);
+fn insert_verification_with_conn(conn: &Connection, verification: &Verification) -> Result<()> {
     let files_reviewed_json =
         serde_json::to_string(&verification.files_reviewed).unwrap_or_else(|_| "[]".to_string());
 
@@ -443,6 +521,73 @@ pub fn add_verification_with_conn(conn: &Connection, verification: &Verification
     save_verification_issues_with_conn(conn, &verification)?;
 
     Ok(())
+}
+
+pub fn add_verification_with_conn(conn: &Connection, verification: &Verification) -> Result<()> {
+    let verification = sanitized_verification_for_write(verification);
+    validate_verification_authority_with_conn(conn, &verification, false)?;
+    insert_verification_with_conn(conn, &verification)
+}
+
+/// Persist an internal close-flow verification that cannot be supplied through
+/// the generic store contract.
+pub fn add_system_verification(cas_dir: &Path, verification: &Verification) -> Result<()> {
+    if verification.provenance != VerificationProvenance::System {
+        return Err(StoreError::Parse(
+            "internal verification write requires system provenance".to_string(),
+        ));
+    }
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let conn = store.conn.lock().map_err(lock_err)?;
+    insert_verification_with_conn(&conn, verification)
+}
+
+/// Update mutable result fields on an existing internal close-flow record.
+pub fn update_system_verification(cas_dir: &Path, verification: &Verification) -> Result<()> {
+    if verification.provenance != VerificationProvenance::System {
+        return Err(StoreError::Parse(
+            "internal verification update requires system provenance".to_string(),
+        ));
+    }
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let conn = store.conn.lock().map_err(lock_err)?;
+    let existing = conn
+        .query_row(
+            "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
+                dispatch_id, issuer_agent_id, status, confidence, summary, files_reviewed,
+                duration_ms, created_at FROM verifications WHERE id = ?1",
+            params![verification.id],
+            SqliteVerificationStore::parse_verification,
+        )
+        .optional()?
+        .ok_or_else(|| StoreError::NotFound(verification.id.clone()))?;
+    if existing.task_id != verification.task_id
+        || existing.agent_id != verification.agent_id
+        || existing.verification_type != verification.verification_type
+        || existing.provenance != verification.provenance
+        || existing.capability_id != verification.capability_id
+        || existing.dispatch_id != verification.dispatch_id
+        || existing.issuer_agent_id != verification.issuer_agent_id
+    {
+        return Err(StoreError::Parse(
+            "verification authority and identity fields are immutable".to_string(),
+        ));
+    }
+    let files =
+        serde_json::to_string(&verification.files_reviewed).unwrap_or_else(|_| "[]".to_string());
+    conn.execute(
+        "UPDATE verifications SET status = ?2, confidence = ?3, summary = ?4,
+         files_reviewed = ?5, duration_ms = ?6 WHERE id = ?1",
+        params![
+            verification.id,
+            verification.status.to_string(),
+            verification.confidence,
+            verification.summary,
+            files,
+            verification.duration_ms.map(|v| v as i64)
+        ],
+    )?;
+    save_verification_issues_with_conn(&conn, verification)
 }
 
 /// Save verification issues using an existing connection (for cross-store transactions).
@@ -1046,13 +1191,14 @@ pub fn invalidate_verification_dispatch_and_reopen_task_exact(
         .map_err(|error| StoreError::Parse(format!("invalid verification status: {error}")))?;
     let provenance = VerificationProvenance::from_str(&provenance)
         .map_err(|error| StoreError::Parse(format!("invalid verification provenance: {error}")))?;
-    if !matches!(status, VerificationStatus::Approved | VerificationStatus::Skipped)
-        || provenance == VerificationProvenance::Legacy
+    if !matches!(
+        status,
+        VerificationStatus::Approved | VerificationStatus::Skipped
+    ) || provenance == VerificationProvenance::Legacy
         || verdict_dispatch_id.as_deref() != Some(dispatch_id)
     {
         return Err(StoreError::Parse(
-            "fresh-scope recovery requires an exact nonlegacy Approved/Skipped verdict"
-                .to_string(),
+            "fresh-scope recovery requires an exact nonlegacy Approved/Skipped verdict".to_string(),
         ));
     }
     let dispatch = invalidate_verification_dispatch_for_new_cycle_with_conn(&tx, dispatch_id)?;
@@ -1856,37 +2002,8 @@ impl VerificationStore for SqliteVerificationStore {
     fn add(&self, verification: &Verification) -> Result<()> {
         let conn = self.conn.lock().map_err(lock_err)?;
         let verification = sanitized_verification_for_write(verification);
-
-        let files_reviewed_json = serde_json::to_string(&verification.files_reviewed)
-            .unwrap_or_else(|_| "[]".to_string());
-
-        conn.execute(
-            "INSERT INTO verifications
-             (id, task_id, agent_id, verification_type, provenance, capability_id, dispatch_id,
-              issuer_agent_id, status, confidence, summary, files_reviewed, duration_ms, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-            params![
-                verification.id,
-                verification.task_id,
-                verification.agent_id,
-                verification.verification_type.to_string(),
-                verification.provenance.to_string(),
-                verification.capability_id,
-                verification.dispatch_id,
-                verification.issuer_agent_id,
-                verification.status.to_string(),
-                verification.confidence,
-                verification.summary,
-                files_reviewed_json,
-                verification.duration_ms.map(|v| v as i64),
-                verification.created_at.to_rfc3339(),
-            ],
-        )?;
-
-        // Save issues
-        self.save_issues(&conn, &verification)?;
-
-        Ok(())
+        validate_verification_authority_with_conn(&conn, &verification, false)?;
+        insert_verification_with_conn(&conn, &verification)
     }
 
     fn get(&self, id: &str) -> Result<Verification> {
@@ -1914,6 +2031,31 @@ impl VerificationStore for SqliteVerificationStore {
     fn update(&self, verification: &Verification) -> Result<()> {
         let conn = self.conn.lock().map_err(lock_err)?;
         let verification = sanitized_verification_for_write(verification);
+
+        let existing = conn
+            .query_row(
+                "SELECT id, task_id, agent_id, verification_type, provenance, capability_id,
+                        dispatch_id, issuer_agent_id, status, confidence, summary, files_reviewed,
+                        duration_ms, created_at
+                 FROM verifications WHERE id = ?1",
+                params![verification.id],
+                Self::parse_verification,
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::NotFound(verification.id.clone()))?;
+        if existing.task_id != verification.task_id
+            || existing.agent_id != verification.agent_id
+            || existing.verification_type != verification.verification_type
+            || existing.provenance != verification.provenance
+            || existing.capability_id != verification.capability_id
+            || existing.dispatch_id != verification.dispatch_id
+            || existing.issuer_agent_id != verification.issuer_agent_id
+        {
+            return Err(StoreError::Parse(
+                "verification authority and identity fields are immutable".to_string(),
+            ));
+        }
+        validate_verification_authority_with_conn(&conn, &verification, true)?;
 
         let files_reviewed_json = serde_json::to_string(&verification.files_reviewed)
             .unwrap_or_else(|_| "[]".to_string());
@@ -3036,6 +3178,23 @@ mod tests {
     #[test]
     fn verifier_authored_payload_is_sanitized_at_every_write_boundary() {
         let (store, dir) = create_test_store();
+        let supervisor_id = "supervisor-private";
+        {
+            let conn = store.conn.lock().expect("db");
+            conn.execute_batch(crate::agent_store::AGENT_SCHEMA)
+                .expect("agent schema");
+            let mut supervisor = Agent::new(supervisor_id.to_string(), supervisor_id.to_string());
+            supervisor.role = AgentRole::Supervisor;
+            register_agent_with_conn(&conn, &supervisor).expect("register supervisor");
+        }
+        let dispatch = create_verification_dispatch(
+            dir.path(),
+            "cas-private",
+            "worker-private",
+            supervisor_id,
+            Utc::now() + Duration::minutes(10),
+        )
+        .expect("dispatch");
         let raw_capability =
             "vcap-fedcba9876543210fedcba9876543210.abcdef0123456789abcdef0123456789";
         let raw_path = "/home/verifier/private-proof.json";
@@ -3054,7 +3213,10 @@ mod tests {
                 Some("password=verifier-secret".to_string()),
             )],
         );
-        verification.provenance = VerificationProvenance::TaskVerifier;
+        verification.provenance = VerificationProvenance::SupervisorDirect;
+        verification.agent_id = Some(supervisor_id.to_string());
+        verification.issuer_agent_id = Some(supervisor_id.to_string());
+        verification.dispatch_id = Some(dispatch.id);
         verification.files_reviewed = vec![raw_path.to_string(), "src/lib.rs".to_string()];
 
         store.add(&verification).expect("add unsafe verification");

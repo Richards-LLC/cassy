@@ -1482,6 +1482,32 @@ fn preflight_factory_launch(
         }
     };
 
+    if let Some(cas_root) = resolved_cas_root.as_deref() {
+        let config = Config::load(cas_root).unwrap_or_default();
+        let policy = crate::factory_target_cache::TargetCachePolicy::from(config.factory());
+        match crate::factory_target_cache::capacity_status(cwd, policy) {
+            Ok(capacity) if capacity.pressure => {
+                let warning = format!(
+                    "Cargo target-cache disk pressure: filesystem is {}% used (factory high watermark {}%, low watermark {}%). Run coordination gc_report, review TARGET_CACHE_STATUS_JSON, then explicitly run gc_cleanup force=true dry_run=false.",
+                    capacity.used_percent,
+                    capacity.high_watermark_percent,
+                    capacity.low_watermark_percent,
+                );
+                if args.workers > 0 {
+                    failures.push(format!(
+                        "{warning} Worker launch is blocked before builds can reach ENOSPC; start supervisor-only with --workers 0 to inspect and reclaim."
+                    ));
+                } else {
+                    notices.push(warning);
+                }
+            }
+            Ok(_) => {}
+            Err(error) => notices.push(format!(
+                "Cargo target-cache capacity probe unavailable (cleanup will fail closed): {error}"
+            )),
+        }
+    }
+
     let claude_installed = is_claude_installed();
     let grok_installed = is_grok_installed();
 

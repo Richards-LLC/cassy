@@ -452,6 +452,11 @@ pub struct FactoryRequest {
     #[serde(default)]
     pub force: Option<bool>,
 
+    /// Preview target-cache reclamation without deleting artifacts.
+    #[schemars(description = "gc_cleanup: preview exact target-cache candidates and bytes without deleting them (target-cache cleanup defaults to dry-run unless explicitly false)")]
+    #[serde(default)]
+    pub dry_run: Option<bool>,
+
     /// Clear the pinned epic focus for focus_epic
     #[schemars(description = "Clear the pinned epic focus (focus_epic only)")]
     #[serde(default)]
@@ -820,8 +825,8 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub orphans: Option<bool>,
 
-    /// Preview cleanup without making changes (for worktree_cleanup)
-    #[schemars(description = "Preview cleanup without making changes")]
+    /// Preview cleanup without making changes.
+    #[schemars(description = "Preview cleanup without making changes (worktree_cleanup; gc_cleanup target caches default to preview unless explicitly false)")]
     #[serde(default)]
     pub dry_run: Option<bool>,
 }
@@ -889,6 +894,7 @@ impl CoordinationRequest {
             target: self.target.clone(),
             message: self.message.clone(),
             force: self.force,
+            dry_run: self.dry_run,
             clear: self.clear,
             branch: self.branch.clone(),
             older_than_secs: self.older_than_secs,

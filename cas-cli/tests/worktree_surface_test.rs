@@ -2518,3 +2518,327 @@ async fn transactional_delivery_public_merge_persists_changed_worker_tip_without
         3
     );
 }
+
+#[tokio::test]
+async fn pending_delivery_proof_rejects_review_scope_update_but_allows_notes() {
+    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let home = TempDir::new().expect("temp HOME");
+    let _home = HomeGuard::enter(home.path());
+    let repo = GitRepo::new();
+    run_git(
+        &["remote", "add", "origin", "git@github.com:org/scope-lock.git"],
+        &repo.root,
+    );
+    let cas_root = init_cas_dir(&repo.root).expect("init CAS");
+    disable_system_a(&cas_root);
+    let task_store = open_task_store(&cas_root).expect("task store");
+
+    let mut epic = Task::new("cas-scope-epic".to_string(), "Scope epic".to_string());
+    epic.task_type = TaskType::Epic;
+    task_store.add(&epic).expect("add epic");
+
+    let mut task = Task::new(
+        "cas-scope-locked".to_string(),
+        "Immutable review scope".to_string(),
+    );
+    task.status = TaskStatus::PendingSupervisorReview;
+    task.pending_verification = true;
+    task.assignee = Some("alice".to_string());
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "remote:github.com/org/scope-lock".to_string(),
+        target_branch: "main".to_string(),
+    });
+    task_store.add(&task).expect("add task");
+
+    let input = WorkerCompletionReceiptInput {
+        task_id: task.id.clone(),
+        worker_agent_id: "scope-worker".to_string(),
+        repo_selector: "remote:github.com/org/scope-lock".to_string(),
+        source_branch: "factory/alice".to_string(),
+        commit_sha: "a".repeat(40),
+        merge_base_sha: "b".repeat(40),
+        target_branch: "main".to_string(),
+        target_sha: "c".repeat(40),
+        proof_reference: "proof:scope-lock".to_string(),
+        scope_summary: "immutable review boundary".to_string(),
+    };
+    let receipt = cas_store::build_worker_completion_receipt(&input, "alice", chrono::Utc::now());
+    let (transaction, dispatch) = cas_store::create_worker_delivery_with_dispatch(
+        &cas_root,
+        &receipt,
+        WorkerDeliveryState::AwaitingVerification,
+        "scope-worker",
+        "scope-supervisor",
+        chrono::Utc::now() + chrono::Duration::minutes(10),
+    )
+    .expect("active exact delivery boundary");
+    let events_before =
+        cas_store::list_worker_delivery_events(&cas_root, &transaction.id).expect("events");
+    let task_before = serde_json::to_value(task_store.get(&task.id).unwrap()).unwrap();
+    let deps_before =
+        serde_json::to_value(task_store.get_dependencies(&task.id).unwrap()).unwrap();
+
+    let service = make_service(cas_root.clone());
+    let error = service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "update",
+            "id": task.id,
+            "title": "Changed title",
+            "notes": "must not append on mixed rejected request",
+            "priority": 0,
+            "labels": "changed,security",
+            "description": "Changed description",
+            "design": "Changed design",
+            "acceptance_criteria": "Changed acceptance",
+            "demo_statement": "Changed demo",
+            "execution_note": "additive-only",
+            "external_ref": "changed-reference",
+            "assignee": "bob",
+            "status": "open",
+            "epic": epic.id,
+            "depth": "light",
+            "target_repo": repo.root,
+            "target_branch": "review-scope"
+        }))))
+        .await
+        .expect_err("public review-scope update must be rejected");
+    let text = error.message.to_string();
+    assert!(
+        text.contains("DELIVERY PROOF SCOPE LOCKED"),
+        "review-relevant task mutation must fail closed, got:\n{text}"
+    );
+    assert_eq!(
+        serde_json::to_value(task_store.get(&task.id).unwrap()).unwrap(),
+        task_before,
+        "rejected scope update must leave the task byte-for-byte unchanged"
+    );
+    assert_eq!(
+        serde_json::to_value(task_store.get_dependencies(&task.id).unwrap()).unwrap(),
+        deps_before
+    );
+    assert_eq!(
+        cas_store::get_latest_verification_dispatch(&cas_root, &task.id)
+            .unwrap()
+            .unwrap(),
+        dispatch
+    );
+    assert_eq!(
+        cas_store::get_latest_worker_delivery(&cas_root, &task.id)
+            .unwrap()
+            .unwrap()
+            .1,
+        transaction
+    );
+    assert_eq!(
+        cas_store::list_worker_delivery_events(&cas_root, &transaction.id).unwrap(),
+        events_before
+    );
+
+    let update_to_closed = service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "update",
+            "id": task.id,
+            "status": "closed"
+        }))))
+        .await
+        .expect_err("public update-to-closed must be rejected");
+    assert!(
+        update_to_closed
+            .message
+            .contains("DELIVERY PROOF SCOPE LOCKED"),
+        "update-to-closed must use the same early proof-scope guard"
+    );
+    assert_eq!(
+        serde_json::to_value(task_store.get(&task.id).unwrap()).unwrap(),
+        task_before
+    );
+
+    let note = service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "update",
+            "id": task.id,
+            "notes": "harmless progress"
+        }))))
+        .await
+        .expect("notes-only update");
+    assert!(get_text(&note).contains("notes"));
+    let after_note = task_store.get(&task.id).unwrap();
+    assert!(after_note.notes.contains("harmless progress"));
+    assert_eq!(after_note.status, TaskStatus::PendingSupervisorReview);
+    assert_eq!(
+        cas_store::get_latest_verification_dispatch(&cas_root, &task.id)
+            .unwrap()
+            .unwrap(),
+        dispatch
+    );
+    assert_eq!(
+        cas_store::get_latest_worker_delivery(&cas_root, &task.id)
+            .unwrap()
+            .unwrap()
+            .1,
+        transaction
+    );
+    assert_eq!(
+        cas_store::list_worker_delivery_events(&cas_root, &transaction.id).unwrap(),
+        events_before
+    );
+
+    let progress = service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "notes",
+            "id": task.id,
+            "note_type": "progress",
+            "notes": "dedicated progress action remains available"
+        }))))
+        .await
+        .expect("dedicated progress note");
+    assert!(get_text(&progress).contains("progress note"));
+    let after_progress = task_store.get(&task.id).unwrap();
+    assert!(
+        after_progress
+            .notes
+            .contains("dedicated progress action remains available")
+    );
+    assert_eq!(after_progress.status, TaskStatus::PendingSupervisorReview);
+    assert_eq!(
+        cas_store::get_latest_verification_dispatch(&cas_root, &task.id)
+            .unwrap()
+            .unwrap(),
+        dispatch
+    );
+    assert_eq!(
+        cas_store::get_latest_worker_delivery(&cas_root, &task.id)
+            .unwrap()
+            .unwrap()
+            .1,
+        transaction
+    );
+    assert_eq!(
+        cas_store::list_worker_delivery_events(&cas_root, &transaction.id).unwrap(),
+        events_before
+    );
+}
+
+#[tokio::test]
+async fn terminal_task_rejects_fresh_completion_receipt_without_any_mutation() {
+    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let home = TempDir::new().expect("temp HOME");
+    let _home = HomeGuard::enter(home.path());
+    let repo = GitRepo::new();
+    run_git(
+        &["remote", "add", "origin", "git@github.com:org/terminal-replay.git"],
+        &repo.root,
+    );
+    let cas_root = init_cas_dir(&repo.root).expect("init CAS");
+    disable_system_a(&cas_root);
+    let worker_id = "terminal-worker-session";
+    register_delivery_agent(
+        &cas_root,
+        worker_id,
+        "alice",
+        AgentRole::Worker,
+        "terminal-factory",
+    );
+    let worker_path = cas_root.join("worktrees").join("alice");
+    repo.add_worktree(&worker_path, "factory/alice");
+    std::fs::write(worker_path.join("replayed.rs"), "pub fn replayed() {}\n").unwrap();
+    run_git(&["add", "replayed.rs"], &worker_path);
+    run_git(&["commit", "-m", "stale post-close worker commit"], &worker_path);
+
+    let task_store = open_task_store(&cas_root).expect("task store");
+    let mut task = Task::new(
+        "cas-terminal-receipt".to_string(),
+        "Already delivered task".to_string(),
+    );
+    task.status = TaskStatus::Closed;
+    task.closed_at = Some(chrono::Utc::now());
+    task.assignee = Some("alice".to_string());
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "remote:github.com/org/terminal-replay".to_string(),
+        target_branch: "main".to_string(),
+    });
+    task_store.add(&task).expect("add closed task");
+    let task_before = serde_json::to_value(task_store.get(&task.id).unwrap()).unwrap();
+    assert!(
+        cas_store::get_latest_worker_delivery(&cas_root, &task.id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        cas_store::get_latest_verification_dispatch(&cas_root, &task.id)
+            .unwrap()
+            .is_none()
+    );
+    let durable_counts = || {
+        let conn = rusqlite::Connection::open(cas_root.join("cas.db")).unwrap();
+        [
+            "worker_completion_receipts",
+            "worker_delivery_transactions",
+            "worker_delivery_events",
+            "verification_dispatches",
+            "verifications",
+        ]
+        .map(|table| {
+            conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+        })
+    };
+    let counts_before = durable_counts();
+    let receipt = WorkerCompletionReceiptInput {
+        task_id: task.id.clone(),
+        worker_agent_id: worker_id.to_string(),
+        repo_selector: "remote:github.com/org/terminal-replay".to_string(),
+        source_branch: "factory/alice".to_string(),
+        commit_sha: git_stdout(&repo.root, &["rev-parse", "factory/alice"]),
+        merge_base_sha: git_stdout(
+            &repo.root,
+            &["merge-base", "factory/alice", "main"],
+        ),
+        target_branch: "main".to_string(),
+        target_sha: git_stdout(&repo.root, &["rev-parse", "main"]),
+        proof_reference: "proof:terminal-replay".to_string(),
+        scope_summary: "stale post-close receipt".to_string(),
+    };
+    let receipt_id =
+        cas_store::build_worker_completion_receipt(&receipt, "alice", chrono::Utc::now()).id;
+
+    let worker = delivery_service(&cas_root, worker_id);
+    let result = worker
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "close",
+            "id": task.id,
+            "reason": "stale terminal replay",
+            "completion_receipt": serde_json::to_string(&receipt).unwrap()
+        }))))
+        .await
+        .expect("terminal receipt response");
+    let text = get_text(&result);
+    assert!(
+        text.contains("DELIVERY RECEIPT REJECTED") && text.contains("already Closed"),
+        "terminal receipt must fail closed, got:\n{text}"
+    );
+    assert_eq!(
+        serde_json::to_value(task_store.get(&task.id).unwrap()).unwrap(),
+        task_before,
+        "terminal replay must not update status, timestamps, or deliverables"
+    );
+    assert!(
+        cas_store::get_worker_delivery_by_receipt(&cas_root, &receipt_id)
+            .unwrap()
+            .is_none(),
+        "terminal replay must not create a receipt or transaction"
+    );
+    assert!(
+        cas_store::get_latest_verification_dispatch(&cas_root, &task.id)
+            .unwrap()
+            .is_none(),
+        "terminal replay must not create a verification dispatch"
+    );
+    assert_eq!(
+        durable_counts(),
+        counts_before,
+        "terminal replay must not create receipts, transactions, events, dispatches, or verdicts"
+    );
+}

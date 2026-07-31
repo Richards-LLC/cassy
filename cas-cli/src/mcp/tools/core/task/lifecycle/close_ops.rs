@@ -724,6 +724,13 @@ impl CasCore {
         })?;
 
         if let Some(raw_receipt) = completion_receipt.as_deref() {
+            if let Err(message) = super::proof_scope::guard_task_proof_scope(
+                &self.cas_root,
+                &task,
+                super::proof_scope::ProofScopeOperation::CompletionReceipt,
+            ) {
+                return Ok(Self::tool_error(message));
+            }
             return self
                 .submit_worker_completion_receipt(raw_receipt, &mut task, task_store.as_ref())
                 .await;

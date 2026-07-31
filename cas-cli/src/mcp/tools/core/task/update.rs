@@ -262,6 +262,21 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+        if let Err(message) = super::lifecycle::proof_scope::guard_task_proof_scope(
+            &self.cas_root,
+            &task,
+            super::lifecycle::proof_scope::ProofScopeOperation::TaskUpdate {
+                request: &req,
+                target_repo_supplied: target_repo.is_some(),
+                target_branch_supplied: target_branch.is_some(),
+            },
+        ) {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(message),
+                data: None,
+            });
+        }
         let existing_repo_context = if target_repo.is_none() {
             match task.deliverables.work_target.as_ref() {
                 Some(target) => Some(

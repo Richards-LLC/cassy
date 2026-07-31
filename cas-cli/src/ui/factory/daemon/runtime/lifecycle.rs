@@ -490,9 +490,9 @@ impl FactoryDaemon {
                         if !self.app.prompt_is_still_deliverable(&prompt) {
                             tracing::info!(
                                 target: "cas::coordination",
-                                stage = "drop_stale_worker_idle_before_injection",
+                                stage = "drop_stale_taskless_worker_before_injection",
                                 worker = prompt.drop_if_worker_assigned.as_deref().unwrap_or(""),
-                                "dropped WorkerIdle because assignment landed after batch revalidation"
+                                "dropped taskless-worker alert because assignment landed after batch revalidation"
                             );
                             continue;
                         }

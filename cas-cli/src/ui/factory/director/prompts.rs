@@ -556,8 +556,9 @@ pub struct Prompt {
     pub target: String,
     /// Prompt text to inject
     pub text: String,
-    /// cas-ed6c: `Some(worker)` when this prompt is a `WorkerIdle`-class
-    /// alert about `worker` — threaded down to `deliver_to_worker` so the
+    /// cas-ed6c/cas-38e3: `Some(worker)` when this prompt is a taskless-worker
+    /// alert about `worker` (`WorkerIdle` or `AgentRegistered`) — threaded down
+    /// to `deliver_to_worker` so the
     /// queued inbox row can be tagged for later retraction
     /// (`TeamsManager::prune_stale_idle_alerts`) if the worker gains a real
     /// assignment before the recipient ever reads it. `None` for every
@@ -578,7 +579,7 @@ pub struct Prompt {
     /// prompt kind, including the plain informational (non-merge)
     /// close-rejected idle wording, which still uses `retract_worker`.
     pub retract_task: Option<String>,
-    /// Taskless `WorkerIdle` prompts must be checked once more against a
+    /// Taskless worker prompts must be checked once more against a
     /// fresh store snapshot immediately before their PTY/inbox injection.
     /// This closes the small race after batch revalidation but before the
     /// transport write. Other prompt kinds do not carry this tag.
@@ -1524,13 +1525,13 @@ pub fn generate_prompt(
             let ready_count = dispatchable_ready_count(data, gated_task_ids);
             let text = if ready_count > 0 {
                 format!(
-                    "Worker {agent_name} is ready and waiting for tasks.\n\
+                    "Worker {agent_name} has registered and is awaiting its first task.\n\
                      Ready tasks exist — check live: `{supervisor_prefix}task action=ready`\n\
                      Assign work: {supervisor_prefix}task action=update id=<task-id> assignee={agent_name}"
                 )
             } else {
                 format!(
-                    "Worker {agent_name} is ready and waiting for tasks.\n\
+                    "Worker {agent_name} has registered and is awaiting its first task.\n\
                      No dispatchable tasks in current snapshot — verify with \
                      `{supervisor_prefix}task action=ready` before acting."
                 )
@@ -1539,9 +1540,9 @@ pub fn generate_prompt(
             Some(Prompt {
                 target: supervisor_name.to_string(),
                 text: with_response_instructions(&text, agent_name, supervisor_cli),
-                retract_worker: None,
+                retract_worker: Some(agent_name.clone()),
                 retract_task: None,
-                drop_if_worker_assigned: None,
+                drop_if_worker_assigned: Some(agent_name.clone()),
             })
         }
 
@@ -2378,6 +2379,46 @@ mod tests {
         assert!(
             !prompt_is_still_deliverable(&prompt, &assigned_data),
             "last-mile delivery must drop an already-enqueued WorkerIdle after assignment"
+        );
+    }
+
+    #[test]
+    fn queued_worker_ready_is_dropped_if_assignment_lands_before_injection() {
+        let event = DirectorEvent::AgentRegistered {
+            agent_id: "sess-id-abc123".to_string(),
+            agent_name: "swift-fox".to_string(),
+        };
+        let idle_data = make_data(0);
+        let prompt = generate_prompt(
+            &event,
+            &idle_data,
+            &idle_data,
+            "supervisor",
+            &default_config(),
+            codex(),
+            codex(),
+            &HashSet::new(),
+            None,
+        )
+        .expect("newly registered taskless worker should enqueue a ready prompt");
+        assert!(prompt.text.contains("awaiting its first task"));
+        assert_eq!(prompt.retract_worker.as_deref(), Some("swift-fox"));
+        assert_eq!(
+            prompt.drop_if_worker_assigned.as_deref(),
+            Some("swift-fox")
+        );
+
+        let mut assigned_data = make_data(0);
+        assigned_data.in_progress_tasks = vec![task_with_status(
+            "cas-next",
+            Some("swift-fox"),
+            TaskStatus::InProgress,
+        )];
+        assigned_data.agents[0].current_task = Some("cas-next".to_string());
+
+        assert!(
+            !prompt_is_still_deliverable(&prompt, &assigned_data),
+            "last-mile delivery must drop an already-enqueued ready alert after assignment"
         );
     }
 

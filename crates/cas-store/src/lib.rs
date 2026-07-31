@@ -115,7 +115,8 @@ pub use verification_store::{
     invalidate_verification_dispatch_for_new_cycle, issue_server_verifier_handoff,
     issue_server_verifier_handoff_with_secret, issue_verifier_capability,
     resolve_verification_dispatch_with_conn, save_verification_issues_with_conn,
-    timeout_verification_dispatch, update_system_verification,
+    reopen_closed_task_atomic, timeout_verification_dispatch, update_system_verification,
+    ParentDependencyUpdate, TaskReopenLifecycleOutbox,
 };
 
 // Worktree store for git worktree tracking

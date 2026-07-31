@@ -3609,6 +3609,7 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+        let original_updated_at = task.updated_at;
 
         let fresh_scope_dispatch =
             super::proof_scope::close_authoritative_task_proof_dispatch(&self.cas_root, &task.id)
@@ -3626,6 +3627,19 @@ impl CasCore {
             && task.status != TaskStatus::Blocked
             && fresh_scope_dispatch.is_none()
         {
+            let already_reopened = task.status == TaskStatus::Open
+                && cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|dispatch| {
+                        dispatch.state == cas_types::VerificationDispatchState::Invalidated
+                    });
+            if already_reopened {
+                return Ok(Self::success(format!(
+                    "Reopened task idempotently: {} - {}",
+                    req.id, task.title
+                )));
+            }
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
                 format!(
@@ -3639,16 +3653,6 @@ impl CasCore {
         }
 
         let old_status = task.status;
-        if old_status == TaskStatus::Closed {
-            cas_store::invalidate_verification_dispatch_for_new_cycle(&self.cas_root, &task.id)
-                .map_err(|error| McpError {
-                    code: ErrorCode::INTERNAL_ERROR,
-                    message: Cow::from(format!(
-                        "Failed to invalidate reopened task proof cycle: {error}"
-                    )),
-                    data: None,
-                })?;
-        }
         task.status = TaskStatus::Open;
         if old_status == TaskStatus::Closed {
             // cas-cd24: closed-specific resets stay gated to the closed
@@ -3691,6 +3695,50 @@ impl CasCore {
             }
         }
 
+        let actor = self
+            .get_agent_id()
+            .ok()
+            .and_then(|id| {
+                self.open_agent_store()
+                    .ok()
+                    .and_then(|s| s.get(&id).ok())
+                    .map(|a| a.name)
+            })
+            .unwrap_or_else(|| "unknown".into());
+        let occurrence = super::supervisor_push::occurrence_from_updated_at(task.updated_at);
+        let lifecycle_outbox = if old_status == TaskStatus::Closed {
+            let agent_store = self.open_agent_store().map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Failed to prepare reopen lifecycle: {error}")),
+                data: None,
+            })?;
+            let outbox = super::supervisor_push::prepare_task_lifecycle_outbox(
+                agent_store.as_ref(),
+                &task.id,
+                &task.title,
+                old_status,
+                TaskStatus::Open,
+                &actor,
+                req.reason.as_deref(),
+                super::supervisor_push::LifecycleTransition::ReadyReopened,
+                &occurrence,
+            );
+            if outbox.is_some() {
+                crate::store::open_supervisor_queue_store(&self.cas_root).map_err(|error| {
+                    McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!(
+                            "Failed to initialize reopen lifecycle outbox: {error}"
+                        )),
+                        data: None,
+                    }
+                })?;
+            }
+            outbox
+        } else {
+            None
+        };
+
         if let Some(dispatch) = fresh_scope_dispatch
             .as_ref()
             .filter(|_| old_status != TaskStatus::Closed)
@@ -3709,6 +3757,22 @@ impl CasCore {
                 )),
                 data: None,
             })?;
+        } else if old_status == TaskStatus::Closed {
+            cas_store::reopen_closed_task_atomic(
+                &self.cas_root,
+                &task,
+                original_updated_at,
+                cas_store::ParentDependencyUpdate::Unchanged,
+                lifecycle_outbox.as_ref(),
+            )
+            .map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!(
+                    "Failed to atomically invalidate proof cycle and reopen task {}: {error}",
+                    task.id
+                )),
+                data: None,
+            })?;
         } else {
             task_store.update(&task).map_err(|e| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
@@ -3718,17 +3782,6 @@ impl CasCore {
         }
 
         // cas-062d / cas-17e4: ready/reopened outbox after successful reopen.
-        let actor = self
-            .get_agent_id()
-            .ok()
-            .and_then(|id| {
-                self.open_agent_store()
-                    .ok()
-                    .and_then(|s| s.get(&id).ok())
-                    .map(|a| a.name)
-            })
-            .unwrap_or_else(|| "unknown".into());
-        let occurrence = super::supervisor_push::occurrence_from_updated_at(task.updated_at);
         if let Err(e) = self.push_task_lifecycle(
             &req.id,
             &task.title,

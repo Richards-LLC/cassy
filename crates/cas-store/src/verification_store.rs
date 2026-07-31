@@ -12,18 +12,38 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use crate::Result;
+use crate::SqliteEventStore;
 use crate::agent_store::register_agent_with_conn;
 use crate::error::StoreError;
 use crate::event_store::record_event_with_conn;
 use crate::recording_store::capture_task_event;
 use crate::shared_db::ImmediateTx;
+use crate::supervisor_queue_store::{
+    NotificationPriority, SqliteSupervisorQueueStore, SupervisorQueueStore,
+};
+use crate::task_store::SqliteTaskStore;
 use cas_types::{
-    Agent, AgentRole, AgentStatus, AgentType, Event, EventEntityType, EventType, IssueSeverity,
-    RecordingEventType, Task, TaskStatus, Verification, VerificationDispatch,
-    VerificationDispatchState, VerificationIssue, VerificationProofBoundary,
+    Agent, AgentRole, AgentStatus, AgentType, Dependency, DependencyType, Event, EventEntityType,
+    EventType, IssueSeverity, RecordingEventType, Task, TaskStatus, Verification,
+    VerificationDispatch, VerificationDispatchState, VerificationIssue, VerificationProofBoundary,
     VerificationProvenance, VerificationRecoveryAction, VerificationStatus, VerificationType,
     VerifierCapability,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskReopenLifecycleOutbox {
+    pub supervisor_id: String,
+    pub payload: String,
+    pub priority: NotificationPriority,
+    pub transition_key: String,
+    pub prompt_delivered_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ParentDependencyUpdate {
+    Unchanged,
+    Replace(Option<Dependency>),
+}
 
 // Helper to convert lock errors
 fn lock_err<T>(_: std::sync::PoisonError<T>) -> StoreError {
@@ -1163,6 +1183,132 @@ pub fn invalidate_verification_dispatch_for_new_cycle(
     let dispatch = invalidate_verification_dispatch_for_new_cycle_with_conn(&tx, &dispatch.id)?;
     tx.commit()?;
     Ok(Some(dispatch))
+}
+
+/// Reopen a closed task and invalidate its reusable proof as one durable mutation.
+///
+/// The full task row, optional parent dependency replacement, task event/recording,
+/// and durable supervisor lifecycle occurrence share the same immediate transaction.
+/// Any injected or real failure therefore leaves the prior closed proof cycle intact.
+#[allow(clippy::too_many_arguments)]
+pub fn reopen_closed_task_atomic(
+    cas_dir: &Path,
+    task: &Task,
+    expected_updated_at: DateTime<Utc>,
+    parent_dependency: ParentDependencyUpdate,
+    lifecycle_outbox: Option<&TaskReopenLifecycleOutbox>,
+) -> Result<Option<VerificationDispatch>> {
+    if task.status != TaskStatus::Open || task.closed_at.is_some() {
+        return Err(StoreError::Parse(
+            "atomic closed-task reopen requires the complete proposed Open task".to_string(),
+        ));
+    }
+
+    SqliteEventStore::open(cas_dir)?;
+    if lifecycle_outbox.is_some() {
+        let supervisor_queue = SqliteSupervisorQueueStore::open(cas_dir)?;
+        supervisor_queue.init()?;
+    }
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let conn = store.conn.lock().map_err(lock_err)?;
+    let tx = ImmediateTx::new(&conn)?;
+
+    let dispatch = match get_latest_verification_dispatch_with_conn(&tx, &task.id)? {
+        Some(dispatch)
+            if matches!(
+                dispatch.state,
+                VerificationDispatchState::Resolved | VerificationDispatchState::TimedOut
+            ) =>
+        {
+            Some(invalidate_verification_dispatch_for_new_cycle_with_conn(
+                &tx,
+                &dispatch.id,
+            )?)
+        }
+        _ => None,
+    };
+
+    SqliteTaskStore::reopen_exact_with_conn(&tx, task, TaskStatus::Closed, expected_updated_at)?;
+
+    if let ParentDependencyUpdate::Replace(replacement) = parent_dependency {
+        if let Some(dep) = replacement.as_ref() {
+            if dep.from_id != task.id || dep.dep_type != DependencyType::ParentChild {
+                return Err(StoreError::Parse(
+                    "atomic reopen parent replacement must be a ParentChild dependency".to_string(),
+                ));
+            }
+            let parent_type: Option<String> = tx
+                .query_row(
+                    "SELECT task_type FROM tasks WHERE id = ?1",
+                    params![dep.to_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            match parent_type.as_deref() {
+                Some("epic") => {}
+                Some(other) => {
+                    return Err(StoreError::Parse(format!(
+                        "Task {} is not an epic (type: {other})",
+                        dep.to_id
+                    )));
+                }
+                None => return Err(StoreError::TaskNotFound(dep.to_id.clone())),
+            }
+        }
+        tx.execute(
+            "DELETE FROM dependencies WHERE from_id = ?1 AND dep_type = ?2",
+            params![task.id, DependencyType::ParentChild.to_string()],
+        )?;
+        if let Some(dep) = replacement {
+            tx.execute(
+                "INSERT INTO dependencies (from_id, to_id, dep_type, created_at, created_by)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    dep.from_id,
+                    dep.to_id,
+                    dep.dep_type.to_string(),
+                    dep.created_at.to_rfc3339(),
+                    dep.created_by,
+                ],
+            )?;
+        }
+    }
+
+    let event = Event::new(
+        EventType::TaskCreated,
+        EventEntityType::Task,
+        &task.id,
+        format!("Task reopened: {}", task.title),
+    );
+    record_event_with_conn(&tx, &event)?;
+    let recording_schema_exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'recordings')",
+        [],
+        |row| row.get(0),
+    )?;
+    if recording_schema_exists {
+        capture_task_event(&tx, RecordingEventType::TaskCreated, &task.id, None)?;
+    }
+
+    if let Some(outbox) = lifecycle_outbox {
+        tx.execute(
+            "INSERT INTO supervisor_queue
+             (supervisor_id, event_type, payload, priority, created_at, transition_key,
+              prompt_delivered_at)
+             VALUES (?1, 'task_lifecycle', ?2, ?3, ?4, ?5, ?6)",
+            params![
+                outbox.supervisor_id,
+                outbox.payload,
+                i32::from(outbox.priority),
+                task.updated_at.to_rfc3339(),
+                outbox.transition_key,
+                outbox.prompt_delivered_at.map(|at| at.to_rfc3339()),
+            ],
+        )?;
+    }
+
+    tx.commit()?;
+    Ok(dispatch)
 }
 
 /// Atomically invalidate one exact reviewed scope and reopen its task.

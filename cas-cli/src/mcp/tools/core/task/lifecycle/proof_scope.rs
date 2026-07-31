@@ -75,7 +75,7 @@ impl ProofScopeOperation<'_> {
     }
 }
 
-fn delivery_state_locks_scope(state: WorkerDeliveryState) -> bool {
+pub(crate) fn delivery_state_locks_scope(state: WorkerDeliveryState) -> bool {
     matches!(
         state,
         WorkerDeliveryState::AwaitingVerification

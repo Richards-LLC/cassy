@@ -1311,14 +1311,15 @@ mod tests {
             super::ProxySnapshotReadErrorKind::ConfigMismatch
         );
 
-        snapshot.generated_at_ms = super::now_millis().unwrap().saturating_add(30_001);
+        // Stay a full minute beyond the accepted 30s skew so serialization,
+        // filesystem I/O, and scheduler delay cannot cross the boundary.
+        snapshot.generated_at_ms = super::now_millis().unwrap().saturating_add(90_000);
         snapshot.health.generated_at_ms = snapshot.generated_at_ms;
         std::fs::write(
             tmp.path().join(super::PROXY_SNAPSHOT_CACHE),
             serde_json::to_vec(&snapshot).unwrap(),
         )
         .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(2));
         assert_eq!(
             super::read_proxy_snapshot_cache(tmp.path())
                 .unwrap_err()

@@ -2,6 +2,73 @@ use crate::support::*;
 use cas::mcp::tools::service::SearchContextRequest;
 use cas::mcp::tools::*;
 use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::ErrorCode;
+
+fn seed_projection_documents(cas_root: &std::path::Path) {
+    let index_dir = cas_root.join("index/tantivy");
+    drop(cas::hybrid_search::SearchIndex::open(&index_dir).unwrap());
+
+    let index = tantivy::Index::open_in_dir(index_dir).unwrap();
+    let schema = index.schema();
+    let id = schema.get_field("id").unwrap();
+    let content = schema.get_field("content").unwrap();
+    let tags = schema.get_field("tags").unwrap();
+    let kind = schema.get_field("type").unwrap();
+    let title = schema.get_field("title").unwrap();
+    let doc_type = schema.get_field("doc_type").unwrap();
+    let mut writer = index.writer(50_000_000).unwrap();
+
+    for (document_type, marker) in [
+        ("entry", "projectionentrye626"),
+        ("task", "projectiontaske626"),
+        ("rule", "projectionrulee626"),
+        ("skill", "projectionskille626"),
+        ("code_symbol", "projectionsymbole626"),
+        ("code_file", "projectionfilee626"),
+        ("spec", "projectionspece626"),
+    ] {
+        let mut document = tantivy::TantivyDocument::new();
+        document.add_text(id, format!("{document_type}-e626"));
+        document.add_text(content, marker);
+        document.add_text(tags, "");
+        document.add_text(kind, "test");
+        document.add_text(title, marker);
+        document.add_text(doc_type, document_type);
+        writer.add_document(document).unwrap();
+    }
+
+    // A same-query decoy proves that `doc_type=spec` is an actual filter,
+    // rather than merely allowing the requested projection to rank first.
+    let mut decoy = tantivy::TantivyDocument::new();
+    decoy.add_text(id, "entry-spec-decoy-e626");
+    decoy.add_text(content, "projectionspece626");
+    decoy.add_text(tags, "");
+    decoy.add_text(kind, "test");
+    decoy.add_text(title, "projectionspece626");
+    decoy.add_text(doc_type, "entry");
+    writer.add_document(decoy).unwrap();
+    writer.commit().unwrap();
+}
+
+async fn provenance_search(
+    service: &CasService,
+    query: &str,
+    doc_type: Option<&str>,
+    version: usize,
+) -> Result<serde_json::Value, rmcp::ErrorData> {
+    let request: SearchContextRequest = serde_json::from_value(serde_json::json!({
+        "action": "search",
+        "query": query,
+        "doc_type": doc_type,
+        "limit": 10,
+        "provenance_version": version
+    }))
+    .unwrap();
+    service
+        .search(Parameters(request))
+        .await
+        .map(|result| serde_json::from_str(&extract_text(result)).unwrap())
+}
 
 #[tokio::test]
 async fn test_search_empty() {
@@ -136,6 +203,90 @@ async fn test_search_filter_by_type() {
     if !text.contains("No results") {
         // If we got results, they should be task-related
         assert!(!text.contains("entry") || text.contains("task"));
+    }
+}
+
+#[tokio::test]
+async fn provenance_v1_rejects_unsupported_versions_at_the_public_boundary() {
+    let (_temp, core) = setup_cas();
+    let service = CasService::new(core, None);
+
+    let error = provenance_search(&service, "anything", None, 2)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+    assert_eq!(
+        error.message,
+        "unsupported provenance_version 2; expected 1"
+    );
+}
+
+#[tokio::test]
+async fn provenance_v1_empty_results_classify_each_query_family() {
+    let (_temp, core) = setup_cas();
+    let service = CasService::new(core, None);
+
+    for (query, doc_type, expected_family) in [
+        ("plainkeywordmissinge626", None, "keyword"),
+        ("what is missing e626?", None, "question"),
+        ("\"missing:e626\"", None, "filtered"),
+        ("cas-dead", None, "id_lookup"),
+        ("missingcodee626", Some("code_symbol"), "code"),
+    ] {
+        let envelope = provenance_search(&service, query, doc_type, 1)
+            .await
+            .unwrap();
+        assert_eq!(envelope["version"], 1, "{query}");
+        assert_eq!(envelope["schema"], "cas.retrieval.provenance.v1", "{query}");
+        assert_eq!(envelope["query_family"], expected_family, "{query}");
+        assert_eq!(envelope["hits"], serde_json::json!([]), "{query}");
+    }
+}
+
+#[tokio::test]
+async fn provenance_v1_projects_every_unified_document_type() {
+    let (temp, core) = setup_cas();
+    seed_projection_documents(&temp.path().join(".cas"));
+    let service = CasService::new(core, None);
+
+    for (document_type, marker, preview_prefix, origin, scope) in [
+        ("entry", "projectionentrye626", "[Entry]", None, "unknown"),
+        ("task", "projectiontaske626", "[Task]", None, "project"),
+        ("rule", "projectionrulee626", "[Rule]", None, "unknown"),
+        ("skill", "projectionskille626", "[Skill]", None, "unknown"),
+        (
+            "code_symbol",
+            "projectionsymbole626",
+            "[Code]",
+            Some("code_index"),
+            "project",
+        ),
+        (
+            "code_file",
+            "projectionfilee626",
+            "[File]",
+            Some("code_index"),
+            "project",
+        ),
+        ("spec", "projectionspece626", "[Spec]", None, "project"),
+    ] {
+        let envelope = provenance_search(&service, marker, Some(document_type), 1)
+            .await
+            .unwrap();
+        let hits = envelope["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), 1, "{document_type}: {envelope}");
+        let hit = &hits[0];
+        assert_eq!(hit["document_type"], document_type);
+        assert!(
+            hit["preview"].as_str().unwrap().starts_with(preview_prefix),
+            "{document_type}: {hit}"
+        );
+        assert_eq!(
+            hit["provenance"]["source"]["origin"],
+            origin.map_or(serde_json::Value::Null, serde_json::Value::from)
+        );
+        assert_eq!(hit["provenance"]["source"]["index"], "tantivy_unified_v1");
+        assert_eq!(hit["provenance"]["scope"], scope);
     }
 }
 

@@ -24,3 +24,13 @@ The supervisor's close was then rejected with `CODE_REVIEW_REQUIRED: this task h
 ## Minor
 
 Close output said "verification skipped — assignee unknown" even though verification ver-fd59de6ef422 existed for the task — the close path did not find it.
+
+## Addendum 2026-07-31 (later same day): Symptom 3 — epic-less task inherits the worker's whole persistent branch
+
+Task cas-297d (zero-commit relay task, no epic association) assigned to a worker whose persistent factory branch carried 34 commits — all belonging to OTHER tasks and already merged into their respective epic branches. Close was rejected with `MERGE REQUIRED: factory/clever-octopus-61 has 34 commit(s) not on master`, and the guard is explicitly unbypassable ("data-state guard, not a review gate"). The demanded remediation (merge the branch to master) would have prematurely landed unreleased epic work on trunk. Workaround used: `task action=reset` to strip the assignee/factory anchor, then supervisor close — which also skipped verification lookup ("orphaned task, no assignee"), losing the audit linkage.
+
+Suggested fix: the merge-state guard should scope to commits attributable to THIS task (e.g. commits since task start / referencing the task id), and an epic-less task should not resolve its merge target to master when the branch's commits are already merged to epic branches. A task with zero task-attributable commits should not trip the guard at all.
+
+## Addendum 2026-07-31 (Symptom 4): guard ignores the branch actually used, keys on the registered worker branch
+
+Task cas-5d90: to avoid Symptom 3, the worker deliberately did its single-commit work on a CLEAN task-local branch (`factory/clever-octopus-61-cas-5d90`, based on the task's epic tip, containing only commit b323c85), which the supervisor merged into the epic and pushed BEFORE the close attempt (`git merge-base --is-ancestor` verified). Close still bounced `MERGE REQUIRED` — the guard evaluated the worker's REGISTERED persistent branch (`factory/clever-octopus-61`, 36 unrelated commits) rather than the branch the commit receipt lives on. So even the disciplined workaround (clean per-task branch, merged first, receipt supplied) cannot satisfy the gate. The guard should resolve merge-state from the commit_receipt's branch/ancestry, not the worker's registered branch name.

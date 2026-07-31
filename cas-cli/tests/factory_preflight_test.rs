@@ -4,6 +4,34 @@ use assert_cmd::Command;
 use serde_json::Value;
 use tempfile::TempDir;
 
+fn file_snapshot(root: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    fn visit(
+        root: &std::path::Path,
+        current: &std::path::Path,
+        files: &mut Vec<(std::path::PathBuf, Vec<u8>)>,
+    ) {
+        let mut entries = std::fs::read_dir(current)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                visit(root, &path, files);
+            } else {
+                files.push((
+                    path.strip_prefix(root).unwrap().to_path_buf(),
+                    std::fs::read(path).unwrap(),
+                ));
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    visit(root, root, &mut files);
+    files
+}
+
 fn git(repo: &std::path::Path, args: &[&str]) {
     assert!(
         std::process::Command::new("git")
@@ -63,6 +91,19 @@ fn command_at(cwd: &std::path::Path, home: &TempDir) -> Command {
     command
 }
 
+#[allow(deprecated)]
+fn human_command_at(cwd: &std::path::Path, home: &TempDir) -> Command {
+    let mut command = Command::cargo_bin("cas").unwrap();
+    command
+        .current_dir(cwd)
+        .env("HOME", home.path())
+        .env_remove("CAS_ROOT")
+        .env_remove("CAS_SOURCE_DIR")
+        .env_remove("CAS_EXPECTED_DEPLOYMENT_SHA")
+        .args(["factory", "preflight"]);
+    command
+}
+
 #[test]
 fn explicit_cas_root_for_another_repo_still_fails_critical() {
     let active = project(true);
@@ -92,6 +133,7 @@ fn nested_cwd_uses_the_resolved_cas_project_root_for_all_evidence() {
     std::fs::create_dir_all(&nested).unwrap();
     let home = TempDir::new().unwrap();
     let output = command_at(&nested, &home)
+        .args(["--cas-root", project.path().join(".cas").to_str().unwrap()])
         .assert()
         .success()
         .get_output()
@@ -101,6 +143,45 @@ fn nested_cwd_uses_the_resolved_cas_project_root_for_all_evidence() {
     assert_eq!(report["repository"]["state"], "ready");
     assert_eq!(report["cas_mcp"]["configured"], true);
     assert_eq!(report["factory_blocked"], false);
+}
+
+#[test]
+fn human_cli_reports_ready_and_leaves_home_cas_state_unchanged() {
+    let project = project(true);
+    let nested = project.path().join("nested/deeper");
+    std::fs::create_dir_all(&nested).unwrap();
+    let home = TempDir::new().unwrap();
+    std::fs::create_dir_all(home.path().join(".cas")).unwrap();
+    std::fs::create_dir_all(home.path().join(".config/cas")).unwrap();
+    std::fs::write(
+        home.path().join(".cas/live-task-ledger.sqlite"),
+        b"live-ledger-sentinel",
+    )
+    .unwrap();
+    std::fs::write(
+        home.path().join(".config/cas/known_repos.db"),
+        b"live-registry-sentinel",
+    )
+    .unwrap();
+    let before = file_snapshot(home.path());
+
+    let output = human_command_at(&nested, &home)
+        .args(["--cas-root", project.path().join(".cas").to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let human = String::from_utf8(output).unwrap();
+    assert!(human.starts_with("Factory preflight:"));
+    assert!(!human.contains("(factory blocked)"), "{human}");
+    assert!(human.contains("repository: ready"), "{human}");
+    assert!(human.contains("cas mcp: ready configured=true"), "{human}");
+    assert_eq!(
+        file_snapshot(home.path()),
+        before,
+        "preflight must not mutate ambient HOME/CAS state"
+    );
 }
 
 #[test]

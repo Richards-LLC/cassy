@@ -3,6 +3,7 @@ use cas::mcp::CasService;
 use cas::mcp::tools::*;
 use cas_mcp::SystemRequest;
 use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::ErrorCode;
 
 #[tokio::test]
 async fn test_context() {
@@ -151,4 +152,123 @@ async fn proxy_management_keeps_unsafe_config_name_routing_only() {
     let removed = extract_text(service.system(Parameters(remove)).await.unwrap());
     assert!(removed.contains(&public_name));
     assert!(!removed.contains(raw_name));
+}
+
+fn proxy_health_request() -> SystemRequest {
+    serde_json::from_value(serde_json::json!({"action": "proxy_health"})).unwrap()
+}
+
+#[cfg(feature = "mcp-proxy")]
+#[tokio::test]
+async fn system_proxy_health_prefers_the_active_proxy_snapshot() {
+    let (_temp, core) = setup_cas();
+    let proxy = cmcp_core::ProxyEngine::from_configs(Default::default())
+        .await
+        .unwrap();
+    let service = CasService::new(core, Some(std::sync::Arc::new(proxy)));
+
+    let result = service
+        .system(Parameters(proxy_health_request()))
+        .await
+        .unwrap();
+    let health: serde_json::Value = serde_json::from_str(&extract_text(result)).unwrap();
+    assert_eq!(health["healthy"], 0);
+    assert_eq!(health["degraded"], 0);
+    assert_eq!(health["servers"], serde_json::json!([]));
+    assert!(
+        health["session_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("proxy-"))
+    );
+}
+
+#[cfg(feature = "mcp-proxy")]
+#[tokio::test]
+async fn system_proxy_health_cache_fallback_is_sanitized() {
+    let (temp, core) = setup_cas();
+    let raw_name = "https://user:token@example.invalid/private";
+    let raw_session = "/home/operator/secret-session";
+    let forged = cmcp_core::ProxyHealthSnapshot {
+        session_id: raw_session.to_string(),
+        generated_at_ms: 42,
+        healthy: 0,
+        degraded: 1,
+        servers: vec![cmcp_core::UpstreamHealth {
+            name: raw_name.to_string(),
+            transport: "Bearer cache-secret".to_string(),
+            state: cmcp_core::UpstreamState::Backoff,
+            attempts: 1,
+            consecutive_failures: 1,
+            tool_count: 0,
+            last_error_code: Some("token=cache-secret\ncontrol".to_string()),
+            last_attempt_at_ms: Some(40),
+            next_retry_at_ms: Some(50),
+        }],
+    };
+    std::fs::write(
+        temp.path().join(".cas/proxy_health.json"),
+        serde_json::to_vec(&forged).unwrap(),
+    )
+    .unwrap();
+    let service = CasService::new(core, None);
+
+    let result = service
+        .system(Parameters(proxy_health_request()))
+        .await
+        .unwrap();
+    let text = extract_text(result);
+    let health: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(health["session_id"], "proxy-unknown");
+    assert_eq!(health["servers"][0]["transport"], "unknown");
+    assert_eq!(health["servers"][0]["last_error_code"], "unknown");
+    assert!(
+        health["servers"][0]["name"]
+            .as_str()
+            .is_some_and(|name| name.starts_with("upstream-") && name.len() == 41)
+    );
+    for forbidden in [
+        raw_name,
+        raw_session,
+        "Bearer cache-secret",
+        "token=cache-secret",
+        "control",
+    ] {
+        assert!(!text.contains(forbidden), "{forbidden:?} leaked: {text}");
+    }
+}
+
+#[cfg(feature = "mcp-proxy")]
+#[tokio::test]
+async fn system_proxy_health_cache_errors_have_stable_public_contracts() {
+    for (cache, expected_prefix) in [
+        (
+            None,
+            "MCP proxy health is unavailable (no active proxy and no cache):",
+        ),
+        (
+            Some(b"{not-json".as_slice()),
+            "MCP proxy health cache is invalid:",
+        ),
+    ] {
+        let (temp, core) = setup_cas();
+        if let Some(cache) = cache {
+            std::fs::write(temp.path().join(".cas/proxy_health.json"), cache).unwrap();
+        }
+        let service = CasService::new(core, None);
+        let error = service
+            .system(Parameters(proxy_health_request()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
+        assert!(
+            error.message.starts_with(expected_prefix),
+            "{}",
+            error.message
+        );
+        assert!(
+            !error
+                .message
+                .contains(temp.path().to_string_lossy().as_ref())
+        );
+    }
 }

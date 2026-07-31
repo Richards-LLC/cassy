@@ -143,6 +143,7 @@ impl CasCore {
                 "task" | "tasks" => Some(vec![DocType::Task]),
                 "rule" | "rules" => Some(vec![DocType::Rule]),
                 "skill" | "skills" => Some(vec![DocType::Skill]),
+                "spec" | "specs" | "specification" | "specifications" => Some(vec![DocType::Spec]),
                 "code" | "code_symbol" | "symbol" | "symbols" => Some(vec![DocType::CodeSymbol]),
                 "code_file" | "file" | "files" => Some(vec![DocType::CodeFile]),
                 _ => None,

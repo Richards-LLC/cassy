@@ -928,8 +928,11 @@ fn fetch_team_suggestions_for_context() -> Result<String, MemError> {
 /// and formats a concise section listing connected servers and their tools.
 /// Returns empty string if no cache file exists or it's empty.
 fn build_mcp_tools_section(cas_root: &Path) -> String {
-    let cache_path = cas_root.join("proxy_catalog.json");
-    let data = match std::fs::read(&cache_path) {
+    #[cfg(feature = "mcp-proxy")]
+    let loaded = crate::mcp::read_proxy_catalog_cache(cas_root);
+    #[cfg(not(feature = "mcp-proxy"))]
+    let loaded = std::fs::read(cas_root.join("proxy_catalog.json"));
+    let data = match loaded {
         Ok(d) => d,
         Err(_) => return String::new(),
     };

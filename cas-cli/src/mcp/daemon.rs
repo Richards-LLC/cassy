@@ -214,8 +214,11 @@ impl EmbeddedDaemon {
         };
 
         if proxy.retry_unhealthy().await > 0 {
-            crate::mcp::server::write_proxy_catalog_cache(&self.config.cas_root, &proxy).await;
-            crate::mcp::server::write_proxy_health_cache(&self.config.cas_root, &proxy).await;
+            if let Err(error) =
+                crate::mcp::server::write_proxy_snapshot_cache(&self.config.cas_root, &proxy).await
+            {
+                eprintln!("[CAS] Failed to publish MCP proxy state: {error}");
+            }
         }
 
         // Check mtime
@@ -257,13 +260,14 @@ impl EmbeddedDaemon {
                         eprintln!(
                             "[CAS] Proxy reloaded ({server_count} server(s), {tool_count} tools)"
                         );
-                        crate::mcp::server::write_proxy_catalog_cache(
+                        if let Err(error) = crate::mcp::server::write_proxy_snapshot_cache(
                             &self.config.cas_root,
                             &proxy,
                         )
-                        .await;
-                        crate::mcp::server::write_proxy_health_cache(&self.config.cas_root, &proxy)
-                            .await;
+                        .await
+                        {
+                            eprintln!("[CAS] Failed to publish MCP proxy state: {error}");
+                        }
                     }
                     Err(e) => {
                         eprintln!("[CAS] Proxy reload failed: {e}");

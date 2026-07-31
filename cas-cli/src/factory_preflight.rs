@@ -1008,7 +1008,7 @@ fn collect_proxy_facts(cas_root: &Path, live: Option<ProxySnapshotInput>) -> Pro
         }
         let health_path = cas_root.join("proxy_health.json");
         let (snapshot, invalid_snapshot) = if health_path.exists() {
-            match std::fs::read(&health_path)
+            match crate::mcp::read_proxy_health_cache(cas_root)
                 .ok()
                 .and_then(|raw| serde_json::from_slice::<cmcp_core::ProxyHealthSnapshot>(&raw).ok())
             {

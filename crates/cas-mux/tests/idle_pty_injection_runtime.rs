@@ -27,6 +27,38 @@
 //! produces a submitted line at the OS level. The Codex "stopped and not
 //! resuming" symptom this task investigated is therefore NOT an idle-gate
 //! problem — see the companion busy-injection note in the task record.
+//!
+//! # CORRECTION (cas-5fff, 2026-07-31) — READ BEFORE CITING THIS FILE
+//!
+//! The two results above still stand **for what this file actually
+//! measures**. What does NOT stand is the generalisation cas-893c drew from
+//! them and recorded as an explicit negative result: *"the Codex PTY path is
+//! NOT the cause"* / *"don't re-suspect the Codex PTY injection mechanism
+//! itself, it works correctly when the recipient is idle."*
+//!
+//! That conclusion was measured against the `bash` stand-in above and then
+//! stated about `codex`. It is false of the real binary. bash has no TUI: it
+//! accepts a raw write followed by a bare CR and submits the line. Codex runs
+//! a full-screen TUI with a **paste-burst detector**, and for any injected
+//! payload above roughly 1 KB that detector consumes the trailing CR as the
+//! terminator of an unframed paste instead of reading it as Enter. The write
+//! lands in full, the submit is lost, and the message sits in the composer as
+//! a draft forever while the daemon reports `stage: delivered`.
+//!
+//! Cost of the substitution: three months, and an entire factory epic in
+//! which every merge handoff had to be force-closed by the supervisor because
+//! no worker ever woke to re-close its task.
+//!
+//! The fix (bracketed-paste framing in `Pane::inject_prompt`) and its live
+//! coverage against the real binary live in
+//! `crates/cas-mux/tests/nonurgent_idle_codex_runtime.rs`. **A claim about a
+//! harness's behavior is only valid for the harness it was measured against**
+//! — this file may be used to reason about bash and about cas's own readiness
+//! gate, and about nothing else.
+//!
+//! This test keeps its `SupervisorCli::Claude` pane deliberately: Claude
+//! injection bytes are unchanged by cas-5fff, so what it measures is still
+//! exactly what it always measured.
 
 #[path = "support/real_pty_serial.rs"]
 mod real_pty_serial;

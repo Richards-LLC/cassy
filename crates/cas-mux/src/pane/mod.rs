@@ -1263,11 +1263,27 @@ impl Pane {
             && self.created_at.elapsed() >= std::time::Duration::from_secs(5)
     }
 
+    /// Type `prompt` into the pane's harness and submit it as a fresh turn.
+    ///
+    /// The payload is framed per harness (cas-5fff): Codex requires explicit
+    /// bracketed-paste delimiters, without which its paste-burst detector
+    /// consumes the trailing CR as the paste terminator and leaves the whole
+    /// message sitting in the composer as an unsubmitted draft — see
+    /// [`crate::harness::HarnessCapabilities::requires_bracketed_paste_injection`]
+    /// for the live measurements. Claude and Grok payloads are unchanged.
+    ///
+    /// This is the single choke point for BOTH injection paths — normal
+    /// (`Mux::inject`) and urgent (`Mux::interrupt_and_inject`, which calls
+    /// this after `break_turn`) — so the framing contract cannot drift between
+    /// them. That is also why the cas-5fff defect degraded urgent delivery
+    /// into "usually, retry if not" rather than leaving it healthy: both paths
+    /// were sampling the same swallow, with payload size as the variable.
     pub async fn inject_prompt(&self, prompt: &str) -> Result<()> {
         match &self.backend {
             PaneBackend::Pty(pty) => {
                 let text = prompt.trim();
-                pty.write(text.as_bytes()).await?;
+                let framed = crate::harness::injection_payload_bytes(self.harness, text);
+                pty.write(&framed).await?;
                 // Send carriage return after a settle delay in a background task
                 // so we don't block the daemon event loop for 150-500ms.
                 let writer = pty.writer_handle();

@@ -327,6 +327,26 @@ impl WorktreeManager {
         force: bool,
         cleanup: bool,
     ) -> WorktreeResult<Option<String>> {
+        let merge_commit = self.merge_preserving_worktree(worktree, force, cleanup)?;
+        if cleanup {
+            self.cleanup_merged_worktree(worktree)?;
+        }
+        Ok(merge_commit)
+    }
+
+    /// Merge while deliberately preserving the source worktree.
+    ///
+    /// `will_cleanup` controls dirty-tree validation exactly as it does for
+    /// [`Self::merge_and_cleanup`], but removal is deferred to
+    /// [`Self::cleanup_merged_worktree`]. Transactional delivery uses this
+    /// split so its ancestry-gated post-merge state can be durable before the
+    /// source worktree is removed.
+    pub(crate) fn merge_preserving_worktree(
+        &self,
+        worktree: &mut Worktree,
+        force: bool,
+        will_cleanup: bool,
+    ) -> WorktreeResult<Option<String>> {
         if self.config.auto_merge {
             // cas-e18f/cas-09f2: inspect the shared merge point before even
             // evaluating the requested source worktree. Residue from an
@@ -353,12 +373,12 @@ impl WorktreeManager {
 
         // Check for uncommitted changes (cas-006c: named-path classification,
         // not a raw "any porcelain output" check — see
-        // GitOperations::classify_dirty_status). will_remove=cleanup: when
+        // GitOperations::classify_dirty_status). will_remove=will_cleanup: when
         // this merge also removes the worktree directory, untracked files
         // must block too (removal destroys them outright); when the
         // worktree survives (cleanup=false) they only warn.
         if !force {
-            self.reject_or_warn_on_dirty(&worktree.path, cleanup)?;
+            self.reject_or_warn_on_dirty(&worktree.path, will_cleanup)?;
         }
 
         let merge_commit = if self.config.auto_merge {
@@ -402,29 +422,26 @@ impl WorktreeManager {
             None
         };
 
-        // cas-369f: force ≠ cleanup. Only remove when the caller explicitly
-        // requested cleanup (or System-A path that passed config-driven true).
-        //
-        // cas-006c: pass force=true to the low-level git removal here. By
-        // this point either the caller explicitly forced past our gate
-        // above, or (force=false) `reject_or_warn_on_dirty(path, cleanup)`
-        // already vetted the tree as safe to remove — which, because
-        // `will_remove` was true, means it also blocked on untracked files,
-        // not just tracked ones. Our own gate is therefore at least as
-        // strict as git's own untracked-file refusal here, so bypassing the
-        // latter is safe rather than a second false-positive (it only stays
-        // permissive for the CAS `.husky/_/` artifact, which is the actual
-        // bug this task fixes).
-        if cleanup {
-            self.git.remove_worktree(&worktree.path, true)?;
-
-            // Delete the branch
-            let _ = self.git.delete_branch(&worktree.branch, true);
-
-            worktree.mark_removed();
-        }
-
         Ok(merge_commit)
+    }
+
+    /// Remove a successfully merged worktree after any caller-owned durable
+    /// state has been committed.
+    ///
+    /// The dirty-tree decision belongs to `merge_preserving_worktree`; this
+    /// method is intentionally only the destructive half of the existing
+    /// merge-and-cleanup operation.
+    pub(crate) fn cleanup_merged_worktree(&self, worktree: &mut Worktree) -> WorktreeResult<()> {
+        // cas-006c: pass force=true to the low-level git removal here. The
+        // merge preflight already vetted the tree with `will_cleanup=true`,
+        // or the caller explicitly forced past that gate.
+        self.git.remove_worktree(&worktree.path, true)?;
+
+        // Delete the branch.
+        let _ = self.git.delete_branch(&worktree.branch, true);
+
+        worktree.mark_removed();
+        Ok(())
     }
 
     /// Abandon a worktree without merging

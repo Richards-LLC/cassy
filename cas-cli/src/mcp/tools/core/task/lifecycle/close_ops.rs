@@ -3420,7 +3420,7 @@ impl CasCore {
         VerificationSkipReason::AssigneeUnknown
     }
 
-    /// Reopen a closed OR blocked task (cas-cd24: blocked support added).
+    /// Reopen a closed/blocked task, or reset one exact approved task-only scope.
     ///
     /// cas-3c23: reopening a Closed/merged task is a supervisor-only action.
     /// A factory worker told (by a stale director re-dispatch or coordination
@@ -3441,6 +3441,12 @@ impl CasCore {
     /// (status flip, `closed_at`/`factory_branch_anchor` reset) is
     /// unchanged; Blocked→Open is new and does not touch those
     /// closed-specific fields.
+    ///
+    /// cas-e1b5: a nonterminal task with the exact latest nonlegacy
+    /// Approved/Skipped Resolved task-only dispatch may also be reopened to
+    /// start a fresh review scope. The named dispatch is invalidated before
+    /// moving the task to Open. Delivery-bound, rejected/error, superseded,
+    /// and ordinary task states retain the existing rejection behavior.
     pub async fn cas_task_reopen(
         &self,
         Parameters(req): Parameters<TaskReopenRequest>,
@@ -3466,13 +3472,29 @@ impl CasCore {
             data: None,
         })?;
 
-        if task.status != TaskStatus::Closed && task.status != TaskStatus::Blocked {
+        let fresh_scope_dispatch =
+            super::proof_scope::close_authoritative_task_proof_dispatch(&self.cas_root, &task.id)
+                .map_err(|reason| {
+                    Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        format!(
+                            "task fresh-scope recovery rejected: exact proof state for {} is unreadable ({reason})",
+                            task.id
+                        ),
+                    )
+                })?;
+
+        if task.status != TaskStatus::Closed
+            && task.status != TaskStatus::Blocked
+            && fresh_scope_dispatch.is_none()
+        {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
                 format!(
                     "Task is already {} (only closed or blocked tasks can be \
-                     reopened). To change status directly, use: \
-                     `task action=update id={} status=open`.",
+                     reopened, unless an exact Resolved task-only proof must be \
+                     invalidated before fresh review scope). To change status \
+                     directly, use: `task action=update id={} status=open`.",
                     task.status, req.id
                 ),
             ));
@@ -3516,7 +3538,9 @@ impl CasCore {
         // `close_reason`/note pattern above in `cas_task_close`.
         if let Some(reason) = &req.reason {
             let timestamp = task.updated_at.format("%Y-%m-%d %H:%M");
-            let verb = if old_status == TaskStatus::Blocked {
+            let verb = if fresh_scope_dispatch.is_some() && old_status != TaskStatus::Closed {
+                "Review scope reset"
+            } else if old_status == TaskStatus::Blocked {
                 "Unblocked"
             } else {
                 "Reopened"
@@ -3529,11 +3553,31 @@ impl CasCore {
             }
         }
 
-        task_store.update(&task).map_err(|e| McpError {
-            code: ErrorCode::INTERNAL_ERROR,
-            message: Cow::from(format!("Failed to update: {e}")),
-            data: None,
-        })?;
+        if let Some(dispatch) = fresh_scope_dispatch
+            .as_ref()
+            .filter(|_| old_status != TaskStatus::Closed)
+        {
+            cas_store::invalidate_verification_dispatch_and_reopen_task_exact(
+                &self.cas_root,
+                &dispatch.id,
+                &task,
+                old_status,
+            )
+            .map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!(
+                    "Failed to atomically invalidate exact reviewed scope {} and reopen task {}: {error}",
+                    dispatch.id, task.id
+                )),
+                data: None,
+            })?;
+        } else {
+            task_store.update(&task).map_err(|e| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Failed to update: {e}")),
+                data: None,
+            })?;
+        }
 
         // cas-062d / cas-17e4: ready/reopened outbox after successful reopen.
         let actor = self
@@ -3577,9 +3621,14 @@ impl CasCore {
             ));
         }
 
+        let suffix = if fresh_scope_dispatch.is_some() && old_status != TaskStatus::Closed {
+            " (invalidated the exact approved proof and opened a fresh verification scope)"
+        } else {
+            ""
+        };
         Ok(Self::success(format!(
-            "Reopened task: {} - {}",
-            req.id, task.title
+            "Reopened task: {} - {}{}",
+            req.id, task.title, suffix
         )))
     }
 

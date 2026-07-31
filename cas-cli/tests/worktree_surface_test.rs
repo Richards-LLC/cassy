@@ -3415,6 +3415,234 @@ async fn pending_delivery_proof_rejects_review_scope_update_but_allows_notes() {
 }
 
 #[tokio::test]
+async fn resolved_task_proof_freezes_scope_until_supervisor_starts_a_fresh_cycle() {
+    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let home = TempDir::new().expect("temp HOME");
+    let _home = HomeGuard::enter(home.path());
+    let repo = GitRepo::new();
+    let cas_root = init_cas_dir(&repo.root).expect("init CAS");
+    std::fs::write(
+        cas_root.join("config.toml"),
+        "[worktrees]\nenabled = false\n[verification]\nenabled = true\n[code_review]\nowner = \"worker\"\n",
+    )
+    .unwrap();
+
+    let worker_id = "resolved-scope-worker";
+    let supervisor_id = "resolved-scope-supervisor";
+    register_delivery_agent(
+        &cas_root,
+        worker_id,
+        "alice",
+        AgentRole::Worker,
+        "resolved-scope-factory",
+    );
+    register_delivery_agent(
+        &cas_root,
+        supervisor_id,
+        "supervisor",
+        AgentRole::Supervisor,
+        "resolved-scope-factory",
+    );
+    let worker = delivery_service(&cas_root, worker_id);
+    let supervisor = delivery_service(&cas_root, supervisor_id);
+    let task_store = open_task_store(&cas_root).expect("task store");
+
+    async fn approve_task_scope(
+        cas_root: &Path,
+        supervisor: &CasService,
+        task_id: &str,
+        supervisor_id: &str,
+    ) -> cas_types::VerificationDispatch {
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            cas_root,
+            task_id,
+            supervisor_id,
+            supervisor_id,
+            &cas_types::VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(10),
+            false,
+        )
+        .expect("task-only dispatch");
+        supervisor
+            .verification(Parameters(verification_req(serde_json::json!({
+                "action": "add",
+                "task_id": task_id,
+                "status": "approved",
+                "summary": "approved immutable task scope",
+                "confidence": 1.0,
+                "dispatch_id": dispatch.id,
+            }))))
+            .await
+            .expect("public supervisor verification");
+        cas_store::get_verification_dispatch(cas_root, &dispatch.id).unwrap()
+    }
+
+    let mut unchanged = Task::new(
+        "cas-resolved-scope-unchanged".to_string(),
+        "Reviewed unchanged scope".to_string(),
+    );
+    unchanged.status = TaskStatus::InProgress;
+    unchanged.depth = TaskDepth::Deep;
+    unchanged.assignee = Some("alice".to_string());
+    unchanged.acceptance_criteria = "original acceptance".to_string();
+    task_store.add(&unchanged).expect("add unchanged task");
+    let unchanged_dispatch =
+        approve_task_scope(&cas_root, &supervisor, &unchanged.id, supervisor_id).await;
+    assert_eq!(
+        unchanged_dispatch.state,
+        cas_types::VerificationDispatchState::Resolved
+    );
+
+    let before_rejected_update = durable_close_snapshot(&cas_root);
+    let rejected = worker
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "update",
+            "id": unchanged.id,
+            "acceptance_criteria": "scope changed after approval",
+        }))))
+        .await
+        .expect_err("resolved close-authoritative scope must reject semantic mutation");
+    assert!(rejected.message.contains("DELIVERY PROOF SCOPE LOCKED"));
+    assert!(rejected.message.contains("task action=reopen"));
+    assert_eq!(
+        durable_close_snapshot(&cas_root),
+        before_rejected_update,
+        "rejected semantic update must not mutate task, proof, events, or queues"
+    );
+
+    worker
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "update",
+            "id": unchanged.id,
+            "notes": "notes remain outside reviewed semantic scope",
+        }))))
+        .await
+        .expect("notes-only update remains supported");
+    assert!(
+        task_store
+            .get(&unchanged.id)
+            .unwrap()
+            .notes
+            .contains("notes remain outside reviewed semantic scope")
+    );
+
+    let unchanged_close = worker
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "update",
+            "id": unchanged.id,
+            "status": "closed",
+        }))))
+        .await
+        .expect("the unchanged reviewed scope may close with its exact verdict");
+    assert!(get_text(&unchanged_close).contains("Updated task"));
+    let closed = task_store.get(&unchanged.id).unwrap();
+    assert_eq!(closed.status, TaskStatus::Closed);
+    assert_eq!(closed.acceptance_criteria, "original acceptance");
+
+    let mut fresh = Task::new(
+        "cas-resolved-scope-fresh".to_string(),
+        "Reviewed scope needing rework".to_string(),
+    );
+    fresh.status = TaskStatus::InProgress;
+    fresh.depth = TaskDepth::Deep;
+    fresh.assignee = Some("alice".to_string());
+    fresh.acceptance_criteria = "first-cycle acceptance".to_string();
+    task_store.add(&fresh).expect("add fresh-cycle task");
+    let old_dispatch = approve_task_scope(&cas_root, &supervisor, &fresh.id, supervisor_id).await;
+
+    let rejected = worker
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "update",
+            "id": fresh.id,
+            "acceptance_criteria": "second-cycle acceptance",
+        }))))
+        .await
+        .expect_err("approved scope needs explicit recovery before mutation");
+    assert!(rejected.message.contains("task action=reopen"));
+
+    let worker_reopen = {
+        let _role = VarGuard::set("CAS_AGENT_ROLE", "worker");
+        worker
+            .task(Parameters(task_req(serde_json::json!({
+                "action": "reopen",
+                "id": fresh.id,
+                "reason": "worker must not invalidate approved proof",
+            }))))
+            .await
+            .expect_err("worker cannot reset an approved review scope")
+    };
+    assert!(worker_reopen.message.contains("only supervisors"));
+    assert_eq!(
+        cas_store::get_verification_dispatch(&cas_root, &old_dispatch.id)
+            .unwrap()
+            .state,
+        cas_types::VerificationDispatchState::Resolved
+    );
+
+    let reopen = {
+        let _role = VarGuard::set("CAS_AGENT_ROLE", "supervisor");
+        supervisor
+            .task(Parameters(task_req(serde_json::json!({
+                "action": "reopen",
+                "id": fresh.id,
+                "reason": "invalidate approved scope before rework",
+            }))))
+            .await
+            .expect("supervisor starts a fresh review scope")
+    };
+    assert!(get_text(&reopen).contains("fresh verification scope"));
+    assert_eq!(
+        cas_store::get_verification_dispatch(&cas_root, &old_dispatch.id)
+            .unwrap()
+            .state,
+        cas_types::VerificationDispatchState::Invalidated
+    );
+    assert_eq!(task_store.get(&fresh.id).unwrap().status, TaskStatus::Open);
+
+    worker
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "start",
+            "id": fresh.id,
+        }))))
+        .await
+        .expect("worker starts fresh cycle");
+    worker
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "update",
+            "id": fresh.id,
+            "acceptance_criteria": "second-cycle acceptance",
+        }))))
+        .await
+        .expect("fresh scope may be updated");
+
+    let close = {
+        let _role = VarGuard::set("CAS_AGENT_ROLE", "worker");
+        let _factory = VarGuard::set("CAS_FACTORY_MODE", "1");
+        worker
+            .task(Parameters(task_req(serde_json::json!({
+                "action": "close",
+                "id": fresh.id,
+                "reason": "fresh scope requires fresh proof",
+            }))))
+            .await
+            .expect("public close returns fresh verification guidance")
+    };
+    let close_text = get_text(&close);
+    assert!(close_text.contains("VERIFICATION REQUIRED"), "{close_text}");
+    let new_dispatch = cas_store::get_latest_verification_dispatch(&cas_root, &fresh.id)
+        .unwrap()
+        .unwrap();
+    assert_ne!(new_dispatch.id, old_dispatch.id);
+    assert_eq!(
+        new_dispatch.state,
+        cas_types::VerificationDispatchState::Pending
+    );
+    let changed = task_store.get(&fresh.id).unwrap();
+    assert_eq!(changed.acceptance_criteria, "second-cycle acceptance");
+    assert_ne!(changed.status, TaskStatus::Closed);
+}
+
+#[tokio::test]
 async fn terminal_task_rejects_fresh_completion_receipt_without_any_mutation() {
     let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
     let home = TempDir::new().expect("temp HOME");

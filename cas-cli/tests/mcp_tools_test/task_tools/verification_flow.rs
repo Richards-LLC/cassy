@@ -903,6 +903,7 @@ async fn test_update_to_closed_is_exact_task_gated_but_other_task_update_remains
 #[tokio::test]
 async fn test_update_to_closed_rejects_stale_task_row_behind_current_dispatch() {
     let (temp, service) = setup_cas();
+    let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
     std::fs::write(
         cas_dir.join("config.toml"),
@@ -978,14 +979,16 @@ async fn test_update_to_closed_rejects_stale_task_row_behind_current_dispatch() 
         .await
         .expect("exact current verdict authorizes update");
 
-    service
-        .cas_task_update(Parameters(task_status_update(
-            &task_id,
-            Some("in_progress"),
-            None,
-        )))
-        .await
-        .expect("reopen exact task");
+    {
+        let _supervisor = ScopedSupervisorEnv::new();
+        service
+            .cas_task_reopen(Parameters(TaskReopenRequest {
+                id: task_id.clone(),
+                reason: Some("invalidate approved proof before rework".to_string()),
+            }))
+            .await
+            .expect("supervisor reopens exact task proof scope");
+    }
     assert_eq!(
         cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
             .unwrap()

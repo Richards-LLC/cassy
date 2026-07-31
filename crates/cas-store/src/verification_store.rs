@@ -14,8 +14,12 @@ use std::sync::{Arc, Mutex};
 use crate::Result;
 use crate::agent_store::register_agent_with_conn;
 use crate::error::StoreError;
+use crate::event_store::record_event_with_conn;
+use crate::recording_store::capture_task_event;
+use crate::shared_db::ImmediateTx;
 use cas_types::{
-    Agent, AgentRole, AgentStatus, AgentType, IssueSeverity, Verification, VerificationDispatch,
+    Agent, AgentRole, AgentStatus, AgentType, Event, EventEntityType, EventType, IssueSeverity,
+    RecordingEventType, Task, TaskStatus, Verification, VerificationDispatch,
     VerificationDispatchState, VerificationIssue, VerificationProofBoundary,
     VerificationProvenance, VerificationRecoveryAction, VerificationStatus, VerificationType,
     VerifierCapability,
@@ -991,14 +995,119 @@ pub fn invalidate_verification_dispatch_for_new_cycle(
 ) -> Result<Option<VerificationDispatch>> {
     let store = SqliteVerificationStore::open(cas_dir)?;
     let conn = store.conn.lock().map_err(lock_err)?;
-    let Some(dispatch) = get_latest_verification_dispatch_with_conn(&conn, task_id)? else {
+    let tx = ImmediateTx::new(&conn)?;
+    let Some(dispatch) = get_latest_verification_dispatch_with_conn(&tx, task_id)? else {
+        tx.commit()?;
         return Ok(None);
     };
+    let dispatch = invalidate_verification_dispatch_for_new_cycle_with_conn(&tx, &dispatch.id)?;
+    tx.commit()?;
+    Ok(Some(dispatch))
+}
+
+/// Atomically invalidate one exact reviewed scope and reopen its task.
+///
+/// The task compare-and-set is intentionally in the same `BEGIN IMMEDIATE`
+/// transaction as the latest-dispatch check. A failed or superseded reopen
+/// therefore cannot leave a still-nonterminal task with its close authority
+/// silently removed.
+pub fn invalidate_verification_dispatch_and_reopen_task_exact(
+    cas_dir: &Path,
+    dispatch_id: &str,
+    task: &Task,
+    expected_status: TaskStatus,
+) -> Result<VerificationDispatch> {
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let conn = store.conn.lock().map_err(lock_err)?;
+    let tx = ImmediateTx::new(&conn)?;
+    let selected = get_verification_dispatch_with_conn(&tx, dispatch_id)?;
+    if selected.task_id != task.id
+        || selected.receipt_id.is_some()
+        || selected.delivery_transaction_id.is_some()
+        || selected.state != VerificationDispatchState::Resolved
+    {
+        return Err(StoreError::Parse(
+            "fresh-scope recovery requires the exact Resolved task-only dispatch".to_string(),
+        ));
+    }
+    let verdict: Option<(String, String, Option<String>)> = tx
+        .query_row(
+            "SELECT status, provenance, dispatch_id
+             FROM verifications WHERE dispatch_id = ?1
+             ORDER BY created_at DESC, id DESC LIMIT 1",
+            params![dispatch_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let (status, provenance, verdict_dispatch_id) = verdict.ok_or_else(|| {
+        StoreError::Parse("fresh-scope recovery requires an exact durable verdict".to_string())
+    })?;
+    let status = VerificationStatus::from_str(&status)
+        .map_err(|error| StoreError::Parse(format!("invalid verification status: {error}")))?;
+    let provenance = VerificationProvenance::from_str(&provenance)
+        .map_err(|error| StoreError::Parse(format!("invalid verification provenance: {error}")))?;
+    if !matches!(status, VerificationStatus::Approved | VerificationStatus::Skipped)
+        || provenance == VerificationProvenance::Legacy
+        || verdict_dispatch_id.as_deref() != Some(dispatch_id)
+    {
+        return Err(StoreError::Parse(
+            "fresh-scope recovery requires an exact nonlegacy Approved/Skipped verdict"
+                .to_string(),
+        ));
+    }
+    let dispatch = invalidate_verification_dispatch_for_new_cycle_with_conn(&tx, dispatch_id)?;
+    if dispatch.task_id != task.id || dispatch.state != VerificationDispatchState::Invalidated {
+        return Err(StoreError::Parse(
+            "exact reviewed scope was not invalidated".to_string(),
+        ));
+    }
+    let rows = tx.execute(
+        "UPDATE tasks SET status = ?1, notes = ?2, updated_at = ?3
+         WHERE id = ?4 AND status = ?5",
+        params![
+            TaskStatus::Open.to_string(),
+            task.notes,
+            task.updated_at.to_rfc3339(),
+            task.id,
+            expected_status.to_string(),
+        ],
+    )?;
+    if rows != 1 {
+        return Err(StoreError::Parse(
+            "exact proof-cycle reopen raced with a task status change".to_string(),
+        ));
+    }
+
+    let event = Event::new(
+        EventType::TaskCreated,
+        EventEntityType::Task,
+        &task.id,
+        format!("Task reopened: {}", task.title),
+    );
+    let _ = record_event_with_conn(&tx, &event);
+    let _ = capture_task_event(&tx, RecordingEventType::TaskCreated, &task.id, None);
+    tx.commit()?;
+    Ok(dispatch)
+}
+
+fn invalidate_verification_dispatch_for_new_cycle_with_conn(
+    conn: &Connection,
+    dispatch_id: &str,
+) -> Result<VerificationDispatch> {
+    let dispatch = get_verification_dispatch_with_conn(conn, dispatch_id)?;
+    let latest = get_latest_verification_dispatch_with_conn(conn, &dispatch.task_id)?
+        .ok_or_else(|| StoreError::NotFound("latest verification dispatch".to_string()))?;
+    if latest.id != dispatch.id {
+        return Err(StoreError::Parse(
+            "verification proof-cycle invalidation no longer names the latest task dispatch"
+                .to_string(),
+        ));
+    }
     if !matches!(
         dispatch.state,
         VerificationDispatchState::Resolved | VerificationDispatchState::TimedOut
     ) {
-        return Ok(Some(dispatch));
+        return Ok(dispatch);
     }
     let now = Utc::now();
     let changed = conn.execute(
@@ -1012,7 +1121,7 @@ pub fn invalidate_verification_dispatch_for_new_cycle(
             "verification proof-cycle invalidation raced".to_string(),
         ));
     }
-    get_latest_verification_dispatch_with_conn(&conn, task_id)
+    get_verification_dispatch_with_conn(conn, dispatch_id)
 }
 
 /// Mint an unbound legacy explicit-bearer verifier capability.
@@ -1994,6 +2103,7 @@ impl VerificationStore for SqliteVerificationStore {
 #[cfg(test)]
 mod tests {
     use crate::verification_store::*;
+    use crate::{SqliteTaskStore, TaskStore};
     use tempfile::TempDir;
 
     fn create_test_store() -> (SqliteVerificationStore, TempDir) {
@@ -2739,6 +2849,70 @@ mod tests {
         .expect("dispatch");
         assert_eq!(resolved.state, VerificationDispatchState::Resolved);
         assert!(resolved.resolved_at.is_some());
+    }
+
+    #[test]
+    fn exact_proof_cycle_invalidation_cannot_touch_a_superseded_dispatch() {
+        let (_store, dir) = create_test_store();
+        let resolved = create_verification_dispatch(
+            dir.path(),
+            "cas-invalidate-race",
+            "worker",
+            "supervisor",
+            Utc::now() + Duration::minutes(10),
+        )
+        .expect("resolved cycle");
+        let conn = Connection::open(dir.path().join("cas.db")).expect("db");
+        resolve_verification_dispatch_with_conn(&conn, &resolved.id, "supervisor", None, true)
+            .expect("resolve cycle");
+        drop(conn);
+        let replacement = create_verification_dispatch(
+            dir.path(),
+            "cas-invalidate-race",
+            "worker",
+            "supervisor",
+            Utc::now() + Duration::minutes(10),
+        )
+        .expect("newer pending cycle");
+
+        let task_store = SqliteTaskStore::open(dir.path()).expect("task store");
+        task_store.init().expect("task schema");
+        let mut task = Task::new(
+            "cas-invalidate-race".to_string(),
+            "atomic scope recovery".to_string(),
+        );
+        task.status = TaskStatus::InProgress;
+        task_store.add(&task).expect("task");
+        let expected_task = task.clone();
+        task.status = TaskStatus::Open;
+
+        assert!(
+            invalidate_verification_dispatch_and_reopen_task_exact(
+                dir.path(),
+                &resolved.id,
+                &task,
+                TaskStatus::InProgress,
+            )
+            .is_err(),
+            "recovery naming an older proof must not invalidate or reopen through a newer cycle"
+        );
+        assert_eq!(
+            task_store.get(&task.id).unwrap().status,
+            expected_task.status,
+            "failed exact invalidation must roll back the task transition"
+        );
+        assert_eq!(
+            get_verification_dispatch(dir.path(), &resolved.id)
+                .unwrap()
+                .state,
+            VerificationDispatchState::Resolved
+        );
+        assert_eq!(
+            get_verification_dispatch(dir.path(), &replacement.id)
+                .unwrap()
+                .state,
+            VerificationDispatchState::Pending
+        );
     }
 
     #[test]

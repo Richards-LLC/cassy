@@ -461,8 +461,7 @@ impl CasService {
                 )
             }),
             None => {
-                let path = self.inner.cas_root.join("proxy_health.json");
-                std::fs::read_to_string(&path)
+                crate::mcp::read_proxy_health_cache(&self.inner.cas_root)
                     .map_err(|error| {
                         Self::error(
                             ErrorCode::INTERNAL_ERROR,
@@ -472,6 +471,12 @@ impl CasService {
                         )
                     })
                     .and_then(|json| {
+                        let json = String::from_utf8(json).map_err(|error| {
+                            Self::error(
+                                ErrorCode::INTERNAL_ERROR,
+                                format!("MCP proxy health cache is invalid: {error}"),
+                            )
+                        })?;
                         parse_proxy_health_cache(&json).map_err(|error| {
                             Self::error(
                                 ErrorCode::INTERNAL_ERROR,

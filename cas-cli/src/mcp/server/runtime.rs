@@ -258,8 +258,9 @@ async fn run_server_impl() -> anyhow::Result<()> {
                     Ok(engine) => {
                         let count = engine.tool_count().await;
                         eprintln!("[CAS] MCP proxy ready ({count} upstream tools)");
-                        write_proxy_catalog_cache(&cas_root, &engine).await;
-                        write_proxy_health_cache(&cas_root, &engine).await;
+                        if let Err(error) = write_proxy_snapshot_cache(&cas_root, &engine).await {
+                            eprintln!("[CAS] Failed to publish MCP proxy state: {error}");
+                        }
                         Some(std::sync::Arc::new(engine))
                     }
                     Err(e) => {
@@ -268,7 +269,18 @@ async fn run_server_impl() -> anyhow::Result<()> {
                     }
                 }
             }
-            _ => None,
+            Ok(_) => {
+                if let Err(error) = write_empty_proxy_snapshot_cache(&cas_root) {
+                    eprintln!("[CAS] Failed to publish empty MCP proxy state: {error}");
+                }
+                None
+            }
+            Err(error) => {
+                eprintln!(
+                    "[CAS] Failed to load MCP proxy config (continuing without proxy): {error}"
+                );
+                None
+            }
         }
     };
     #[cfg(not(feature = "mcp-proxy"))]
@@ -534,38 +546,167 @@ pub async fn write_proxy_catalog_cache(
     cas_root: &std::path::Path,
     engine: &cmcp_core::ProxyEngine,
 ) {
+    match proxy_catalog_bytes(engine).await {
+        Ok(bytes) => {
+            if let Err(error) = write_proxy_cache_file(cas_root, "proxy_catalog.json", &bytes) {
+                eprintln!("[CAS] Failed to write proxy catalog cache: {error}");
+            }
+        }
+        Err(error) => {
+            eprintln!("[CAS] Failed to serialize proxy catalog: {error}");
+        }
+    }
+}
+
+#[cfg(feature = "mcp-proxy")]
+const PROXY_CACHE_LOCK: &str = ".proxy_snapshot.lock";
+
+#[cfg(feature = "mcp-proxy")]
+fn with_proxy_cache_lock<T>(
+    cas_root: &std::path::Path,
+    exclusive: bool,
+    operation: impl FnOnce() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    use fs2::FileExt;
+
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(cas_root.join(PROXY_CACHE_LOCK))?;
+    if exclusive {
+        lock.lock_exclusive()?;
+    } else {
+        lock.lock_shared()?;
+    }
+    let result = operation();
+    let unlock_result = FileExt::unlock(&lock);
+    match (result, unlock_result) {
+        (Err(error), _) => Err(error),
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+#[cfg(feature = "mcp-proxy")]
+fn write_proxy_cache_file(
+    cas_root: &std::path::Path,
+    name: &str,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    with_proxy_cache_lock(cas_root, true, || {
+        atomic_write_proxy_cache_file(cas_root, name, bytes)
+    })
+}
+
+#[cfg(feature = "mcp-proxy")]
+fn atomic_write_proxy_cache_file(
+    cas_root: &std::path::Path,
+    name: &str,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+    let temp_name = format!(
+        ".{name}.tmp-{}-{}",
+        std::process::id(),
+        TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
+    let temp_path = cas_root.join(temp_name);
+    let final_path = cas_root.join(name);
+    if let Err(error) = std::fs::write(&temp_path, bytes) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
+    }
+    let result = std::fs::rename(&temp_path, final_path);
+    if result.is_err() {
+        let _ = std::fs::remove_file(temp_path);
+    }
+    result
+}
+
+#[cfg(feature = "mcp-proxy")]
+fn publish_proxy_cache_pair(
+    cas_root: &std::path::Path,
+    catalog: &[u8],
+    health: &[u8],
+) -> std::io::Result<()> {
+    with_proxy_cache_lock(cas_root, true, || {
+        atomic_write_proxy_cache_file(cas_root, "proxy_catalog.json", catalog)?;
+        atomic_write_proxy_cache_file(cas_root, "proxy_health.json", health)
+    })
+}
+
+#[cfg(feature = "mcp-proxy")]
+pub fn read_proxy_catalog_cache(cas_root: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    with_proxy_cache_lock(cas_root, false, || {
+        std::fs::read(cas_root.join("proxy_catalog.json"))
+    })
+}
+
+#[cfg(feature = "mcp-proxy")]
+pub fn read_proxy_health_cache(cas_root: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    with_proxy_cache_lock(cas_root, false, || {
+        std::fs::read(cas_root.join("proxy_health.json"))
+    })
+}
+
+#[cfg(feature = "mcp-proxy")]
+async fn proxy_catalog_bytes(engine: &cmcp_core::ProxyEngine) -> anyhow::Result<Vec<u8>> {
     let servers = engine.catalog_entries_by_server().await;
-    // Convert to the format expected by build_mcp_tools_section: { server: [tool_names] }
     let simplified: std::collections::HashMap<String, Vec<String>> = servers
         .into_iter()
         .map(|(server, entries)| {
-            let names = entries.into_iter().map(|e| e.name).collect();
+            let names = entries.into_iter().map(|entry| entry.name).collect();
             (server, names)
         })
         .collect();
-    let cache_path = cas_root.join("proxy_catalog.json");
-    match serde_json::to_string(&simplified) {
-        Ok(json) => {
-            if let Err(e) = std::fs::write(&cache_path, json) {
-                eprintln!("[CAS] Failed to write proxy catalog cache: {e}");
-            }
-        }
-        Err(e) => {
-            eprintln!("[CAS] Failed to serialize proxy catalog: {e}");
-        }
-    }
+    Ok(serde_json::to_vec(&simplified)?)
+}
+
+#[cfg(feature = "mcp-proxy")]
+pub async fn write_proxy_snapshot_cache(
+    cas_root: &std::path::Path,
+    engine: &cmcp_core::ProxyEngine,
+) -> anyhow::Result<()> {
+    let catalog = proxy_catalog_bytes(engine).await?;
+    let health = serde_json::to_vec_pretty(&engine.health_snapshot().await)?;
+    publish_proxy_cache_pair(cas_root, &catalog, &health)?;
+    Ok(())
+}
+
+#[cfg(feature = "mcp-proxy")]
+pub fn write_empty_proxy_snapshot_cache(cas_root: &std::path::Path) -> anyhow::Result<()> {
+    let generated_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64;
+    let snapshot = cmcp_core::ProxyHealthSnapshot {
+        session_id: format!("proxy-{}-{generated_at_ms}-0", std::process::id()),
+        generated_at_ms,
+        healthy: 0,
+        degraded: 0,
+        servers: Vec::new(),
+    };
+    let catalog = serde_json::to_vec(&serde_json::json!({}))?;
+    let health = serde_json::to_vec_pretty(&snapshot)?;
+    publish_proxy_cache_pair(cas_root, &catalog, &health)?;
+    Ok(())
 }
 
 /// Persist credential-free optional-upstream health for factory preflight.
 #[cfg(feature = "mcp-proxy")]
 pub async fn write_proxy_health_cache(cas_root: &std::path::Path, engine: &cmcp_core::ProxyEngine) {
     let snapshot = engine.health_snapshot().await;
-    let cache_path = cas_root.join("proxy_health.json");
     match serde_json::to_string_pretty(&snapshot) {
         Ok(json) => {
-            if let Err(error) = std::fs::write(&cache_path, json) {
+            if let Err(error) =
+                write_proxy_cache_file(cas_root, "proxy_health.json", json.as_bytes())
+            {
                 tracing::debug!(
-                    path = %cache_path.display(),
+                    path = %cas_root.join("proxy_health.json").display(),
                     error = %error,
                     "failed to write MCP proxy health cache"
                 );
@@ -593,21 +734,20 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let cas_root = tmp.path();
         std::fs::write(cas_root.join("proxy_catalog.json"), r#"{"stale":["tool"]}"#).unwrap();
-        let engine = cmcp_core::ProxyEngine::from_configs(Default::default())
-            .await
-            .unwrap();
+        std::fs::write(
+            cas_root.join("proxy_health.json"),
+            r#"{"session_id":"proxy-1","generated_at_ms":1,"healthy":1,"degraded":0,"servers":[{"name":"stale","transport":"http","state":"healthy","attempts":1,"consecutive_failures":0,"tool_count":1,"last_error_code":null,"last_attempt_at_ms":1,"next_retry_at_ms":null}]}"#,
+        )
+        .unwrap();
 
-        super::write_proxy_catalog_cache(cas_root, &engine).await;
-        super::write_proxy_health_cache(cas_root, &engine).await;
+        super::write_empty_proxy_snapshot_cache(cas_root).unwrap();
 
         let catalog: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(cas_root.join("proxy_catalog.json")).unwrap())
-                .unwrap();
+            serde_json::from_slice(&super::read_proxy_catalog_cache(cas_root).unwrap()).unwrap();
         assert_eq!(catalog, serde_json::json!({}));
 
         let health: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(cas_root.join("proxy_health.json")).unwrap())
-                .unwrap();
+            serde_json::from_slice(&super::read_proxy_health_cache(cas_root).unwrap()).unwrap();
         assert_eq!(health["healthy"], 0);
         assert_eq!(health["degraded"], 0);
         assert!(
@@ -616,6 +756,53 @@ mod tests {
                 .is_some_and(|id| !id.is_empty())
         );
         assert_eq!(health["servers"], serde_json::json!([]));
+    }
+
+    #[cfg(feature = "mcp-proxy")]
+    #[test]
+    fn public_cache_readers_cannot_observe_a_half_published_pair() {
+        let tmp = TempDir::new().unwrap();
+        let cas_root = std::sync::Arc::new(tmp.path().to_path_buf());
+        std::fs::write(cas_root.join("proxy_catalog.json"), b"old-catalog").unwrap();
+        std::fs::write(cas_root.join("proxy_health.json"), b"old-health").unwrap();
+
+        let (halfway_tx, halfway_rx) = std::sync::mpsc::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let writer_root = std::sync::Arc::clone(&cas_root);
+        let writer = std::thread::spawn(move || {
+            super::with_proxy_cache_lock(&writer_root, true, || {
+                std::fs::write(writer_root.join("proxy_catalog.json"), b"new-catalog")?;
+                halfway_tx.send(()).unwrap();
+                finish_rx.recv().unwrap();
+                std::fs::write(writer_root.join("proxy_health.json"), b"new-health")
+            })
+            .unwrap();
+        });
+        halfway_rx.recv().unwrap();
+
+        let (observed_tx, observed_rx) = std::sync::mpsc::channel();
+        let reader_root = std::sync::Arc::clone(&cas_root);
+        let reader = std::thread::spawn(move || {
+            observed_tx
+                .send((
+                    super::read_proxy_catalog_cache(&reader_root).unwrap(),
+                    super::read_proxy_health_cache(&reader_root).unwrap(),
+                ))
+                .unwrap();
+        });
+        assert!(
+            observed_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "reader crossed the exclusive pair-publication boundary"
+        );
+        finish_tx.send(()).unwrap();
+        assert_eq!(
+            observed_rx.recv().unwrap(),
+            (b"new-catalog".to_vec(), b"new-health".to_vec())
+        );
+        writer.join().unwrap();
+        reader.join().unwrap();
     }
 
     /// When CLAUDE_PROJECT_DIR is set to a directory that contains a `.cas/`,

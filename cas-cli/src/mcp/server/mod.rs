@@ -717,4 +717,7 @@ mod runtime;
 
 pub use runtime::run_server;
 #[cfg(feature = "mcp-proxy")]
-pub use runtime::{write_proxy_catalog_cache, write_proxy_health_cache};
+pub use runtime::{
+    read_proxy_catalog_cache, read_proxy_health_cache, write_empty_proxy_snapshot_cache,
+    write_proxy_catalog_cache, write_proxy_health_cache, write_proxy_snapshot_cache,
+};

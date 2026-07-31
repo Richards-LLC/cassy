@@ -7,13 +7,101 @@
 #![cfg(feature = "mcp-proxy")]
 
 use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
+use std::process::{Child, ChildStdin, ChildStdout, Stdio};
 
 use cmcp_core::config::{Config, Scope, ServerConfig};
 use cmcp_core::{CatalogEntry, ProxyEngine, UpstreamState};
+use serde_json::{Value, json};
 
 mod support;
 use support::CasSandbox;
+
+struct McpClient {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    next_id: u64,
+}
+
+impl McpClient {
+    fn spawn(sandbox: &CasSandbox) -> Self {
+        let mut command = sandbox.command();
+        let mut child = command
+            .arg("serve")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn cas serve");
+        let stdin = child.stdin.take().expect("cas serve stdin");
+        let stdout = BufReader::new(child.stdout.take().expect("cas serve stdout"));
+        Self {
+            child,
+            stdin,
+            stdout,
+            next_id: 1,
+        }
+    }
+
+    fn request(&mut self, method: &str, params: Value) -> Value {
+        let id = self.next_id;
+        self.next_id += 1;
+        writeln!(
+            self.stdin,
+            "{}",
+            json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
+        )
+        .unwrap();
+        self.stdin.flush().unwrap();
+        loop {
+            let mut line = String::new();
+            assert_ne!(self.stdout.read_line(&mut line).unwrap(), 0);
+            let response: Value = serde_json::from_str(&line).unwrap();
+            if response["id"] == id {
+                assert!(response.get("error").is_none(), "{response}");
+                return response;
+            }
+        }
+    }
+
+    fn initialize(&mut self) {
+        self.request(
+            "initialize",
+            json!({
+                "protocolVersion":"2025-03-26",
+                "capabilities":{},
+                "clientInfo":{"name":"proxy-state-test","version":"1"}
+            }),
+        );
+        writeln!(
+            self.stdin,
+            "{}",
+            json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}})
+        )
+        .unwrap();
+        self.stdin.flush().unwrap();
+    }
+
+    fn system_text(&mut self, action: &str) -> String {
+        let response = self.request(
+            "tools/call",
+            json!({"name":"system","arguments":{"action":action}}),
+        );
+        response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("system text result")
+            .to_string()
+    }
+}
+
+impl Drop for McpClient {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
 
 // ── Config round-trip ────────────────────────────────────────────────
 
@@ -198,6 +286,154 @@ fn catalog_entries_by_server_format_compatible_with_cache() {
     assert_eq!(parsed["chrome-devtools"].len(), 2);
     assert!(parsed["chrome-devtools"].contains(&"navigate_page".to_string()));
     assert!(parsed["chrome-devtools"].contains(&"take_screenshot".to_string()));
+}
+
+#[cfg(unix)]
+#[test]
+fn nonempty_to_empty_restart_clears_public_proxy_state_without_a_live_engine() {
+    let sandbox = CasSandbox::new();
+    let upstream_sandbox = CasSandbox::new();
+    let raw_name = "https://user:token@example.invalid/stale";
+    let public_name = cas_types::public_upstream_id(raw_name);
+    let proxy_path = sandbox.cas_root().join("proxy.toml");
+    let upstream = ServerConfig::Stdio {
+        command: "/bin/sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            r#"exec env \
+  -u CAS_AGENT_ROLE -u CAS_FACTORY_MODE \
+  -u CAS_FACTORY_SUPERVISOR_CLI -u CAS_FACTORY_WORKER_CLI \
+  -u CAS_SESSION_ID -u CAS_FACTORY_SESSION -u CAS_AGENT_ID -u CAS_TASK_ID \
+  "$CAS_TEST_BIN" serve"#
+                .to_string(),
+        ],
+        env: HashMap::from([
+            (
+                "CAS_TEST_BIN".to_string(),
+                env!("CARGO_BIN_EXE_cas").to_string(),
+            ),
+            (
+                "CAS_ROOT".to_string(),
+                upstream_sandbox.cas_root().to_string_lossy().into_owned(),
+            ),
+            (
+                "CAS_DIR".to_string(),
+                upstream_sandbox.cas_root().to_string_lossy().into_owned(),
+            ),
+            (
+                "CLAUDE_PROJECT_DIR".to_string(),
+                upstream_sandbox.path().to_string_lossy().into_owned(),
+            ),
+            (
+                "HOME".to_string(),
+                upstream_sandbox.home_dir().to_string_lossy().into_owned(),
+            ),
+            (
+                "XDG_CONFIG_HOME".to_string(),
+                upstream_sandbox
+                    .xdg_config_home()
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        ]),
+    };
+    let mut nonempty = Config::default();
+    nonempty.add_server(raw_name.to_string(), upstream);
+    nonempty.save_to(&proxy_path).unwrap();
+
+    {
+        let mut first = McpClient::spawn(&sandbox);
+        first.initialize();
+        let health: Value = serde_json::from_str(&first.system_text("proxy_health")).unwrap();
+        assert_eq!(health["servers"].as_array().unwrap().len(), 1);
+        assert_eq!(health["servers"][0]["name"], public_name);
+    }
+
+    let populated_catalog = std::fs::read(sandbox.cas_root().join("proxy_catalog.json")).unwrap();
+    let populated_health = std::fs::read(sandbox.cas_root().join("proxy_health.json")).unwrap();
+    assert!(!populated_health.is_empty());
+    assert!(!String::from_utf8_lossy(&populated_health).contains(raw_name));
+
+    Config::default().save_to(&proxy_path).unwrap();
+    {
+        let mut restarted = McpClient::spawn(&sandbox);
+        restarted.initialize();
+
+        let health_text = restarted.system_text("proxy_health");
+        let health: Value = serde_json::from_str(&health_text).unwrap();
+        assert_eq!(health["healthy"], 0);
+        assert_eq!(health["degraded"], 0);
+        assert_eq!(health["servers"], json!([]));
+        assert!(!health_text.contains(raw_name));
+
+        let catalog: Value = serde_json::from_slice(
+            &std::fs::read(sandbox.cas_root().join("proxy_catalog.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(catalog, json!({}));
+        let cached_health: Value = serde_json::from_slice(
+            &std::fs::read(sandbox.cas_root().join("proxy_health.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cached_health["servers"], json!([]));
+
+        let output = sandbox
+            .command()
+            .args(["--json", "factory", "preflight"])
+            .output()
+            .unwrap();
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["optional_upstreams"]["state"], "ready");
+        assert_eq!(
+            report["optional_upstreams"]["configured"],
+            0,
+            "config={} report={report}",
+            std::fs::read_to_string(&proxy_path).unwrap()
+        );
+        assert_eq!(report["optional_upstreams"]["healthy"], 0);
+        assert_eq!(report["optional_upstreams"]["degraded"], 0);
+        assert_eq!(report["optional_upstreams"]["servers"], json!([]));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(raw_name));
+    }
+
+    std::fs::write(
+        sandbox.cas_root().join("proxy_catalog.json"),
+        &populated_catalog,
+    )
+    .unwrap();
+    std::fs::write(
+        sandbox.cas_root().join("proxy_health.json"),
+        &populated_health,
+    )
+    .unwrap();
+    std::fs::write(&proxy_path, "[[malformed").unwrap();
+    {
+        let mut malformed = McpClient::spawn(&sandbox);
+        malformed.initialize();
+        assert_eq!(
+            std::fs::read(sandbox.cas_root().join("proxy_catalog.json")).unwrap(),
+            populated_catalog
+        );
+        assert_eq!(
+            std::fs::read(sandbox.cas_root().join("proxy_health.json")).unwrap(),
+            populated_health
+        );
+
+        let output = sandbox
+            .command()
+            .args(["--json", "factory", "preflight"])
+            .output()
+            .unwrap();
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["optional_upstreams"]["state"], "degraded");
+        assert!(
+            report["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|finding| { finding["code"] == "optional_upstreams.config_invalid" })
+        );
+    }
 }
 
 #[cfg(unix)]

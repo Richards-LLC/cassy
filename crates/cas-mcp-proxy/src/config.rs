@@ -94,13 +94,15 @@ impl Config {
     /// Load and merge project config with user config (~/.config/code-mode-mcp/config.toml).
     /// Project config takes precedence over user config.
     pub fn load_merged(project_path: Option<&Path>) -> Result<Config> {
-        // Start with user config
-        let mut merged = match Scope::User.config_path() {
-            Ok(user_path) => Config::load_from(&user_path).unwrap_or_default(),
-            Err(_) => Config::default(),
-        };
+        let user_path = Scope::User.config_path().ok();
+        Self::load_merged_from(user_path.as_deref(), project_path)
+    }
 
-        // Overlay project config (takes precedence)
+    fn load_merged_from(user_path: Option<&Path>, project_path: Option<&Path>) -> Result<Config> {
+        let mut merged = match user_path {
+            Some(path) => Config::load_from(path)?,
+            None => Config::default(),
+        };
         if let Some(path) = project_path {
             let project = Config::load_from(path)?;
             for (name, server) in project.servers {
@@ -184,6 +186,23 @@ mod tests {
     fn load_missing_file_returns_empty() {
         let config = Config::load_from(Path::new("/nonexistent/config.toml")).unwrap();
         assert!(config.servers.is_empty());
+    }
+
+    #[test]
+    fn load_merged_rejects_malformed_or_unreadable_project_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let malformed = dir.path().join("malformed.toml");
+        std::fs::write(&malformed, "[[not valid").unwrap();
+        let error = Config::load_merged_from(None, Some(&malformed)).unwrap_err();
+        assert!(error.to_string().contains("failed to parse"));
+
+        let unreadable = dir.path().join("directory-not-file");
+        std::fs::create_dir(&unreadable).unwrap();
+        let error = Config::load_merged_from(None, Some(&unreadable)).unwrap_err();
+        assert!(error.to_string().contains("failed to read"));
+
+        let error = Config::load_merged_from(Some(&malformed), None).unwrap_err();
+        assert!(error.to_string().contains("failed to parse"));
     }
 
     #[test]

@@ -269,7 +269,7 @@ fn create_worker_delivery_with_conn(
     }
     let now = Utc::now();
     let transaction_id = worker_delivery_transaction_id(&receipt.id);
-    conn.execute(
+    let inserted = conn.execute(
         "INSERT OR IGNORE INTO worker_delivery_transactions
          (id, receipt_id, task_id, state, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
@@ -281,7 +281,6 @@ fn create_worker_delivery_with_conn(
             now.to_rfc3339(),
         ],
     )?;
-    insert_event(conn, &transaction_id, state, actor_agent_id, None, now)?;
     let transaction = conn.query_row(
         "SELECT id, receipt_id, task_id, state, supervisor_agent_id, verification_id,
                 merge_commit_sha, last_error_code, last_error_detail, created_at, updated_at
@@ -289,6 +288,14 @@ fn create_worker_delivery_with_conn(
         params![receipt.id],
         transaction_from_row,
     )?;
+    if inserted == 1 {
+        insert_event(conn, &transaction_id, state, actor_agent_id, None, now)?;
+    } else if transaction.state != state {
+        return Err(StoreError::Parse(format!(
+            "worker delivery initial state mismatch: persisted {}, requested {}",
+            transaction.state, state
+        )));
+    }
     Ok(transaction)
 }
 
@@ -802,6 +809,30 @@ mod tests {
                 .len(),
             1
         );
+        let before_mismatch = get_worker_delivery_by_receipt(root.path(), &receipt.id)
+            .unwrap()
+            .expect("persisted delivery boundary");
+        let events_before_mismatch = list_worker_delivery_events(root.path(), &first.id).unwrap();
+        let mismatch = create_worker_delivery(
+            root.path(),
+            &receipt,
+            WorkerDeliveryState::Delivered,
+            "worker-session",
+        )
+        .expect_err("a retry cannot rename the immutable initial state");
+        assert!(mismatch.to_string().contains("initial state mismatch"));
+        assert_eq!(
+            get_worker_delivery_by_receipt(root.path(), &receipt.id)
+                .unwrap()
+                .expect("delivery survives rejected retry"),
+            before_mismatch,
+            "different-state retry mutated the receipt or transaction"
+        );
+        assert_eq!(
+            list_worker_delivery_events(root.path(), &first.id).unwrap(),
+            events_before_mismatch,
+            "different-state retry appended a false event"
+        );
         let conn = open(root.path()).unwrap();
         assert!(
             conn.execute(
@@ -816,6 +847,66 @@ mod tests {
                 params![receipt.id],
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn concurrent_retries_are_state_and_event_idempotent() {
+        let root = TempDir::new().unwrap();
+        let receipt = build_worker_completion_receipt(&input(), "worker", Utc::now());
+        let transaction = create_worker_delivery(
+            root.path(),
+            &receipt,
+            WorkerDeliveryState::AwaitingVerification,
+            "worker-session",
+        )
+        .unwrap();
+        let before = get_worker_delivery_by_receipt(root.path(), &receipt.id)
+            .unwrap()
+            .expect("persisted delivery boundary");
+        let events_before = list_worker_delivery_events(root.path(), &transaction.id).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+
+        let outcomes = std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for index in 0..8 {
+                let root = root.path().to_path_buf();
+                let receipt = receipt.clone();
+                let barrier = barrier.clone();
+                handles.push(scope.spawn(move || {
+                    barrier.wait();
+                    let requested_state = if index == 7 {
+                        WorkerDeliveryState::Delivered
+                    } else {
+                        WorkerDeliveryState::AwaitingVerification
+                    };
+                    create_worker_delivery(&root, &receipt, requested_state, "worker-session")
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("retry thread must not panic"))
+                .collect::<Vec<_>>()
+        });
+
+        assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 7);
+        let errors = outcomes
+            .iter()
+            .filter_map(|result| result.as_ref().err())
+            .collect::<Vec<_>>();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].to_string().contains("initial state mismatch"));
+        assert_eq!(
+            get_worker_delivery_by_receipt(root.path(), &receipt.id)
+                .unwrap()
+                .expect("delivery survives concurrent retries"),
+            before,
+            "concurrent retries mutated the receipt or transaction"
+        );
+        assert_eq!(
+            list_worker_delivery_events(root.path(), &transaction.id).unwrap(),
+            events_before,
+            "concurrent retries appended duplicate or false events"
         );
     }
 

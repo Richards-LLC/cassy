@@ -2983,25 +2983,37 @@ async fn completion_receipt_authority_is_exact_active_lease_session() {
     assert_eq!(durable_close_snapshot(&cas_root), before_unleased);
 
     let owner_service = delivery_service(&cas_root, owner_id);
-    let accepted = owner_service
-        .task(Parameters(task_req(serde_json::json!({
-            "action": "close",
-            "id": task.id,
-            "reason": "exact lease owner handoff",
-            "completion_receipt": serde_json::to_string(&owner_receipt).unwrap(),
-        }))))
-        .await
-        .expect("exact lease owner receipt");
-    assert!(
-        get_text(&accepted).contains("Worker delivery receipt accepted idempotently"),
-        "{}",
-        get_text(&accepted)
-    );
+    let concurrent_owner_service = delivery_service(&cas_root, owner_id);
+    let accepted_a = owner_service.task(Parameters(task_req(serde_json::json!({
+        "action": "close",
+        "id": task.id,
+        "reason": "concurrent exact lease owner handoff a",
+        "completion_receipt": serde_json::to_string(&owner_receipt).unwrap(),
+    }))));
+    let accepted_b = concurrent_owner_service.task(Parameters(task_req(serde_json::json!({
+        "action": "close",
+        "id": task.id,
+        "reason": "concurrent exact lease owner handoff b",
+        "completion_receipt": serde_json::to_string(&owner_receipt).unwrap(),
+    }))));
+    let (accepted_a, accepted_b) = tokio::join!(accepted_a, accepted_b);
+    let accepted_a = accepted_a.expect("first concurrent exact lease owner receipt");
+    let accepted_b = accepted_b.expect("second concurrent exact lease owner receipt");
+    for accepted in [&accepted_a, &accepted_b] {
+        assert!(
+            get_text(accepted).contains("Worker delivery receipt accepted idempotently"),
+            "{}",
+            get_text(accepted)
+        );
+    }
     let (stored_receipt, transaction) = cas_store::get_latest_worker_delivery(&cas_root, &task.id)
         .unwrap()
         .expect("lease-authorized delivery");
     assert_eq!(stored_receipt.worker_agent_id, owner_id);
     assert_eq!(transaction.state, WorkerDeliveryState::AwaitingVerification);
+    let events = cas_store::list_worker_delivery_events(&cas_root, &transaction.id).unwrap();
+    assert_eq!(events.len(), 1, "concurrent creation must emit one event");
+    assert_eq!(events[0].state, WorkerDeliveryState::AwaitingVerification);
     let dispatch = cas_store::get_latest_verification_dispatch(&cas_root, &task.id)
         .unwrap()
         .expect("receipt dispatch");
@@ -3019,20 +3031,28 @@ async fn completion_receipt_authority_is_exact_active_lease_session() {
     );
 
     let before_retry = durable_close_snapshot(&cas_root);
-    let retry = owner_service
-        .task(Parameters(task_req(serde_json::json!({
-            "action": "close",
-            "id": task.id,
-            "reason": "same-session exact-cycle retry",
-            "completion_receipt": serde_json::to_string(&owner_receipt).unwrap(),
-        }))))
-        .await
-        .expect("same-session exact receipt retry");
-    assert!(get_text(&retry).contains("accepted idempotently"));
+    let retry_service = delivery_service(&cas_root, owner_id);
+    let retry_a = owner_service.task(Parameters(task_req(serde_json::json!({
+        "action": "close",
+        "id": task.id,
+        "reason": "concurrent same-session exact-cycle retry a",
+        "completion_receipt": serde_json::to_string(&owner_receipt).unwrap(),
+    }))));
+    let retry_b = retry_service.task(Parameters(task_req(serde_json::json!({
+        "action": "close",
+        "id": task.id,
+        "reason": "concurrent same-session exact-cycle retry b",
+        "completion_receipt": serde_json::to_string(&owner_receipt).unwrap(),
+    }))));
+    let (retry_a, retry_b) = tokio::join!(retry_a, retry_b);
+    let retry_a = retry_a.expect("first concurrent exact receipt retry");
+    let retry_b = retry_b.expect("second concurrent exact receipt retry");
+    assert!(get_text(&retry_a).contains("accepted idempotently"));
+    assert!(get_text(&retry_b).contains("accepted idempotently"));
     assert_eq!(
         durable_close_snapshot(&cas_root),
         before_retry,
-        "same-session exact-cycle retry must be a durable no-op"
+        "concurrent same-session exact-cycle retries must be durable no-ops"
     );
 }
 

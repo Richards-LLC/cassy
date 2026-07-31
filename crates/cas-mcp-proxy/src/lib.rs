@@ -6,12 +6,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use cas_types::{public_tool_id, public_tool_ids, public_upstream_id, public_upstream_ids};
 use rmcp::model::Tool;
 use rmcp::service::RunningService;
 use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use tokio::process::Command;
 use tokio::sync::RwLock;
 
@@ -96,8 +96,13 @@ impl ProxyHealthSnapshot {
     /// JSON, cache, log, or preflight boundary.
     pub fn sanitized(mut self) -> Self {
         self.session_id = safe_session_id(&self.session_id);
+        let public_names =
+            public_upstream_ids(self.servers.iter().map(|server| server.name.as_str()));
         for server in &mut self.servers {
-            server.name = safe_upstream_id(&server.name);
+            server.name = public_names
+                .get(&server.name)
+                .cloned()
+                .unwrap_or_else(|| public_upstream_id(&server.name));
             server.transport = safe_transport(&server.transport).to_string();
             server.last_error_code = server
                 .last_error_code
@@ -224,6 +229,13 @@ impl ProxyEngine {
         now: u64,
         connect_timeout: Duration,
     ) {
+        let public_name = {
+            let configs = self.configs.read().await;
+            public_upstream_ids(configs.keys().map(String::as_str))
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| public_upstream_id(name))
+        };
         let result = tokio::time::timeout(connect_timeout, connect_server(name, config))
             .await
             .map_err(|_| anyhow::anyhow!("MCP upstream connection timed out"))
@@ -241,7 +253,7 @@ impl ProxyEngine {
                     .or_insert_with(|| initial_health(name, config));
                 record_success(record, tool_count, now);
                 tracing::info!(
-                    upstream = %safe_upstream_id(name),
+                    upstream = %public_name,
                     tool_count,
                     proxy_session = %self.session_id,
                     "MCP upstream connected"
@@ -258,13 +270,13 @@ impl ProxyEngine {
                 };
                 match visibility {
                     FailureVisibility::Error => tracing::error!(
-                        upstream = %safe_upstream_id(name),
+                        upstream = %public_name,
                         error_code = code,
                         proxy_session = %self.session_id,
                         "Optional MCP upstream unavailable; CAS will continue and retry"
                     ),
                     FailureVisibility::Debug => tracing::debug!(
-                        upstream = %safe_upstream_id(name),
+                        upstream = %public_name,
                         error_code = code,
                         proxy_session = %self.session_id,
                         "Optional MCP upstream retry failed"
@@ -286,6 +298,8 @@ impl ProxyEngine {
     /// output is truncated to that many bytes.
     pub async fn search(&self, query: &str, max_length: Option<usize>) -> Result<Value> {
         let servers = self.servers.read().await;
+        let configs = self.configs.read().await;
+        let public_servers = public_upstream_ids(configs.keys().map(String::as_str));
 
         // Parse optional server: prefix
         let (server_filter, keywords) = parse_search_query(query);
@@ -293,18 +307,28 @@ impl ProxyEngine {
         let mut results: Vec<SearchResult> = Vec::new();
 
         for (server_name, connected) in servers.iter() {
+            let public_server = public_servers
+                .get(server_name)
+                .cloned()
+                .unwrap_or_else(|| public_upstream_id(server_name));
             // Apply server filter if present
             if let Some(ref filter) = server_filter {
-                if !server_name.to_lowercase().contains(&filter.to_lowercase()) {
+                let filter = filter.to_lowercase();
+                if !public_server.to_lowercase().contains(&filter) {
                     continue;
                 }
             }
 
+            let public_tools =
+                public_tool_ids(connected.tools.iter().map(|tool| tool.name.as_ref()));
             for tool in &connected.tools {
                 if matches_keywords(tool, &keywords) {
                     results.push(SearchResult {
-                        server: server_name.clone(),
-                        name: tool.name.to_string(),
+                        server: public_server.clone(),
+                        name: public_tools
+                            .get(tool.name.as_ref())
+                            .cloned()
+                            .unwrap_or_else(|| public_tool_id(tool.name.as_ref())),
                         description: tool.description.as_ref().map(|d| d.to_string()),
                         input_schema: serde_json::to_value(&*tool.input_schema).unwrap_or_default(),
                     });
@@ -370,7 +394,8 @@ impl ProxyEngine {
                     Err(e) => {
                         text_parts.push(format!(
                             "[{}.{} error]: {e}",
-                            calls[i].server, calls[i].tool
+                            public_upstream_id(&calls[i].server),
+                            public_tool_id(&calls[i].tool)
                         ));
                     }
                 }
@@ -396,19 +421,32 @@ impl ProxyEngine {
     /// Return catalog entries grouped by server name.
     pub async fn catalog_entries_by_server(&self) -> HashMap<String, Vec<CatalogEntry>> {
         let servers = self.servers.read().await;
+        let configs = self.configs.read().await;
+        let public_servers = public_upstream_ids(configs.keys().map(String::as_str));
         servers
             .iter()
             .map(|(name, connected)| {
+                let public_tools =
+                    public_tool_ids(connected.tools.iter().map(|tool| tool.name.as_ref()));
                 let entries = connected
                     .tools
                     .iter()
                     .map(|tool| CatalogEntry {
-                        name: tool.name.to_string(),
+                        name: public_tools
+                            .get(tool.name.as_ref())
+                            .cloned()
+                            .unwrap_or_else(|| public_tool_id(tool.name.as_ref())),
                         description: tool.description.as_ref().map(|d| d.to_string()),
                         input_schema: serde_json::to_value(&*tool.input_schema).unwrap_or_default(),
                     })
                     .collect();
-                (name.clone(), entries)
+                (
+                    public_servers
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_else(|| public_upstream_id(name)),
+                    entries,
+                )
             })
             .collect()
     }
@@ -423,6 +461,8 @@ impl ProxyEngine {
     pub async fn reload(&self, configs: HashMap<String, ServerConfig>) -> Result<()> {
         let mut servers = self.servers.write().await;
         let old_configs = self.configs.read().await.clone();
+        let old_public_names = public_upstream_ids(old_configs.keys().map(String::as_str));
+        let new_public_names = public_upstream_ids(configs.keys().map(String::as_str));
 
         // Remove servers no longer in config
         let current_names: Vec<String> = servers.keys().cloned().collect();
@@ -431,7 +471,10 @@ impl ProxyEngine {
                 if let Some(removed) = servers.remove(name) {
                     let _ = removed.service.cancel().await;
                     tracing::info!(
-                        upstream = %safe_upstream_id(name),
+                        upstream = %old_public_names
+                            .get(name)
+                            .cloned()
+                            .unwrap_or_else(|| public_upstream_id(name)),
                         "MCP upstream disconnected"
                     );
                 }
@@ -453,7 +496,10 @@ impl ProxyEngine {
                 if let Some(removed) = servers.remove(name) {
                     let _ = removed.service.cancel().await;
                     tracing::info!(
-                        upstream = %safe_upstream_id(name),
+                        upstream = %new_public_names
+                            .get(name)
+                            .cloned()
+                            .unwrap_or_else(|| public_upstream_id(name)),
                         "MCP upstream config changed"
                     );
                 }
@@ -492,13 +538,7 @@ impl ProxyEngine {
                     task: None,
                 },
             )
-            .await
-            .with_context(|| {
-                format!(
-                    "tool call '{tool_name}' on '{}' failed",
-                    safe_upstream_id(server_name)
-                )
-            })?;
+            .await?;
 
         serde_json::to_value(result).context("failed to serialize tool result")
     }
@@ -522,27 +562,40 @@ impl ProxyEngine {
             },
         )
         .await
-        .with_context(|| {
-            format!(
-                "tool call '{tool_name}' on '{}' failed",
-                safe_upstream_id(server_name)
-            )
-        })
     }
 
     async fn call_upstream(
         &self,
         server_name: &str,
-        request: rmcp::model::CallToolRequestParams,
+        mut request: rmcp::model::CallToolRequestParams,
     ) -> Result<rmcp::model::CallToolResult> {
+        let configs = self.configs.read().await;
+        let public_servers = public_upstream_ids(configs.keys().map(String::as_str));
+        let requested_public = public_servers
+            .get(server_name)
+            .cloned()
+            .unwrap_or_else(|| public_upstream_id(server_name));
+        let resolved_server = resolve_routing_name(server_name, &public_servers, "server")?;
+        let resolved_public = public_servers
+            .get(&resolved_server)
+            .cloned()
+            .unwrap_or_else(|| public_upstream_id(&resolved_server));
+        drop(configs);
         let servers = self.servers.read().await;
-        let server = servers.get(server_name).with_context(|| {
-            let mut available: Vec<String> =
-                servers.keys().map(|name| safe_upstream_id(name)).collect();
+        let server = servers.get(&resolved_server).with_context(|| {
+            let mut available: Vec<String> = servers
+                .keys()
+                .map(|name| {
+                    public_servers
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_else(|| public_upstream_id(name))
+                })
+                .collect();
             available.sort();
             format!(
                 "server '{}' not connected. Available: {}",
-                safe_upstream_id(server_name),
+                requested_public,
                 if available.is_empty() {
                     "(none)".to_string()
                 } else {
@@ -550,6 +603,14 @@ impl ProxyEngine {
                 }
             )
         })?;
+        let public_tools = public_tool_ids(server.tools.iter().map(|tool| tool.name.as_ref()));
+        let requested_tool = request.name.to_string();
+        let resolved_tool = resolve_routing_name(&requested_tool, &public_tools, "tool")?;
+        let resolved_public_tool = public_tools
+            .get(&resolved_tool)
+            .cloned()
+            .unwrap_or_else(|| public_tool_id(&resolved_tool));
+        request.name = resolved_tool.into();
         let generation = server.generation;
         let result = server.service.call_tool(request).await;
         let completion = CALL_COMPLETION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -563,10 +624,12 @@ impl ProxyEngine {
             Err(error) => {
                 drop(servers);
                 if let Some(code) = classify_live_failure(&error) {
-                    self.record_live_failure(server_name, generation, completion, code)
+                    self.record_live_failure(&resolved_server, generation, completion, code)
                         .await;
                 }
-                Err(error.into())
+                Err(anyhow::Error::from(error).context(format!(
+                    "tool call '{resolved_public_tool}' on '{resolved_public}' failed"
+                )))
             }
         }
     }
@@ -578,6 +641,13 @@ impl ProxyEngine {
         failure_completion: u64,
         code: &'static str,
     ) {
+        let public_name = {
+            let configs = self.configs.read().await;
+            public_upstream_ids(configs.keys().map(String::as_str))
+                .get(server_name)
+                .cloned()
+                .unwrap_or_else(|| public_upstream_id(server_name))
+        };
         let mut servers = self.servers.write().await;
         let should_remove = servers.get(server_name).is_some_and(|server| {
             live_failure_applies(
@@ -604,13 +674,13 @@ impl ProxyEngine {
         let _ = removed.service.cancel().await;
         match visibility {
             FailureVisibility::Error => tracing::error!(
-                upstream = %safe_upstream_id(server_name),
+                upstream = %public_name,
                 error_code = code,
                 proxy_session = %self.session_id,
                 "Optional MCP upstream connection failed after startup; retry scheduled"
             ),
             FailureVisibility::Debug => tracing::debug!(
-                upstream = %safe_upstream_id(server_name),
+                upstream = %public_name,
                 error_code = code,
                 proxy_session = %self.session_id,
                 "Optional MCP upstream connection failure already recorded"
@@ -620,12 +690,19 @@ impl ProxyEngine {
 
     /// Gracefully shut down all connected servers.
     pub async fn shutdown(&self) {
+        let public_names = {
+            let configs = self.configs.read().await;
+            public_upstream_ids(configs.keys().map(String::as_str))
+        };
         let mut servers = self.servers.write().await;
         for (name, server) in servers.drain() {
             if let Err(e) = server.service.cancel().await {
                 eprintln!(
                     "[proxy] Error shutting down '{}': {e}",
-                    safe_upstream_id(&name)
+                    public_names
+                        .get(&name)
+                        .cloned()
+                        .unwrap_or_else(|| public_upstream_id(&name))
                 );
             }
         }
@@ -651,7 +728,9 @@ fn new_session_id() -> String {
 
 fn initial_health(name: &str, config: &ServerConfig) -> UpstreamHealth {
     UpstreamHealth {
-        name: safe_upstream_id(name),
+        // Keep the routing identity only inside the engine. health_snapshot()
+        // projects the complete set immediately before any public boundary.
+        name: name.to_string(),
         transport: transport_name(config).to_string(),
         state: UpstreamState::Degraded,
         attempts: 0,
@@ -735,14 +814,6 @@ fn classify_live_failure(error: &rmcp::service::ServiceError) -> Option<&'static
     }
 }
 
-fn safe_upstream_id(name: &str) -> String {
-    if is_generated_upstream_id(name) {
-        return name.to_string();
-    }
-    let digest = Sha256::digest(name.as_bytes());
-    format!("upstream-{}", hex_prefix(&digest, 16))
-}
-
 fn safe_session_id(session_id: &str) -> String {
     if session_id.len() <= 96
         && session_id.strip_prefix("proxy-").is_some_and(|suffix| {
@@ -758,23 +829,23 @@ fn safe_session_id(session_id: &str) -> String {
     }
 }
 
-fn is_generated_upstream_id(name: &str) -> bool {
-    name.strip_prefix("upstream-").is_some_and(|suffix| {
-        suffix.len() == 32
-            && suffix
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    })
-}
-
-fn hex_prefix(bytes: &[u8], take: usize) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(take.saturating_mul(2));
-    for byte in bytes.iter().take(take) {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
+fn resolve_routing_name(
+    requested: &str,
+    public_names: &std::collections::BTreeMap<String, String>,
+    kind: &str,
+) -> Result<String> {
+    if public_names.contains_key(requested) {
+        return Ok(requested.to_string());
     }
-    output
+    let matches: Vec<&str> = public_names
+        .iter()
+        .filter_map(|(raw, public)| (public == requested).then_some(raw.as_str()))
+        .collect();
+    match matches.as_slice() {
+        [raw] => Ok((*raw).to_string()),
+        [] => Ok(requested.to_string()),
+        _ => anyhow::bail!("ambiguous public {kind} identity"),
+    }
 }
 
 fn safe_transport(transport: &str) -> &'static str {
@@ -1122,6 +1193,18 @@ mod tests {
     }
 
     #[test]
+    fn ambiguous_public_routing_fails_closed_without_candidate_names() {
+        let public_names = std::collections::BTreeMap::from([
+            ("https://secret-one.invalid".to_string(), "upstream-same".to_string()),
+            ("/home/operator/secret-two".to_string(), "upstream-same".to_string()),
+        ]);
+        let error = resolve_routing_name("upstream-same", &public_names, "server").unwrap_err();
+        assert_eq!(error.to_string(), "ambiguous public server identity");
+        assert!(!error.to_string().contains("secret"));
+        assert!(!error.to_string().contains("/home"));
+    }
+
+    #[test]
     fn matches_keywords_empty_matches_all() {
         let tool = make_tool("anything", "some description");
         assert!(matches_keywords(&tool, &[]));
@@ -1451,7 +1534,7 @@ mod tests {
         assert_ne!(snapshot.servers[0].name, snapshot.servers[1].name);
         assert_eq!(snapshot.session_id, "proxy-unknown");
         for server in &snapshot.servers {
-            assert!(is_generated_upstream_id(&server.name));
+            assert!(server.name.starts_with("upstream-"));
             assert_eq!(server.name.len(), "upstream-".len() + 32);
         }
         assert_eq!(snapshot.servers[0].transport, "unknown");
@@ -1480,6 +1563,49 @@ mod tests {
         ] {
             assert!(!json.contains(forbidden), "{forbidden:?} leaked: {json}");
         }
+    }
+
+    #[test]
+    fn health_projection_preserves_safe_names_and_disambiguates_forged_collisions() {
+        let unsafe_name = "https://token@example.invalid/private";
+        let colliding_name = public_upstream_id(unsafe_name);
+        let snapshot = ProxyHealthSnapshot {
+            session_id: "proxy-1-2-3".to_string(),
+            generated_at_ms: 1,
+            healthy: 3,
+            degraded: 0,
+            servers: ["github", unsafe_name, colliding_name.as_str()]
+                .into_iter()
+                .map(|name| UpstreamHealth {
+                    name: name.to_string(),
+                    transport: "http".to_string(),
+                    state: UpstreamState::Healthy,
+                    attempts: 1,
+                    consecutive_failures: 0,
+                    tool_count: 1,
+                    last_error_code: None,
+                    last_attempt_at_ms: Some(1),
+                    next_retry_at_ms: None,
+                })
+                .collect(),
+        }
+        .sanitized();
+
+        assert_eq!(snapshot.servers[0].name, "github");
+        assert_ne!(snapshot.servers[1].name, snapshot.servers[2].name);
+        assert!(
+            snapshot.servers[1]
+                .name
+                .starts_with("upstream-disambiguated-")
+        );
+        assert!(
+            snapshot.servers[2]
+                .name
+                .starts_with("upstream-disambiguated-")
+        );
+        assert_eq!(snapshot.clone().sanitized(), snapshot);
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(!json.contains(unsafe_name));
     }
 
     #[test]

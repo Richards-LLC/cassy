@@ -345,8 +345,9 @@ impl CasService {
         })?;
 
         let verb = if is_update { "Updated" } else { "Added" };
+        let public_name = cas_types::public_upstream_id(&name);
         Ok(Self::success(format!(
-            "{verb} MCP server '{name}' ({transport} transport). Restart `cas serve` to connect."
+            "{verb} MCP server '{public_name}' ({transport} transport). Restart `cas serve` to connect."
         )))
     }
 
@@ -372,9 +373,10 @@ impl CasService {
             )
         })?;
 
+        let public_name = cas_types::public_upstream_id(&name);
         if !config.remove_server(&name) {
             return Ok(Self::success(format!(
-                "Server '{name}' not found in proxy config"
+                "Server '{public_name}' not found in proxy config"
             )));
         }
 
@@ -386,7 +388,7 @@ impl CasService {
         })?;
 
         Ok(Self::success(format!(
-            "Removed MCP server '{name}'. Restart `cas serve` to disconnect."
+            "Removed MCP server '{public_name}'. Restart `cas serve` to disconnect."
         )))
     }
 
@@ -413,13 +415,23 @@ impl CasService {
             ));
         }
 
+        let public_names =
+            cas_types::public_upstream_ids(config.servers.keys().map(String::as_str));
         let servers: Vec<serde_json::Value> = config
             .servers
             .iter()
             .map(|(name, cfg)| {
                 let mut obj = serde_json::to_value(cfg).unwrap_or_default();
                 if let serde_json::Value::Object(ref mut m) = obj {
-                    m.insert("name".to_string(), serde_json::json!(name));
+                    m.insert(
+                        "name".to_string(),
+                        serde_json::json!(
+                            public_names
+                                .get(name)
+                                .cloned()
+                                .unwrap_or_else(|| cas_types::public_upstream_id(name))
+                        ),
+                    );
                 }
                 obj
             })

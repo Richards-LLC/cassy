@@ -49,4 +49,6 @@ pub mod tools;
 
 pub use server::CasCore;
 pub use server::run_server;
+#[cfg(feature = "mcp-proxy")]
+pub use server::write_proxy_catalog_cache;
 pub use tools::CasService;

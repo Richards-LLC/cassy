@@ -825,6 +825,57 @@ fn task_status_update(id: &str, status: Option<&str>, notes: Option<&str>) -> Ta
     }
 }
 
+/// Seed a supervisor-direct verdict through the generic store contract with
+/// the same durable authority fields that production `verification.add`
+/// derives before insertion. Tests using this helper exercise downstream
+/// close/update behavior, not public verifier authentication.
+fn add_exact_supervisor_fixture_verdict(
+    cas_dir: &std::path::Path,
+    mut verification: Verification,
+    dispatch_id: Option<&str>,
+) -> cas::types::VerificationDispatch {
+    const SUPERVISOR_ID: &str = "fixture-durable-supervisor";
+    let agent_store = open_agent_store(cas_dir).expect("agent store");
+    let mut supervisor = cas::types::Agent::new(
+        SUPERVISOR_ID.to_string(),
+        "fixture-supervisor".to_string(),
+    );
+    supervisor.role = AgentRole::Supervisor;
+    agent_store
+        .register(&supervisor)
+        .expect("register durable fixture supervisor");
+
+    let dispatch = match dispatch_id {
+        Some(id) => cas_store::get_verification_dispatch(cas_dir, id).expect("exact dispatch"),
+        None => cas_store::create_verification_dispatch(
+            cas_dir,
+            &verification.task_id,
+            "fixture-requester",
+            SUPERVISOR_ID,
+            chrono::Utc::now() + chrono::Duration::minutes(10),
+        )
+        .expect("create exact fixture dispatch"),
+    };
+    verification.provenance = cas::types::VerificationProvenance::SupervisorDirect;
+    verification.agent_id = Some(SUPERVISOR_ID.to_string());
+    verification.issuer_agent_id = Some(SUPERVISOR_ID.to_string());
+    verification.dispatch_id = Some(dispatch.id.clone());
+    open_verification_store(cas_dir)
+        .expect("verification store")
+        .add(&verification)
+        .expect("persist exact supervisor verdict");
+    let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).expect("db");
+    cas_store::resolve_verification_dispatch_with_conn(
+        &conn,
+        &dispatch.id,
+        SUPERVISOR_ID,
+        None,
+        true,
+    )
+    .expect("resolve exact fixture dispatch");
+    dispatch
+}
+
 #[tokio::test]
 async fn test_update_to_closed_is_exact_task_gated_but_other_task_update_remains_available() {
     let (temp, service) = setup_cas();
@@ -875,16 +926,12 @@ async fn test_update_to_closed_is_exact_task_gated_but_other_task_update_remains
         .expect("unrelated B update remains available");
     assert!(extract_text(unrelated).contains("notes"));
 
-    let verification_store = open_verification_store(&cas_dir).expect("verification store");
-    let mut approved = Verification::approved(
+    let approved = Verification::approved(
         "ver-update-close-authorized".to_string(),
         id_a.clone(),
         "registered supervisor verdict".to_string(),
     );
-    approved.provenance = cas::types::VerificationProvenance::SupervisorDirect;
-    approved.agent_id = Some("registered-supervisor".to_string());
-    approved.issuer_agent_id = Some("registered-supervisor".to_string());
-    verification_store.add(&approved).expect("approved verdict");
+    add_exact_supervisor_fixture_verdict(&cas_dir, approved, None);
 
     service
         .cas_task_update(Parameters(task_status_update(&id_a, Some("closed"), None)))
@@ -952,23 +999,12 @@ async fn test_update_to_closed_rejects_stale_task_row_behind_current_dispatch() 
         .await
         .expect_err("older task-wide approval must not authorize a current dispatch");
 
-    let mut exact = Verification::approved(
+    let exact = Verification::approved(
         "ver-exact-update".to_string(),
         task_id.clone(),
         "exact current approval".to_string(),
     );
-    exact.provenance = cas::types::VerificationProvenance::SupervisorDirect;
-    exact.dispatch_id = Some(dispatch.id.clone());
-    verification_store.add(&exact).expect("exact verdict");
-    let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).expect("db");
-    cas_store::resolve_verification_dispatch_with_conn(
-        &conn,
-        &dispatch.id,
-        "registered-supervisor",
-        None,
-        true,
-    )
-    .expect("resolve exact dispatch");
+    add_exact_supervisor_fixture_verdict(&cas_dir, exact, Some(&dispatch.id));
 
     service
         .cas_task_update(Parameters(task_status_update(
@@ -4367,8 +4403,6 @@ async fn test_epic_close_requires_epic_verification_type() {
     let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
 
-    let verification_store = open_verification_store(&cas_dir).unwrap();
-
     // Create epic
     let req = TaskCreateRequest {
         depth: None,
@@ -4426,23 +4460,12 @@ async fn test_epic_close_requires_epic_verification_type() {
     let task_dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, id)
         .unwrap()
         .unwrap();
-    let mut task_ver = Verification::approved(
+    let task_ver = Verification::approved(
         "ver-epic-task".to_string(),
         id.to_string(),
         "Task-level verification".to_string(),
     );
-    task_ver.provenance = cas::types::VerificationProvenance::SupervisorDirect;
-    task_ver.dispatch_id = Some(task_dispatch.id.clone());
-    verification_store.add(&task_ver).unwrap();
-    let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).expect("db");
-    cas_store::resolve_verification_dispatch_with_conn(
-        &conn,
-        &task_dispatch.id,
-        "registered-supervisor",
-        None,
-        true,
-    )
-    .expect("resolve task-level dispatch");
+    add_exact_supervisor_fixture_verdict(&cas_dir, task_ver, Some(&task_dispatch.id));
 
     let close_req = TaskCloseRequest {
         id: id.to_string(),
@@ -4473,17 +4496,7 @@ async fn test_epic_close_requires_epic_verification_type() {
         "Epic verification passed".to_string(),
     );
     epic_ver.verification_type = VerificationType::Epic;
-    epic_ver.provenance = cas::types::VerificationProvenance::SupervisorDirect;
-    epic_ver.dispatch_id = Some(epic_dispatch.id.clone());
-    verification_store.add(&epic_ver).unwrap();
-    cas_store::resolve_verification_dispatch_with_conn(
-        &conn,
-        &epic_dispatch.id,
-        "registered-supervisor",
-        None,
-        true,
-    )
-    .expect("resolve epic dispatch");
+    add_exact_supervisor_fixture_verdict(&cas_dir, epic_ver, Some(&epic_dispatch.id));
 
     let close_req = TaskCloseRequest {
         id: id.to_string(),
@@ -6119,8 +6132,6 @@ async fn test_close_forwards_persisted_review_envelope_after_jail() {
     let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
     let task_store = open_task_store(&cas_dir).unwrap();
-    let verification_store = open_verification_store(&cas_dir).unwrap();
-
     // Make the project root (cas_root.parent()) a real git repo with
     // staged code changes so the cas-code-review gate actually fires —
     // otherwise `has_reviewable_changes` returns false and the gate
@@ -6224,23 +6235,12 @@ async fn test_close_forwards_persisted_review_envelope_after_jail() {
     let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &id)
         .unwrap()
         .unwrap();
-    let mut ver = Verification::approved(
+    let ver = Verification::approved(
         "ver-cas-3086".to_string(),
         id.clone(),
         "verified".to_string(),
     );
-    ver.provenance = cas::types::VerificationProvenance::SupervisorDirect;
-    ver.dispatch_id = Some(dispatch.id.clone());
-    verification_store.add(&ver).expect("add verification");
-    let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).expect("db");
-    cas_store::resolve_verification_dispatch_with_conn(
-        &conn,
-        &dispatch.id,
-        "registered-supervisor",
-        None,
-        true,
-    )
-    .expect("resolve exact dispatch");
+    add_exact_supervisor_fixture_verdict(&cas_dir, ver, Some(&dispatch.id));
 
     // Supervisor closes — no bypass_code_review, no code_review_findings.
     // Pre-fix: gate would return CODE_REVIEW_REQUIRED because the
@@ -8820,9 +8820,6 @@ async fn test_verifier_embedded_paths_and_obfuscated_secrets_never_persist_or_pr
         task_id.clone(),
         format!("verified; evidence at={embedded_path}"),
     );
-    verdict.provenance = cas::types::VerificationProvenance::SupervisorDirect;
-    verdict.agent_id = Some("registered-supervisor".to_string());
-    verdict.issuer_agent_id = Some("registered-supervisor".to_string());
     verdict.issues = vec![cas::types::VerificationIssue::blocking(
         format!("[proof]({embedded_path})"),
         Some(12),
@@ -8837,9 +8834,7 @@ async fn test_verifier_embedded_paths_and_obfuscated_secrets_never_persist_or_pr
         obfuscated_akia.to_string(),
         "src/lib.rs".to_string(),
     ];
-    verification_store
-        .add(&verdict)
-        .expect("supervisor-direct verdict persists");
+    add_exact_supervisor_fixture_verdict(&cas_dir, verdict, None);
 
     // Durable persistence: the raw SQLite rows must already be redacted, so no
     // later projection is load-bearing for containment.

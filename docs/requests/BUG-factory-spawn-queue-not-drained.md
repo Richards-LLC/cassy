@@ -18,6 +18,12 @@ Possibly relevant: repo was `git init`-ed *during* the session (session started 
 
 Either spawn the worker (dequeue → worktree_create → PTY spawn, with log lines), or fail loudly back to the supervisor with an actionable error. Silent queue accumulation is the worst outcome — supervisor believes workers are booting.
 
+## Second occurrence — new signal (same session, 18:17 UTC)
+
+After a daemon restart the queue drained correctly and three workers ran an epic to completion. The supervisor then issued `shutdown_workers count=0` (shut down ALL workers). A later `spawn_workers` for a new epic enqueued and **again never drained** — same log signature, no dequeue line. This suggests `shutdown_workers count=0` may leave the factory runtime in a terminal/shutdown state that permanently stops the spawn-queue consumer, rather than just stopping current workers. If so, the "daemon predates git init" theory above may be a red herring for occurrence #1 and the real bug is a non-restartable consumer loop.
+
+Suggested check: does the queue consumer task exit (rather than idle) when the worker set drops to zero or when a shutdown-all is processed?
+
 ## Repro sketch
 
 1. Start factory TUI/daemon in a directory that is NOT a git repo.

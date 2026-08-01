@@ -243,6 +243,142 @@ fn current_factory_session() -> Option<String> {
         .filter(|s| !s.trim().is_empty())
 }
 
+/// Resolve the ref used by `sync_all_workers` without touching worker clones.
+///
+/// Resolution order is intentionally strict:
+/// 1. A supplied epic id is authoritative and must resolve to a live Epic with
+///    a branch in this project's task store. Any failure is terminal.
+/// 2. An explicit branch is used as-is.
+/// 3. The current session's pinned/default epic is used only after its
+///    `project_dir` is proven to match this CAS root's project.
+/// 4. With no focused epic, use the local repository's default branch.
+///
+/// There is deliberately no "first ready/in-progress epic" fallback: task
+/// store listing may include synchronized/global records from other projects,
+/// and choosing one would turn ambient state into a branch mutation target.
+fn resolve_sync_all_workers_target(
+    cas_root: &std::path::Path,
+    req: &FactoryRequest,
+) -> std::result::Result<String, String> {
+    use crate::store::open_task_store;
+    use cas_types::{TaskStatus, TaskType};
+
+    fn epic_branch(
+        task_store: &dyn crate::store::TaskStore,
+        epic_id: &str,
+        source: &str,
+    ) -> std::result::Result<String, String> {
+        let epic = task_store
+            .get(epic_id)
+            .map_err(|e| format!("sync_all_workers: {source} epic {epic_id} not found: {e}"))?;
+        if epic.task_type != TaskType::Epic {
+            return Err(format!(
+                "sync_all_workers: {source} task {epic_id} is not an Epic (task_type={:?})",
+                epic.task_type
+            ));
+        }
+        if epic.status == TaskStatus::Closed {
+            return Err(format!(
+                "sync_all_workers: {source} epic {epic_id} is Closed"
+            ));
+        }
+        epic.branch
+            .filter(|branch| !branch.trim().is_empty())
+            .ok_or_else(|| format!("sync_all_workers: {source} epic {epic_id} has no branch"))
+    }
+
+    if let Some(raw_id) = req.id.as_deref() {
+        let epic_id = raw_id.trim();
+        if epic_id.is_empty() {
+            return Err("sync_all_workers: explicit epic id cannot be blank".to_string());
+        }
+        let task_store = open_task_store(cas_root)
+            .map_err(|e| format!("sync_all_workers: failed to open task store: {e}"))?;
+        return epic_branch(task_store.as_ref(), epic_id, "explicit");
+    }
+
+    if let Some(branch) = req
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+    {
+        return Ok(branch.to_string());
+    }
+
+    if let Some(factory_session) = current_factory_session() {
+        use crate::ui::factory::{SessionMetadata, metadata_path};
+
+        let path = metadata_path(&factory_session);
+        let data = std::fs::read_to_string(&path).map_err(|e| {
+            format!(
+                "sync_all_workers: cannot validate factory session {factory_session} metadata: {e}"
+            )
+        })?;
+        let metadata: SessionMetadata = serde_json::from_str(&data).map_err(|e| {
+            format!("sync_all_workers: invalid factory session {factory_session} metadata: {e}")
+        })?;
+
+        let project_root = cas_root.parent().unwrap_or(cas_root);
+        let metadata_project = metadata
+            .project_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "sync_all_workers: factory session {factory_session} has no project_dir; refusing unscoped epic focus"
+                )
+            })?;
+        let metadata_project = std::fs::canonicalize(metadata_project).map_err(|e| {
+            format!(
+                "sync_all_workers: cannot resolve factory session {factory_session} project_dir {metadata_project}: {e}"
+            )
+        })?;
+        let project_root = std::fs::canonicalize(project_root).map_err(|e| {
+            format!(
+                "sync_all_workers: cannot resolve current project {}: {e}",
+                project_root.display()
+            )
+        })?;
+        if metadata_project != project_root {
+            return Err(format!(
+                "sync_all_workers: factory session {factory_session} belongs to {}, not current project {}; refusing cross-project epic focus",
+                metadata_project.display(),
+                project_root.display()
+            ));
+        }
+
+        let focused_epic_id = metadata
+            .pinned_epic_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .or_else(|| {
+                metadata
+                    .epic_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+            });
+        if let Some(epic_id) = focused_epic_id {
+            let task_store = open_task_store(cas_root)
+                .map_err(|e| format!("sync_all_workers: failed to open task store: {e}"))?;
+            return epic_branch(task_store.as_ref(), epic_id, "focused");
+        }
+    }
+
+    // Use local main branch, not origin/main. In factory mode the supervisor
+    // merges worker branches into the local default branch, so workers should
+    // rebase onto it directly.
+    use crate::worktree::GitOperations;
+    Ok(GitOperations::detect_repo_root(cas_root)
+        .ok()
+        .map(GitOperations::new)
+        .map(|git| git.detect_default_branch())
+        .unwrap_or_else(|| "main".to_string()))
+}
+
 fn parse_worker_name_filter(filter: Option<&String>) -> std::collections::HashSet<String> {
     filter
         .into_iter()
@@ -1460,8 +1596,15 @@ impl CasService {
         &self,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
-        use crate::store::{open_agent_store, open_task_store};
-        use cas_types::{AgentRole, AgentStatus, TaskStatus, TaskType};
+        use crate::store::open_agent_store;
+        use cas_types::{AgentRole, AgentStatus};
+
+        // cas-bfa5: resolve and validate the complete target before inspecting
+        // or mutating any worker clone. In particular, an invalid explicit id
+        // must not fall through to a focused/ready epic and a stale session
+        // focus must not select an epic from another project.
+        let sync_ref = resolve_sync_all_workers_target(&self.inner.cas_root, &req)
+            .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
 
         let store = open_agent_store(&self.inner.cas_root).map_err(|e| {
             Self::error(
@@ -1506,44 +1649,6 @@ impl CasService {
                 "No matching active workers found for requested worker_names filter.",
             ));
         }
-
-        let sync_ref = if let Some(branch) = req.branch.clone().filter(|b| !b.trim().is_empty()) {
-            branch
-        } else {
-            let task_store = open_task_store(&self.inner.cas_root).map_err(|e| {
-                Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("Failed to open task store: {e}"),
-                )
-            })?;
-
-            let mut epic_branch = None;
-            if let Ok(tasks) = task_store.list(None) {
-                if let Some(epic) = tasks
-                    .iter()
-                    .find(|t| t.task_type == TaskType::Epic && t.status == TaskStatus::InProgress)
-                {
-                    epic_branch = epic.branch.clone();
-                }
-                if epic_branch.is_none() {
-                    epic_branch = tasks
-                        .iter()
-                        .find(|t| t.task_type == TaskType::Epic && t.status == TaskStatus::Open)
-                        .and_then(|t| t.branch.clone());
-                }
-            }
-            epic_branch.unwrap_or_else(|| {
-                // Use local main branch, not origin/main. In factory mode the
-                // supervisor merges worker branches into the local main branch,
-                // so workers should rebase onto it directly.
-                use crate::worktree::GitOperations;
-                GitOperations::detect_repo_root(&self.inner.cas_root)
-                    .ok()
-                    .map(GitOperations::new)
-                    .map(|git| git.detect_default_branch())
-                    .unwrap_or_else(|| "main".to_string())
-            })
-        };
 
         let mut synced = Vec::new();
         let mut skipped = Vec::new();

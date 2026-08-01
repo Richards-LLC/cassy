@@ -8,6 +8,8 @@
 
 use crate::support::*;
 use cas::mcp::tools::*;
+use cas::store::open_task_store;
+use cas::types::TaskStatus;
 use rmcp::handler::server::wrapper::Parameters;
 
 async fn create_task(service: &cas::mcp::CasCore, title: &str) -> String {
@@ -209,4 +211,117 @@ async fn test_task_show_with_deps_has_no_arrows_and_names_both_directions() {
         text.contains(&id_c),
         "task show must name the task blocked by A (C): {text}"
     );
+}
+
+/// cas-e500: reproduce the live lifecycle shape: a previously closed task is
+/// reopened, receives a blocking dependency after reopen, and its assignee
+/// explicitly attempts both normal start and manual claim while the blocker is
+/// still in progress.
+#[tokio::test]
+async fn late_blocker_rearms_reopened_task_and_rejects_start_and_claim() {
+    let (temp, service) = setup_cas();
+    let task_store = open_task_store(&temp.path().join(".cas")).expect("task store");
+
+    let blocker_id = create_task(&service, "In-progress blocker").await;
+    let target_id = create_task(&service, "Reopened dependent").await;
+
+    let mut blocker = task_store.get(&blocker_id).expect("blocker");
+    blocker.status = TaskStatus::InProgress;
+    task_store
+        .update(&blocker)
+        .expect("mark blocker in progress");
+
+    // Preserve the relevant live-repro history without involving the close
+    // verification gate: this task was closed, then reopened before dep_add.
+    let mut target = task_store.get(&target_id).expect("target");
+    target.status = TaskStatus::Closed;
+    task_store.update(&target).expect("close target fixture");
+    target.status = TaskStatus::Open;
+    target.assignee = Some("test-agent".to_string());
+    task_store
+        .update(&target)
+        .expect("reopen and assign target fixture");
+
+    service
+        .cas_task_dep_add(Parameters(DependencyRequest {
+            from_id: target_id.clone(),
+            to_id: blocker_id.clone(),
+            dep_type: "blocks".to_string(),
+        }))
+        .await
+        .expect("late blocking dependency should be added");
+
+    let rearmed = task_store.get(&target_id).expect("rearmed target");
+    assert_eq!(
+        rearmed.status,
+        TaskStatus::Blocked,
+        "dep_add must re-arm an open/reopened task"
+    );
+
+    // Reproduce the historical stale projection exactly: even if an older DB
+    // or concurrent writer leaves the task Open, the lifecycle boundary must
+    // fail closed from the live dependency rows rather than trusting status.
+    let mut stale_open = rearmed;
+    stale_open.status = TaskStatus::Open;
+    task_store
+        .update(&stale_open)
+        .expect("restore stale open status fixture");
+
+    let start_error = service
+        .cas_task_start(Parameters(IdRequest {
+            id: target_id.clone(),
+        }))
+        .await
+        .expect_err("start must reject an open blocking dependency");
+    assert!(
+        start_error.message.contains(&blocker_id),
+        "start guidance must identify the actionable blocker: {}",
+        start_error.message
+    );
+
+    let claim_error = service
+        .cas_task_claim(Parameters(TaskClaimRequest {
+            task_id: target_id,
+            duration_secs: 600,
+            reason: Some("manual recovery claim".to_string()),
+        }))
+        .await
+        .expect_err("claim must reject an open blocking dependency");
+    assert!(
+        claim_error.message.contains(&blocker_id),
+        "claim guidance must identify the actionable blocker: {}",
+        claim_error.message
+    );
+}
+
+/// The lifecycle gate must consume only `blocks` edges. In particular, a
+/// parent-child epic link or a soft related link must never wedge task start.
+#[tokio::test]
+async fn non_blocking_dependency_types_do_not_rearm_or_reject_start() {
+    let (temp, service) = setup_cas();
+    let task_store = open_task_store(&temp.path().join(".cas")).expect("task store");
+
+    for dep_type in ["related", "parent"] {
+        let prerequisite_id = create_task(&service, &format!("{dep_type} target")).await;
+        let dependent_id = create_task(&service, &format!("{dep_type} dependent")).await;
+
+        service
+            .cas_task_dep_add(Parameters(DependencyRequest {
+                from_id: dependent_id.clone(),
+                to_id: prerequisite_id,
+                dep_type: dep_type.to_string(),
+            }))
+            .await
+            .expect("non-blocking dependency should be added");
+
+        assert_eq!(
+            task_store.get(&dependent_id).expect("dependent").status,
+            TaskStatus::Open,
+            "{dep_type} must not project Blocked status"
+        );
+        service
+            .cas_task_start(Parameters(IdRequest { id: dependent_id }))
+            .await
+            .unwrap_or_else(|error| panic!("{dep_type} must not reject start: {error}"));
+    }
 }

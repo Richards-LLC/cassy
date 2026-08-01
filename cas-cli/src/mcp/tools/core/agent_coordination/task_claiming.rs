@@ -24,6 +24,8 @@ impl CasCore {
             });
         }
 
+        super::super::task::ensure_no_open_blockers(task_store.as_ref(), &req.task_id, "claim")?;
+
         // Get or register the agent - this ensures the agent exists in the database
         // before we try to claim a task (required due to foreign key constraint)
         let agent_id = self.get_agent_id()?;

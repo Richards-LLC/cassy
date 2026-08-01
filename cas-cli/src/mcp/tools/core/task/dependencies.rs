@@ -8,7 +8,7 @@ impl CasCore {
         let task_store = self.open_task_store()?;
 
         // Verify both tasks exist
-        task_store.get(&req.from_id).map_err(|e| McpError {
+        let mut from_task = task_store.get(&req.from_id).map_err(|e| McpError {
             code: ErrorCode::INVALID_PARAMS,
             message: Cow::from(format!("From task not found: {e}")),
             data: None,
@@ -39,6 +39,33 @@ impl CasCore {
             message: Cow::from(format!("Failed to add dependency: {e}")),
             data: None,
         })?;
+
+        // A late blocking edge must re-arm an open (including reopened) task.
+        // Non-blocking dependency types never project lifecycle status.
+        if dep_type == DependencyType::Blocks
+            && from_task.status == TaskStatus::Open
+            && task_store
+                .get_blockers(&from_task.id)
+                .map_err(|e| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!(
+                        "Dependency was added, but failed to evaluate blockers: {e}"
+                    )),
+                    data: None,
+                })?
+                .iter()
+                .any(|blocker| blocker.id == req.to_id)
+        {
+            from_task.status = TaskStatus::Blocked;
+            from_task.updated_at = chrono::Utc::now();
+            task_store.update(&from_task).map_err(|e| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!(
+                    "Dependency was added, but failed to mark task blocked: {e}"
+                )),
+                data: None,
+            })?;
+        }
 
         Ok(Self::success(format!(
             "Added dependency: {}",

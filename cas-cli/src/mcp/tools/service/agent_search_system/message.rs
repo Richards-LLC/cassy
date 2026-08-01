@@ -822,13 +822,13 @@ impl CasService {
             })?;
 
         match report {
-            Some(r) => {
+            Some(mut r) => {
+                enrich_report_from_harness_artifact(&self.inner.cas_root, &mut r);
                 // cas-893c AC2: `delivered_at` is only transport handoff (the
-                // teams-inbox write / PTY inject succeeding) — cas cannot
-                // observe whether the recipient's harness actually consumed
-                // it (see `ObservationStatus` / the `wake`/`reaction` fields
-                // below, which stay `Unobserved` because cas has no signal
-                // for that). `confirmed_at` is the only field that means
+                // teams-inbox write / PTY inject succeeding). cas-4fb9 adds
+                // artifact-backed wake/reaction observations where the
+                // recipient harness exposes them; a missing artifact remains
+                // `Unobserved`. `confirmed_at` is still the only field that means
                 // "the recipient told us it got this" (an explicit
                 // `message_ack`), which most recipients never call. So the
                 // honest "how long has this been undelivered" clock runs
@@ -893,9 +893,65 @@ impl CasService {
     }
 }
 
+/// Enrich the store's deliberately conservative report with real harness
+/// records. Failure at any lookup/parse step leaves both stages unobserved.
+///
+/// The delivery timestamp is only an ordering floor: it never becomes an
+/// observation itself. A non-Unobserved value requires a concrete record in
+/// the target worker's resolved artifact, and the record timestamp + path are
+/// attached to the report as provenance.
+fn enrich_report_from_harness_artifact(
+    cas_root: &std::path::Path,
+    report: &mut cas_store::MessageDeliveryReport,
+) {
+    use cas_store::ObservationStatus;
+
+    let Some(delivered_at) = report.delivered_at else {
+        return;
+    };
+    let Ok(store) = crate::store::open_agent_store(cas_root) else {
+        return;
+    };
+    let Ok(agents) = store.list(None) else {
+        return;
+    };
+    let Some(agent) = agents.into_iter().find(|agent| {
+        (agent.name == report.target || agent.id == report.target)
+            && report.factory_session.as_ref().is_none_or(|session| {
+                agent.factory_session.as_ref() == Some(session)
+            })
+    }) else {
+        return;
+    };
+    let cli = crate::mcp::tools::service::factory_ops::worker_cli_from_agent(&agent);
+    let Some(path) = crate::mcp::tools::service::factory_ops::worker_transcript_path_for_agent(
+        cas_root,
+        &agent,
+    ) else {
+        return;
+    };
+    let observations =
+        crate::mcp::tools::service::harness_observation::observations_after_delivery(
+            &path,
+            cli,
+            delivered_at,
+            &report.prompt,
+        );
+    if let Some(wake) = observations.wake {
+        report.wake = ObservationStatus::Observed;
+        report.wake_observed_at = Some(wake.at);
+        report.wake_evidence = Some(wake.evidence);
+    }
+    if let Some(reaction) = observations.reaction {
+        report.reaction = ObservationStatus::Observed;
+        report.reaction_observed_at = Some(reaction.at);
+        report.reaction_evidence = Some(reaction.evidence);
+    }
+}
+
 #[cfg(test)]
 mod inbox_poll_identity_tests {
-    use super::resolve_inbox_recipient;
+    use super::{enrich_report_from_harness_artifact, resolve_inbox_recipient};
 
     #[test]
     fn registered_identity_precedes_environment_fallback() {
@@ -915,5 +971,74 @@ mod inbox_poll_identity_tests {
             Some("env-worker".to_string())
         );
         assert_eq!(resolve_inbox_recipient(None, Some("  ".to_string())), None);
+    }
+
+    #[test]
+    fn message_report_is_enriched_only_by_target_codex_rollout_records() {
+        use cas_store::ObservationStatus;
+
+        let _lock = crate::hooks::test_env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let cas_root = temp.path().join("project");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        let codex_home = temp.path().join("codex-home");
+        let sessions = codex_home.join("sessions/2099/01/01");
+        std::fs::create_dir_all(&sessions).unwrap();
+        // Exercise the live legacy-row shape: factory registration has no
+        // clone_path metadata, so status resolves the convention worktree.
+        let clone_path = cas_root.join("worktrees/worker-a");
+        std::fs::create_dir_all(&clone_path).unwrap();
+        let rollout = sessions.join("rollout-live-worker-session.jsonl");
+        std::fs::write(
+            &rollout,
+            format!(
+                concat!(
+                    "{{\"timestamp\":\"2099-01-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{{\"cwd\":{:?},\"originator\":\"codex-tui\",\"source\":\"cli\"}}}}\n",
+                    "{{\"timestamp\":\"2099-01-01T00:00:02Z\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_started\",\"turn_id\":\"observed-turn\"}}}}\n",
+                    "{{\"timestamp\":\"2099-01-01T00:00:02.500Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"Message from supervisor: act\"}}],\"internal_chat_message_metadata_passthrough\":{{\"turn_id\":\"observed-turn\"}}}}}}\n",
+                    "{{\"timestamp\":\"2099-01-01T00:00:03Z\",\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"assistant\",\"internal_chat_message_metadata_passthrough\":{{\"turn_id\":\"observed-turn\"}}}}}}\n"
+                ),
+                clone_path.display().to_string()
+            ),
+        )
+        .unwrap();
+
+        let old_codex_home = std::env::var("CODEX_HOME").ok();
+        unsafe { std::env::set_var("CODEX_HOME", &codex_home) };
+
+        let agent_store = crate::store::open_agent_store(&cas_root).unwrap();
+        let mut agent = cas_types::Agent::new(
+            "live-worker-session".to_string(),
+            "worker-a".to_string(),
+        );
+        agent.role = cas_types::AgentRole::Worker;
+        agent.factory_session = Some("factory-1".to_string());
+        agent
+            .metadata
+            .insert("worker_cli".to_string(), "codex".to_string());
+        agent_store.register(&agent).unwrap();
+
+        let queue = crate::store::open_prompt_queue_store(&cas_root).unwrap();
+        let message_id = queue
+            .enqueue_with_session("supervisor", "worker-a", "act", "factory-1")
+            .unwrap();
+        queue.mark_transport_delivered(message_id).unwrap();
+        let mut report = queue.message_delivery_report(message_id).unwrap().unwrap();
+        assert_eq!(report.wake, ObservationStatus::Unobserved);
+        assert!(serde_json::to_value(&report).unwrap().get("prompt").is_none());
+
+        enrich_report_from_harness_artifact(&cas_root, &mut report);
+
+        unsafe {
+            match old_codex_home {
+                Some(value) => std::env::set_var("CODEX_HOME", value),
+                None => std::env::remove_var("CODEX_HOME"),
+            }
+        }
+        assert_eq!(report.wake, ObservationStatus::Observed);
+        assert_eq!(report.reaction, ObservationStatus::Observed);
+        assert!(report.wake_evidence.as_deref().is_some_and(|evidence| {
+            evidence.contains("task_started") && evidence.contains("rollout-live-worker")
+        }));
     }
 }

@@ -1,7 +1,9 @@
+use crate::ui::factory::daemon::SpawnVerification;
 use crate::ui::factory::daemon::imports::*;
 use crate::ui::factory::director::AgentSummary;
 
 const PROMPT_POISON_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+const SPAWN_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(60);
 /// Stale expiry self-heals on the next 2-second tick, so never spend the
 /// shared store's 5-second busy timeout (plus blocking retries) on this path.
 const REMINDER_EXPIRY_BUSY_BUDGET: Duration = Duration::from_millis(100);
@@ -116,6 +118,17 @@ fn take_spawn_cancellation(
     cancelled_spawns.remove(worker_name)
 }
 
+/// Whether a pending spawn existed when a shutdown request was issued.
+/// Queue IDs are monotonic. A direct GUI/WS action has no durable ID and is
+/// conservatively treated as already pending so interactive shutdown keeps its
+/// historical behavior.
+fn spawn_predates_shutdown(spawn_request: Option<i64>, shutdown_request: Option<i64>) -> bool {
+    match (spawn_request, shutdown_request) {
+        (Some(spawn), Some(shutdown)) => spawn <= shutdown,
+        _ => true,
+    }
+}
+
 fn enqueue_spawn_cancelled_notice(
     cas_dir: &std::path::Path,
     supervisor_name: &str,
@@ -136,6 +149,130 @@ fn enqueue_spawn_cancelled_notice(
         Some(factory_session),
         Some(&summary),
     )?)
+}
+
+fn append_spawn_audit(
+    cas_dir: &std::path::Path,
+    factory_session: &str,
+    request_id: Option<i64>,
+    worker_name: Option<&str>,
+    stage: &str,
+    outcome: &str,
+    detail: &str,
+) {
+    let request_id_text = request_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "direct".to_string());
+    let worker = worker_name.unwrap_or("");
+    tracing::info!(
+        target: "cas::factory::spawn",
+        request_id = %request_id_text,
+        worker = %worker,
+        stage = %stage,
+        outcome = %outcome,
+        detail = %detail,
+        "factory spawn lifecycle"
+    );
+
+    let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(
+        cas_dir,
+        "worker_spawn_stage",
+        &[
+            ("request_id", request_id_text.as_str()),
+            ("worker", worker),
+            ("stage", stage),
+            ("outcome", outcome),
+            ("detail", detail),
+        ],
+    );
+
+    // Fork-first daemons can inherit an already-installed tracing subscriber;
+    // replacing it after fork then fails, leaving daemon.log and
+    // daemon-trace.log empty. Spawn audit is load-bearing, so append the
+    // compact JSON record directly as well as emitting tracing/session events.
+    let record = serde_json::json!({
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "event": "worker_spawn_stage",
+        "factory_session": factory_session,
+        "request_id": request_id_text,
+        "worker": worker,
+        "stage": stage,
+        "outcome": outcome,
+        "detail": detail,
+    });
+    let Ok(mut line) = serde_json::to_string(&record) else {
+        return;
+    };
+    line.push('\n');
+    append_spawn_audit_line(
+        [
+            daemon_log_path(factory_session),
+            daemon_trace_log_path(factory_session),
+        ],
+        &line,
+    );
+}
+
+fn append_spawn_audit_line(paths: impl IntoIterator<Item = std::path::PathBuf>, line: &str) {
+    for path in paths {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = std::io::Write::write_all(&mut file, line.as_bytes());
+        }
+    }
+}
+
+fn enqueue_spawn_outcome_notice(
+    cas_dir: &std::path::Path,
+    supervisor_name: &str,
+    factory_session: &str,
+    request_id: Option<i64>,
+    worker_name: &str,
+    stage: &str,
+    success: bool,
+    detail: &str,
+) -> anyhow::Result<i64> {
+    let queue = open_prompt_queue_store(cas_dir)?;
+    let request = request_id
+        .map(|id| format!("request {id}"))
+        .unwrap_or_else(|| "direct spawn".to_string());
+    let (summary, message) = if success {
+        (
+            format!("Worker spawn verified: {worker_name}"),
+            format!(
+                "Factory spawn {request} for worker '{worker_name}' completed: \
+                 stage={stage}, outcome=registered. {detail}"
+            ),
+        )
+    } else {
+        (
+            format!("Worker spawn failed at {stage}: {worker_name}"),
+            format!(
+                "Factory spawn {request} for worker '{worker_name}' failed: \
+                 stage={stage}. {detail}"
+            ),
+        )
+    };
+    Ok(queue.enqueue_with_summary(
+        "director",
+        supervisor_name,
+        &message,
+        Some(factory_session),
+        Some(&summary),
+    )?)
+}
+
+fn take_unverified_spawn_on_exit(
+    verifications: &mut HashMap<String, SpawnVerification>,
+    worker_name: &str,
+) -> Option<SpawnVerification> {
+    verifications.remove(worker_name)
 }
 
 impl FactoryDaemon {
@@ -174,7 +311,7 @@ impl FactoryDaemon {
         worker_name: &str,
         exit_code: Option<i32>,
     ) -> anyhow::Result<()> {
-        let agent_store = open_agent_store(self.app.cas_dir())?;
+        let unverified = take_unverified_spawn_on_exit(&mut self.spawn_verifications, worker_name);
 
         // Look up agent by name
         let agent_id = self
@@ -186,7 +323,9 @@ impl FactoryDaemon {
             .map(|a| a.id.clone());
 
         if let Some(id) = agent_id {
-            let _ = agent_store.mark_stale(&id);
+            if let Ok(agent_store) = open_agent_store(self.app.cas_dir()) {
+                let _ = agent_store.mark_stale(&id);
+            }
         }
 
         self.app.mark_worker_crashed(worker_name).await;
@@ -202,7 +341,115 @@ impl FactoryDaemon {
             .set_error(format!("Worker '{worker_name}' {exit_info}"));
         self.app.notifier().notify_crash(worker_name, &exit_info);
 
+        if let Some(verification) = unverified {
+            let detail = format!("Worker process {exit_info} before CAS agent registration.");
+            append_spawn_audit(
+                self.app.cas_dir(),
+                &self.session_name,
+                verification.request_id,
+                Some(worker_name),
+                "register",
+                "failed",
+                &detail,
+            );
+            if let Err(error) = enqueue_spawn_outcome_notice(
+                self.app.cas_dir(),
+                self.app.supervisor_name(),
+                &self.session_name,
+                verification.request_id,
+                worker_name,
+                "register",
+                false,
+                &detail,
+            ) {
+                tracing::warn!(
+                    worker = %worker_name,
+                    error = %error,
+                    "failed to enqueue supervisor-visible pre-registration exit"
+                );
+            }
+        }
+
         Ok(())
+    }
+
+    pub(super) fn reconcile_spawn_verifications(&mut self) {
+        if self.spawn_verifications.is_empty() {
+            return;
+        }
+        let Ok(agent_store) = open_agent_store(self.app.cas_dir()) else {
+            return;
+        };
+        let Ok(active_agents) = agent_store.list(Some(cas_types::AgentStatus::Active)) else {
+            return;
+        };
+        let registered: std::collections::HashSet<&str> = active_agents
+            .iter()
+            .filter(|agent| {
+                agent.role == cas_types::AgentRole::Worker
+                    && agent.factory_session.as_deref() == Some(self.session_name.as_str())
+            })
+            .map(|agent| agent.name.as_str())
+            .collect();
+        let now = Instant::now();
+        let finished: Vec<(String, bool)> = self
+            .spawn_verifications
+            .iter()
+            .filter_map(|(worker, verification)| {
+                if registered.contains(worker.as_str()) {
+                    Some((worker.clone(), true))
+                } else if now.saturating_duration_since(verification.launched_at)
+                    >= SPAWN_REGISTRATION_TIMEOUT
+                {
+                    Some((worker.clone(), false))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for (worker, success) in finished {
+            let Some(verification) = self.spawn_verifications.remove(&worker) else {
+                continue;
+            };
+            let (outcome, detail) = if success {
+                (
+                    "confirmed",
+                    "Worker is active in the CAS agent registry for this factory session."
+                        .to_string(),
+                )
+            } else {
+                (
+                    "timeout",
+                    format!(
+                        "Worker process launched but did not register with CAS within {} seconds; \
+                         inspect the worker pane/process and daemon logs.",
+                        SPAWN_REGISTRATION_TIMEOUT.as_secs()
+                    ),
+                )
+            };
+            append_spawn_audit(
+                self.app.cas_dir(),
+                &self.session_name,
+                verification.request_id,
+                Some(&worker),
+                "register",
+                outcome,
+                &detail,
+            );
+            if let Err(error) = enqueue_spawn_outcome_notice(
+                self.app.cas_dir(),
+                self.app.supervisor_name(),
+                &self.session_name,
+                verification.request_id,
+                &worker,
+                "register",
+                success,
+                &detail,
+            ) {
+                tracing::warn!(worker = %worker, error = %error, "failed to enqueue spawn outcome");
+            }
+        }
     }
 
     /// Check if a message source is a dead (shutdown/crashed) worker.
@@ -1093,9 +1340,19 @@ impl FactoryDaemon {
         let requests = queue.poll(&self.session_name, 10)?;
 
         for request in requests {
-            tracing::info!("Enqueuing spawn request: {:?}", request.action);
+            let action = request.action.as_str();
+            append_spawn_audit(
+                self.app.cas_dir(),
+                &self.session_name,
+                Some(request.id),
+                None,
+                "dequeue",
+                "accepted",
+                action,
+            );
             match request.action {
                 SpawnAction::Spawn => {
+                    let request_id = Some(request.id);
                     let count = request.count.unwrap_or(1) as usize;
                     let isolate = request.isolate;
                     // cas-2992: deserialize the optional WorkerSpec from the queue row.
@@ -1128,6 +1385,7 @@ impl FactoryDaemon {
                         self.app.spawning_count += count;
                         for _ in 0..count {
                             self.pending_spawns.push_back(PendingSpawn::Anonymous {
+                                request_id,
                                 isolate,
                                 spec: spec.clone(),
                                 task_id: task_id.take(),
@@ -1137,6 +1395,7 @@ impl FactoryDaemon {
                         self.app.spawning_count += request.worker_names.len();
                         for name in request.worker_names {
                             self.pending_spawns.push_back(PendingSpawn::Named {
+                                request_id,
                                 name,
                                 isolate,
                                 spec: spec.clone(),
@@ -1147,6 +1406,7 @@ impl FactoryDaemon {
                 }
                 SpawnAction::Shutdown => {
                     self.pending_spawns.push_back(PendingSpawn::Shutdown {
+                        request_id: Some(request.id),
                         count: request.count.map(|c| c as usize),
                         names: request.worker_names,
                         force: request.force,
@@ -1173,10 +1433,10 @@ impl FactoryDaemon {
         let spawn_finished = self
             .spawn_task
             .as_ref()
-            .map(|(_, _, _, handle)| handle.is_finished())
+            .map(|(_, _, _, _, handle)| handle.is_finished())
             .unwrap_or(false);
         if spawn_finished {
-            let (pending_name, pending_spec, pending_task_id, handle) =
+            let (pending_name, request_id, pending_spec, pending_task_id, handle) =
                 self.spawn_task.take().unwrap();
             // Remove from pending workers (boot pane transitions to real pane or disappears)
             self.app.remove_pending_worker(&pending_name);
@@ -1209,6 +1469,15 @@ impl FactoryDaemon {
                         worker = %pending_name,
                         cleanup = %cleanup_status,
                         "cas-7a94/cas-421c: in-flight spawn cancelled by shutdown — discarding pane and releasing pre-assign"
+                    );
+                    append_spawn_audit(
+                        self.app.cas_dir(),
+                        &self.session_name,
+                        request_id,
+                        Some(&pending_name),
+                        "launch",
+                        "cancelled",
+                        &visible_error,
                     );
                     self.app.set_error(visible_error);
                     if let Some(ref task_id) = pending_task_id {
@@ -1261,7 +1530,22 @@ impl FactoryDaemon {
                         task_id_for_finish,
                     ) {
                         Ok(name) => {
-                            tracing::info!("Spawned worker (async): {}", name);
+                            append_spawn_audit(
+                                self.app.cas_dir(),
+                                &self.session_name,
+                                request_id,
+                                Some(&name),
+                                "launch",
+                                "started",
+                                "Worker PTY process started; awaiting CAS registration.",
+                            );
+                            self.spawn_verifications.insert(
+                                name.clone(),
+                                SpawnVerification {
+                                    request_id,
+                                    launched_at: Instant::now(),
+                                },
+                            );
                             // A worker may reuse a retired name (e.g. a Codex worker
                             // spawned into a Claude worker's old name). Clear it from
                             // the insert-only dead set so its messages aren't dropped
@@ -1318,6 +1602,26 @@ impl FactoryDaemon {
                                 );
                             }
                             self.app.set_error(format!("Failed to finish spawn: {e}"));
+                            let detail = e.to_string();
+                            append_spawn_audit(
+                                self.app.cas_dir(),
+                                &self.session_name,
+                                request_id,
+                                Some(&pending_name),
+                                "launch",
+                                "failed",
+                                &detail,
+                            );
+                            let _ = enqueue_spawn_outcome_notice(
+                                self.app.cas_dir(),
+                                self.app.supervisor_name(),
+                                &self.session_name,
+                                request_id,
+                                &pending_name,
+                                "launch",
+                                false,
+                                &detail,
+                            );
                         }
                     }
                 }
@@ -1335,6 +1639,26 @@ impl FactoryDaemon {
                         );
                     }
                     self.app.set_error(format!("Failed to spawn worker: {e}"));
+                    let detail = e.to_string();
+                    append_spawn_audit(
+                        self.app.cas_dir(),
+                        &self.session_name,
+                        request_id,
+                        Some(&pending_name),
+                        "provision",
+                        "failed",
+                        &detail,
+                    );
+                    let _ = enqueue_spawn_outcome_notice(
+                        self.app.cas_dir(),
+                        self.app.supervisor_name(),
+                        &self.session_name,
+                        request_id,
+                        &pending_name,
+                        "provision",
+                        false,
+                        &detail,
+                    );
                 }
                 Err(e) => {
                     crate::telemetry::track(
@@ -1349,6 +1673,26 @@ impl FactoryDaemon {
                         );
                     }
                     self.app.set_error(format!("Spawn task panicked: {e}"));
+                    let detail = e.to_string();
+                    append_spawn_audit(
+                        self.app.cas_dir(),
+                        &self.session_name,
+                        request_id,
+                        Some(&pending_name),
+                        "provision",
+                        "failed",
+                        &detail,
+                    );
+                    let _ = enqueue_spawn_outcome_notice(
+                        self.app.cas_dir(),
+                        self.app.supervisor_name(),
+                        &self.session_name,
+                        request_id,
+                        &pending_name,
+                        "provision",
+                        false,
+                        &detail,
+                    );
                 }
             }
             self.app.spawning_count = self.app.spawning_count.saturating_sub(1);
@@ -1367,6 +1711,7 @@ impl FactoryDaemon {
 
         match action {
             PendingSpawn::Anonymous {
+                request_id,
                 isolate,
                 spec,
                 task_id,
@@ -1374,6 +1719,15 @@ impl FactoryDaemon {
                 match self.app.prepare_worker_spawn(None, isolate) {
                     Ok(prep) => {
                         let worker_name = prep.worker_name.clone();
+                        append_spawn_audit(
+                            self.app.cas_dir(),
+                            &self.session_name,
+                            request_id,
+                            Some(&worker_name),
+                            "provision",
+                            "started",
+                            "Preparing worker filesystem and worktree.",
+                        );
                         // cas-7a94: bind task_id as soon as the worker name is
                         // known — before the isolate worktree finishes — so
                         // codex+isolate async gaps cannot skip pre-assign.
@@ -1389,6 +1743,7 @@ impl FactoryDaemon {
                         self.app.add_pending_worker(worker_name.clone(), isolate);
                         self.spawn_task = Some((
                             worker_name,
+                            request_id,
                             spec,
                             task_id,
                             tokio::task::spawn_blocking(move || prep.run()),
@@ -1403,11 +1758,32 @@ impl FactoryDaemon {
                             ],
                         );
                         self.app.set_error(format!("Failed to prepare spawn: {e}"));
+                        let detail = e.to_string();
+                        append_spawn_audit(
+                            self.app.cas_dir(),
+                            &self.session_name,
+                            request_id,
+                            None,
+                            "prepare",
+                            "failed",
+                            &detail,
+                        );
+                        let _ = enqueue_spawn_outcome_notice(
+                            self.app.cas_dir(),
+                            self.app.supervisor_name(),
+                            &self.session_name,
+                            request_id,
+                            "unresolved",
+                            "prepare",
+                            false,
+                            &detail,
+                        );
                         self.app.spawning_count = self.app.spawning_count.saturating_sub(1);
                     }
                 }
             }
             PendingSpawn::Named {
+                request_id,
                 name,
                 isolate,
                 spec,
@@ -1416,6 +1792,15 @@ impl FactoryDaemon {
                 match self.app.prepare_worker_spawn(Some(&name), isolate) {
                     Ok(prep) => {
                         let worker_name = prep.worker_name.clone();
+                        append_spawn_audit(
+                            self.app.cas_dir(),
+                            &self.session_name,
+                            request_id,
+                            Some(&worker_name),
+                            "provision",
+                            "started",
+                            "Preparing worker filesystem and worktree.",
+                        );
                         // cas-7a94: early pre-assign once name is final (see Anonymous).
                         if let Some(ref tid) = task_id {
                             let _ = crate::ui::factory::app::render_and_ops::epic_workers::assign_task_to_new_worker(
@@ -1427,6 +1812,7 @@ impl FactoryDaemon {
                         self.app.add_pending_worker(worker_name.clone(), isolate);
                         self.spawn_task = Some((
                             worker_name,
+                            request_id,
                             spec,
                             task_id,
                             tokio::task::spawn_blocking(move || prep.run()),
@@ -1442,28 +1828,58 @@ impl FactoryDaemon {
                         );
                         self.app
                             .set_error(format!("Failed to prepare spawn '{name}': {e}"));
+                        let detail = e.to_string();
+                        append_spawn_audit(
+                            self.app.cas_dir(),
+                            &self.session_name,
+                            request_id,
+                            Some(&name),
+                            "prepare",
+                            "failed",
+                            &detail,
+                        );
+                        let _ = enqueue_spawn_outcome_notice(
+                            self.app.cas_dir(),
+                            self.app.supervisor_name(),
+                            &self.session_name,
+                            request_id,
+                            &name,
+                            "prepare",
+                            false,
+                            &detail,
+                        );
                         self.app.spawning_count = self.app.spawning_count.saturating_sub(1);
                     }
                 }
             }
             PendingSpawn::Shutdown {
+                request_id: shutdown_request_id,
                 count,
                 names,
                 force,
             } => {
                 // Shutdowns are fast - process synchronously
+                // A shutdown may jump the FIFO while a slow spawn is in flight.
+                // Only expose that generation to shutdown if it was already
+                // requested at the time of the shutdown. Otherwise a later
+                // spawn polled in the same batch could be cancelled by an older
+                // shutdown-all request.
+                let cancellable_in_flight = self.spawn_task.as_ref().and_then(
+                    |(name, spawn_request_id, _, _, _)| {
+                        spawn_predates_shutdown(*spawn_request_id, shutdown_request_id)
+                            .then_some(name.as_str())
+                    },
+                );
                 // Collect worker names before shutdown for GUI notification
                 let workers_to_stop = shutdown_targets(
                     self.app.worker_names(),
-                    self.spawn_task.as_ref().map(|(name, _, _, _)| name.as_str()),
+                    cancellable_in_flight,
                     count,
                     &names,
                 );
                 cancel_targeted_in_flight_spawn(
                     &mut self.cancelled_spawns,
-                    self.spawn_task
-                        .as_ref()
-                        .map(|(name, _, _, _)| name.as_str()),
+                    cancellable_in_flight,
                     &workers_to_stop,
                 );
 
@@ -1478,11 +1894,14 @@ impl FactoryDaemon {
                     while let Some(pending) = self.pending_spawns.pop_front() {
                         match pending {
                             PendingSpawn::Named {
+                                request_id,
                                 name,
                                 isolate,
                                 spec,
                                 task_id,
-                            } if cancel_all || stop_set.contains(name.as_str()) => {
+                            } if (cancel_all || stop_set.contains(name.as_str()))
+                                && spawn_predates_shutdown(request_id, shutdown_request_id) =>
+                            {
                                 if let Some(ref tid) = task_id {
                                     crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound(
                                         self.app.cas_dir(),
@@ -1499,15 +1918,36 @@ impl FactoryDaemon {
                                     worker = %name,
                                     "cas-7a94: cancelled pending spawn on shutdown — released pre-assign"
                                 );
+                                append_spawn_audit(
+                                    self.app.cas_dir(),
+                                    &self.session_name,
+                                    request_id,
+                                    Some(&name),
+                                    "launch",
+                                    "cancelled",
+                                    "Spawn was still queued when shutdown-all cancelled it.",
+                                );
                                 let _ = (isolate, spec); // consumed
                             }
                             PendingSpawn::Anonymous {
+                                request_id,
                                 isolate,
                                 spec,
                                 task_id,
-                            } if cancel_all => {
+                            } if cancel_all
+                                && spawn_predates_shutdown(request_id, shutdown_request_id) =>
+                            {
                                 // Anonymous names are only known once prepare runs;
                                 // if still in the queue, no early assign has fired yet.
+                                append_spawn_audit(
+                                    self.app.cas_dir(),
+                                    &self.session_name,
+                                    request_id,
+                                    None,
+                                    "launch",
+                                    "cancelled",
+                                    "Anonymous spawn was still queued when shutdown-all cancelled it.",
+                                );
                                 let _ = (isolate, spec, task_id);
                                 self.app.spawning_count = self.app.spawning_count.saturating_sub(1);
                             }
@@ -1979,14 +2419,15 @@ fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        cancel_targeted_in_flight_spawn, enqueue_spawn_cancelled_notice, is_exact_agent_name_match,
-        matches_event_filter, prompt_poison_sweep_due, prompt_poison_sweep_targets,
-        registered_prompt_sweep_agents, reminder_matches_factory_session,
-        report_stale_reminder_expiry, shutdown_targets, take_next_pending_spawn,
-        take_spawn_cancellation,
+        append_spawn_audit_line, cancel_targeted_in_flight_spawn, enqueue_spawn_cancelled_notice,
+        enqueue_spawn_outcome_notice, is_exact_agent_name_match, matches_event_filter,
+        prompt_poison_sweep_due, prompt_poison_sweep_targets, registered_prompt_sweep_agents,
+        reminder_matches_factory_session, report_stale_reminder_expiry, shutdown_targets,
+        spawn_predates_shutdown, take_next_pending_spawn, take_spawn_cancellation,
+        take_unverified_spawn_on_exit,
     };
     use crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound;
-    use crate::ui::factory::daemon::{FactoryDaemon, PendingSpawn};
+    use crate::ui::factory::daemon::{FactoryDaemon, PendingSpawn, SpawnVerification};
     use crate::ui::factory::director::{AgentSummary, DirectorData, DirectorEvent};
     use cas_store::DeliveryStage;
     use cas_types::{AgentStatus, Task, TaskStatus};
@@ -2369,6 +2810,7 @@ mod tests {
                 shell: None,
             },
             PendingSpawn::Shutdown {
+                request_id: None,
                 count: None,
                 names: vec!["booting-worker".into()],
                 force: false,
@@ -2420,6 +2862,45 @@ mod tests {
             !take_spawn_cancellation(&mut cancelled, worker),
             "completed shutdown must not permanently tombstone a reusable worker name"
         );
+    }
+
+    #[test]
+    fn spawn_after_shutdown_all_remains_dequeueable() {
+        let mut pending = VecDeque::from([PendingSpawn::Shutdown {
+            request_id: Some(407),
+            count: Some(0),
+            names: vec![],
+            force: false,
+        }]);
+
+        assert!(matches!(
+            take_next_pending_spawn(&mut pending, false),
+            Some(PendingSpawn::Shutdown { count: Some(0), .. })
+        ));
+        assert!(
+            !spawn_predates_shutdown(Some(408), Some(407)),
+            "a later queue request must survive shutdown-all"
+        );
+        assert!(
+            spawn_predates_shutdown(Some(406), Some(407)),
+            "a generation already queued when shutdown was issued remains cancellable"
+        );
+        pending.push_back(PendingSpawn::Named {
+            request_id: Some(408),
+            name: "fresh-worker".into(),
+            isolate: true,
+            spec: None,
+            task_id: None,
+        });
+
+        assert!(matches!(
+            take_next_pending_spawn(&mut pending, false),
+            Some(PendingSpawn::Named {
+                request_id: Some(408),
+                name,
+                ..
+            }) if name == "fresh-worker"
+        ));
     }
 
     /// Preserve cas-7a94: shutdown that lands during worker N's current build
@@ -2481,6 +2962,58 @@ mod tests {
         assert_eq!(prompts[0].summary.as_deref(), Some("Worker spawn cancelled: clock-fixer"));
         assert!(prompts[0].prompt.contains("No worker pane was registered"));
         assert!(prompts[0].prompt.contains("worktree and branch were removed"));
+    }
+
+    #[test]
+    fn child_exits_immediately_before_registration_notifies_supervisor() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut verifications = HashMap::from([(
+            "short-lived-worker".to_string(),
+            SpawnVerification {
+                request_id: Some(407),
+                launched_at: Instant::now(),
+            },
+        )]);
+
+        let verification = take_unverified_spawn_on_exit(&mut verifications, "short-lived-worker")
+            .expect("an exit before registration must retain request correlation");
+        assert_eq!(verification.request_id, Some(407));
+        assert!(verifications.is_empty());
+
+        enqueue_spawn_outcome_notice(
+            &cas_dir,
+            "keen-crane",
+            "factory-session",
+            verification.request_id,
+            "short-lived-worker",
+            "register",
+            false,
+            "Worker process exited before CAS agent registration.",
+        )
+        .unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let prompts = queue.peek_all(10).unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(
+            prompts[0].summary.as_deref(),
+            Some("Worker spawn failed at register: short-lived-worker")
+        );
+        assert!(prompts[0].prompt.contains("request 407"));
+        assert!(prompts[0].prompt.contains("stage=register"));
+    }
+
+    #[test]
+    fn spawn_stage_audit_writes_both_daemon_logs() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let daemon = temp.path().join("daemon.log");
+        let trace = temp.path().join("daemon-trace.log");
+        let line = "{\"event\":\"worker_spawn_stage\",\"stage\":\"dequeue\"}\n";
+
+        append_spawn_audit_line([daemon.clone(), trace.clone()], line);
+
+        assert_eq!(std::fs::read_to_string(daemon).unwrap(), line);
+        assert_eq!(std::fs::read_to_string(trace).unwrap(), line);
     }
 
     // -----------------------------------------------------------------------

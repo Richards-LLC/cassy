@@ -535,6 +535,7 @@ impl DaemonInitPhase {
             compact_rows: 0,
             pending_spawns: VecDeque::new(),
             spawn_task: None,
+            spawn_verifications: HashMap::new(),
             cloud_handle,
             phone_home: self.phone_home,
             relay_clients: HashMap::new(),

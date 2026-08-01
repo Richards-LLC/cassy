@@ -167,6 +167,7 @@ impl FactoryDaemon {
             compact_rows: 0,
             pending_spawns: VecDeque::new(),
             spawn_task: None,
+            spawn_verifications: HashMap::new(),
             cloud_handle,
             phone_home: false,
             relay_clients: HashMap::new(),
@@ -362,6 +363,10 @@ impl FactoryDaemon {
             // Periodic CAS data refresh
             let mut refreshed = false;
             if last_refresh.elapsed() >= refresh_interval {
+                // A successful PTY spawn is not a verified worker. Confirm the
+                // harness reached CAS registration (or surface a bounded
+                // timeout) on the existing two-second lifecycle cadence.
+                self.reconcile_spawn_verifications();
                 // cas-f9e8 telemetry: the gap between the previous refresh
                 // and this one is Channel C's worst-case delivery latency
                 // for director-generated events. Logged at debug; enable

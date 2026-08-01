@@ -1033,6 +1033,15 @@ impl CasService {
                             .then(|| transcript_path_fast(clone_path.as_deref(), session_uuid))
                             .flatten()
                     });
+                // cas-4fb9: checkpoint/heartbeat freshness cannot answer
+                // whether the harness actually started a turn. Render the
+                // harness's own artifact-backed turn observation separately.
+                // Claude deliberately stays unobserved: Agent Teams inbox
+                // persistence is transport evidence, not wake evidence.
+                let harness_turn_info = format_harness_turn_observation(
+                    worker_cli,
+                    transcript_path_for_worker.as_deref(),
+                );
                 // Surface transcript path only for hard-dead workers so the
                 // supervisor can salvage whatever was in-flight when the CC
                 // client died (cas-2749 AC: transcript-path-surfacing on
@@ -1251,7 +1260,7 @@ impl CasService {
                     }
                 };
                 output.push_str(&format!(
-                    "  • {} (heartbeat: {}){}{}{}{}{}{}{}\n    session: {}\n",
+                    "  • {} (heartbeat: {}){}{}{}{}{}{}{}{}\n    session: {}\n",
                     &agent.name,
                     since,
                     liveness_label,
@@ -1261,6 +1270,7 @@ impl CasService {
                     model_info,
                     context_info,
                     activity_info,
+                    harness_turn_info,
                     session_uuid
                 ));
             }
@@ -2633,6 +2643,25 @@ fn collect_worker_worktree_status(
     }
 }
 
+/// Resolve a registered worker's concrete harness artifact using the same
+/// clone-path fallback and harness-aware resolver as `worker_status`.
+///
+/// Factory agent rows created before clone-path metadata was persisted still
+/// resolve through `{cas_root}/worktrees/{worker_name}`; message_status must
+/// not silently lose rollout evidence for those legacy/live rows.
+pub(crate) fn worker_transcript_path_for_agent(
+    cas_root: &std::path::Path,
+    agent: &cas_types::Agent,
+) -> Option<std::path::PathBuf> {
+    let clone_path = match resolve_worker_clone_path(cas_root, agent) {
+        WorkerClonePathResolve::Ready(path) => path,
+        WorkerClonePathResolve::NotOnDisk { candidate, .. } => candidate,
+    };
+    let cli = worker_cli_from_agent(agent);
+    let session_id = agent.cc_session_id.as_deref().unwrap_or(&agent.id);
+    worker_status_transcript_path(clone_path.to_str(), session_id, cli)
+}
+
 fn run_git(path: &std::path::Path, args: &[&str]) -> std::result::Result<String, String> {
     let output = std::process::Command::new("git")
         .args(args)
@@ -2845,6 +2874,62 @@ pub(crate) fn last_worker_activity_secs_with_transcript(
         Some((secs, phase)) if secs <= transcript_secs => Some((secs, phase)),
         _ => Some((transcript_secs, "activity")),
     }
+}
+
+/// Render the latest real harness turn observation for `worker_status`.
+///
+/// This is intentionally separate from `last activity`: transcript mtime is
+/// useful freshness evidence, but it does not name the state transition a
+/// supervisor needs when diagnosing a swallowed delivery. Only parsed harness
+/// records reach this line; an unresolved artifact remains explicitly
+/// unobserved.
+fn format_harness_turn_observation(
+    cli: cas_mux::SupervisorCli,
+    artifact_path: Option<&std::path::Path>,
+) -> String {
+    format_harness_turn_observation_at(cli, artifact_path, chrono::Utc::now())
+}
+
+fn format_harness_turn_observation_at(
+    cli: cas_mux::SupervisorCli,
+    artifact_path: Option<&std::path::Path>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    if cli == cas_mux::SupervisorCli::Claude {
+        return "\n    harness turn: unobserved (Claude has no authoritative turn-start artifact; inbox persistence is delivery only)".to_string();
+    }
+    let Some(path) = artifact_path else {
+        return format!(
+            "\n    harness turn: unobserved ({} artifact unresolved)",
+            cli.as_str()
+        );
+    };
+    let observations =
+        crate::mcp::tools::service::harness_observation::latest_turn_observations(path, cli);
+    let Some(wake) = observations.wake else {
+        let completion = observations.completion.map_or_else(String::new, |completion| {
+            format!(
+                "; completion observed at {} from {}",
+                completion.at.to_rfc3339(),
+                completion.evidence
+            )
+        });
+        return format!(
+            "\n    harness turn: unobserved (resolved {} artifact has no authoritative turn-start record{})",
+            cli.as_str(),
+            completion
+        );
+    };
+    let age = (now - wake.at).num_seconds().max(0);
+    let reaction = observations.reaction.map_or_else(
+        || "reaction unobserved".to_string(),
+        |reaction| format!("reaction observed at {}", reaction.at.to_rfc3339()),
+    );
+    format!(
+        "\n    harness turn: started {age}s ago at {} ({reaction}; artifact-backed: {})",
+        wake.at.to_rfc3339(),
+        wake.evidence
+    )
 }
 
 /// cas-78bf: elapsed time for the sustained assigned-but-unstarted state.
@@ -4490,6 +4575,43 @@ effort = "high"
             WORKER_DEAD_SECS > WORKER_STALE_SECS,
             "WORKER_DEAD_SECS ({WORKER_DEAD_SECS}) must exceed WORKER_STALE_SECS ({WORKER_STALE_SECS}) — the two-band model collapses otherwise"
         );
+    }
+
+    #[test]
+    fn worker_status_names_artifact_backed_codex_turn_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let rollout = temp.path().join("rollout.jsonl");
+        std::fs::write(
+            &rollout,
+            concat!(
+                "{\"timestamp\":\"2026-07-31T20:01:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"worker-status-turn\"}}\n",
+                "{\"timestamp\":\"2026-07-31T20:01:03Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\"}}\n"
+            ),
+        )
+        .unwrap();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-31T20:01:05Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let rendered = format_harness_turn_observation_at(
+            cas_mux::SupervisorCli::Codex,
+            Some(&rollout),
+            now,
+        );
+        assert!(rendered.contains("harness turn: started 3s ago"));
+        assert!(rendered.contains("reaction observed"));
+        assert!(rendered.contains("artifact-backed"));
+        assert!(rendered.contains("task_started"));
+    }
+
+    #[test]
+    fn worker_status_does_not_call_claude_inbox_persistence_a_wake() {
+        let rendered = format_harness_turn_observation_at(
+            cas_mux::SupervisorCli::Claude,
+            None,
+            chrono::Utc::now(),
+        );
+        assert!(rendered.contains("harness turn: unobserved"));
+        assert!(rendered.contains("inbox persistence is delivery only"));
     }
 
     // --- cas-8240: liveness_label_for branch matrix -------------------------

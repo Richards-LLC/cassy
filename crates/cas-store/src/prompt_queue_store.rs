@@ -418,33 +418,47 @@ impl std::fmt::Display for PendingReason {
     }
 }
 
-/// Evidence CAS does **not** fabricate (harness wake / model reaction).
+/// Harness observation backed by a concrete external artifact.
+///
+/// `Observed` is never derived from queue age, delivery age, heartbeat age,
+/// or any other elapsed-time heuristic. Callers may set it only while also
+/// attaching the artifact timestamp and provenance to the corresponding
+/// `*_observed_at` / `*_evidence` fields on [`MessageDeliveryReport`].
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ObservationStatus {
     /// No authoritative CAS observation for this stage.
     #[default]
     Unobserved,
+    /// A concrete harness artifact records this stage.
+    Observed,
 }
 
 impl std::fmt::Display for ObservationStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Unobserved => write!(f, "unobserved"),
+            Self::Observed => write!(f, "observed"),
         }
     }
 }
 
 /// Stage-based delivery report for one prompt_queue message (cas-2c5f).
 ///
-/// Additive to legacy [`MessageStatus`]. Wake/reaction are always
-/// [`ObservationStatus::Unobserved`] — never inferred from timestamps.
+/// Additive to legacy [`MessageStatus`]. The store returns wake/reaction as
+/// [`ObservationStatus::Unobserved`]; harness-aware query surfaces may enrich
+/// them only from concrete artifacts. They are never inferred from elapsed
+/// time or transport/confirmation timestamps.
 ///
 /// `delivered_at` is **only** set after full transport handoff
 /// (`transport_delivered_at`). Partial broadcasts never populate it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MessageDeliveryReport {
     pub id: i64,
+    /// Original queue payload used only to correlate a concrete harness input
+    /// record. It is deliberately omitted from the public status response.
+    #[serde(skip)]
+    pub prompt: String,
     /// Legacy three-value status (processed_at/acked_at) for older clients.
     pub legacy_status: MessageStatus,
     /// Highest monotonic stage reached (authoritative columns only).
@@ -468,7 +482,19 @@ pub struct MessageDeliveryReport {
     pub broadcast_succeeded: Option<u32>,
     pub broadcast_failed: Option<u32>,
     pub wake: ObservationStatus,
+    /// Timestamp carried by the concrete harness wake artifact.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wake_observed_at: Option<DateTime<Utc>>,
+    /// Human-readable path + record shape that proves the wake observation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wake_evidence: Option<String>,
     pub reaction: ObservationStatus,
+    /// Timestamp carried by the concrete harness reaction artifact.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reaction_observed_at: Option<DateTime<Utc>>,
+    /// Human-readable path + record shape that proves the reaction observation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reaction_evidence: Option<String>,
 }
 
 /// Stage-observability columns (cas-2c5f). Idempotent ALTERs.
@@ -2004,7 +2030,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         let conn = self.conn.lock().unwrap();
 
         let row = conn.query_row(
-            "SELECT id, source, target, created_at, processed_at, factory_session,
+            "SELECT id, prompt, source, target, created_at, processed_at, factory_session,
                     priority, acked_at, urgent, selected_at, last_pending_reason,
                     last_pending_detail, transport_delivered_at, highest_stage,
                     broadcast_attempted, broadcast_succeeded, broadcast_failed
@@ -2016,25 +2042,27 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
-                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(4)?,
                     row.get::<_, Option<String>>(5)?,
-                    row.get::<_, u8>(6).unwrap_or(2),
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, i64>(8).map(|v| v != 0).unwrap_or(false),
-                    row.get::<_, Option<String>>(9).unwrap_or(None),
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, u8>(7).unwrap_or(2),
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, i64>(9).map(|v| v != 0).unwrap_or(false),
                     row.get::<_, Option<String>>(10).unwrap_or(None),
                     row.get::<_, Option<String>>(11).unwrap_or(None),
                     row.get::<_, Option<String>>(12).unwrap_or(None),
                     row.get::<_, Option<String>>(13).unwrap_or(None),
-                    row.get::<_, Option<i64>>(14).unwrap_or(None),
+                    row.get::<_, Option<String>>(14).unwrap_or(None),
                     row.get::<_, Option<i64>>(15).unwrap_or(None),
                     row.get::<_, Option<i64>>(16).unwrap_or(None),
+                    row.get::<_, Option<i64>>(17).unwrap_or(None),
                 ))
             },
         );
 
         let (
             id,
+            prompt,
             source,
             target,
             created_at_s,
@@ -2141,6 +2169,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
         Ok(Some(MessageDeliveryReport {
             id,
+            prompt,
             legacy_status,
             stage,
             source,
@@ -2158,7 +2187,11 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             broadcast_succeeded: bc_succeeded.map(|n| n as u32),
             broadcast_failed: bc_failed.map(|n| n as u32),
             wake: ObservationStatus::Unobserved,
+            wake_observed_at: None,
+            wake_evidence: None,
             reaction: ObservationStatus::Unobserved,
+            reaction_observed_at: None,
+            reaction_evidence: None,
         }))
     }
 

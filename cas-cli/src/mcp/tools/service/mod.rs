@@ -1110,6 +1110,7 @@ pub(crate) mod agent_liveness;
 mod agent_search_system;
 mod core;
 pub(crate) mod factory_ops;
+pub(crate) mod harness_observation;
 mod factory_remind;
 pub(crate) mod orphan_recovery;
 mod panic_catch;

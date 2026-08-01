@@ -437,6 +437,8 @@ impl CasCore {
             ));
         }
 
+        super::ensure_no_open_blockers(task_store.as_ref(), &req.id, "start")?;
+
         if let Some(target) = task.deliverables.work_target.as_ref() {
             super::repo_context::resolve_repo_context(&self.cas_root, target).map_err(
                 |message| McpError {

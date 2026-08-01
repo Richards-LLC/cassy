@@ -243,6 +243,142 @@ fn current_factory_session() -> Option<String> {
         .filter(|s| !s.trim().is_empty())
 }
 
+/// Resolve the ref used by `sync_all_workers` without touching worker clones.
+///
+/// Resolution order is intentionally strict:
+/// 1. A supplied epic id is authoritative and must resolve to a live Epic with
+///    a branch in this project's task store. Any failure is terminal.
+/// 2. An explicit branch is used as-is.
+/// 3. The current session's pinned/default epic is used only after its
+///    `project_dir` is proven to match this CAS root's project.
+/// 4. With no focused epic, use the local repository's default branch.
+///
+/// There is deliberately no "first ready/in-progress epic" fallback: task
+/// store listing may include synchronized/global records from other projects,
+/// and choosing one would turn ambient state into a branch mutation target.
+fn resolve_sync_all_workers_target(
+    cas_root: &std::path::Path,
+    req: &FactoryRequest,
+) -> std::result::Result<String, String> {
+    use crate::store::open_task_store;
+    use cas_types::{TaskStatus, TaskType};
+
+    fn epic_branch(
+        task_store: &dyn crate::store::TaskStore,
+        epic_id: &str,
+        source: &str,
+    ) -> std::result::Result<String, String> {
+        let epic = task_store
+            .get(epic_id)
+            .map_err(|e| format!("sync_all_workers: {source} epic {epic_id} not found: {e}"))?;
+        if epic.task_type != TaskType::Epic {
+            return Err(format!(
+                "sync_all_workers: {source} task {epic_id} is not an Epic (task_type={:?})",
+                epic.task_type
+            ));
+        }
+        if epic.status == TaskStatus::Closed {
+            return Err(format!(
+                "sync_all_workers: {source} epic {epic_id} is Closed"
+            ));
+        }
+        epic.branch
+            .filter(|branch| !branch.trim().is_empty())
+            .ok_or_else(|| format!("sync_all_workers: {source} epic {epic_id} has no branch"))
+    }
+
+    if let Some(raw_id) = req.id.as_deref() {
+        let epic_id = raw_id.trim();
+        if epic_id.is_empty() {
+            return Err("sync_all_workers: explicit epic id cannot be blank".to_string());
+        }
+        let task_store = open_task_store(cas_root)
+            .map_err(|e| format!("sync_all_workers: failed to open task store: {e}"))?;
+        return epic_branch(task_store.as_ref(), epic_id, "explicit");
+    }
+
+    if let Some(branch) = req
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+    {
+        return Ok(branch.to_string());
+    }
+
+    if let Some(factory_session) = current_factory_session() {
+        use crate::ui::factory::{SessionMetadata, metadata_path};
+
+        let path = metadata_path(&factory_session);
+        let data = std::fs::read_to_string(&path).map_err(|e| {
+            format!(
+                "sync_all_workers: cannot validate factory session {factory_session} metadata: {e}"
+            )
+        })?;
+        let metadata: SessionMetadata = serde_json::from_str(&data).map_err(|e| {
+            format!("sync_all_workers: invalid factory session {factory_session} metadata: {e}")
+        })?;
+
+        let project_root = cas_root.parent().unwrap_or(cas_root);
+        let metadata_project = metadata
+            .project_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "sync_all_workers: factory session {factory_session} has no project_dir; refusing unscoped epic focus"
+                )
+            })?;
+        let metadata_project = std::fs::canonicalize(metadata_project).map_err(|e| {
+            format!(
+                "sync_all_workers: cannot resolve factory session {factory_session} project_dir {metadata_project}: {e}"
+            )
+        })?;
+        let project_root = std::fs::canonicalize(project_root).map_err(|e| {
+            format!(
+                "sync_all_workers: cannot resolve current project {}: {e}",
+                project_root.display()
+            )
+        })?;
+        if metadata_project != project_root {
+            return Err(format!(
+                "sync_all_workers: factory session {factory_session} belongs to {}, not current project {}; refusing cross-project epic focus",
+                metadata_project.display(),
+                project_root.display()
+            ));
+        }
+
+        let focused_epic_id = metadata
+            .pinned_epic_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .or_else(|| {
+                metadata
+                    .epic_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+            });
+        if let Some(epic_id) = focused_epic_id {
+            let task_store = open_task_store(cas_root)
+                .map_err(|e| format!("sync_all_workers: failed to open task store: {e}"))?;
+            return epic_branch(task_store.as_ref(), epic_id, "focused");
+        }
+    }
+
+    // Use local main branch, not origin/main. In factory mode the supervisor
+    // merges worker branches into the local default branch, so workers should
+    // rebase onto it directly.
+    use crate::worktree::GitOperations;
+    Ok(GitOperations::detect_repo_root(cas_root)
+        .ok()
+        .map(GitOperations::new)
+        .map(|git| git.detect_default_branch())
+        .unwrap_or_else(|| "main".to_string()))
+}
+
 fn parse_worker_name_filter(filter: Option<&String>) -> std::collections::HashSet<String> {
     filter
         .into_iter()
@@ -897,6 +1033,15 @@ impl CasService {
                             .then(|| transcript_path_fast(clone_path.as_deref(), session_uuid))
                             .flatten()
                     });
+                // cas-4fb9: checkpoint/heartbeat freshness cannot answer
+                // whether the harness actually started a turn. Render the
+                // harness's own artifact-backed turn observation separately.
+                // Claude deliberately stays unobserved: Agent Teams inbox
+                // persistence is transport evidence, not wake evidence.
+                let harness_turn_info = format_harness_turn_observation(
+                    worker_cli,
+                    transcript_path_for_worker.as_deref(),
+                );
                 // Surface transcript path only for hard-dead workers so the
                 // supervisor can salvage whatever was in-flight when the CC
                 // client died (cas-2749 AC: transcript-path-surfacing on
@@ -1115,7 +1260,7 @@ impl CasService {
                     }
                 };
                 output.push_str(&format!(
-                    "  • {} (heartbeat: {}){}{}{}{}{}{}{}\n    session: {}\n",
+                    "  • {} (heartbeat: {}){}{}{}{}{}{}{}{}\n    session: {}\n",
                     &agent.name,
                     since,
                     liveness_label,
@@ -1125,6 +1270,7 @@ impl CasService {
                     model_info,
                     context_info,
                     activity_info,
+                    harness_turn_info,
                     session_uuid
                 ));
             }
@@ -1460,8 +1606,15 @@ impl CasService {
         &self,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
-        use crate::store::{open_agent_store, open_task_store};
-        use cas_types::{AgentRole, AgentStatus, TaskStatus, TaskType};
+        use crate::store::open_agent_store;
+        use cas_types::{AgentRole, AgentStatus};
+
+        // cas-bfa5: resolve and validate the complete target before inspecting
+        // or mutating any worker clone. In particular, an invalid explicit id
+        // must not fall through to a focused/ready epic and a stale session
+        // focus must not select an epic from another project.
+        let sync_ref = resolve_sync_all_workers_target(&self.inner.cas_root, &req)
+            .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
 
         let store = open_agent_store(&self.inner.cas_root).map_err(|e| {
             Self::error(
@@ -1506,44 +1659,6 @@ impl CasService {
                 "No matching active workers found for requested worker_names filter.",
             ));
         }
-
-        let sync_ref = if let Some(branch) = req.branch.clone().filter(|b| !b.trim().is_empty()) {
-            branch
-        } else {
-            let task_store = open_task_store(&self.inner.cas_root).map_err(|e| {
-                Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("Failed to open task store: {e}"),
-                )
-            })?;
-
-            let mut epic_branch = None;
-            if let Ok(tasks) = task_store.list(None) {
-                if let Some(epic) = tasks
-                    .iter()
-                    .find(|t| t.task_type == TaskType::Epic && t.status == TaskStatus::InProgress)
-                {
-                    epic_branch = epic.branch.clone();
-                }
-                if epic_branch.is_none() {
-                    epic_branch = tasks
-                        .iter()
-                        .find(|t| t.task_type == TaskType::Epic && t.status == TaskStatus::Open)
-                        .and_then(|t| t.branch.clone());
-                }
-            }
-            epic_branch.unwrap_or_else(|| {
-                // Use local main branch, not origin/main. In factory mode the
-                // supervisor merges worker branches into the local main branch,
-                // so workers should rebase onto it directly.
-                use crate::worktree::GitOperations;
-                GitOperations::detect_repo_root(&self.inner.cas_root)
-                    .ok()
-                    .map(GitOperations::new)
-                    .map(|git| git.detect_default_branch())
-                    .unwrap_or_else(|| "main".to_string())
-            })
-        };
 
         let mut synced = Vec::new();
         let mut skipped = Vec::new();
@@ -2528,6 +2643,25 @@ fn collect_worker_worktree_status(
     }
 }
 
+/// Resolve a registered worker's concrete harness artifact using the same
+/// clone-path fallback and harness-aware resolver as `worker_status`.
+///
+/// Factory agent rows created before clone-path metadata was persisted still
+/// resolve through `{cas_root}/worktrees/{worker_name}`; message_status must
+/// not silently lose rollout evidence for those legacy/live rows.
+pub(crate) fn worker_transcript_path_for_agent(
+    cas_root: &std::path::Path,
+    agent: &cas_types::Agent,
+) -> Option<std::path::PathBuf> {
+    let clone_path = match resolve_worker_clone_path(cas_root, agent) {
+        WorkerClonePathResolve::Ready(path) => path,
+        WorkerClonePathResolve::NotOnDisk { candidate, .. } => candidate,
+    };
+    let cli = worker_cli_from_agent(agent);
+    let session_id = agent.cc_session_id.as_deref().unwrap_or(&agent.id);
+    worker_status_transcript_path(clone_path.to_str(), session_id, cli)
+}
+
 fn run_git(path: &std::path::Path, args: &[&str]) -> std::result::Result<String, String> {
     let output = std::process::Command::new("git")
         .args(args)
@@ -2740,6 +2874,62 @@ pub(crate) fn last_worker_activity_secs_with_transcript(
         Some((secs, phase)) if secs <= transcript_secs => Some((secs, phase)),
         _ => Some((transcript_secs, "activity")),
     }
+}
+
+/// Render the latest real harness turn observation for `worker_status`.
+///
+/// This is intentionally separate from `last activity`: transcript mtime is
+/// useful freshness evidence, but it does not name the state transition a
+/// supervisor needs when diagnosing a swallowed delivery. Only parsed harness
+/// records reach this line; an unresolved artifact remains explicitly
+/// unobserved.
+fn format_harness_turn_observation(
+    cli: cas_mux::SupervisorCli,
+    artifact_path: Option<&std::path::Path>,
+) -> String {
+    format_harness_turn_observation_at(cli, artifact_path, chrono::Utc::now())
+}
+
+fn format_harness_turn_observation_at(
+    cli: cas_mux::SupervisorCli,
+    artifact_path: Option<&std::path::Path>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    if cli == cas_mux::SupervisorCli::Claude {
+        return "\n    harness turn: unobserved (Claude has no authoritative turn-start artifact; inbox persistence is delivery only)".to_string();
+    }
+    let Some(path) = artifact_path else {
+        return format!(
+            "\n    harness turn: unobserved ({} artifact unresolved)",
+            cli.as_str()
+        );
+    };
+    let observations =
+        crate::mcp::tools::service::harness_observation::latest_turn_observations(path, cli);
+    let Some(wake) = observations.wake else {
+        let completion = observations.completion.map_or_else(String::new, |completion| {
+            format!(
+                "; completion observed at {} from {}",
+                completion.at.to_rfc3339(),
+                completion.evidence
+            )
+        });
+        return format!(
+            "\n    harness turn: unobserved (resolved {} artifact has no authoritative turn-start record{})",
+            cli.as_str(),
+            completion
+        );
+    };
+    let age = (now - wake.at).num_seconds().max(0);
+    let reaction = observations.reaction.map_or_else(
+        || "reaction unobserved".to_string(),
+        |reaction| format!("reaction observed at {}", reaction.at.to_rfc3339()),
+    );
+    format!(
+        "\n    harness turn: started {age}s ago at {} ({reaction}; artifact-backed: {})",
+        wake.at.to_rfc3339(),
+        wake.evidence
+    )
 }
 
 /// cas-78bf: elapsed time for the sustained assigned-but-unstarted state.
@@ -4385,6 +4575,43 @@ effort = "high"
             WORKER_DEAD_SECS > WORKER_STALE_SECS,
             "WORKER_DEAD_SECS ({WORKER_DEAD_SECS}) must exceed WORKER_STALE_SECS ({WORKER_STALE_SECS}) — the two-band model collapses otherwise"
         );
+    }
+
+    #[test]
+    fn worker_status_names_artifact_backed_codex_turn_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let rollout = temp.path().join("rollout.jsonl");
+        std::fs::write(
+            &rollout,
+            concat!(
+                "{\"timestamp\":\"2026-07-31T20:01:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"worker-status-turn\"}}\n",
+                "{\"timestamp\":\"2026-07-31T20:01:03Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\"}}\n"
+            ),
+        )
+        .unwrap();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-31T20:01:05Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let rendered = format_harness_turn_observation_at(
+            cas_mux::SupervisorCli::Codex,
+            Some(&rollout),
+            now,
+        );
+        assert!(rendered.contains("harness turn: started 3s ago"));
+        assert!(rendered.contains("reaction observed"));
+        assert!(rendered.contains("artifact-backed"));
+        assert!(rendered.contains("task_started"));
+    }
+
+    #[test]
+    fn worker_status_does_not_call_claude_inbox_persistence_a_wake() {
+        let rendered = format_harness_turn_observation_at(
+            cas_mux::SupervisorCli::Claude,
+            None,
+            chrono::Utc::now(),
+        );
+        assert!(rendered.contains("harness turn: unobserved"));
+        assert!(rendered.contains("inbox persistence is delivery only"));
     }
 
     // --- cas-8240: liveness_label_for branch matrix -------------------------

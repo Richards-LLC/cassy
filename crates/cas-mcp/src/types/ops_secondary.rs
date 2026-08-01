@@ -402,12 +402,12 @@ pub struct FactoryRequest {
     )]
     pub action: String,
 
-    /// Generic id field — used by `epic_status` to identify the
-    /// target epic, and forwarded from the unified
+    /// Generic id field — used by `epic_status` and `sync_all_workers` to
+    /// identify the target epic, and forwarded from the unified
     /// `CoordinationRequest.id` so callers can write
     /// `mcp__cas__coordination action=epic_status id=cas-754b`.
     #[schemars(
-        description = "ID for actions that target a specific entity (e.g., epic_id for epic_status)"
+        description = "ID for actions that target a specific entity (e.g., epic_id for epic_status or sync_all_workers)"
     )]
     #[serde(default)]
     pub id: Option<String>,

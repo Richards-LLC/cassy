@@ -410,6 +410,14 @@ fn get_text(result: &rmcp::model::CallToolResult) -> String {
 }
 
 fn write_session_metadata(session_name: &str, epic_id: Option<&str>) {
+    write_session_metadata_for_project(session_name, epic_id, "/tmp/project");
+}
+
+fn write_session_metadata_for_project(
+    session_name: &str,
+    epic_id: Option<&str>,
+    project_dir: &str,
+) {
     let path = cas::ui::factory::metadata_path(session_name);
     std::fs::create_dir_all(path.parent().expect("metadata parent")).unwrap();
     let metadata = cas::ui::factory::create_metadata(
@@ -418,15 +426,212 @@ fn write_session_metadata(session_name: &str, epic_id: Option<&str>) {
         "supervisor",
         &[],
         epic_id,
-        Some("/tmp/project"),
+        Some(project_dir),
         None,
     );
     std::fs::write(path, serde_json::to_string_pretty(&metadata).unwrap()).unwrap();
 }
 
+fn add_epic_with_id(env: &FactoryTestEnv, id: &str, status: TaskStatus, branch: &str) {
+    let mut epic = Task::new(id.to_string(), id.to_string());
+    epic.task_type = TaskType::Epic;
+    epic.status = status;
+    epic.branch = Some(branch.to_string());
+    env.task_store().add(&epic).expect("add epic fixture");
+}
+
+fn init_sync_repo(env: &FactoryTestEnv, worker: &str) -> PathBuf {
+    use std::process::Command;
+
+    fn git(project: &std::path::Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(project)
+            .output()
+            .expect("run git fixture command");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let project = env.cas_root.parent().expect("project root");
+    git(project, &["init", "-b", "main"]);
+    git(project, &["config", "user.email", "test@cas"]);
+    git(project, &["config", "user.name", "CAS Test"]);
+    std::fs::write(project.join("README"), "initial\n").unwrap();
+    git(project, &["add", "README"]);
+    git(project, &["commit", "-m", "initial"]);
+
+    git(project, &["checkout", "-b", "epic/foreign"]);
+    std::fs::write(project.join("foreign.txt"), "foreign\n").unwrap();
+    git(project, &["add", "foreign.txt"]);
+    git(project, &["commit", "-m", "foreign epic"]);
+    git(project, &["checkout", "main"]);
+
+    git(project, &["checkout", "-b", "epic/requested"]);
+    std::fs::write(project.join("requested.txt"), "requested\n").unwrap();
+    git(project, &["add", "requested.txt"]);
+    git(project, &["commit", "-m", "requested epic"]);
+    git(project, &["checkout", "main"]);
+
+    let worker_path = env.cas_root.join("worktrees").join(worker);
+    std::fs::create_dir_all(worker_path.parent().unwrap()).unwrap();
+    git(
+        project,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            &format!("factory/{worker}"),
+            worker_path.to_str().unwrap(),
+            "main",
+        ],
+    );
+    worker_path
+}
+
+fn git_stdout(path: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(path)
+        .output()
+        .expect("run git query");
+    assert!(
+        output.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
 fn read_session_metadata(session_name: &str) -> cas::ui::factory::SessionMetadata {
     let path = cas::ui::factory::metadata_path(session_name);
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn test_sync_all_workers_explicit_id_beats_unrelated_in_progress_epic_cas_bfa5() {
+    let home = TempDir::new().expect("home tempdir");
+    let _guard = EnvGuard::set(&[
+        ("CAS_FACTORY_SESSION", "session-sync-explicit"),
+        ("HOME", home.path().to_str().unwrap()),
+    ]);
+    let env = FactoryTestEnv::new();
+    let worker = "sync-explicit-worker";
+    let worker_path = init_sync_repo(&env, worker);
+    env.register_worker_in_session(worker, "session-sync-explicit");
+    add_epic_with_id(&env, "cas-3648", TaskStatus::InProgress, "epic/foreign");
+    add_epic_with_id(&env, "cas-3b7c", TaskStatus::Open, "epic/requested");
+    write_session_metadata_for_project(
+        "session-sync-explicit",
+        Some("cas-3b7c"),
+        env.cas_root.parent().unwrap().to_str().unwrap(),
+    );
+
+    let mut req = factory_req("sync_all_workers");
+    req.id = Some("cas-3b7c".to_string());
+    let result = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect("explicit requested epic should resolve");
+    let text = get_text(&result);
+
+    assert!(text.contains("Sync target: epic/requested"), "{text}");
+    assert!(worker_path.join("requested.txt").exists());
+    assert!(
+        !worker_path.join("foreign.txt").exists(),
+        "foreign in-progress epic must not become the sync target"
+    );
+}
+
+#[tokio::test]
+async fn test_sync_all_workers_invalid_explicit_id_has_zero_worker_mutations_cas_bfa5() {
+    let home = TempDir::new().expect("home tempdir");
+    let _guard = EnvGuard::set(&[
+        ("CAS_FACTORY_SESSION", "session-sync-invalid"),
+        ("HOME", home.path().to_str().unwrap()),
+    ]);
+    let env = FactoryTestEnv::new();
+    let worker = "sync-invalid-worker";
+    let worker_path = init_sync_repo(&env, worker);
+    env.register_worker_in_session(worker, "session-sync-invalid");
+    add_epic_with_id(&env, "cas-3648", TaskStatus::InProgress, "epic/foreign");
+    write_session_metadata_for_project(
+        "session-sync-invalid",
+        Some("cas-3648"),
+        env.cas_root.parent().unwrap().to_str().unwrap(),
+    );
+    std::fs::write(worker_path.join("dirty.txt"), "must survive untouched\n").unwrap();
+    let head_before = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
+    let status_before = git_stdout(&worker_path, &["status", "--porcelain"]);
+    let reflog_before = git_stdout(&worker_path, &["reflog", "show", "--format=%H %gs"]);
+
+    let mut req = factory_req("sync_all_workers");
+    req.id = Some("cas-does-not-exist".to_string());
+    let err = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect_err("invalid explicit id must fail closed");
+    let err_text = err.to_string();
+
+    assert!(err_text.contains("cas-does-not-exist"), "{err_text}");
+    assert_eq!(
+        git_stdout(&worker_path, &["rev-parse", "HEAD"]),
+        head_before
+    );
+    assert_eq!(
+        git_stdout(&worker_path, &["status", "--porcelain"]),
+        status_before
+    );
+    assert_eq!(
+        git_stdout(&worker_path, &["reflog", "show", "--format=%H %gs"]),
+        reflog_before,
+        "resolution failure must occur before stash/fetch/rebase"
+    );
+    assert!(!worker_path.join("foreign.txt").exists());
+}
+
+#[tokio::test]
+async fn test_sync_all_workers_rejects_cross_project_session_focus_cas_bfa5() {
+    let home = TempDir::new().expect("home tempdir");
+    let _guard = EnvGuard::set(&[
+        ("CAS_FACTORY_SESSION", "session-sync-cross-project"),
+        ("HOME", home.path().to_str().unwrap()),
+    ]);
+    let env = FactoryTestEnv::new();
+    let worker = "sync-cross-project-worker";
+    let worker_path = init_sync_repo(&env, worker);
+    env.register_worker_in_session(worker, "session-sync-cross-project");
+    add_epic_with_id(&env, "cas-3648", TaskStatus::InProgress, "epic/foreign");
+    let other_project = home.path().join("roark-realty");
+    std::fs::create_dir_all(&other_project).unwrap();
+    write_session_metadata_for_project(
+        "session-sync-cross-project",
+        Some("cas-3648"),
+        other_project.to_str().unwrap(),
+    );
+    let head_before = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
+
+    let req = factory_req("sync_all_workers");
+    let err = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect_err("cross-project focus must fail closed");
+    let err_text = err.to_string();
+
+    assert!(err_text.contains("cross-project"), "{err_text}");
+    assert_eq!(
+        git_stdout(&worker_path, &["rev-parse", "HEAD"]),
+        head_before
+    );
+    assert!(!worker_path.join("foreign.txt").exists());
 }
 
 #[tokio::test]

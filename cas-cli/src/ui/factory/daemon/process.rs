@@ -307,6 +307,7 @@ pub async fn run_daemon_after_fork(
         compact_rows: 0,
         pending_spawns: VecDeque::new(),
         spawn_task: None,
+        spawn_verifications: HashMap::new(),
         cloud_handle,
         phone_home: false,
         relay_clients: HashMap::new(),
@@ -392,7 +393,10 @@ pub(super) fn open_log_file_truncate(path: &std::path::Path) -> std::io::Result<
     }
     std::fs::OpenOptions::new()
         .create(true)
-        .write(true)
+        // Keep O_APPEND on the trace descriptor after the one-time truncate.
+        // Spawn lifecycle audit uses an independent append descriptor so this
+        // prevents later tracing writes from overwriting those records.
+        .append(true)
         .truncate(true)
         .open(path)
 }

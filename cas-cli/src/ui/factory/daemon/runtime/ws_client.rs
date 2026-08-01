@@ -285,6 +285,7 @@ impl FactoryDaemon {
                     for i in 0..count {
                         let spec = specs.get(i).cloned().flatten();
                         self.pending_spawns.push_back(PendingSpawn::Anonymous {
+                            request_id: None,
                             isolate: false,
                             spec,
                             // cas-6913: task_id pre-assignment is MCP-only for
@@ -297,6 +298,7 @@ impl FactoryDaemon {
                     for (i, name) in names.into_iter().enumerate() {
                         let spec = specs.get(i).cloned().flatten();
                         self.pending_spawns.push_back(PendingSpawn::Named {
+                            request_id: None,
                             name,
                             isolate: false,
                             spec,
@@ -307,6 +309,7 @@ impl FactoryDaemon {
             }
             ClientMessage::ShutdownWorkers { count, names } => {
                 self.pending_spawns.push_back(PendingSpawn::Shutdown {
+                    request_id: None,
                     count: Some(count),
                     names,
                     force: false,

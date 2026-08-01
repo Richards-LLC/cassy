@@ -104,6 +104,8 @@ struct WsConnection {
 enum PendingSpawn {
     /// Spawn a worker with an auto-generated name
     Anonymous {
+        /// Queue request that originated this spawn. `None` for GUI/WS spawns.
+        request_id: Option<i64>,
         isolate: bool,
         spec: Option<cas_mux::WorkerSpec>,
         /// cas-6913: task to pre-assign once this worker finishes spawning.
@@ -113,6 +115,8 @@ enum PendingSpawn {
     },
     /// Spawn a worker with a specific name
     Named {
+        /// Queue request that originated this spawn. `None` for GUI/WS spawns.
+        request_id: Option<i64>,
         name: String,
         isolate: bool,
         spec: Option<cas_mux::WorkerSpec>,
@@ -121,6 +125,8 @@ enum PendingSpawn {
     },
     /// Shutdown workers
     Shutdown {
+        /// Queue request that issued this shutdown. `None` for GUI/WS shutdowns.
+        request_id: Option<i64>,
         count: Option<usize>,
         names: Vec<String>,
         force: bool,
@@ -131,6 +137,13 @@ enum PendingSpawn {
     Shell { name: String, shell: Option<String> },
     /// Kill a shell pane
     KillShell { name: String },
+}
+
+/// A launched worker that has not yet proved liveness by registering in CAS.
+#[derive(Debug, Clone)]
+struct SpawnVerification {
+    request_id: Option<i64>,
+    launched_at: Instant,
 }
 
 /// Factory daemon state
@@ -165,17 +178,20 @@ pub struct FactoryDaemon {
     compact_rows: u16,
     /// Pending spawn/shutdown actions (processed one per tick to avoid blocking TUI)
     pending_spawns: VecDeque<PendingSpawn>,
-    /// In-flight background spawn task: (worker_name, per-spawn spec override, task_id to
-    /// pre-assign (cas-6913), join_handle).
+    /// In-flight background spawn task: (worker_name, queue request id, per-spawn
+    /// spec override, task_id to pre-assign (cas-6913), join_handle).
     /// One at a time, runs git worktree ops off main thread.
     /// The spec/task_id carry the caller-supplied overrides through the async gap to
     /// finish_worker_spawn.
     spawn_task: Option<(
         String,
+        Option<i64>,
         Option<cas_mux::WorkerSpec>,
         Option<String>,
         JoinHandle<anyhow::Result<WorkerSpawnResult>>,
     )>,
+    /// Workers whose CLI was launched but whose CAS registration is not confirmed yet.
+    spawn_verifications: HashMap<String, SpawnVerification>,
     /// Cloud phone-home WebSocket client handle
     cloud_handle: Option<cloud_client::CloudClientHandle>,
     /// Whether cloud phone-home should be started (deferred from init for fork-first path)
@@ -280,6 +296,7 @@ mod tests {
 
         // Step 1: handler pushes PendingSpawn with the spec (simulates ws_client / gui_client).
         let pending = PendingSpawn::Named {
+            request_id: Some(42),
             name: "alice".to_string(),
             isolate: false,
             spec: Some(codex_spec.clone()),
@@ -336,6 +353,7 @@ mod tests {
     #[test]
     fn pending_spawn_task_id_survives_named_and_anonymous_variants() {
         let named = PendingSpawn::Named {
+            request_id: Some(7),
             name: "alice".to_string(),
             isolate: false,
             spec: None,
@@ -352,6 +370,7 @@ mod tests {
         );
 
         let anonymous = PendingSpawn::Anonymous {
+            request_id: Some(8),
             isolate: true,
             spec: None,
             task_id: Some("cas-xyz9".to_string()),

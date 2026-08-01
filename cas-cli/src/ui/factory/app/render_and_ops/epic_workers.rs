@@ -2,6 +2,29 @@ use crate::store::{open_agent_store, open_task_store};
 use crate::ui::factory::app::imports::*;
 use crate::worktree::RemoveOutcome;
 
+fn validate_live_spawn_repo_context(
+    manager: &WorktreeManager,
+    project_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    use crate::worktree::GitOperations;
+
+    let live_root = GitOperations::detect_repo_root(project_path).map_err(|error| {
+        anyhow::anyhow!(
+            "Repository is not available at spawn time: {error}. If git was initialized after \
+             the factory started, restart the factory daemon before spawning isolated workers."
+        )
+    })?;
+    if live_root != manager.repo_root() {
+        anyhow::bail!(
+            "Repository context changed after the factory daemon started (cached root: {}, \
+             live root: {}). Restart the factory daemon so worker isolation uses the new repository.",
+            manager.repo_root().display(),
+            live_root.display(),
+        );
+    }
+    Ok(())
+}
+
 fn bool_prop(value: bool) -> &'static str {
     if value { "true" } else { "false" }
 }
@@ -595,6 +618,12 @@ impl FactoryApp {
 
         let (worktree_info, base_mismatch_notice) = if isolate {
             if let Some(manager) = &self.worktree_manager {
+                // Re-resolve the repository on every request. A daemon started
+                // before `git init` may have latched an ancestor repository;
+                // continuing with that stale root would create worker branches
+                // in the wrong project. The verified-spawn lifecycle surfaces
+                // this per-request failure to the supervisor.
+                validate_live_spawn_repo_context(manager, self.project_path())?;
                 // Verify repo has commits before trying to create worktrees
                 if !manager.git().has_commits().unwrap_or(false) {
                     crate::telemetry::track(
@@ -1282,6 +1311,38 @@ mod spawn_base_tests {
             "main",
             "without an active epic, dynamic isolated workers should branch from trunk, not supervisor HEAD"
         );
+    }
+
+    #[test]
+    fn daemon_started_before_nested_git_init_rechecks_repo_context_per_spawn() {
+        let tmp = TempDir::new().unwrap();
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir(&parent).unwrap();
+        init_repo(&parent);
+        let project = parent.join("new-project");
+        std::fs::create_dir(&project).unwrap();
+
+        let manager = WorktreeManager::new(
+            &project,
+            WorktreeConfig {
+                enabled: true,
+                base_path: project.join(".cas/worktrees").to_string_lossy().to_string(),
+                branch_prefix: "factory/".to_string(),
+                auto_merge: false,
+                cleanup_on_close: false,
+                promote_entries_on_merge: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(manager.repo_root(), parent.as_path());
+
+        // Simulate `git init` after daemon construction. The next spawn must
+        // not silently keep using the ancestor root cached at startup.
+        init_repo(&project);
+        let error = validate_live_spawn_repo_context(&manager, &project)
+            .expect_err("changed repository context must fail this spawn loudly");
+        assert!(error.to_string().contains("Repository context changed"));
+        assert!(error.to_string().contains("Restart the factory daemon"));
     }
 
     #[test]

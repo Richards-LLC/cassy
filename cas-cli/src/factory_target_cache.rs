@@ -314,6 +314,9 @@ pub fn cleanup_selected(
             }
         }
     }
+    // cas-cef2: File close alone cannot release a flock inherited by a
+    // concurrently forked child; make the operation boundary explicit.
+    FileExt::unlock(&lock)?;
     Ok(())
 }
 

@@ -100,6 +100,19 @@ struct ActiveLogFile {
     file: File,
 }
 
+impl Drop for ActiveLogFile {
+    fn drop(&mut self) {
+        // cas-cef2: a rotated handle may have been inherited across fork;
+        // close-only release would keep the old log undeletable.
+        if let Err(error) = FileExt::unlock(&self.file) {
+            // Do not emit through tracing while dropping tracing's own file
+            // writer. That can recurse into this writer during rotation or
+            // shutdown; stderr is the safe visible fallback.
+            eprintln!("ERROR: Failed to release CAS log file lock: {error}");
+        }
+    }
+}
+
 const DATE_CHECK_INTERVAL_SECS: u64 = 1;
 
 impl DailyLogWriter {
@@ -298,11 +311,16 @@ fn cleanup_old_logs_with_hooks(
                     Err(error) => return Err(error),
                 }
                 hook(&path, CleanupStage::BeforeRemove);
-                match fs::remove_file(&path) {
+                let remove_result = fs::remove_file(&path);
+                // cas-cef2: attempt LOCK_UN on every remove outcome before
+                // returning or continuing through the cleanup scan.
+                let unlock_result = FileExt::unlock(&candidate);
+                match remove_result {
                     Ok(()) => removed += 1,
                     Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                     Err(error) => return Err(error),
                 }
+                unlock_result?;
             }
         }
     }

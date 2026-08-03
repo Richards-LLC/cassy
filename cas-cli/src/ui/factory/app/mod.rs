@@ -2094,13 +2094,23 @@ pub(crate) fn update_session_metadata_at(
         .open(&lock_path)?;
     lock_file.lock_exclusive()?;
 
-    let data = fs::read_to_string(path)?;
-    let mut metadata = serde_json::from_str::<SessionMetadata>(&data)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    mutator(&mut metadata);
-    let json = serde_json::to_string_pretty(&metadata)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    atomic_write_session_metadata(path, &json)
+    let result = (|| {
+        let data = fs::read_to_string(path)?;
+        let mut metadata = serde_json::from_str::<SessionMetadata>(&data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        mutator(&mut metadata);
+        let json = serde_json::to_string_pretty(&metadata)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        atomic_write_session_metadata(path, &json)
+    })();
+    // cas-cef2: release explicitly so a forked child cannot extend this
+    // metadata critical section merely by inheriting the descriptor.
+    let unlock_result = FileExt::unlock(&lock_file);
+    match (result, unlock_result) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+        (Ok(()), Err(error)) => Err(error),
+    }
 }
 
 fn atomic_write_session_metadata(path: &std::path::Path, contents: &str) -> std::io::Result<()> {

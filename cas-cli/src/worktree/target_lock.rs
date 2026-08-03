@@ -35,6 +35,25 @@ pub struct DeliveryTargetLock {
     key: String,
 }
 
+impl Drop for DeliveryTargetLock {
+    fn drop(&mut self) {
+        // `flock` is inherited across fork. Closing only the parent's file
+        // descriptor does not release the lock while a forked child still
+        // holds its inherited reference, even when FD_CLOEXEC ensures a later
+        // exec will close it. Explicit LOCK_UN releases the shared lock at the
+        // operation boundary instead of extending it to the child's lifetime.
+        if let Err(error) = FileExt::unlock(&self._file) {
+            // Drop must never panic (especially during unwinding), but a
+            // failed unlock can strand every delivery targeting this ref.
+            tracing::error!(
+                lock_key = %self.key,
+                error = %error,
+                "failed to release delivery-target lock"
+            );
+        }
+    }
+}
+
 impl DeliveryTargetLock {
     /// Stable, opaque identity of the (repository, target ref) pair this lock
     /// guards. Contains no raw path or branch text, so it is safe to log.
@@ -141,7 +160,11 @@ mod tests {
             .join("locks")
             .join("delivery-target")
             .join(format!("{key}.lock"));
-        let contender = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        let contender = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
         assert!(
             contender.try_lock_exclusive().is_err(),
             "a held delivery-target lock must exclude a concurrent acquirer"
@@ -149,6 +172,113 @@ mod tests {
 
         drop(held);
         // Released on drop, so the contender can now take it.
-        assert!(contender.try_lock_exclusive().is_ok());
+        contender
+            .try_lock_exclusive()
+            .expect("released delivery-target lock must be immediately reacquirable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delivery_target_lock_descriptor_is_close_on_exec() {
+        use std::os::fd::AsRawFd;
+
+        let temp = TempDir::new().unwrap();
+        let held =
+            lock_delivery_target(temp.path(), Path::new("/repos/alpha/.git"), "main").unwrap();
+        let flags = unsafe { libc::fcntl(held._file.as_raw_fd(), libc::F_GETFD) };
+
+        assert!(flags >= 0, "F_GETFD must succeed for the lock descriptor");
+        assert_ne!(
+            flags & libc::FD_CLOEXEC,
+            0,
+            "delivery-target locks must not leak across exec"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawned_process_does_not_retain_delivery_target_lock() {
+        let temp = TempDir::new().unwrap();
+        let repo = PathBuf::from("/repos/alpha/.git");
+        let held = lock_delivery_target(temp.path(), &repo, "main").unwrap();
+        let key = held.key().to_string();
+        let path = temp
+            .path()
+            .join("locks")
+            .join("delivery-target")
+            .join(format!("{key}.lock"));
+        let contender = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 5"])
+            .spawn()
+            .expect("spawn a child that stays alive after exec");
+        drop(held);
+        let reacquire = contender.try_lock_exclusive();
+        let _ = child.kill();
+        let _ = child.wait();
+
+        reacquire.expect("an exec'd child must not inherit the delivery-target lock");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_guard_unlocks_even_when_forked_child_inherits_descriptor() {
+        let temp = TempDir::new().unwrap();
+        let repo = PathBuf::from("/repos/alpha/.git");
+        let held = lock_delivery_target(temp.path(), &repo, "main").unwrap();
+        let key = held.key().to_string();
+        let path = temp
+            .path()
+            .join("locks")
+            .join("delivery-target")
+            .join(format!("{key}.lock"));
+        let contender = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+
+        let mut pipe_fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0);
+        let child = unsafe { libc::fork() };
+        assert!(
+            child >= 0,
+            "fork failed: {}",
+            std::io::Error::last_os_error()
+        );
+        if child == 0 {
+            unsafe {
+                libc::close(pipe_fds[1]);
+                let mut byte = 0u8;
+                let _ = libc::read(
+                    pipe_fds[0],
+                    (&mut byte as *mut u8).cast::<libc::c_void>(),
+                    1,
+                );
+                libc::close(pipe_fds[0]);
+                libc::_exit(0);
+            }
+        }
+
+        unsafe { libc::close(pipe_fds[0]) };
+        drop(held);
+        let reacquire = contender.try_lock_exclusive();
+
+        let byte = 1u8;
+        unsafe {
+            let _ = libc::write(pipe_fds[1], (&byte as *const u8).cast::<libc::c_void>(), 1);
+            libc::close(pipe_fds[1]);
+            let mut status = 0;
+            let _ = libc::waitpid(child, &mut status, 0);
+        }
+
+        reacquire.expect(
+            "dropping the guard must unlock even while a forked child retains the descriptor",
+        );
     }
 }

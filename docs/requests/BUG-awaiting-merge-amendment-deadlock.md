@@ -27,3 +27,51 @@ Supervisor forced `task update status=open` with an audit note, after which the 
 - `task start` permitted on `awaiting_merge` when the parked branch shows 0 unmerged commits AND the latest decision note is an amendment verdict.
 
 Any of these beats "only a merge conflict unlocks start", which assumes review can never fail after merge.
+
+---
+
+## Recurrence 2026-08-02 — declined-merge variant, and the documented workaround is now blocked
+
+**Observed:** Woodworking factory session `Woodworking-jolly-octopus-76`, tasks cas-6fac and cas-bdcb, cas 2.38.2.
+
+Two things are new since the original report.
+
+### 1. A second trigger: the supervisor DECLINES the merge
+
+The original report covers merged-then-amendment-required. This variant never merges at all. Worker delivers, `close` returns MERGE REQUIRED, task parks `awaiting_merge` — and on review the supervisor **rejects the work and does not merge it**. Here the deliverable (cat silhouettes) was structurally valid, analytically correct, and did not depict a cat, so the branch was correctly not taken.
+
+The task must become actionable again for a redraw, but:
+
+- `task start` — rejected, task is `awaiting_merge` (worker attempted; CAS suggested `start` as the remedy in its own MERGE REQUIRED text, which is misleading when the merge was refused rather than pending).
+- `task reopen` — rejected: *"Task is already awaiting_merge (only closed or blocked tasks can be reopened)"*. The error then suggests `task update status=open`, which is also refused — see below.
+
+This is arguably the more common case than amendment-after-merge: any review that rejects work outright lands here.
+
+### 2. The recommended workaround is now blocked by the proof lock
+
+The original report's workaround was "supervisor forced `task update status=open`". That path no longer works:
+
+```
+task update id=cas-6fac status=open
+→ MCP error -32602: DELIVERY PROOF SCOPE LOCKED: task cas-6fac has an active
+  exact verification/delivery proof boundary. Refusing review-relevant update
+  fields [status]. Append progress with notes only.
+```
+
+So the state machine now refuses both the sanctioned transitions AND the documented manual override. The only path left was:
+
+```
+task reset id=cas-6fac force=true
+```
+
+which works but is semantically wrong for this case: `reset` is documented for reviving tasks orphaned by a dead session. It force-releases the lease, **clears the assignee**, and logs a forced-reset audit note. The worker was alive, correct, and about to redo the work — it then had to be re-assigned. The audit trail records "orphaned task recovered" when what happened was "supervisor rejected the deliverable".
+
+### Suggested fix, extending the original
+
+Add an explicit supervisor verdict that owns this transition, e.g. `task reject` / `task request_changes`, which:
+
+- transitions `awaiting_merge → open` (or `in_progress`) **preserving the assignee**,
+- records the rejection reason as a first-class decision note rather than a forced-reset audit line,
+- is exempt from the delivery-proof lock, since recording a failed review is exactly when the proof boundary should yield.
+
+Whatever the mechanism, the proof lock should not be able to block the recording of a negative review outcome. As it stands, a supervisor who declines work has no supported action at all.

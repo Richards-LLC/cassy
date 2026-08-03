@@ -530,4 +530,25 @@ mod tests {
         assert!(!stale.exists(), "expired state json should be pruned");
         assert!(lock.exists(), "non-json lock sentinel must be retained");
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn fs_usage_reports_used_bytes_for_a_real_filesystem() {
+        let temp = tempfile::tempdir().unwrap();
+        let usage = fs_usage(temp.path()).expect("statvfs should inspect a temp directory");
+        assert!(
+            usage.used_bytes < u64::MAX,
+            "widened, saturating statvfs arithmetic must stay in byte range"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fs_usage_preserves_none_for_nul_path() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = Path::new(OsStr::from_bytes(b"/tmp/bad\0path"));
+        assert_eq!(fs_usage(path), None);
+    }
 }

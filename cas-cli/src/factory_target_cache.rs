@@ -648,6 +648,31 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn filesystem_capacity_reports_total_and_unprivileged_available_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let (total_bytes, available_bytes) =
+            filesystem_capacity(temp.path()).expect("statvfs should inspect a temp directory");
+
+        assert!(total_bytes > 0);
+        assert!(
+            available_bytes <= total_bytes,
+            "f_bavail-derived capacity cannot exceed total capacity"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_capacity_rejects_nul_path_as_invalid_input() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = Path::new(OsStr::from_bytes(b"/tmp/bad\0path"));
+        let error = filesystem_capacity(path).expect_err("NUL path must be rejected");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn symlink_target_escape_is_reported_and_never_removed() {
         use std::os::unix::fs::symlink;
         let temp = tempfile::tempdir().unwrap();

@@ -894,7 +894,7 @@ impl FactoryApp {
         let _ = self.refresh_data();
 
         // Update event detector
-        self.event_detector.remove_worker(name);
+        self.remove_worker_from_event_detector(name);
 
         // Update pane grid for navigation
         self.pane_grid = PaneGrid::new(&self.worker_names, &self.supervisor_name, self.is_tabbed);
@@ -1018,7 +1018,7 @@ impl FactoryApp {
         self.worker_names.retain(|n| n != name);
 
         // Update event detector (suppresses future events from this worker)
-        self.event_detector.remove_worker(name);
+        self.remove_worker_from_event_detector(name);
 
         // Update pane grid for navigation
         self.pane_grid = PaneGrid::new(&self.worker_names, &self.supervisor_name, self.is_tabbed);

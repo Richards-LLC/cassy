@@ -317,6 +317,13 @@ pub struct SessionMetadata {
     /// Explicit supervisor-pinned epic ID for display focus
     #[serde(default)]
     pub pinned_epic_id: Option<String>,
+    /// Workers deliberately parked by the supervisor for this factory session.
+    ///
+    /// The director reconciles this durable set into its in-memory hold gate.
+    /// Session metadata is removed on clean shutdown, so holds survive a daemon
+    /// restart of the same session but never cross into a different session.
+    #[serde(default)]
+    pub held_workers: Vec<String>,
     /// Project directory this session belongs to (for multi-project isolation)
     #[serde(default)]
     pub project_dir: Option<String>,

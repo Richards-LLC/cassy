@@ -243,6 +243,16 @@ fn current_factory_session() -> Option<String> {
         .filter(|s| !s.trim().is_empty())
 }
 
+fn worker_hold_role_gate(is_supervisor: bool, action: &str) -> Result<(), String> {
+    if is_supervisor {
+        Ok(())
+    } else {
+        Err(format!(
+            "coordination {action} rejected: only supervisors may change a worker's director hold state"
+        ))
+    }
+}
+
 /// Resolve the ref used by `sync_all_workers` without touching worker clones.
 ///
 /// Resolution order is intentionally strict:
@@ -728,6 +738,104 @@ impl CasService {
         Ok(Self::success(msg))
     }
 
+    /// Arm or release the director's session-scoped worker hold gate.
+    ///
+    /// The environment-derived role check is the same workflow guardrail used
+    /// by other supervisor-only operations. It is not an adversarial security
+    /// boundary; factory process ownership remains the trust boundary.
+    pub(super) async fn factory_set_worker_hold(
+        &self,
+        req: FactoryRequest,
+        held: bool,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::harness_policy::is_supervisor_from_env;
+        use crate::store::open_agent_store;
+        use crate::ui::factory::{metadata_path, persist_session_metadata_worker_hold_at};
+        use cas_types::{AgentRole, AgentStatus};
+
+        let action = if held { "hold_worker" } else { "release_worker" };
+        worker_hold_role_gate(is_supervisor_from_env(), action)
+            .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+
+        let factory_session = current_factory_session().ok_or_else(|| {
+            Self::error(
+                ErrorCode::INVALID_REQUEST,
+                format!(
+                    "{action} requires an active factory session (CAS_FACTORY_SESSION is not set)"
+                ),
+            )
+        })?;
+        let worker_name = req
+            .target
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| {
+                Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!("{action} requires target=<worker-name>"),
+                )
+            })?;
+
+        let agent_store = open_agent_store(&self.inner.cas_root).map_err(|error| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to open agent store: {error}"),
+            )
+        })?;
+        let owned = supervisor_owned_workers();
+        let worker_is_in_session = agent_store
+            .list(None)
+            .map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Failed to list workers: {error}"),
+                )
+            })?
+            .into_iter()
+            .any(|agent| {
+                agent.role == AgentRole::Worker
+                    && matches!(agent.status, AgentStatus::Active | AgentStatus::Idle)
+                    && agent.name == worker_name
+                    && agent.visible_to_factory_session(Some(&factory_session))
+                    && owned
+                        .as_ref()
+                        .is_none_or(|workers| workers.contains(worker_name))
+            });
+        if !worker_is_in_session {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!(
+                    "Worker {worker_name:?} is not a live member of factory session {factory_session}"
+                ),
+            ));
+        }
+
+        let path = metadata_path(&factory_session);
+        persist_session_metadata_worker_hold_at(&path, worker_name, held).map_err(|error| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to update worker hold state: {error}"),
+            )
+        })?;
+
+        let event_type = if held {
+            "worker_hold_armed"
+        } else {
+            "worker_hold_released"
+        };
+        let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(
+            &self.inner.cas_root,
+            event_type,
+            &[("worker", worker_name), ("factory_session", &factory_session)],
+        );
+
+        let verb = if held { "Held" } else { "Released" };
+        Ok(Self::success(format!(
+            "{verb} worker {worker_name} for factory session {factory_session}. Hold state survives a daemon restart of this session and is cleared on worker removal or session shutdown."
+        )))
+    }
+
     pub(super) async fn factory_worker_status(
         &self,
         _req: FactoryRequest,
@@ -813,6 +921,10 @@ impl CasService {
             std::collections::HashSet::new();
         let mut stale_pruned = 0usize;
         let factory_session = current_factory_session();
+        let held_workers = factory_session
+            .as_deref()
+            .and_then(crate::ui::factory::worker_holds_from_session_metadata_named)
+            .unwrap_or_default();
         if let Ok(stale_agents) = store.list_stale(worker_stale_threshold_secs) {
             for agent in stale_agents {
                 if !agent.visible_to_factory_session(factory_session.as_deref()) {
@@ -1000,6 +1112,11 @@ impl CasService {
                     " [alive — heartbeat stale]"
                 } else {
                     liveness_label_for(elapsed)
+                };
+                let held_label = if held_workers.contains(&agent.name) {
+                    " [HELD]"
+                } else {
+                    ""
                 };
                 let worktree_status = collect_worker_worktree_status(&self.inner.cas_root, agent);
                 let clone_path = worktree_status.clone_path;
@@ -1260,10 +1377,11 @@ impl CasService {
                     }
                 };
                 output.push_str(&format!(
-                    "  • {} (heartbeat: {}){}{}{}{}{}{}{}{}\n    session: {}\n",
+                    "  • {} (heartbeat: {}){}{}{}{}{}{}{}{}{}\n    session: {}\n",
                     &agent.name,
                     since,
                     liveness_label,
+                    held_label,
                     clone_info,
                     git_info,
                     transcript_info,

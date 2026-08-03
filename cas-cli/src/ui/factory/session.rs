@@ -373,6 +373,25 @@ pub fn create_metadata(
 
     let log_dir = session_log_dir(session_name);
     let _ = fs::create_dir_all(&log_dir);
+    // cas-60dd: an in-place daemon restart keeps deliberate worker holds for
+    // the same factory session. Intersect with the workers being restored so
+    // a stale name can never leak into a different worker roster. Clean
+    // shutdown removes the metadata file, which clears the entire set.
+    let known_workers: std::collections::HashSet<&str> =
+        worker_names.iter().map(String::as_str).collect();
+    let mut held_workers = fs::read_to_string(metadata_path(session_name))
+        .ok()
+        .and_then(|json| serde_json::from_str::<SessionMetadata>(&json).ok())
+        .map(|metadata| {
+            metadata
+                .held_workers
+                .into_iter()
+                .filter(|name| known_workers.contains(name.as_str()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    held_workers.sort();
+    held_workers.dedup();
 
     SessionMetadata {
         name: session_name.to_string(),
@@ -410,6 +429,7 @@ pub fn create_metadata(
             .collect(),
         epic_id: epic_id.map(|s| s.to_string()),
         pinned_epic_id: None,
+        held_workers,
         project_dir: project_dir.map(|s| s.to_string()),
         team_name: None,
     }
@@ -418,6 +438,62 @@ pub fn create_metadata(
 #[cfg(test)]
 mod tests {
     use crate::ui::factory::session::*;
+
+    #[test]
+    fn create_metadata_preserves_only_same_session_roster_holds_cas_60dd() {
+        let home = tempfile::tempdir().unwrap();
+        let _guard = crate::test_support::TestEnvGuard::with_vars(&[(
+            "HOME",
+            home.path().to_str().unwrap(),
+        )]);
+        let session = "restartable-factory";
+        let held = "lively-crow";
+        let first = create_metadata(
+            session,
+            1,
+            "supervisor",
+            &[held.to_string()],
+            None,
+            None,
+            None,
+        );
+        let mut first = first;
+        first.held_workers.push(held.to_string());
+        let path = metadata_path(session);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_string_pretty(&first).unwrap()).unwrap();
+
+        let restarted = create_metadata(
+            session,
+            2,
+            "supervisor",
+            &[held.to_string()],
+            None,
+            None,
+            None,
+        );
+        assert_eq!(restarted.held_workers, vec![held.to_string()]);
+
+        let different_roster = create_metadata(
+            session,
+            3,
+            "supervisor",
+            &["new-crow".to_string()],
+            None,
+            None,
+            None,
+        );
+        assert!(
+            different_roster.held_workers.is_empty(),
+            "a stale friendly name must not leak into a different worker roster"
+        );
+
+        SessionManager::new().remove_metadata(session).unwrap();
+        assert!(
+            !path.exists(),
+            "clean session shutdown removes the metadata file and every persisted hold"
+        );
+    }
 
     #[test]
     fn test_generate_session_name_without_project() {

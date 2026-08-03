@@ -5,6 +5,8 @@ priority: medium
 cas_task: cas-4fa1
 ---
 
+> Migrated to GitHub Issues: [#56](https://github.com/pippenz/cas/issues/56)
+
 # BUG: close guard binds to spawn-repo factory anchor; cross-repo tasks cannot close
 
 ## What happened

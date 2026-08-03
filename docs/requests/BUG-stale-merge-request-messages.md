@@ -6,6 +6,8 @@ cas_version: 2.38.2
 session: Woodworking-jolly-octopus-76
 ---
 
+> Migrated to GitHub Issues: [#61](https://github.com/pippenz/cas/issues/61)
+
 # BUG: worker merge-request messages arrive after the merge, on nearly every task
 
 ## What happens

@@ -6,6 +6,8 @@ cas_version: 2.38.2
 session: Woodworking-jolly-octopus-76
 ---
 
+> Migrated to GitHub Issues: [#57](https://github.com/pippenz/cas/issues/57)
+
 # BUG: close receipt silently requires a full SHA; the rejection does not say so
 
 ## What happens

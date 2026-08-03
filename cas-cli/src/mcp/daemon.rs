@@ -1468,6 +1468,7 @@ pub(crate) fn read_pid_starttime(_pid: u32) -> Option<u64> {
 /// the file, not the first, before splitting the remainder on whitespace.
 /// Field 22 is then index 19 of that remainder (fields 3–52 become indices
 /// 0–49).
+#[cfg(target_os = "linux")]
 pub(crate) fn parse_starttime_from_stat(raw: &str) -> Option<u64> {
     let last_paren = raw.rfind(')')?;
     // Skip the `)` and the whitespace that follows it, then split the tail.

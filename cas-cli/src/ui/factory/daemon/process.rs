@@ -425,7 +425,6 @@ pub(super) fn install_panic_hook(path: std::path::PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write as _;
 
     /// Regression: `append(true) + truncate(true)` is EINVAL on every platform.
     /// This function is the first statement of every daemon-entry path, so when

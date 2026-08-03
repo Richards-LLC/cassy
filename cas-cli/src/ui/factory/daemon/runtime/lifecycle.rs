@@ -488,6 +488,40 @@ impl FactoryDaemon {
                                 "prune_stale_merge_alerts failed — non-fatal, stale alerts may still be delivered"
                             ),
                         }
+
+                        // cas-06ca: EpicAllSubtasksClosed bypasses the durable
+                        // prompt_queue and is written directly to the Teams
+                        // inbox. Carrying epic_id on that row lets this existing
+                        // generic retraction mechanism re-check the same live
+                        // predicate used before transport. This block only runs
+                        // with an authoritative store snapshot; missing state is
+                        // uncertainty and preserves the row.
+                        match teams.prune_stale_epic_completion_alerts(
+                            "supervisor",
+                            |epic_id| {
+                                !crate::ui::factory::director::epic_completion_is_current(
+                                    unfiltered_data,
+                                    epic_id,
+                                )
+                            },
+                        ) {
+                            Ok(0) => {}
+                            Ok(n) => tracing::info!(
+                                target: "cas::coordination",
+                                stage = "retract_stale_epic_completion",
+                                channel = "teams_inbox",
+                                retracted = n,
+                                "swept stale epic-completion alert(s) before delivery"
+                            ),
+                            // Retraction is best-effort. A lock/read failure
+                            // must never interrupt delivery or surface as a
+                            // user-facing error.
+                            Err(error) => tracing::debug!(
+                                target: "cas::coordination",
+                                error = %error,
+                                "epic-completion inbox retraction skipped"
+                            ),
+                        }
                     }
 
                     // Inject prompts (config already checked in generate_prompt)
@@ -529,6 +563,10 @@ impl FactoryDaemon {
                                 // merge lands (or it leaves AwaitingMerge)
                                 // before the recipient ever reads the row.
                                 prompt.retract_task.as_deref(),
+                                // cas-06ca: carry the epic occurrence identity
+                                // through transport so unread completion rows
+                                // can be retracted if live state advances.
+                                prompt.retract_epic.as_deref(),
                             )
                             .await;
                         let inject_ms = inject_started.elapsed().as_secs_f64() * 1000.0;

@@ -95,6 +95,30 @@ pub fn worker_now_has_real_assignment(data: &DirectorData, worker: &str) -> bool
     worker_has_open_or_in_progress_assignment(data, worker)
 }
 
+/// Whether an `EpicAllSubtasksClosed` occurrence is still actionable.
+///
+/// Only positive, authoritative evidence makes an occurrence stale: the epic
+/// is now Closed, or a non-closed subtask is present again. A missing epic is
+/// unverifiable rather than stale, so it deliberately returns `true`. This
+/// fail-open direction keeps transient/incomplete snapshots from suppressing
+/// or retracting a legitimate supervisor notification.
+pub(crate) fn epic_completion_is_current(data: &DirectorData, epic_id: &str) -> bool {
+    let Some(epic) = data.epic_tasks.iter().find(|epic| epic.id == epic_id) else {
+        return true;
+    };
+    if epic.status == TaskStatus::Closed {
+        return false;
+    }
+
+    !data
+        .ready_tasks
+        .iter()
+        .chain(data.in_progress_tasks.iter())
+        .any(|task| {
+            task.epic.as_deref() == Some(epic_id) && task.status != TaskStatus::Closed
+        })
+}
+
 fn worker_has_open_or_in_progress_assignment(data: &DirectorData, worker: &str) -> bool {
     data.in_progress_tasks
         .iter()
@@ -311,6 +335,14 @@ pub fn revalidate_event_for_delivery_with_context(
 ) -> Option<DirectorEvent> {
     match event {
         DirectorEvent::EpicAllSubtasksClosed { epic_id, .. } => {
+            if !epic_completion_is_current(unfiltered_data, epic_id) {
+                tracing::info!(
+                    target: "cas::coordination",
+                    epic_id = %epic_id,
+                    "suppressing stale EpicAllSubtasksClosed after authoritative state changed"
+                );
+                return None;
+            }
             let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
             let ctx = epic_completion_context(
                 unfiltered_data,
@@ -564,18 +596,29 @@ pub struct Prompt {
     /// prompt kind, including the plain informational (non-merge)
     /// close-rejected idle wording, which still uses `retract_worker`.
     pub retract_task: Option<String>,
-    /// Taskless worker prompts must be checked once more against a
-    /// fresh store snapshot immediately before their PTY/inbox injection.
-    /// This closes the small race after batch revalidation but before the
-    /// transport write. Other prompt kinds do not carry this tag.
+    /// Epic id carried by an `EpicAllSubtasksClosed` occurrence. The same id
+    /// drives the last-mile live-state check and best-effort retraction of an
+    /// unread Teams inbox row if the epic closes or a subtask reopens.
+    pub retract_epic: Option<String>,
+    /// Taskless worker prompts must be checked once more against a fresh
+    /// store snapshot immediately before their PTY/inbox injection. Epic
+    /// prompts use `retract_epic` for the same last-mile race; this field is
+    /// specific to worker-assignment currency.
     pub drop_if_worker_assigned: Option<String>,
 }
 
 /// Last-mile predicate for a prompt that has already survived event-level
 /// revalidation. The caller supplies a snapshot loaded immediately before
-/// transport injection, not the earlier batch snapshot.
+/// transport injection, not the earlier batch snapshot. Epic occurrence
+/// identity and worker identity are both checked here, through their single
+/// shared predicates.
 pub(crate) fn prompt_is_still_deliverable(prompt: &Prompt, data: &DirectorData) -> bool {
-    prompt
+    let epic_is_current = prompt
+        .retract_epic
+        .as_deref()
+        .is_none_or(|epic_id| epic_completion_is_current(data, epic_id));
+    epic_is_current
+        && prompt
         .drop_if_worker_assigned
         .as_deref()
         .is_none_or(|worker| !worker_now_has_real_assignment(data, worker))
@@ -1079,6 +1122,7 @@ pub fn generate_prompt(
                 text: with_response_instructions(&text, supervisor_name, worker_cli),
                 retract_worker: None,
                 retract_task: None,
+                retract_epic: None,
                 drop_if_worker_assigned: None,
             })
         }
@@ -1153,6 +1197,7 @@ pub fn generate_prompt(
                 text: with_response_instructions(&text, worker, supervisor_cli),
                 retract_worker: None,
                 retract_task: None,
+                retract_epic: None,
                 drop_if_worker_assigned: None,
             })
         }
@@ -1176,6 +1221,7 @@ pub fn generate_prompt(
                 text: with_response_instructions(&text, worker, supervisor_cli),
                 retract_worker: None,
                 retract_task: None,
+                retract_epic: None,
                 drop_if_worker_assigned: None,
             })
         }
@@ -1311,6 +1357,7 @@ pub fn generate_prompt(
                     text: with_response_instructions(&text, worker, supervisor_cli),
                     retract_worker,
                     retract_task,
+                    retract_epic: None,
                     drop_if_worker_assigned: None,
                 });
             }
@@ -1369,6 +1416,7 @@ pub fn generate_prompt(
                 text: with_response_instructions(&text, worker, supervisor_cli),
                 retract_worker: Some(worker.clone()),
                 retract_task: None,
+                retract_epic: None,
                 drop_if_worker_assigned: Some(worker.clone()),
             })
         }
@@ -1412,6 +1460,7 @@ pub fn generate_prompt(
                     text: with_response_instructions(&text, worker, supervisor_cli),
                     retract_worker: None,
                     retract_task: None,
+                    retract_epic: None,
                     drop_if_worker_assigned: None,
                 });
             }
@@ -1434,6 +1483,7 @@ pub fn generate_prompt(
                     text: with_response_instructions(&text, supervisor_name, worker_cli),
                     retract_worker: None,
                     retract_task: None,
+                    retract_epic: None,
                     drop_if_worker_assigned: None,
                 })
             } else {
@@ -1466,6 +1516,7 @@ pub fn generate_prompt(
                     text: with_response_instructions(&text, worker, supervisor_cli),
                     retract_worker: None,
                     retract_task: None,
+                    retract_epic: None,
                     drop_if_worker_assigned: None,
                 })
             }
@@ -1527,6 +1578,7 @@ pub fn generate_prompt(
                 text: with_response_instructions(&text, agent_name, supervisor_cli),
                 retract_worker: Some(agent_name.clone()),
                 retract_task: None,
+                retract_epic: None,
                 drop_if_worker_assigned: Some(agent_name.clone()),
             })
         }
@@ -1653,6 +1705,7 @@ pub fn generate_prompt(
                 text,
                 retract_worker: None,
                 retract_task: None,
+                retract_epic: Some(epic_id.clone()),
                 drop_if_worker_assigned: None,
             })
         }

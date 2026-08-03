@@ -109,6 +109,11 @@ pub struct InboxMessage {
     /// merge has already landed or the task is no longer `AwaitingMerge`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retract_task: Option<String>,
+    /// Epic id for an `EpicAllSubtasksClosed` notification. This occurrence
+    /// identity lets a later director tick retract the unread row only when
+    /// live state positively proves the epic has closed or a subtask reopened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retract_epic: Option<String>,
 }
 
 /// Team member entry in config.json.
@@ -657,7 +662,7 @@ impl TeamsManager {
         summary: Option<&str>,
         color: Option<&str>,
     ) -> anyhow::Result<()> {
-        self.write_to_inbox_impl(target, from, message, summary, color, None, None)
+        self.write_to_inbox_impl(target, from, message, summary, color, None, None, None)
     }
 
     /// Like [`Self::write_to_inbox`], but tags the queued row with the
@@ -674,7 +679,16 @@ impl TeamsManager {
         color: Option<&str>,
         worker: &str,
     ) -> anyhow::Result<()> {
-        self.write_to_inbox_impl(target, from, message, summary, color, Some(worker), None)
+        self.write_to_inbox_impl(
+            target,
+            from,
+            message,
+            summary,
+            color,
+            Some(worker),
+            None,
+            None,
+        )
     }
 
     /// Like [`Self::write_to_inbox`], but tags the queued row with the task
@@ -696,7 +710,39 @@ impl TeamsManager {
         color: Option<&str>,
         task_id: &str,
     ) -> anyhow::Result<()> {
-        self.write_to_inbox_impl(target, from, message, summary, color, None, Some(task_id))
+        self.write_to_inbox_impl(
+            target,
+            from,
+            message,
+            summary,
+            color,
+            None,
+            Some(task_id),
+            None,
+        )
+    }
+
+    /// Persist an epic-completion occurrence with its epic id so an unread
+    /// Teams row can be revalidated and retracted on a later director tick.
+    pub fn write_to_inbox_for_epic_completion(
+        &self,
+        target: &str,
+        from: &str,
+        message: &str,
+        summary: Option<&str>,
+        color: Option<&str>,
+        epic_id: &str,
+    ) -> anyhow::Result<()> {
+        self.write_to_inbox_impl(
+            target,
+            from,
+            message,
+            summary,
+            color,
+            None,
+            None,
+            Some(epic_id),
+        )
     }
 
     fn write_to_inbox_impl(
@@ -708,6 +754,7 @@ impl TeamsManager {
         color: Option<&str>,
         retract_worker: Option<&str>,
         retract_task: Option<&str>,
+        retract_epic: Option<&str>,
     ) -> anyhow::Result<()> {
         let inbox_path = self.inboxes_dir.join(format!("{}.json", target));
 
@@ -812,6 +859,7 @@ impl TeamsManager {
             read: false,
             retract_worker: retract_worker.map(str::to_string),
             retract_task: retract_task.map(str::to_string),
+            retract_epic: retract_epic.map(str::to_string),
         });
 
         // Write back
@@ -894,8 +942,26 @@ impl TeamsManager {
         )
     }
 
-    /// Shared sweep body for [`Self::prune_stale_idle_alerts`] and
-    /// [`Self::prune_stale_merge_alerts`] (cas-e48f unification): both need
+    /// Best-effort retraction for unread epic-completion rows. The caller's
+    /// predicate must return true only for positively-proven stale state;
+    /// uncertainty returns false and preserves the row.
+    pub fn prune_stale_epic_completion_alerts(
+        &self,
+        target: &str,
+        epic_completion_is_stale: impl Fn(&str) -> bool,
+    ) -> anyhow::Result<usize> {
+        self.prune_stale_rows_by_key(
+            target,
+            |message| message.retract_epic.as_deref(),
+            epic_completion_is_stale,
+            "EpicAllSubtasksClosed",
+            "epic closed or a subtask reopened before this row was read",
+        )
+    }
+
+    /// Shared sweep body for [`Self::prune_stale_idle_alerts`],
+    /// [`Self::prune_stale_merge_alerts`], and
+    /// [`Self::prune_stale_epic_completion_alerts`]: all need
     /// the identical lock/read/retain/write dance over the same inbox file
     /// shape, differing only in which tag field they key on and what
     /// "stale" means for that tag. `extract_key` pulls the row's tag (if
@@ -1994,6 +2060,7 @@ mod tests {
             read: true,
             retract_worker: Some("swift-fox".to_string()),
             retract_task: None,
+            retract_epic: None,
         }];
         let inbox_path = mgr.inboxes_dir.join("supervisor.json");
         std::fs::write(&inbox_path, serde_json::to_string_pretty(&seeded).unwrap()).unwrap();
@@ -2169,6 +2236,7 @@ mod tests {
             read: true,
             retract_worker: None,
             retract_task: Some("cas-1234".to_string()),
+            retract_epic: None,
         }];
         let inbox_path = mgr.inboxes_dir.join("supervisor.json");
         std::fs::write(&inbox_path, serde_json::to_string_pretty(&seeded).unwrap()).unwrap();
@@ -2272,6 +2340,7 @@ mod tests {
             read: true,
             retract_worker: None,
             retract_task: None,
+            retract_epic: None,
         }];
         let inbox_path = mgr.inboxes_dir.join("swift-fox.json");
         std::fs::write(&inbox_path, serde_json::to_string_pretty(&seeded).unwrap())
@@ -2315,6 +2384,7 @@ mod tests {
                 read: false,
                 retract_worker: None,
                 retract_task: None,
+                retract_epic: None,
             },
             InboxMessage {
                 from: DIRECTOR_AGENT_NAME.to_string(),
@@ -2325,6 +2395,7 @@ mod tests {
                 read: true,
                 retract_worker: None,
                 retract_task: None,
+                retract_epic: None,
             },
         ];
         let inbox_path = mgr.inboxes_dir.join("swift-fox.json");
@@ -2378,6 +2449,7 @@ mod tests {
             read: true,
             retract_worker: None,
             retract_task: None,
+            retract_epic: None,
         }];
         let inbox_path = mgr.inboxes_dir.join("swift-fox.json");
         std::fs::write(&inbox_path, serde_json::to_string_pretty(&seeded).unwrap()).unwrap();

@@ -1085,6 +1085,7 @@ impl FactoryDaemon {
                             None,
                             None,
                             None,
+                            None,
                         )
                         .await
                     };

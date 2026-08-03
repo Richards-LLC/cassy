@@ -4417,13 +4417,14 @@ pub(crate) fn run_factory_branch_merge_gate(
              {factory_branch} into {parent_branch}, including the current tip \
              and freshness qualifier (e.g. \
              `{coord} action=message \
-             target=supervisor summary=\"ready to merge\" message=\"Fresh after \
+             target=supervisor task_id={} summary=\"ready to merge\" message=\"Fresh after \
              draining unread inbox messages until No unread messages: \
              {factory_branch} tip {branch_tip}; please re-check reachability, then \
              merge into {parent_branch} if still needed\"`). \
              They merge with \
              `git merge --no-ff {factory_branch}` on the epic branch.\n\
              5. Once merged, retry mcp__cas__task action=close",
+            task.id,
         )
     } else {
         format!(
@@ -10005,6 +10006,10 @@ mod merge_state_gate_tests {
                     assert!(
                         msg.contains(&expected_tip),
                         "escalation template must include the current branch tip {expected_tip}: {msg}"
+                    );
+                    assert!(
+                        msg.contains(&format!("task_id={}", task.id)),
+                        "structured merge request must carry the parked task identity: {msg}"
                     );
                     assert!(
                         msg.contains(

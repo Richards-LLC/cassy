@@ -750,6 +750,104 @@ impl FactoryDaemon {
         for queued in prompts {
             let target = &queued.target;
 
+            // cas-bc8c: structured transition prompts are only actionable
+            // while the state they describe is still current. Revalidate at
+            // the last shared point before inbox/PTY transport, after any
+            // queue delay. Ordinary free-form messages have no envelope and
+            // deliberately bypass this block unchanged.
+            if let Some(envelope) =
+                crate::prompt_revalidation::parse_merge_request_envelope(&queued.prompt)
+            {
+                use crate::mcp::tools::core::task::repo_context::resolve_repo_context;
+                use crate::prompt_revalidation::{
+                    MergeRequestDecision, merge_landed_guidance, revalidate_merge_request,
+                };
+
+                let decision = crate::store::open_task_store_local(self.app.cas_dir())
+                    .ok()
+                    .and_then(|store| store.get(&envelope.task_id).ok())
+                    .and_then(|task| task.deliverables.work_target)
+                    .and_then(|work_target| {
+                        resolve_repo_context(self.app.cas_dir(), &work_target).ok()
+                    })
+                    .filter(|repo| repo.target_branch == envelope.target_branch)
+                    .map(|repo| {
+                        revalidate_merge_request(
+                            &repo.repo_root,
+                            &envelope.branch_tip,
+                            &repo.target_branch,
+                        )
+                    });
+
+                if let Some(MergeRequestDecision::AlreadyIntegrated { target_tip }) = decision {
+                    let _ = queue.mark_suppressed(
+                        queued.id,
+                        Some("merge request branch tip already integrated into target"),
+                    );
+                    let guidance = merge_landed_guidance(
+                        &envelope.task_id,
+                        &envelope.branch_tip,
+                        &envelope.target_branch,
+                        &target_tip,
+                    );
+                    if let Err(error) = queue.enqueue_urgent_with_outcome(
+                        "supervisor",
+                        &queued.source,
+                        &guidance,
+                        queued.factory_session.as_deref(),
+                        Some("merge already landed — re-close task"),
+                        Some(cas_store::NotificationPriority::High),
+                        false,
+                    ) {
+                        tracing::warn!(
+                            prompt_id = queued.id,
+                            task_id = %envelope.task_id,
+                            error = %error,
+                            "cas-bc8c: stale merge request suppressed but worker guidance enqueue failed"
+                        );
+                    }
+                    continue;
+                }
+            }
+
+            if let Some(envelope) =
+                crate::prompt_revalidation::parse_lifecycle_envelope(&queued.prompt)
+                && let Ok(store) = crate::store::open_task_store_local(self.app.cas_dir())
+            {
+                let stale = match store.get(&envelope.task_id) {
+                    Ok(task) => matches!(
+                        crate::prompt_revalidation::revalidate_lifecycle_prompt(
+                            &queued.prompt,
+                            task.status,
+                            task.updated_at,
+                        ),
+                        crate::prompt_revalidation::LifecyclePromptDecision::SuppressStale { .. }
+                    ),
+                    Err(cas_store::StoreError::TaskNotFound(_)) => true,
+                    Err(error) => {
+                        tracing::warn!(
+                            prompt_id = queued.id,
+                            task_id = %envelope.task_id,
+                            error = %error,
+                            "cas-bc8c: lifecycle state unavailable; retaining prompt for delivery"
+                        );
+                        false
+                    }
+                };
+                if stale {
+                    let _ = queue.mark_suppressed(
+                        queued.id,
+                        Some("task lifecycle occurrence no longer matches current task state"),
+                    );
+                    tracing::debug!(
+                        prompt_id = queued.id,
+                        task_id = %envelope.task_id,
+                        "cas-bc8c: suppressed stale task lifecycle prompt before transport"
+                    );
+                    continue;
+                }
+            }
+
             // Suppress messages from workers that have been shut down or crashed.
             // These workers are no longer in the session and their messages (especially
             // idle notifications) would just add noise to the supervisor context.

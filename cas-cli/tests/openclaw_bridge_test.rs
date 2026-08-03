@@ -6,6 +6,10 @@ use tempfile::TempDir;
 use cas::store::open_prompt_queue_store;
 use cas::ui::factory::{SessionManager, create_metadata};
 
+#[path = "../src/test_env_guard.rs"]
+mod test_env_guard;
+use test_env_guard::TestEnvGuard;
+
 fn cas_cmd(project_dir: &std::path::Path, home: &std::path::Path) -> Command {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cas"));
     cmd.current_dir(project_dir);
@@ -21,7 +25,8 @@ fn openclaw_cli_bridge_smoke() {
     let project = TempDir::new().unwrap();
 
     // Ensure in-process helpers (SessionManager/create_metadata) use the temp HOME too.
-    unsafe { std::env::set_var("HOME", home.path()) };
+    let mut env = TestEnvGuard::new();
+    env.set("HOME", home.path());
 
     // Initialize CAS in the project (creates .cas/)
     cas_cmd(project.path(), home.path())

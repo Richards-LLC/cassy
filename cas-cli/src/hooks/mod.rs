@@ -100,11 +100,7 @@ use crate::store::find_cas_root;
 /// Usage: `let _g = crate::hooks::test_env_lock();`
 #[cfg(test)]
 pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
-    use std::sync::{Mutex, OnceLock};
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+    crate::test_env_guard::test_env_lock()
 }
 
 /// Route a hook event to its handler

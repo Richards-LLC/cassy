@@ -27,6 +27,10 @@ use std::path::PathBuf;
 
 use cas::cli::integrate::vercel;
 
+#[path = "../src/test_env_guard.rs"]
+mod test_env_guard;
+use test_env_guard::TestEnvGuard;
+
 /// Resolve the fixture script relative to the cas-cli crate root.
 fn fixture_path() -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -34,48 +38,6 @@ fn fixture_path() -> PathBuf {
         .join("tests")
         .join("fixtures")
         .join("mock_mcp_vercel_server.py")
-}
-
-/// Set `XDG_CONFIG_HOME` and `HOME` to `home` for the duration of `f`.
-/// Restores the prior values on Drop.
-///
-/// **Not thread-safe.** Cargo runs each integration-test file as its
-/// own process so this is fine here, but never use this helper in inline
-/// `#[cfg(test)] mod tests` blocks where multiple tests share a process.
-fn with_env_home<F, T>(home: &std::path::Path, f: F) -> T
-where
-    F: FnOnce() -> T,
-{
-    let prev_home = std::env::var_os("HOME");
-    let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
-    // SAFETY: env mutation on a per-binary integration test process.
-    unsafe {
-        std::env::set_var("HOME", home);
-        std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
-    }
-    struct Restore {
-        home: Option<std::ffi::OsString>,
-        xdg: Option<std::ffi::OsString>,
-    }
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.home {
-                    Some(v) => std::env::set_var("HOME", v),
-                    None => std::env::remove_var("HOME"),
-                }
-                match &self.xdg {
-                    Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-                    None => std::env::remove_var("XDG_CONFIG_HOME"),
-                }
-            }
-        }
-    }
-    let _g = Restore {
-        home: prev_home,
-        xdg: prev_xdg,
-    };
-    f()
 }
 
 /// Skip the test gracefully when `python3` is not on PATH.
@@ -115,7 +77,10 @@ args = ["{}"]
     );
     std::fs::write(config_dir.join("config.toml"), toml).unwrap();
 
-    with_env_home(tmp.path(), || {
+    let mut env = TestEnvGuard::new();
+    env.set("HOME", tmp.path());
+    env.set("XDG_CONFIG_HOME", tmp.path().join(".config"));
+    {
         let client = vercel::default_client();
 
         // list_projects round-trip ---------------------------------------------------
@@ -159,5 +124,5 @@ args = ["{}"]
         // explicitly observe that here; cargo test's process tree cleanup
         // would surface a leaked Python child as a hang.
         drop(client);
-    });
+    }
 }

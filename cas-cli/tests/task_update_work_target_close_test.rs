@@ -9,6 +9,10 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::RawContent;
 use tempfile::TempDir;
 
+#[path = "../src/test_env_guard.rs"]
+mod test_env_guard;
+use test_env_guard::TestEnvGuard;
+
 struct GitRepo {
     _temp: TempDir,
     root: PathBuf,
@@ -138,9 +142,8 @@ fn durable_snapshot(cas_root: &Path) -> Vec<(String, Vec<Vec<String>>)> {
 #[tokio::test]
 async fn combined_work_target_update_and_close_uses_the_updated_branch() {
     let home = TempDir::new().expect("temporary HOME");
-    let original_home = std::env::var_os("HOME");
-    // SAFETY: this integration test is the only test in its process.
-    unsafe { std::env::set_var("HOME", home.path()) };
+    let mut env = TestEnvGuard::new();
+    env.set("HOME", home.path());
 
     let repo = GitRepo::new();
     run_git(&repo.root, &["branch", "alternate"]);
@@ -227,10 +230,4 @@ async fn combined_work_target_update_and_close_uses_the_updated_branch() {
     assert!(result_text(&legacy_close).contains("Updated task"));
     assert_eq!(task_store.get(&task.id).unwrap().status, TaskStatus::Closed);
 
-    unsafe {
-        match original_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-    }
 }

@@ -85,6 +85,41 @@ envelope only at send time, while a task reloaded from SQLite always serializes
 with `scope=project`. Delete rows have no payload. Classification still needs
 an external ownership manifest or authoritative per-project export.
 
+### No local ownership manifest exists
+
+Read-only checks against the affected store ruled out all plausible local
+provenance sources:
+
+- `Task.scope` is assigned at read time by
+  `crates/cas-store/src/task_store.rs:224`; it is not stored provenance.
+- `events -> sessions.cwd` cannot classify tasks. Events were replicated with
+  the contaminated tasks, and `events.session_id` is almost always null. Only
+  3 of 406 open tasks had any event that joined to a local session. A confirmed
+  foreign task had 13 local events while a native task had one.
+- `known_repo_bindings` and `commit_links` contained zero rows in the project
+  store. `known_repos` is a directory-touch index, not a task-to-project map.
+
+There is therefore **no ownership manifest in the local stores**. Local data
+alone cannot produce a safe automated classification. These failed signals
+should not be re-investigated during recovery.
+
+The cloud is the only system that recorded `project_canonical_id`, because the
+client adds it to the push envelope at send time. Cloud provenance ends when
+push stopped on 2026-05-12, but it may cover a substantial share of the older
+1,525 duplicated tasks. A recovery export must be obtained by an authorized
+operator after credential rotation; this report does not query the service.
+For every relevant task ID, the export must return the owning account/team,
+`project_canonical_id`, task body or stable semantic-body hash, cloud creation
+and update times, deletion/tombstone state, and the server-side receipt or
+version identifying the accepted push. Results must be grouped by project and
+must expose IDs that appear under more than one cloud project rather than
+silently choosing one.
+
+Tasks not covered by cloud provenance require content-based heuristics followed
+by human review. Heuristics may rank likely owners using product names, paths,
+labels, external references, and semantic similarity, but they are not
+authority and must never directly drive deletion or upload.
+
 Commit `7ff1be85` (cas-8248) repairs the previously dead automatic team drain.
 The affected host currently predates that commit, so its 3,245 rows remain
 inert. Installing a build containing cas-8248 before classification can publish
@@ -106,7 +141,9 @@ machines.
 4. **Build an ownership and conflict manifest.** Inventory each task ID across
    global, every project store, cloud exports grouped by project, and queue
    payloads. Record locations, semantic-body hashes, timestamps, operations,
-   and queue/team IDs. Do not include sensitive task text in a public report.
+   and queue/team IDs. Cloud push receipts are the authoritative source where
+   available. Uncovered IDs require heuristic ranking and human approval. Do
+   not include sensitive task text in a public report.
 5. **Classify the queue before enabling its drain.** Upsert payloads may be
    compared directly with the manifest. Deletes require ID-based ownership.
    Quarantine every row whose ownership is absent, ambiguous, or inconsistent
@@ -121,6 +158,12 @@ machines.
    that project, in bounded batches with retry/error observation.
 8. **Verify propagation before normal operation.** Confirm cloud counts and a
    clean second-machine pull for each project before lifting the hold.
+
+At present, **flush the queue has no safe automated form**. The 3,245 rows must
+stay in place and the affected host must remain on its pre-cas-8248 binary until
+cloud provenance is recovered or the user explicitly accepts a
+heuristic-and-human-reviewed classification. A repaired drain is not itself a
+classification mechanism.
 
 There is no new task-write isolation code to deploy from cas-de89: current
 create and store writes already target one caller-selected database, and the

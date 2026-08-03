@@ -33,59 +33,14 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::RawContent;
 use tempfile::TempDir;
 
+#[path = "../src/test_env_guard.rs"]
+mod test_env_guard;
+use test_env_guard::TestEnvGuard;
+
 // =============================================================================
 // Fixtures (deliberately self-contained: cas-0a21 must not couple to the
 // shared worktree_surface_test helpers while cas-59c0 is editing that file)
 // =============================================================================
-
-/// Serializes every test in this process that mutates cwd / HOME.
-fn merge_cwd_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
-}
-
-struct CwdGuard {
-    original: PathBuf,
-}
-
-impl CwdGuard {
-    fn enter(dir: &Path) -> Self {
-        let original = std::env::current_dir().expect("current_dir");
-        std::env::set_current_dir(dir).expect("set_current_dir");
-        Self { original }
-    }
-}
-
-impl Drop for CwdGuard {
-    fn drop(&mut self) {
-        let _ = std::env::set_current_dir(&self.original);
-    }
-}
-
-struct HomeGuard {
-    original: Option<std::ffi::OsString>,
-}
-
-impl HomeGuard {
-    fn enter(path: &Path) -> Self {
-        let original = std::env::var_os("HOME");
-        // SAFETY: every test here holds merge_cwd_lock for the full mutation
-        // lifetime, so no other thread observes the mutated environment.
-        unsafe { std::env::set_var("HOME", path) };
-        Self { original }
-    }
-}
-
-impl Drop for HomeGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match &self.original {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
-    }
-}
 
 fn run_git(args: &[&str], dir: &Path) {
     let out = Command::new("git")
@@ -419,9 +374,9 @@ fn assert_no_delivery_projection(fixture: &DeliveryFixture, state: WorkerDeliver
 /// supervisor needs `is_recoverable_failure()` to offer recovery.
 #[tokio::test]
 async fn delivery_merge_refuses_target_drift_before_merge_as_recoverable_tip_changed() {
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
     let home = TempDir::new().expect("temp HOME");
-    let _home = HomeGuard::enter(home.path());
+    let mut env = TestEnvGuard::new();
+    env.set("HOME", home.path());
     let fixture = arm_delivery("driftbefore", "drift-before").await;
 
     // A concurrent actor commits on the reviewed target after approval.
@@ -434,9 +389,8 @@ async fn delivery_merge_refuses_target_drift_before_merge_as_recoverable_tip_cha
     let drifted = git_stdout(&fixture.repo.root, &["rev-parse", "main"]);
     assert_ne!(drifted, fixture.receipt.target_sha);
 
-    let _cwd = CwdGuard::enter(&fixture.repo.root);
+    env.set_current_dir(&fixture.repo.root);
     let output = run_merge(&fixture).await;
-    drop(_cwd);
 
     let state = delivery_state(&fixture);
     assert_eq!(
@@ -462,9 +416,9 @@ async fn delivery_merge_refuses_target_drift_before_merge_as_recoverable_tip_cha
 /// of the new tip. Only a first-parent (topology-rooted) check rejects it.
 #[tokio::test]
 async fn delivery_merge_refuses_target_drift_injected_between_preflight_and_merge() {
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
     let home = TempDir::new().expect("temp HOME");
-    let _home = HomeGuard::enter(home.path());
+    let mut env = TestEnvGuard::new();
+    env.set("HOME", home.path());
     let fixture = arm_delivery("driftduring", "drift-during").await;
 
     let reviewed = fixture.receipt.target_sha.clone();
@@ -474,9 +428,8 @@ async fn delivery_merge_refuses_target_drift_injected_between_preflight_and_merg
     );
     fixture.repo.arm_post_checkout_drift("cas0a21drift");
 
-    let _cwd = CwdGuard::enter(&fixture.repo.root);
+    env.set_current_dir(&fixture.repo.root);
     let output = run_merge(&fixture).await;
-    drop(_cwd);
 
     // The hook must actually have fired, or this regression proves nothing.
     let final_tip = git_stdout(&fixture.repo.root, &["rev-parse", "main"]);
@@ -526,9 +479,9 @@ async fn delivery_merge_refuses_target_drift_injected_between_preflight_and_merg
 /// deliveries never contend or leak state across repos.
 #[tokio::test]
 async fn concurrent_deliveries_in_independent_repositories_remain_independent() {
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
     let home = TempDir::new().expect("temp HOME");
-    let _home = HomeGuard::enter(home.path());
+    let mut env = TestEnvGuard::new();
+    env.set("HOME", home.path());
 
     let first = arm_delivery("indepone", "independent-one").await;
     let second = arm_delivery("indeptwo", "independent-two").await;
@@ -541,12 +494,10 @@ async fn concurrent_deliveries_in_independent_repositories_remain_independent() 
         &first.repo.root,
     );
 
-    let cwd = CwdGuard::enter(&first.repo.root);
+    env.set_current_dir(&first.repo.root);
     let first_output = run_merge(&first).await;
-    drop(cwd);
-    let cwd = CwdGuard::enter(&second.repo.root);
+    env.set_current_dir(&second.repo.root);
     let second_output = run_merge(&second).await;
-    drop(cwd);
 
     assert_eq!(
         delivery_state(&first),

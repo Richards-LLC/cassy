@@ -8,6 +8,10 @@ use tempfile::TempDir;
 
 use cas::ui::factory::{SessionManager, create_metadata};
 
+#[path = "../src/test_env_guard.rs"]
+mod test_env_guard;
+use test_env_guard::TestEnvGuard;
+
 fn cas_bin() -> std::path::PathBuf {
     assert_cmd::cargo::cargo_bin!("cas").to_path_buf()
 }
@@ -18,7 +22,8 @@ fn bridge_server_sse_emits_heartbeat() {
     let project = TempDir::new().unwrap();
 
     // Ensure in-process helpers (SessionManager/create_metadata) use the temp HOME too.
-    unsafe { std::env::set_var("HOME", home.path()) };
+    let mut env = TestEnvGuard::new();
+    env.set("HOME", home.path());
 
     // Initialize CAS in the project (creates .cas/)
     std::process::Command::new(cas_bin())

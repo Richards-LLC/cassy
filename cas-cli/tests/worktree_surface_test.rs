@@ -30,20 +30,56 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::RawContent;
 use tempfile::TempDir;
 
+#[path = "../src/test_env_guard.rs"]
+mod test_env_guard;
+use test_env_guard::TestEnvGuard;
+
+/// cas-6a30: every test in this integration binary shares one process. Direct
+/// HOME/XDG_CONFIG_HOME mutation bypasses the canonical guard and can move the
+/// host registry between schema installation and strict store open.
+#[test]
+fn process_home_mutation_uses_the_canonical_test_env_guard() {
+    let source = include_str!("worktree_surface_test.rs");
+    let offenders = source
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| {
+            let mutates_env = line.contains("std::env::set_var")
+                || line.contains("std::env::remove_var");
+            let mutates_home = line.contains("\"HOME\"")
+                || line.contains("\"XDG_CONFIG_HOME\"");
+            mutates_env && mutates_home
+        })
+        .map(|(index, line)| format!("{}: {}", index + 1, line.trim()))
+        .collect::<Vec<_>>();
+
+    assert!(
+        offenders.is_empty(),
+        "HOME/XDG_CONFIG_HOME must be mutated through TestEnvGuard: {offenders:?}"
+    );
+}
+
 /// Initialize a project fixture while keeping the host-level known-repo
 /// registry inside this test binary's private HOME. Several System-A tests
 /// intentionally exercise registry resolution, so simply suppressing the
 /// registration would make the fixture less realistic.
-fn init_cas_dir(path: &Path) -> anyhow::Result<PathBuf> {
+fn test_env() -> TestEnvGuard {
     use std::sync::OnceLock;
 
     static TEST_HOME: OnceLock<TempDir> = OnceLock::new();
     let home = TEST_HOME.get_or_init(|| TempDir::new().expect("isolated worktree test HOME"));
-    unsafe {
-        std::env::set_var("HOME", home.path());
-        std::env::set_var("XDG_CONFIG_HOME", home.path().join("xdg"));
-    }
+    let home = home
+        .path()
+        .canonicalize()
+        .expect("canonical isolated worktree test HOME");
+    let xdg = home.join("xdg");
+    TestEnvGuard::with_optional_vars(&[
+        ("HOME", home.to_str()),
+        ("XDG_CONFIG_HOME", xdg.to_str()),
+    ])
+}
 
+fn init_cas_dir(path: &Path, _env: &mut TestEnvGuard) -> anyhow::Result<PathBuf> {
     let cas_root = cas::store::init_cas_dir(path)?;
     cas::store::known_repos::ensure_host_schema()?;
     cas::store::known_repos::register_repo_strict(path)?;
@@ -404,7 +440,8 @@ async fn exercise_direct_close_delivery_state(
     let project = GitRepo::new();
     run_git(&["branch", "factory/delivery-worker"], &project.root);
     let commit_sha = git_stdout(&project.root, &["rev-parse", "main"]);
-    let cas_root = init_cas_dir(&project.root).expect("init direct-close CAS");
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&project.root, &mut env).expect("init direct-close CAS");
     let task_store = open_task_store(&cas_root).expect("task store");
     let task_id = format!("direct-close-{state}");
     let mut task = Task::new(task_id.clone(), format!("Direct close in {state}"));
@@ -519,7 +556,8 @@ async fn exercise_direct_close_delivery_state(
 #[tokio::test]
 async fn test_worktree_list_shows_factory_worktrees_when_system_a_disabled() {
     let repo = GitRepo::new();
-    let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
 
     // System A explicitly off
     disable_system_a(&cas_root);
@@ -562,7 +600,8 @@ async fn test_worktree_list_shows_factory_worktrees_when_system_a_disabled() {
 #[tokio::test]
 async fn test_worktree_list_no_disabled_message_when_no_factory_worktrees() {
     let repo = GitRepo::new();
-    let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
 
     // System A off, no factory worktrees at all
     disable_system_a(&cas_root);
@@ -600,7 +639,8 @@ async fn test_worktree_list_no_disabled_message_when_no_factory_worktrees() {
 #[tokio::test]
 async fn test_worktree_list_honors_configured_base_path() {
     let repo = GitRepo::new();
-    let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     // Unique name: relative base_path resolves under the project parent
     // (often /tmp), so a fixed name collides across tests/processes.
     let base_name = format!(
@@ -653,7 +693,8 @@ async fn test_worktree_list_honors_configured_base_path() {
 #[tokio::test]
 async fn test_worktree_list_surfaces_unregistered_epic_worktree_outside_cas_dir() {
     let repo = GitRepo::new();
-    let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     disable_system_a(&cas_root);
 
     // No SQLite WorktreeStore row — simulates a worktree created by a
@@ -686,7 +727,8 @@ async fn test_worktree_list_surfaces_unregistered_epic_worktree_outside_cas_dir(
 #[tokio::test]
 async fn test_worktree_list_ignores_unrelated_git_worktrees() {
     let repo = GitRepo::new();
-    let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     disable_system_a(&cas_root);
 
     let tmp = TempDir::new().expect("TempDir for unrelated worktree");
@@ -717,7 +759,8 @@ async fn test_worktree_list_ignores_unrelated_git_worktrees() {
 #[tokio::test]
 async fn test_worktree_list_shows_sibling_session_factory_worktree_without_store_row() {
     let repo = GitRepo::new();
-    let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     disable_system_a(&cas_root);
 
     // Session A created this; session B only has the git worktree + shared .cas.
@@ -747,28 +790,6 @@ async fn test_worktree_list_shows_sibling_session_factory_worktree_without_store
 // even when System A is off, since spawn never checked that flag either.
 // =============================================================================
 
-/// `worktree_merge`'s handler resolves the repo root from the *process*
-/// current directory (`std::env::current_dir()`), not from `cas_root` —
-/// a pre-existing quirk shared by `worktree_create` too, unrelated to this
-/// fix. Since cwd is process-global, tests that exercise `worktree_merge`
-/// must serialize around changing it. All such tests live in this file and
-/// take this lock for their full duration; no other test file is affected
-/// (`cargo test` runs each integration-test file as its own process).
-fn merge_cwd_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
-}
-
-/// RAII guard: switches the process cwd to `dir` on construction, restores
-/// the original cwd on drop (including on panic/early return).
-struct CwdGuard {
-    original: PathBuf,
-}
-
-struct HomeGuard {
-    original: Option<std::ffi::OsString>,
-}
-
 struct VarGuard {
     key: &'static str,
     original: Option<std::ffi::OsString>,
@@ -790,41 +811,6 @@ impl Drop for VarGuard {
                 None => std::env::remove_var(self.key),
             }
         }
-    }
-}
-
-impl HomeGuard {
-    fn enter(path: &Path) -> Self {
-        let original = std::env::var_os("HOME");
-        // SAFETY: every test in this integration-test process that mutates
-        // process state holds merge_cwd_lock for the full mutation lifetime.
-        unsafe { std::env::set_var("HOME", path) };
-        Self { original }
-    }
-}
-
-impl Drop for HomeGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match &self.original {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-        }
-    }
-}
-
-impl CwdGuard {
-    fn enter(dir: &Path) -> Self {
-        let original = std::env::current_dir().expect("current_dir");
-        std::env::set_current_dir(dir).expect("set_current_dir");
-        Self { original }
-    }
-}
-
-impl Drop for CwdGuard {
-    fn drop(&mut self) {
-        let _ = std::env::set_current_dir(&self.original);
     }
 }
 
@@ -863,7 +849,8 @@ fn git_stdout(dir: &Path, args: &[&str]) -> String {
 #[tokio::test]
 async fn test_worktree_merge_succeeds_for_factory_worktree_when_system_a_disabled() {
     let repo = GitRepo::new();
-    let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     disable_system_a(&cas_root);
 
     let wt_path = cas_root.join("worktrees").join("alice");
@@ -874,8 +861,7 @@ async fn test_worktree_merge_succeeds_for_factory_worktree_when_system_a_disable
     run_git(&["add", "."], &wt_path);
     run_git(&["commit", "-m", "alice work"], &wt_path);
 
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
-    let _cwd = CwdGuard::enter(&repo.root);
+    env.set_current_dir(&repo.root);
 
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
@@ -914,9 +900,9 @@ async fn test_worktree_merge_succeeds_for_factory_worktree_when_system_a_disable
 
 #[tokio::test]
 async fn task_bound_cross_repo_merge_mutates_only_declared_repo() {
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let mut env = test_env();
     let home = TempDir::new().expect("temp HOME");
-    let _home = HomeGuard::enter(home.path());
+    env.set("HOME", home.path());
 
     let repo_a = GitRepo::new();
     let repo_b = GitRepo::new();
@@ -928,8 +914,8 @@ async fn task_bound_cross_repo_merge_mutates_only_declared_repo() {
         &["remote", "add", "origin", "git@github.com:org/work-b.git"],
         &repo_b.root,
     );
-    let cas_root_a = init_cas_dir(&repo_a.root).expect("init repo A CAS");
-    let cas_root_b = init_cas_dir(&repo_b.root).expect("init repo B CAS");
+    let cas_root_a = init_cas_dir(&repo_a.root, &mut env).expect("init repo A CAS");
+    let cas_root_b = init_cas_dir(&repo_b.root, &mut env).expect("init repo B CAS");
     disable_system_a(&cas_root_a);
 
     let task_store = open_task_store(&cas_root_a).expect("open repo A task store");
@@ -953,7 +939,7 @@ async fn task_bound_cross_repo_merge_mutates_only_declared_repo() {
     let a_head_before = git_stdout(&repo_a.root, &["rev-parse", "HEAD"]);
     let a_index_before = git_stdout(&repo_a.root, &["write-tree"]);
     let a_status_before = git_stdout(&repo_a.root, &["status", "--porcelain=v1"]);
-    let _cwd = CwdGuard::enter(&repo_a.root);
+    env.set_current_dir(&repo_a.root);
 
     let svc = make_service(cas_root_a);
     let mut req = coord_req("worktree_merge");
@@ -1002,9 +988,9 @@ async fn task_bound_cross_repo_merge_mutates_only_declared_repo() {
 
 #[tokio::test]
 async fn public_create_update_and_close_reuse_duplicate_selector_binding() {
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let mut env = test_env();
     let home = TempDir::new().expect("temp HOME");
-    let _home = HomeGuard::enter(home.path());
+    env.set("HOME", home.path());
     let repo_a = GitRepo::new();
     let repo_b = GitRepo::new();
     for repo in [&repo_a, &repo_b] {
@@ -1018,8 +1004,8 @@ async fn public_create_update_and_close_reuse_duplicate_selector_binding() {
             &repo.root,
         );
     }
-    let cas_root_a = init_cas_dir(&repo_a.root).expect("init clone A CAS");
-    init_cas_dir(&repo_b.root).expect("init clone B CAS");
+    let cas_root_a = init_cas_dir(&repo_a.root, &mut env).expect("init clone A CAS");
+    init_cas_dir(&repo_b.root, &mut env).expect("init clone B CAS");
     let store = cas::store::known_repos::open_host_known_repo_store().unwrap();
     store
         .bind(
@@ -1098,9 +1084,9 @@ async fn public_create_update_and_close_reuse_duplicate_selector_binding() {
 
 #[tokio::test]
 async fn task_bound_merge_uses_persisted_binding_for_duplicate_live_clones() {
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let mut env = test_env();
     let home = TempDir::new().expect("temp HOME");
-    let _home = HomeGuard::enter(home.path());
+    env.set("HOME", home.path());
 
     let repo_a = GitRepo::new();
     let repo_b = GitRepo::new();
@@ -1115,8 +1101,8 @@ async fn task_bound_merge_uses_persisted_binding_for_duplicate_live_clones() {
             &repo.root,
         );
     }
-    let cas_root_a = init_cas_dir(&repo_a.root).expect("init clone A CAS");
-    let cas_root_b = init_cas_dir(&repo_b.root).expect("init clone B CAS");
+    let cas_root_a = init_cas_dir(&repo_a.root, &mut env).expect("init clone A CAS");
+    let cas_root_b = init_cas_dir(&repo_b.root, &mut env).expect("init clone B CAS");
     disable_system_a(&cas_root_a);
 
     let store = cas::store::known_repos::open_host_known_repo_store().unwrap();
@@ -1147,7 +1133,7 @@ async fn task_bound_merge_uses_persisted_binding_for_duplicate_live_clones() {
     let a_head_before = git_stdout(&repo_a.root, &["rev-parse", "HEAD"]);
     let a_index_before = git_stdout(&repo_a.root, &["write-tree"]);
     let a_status_before = git_stdout(&repo_a.root, &["status", "--porcelain=v1"]);
-    let _cwd = CwdGuard::enter(&repo_a.root);
+    env.set_current_dir(&repo_a.root);
 
     // Constructing a fresh service after the binding write models process
     // restart: resolution must come from host persistence, never cwd/recency.
@@ -1182,9 +1168,9 @@ async fn task_bound_merge_uses_persisted_binding_for_duplicate_live_clones() {
 
 #[tokio::test]
 async fn task_bound_system_a_merge_rejects_same_selector_worktree_from_wrong_clone() {
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let mut env = test_env();
     let home = TempDir::new().expect("temp HOME");
-    let _home = HomeGuard::enter(home.path());
+    env.set("HOME", home.path());
 
     let repo_a = GitRepo::new();
     let repo_b = GitRepo::new();
@@ -1199,8 +1185,8 @@ async fn task_bound_system_a_merge_rejects_same_selector_worktree_from_wrong_clo
             &repo.root,
         );
     }
-    let cas_root_a = init_cas_dir(&repo_a.root).expect("init clone A CAS");
-    let cas_root_b = init_cas_dir(&repo_b.root).expect("init clone B CAS");
+    let cas_root_a = init_cas_dir(&repo_a.root, &mut env).expect("init clone A CAS");
+    let cas_root_b = init_cas_dir(&repo_b.root, &mut env).expect("init clone B CAS");
 
     let selector = "remote:github.com/org/shared-system-a";
     let known_repos = cas::store::known_repos::open_host_known_repo_store().unwrap();
@@ -1331,9 +1317,9 @@ async fn task_bound_system_a_merge_rejects_same_selector_worktree_from_wrong_clo
 
 #[tokio::test]
 async fn update_to_closed_rejects_unmerged_task_without_mutation_then_closes_after_merge() {
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let mut env = test_env();
     let home = TempDir::new().expect("temp HOME");
-    let _home = HomeGuard::enter(home.path());
+    env.set("HOME", home.path());
     let repo_a = GitRepo::new();
     let repo_b = GitRepo::new();
     run_git(
@@ -1344,8 +1330,8 @@ async fn update_to_closed_rejects_unmerged_task_without_mutation_then_closes_aft
         &["remote", "add", "origin", "git@github.com:org/work-b.git"],
         &repo_b.root,
     );
-    let cas_root_a = init_cas_dir(&repo_a.root).expect("init repo A CAS");
-    let cas_root_b = init_cas_dir(&repo_b.root).expect("init repo B CAS");
+    let cas_root_a = init_cas_dir(&repo_a.root, &mut env).expect("init repo A CAS");
+    let cas_root_b = init_cas_dir(&repo_b.root, &mut env).expect("init repo B CAS");
 
     let own_path = cas_root_b.join("worktrees").join("frontend");
     repo_b.add_worktree(&own_path, "factory/frontend");
@@ -1444,11 +1430,11 @@ async fn update_to_closed_rejects_unmerged_task_without_mutation_then_closes_aft
 
 #[tokio::test]
 async fn update_to_closed_preserves_legacy_non_git_non_factory_path() {
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let mut env = test_env();
     let home = TempDir::new().expect("temp HOME");
-    let _home = HomeGuard::enter(home.path());
+    env.set("HOME", home.path());
     let project = TempDir::new().expect("non-git project");
-    let cas_root = init_cas_dir(project.path()).expect("init non-git CAS");
+    let cas_root = init_cas_dir(project.path(), &mut env).expect("init non-git CAS");
     let task_store = open_task_store(&cas_root).expect("task store");
     let mut task = Task::new(
         "legacy-update-close".to_string(),
@@ -1494,9 +1480,9 @@ async fn update_to_closed_accepts_delivered_transaction_without_replaying_delive
 
 #[tokio::test]
 async fn update_to_closed_fails_closed_when_declared_task_worktree_branch_is_ambiguous() {
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let mut env = test_env();
     let home = TempDir::new().expect("temp HOME");
-    let _home = HomeGuard::enter(home.path());
+    env.set("HOME", home.path());
     let repo_a = GitRepo::new();
     let repo_b = GitRepo::new();
     run_git(
@@ -1507,8 +1493,8 @@ async fn update_to_closed_fails_closed_when_declared_task_worktree_branch_is_amb
         &["remote", "add", "origin", "git@github.com:org/work-b.git"],
         &repo_b.root,
     );
-    let cas_root_a = init_cas_dir(&repo_a.root).expect("init repo A CAS");
-    let cas_root_b = init_cas_dir(&repo_b.root).expect("init repo B CAS");
+    let cas_root_a = init_cas_dir(&repo_a.root, &mut env).expect("init repo A CAS");
+    let cas_root_b = init_cas_dir(&repo_b.root, &mut env).expect("init repo B CAS");
 
     let misleading_path = cas_root_b.join("worktrees").join("frontend");
     repo_b.add_worktree(&misleading_path, "factory/other-worker");
@@ -1540,9 +1526,9 @@ async fn update_to_closed_fails_closed_when_declared_task_worktree_branch_is_amb
 
 #[tokio::test]
 async fn update_to_closed_failed_hook_leaves_status_and_evidence_unchanged() {
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let mut env = test_env();
     let home = TempDir::new().expect("temp HOME");
-    let _home = HomeGuard::enter(home.path());
+    env.set("HOME", home.path());
     let repo_a = GitRepo::new();
     let repo_b = GitRepo::new();
     run_git(
@@ -1553,8 +1539,8 @@ async fn update_to_closed_failed_hook_leaves_status_and_evidence_unchanged() {
         &["remote", "add", "origin", "git@github.com:org/work-b.git"],
         &repo_b.root,
     );
-    let cas_root_a = init_cas_dir(&repo_a.root).expect("init repo A CAS");
-    let cas_root_b = init_cas_dir(&repo_b.root).expect("init repo B CAS");
+    let cas_root_a = init_cas_dir(&repo_a.root, &mut env).expect("init repo A CAS");
+    let cas_root_b = init_cas_dir(&repo_b.root, &mut env).expect("init repo B CAS");
 
     let own_path = cas_root_b.join("worktrees").join("frontend");
     repo_b.add_worktree(&own_path, "factory/frontend");
@@ -1607,9 +1593,9 @@ async fn update_to_closed_failed_hook_leaves_status_and_evidence_unchanged() {
 
 #[tokio::test]
 async fn normal_close_lints_task_anchor_not_newer_same_worker_or_unrelated_worktree() {
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let mut env = test_env();
     let home = TempDir::new().expect("temp HOME");
-    let _home = HomeGuard::enter(home.path());
+    env.set("HOME", home.path());
     let _role = VarGuard::set("CAS_AGENT_ROLE", "worker");
     let _factory = VarGuard::set("CAS_FACTORY_MODE", "1");
     let repo_a = GitRepo::new();
@@ -1622,8 +1608,8 @@ async fn normal_close_lints_task_anchor_not_newer_same_worker_or_unrelated_workt
         &["remote", "add", "origin", "git@github.com:org/work-b.git"],
         &repo_b.root,
     );
-    let cas_root_a = init_cas_dir(&repo_a.root).expect("init repo A CAS");
-    let cas_root_b = init_cas_dir(&repo_b.root).expect("init repo B CAS");
+    let cas_root_a = init_cas_dir(&repo_a.root, &mut env).expect("init repo A CAS");
+    let cas_root_b = init_cas_dir(&repo_b.root, &mut env).expect("init repo B CAS");
 
     let own_path = cas_root_b.join("worktrees").join("frontend");
     repo_b.add_worktree(&own_path, "factory/frontend");
@@ -1699,12 +1685,12 @@ async fn normal_close_lints_task_anchor_not_newer_same_worker_or_unrelated_workt
 #[tokio::test]
 async fn test_worktree_merge_reports_not_found_not_disabled_when_nothing_matches() {
     let repo = GitRepo::new();
-    let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     disable_system_a(&cas_root);
     // No worktree created for "bob" in either system.
 
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
-    let _cwd = CwdGuard::enter(&repo.root);
+    env.set_current_dir(&repo.root);
 
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
@@ -1786,7 +1772,8 @@ fn register_worker_agent(cas_root: &Path, name: &str, factory_session: Option<&s
 #[tokio::test]
 async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
     let repo = GitRepo::new();
-    let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     disable_system_a(&cas_root);
 
     // The epic branch is a real branch in this repo (created off main) so
@@ -1807,8 +1794,7 @@ async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
     run_git(&["add", "."], &wt_path);
     run_git(&["commit", "-m", "alice work"], &wt_path);
 
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
-    let _cwd = CwdGuard::enter(&repo.root);
+    env.set_current_dir(&repo.root);
 
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
@@ -1850,7 +1836,8 @@ async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
 #[tokio::test]
 async fn test_worktree_merge_refuses_explicit_task_whose_parent_epic_is_closed() {
     let repo = GitRepo::new();
-    let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     disable_system_a(&cas_root);
 
     Command::new("git")
@@ -1871,8 +1858,7 @@ async fn test_worktree_merge_refuses_explicit_task_whose_parent_epic_is_closed()
     run_git(&["add", "."], &wt_path);
     run_git(&["commit", "-m", "late work"], &wt_path);
 
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
-    let _cwd = CwdGuard::enter(&repo.root);
+    env.set_current_dir(&repo.root);
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/closed-worker".to_string());
@@ -1900,7 +1886,8 @@ async fn test_worktree_merge_refuses_explicit_task_whose_parent_epic_is_closed()
 async fn test_worktree_merge_standalone_task_requires_force_for_trunk() {
     // cas-0b32 AC4: standalone (no parent epic) trunk merge needs explicit intent.
     let repo = GitRepo::new();
-    let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     disable_system_a(&cas_root);
 
     let task_store = open_task_store(&cas_root).expect("open_task_store");
@@ -1914,8 +1901,7 @@ async fn test_worktree_merge_standalone_task_requires_force_for_trunk() {
     let wt_path = cas_root.join("worktrees").join("bob");
     repo.add_worktree(&wt_path, "factory/bob");
 
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
-    let _cwd = CwdGuard::enter(&repo.root);
+    env.set_current_dir(&repo.root);
 
     let svc = make_service(cas_root.clone());
 
@@ -1959,14 +1945,14 @@ async fn test_worktree_merge_standalone_task_requires_force_for_trunk() {
 #[tokio::test]
 async fn test_worktree_merge_refuses_when_task_id_does_not_exist() {
     let repo = GitRepo::new();
-    let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     disable_system_a(&cas_root);
 
     let wt_path = cas_root.join("worktrees").join("carol");
     repo.add_worktree(&wt_path, "factory/carol");
 
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
-    let _cwd = CwdGuard::enter(&repo.root);
+    env.set_current_dir(&repo.root);
 
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
@@ -1999,14 +1985,14 @@ async fn test_worktree_merge_refuses_silent_trunk_when_no_task_id_and_no_epic_co
     // cas-0b32: the old cas-1d11/cas-0938 "no task_id → trunk" path is the
     // hv-director→main incident. Without epic context, refuse unless force.
     let repo = GitRepo::new();
-    let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     disable_system_a(&cas_root);
 
     let wt_path = cas_root.join("worktrees").join("dave");
     repo.add_worktree(&wt_path, "factory/dave");
 
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
-    let _cwd = CwdGuard::enter(&repo.root);
+    env.set_current_dir(&repo.root);
 
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
@@ -2035,7 +2021,8 @@ async fn test_worktree_merge_refuses_silent_trunk_when_no_task_id_and_no_epic_co
 #[tokio::test]
 async fn test_worktree_merge_uses_assignee_epic_when_no_task_id_cas_0b32() {
     let repo = GitRepo::new();
-    let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     disable_system_a(&cas_root);
 
     Command::new("git")
@@ -2067,8 +2054,7 @@ async fn test_worktree_merge_uses_assignee_epic_when_no_task_id_cas_0b32() {
     run_git(&["add", "."], &wt_path);
     run_git(&["commit", "-m", "director work"], &wt_path);
 
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
-    let _cwd = CwdGuard::enter(&repo.root);
+    env.set_current_dir(&repo.root);
 
     let svc = make_service(cas_root);
     // Incident shape: id only, no task_id.
@@ -2117,7 +2103,8 @@ async fn test_worktree_merge_uses_assignee_epic_when_no_task_id_cas_0b32() {
 #[tokio::test]
 async fn test_worktree_merge_reassignment_ignores_closed_focused_epic_and_honors_trunk() {
     let repo = GitRepo::new();
-    let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     disable_system_a(&cas_root);
 
     Command::new("git")
@@ -2154,15 +2141,9 @@ async fn test_worktree_merge_reassignment_ignores_closed_focused_epic_and_honors
 
     let session = "test-reassignment-focus-b86e";
     let home = TempDir::new().expect("home");
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
-    let _cwd = CwdGuard::enter(&repo.root);
-    let prev_session = std::env::var("CAS_FACTORY_SESSION").ok();
-    let prev_home = std::env::var("HOME").ok();
-    // SAFETY: exclusive merge_cwd_lock serializes env mutation in this file.
-    unsafe {
-        std::env::set_var("CAS_FACTORY_SESSION", session);
-        std::env::set_var("HOME", home.path());
-    }
+    env.set_current_dir(&repo.root);
+    let _session_env = VarGuard::set("CAS_FACTORY_SESSION", session);
+    env.set("HOME", home.path());
     let meta_path = cas::ui::factory::metadata_path(session);
     std::fs::create_dir_all(meta_path.parent().expect("metadata parent")).unwrap();
     let workers = vec!["reassigned-worker".to_string()];
@@ -2195,16 +2176,6 @@ async fn test_worktree_merge_reassignment_ignores_closed_focused_epic_and_honors
     req.allow_trunk = Some(true);
     let result = svc.coordination(Parameters(req)).await;
 
-    unsafe {
-        match prev_session {
-            Some(v) => std::env::set_var("CAS_FACTORY_SESSION", v),
-            None => std::env::remove_var("CAS_FACTORY_SESSION"),
-        }
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-    }
 
     let text = get_text(&result.expect("allow_trunk merge should succeed"));
     assert!(
@@ -2241,7 +2212,8 @@ async fn test_worktree_merge_reassignment_ignores_closed_focused_epic_and_honors
 #[tokio::test]
 async fn test_worktree_merge_ignores_focused_epic_without_task_authority() {
     let repo = GitRepo::new();
-    let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     disable_system_a(&cas_root);
 
     Command::new("git")
@@ -2259,15 +2231,9 @@ async fn test_worktree_merge_ignores_focused_epic_without_task_authority() {
     // Pin focused epic via session metadata (same store focus_epic writes).
     let session = "test-focus-session-0b32";
     let home = TempDir::new().expect("home");
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
-    let _cwd = CwdGuard::enter(&repo.root);
-    let prev_session = std::env::var("CAS_FACTORY_SESSION").ok();
-    let prev_home = std::env::var("HOME").ok();
-    // SAFETY: exclusive merge_cwd_lock serializes env mutation in this file.
-    unsafe {
-        std::env::set_var("CAS_FACTORY_SESSION", session);
-        std::env::set_var("HOME", home.path());
-    }
+    env.set_current_dir(&repo.root);
+    let _session_env = VarGuard::set("CAS_FACTORY_SESSION", session);
+    env.set("HOME", home.path());
     let meta_path = cas::ui::factory::metadata_path(session);
     std::fs::create_dir_all(meta_path.parent().expect("metadata parent")).unwrap();
     let workers = vec!["erin".to_string()];
@@ -2298,16 +2264,6 @@ async fn test_worktree_merge_ignores_focused_epic_without_task_authority() {
     req.id = Some("factory/erin".to_string());
     let result = svc.coordination(Parameters(req)).await;
 
-    unsafe {
-        match prev_session {
-            Some(v) => std::env::set_var("CAS_FACTORY_SESSION", v),
-            None => std::env::remove_var("CAS_FACTORY_SESSION"),
-        }
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-    }
 
     let error = result.expect_err("focused epic alone must not authorize a merge");
     let text = format!("{error:?}");
@@ -2323,7 +2279,8 @@ async fn test_worktree_merge_ignores_focused_epic_without_task_authority() {
 #[tokio::test]
 async fn test_worktree_merge_rejects_cross_project_focused_epic_cas_0b32() {
     let repo = GitRepo::new();
-    let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     disable_system_a(&cas_root);
 
     Command::new("git")
@@ -2339,14 +2296,9 @@ async fn test_worktree_merge_rejects_cross_project_focused_epic_cas_0b32() {
 
     let session = "test-focus-cross-project-0b32";
     let home = TempDir::new().expect("home");
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
-    let _cwd = CwdGuard::enter(&repo.root);
-    let prev_session = std::env::var("CAS_FACTORY_SESSION").ok();
-    let prev_home = std::env::var("HOME").ok();
-    unsafe {
-        std::env::set_var("CAS_FACTORY_SESSION", session);
-        std::env::set_var("HOME", home.path());
-    }
+    env.set_current_dir(&repo.root);
+    let _session_env = VarGuard::set("CAS_FACTORY_SESSION", session);
+    env.set("HOME", home.path());
     let meta_path = cas::ui::factory::metadata_path(session);
     std::fs::create_dir_all(meta_path.parent().unwrap()).unwrap();
     let workers = vec!["erin".to_string()];
@@ -2369,16 +2321,6 @@ async fn test_worktree_merge_rejects_cross_project_focused_epic_cas_0b32() {
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/erin".to_string());
     let result = svc.coordination(Parameters(req)).await;
-    unsafe {
-        match prev_session {
-            Some(v) => std::env::set_var("CAS_FACTORY_SESSION", v),
-            None => std::env::remove_var("CAS_FACTORY_SESSION"),
-        }
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-    }
     assert!(
         result.is_err(),
         "cross-project focused epic must not authorize merge to that epic/trunk silently"
@@ -2395,7 +2337,8 @@ async fn test_worktree_merge_rejects_cross_project_focused_epic_cas_0b32() {
 #[tokio::test]
 async fn test_worktree_merge_rejects_focused_epic_for_non_member_worker_cas_0b32() {
     let repo = GitRepo::new();
-    let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     disable_system_a(&cas_root);
 
     Command::new("git")
@@ -2411,14 +2354,9 @@ async fn test_worktree_merge_rejects_focused_epic_for_non_member_worker_cas_0b32
 
     let session = "test-focus-non-member-0b32";
     let home = TempDir::new().expect("home");
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
-    let _cwd = CwdGuard::enter(&repo.root);
-    let prev_session = std::env::var("CAS_FACTORY_SESSION").ok();
-    let prev_home = std::env::var("HOME").ok();
-    unsafe {
-        std::env::set_var("CAS_FACTORY_SESSION", session);
-        std::env::set_var("HOME", home.path());
-    }
+    env.set_current_dir(&repo.root);
+    let _session_env = VarGuard::set("CAS_FACTORY_SESSION", session);
+    env.set("HOME", home.path());
     let meta_path = cas::ui::factory::metadata_path(session);
     std::fs::create_dir_all(meta_path.parent().unwrap()).unwrap();
     // Session workers list does NOT include "stranger".
@@ -2442,16 +2380,6 @@ async fn test_worktree_merge_rejects_focused_epic_for_non_member_worker_cas_0b32
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/stranger".to_string());
     let result = svc.coordination(Parameters(req)).await;
-    unsafe {
-        match prev_session {
-            Some(v) => std::env::set_var("CAS_FACTORY_SESSION", v),
-            None => std::env::remove_var("CAS_FACTORY_SESSION"),
-        }
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-    }
     assert!(
         result.is_err(),
         "non-member worker must not inherit focused epic merge target"
@@ -2463,7 +2391,8 @@ async fn test_worktree_merge_rejects_focused_epic_for_non_member_worker_cas_0b32
 #[tokio::test]
 async fn test_worktree_merge_rejects_mixed_branchful_and_branchless_parent_epics_cas_0b32() {
     let repo = GitRepo::new();
-    let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     disable_system_a(&cas_root);
 
     Command::new("git")
@@ -2498,8 +2427,7 @@ async fn test_worktree_merge_rejects_mixed_branchful_and_branchless_parent_epics
     let wt_path = cas_root.join("worktrees").join("mixed");
     repo.add_worktree(&wt_path, "factory/mixed");
 
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
-    let _cwd = CwdGuard::enter(&repo.root);
+    env.set_current_dir(&repo.root);
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/mixed".to_string());
@@ -2524,7 +2452,8 @@ async fn test_worktree_merge_rejects_mixed_branchful_and_branchless_parent_epics
 #[tokio::test]
 async fn test_worktree_merge_rejects_branchless_assignee_parent_epic_cas_0b32() {
     let repo = GitRepo::new();
-    let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     disable_system_a(&cas_root);
 
     let task_store = open_task_store(&cas_root).expect("open_task_store");
@@ -2542,8 +2471,7 @@ async fn test_worktree_merge_rejects_branchless_assignee_parent_epic_cas_0b32() 
     let wt_path = cas_root.join("worktrees").join("nb");
     repo.add_worktree(&wt_path, "factory/nb");
 
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
-    let _cwd = CwdGuard::enter(&repo.root);
+    env.set_current_dir(&repo.root);
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
     req.id = Some("factory/nb".to_string());
@@ -2560,7 +2488,8 @@ async fn test_worktree_merge_rejects_branchless_assignee_parent_epic_cas_0b32() 
 #[tokio::test]
 async fn test_worktree_merge_rejects_ambiguous_assignee_epics_cas_0b32() {
     let repo = GitRepo::new();
-    let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     disable_system_a(&cas_root);
 
     for b in ["epic/a", "epic/b"] {
@@ -2597,8 +2526,7 @@ async fn test_worktree_merge_rejects_ambiguous_assignee_epics_cas_0b32() {
     let wt_path = cas_root.join("worktrees").join("multi");
     repo.add_worktree(&wt_path, "factory/multi");
 
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
-    let _cwd = CwdGuard::enter(&repo.root);
+    env.set_current_dir(&repo.root);
 
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
@@ -2621,7 +2549,8 @@ async fn test_worktree_merge_rejects_ambiguous_assignee_epics_cas_0b32() {
 #[tokio::test]
 async fn test_worktree_merge_honors_configured_base_path_not_hardcoded_convention() {
     let repo = GitRepo::new();
-    let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     // Unique base_path under the temp parent so parallel/rerun tests don't
     // collide on a shared /tmp/custom-worktree-loc path.
     let unique = format!(
@@ -2645,8 +2574,7 @@ async fn test_worktree_merge_honors_configured_base_path_not_hardcoded_conventio
     // Sanity: this is NOT where the old hardcoded convention would look.
     assert_ne!(expected_root, cas_root.join("worktrees").join("erin"));
 
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
-    let _cwd = CwdGuard::enter(&repo.root);
+    env.set_current_dir(&repo.root);
 
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
@@ -2679,7 +2607,8 @@ async fn test_worktree_merge_honors_configured_base_path_not_hardcoded_conventio
 #[tokio::test]
 async fn test_worktree_merge_task_id_matching_worker_succeeds_cas_bd5f() {
     let repo = GitRepo::new();
-    let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     disable_system_a(&cas_root);
 
     Command::new("git")
@@ -2696,8 +2625,7 @@ async fn test_worktree_merge_task_id_matching_worker_succeeds_cas_bd5f() {
     run_git(&["add", "."], &wt_path);
     run_git(&["commit", "-m", "match work"], &wt_path);
 
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
-    let _cwd = CwdGuard::enter(&repo.root);
+    env.set_current_dir(&repo.root);
 
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
@@ -2722,7 +2650,8 @@ async fn test_worktree_merge_task_id_matching_worker_succeeds_cas_bd5f() {
 #[tokio::test]
 async fn test_worktree_merge_rejects_foreign_task_assignee_cas_bd5f() {
     let repo = GitRepo::new();
-    let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     disable_system_a(&cas_root);
 
     Command::new("git")
@@ -2738,8 +2667,7 @@ async fn test_worktree_merge_rejects_foreign_task_assignee_cas_bd5f() {
     let wt_path = cas_root.join("worktrees").join("alice");
     repo.add_worktree(&wt_path, "factory/alice");
 
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
-    let _cwd = CwdGuard::enter(&repo.root);
+    env.set_current_dir(&repo.root);
 
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
@@ -2772,7 +2700,8 @@ async fn test_worktree_merge_rejects_foreign_task_assignee_cas_bd5f() {
 #[tokio::test]
 async fn test_worktree_merge_rejects_task_without_assignee_or_lease_cas_bd5f() {
     let repo = GitRepo::new();
-    let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     disable_system_a(&cas_root);
 
     Command::new("git")
@@ -2787,8 +2716,7 @@ async fn test_worktree_merge_rejects_task_without_assignee_or_lease_cas_bd5f() {
     let wt_path = cas_root.join("worktrees").join("carol");
     repo.add_worktree(&wt_path, "factory/carol");
 
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
-    let _cwd = CwdGuard::enter(&repo.root);
+    env.set_current_dir(&repo.root);
 
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
@@ -2814,7 +2742,8 @@ async fn test_worktree_merge_rejects_task_without_assignee_or_lease_cas_bd5f() {
 #[tokio::test]
 async fn test_worktree_merge_rejects_cross_session_lease_mismatch_cas_bd5f() {
     let repo = GitRepo::new();
-    let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     disable_system_a(&cas_root);
 
     Command::new("git")
@@ -2838,8 +2767,7 @@ async fn test_worktree_merge_rejects_cross_session_lease_mismatch_cas_bd5f() {
     let wt_path = cas_root.join("worktrees").join("alice");
     repo.add_worktree(&wt_path, "factory/alice");
 
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
-    let _cwd = CwdGuard::enter(&repo.root);
+    env.set_current_dir(&repo.root);
 
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
@@ -2866,7 +2794,8 @@ async fn test_worktree_merge_rejects_cross_session_lease_mismatch_cas_bd5f() {
 #[tokio::test]
 async fn test_worktree_merge_task_id_authorized_via_matching_lease_cas_bd5f() {
     let repo = GitRepo::new();
-    let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     disable_system_a(&cas_root);
 
     Command::new("git")
@@ -2889,8 +2818,7 @@ async fn test_worktree_merge_task_id_authorized_via_matching_lease_cas_bd5f() {
     run_git(&["add", "."], &wt_path);
     run_git(&["commit", "-m", "lease work"], &wt_path);
 
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
-    let _cwd = CwdGuard::enter(&repo.root);
+    env.set_current_dir(&repo.root);
 
     let svc = make_service(cas_root);
     let mut req = coord_req("worktree_merge");
@@ -3025,15 +2953,15 @@ async fn submit_and_verify_delivery(
 
 #[tokio::test]
 async fn completion_receipt_authority_is_exact_active_lease_session() {
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let mut env = test_env();
     let home = TempDir::new().expect("temp HOME");
-    let _home = HomeGuard::enter(home.path());
+    env.set("HOME", home.path());
     let repo = GitRepo::new();
     run_git(
         &["remote", "add", "origin", "git@github.com:org/delivery.git"],
         &repo.root,
     );
-    let cas_root = init_cas_dir(&repo.root).expect("init CAS");
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init CAS");
     disable_system_a(&cas_root);
     std::fs::write(
         cas_root.join("config.toml"),
@@ -3522,15 +3450,15 @@ async fn completion_receipt_authority_is_exact_active_lease_session() {
 }
 
 async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let mut env = test_env();
     let home = TempDir::new().expect("temp HOME");
-    let _home = HomeGuard::enter(home.path());
+    env.set("HOME", home.path());
     let repo = GitRepo::new();
     run_git(
         &["remote", "add", "origin", "git@github.com:org/delivery.git"],
         &repo.root,
     );
-    let cas_root = init_cas_dir(&repo.root).expect("init CAS");
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init CAS");
     disable_system_a(&cas_root);
     std::fs::write(
         cas_root.join("config.toml"),
@@ -3627,7 +3555,7 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
     // The production merge must persist CloseReady before cleanup removes
     // the source. The newer close gate then simulates interruption after
     // cleanup but before Delivered.
-    let _cwd = CwdGuard::enter(&repo.root);
+    env.set_current_dir(&repo.root);
     let supervisor_service = delivery_service(&cas_root, &supervisor_id);
     let mut merge = coord_req("worktree_merge");
     merge.id = Some(if system_a {
@@ -3873,15 +3801,15 @@ async fn transactional_system_a_cleanup_gate_retry_reconciles_without_source_pat
 
 #[tokio::test]
 async fn transactional_delivery_public_merge_persists_changed_worker_tip_without_git_mutation() {
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let mut env = test_env();
     let home = TempDir::new().expect("temp HOME");
-    let _home = HomeGuard::enter(home.path());
+    env.set("HOME", home.path());
     let repo = GitRepo::new();
     run_git(
         &["remote", "add", "origin", "git@github.com:org/delivery.git"],
         &repo.root,
     );
-    let cas_root = init_cas_dir(&repo.root).expect("init CAS");
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init CAS");
     disable_system_a(&cas_root);
     let worker_id = "stale-worker-session";
     let supervisor_id = "stale-supervisor-session";
@@ -3925,7 +3853,7 @@ async fn transactional_delivery_public_merge_persists_changed_worker_tip_without
     run_git(&["commit", "-m", "tip drift after receipt"], &worker_path);
     let main_before = git_stdout(&repo.root, &["rev-parse", "main"]);
 
-    let _cwd = CwdGuard::enter(&repo.root);
+    env.set_current_dir(&repo.root);
     let supervisor_service = delivery_service(&cas_root, supervisor_id);
     let mut merge = coord_req("worktree_merge");
     merge.id = Some("factory/bob".to_string());
@@ -3952,15 +3880,15 @@ async fn transactional_delivery_public_merge_persists_changed_worker_tip_without
 
 #[tokio::test]
 async fn pending_delivery_proof_rejects_review_scope_update_but_allows_notes() {
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let mut env = test_env();
     let home = TempDir::new().expect("temp HOME");
-    let _home = HomeGuard::enter(home.path());
+    env.set("HOME", home.path());
     let repo = GitRepo::new();
     run_git(
         &["remote", "add", "origin", "git@github.com:org/scope-lock.git"],
         &repo.root,
     );
-    let cas_root = init_cas_dir(&repo.root).expect("init CAS");
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init CAS");
     disable_system_a(&cas_root);
     let task_store = open_task_store(&cas_root).expect("task store");
 
@@ -4150,11 +4078,11 @@ async fn pending_delivery_proof_rejects_review_scope_update_but_allows_notes() {
 
 #[tokio::test]
 async fn resolved_task_proof_freezes_scope_until_supervisor_starts_a_fresh_cycle() {
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let mut env = test_env();
     let home = TempDir::new().expect("temp HOME");
-    let _home = HomeGuard::enter(home.path());
+    env.set("HOME", home.path());
     let repo = GitRepo::new();
-    let cas_root = init_cas_dir(&repo.root).expect("init CAS");
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init CAS");
     std::fs::write(
         cas_root.join("config.toml"),
         "[worktrees]\nenabled = false\n[verification]\nenabled = true\n[code_review]\nowner = \"worker\"\n",
@@ -4378,10 +4306,10 @@ async fn resolved_task_proof_freezes_scope_until_supervisor_starts_a_fresh_cycle
 
 #[tokio::test]
 async fn public_registration_cannot_mint_or_capture_supervisor_verification_authority() {
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let mut env = test_env();
     let home = TempDir::new().expect("temp HOME");
-    let _home = HomeGuard::enter(home.path());
-    let cas_root = init_cas_dir(home.path()).expect("init CAS");
+    env.set("HOME", home.path());
+    let cas_root = init_cas_dir(home.path(), &mut env).expect("init CAS");
     let agent_store = open_agent_store(&cas_root).expect("agent store");
     let task_store = open_task_store(&cas_root).expect("task store");
 
@@ -4689,15 +4617,15 @@ async fn public_registration_cannot_mint_or_capture_supervisor_verification_auth
 
 #[tokio::test]
 async fn terminal_task_rejects_fresh_completion_receipt_without_any_mutation() {
-    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let mut env = test_env();
     let home = TempDir::new().expect("temp HOME");
-    let _home = HomeGuard::enter(home.path());
+    env.set("HOME", home.path());
     let repo = GitRepo::new();
     run_git(
         &["remote", "add", "origin", "git@github.com:org/terminal-replay.git"],
         &repo.root,
     );
-    let cas_root = init_cas_dir(&repo.root).expect("init CAS");
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init CAS");
     disable_system_a(&cas_root);
     let worker_id = "terminal-worker-session";
     register_delivery_agent(

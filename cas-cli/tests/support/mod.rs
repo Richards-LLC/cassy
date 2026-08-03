@@ -1,5 +1,9 @@
 //! Hermetic support for integration tests that spawn the `cas` binary.
 
+// This shared module is compiled separately for each integration-test binary,
+// so helpers used by only some consumers otherwise produce false positives.
+#![allow(dead_code)]
+
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;

@@ -4,7 +4,7 @@ fn assert_preceded_by(source: &str, item: &str, attribute: &str) {
     let item_offset = source
         .find(item)
         .unwrap_or_else(|| panic!("missing source item: {item}"));
-    let prefix = &source[..item_offset];
+    let prefix = source[..item_offset].trim_end();
     let previous_line = prefix.lines().next_back().unwrap_or_default();
     assert_eq!(
         previous_line.trim(),

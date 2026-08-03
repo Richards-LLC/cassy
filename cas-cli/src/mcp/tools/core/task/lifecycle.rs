@@ -460,9 +460,14 @@ impl CasCore {
                     format!(
                         "Cannot start a task that is awaiting merge. The worker work is \
                          already complete; wait for the supervisor to merge the factory \
-                         branch, then retry task close. If that merge fails with a genuine \
+                         branch, then retry task close. If the supervisor declines the \
+                         unmerged delivery, they must first run \
+                         `mcp__cas__task action=request_changes id={} reason=\"state what remains and what must be corrected or reverted\"`; \
+                         a worker cannot self-reject or start a clean parked delivery. If \
+                         that merge fails with a genuine \
                          git conflict, CAS marks the parked task conflicted and its assigned \
                          worker can then start task {} to resolve it.",
+                        req.id,
                         req.id
                     ),
                 ));

@@ -340,6 +340,30 @@ impl CasService {
         self.inner.cas_task_reopen(Parameters(inner_req)).await
     }
 
+    pub(super) async fn task_request_changes(
+        &self,
+        req: TaskRequest,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::mcp::tools::TaskRequestChangesRequest;
+        let inner_req = TaskRequestChangesRequest {
+            id: req.id.ok_or_else(|| {
+                Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "id required for request_changes — pass task ID as `id`",
+                )
+            })?,
+            reason: req.reason.ok_or_else(|| {
+                Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "reason required for request_changes — explain what must change and whether prior commits should stand or be reverted",
+                )
+            })?,
+        };
+        self.inner
+            .cas_task_request_changes(Parameters(inner_req))
+            .await
+    }
+
     pub(super) async fn task_delete(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::IdRequest;
         let inner_req = IdRequest {

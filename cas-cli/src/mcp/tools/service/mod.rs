@@ -258,7 +258,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Task operations. Actions: create, show, update, start, close, reopen, delete, list, ready (actionable), blocked, notes (add progress), dep_add, dep_remove, dep_list, claim, release, reset, transfer, available, mine. Prefer `start` for normal worker execution; use `claim` for manual lease control/recovery; use `reset` to revive a task orphaned by a dead session (atomic: force-releases lease, clears assignee, forces status=open). IMPORTANT for 'close': verification must pass first. Workers should attempt close; if close returns verification-required guidance, follow the indicated verifier ownership workflow."
+        description = "Task operations. Actions: create, show, update, start, close, reopen, request_changes, delete, list, ready (actionable), blocked, notes (add progress), dep_add, dep_remove, dep_list, claim, release, reset, transfer, available, mine. Supervisors use request_changes to decline an unmerged AwaitingMerge delivery while preserving its assignee. Prefer `start` for normal worker execution; use `claim` for manual lease control/recovery; use `reset` to revive a task orphaned by a dead session (atomic: force-releases lease, clears assignee, forces status=open). IMPORTANT for 'close': verification must pass first. Workers should attempt close; if close returns verification-required guidance, follow the indicated verifier ownership workflow."
     )]
     pub async fn task(
         &self,
@@ -275,6 +275,7 @@ impl CasService {
                     | "start"
                     | "close"
                     | "reopen"
+                    | "request_changes"
                     | "delete"
                     | "notes"
                     | "dep_add"
@@ -292,6 +293,7 @@ impl CasService {
                 "start" => this.task_start(req).await,
                 "close" => this.task_close(req).await,
                 "reopen" => this.task_reopen(req).await,
+                "request_changes" => this.task_request_changes(req).await,
                 "delete" => this.task_delete(req).await,
                 "list" => this.task_list(req).await,
                 "ready" => this.task_ready(req).await,
@@ -309,7 +311,7 @@ impl CasService {
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Unknown task action: {}. Valid: create, show, update, start, close, reopen, delete, list, ready, blocked, notes, dep_add, dep_remove, dep_list, claim, release, reset, transfer, available, mine",
+                        "Unknown task action: {}. Valid: create, show, update, start, close, reopen, request_changes, delete, list, ready, blocked, notes, dep_add, dep_remove, dep_list, claim, release, reset, transfer, available, mine",
                         req.action
                     ),
                 )),

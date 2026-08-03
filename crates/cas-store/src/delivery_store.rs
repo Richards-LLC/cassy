@@ -693,8 +693,8 @@ pub fn list_worker_delivery_events(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AgentStore, SqliteAgentStore};
-    use cas_types::{Agent, AgentRole, ClaimResult};
+    use crate::{AgentStore, SqliteAgentStore, SqliteTaskStore, TaskStore};
+    use cas_types::{Agent, AgentRole, ClaimResult, Task, TaskStatus, VerificationDispatchState};
     use tempfile::TempDir;
 
     fn input() -> WorkerCompletionReceiptInput {
@@ -710,6 +710,159 @@ mod tests {
             proof_reference: "proof:workspace-1".into(),
             scope_summary: "bounded delivery change".into(),
         }
+    }
+
+    #[test]
+    fn supervisor_changes_request_reopens_exact_unmerged_delivery_without_losing_assignee() {
+        let root = TempDir::new().unwrap();
+        let task_store = SqliteTaskStore::open(root.path()).unwrap();
+        task_store.init().unwrap();
+        let mut task = Task::new("cas-delivery".into(), "declined work".into());
+        task.status = TaskStatus::AwaitingMerge;
+        task.assignee = Some("worker".into());
+        task.deliverables.factory_branch_anchor = Some("a".repeat(40));
+        task.deliverables.parked_branch = Some("factory/worker".into());
+        task.pending_worktree_merge = true;
+        task_store.add(&task).unwrap();
+
+        let receipt = build_worker_completion_receipt(&input(), "worker", Utc::now());
+        let (delivery, dispatch) = create_worker_delivery_with_dispatch(
+            root.path(),
+            &receipt,
+            WorkerDeliveryState::AwaitingMerge,
+            "worker-session",
+            "supervisor-session",
+            Utc::now() + chrono::Duration::minutes(10),
+        )
+        .unwrap();
+        let conn = Connection::open(root.path().join("cas.db")).unwrap();
+        crate::resolve_verification_dispatch_with_conn(
+            &conn,
+            &dispatch.id,
+            "supervisor-session",
+            None,
+            true,
+        )
+        .unwrap();
+        drop(conn);
+
+        crate::request_changes_for_worker_delivery_exact(
+            root.path(),
+            &task.id,
+            &dispatch.id,
+            &delivery.id,
+            "supervisor-session",
+            "Keep the parser refactor, but revert the public output change before re-delivery.",
+        )
+        .unwrap();
+
+        let reopened = task_store.get(&task.id).unwrap();
+        assert_eq!(reopened.status, TaskStatus::Open);
+        assert_eq!(reopened.assignee.as_deref(), Some("worker"));
+        assert!(reopened.deliverables.factory_branch_anchor.is_none());
+        assert!(reopened.deliverables.parked_branch.is_none());
+        assert!(!reopened.pending_worktree_merge);
+        assert!(reopened.notes.contains("Decision: changes requested"));
+        assert!(reopened.notes.contains("prior commits remain on factory/worker"));
+        assert!(reopened.notes.contains("revert the public output change"));
+
+        let (_, delivery) = get_worker_delivery_by_receipt(root.path(), &receipt.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(delivery.state, WorkerDeliveryState::ChangesRequested);
+        assert_eq!(
+            crate::get_verification_dispatch(root.path(), &dispatch.id)
+                .unwrap()
+                .state,
+            VerificationDispatchState::Invalidated
+        );
+
+        let rejected_retry = create_worker_delivery_with_dispatch(
+            root.path(),
+            &receipt,
+            WorkerDeliveryState::AwaitingVerification,
+            "worker-session",
+            "supervisor-session",
+            Utc::now() + chrono::Duration::minutes(10),
+        )
+        .expect_err("the rejected receipt cannot become a fresh close authority");
+        assert!(rejected_retry.to_string().contains("initial state mismatch"));
+
+        let mut corrected_input = input();
+        corrected_input.commit_sha = "c".repeat(40);
+        let corrected_receipt =
+            build_worker_completion_receipt(&corrected_input, "worker", Utc::now());
+        create_worker_delivery_with_dispatch(
+            root.path(),
+            &corrected_receipt,
+            WorkerDeliveryState::AwaitingVerification,
+            "worker-session",
+            "supervisor-session",
+            Utc::now() + chrono::Duration::minutes(10),
+        )
+        .expect("a new corrective commit opens a fresh delivery cycle");
+    }
+
+    #[test]
+    fn changes_request_rejects_already_merged_delivery_without_mutating_task() {
+        let root = TempDir::new().unwrap();
+        let task_store = SqliteTaskStore::open(root.path()).unwrap();
+        task_store.init().unwrap();
+        let mut task = Task::new("cas-delivery".into(), "already merged work".into());
+        task.status = TaskStatus::AwaitingMerge;
+        task.assignee = Some("worker".into());
+        task.deliverables.factory_branch_anchor = Some("a".repeat(40));
+        task_store.add(&task).unwrap();
+
+        let receipt = build_worker_completion_receipt(&input(), "worker", Utc::now());
+        let (delivery, dispatch) = create_worker_delivery_with_dispatch(
+            root.path(),
+            &receipt,
+            WorkerDeliveryState::AwaitingMerge,
+            "worker-session",
+            "supervisor-session",
+            Utc::now() + chrono::Duration::minutes(10),
+        )
+        .unwrap();
+        let conn = Connection::open(root.path().join("cas.db")).unwrap();
+        crate::resolve_verification_dispatch_with_conn(
+            &conn,
+            &dispatch.id,
+            "supervisor-session",
+            None,
+            true,
+        )
+        .unwrap();
+        drop(conn);
+        transition_worker_delivery(
+            root.path(),
+            &delivery.id,
+            &[WorkerDeliveryState::AwaitingMerge],
+            WorkerDeliveryState::Merged,
+            "supervisor-session",
+            Some("supervisor-session"),
+            None,
+            Some(&"b".repeat(40)),
+            None,
+        )
+        .unwrap();
+
+        let error = crate::request_changes_for_worker_delivery_exact(
+            root.path(),
+            &task.id,
+            &dispatch.id,
+            &delivery.id,
+            "supervisor-session",
+            "This verdict is too late; use the amendment-after-merge path.",
+        )
+        .expect_err("request_changes is only for work that has not merged");
+        assert!(error.to_string().contains("awaiting_merge"));
+        let unchanged = task_store.get(&task.id).unwrap();
+        assert_eq!(unchanged.status, TaskStatus::AwaitingMerge);
+        assert_eq!(
+            unchanged.deliverables.factory_branch_anchor,
+            task.deliverables.factory_branch_anchor
+        );
     }
 
     fn register_worker(store: &SqliteAgentStore, id: &str, name: &str) {

@@ -44,6 +44,9 @@ impl CasCore {
                     cas_types::WorkerDeliveryState::VerificationFailed => {
                         "worker fixes findings, obtains fresh proof, and submits a new receipt"
                     }
+                    cas_types::WorkerDeliveryState::ChangesRequested => {
+                        "assigned worker starts a fresh cycle and adds the requested corrective or revert commits"
+                    }
                     cas_types::WorkerDeliveryState::Conflict => {
                         "worker resolves conflict explicitly, then submits a new receipt"
                     }

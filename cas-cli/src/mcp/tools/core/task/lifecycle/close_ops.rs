@@ -6015,12 +6015,98 @@ pub(crate) fn commit_is_merged_into_parent(
 
 /// Validate a worker-supplied task commit receipt.
 ///
-/// The receipt is deliberately narrower than a git rev: callers must provide
-/// a full SHA, the object must be a commit with a non-empty merge-aware file
-/// diff, the committer timestamp must fall inside the current task work cycle,
-/// and the commit must already be reachable from the resolved parent branch
-/// (local or origin). This is evidence for the merge-before-close case only;
-/// it does not mutate the task's durable commit-time anchor.
+/// The receipt accepts the hexadecimal abbreviations Git users normally copy,
+/// but normalizes them to one full immutable commit ID before validation. The
+/// object must be a commit with a non-empty merge-aware file diff, the
+/// committer timestamp must fall inside the current task work cycle, and the
+/// commit must already be reachable from the resolved parent branch (local or
+/// origin). This is evidence for the merge-before-close case only; it does not
+/// mutate the task's durable commit-time anchor.
+fn resolve_task_commit_receipt_sha(
+    repo_path: &std::path::Path,
+    receipt: &str,
+) -> Result<String, String> {
+    use std::process::Command;
+
+    let receipt = receipt.trim();
+    if !(4..=64).contains(&receipt.len()) || !receipt.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "receipt format invalid: expected 4 to 64 hexadecimal characters; received {} characters",
+            receipt.len()
+        ));
+    }
+
+    // Caller input is restricted to ASCII hex before it reaches Git. Resolve
+    // the submitted object first so type errors remain distinguishable from
+    // unknown/ambiguous abbreviations.
+    let resolved = Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", receipt])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|error| format!("failed to resolve the commit receipt: {error}"))?;
+    if !resolved.status.success() {
+        return Err(format!(
+            "receipt resolution failed: hexadecimal value `{receipt}` does not uniquely resolve to a commit (it is unknown or ambiguous)"
+        ));
+    }
+    let full_object = String::from_utf8_lossy(&resolved.stdout).trim().to_string();
+    if !matches!(full_object.len(), 40 | 64)
+        || !full_object
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return Err("git returned an invalid full commit object ID".to_string());
+    }
+    if !full_object
+        .to_ascii_lowercase()
+        .starts_with(&receipt.to_ascii_lowercase())
+    {
+        return Err(format!(
+            "receipt resolution failed: hexadecimal value `{receipt}` resolved as a ref name rather than an object-ID prefix"
+        ));
+    }
+
+    // rev-parse's peel intentionally follows annotated tags. A receipt is
+    // stricter: its submitted object itself must be a commit, never a tag or
+    // tree whose meaning depends on an extra dereference step.
+    let object_type = Command::new("git")
+        .args(["cat-file", "-t", &full_object])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|error| format!("failed to inspect the receipt object type: {error}"))?;
+    if !object_type.status.success() {
+        return Err(format!(
+            "receipt resolution failed: hexadecimal value `{receipt}` does not uniquely resolve to a commit (it is unknown or ambiguous)"
+        ));
+    }
+    let object_type = String::from_utf8_lossy(&object_type.stdout)
+        .trim()
+        .to_string();
+    if object_type != "commit" {
+        return Err(format!(
+            "receipt object type invalid: `{receipt}` resolves to a {object_type} object, not a commit"
+        ));
+    }
+
+    let commit_object = format!("{full_object}^{{commit}}");
+    let commit = Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", &commit_object])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|error| format!("failed to peel the receipt commit: {error}"))?;
+    if !commit.status.success() {
+        return Err(format!(
+            "receipt resolution failed: `{receipt}` could not be peeled to a commit"
+        ));
+    }
+    let full_commit = String::from_utf8_lossy(&commit.stdout).trim().to_string();
+    if full_commit != full_object {
+        return Err("git resolved the receipt to a different commit object".to_string());
+    }
+
+    Ok(full_commit)
+}
+
 pub(crate) fn validate_task_commit_receipt(
     repo_path: &std::path::Path,
     receipt: &str,
@@ -6030,29 +6116,16 @@ pub(crate) fn validate_task_commit_receipt(
     use std::process::Command;
 
     let receipt = receipt.trim();
-    if !matches!(receipt.len(), 40 | 64) || !receipt.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err("expected a full 40- or 64-character hexadecimal commit SHA".to_string());
-    }
+    let full_receipt = resolve_task_commit_receipt_sha(repo_path, receipt)?;
 
-    let commit_object = format!("{receipt}^{{commit}}");
-    let exists = Command::new("git")
-        .args(["cat-file", "-e", &commit_object])
-        .current_dir(repo_path)
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false);
-    if !exists {
-        return Err("the SHA does not resolve to a commit in this worktree".to_string());
-    }
-
-    if !commit_is_merged_into_parent(repo_path, receipt, parent_branch) {
+    if !commit_is_merged_into_parent(repo_path, &full_receipt, parent_branch) {
         return Err(format!(
             "the commit is not an ancestor of {parent_branch} or origin/{parent_branch}"
         ));
     }
 
     let commit_epoch_output = Command::new("git")
-        .args(["show", "-s", "--format=%ct", receipt, "--"])
+        .args(["show", "-s", "--format=%ct", &full_receipt, "--"])
         .current_dir(repo_path)
         .output()
         .map_err(|error| format!("failed to inspect the commit timestamp: {error}"))?;
@@ -6080,7 +6153,7 @@ pub(crate) fn validate_task_commit_receipt(
             "--name-only",
             "-r",
             "-m",
-            receipt,
+            &full_receipt,
             "--",
         ])
         .current_dir(repo_path)
@@ -6094,7 +6167,8 @@ pub(crate) fn validate_task_commit_receipt(
     }
 
     Ok(format!(
-        "decision: accepted commit_receipt `{receipt}` as task-attributed merge evidence; \
+        "decision: accepted commit_receipt `{receipt}` resolved to full commit `{full_receipt}` \
+         as task-attributed merge evidence; \
          commit epoch {commit_epoch} is within the current task work cycle beginning {} \
          (basis: {}; {}s clock-skew allowance), the commit is merged into \
          {parent_branch}/origin/{parent_branch}, and its merge-aware file diff is non-empty.",
@@ -6130,14 +6204,15 @@ fn commit_receipt_rejection(receipt: &str, parent_branch: &str, reason: &str) ->
         "⚠️ INVALID TASK COMMIT RECEIPT\n\n\
          task close rejected: commit_receipt `{receipt}` is not valid merge \
          evidence: {reason}.\n\n\
-         A close receipt must be the full SHA of a commit produced by this \
+         A close receipt must be the full SHA or an unambiguous hexadecimal \
+         abbreviation of a commit produced by this \
          task, carry a non-empty file diff, and already be an ancestor of \
          {parent_branch} (or origin/{parent_branch}).\n\n\
          To resolve:\n\
          1. Find the task commit with `git log --oneline --all`.\n\
          2. Verify it with `git show --stat <sha>` and \
             `git merge-base --is-ancestor <sha> {parent_branch}`.\n\
-         3. Retry close with `commit_receipt=<full-sha>`.\n\
+         3. Retry close with `commit_receipt=<sha>` (full or an unambiguous abbreviation).\n\
          4. If no commit from this task's current work cycle is available, \
             ask the supervisor to audit the merge and close with \
             `bypass_code_review=true`."
@@ -6185,8 +6260,8 @@ fn commit_receipt_rejection(receipt: &str, parent_branch: &str, reason: &str) ->
 /// worker commit, with `park_task_awaiting_merge` as a legacy/fallback capture.
 /// Genuine zero-commit tasks never receive an anchor.
 ///
-/// `commit_receipt`: optional full SHA supplied on close when no automatic
-/// anchor was captured. It is accepted only after
+/// `commit_receipt`: optional full SHA or unambiguous hexadecimal abbreviation
+/// supplied on close when no automatic anchor was captured. It is accepted only after
 /// [`validate_task_commit_receipt`] proves existence, current-cycle
 /// attribution, non-empty merge-aware diff, and ancestry from the parent.
 ///
@@ -6307,11 +6382,11 @@ pub(crate) fn check_zero_commit_close(
            `mcp__cas__task action=update id={task_id} execution_note=additive-only`\n\
         3. If the supervisor already merged this task's work — including an \
            out-of-band merge after conflict rework cleared the old anchor — \
-           find the full SHA of the worker task commit OR the merge commit \
+           find the SHA of the worker task commit OR the merge commit \
            that actually carried this task's work (never an unrelated \
            historical commit), verify it is an ancestor of \
            {parent_branch}, then retry close with \
-           `commit_receipt=<full-sha>`.\n\
+           `commit_receipt=<sha>` (full or an unambiguous abbreviation).\n\
         4. If no task commit receipt is available, ask the supervisor to \
            audit the merge and close with `bypass_code_review=true`. Only a \
            supervisor can perform that bypass."
@@ -7757,13 +7832,21 @@ pub(crate) fn run_declared_pre_close_hook(
     worker_worktree_path: Option<&std::path::Path>,
     commit_receipt: Option<&str>,
 ) -> Result<cas_types::PreCloseHookEvidence, String> {
+    let receipt_repo = worker_worktree_path.unwrap_or(&repo_context.repo_root);
+    let normalized_receipt = commit_receipt
+        .map(|receipt| resolve_task_commit_receipt_sha(receipt_repo, receipt))
+        .transpose()
+        .map_err(|error| {
+            format!("PRE-CLOSE HOOK CONTEXT REJECTED: commit_receipt {error}")
+        })?;
     let (execution_root, worktree_branch, task_tip) = match worker_worktree_path {
         Some(path) => {
             let branch = git_branch_name(path).ok_or_else(|| {
                 "PRE-CLOSE HOOK CONTEXT REJECTED: task worktree has detached or unreadable HEAD"
                     .to_string()
             })?;
-            let tip = commit_receipt
+            let tip = normalized_receipt
+                .as_deref()
                 .or(task.deliverables.factory_branch_anchor.as_deref())
                 .map(str::to_string)
                 .or_else(|| resolve_branch_sha(path, "HEAD"))
@@ -7788,7 +7871,8 @@ pub(crate) fn run_declared_pre_close_hook(
             (path, Some(branch), tip)
         }
         None => {
-            let tip = commit_receipt
+            let tip = normalized_receipt
+                .as_deref()
                 .or(task.deliverables.factory_branch_anchor.as_deref())
                 .ok_or_else(|| {
                     "PRE-CLOSE HOOK CONTEXT REJECTED: declared task repository resolved, but no \
@@ -13382,7 +13466,7 @@ mod zero_change_close_tests {
                     "rejection must guide worker to set execution_note: {msg}"
                 );
                 assert!(
-                    msg.contains("commit_receipt=<full-sha>")
+                    msg.contains("commit_receipt=<sha>")
                         && msg.contains("ask the supervisor")
                         && msg.contains("bypass_code_review=true")
                         && msg.contains("Only a supervisor"),
@@ -13787,6 +13871,143 @@ mod zero_change_close_tests {
         );
     }
 
+    #[test]
+    fn cas77af_valid_short_receipt_resolves_to_full_commit_and_proceeds() {
+        let dir = init_worker_repo();
+        std::fs::write(dir.path().join("short.rs"), "pub fn short_receipt() {}\n").unwrap();
+        git(dir.path(), &["add", "short.rs"]);
+        git(dir.path(), &["commit", "-q", "-m", "fix: short receipt work"]);
+        let full_receipt = head_sha(dir.path());
+        let short_receipt = &full_receipt[..8];
+
+        git(dir.path(), &["checkout", "-q", "main"]);
+        git(
+            dir.path(),
+            &[
+                "merge",
+                "--no-ff",
+                "-m",
+                "merge short receipt work",
+                "factory/test-worker",
+            ],
+        );
+        git(dir.path(), &["checkout", "-q", "factory/test-worker"]);
+        git(dir.path(), &["reset", "--hard", "main"]);
+
+        let context = crate::mcp::tools::core::task::repo_context::RepoContext {
+            repo_selector: "remote:example.invalid/cas77af".to_string(),
+            repo_root: dir.path().to_path_buf(),
+            git_common_dir: dir.path().join(".git"),
+            target_branch: "main".to_string(),
+        };
+        let task = Task::new("cas-77af".to_string(), "short receipt".to_string());
+        let evidence = run_declared_pre_close_hook(
+            &task,
+            &context,
+            Some(dir.path()),
+            Some(short_receipt),
+        )
+        .expect("short receipt must select a valid close-hook scope");
+        assert_eq!(
+            evidence.task_tip.as_deref(),
+            Some(full_receipt.as_str()),
+            "durable hook evidence must store the canonical full object ID"
+        );
+
+        let note = validate_task_commit_receipt(
+            dir.path(),
+            short_receipt,
+            "main",
+            &test_receipt_window(),
+        )
+        .expect("an unambiguous Git abbreviation must be valid receipt input");
+        assert!(note.contains(short_receipt), "{note}");
+        assert!(note.contains(&full_receipt), "{note}");
+        assert!(
+            note.contains("resolved to full commit"),
+            "the audit note must preserve normalization evidence: {note}"
+        );
+    }
+
+    #[test]
+    fn cas77af_unmerged_short_receipt_reports_ancestry_not_format_or_merge_required() {
+        let dir = init_worker_repo();
+        std::fs::write(
+            dir.path().join("unmerged-short.rs"),
+            "pub fn unmerged_short_receipt() {}\n",
+        )
+        .unwrap();
+        git(dir.path(), &["add", "unmerged-short.rs"]);
+        git(
+            dir.path(),
+            &["commit", "-q", "-m", "fix: unmerged short receipt"],
+        );
+        let full_receipt = head_sha(dir.path());
+        let short_receipt = &full_receipt[..8];
+
+        let reason = validate_task_commit_receipt(
+            dir.path(),
+            short_receipt,
+            "main",
+            &test_receipt_window(),
+        )
+        .expect_err("a real but unmerged commit must remain invalid close evidence");
+        assert!(reason.contains("not an ancestor of main"), "{reason}");
+        assert!(!reason.contains("40- or 64-character"), "{reason}");
+
+        let message = commit_receipt_rejection(short_receipt, "main", &reason);
+        assert!(message.contains("INVALID TASK COMMIT RECEIPT"), "{message}");
+        assert!(!message.contains("MERGE REQUIRED"), "{message}");
+        assert!(message.contains("not an ancestor of main"), "{message}");
+    }
+
+    #[test]
+    fn cas77af_receipt_must_name_a_commit_object_not_a_tree_or_tag_object() {
+        let dir = init_worker_repo();
+        let tree = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD^{tree}"])
+                .current_dir(dir.path())
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        let tree_error = validate_task_commit_receipt(
+            dir.path(),
+            &tree,
+            "main",
+            &test_receipt_window(),
+        )
+        .expect_err("a tree object is not immutable commit evidence");
+        assert!(tree_error.contains("tree object"), "{tree_error}");
+        assert!(tree_error.contains("not a commit"), "{tree_error}");
+
+        git(dir.path(), &["tag", "-a", "receipt-tag", "-m", "receipt tag"]);
+        let tag = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "receipt-tag"])
+                .current_dir(dir.path())
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        let tag_error = validate_task_commit_receipt(
+            dir.path(),
+            &tag,
+            "main",
+            &test_receipt_window(),
+        )
+        .expect_err("an annotated tag object is not immutable commit evidence");
+        assert!(tag_error.contains("tag object"), "{tag_error}");
+        assert!(tag_error.contains("not a commit"), "{tag_error}");
+    }
+
     /// cas-7308a: conflict resume clears the parked anchor, then the
     /// supervisor resolves and merges out-of-band while the worker branch
     /// has no commits beyond the parent. This fixture exercises the worker
@@ -13932,8 +14153,8 @@ mod zero_change_close_tests {
         match outcome {
             ZeroCommitCloseOutcome::AmbiguousCodeTask(msg) => {
                 assert!(msg.contains("INVALID TASK COMMIT RECEIPT"), "{msg}");
-                assert!(msg.contains("does not resolve to a commit"), "{msg}");
-                assert!(msg.contains("commit_receipt=<full-sha>"), "{msg}");
+                assert!(msg.contains("does not uniquely resolve to a commit"), "{msg}");
+                assert!(msg.contains("commit_receipt=<sha>"), "{msg}");
             }
             ZeroCommitCloseOutcome::Proceed => panic!("unknown receipt must not proceed"),
             ZeroCommitCloseOutcome::ProceedWithReceipt(_) => {

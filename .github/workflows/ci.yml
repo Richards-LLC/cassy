@@ -80,6 +80,40 @@ jobs:
           name: cargo-timings
           path: target/cargo-timings
 
+  # Keep this compile-only: --all-targets catches Darwin-only type errors in
+  # production, test, example, and benchmark code without duplicating the full
+  # Linux test suite on a more expensive runner.
+  macos-check:
+    name: macOS Check
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # ghostty_vt_sys builds its native library with Zig even for cargo check.
+      - name: Install Zig
+        run: ./scripts/bootstrap-zig.sh
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.5
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Check workspace
+        env:
+          ZIG: ${{ github.workspace }}/.context/zig/zig
+        run: cargo check --workspace --all-targets
+
+      # Do not add --no-default-features here yet: cas-9f09 tracks the current
+      # feature-gating failures and owns re-enabling that check once they pass.
+
   full-matrix:
     name: Full Matrix
     if: github.event_name == 'schedule' || github.ref == 'refs/heads/main'

@@ -46,23 +46,25 @@ database was modified.
 | Store | Tasks | IDs also in global | Overlap |
 | --- | ---: | ---: | ---: |
 | `.cache/cas-4fb9-demo.GkMKx1` | 2,672 | 1,525 | 57% |
-| `Petrastella/abundant-mines` | 1,419 | 1,255 | 88% |
 | `Petrastella/cas-src` | 2,672 | 1,525 | 57% |
-| `Petrastella/domdms` | 445 | 384 | 86% |
-| `Petrastella/gabber-studio` | 2,876 | 1,692 | 58% |
-| `Petrastella/ozer` | 2,668 | 1,624 | 60% |
-| `Petrastella/pantheon` | 184 | 37 | 20% |
-| `Petrastella/pulse-card` | 32 | 19 | 59% |
-| `Petrastella/rocketship-template` | 1,552 | 1,460 | 94% |
 | `tmp-bugrepro` | 2,278 | 1,525 | 66% |
-| `Penguinz` | 127 | 3 | 2% |
-| `Woodworking` | 81 | 2 | 2% |
-| `soundwave-config` | 33 | 3 | 9% |
-| `petra_stella_tools` | 2 | 1 | 50% |
+| `project-a` | 1,419 | 1,255 | 88% |
+| `project-b` | 445 | 384 | 86% |
+| `project-c` | 2,876 | 1,692 | 58% |
+| `project-d` | 2,668 | 1,624 | 60% |
+| `project-e` | 184 | 37 | 20% |
+| `project-f` | 32 | 19 | 59% |
+| `project-g` | 1,552 | 1,460 | 94% |
+| `project-h` | 127 | 3 | 2% |
+| `project-i` | 81 | 2 | 2% |
+| `project-j` | 33 | 3 | 9% |
+| `project-k` | 2 | 1 | 50% |
 
 Approximately 18 additional stores contained no tasks. The identical 1,525-ID
 overlap in cas-src, tmp-bugrepro, and a disposable demo store rules out an
 isolated restore error. Every heavily used project is affected.
+The internal store-name mapping remains available in the CAS task record for
+`cas-de89`; it is intentionally omitted from this public report.
 
 The duplicated cas-src tasks are sharply bounded by creation date: 665 were
 created in March 2026, 859 in April, and one in July. In cutoff terms, 1,524 of

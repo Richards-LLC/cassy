@@ -29,7 +29,7 @@ cargo bench --bench code_indexing    # Benchmarks
 make test-release-panic              # Verify A2/A3/B3 panic isolation under release profiles
 ```
 
-The `mcp-server` feature is enabled by default. Binary is `cas` (lib + bin in `cas-cli/`). Build script embeds git hash and build date.
+The MCP server is always included because factory agents depend on `cas serve`; the optional `mcp-proxy` feature is enabled by default. Binary is `cas` (lib + bin in `cas-cli/`). Build script embeds git hash and build date.
 
 **Build profiles must use `panic = "unwind"`.** The MCP tool-dispatch panic catcher (EPIC cas-c351) relies on `tokio::spawn` + `JoinError::is_panic`, which only observes a panic if the worker thread unwinds. A compile-time guard in `cas-cli/src/lib.rs` refuses non-test builds with `panic = "abort"` — do not work around it; the entire point of that catcher is to keep `cas serve` alive across handler bugs.
 

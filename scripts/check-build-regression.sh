@@ -43,8 +43,8 @@ check_metric() {
 }
 
 rc=0
-check_metric clean_debug_minimal || rc=1
-check_metric incr_debug_minimal || rc=1
+check_metric clean_debug_no_proxy || rc=1
+check_metric incr_debug_no_proxy || rc=1
 check_metric release_fast || rc=1
 
 exit "$rc"

@@ -1128,6 +1128,7 @@ mod tests {
         assert!(candidate.priority > candidate2.priority);
     }
 
+    #[cfg(feature = "mcp-proxy")]
     #[test]
     fn test_build_mcp_tools_section_with_cache() {
         let dir = tempfile::tempdir().unwrap();
@@ -1179,6 +1180,7 @@ mod tests {
         assert!(section.contains("mcp__cas__mcp_search"));
     }
 
+    #[cfg(feature = "mcp-proxy")]
     #[test]
     fn forged_proxy_catalog_is_sanitized_before_session_start_markdown() {
         let dir = tempfile::tempdir().unwrap();
@@ -1219,6 +1221,7 @@ mod tests {
     /// EPIC cas-8888 (cas-fd9f): the load-bearing regression test — before
     /// the fix, `build_mcp_tools_section` hardcoded Claude's `mcp__cas__`
     /// prefix unconditionally.
+    #[cfg(feature = "mcp-proxy")]
     #[test]
     fn test_build_mcp_tools_section_uses_grok_prefix() {
         let dir = tempfile::tempdir().unwrap();

@@ -40,7 +40,6 @@ fn handle_post_tool_use_with_guardrail(
 
     // === WORKER ACTIVITY TRACKING (for supervisor visibility) ===
     // Send activity events for significant tools to the daemon
-    #[cfg(feature = "mcp-server")]
     if let Some((event_type, description)) = detect_significant_activity(tool_name, input) {
         let event = crate::mcp::socket::DaemonEvent::WorkerActivity {
             session_id: input.session_id.clone(),

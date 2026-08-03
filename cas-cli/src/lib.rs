@@ -304,8 +304,7 @@ pub(crate) mod test_support {
 // Re-export cas-types as types for backward compatibility
 pub use cas_types as types;
 
-// MCP server (behind feature flag)
-#[cfg(feature = "mcp-server")]
+// MCP server (always available; factory agents depend on `cas serve`)
 pub mod mcp;
 
 // Re-exports for convenience

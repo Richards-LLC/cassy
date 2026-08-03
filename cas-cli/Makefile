@@ -101,7 +101,7 @@ build:
 build-full:
 	$(CARGO) build -p cas --all-features
 
-# Fast local build for iteration
+# Build without the optional MCP proxy
 dev-build:
 	$(CARGO) build -p cas --no-default-features
 
@@ -163,7 +163,7 @@ integration:
 unit:
 	$(CARGO) test -p cas --lib
 
-# Fast local tests for iteration
+# Run library tests without the optional MCP proxy
 dev-test:
 	$(CARGO) test -p cas --lib --no-default-features
 

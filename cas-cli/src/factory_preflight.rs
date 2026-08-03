@@ -892,7 +892,6 @@ fn is_cas_source_checkout(path: &Path) -> bool {
         .is_some_and(|manifest| manifest.lines().any(|line| line.trim() == "name = \"cas\""))
 }
 
-#[cfg(feature = "mcp-server")]
 fn collect_repository_facts(
     project_root: &Path,
     cas_root: &Path,
@@ -956,15 +955,6 @@ fn collect_repository_facts(
     }
 }
 
-#[cfg(not(feature = "mcp-server"))]
-fn collect_repository_facts(
-    _project_root: &Path,
-    _cas_root: &Path,
-    _probe: &crate::mcp::tools::core::task::repo_context::BoundedRepoProbe,
-) -> Result<RepositoryFacts, RepositoryFailure> {
-    Err(RepositoryFailure::Missing)
-}
-
 fn cas_mcp_is_configured(project_root: &Path) -> bool {
     let config = std::fs::read_to_string(project_root.join(".mcp.json"))
         .ok()
@@ -987,14 +977,8 @@ fn cas_mcp_is_configured(project_root: &Path) -> bool {
     command_ok && serve_arg
 }
 
-#[cfg(feature = "mcp-server")]
 fn compiled_cas_tool_names() -> Vec<String> {
     crate::mcp::CasService::registered_tool_names_for_build()
-}
-
-#[cfg(not(feature = "mcp-server"))]
-fn compiled_cas_tool_names() -> Vec<String> {
-    Vec::new()
 }
 
 fn collect_proxy_facts(cas_root: &Path, live: Option<ProxySnapshotInput>) -> ProxyFacts {
@@ -1659,7 +1643,6 @@ mod tests {
         assert_eq!(facts.source_sha, None);
     }
 
-    #[cfg(feature = "mcp-server")]
     #[test]
     fn repository_collection_keeps_host_home_separate_from_project_cas_root() {
         let _env = crate::test_support::TestEnvGuard::temp_home();
@@ -1724,7 +1707,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "mcp-server")]
     #[test]
     fn repository_preflight_honors_binding_without_disclosing_host_paths() {
         use cas_store::KnownRepoStore;

@@ -186,7 +186,6 @@ pub fn cleanup_pid_mapping_for_cc_pid(cas_root: &Path, cc_pid: u32) {
 ///
 /// Queries the daemon via Unix socket for the session mapped to this Claude Code PID.
 /// The daemon maintains PID → session mappings in memory (set by SessionStart hook).
-#[cfg(feature = "mcp-server")]
 pub fn read_session_for_mcp(cas_root: &Path) -> std::io::Result<String> {
     use crate::mcp::socket::{DaemonEvent, DaemonResponse, send_event};
 

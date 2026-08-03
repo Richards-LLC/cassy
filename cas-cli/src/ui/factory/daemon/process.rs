@@ -391,13 +391,22 @@ pub(super) fn open_log_file_truncate(path: &std::path::Path) -> std::io::Result<
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    // One-time truncate, then hand back an O_APPEND descriptor. These must be
+    // two separate opens: std rejects `append(true) + truncate(true)` with
+    // EINVAL ("creating or truncating a file requires write or append access")
+    // on every platform, which silently killed every daemon-entry path (cas-7fd9).
+    //
+    // O_APPEND on the returned descriptor is load-bearing: the spawn lifecycle
+    // audit holds an independent append descriptor to this same file, and a
+    // plain write descriptor would start at offset 0 and overwrite its records.
     std::fs::OpenOptions::new()
         .create(true)
-        // Keep O_APPEND on the trace descriptor after the one-time truncate.
-        // Spawn lifecycle audit uses an independent append descriptor so this
-        // prevents later tracing writes from overwriting those records.
-        .append(true)
+        .write(true)
         .truncate(true)
+        .open(path)?;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
         .open(path)
 }
 
@@ -411,4 +420,68 @@ pub(super) fn install_panic_hook(path: std::path::PathBuf) {
         }
         default(info);
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write as _;
+
+    /// Regression: `append(true) + truncate(true)` is EINVAL on every platform.
+    /// This function is the first statement of every daemon-entry path, so when
+    /// it fails the daemon dies before serving its socket and the client hangs
+    /// on the splash screen forever (cas-7fd9).
+    #[test]
+    fn open_log_file_truncate_succeeds_and_truncates_existing_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("trace.log");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"stale content from a previous run").unwrap();
+
+        let mut file = open_log_file_truncate(&path).expect("must not fail with EINVAL");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            0,
+            "previous run's content must be truncated"
+        );
+
+        writeln!(file, "fresh").unwrap();
+        file.flush().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "fresh\n");
+    }
+
+    /// The returned descriptor must carry O_APPEND: the spawn lifecycle audit
+    /// holds an independent append descriptor to the same file, and a plain
+    /// write descriptor would seek to 0 and overwrite those records.
+    #[test]
+    fn open_log_file_truncate_returns_an_appending_descriptor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trace.log");
+
+        let mut traced = open_log_file_truncate(&path).unwrap();
+        let mut audit = open_log_file_append(&path).unwrap();
+
+        writeln!(audit, "audit-record").unwrap();
+        audit.flush().unwrap();
+        writeln!(traced, "trace-record").unwrap();
+        traced.flush().unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            contents.contains("audit-record"),
+            "trace writes must not clobber the audit descriptor's records: {contents:?}"
+        );
+        assert!(contents.contains("trace-record"), "got {contents:?}");
+    }
+
+    /// The truncate happens once, at open. It must create a missing parent dir
+    /// rather than failing, since daemon log dirs are session-scoped.
+    #[test]
+    fn open_log_file_truncate_creates_missing_parent_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a").join("b").join("trace.log");
+
+        open_log_file_truncate(&path).expect("parent dirs should be created");
+        assert!(path.exists());
+    }
 }

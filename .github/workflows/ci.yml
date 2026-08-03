@@ -45,7 +45,7 @@ jobs:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo check -p cas
 
-      - name: Build (no default features)
+      - name: Build (without MCP proxy)
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo build -p cas --no-default-features
@@ -111,8 +111,10 @@ jobs:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo check --workspace --all-targets
 
-      # Do not add --no-default-features here yet: cas-9f09 tracks the current
-      # feature-gating failures and owns re-enabling that check once they pass.
+      - name: Check (without MCP proxy)
+        env:
+          ZIG: ${{ github.workspace }}/.context/zig/zig
+        run: cargo check -p cas --no-default-features
 
   full-matrix:
     name: Full Matrix

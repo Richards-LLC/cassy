@@ -155,7 +155,6 @@ pub enum Commands {
     Bridge(BridgeArgs),
 
     /// Run MCP server for Claude Code integration
-    #[cfg(feature = "mcp-server")]
     Serve,
 
     /// Run diagnostics
@@ -294,7 +293,6 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::Worktree(_)
         | Commands::SweepAll(_) => AuthRequirement::NotRequired,
 
-        #[cfg(feature = "mcp-server")]
         Commands::Serve => AuthRequirement::NotRequired,
 
         Commands::Cloud(_) => AuthRequirement::Required,
@@ -440,7 +438,6 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::Grok(_) => "grok".to_string(),
         Commands::Default(_) => "default".to_string(),
         Commands::Bridge(_) => "bridge".to_string(),
-        #[cfg(feature = "mcp-server")]
         Commands::Serve => "serve".to_string(),
         Commands::Doctor(_) => "doctor".to_string(),
         Commands::Config(_) => "config".to_string(),
@@ -515,7 +512,6 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         }
         Commands::Default(args) => provider_default::execute(args),
         Commands::Bridge(args) => bridge::execute(args, cli),
-        #[cfg(feature = "mcp-server")]
         Commands::Serve => serve_execute(),
         Commands::Doctor(args) => doctor::execute(args, cli, cas_root),
         Commands::Config(cmd) => config::execute_subcommand(cmd, cli, require_cas_root(cas_root)?),
@@ -545,7 +541,6 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
     }
 }
 
-#[cfg(feature = "mcp-server")]
 fn serve_execute() -> anyhow::Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

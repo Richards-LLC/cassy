@@ -51,7 +51,6 @@ pub fn handle_session_start(
                 // gate can detect kernel PID recycling. Previously missing on
                 // this fallback path — caught by the source-scanning test in
                 // mcp::daemon_tests.
-                #[cfg(feature = "mcp-server")]
                 crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, cc_pid);
                 agent.machine_id = Some(Agent::get_or_generate_machine_id());
 
@@ -96,7 +95,6 @@ pub fn handle_session_start(
             }
         };
 
-        #[cfg(feature = "mcp-server")]
         {
             use crate::mcp::socket::{DaemonEvent, send_event};
             let event = DaemonEvent::SessionStart {
@@ -118,12 +116,6 @@ pub fn handle_session_start(
                     register_directly(&mut stores);
                 }
             }
-        }
-
-        #[cfg(not(feature = "mcp-server"))]
-        {
-            // Without MCP server, register directly
-            register_directly(&mut stores);
         }
 
         // Write OTEL context for telemetry correlation
@@ -759,7 +751,6 @@ pub fn handle_session_end(
     }
 
     // Notify daemon via socket that session ended
-    #[cfg(feature = "mcp-server")]
     {
         use crate::agent_id::get_cc_pid_for_hook;
         use crate::mcp::socket::{DaemonEvent, send_event};

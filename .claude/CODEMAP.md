@@ -111,7 +111,7 @@ Rust TUI over an in-process PTY mux (not tmux); `cas` with no subcommand launche
 - CLI: `cas-cli/src/main.rs` → binary `cas`
 - Library: `cas-cli/src/lib.rs` (crate `cas`; also hosts `TestEnvGuard`)
 - Factory TUI: `cas-cli/src/ui/factory/app/mod.rs` (bare `cas` launches this)
-- MCP server: `cas-cli/src/mcp/daemon.rs` via `cas serve` (feature `mcp-server`, default on)
+- MCP server: `cas-cli/src/mcp/daemon.rs` via the always-available `cas serve`
 - HTTP bridge: `cas-cli/src/bridge/server/` via `cas bridge serve`
 - Hook dispatch: `cas-cli/src/cli/hook.rs` via `cas hook <event>`
 - Tests: `cargo test -p cas --lib` (fast), `cargo test --workspace --no-fail-fast` (gate), `cargo bench --bench code_indexing`

@@ -152,10 +152,10 @@ posthog-rs = { version = "0.3", default-features = false }
 # Claude SDK (for AI extraction)
 claude_rs = { git = "https://github.com/codingagentsystem/claude_rs", branch = "main" }
 
-# MCP Server
-rmcp = { version = "0.16", features = ["server", "macros", "transport-io", "client", "transport-child-process", "transport-streamable-http-client-reqwest"], optional = true }
-schemars = { version = "1.0", optional = true }
-cas-mcp = { path = "../crates/cas-mcp", optional = true }
+# MCP Server (always available; the factory requires `cas serve`)
+rmcp = { version = "0.16", features = ["server", "macros", "transport-io", "client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+schemars = { version = "1.0" }
+cas-mcp = { path = "../crates/cas-mcp" }
 
 # MCP Proxy (code-mode-mcp) — optional
 cmcp_core = { package = "code-mode-mcp", path = "../crates/cas-mcp-proxy", optional = true }
@@ -187,9 +187,8 @@ sentry = { version = "0.35", default-features = false, features = ["backtrace", 
 # cas-b65f) ships out of the box — the integration flow needs the proxy to
 # call upstream platform MCPs (Vercel, Neon). Without it, integrate handlers
 # bail with a clear "rebuild with --features mcp-proxy" message.
-default = ["mcp-server", "mcp-proxy"]
-mcp-server = ["dep:rmcp", "dep:schemars", "dep:cas-mcp"]
-mcp-proxy = ["mcp-server", "dep:cmcp_core"]
+default = ["mcp-proxy"]
+mcp-proxy = ["dep:cmcp_core"]
 claude_rs_e2e = []
 # factory-recording feature removed - recording is now always available
 

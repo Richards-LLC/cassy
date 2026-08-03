@@ -34,10 +34,10 @@ measure() {
 
 echo "[build-bench] mode=${MODE}"
 
-# Quick loop: clean + incremental + fast release.
+# Quick loop: proxy-free clean + incremental + fast release.
 cargo clean
-measure clean_debug_minimal cargo build -p cas --no-default-features
-measure incr_debug_minimal cargo build -p cas --no-default-features
+measure clean_debug_no_proxy cargo build -p cas --no-default-features
+measure incr_debug_no_proxy cargo build -p cas --no-default-features
 measure release_fast cargo build -p cas --profile release-fast
 
 if [[ "$MODE" == "full" ]]; then
@@ -57,7 +57,7 @@ fi
   echo
   echo "| Metric | Seconds |"
   echo "|---|---:|"
-  grep -E '^(clean_debug_minimal|incr_debug_minimal|release_fast|clean_debug_all_features|test_norun_all_features|release_full)=' "$OUT_ENV" \
+  grep -E '^(clean_debug_no_proxy|incr_debug_no_proxy|release_fast|clean_debug_all_features|test_norun_all_features|release_full)=' "$OUT_ENV" \
     | while IFS='=' read -r k v; do
         echo "| \`$k\` | $v |"
       done

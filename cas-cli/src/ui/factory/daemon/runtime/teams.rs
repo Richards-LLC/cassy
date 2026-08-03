@@ -152,6 +152,35 @@ pub struct TeamConfig {
     pub members: Vec<TeamMember>,
 }
 
+struct InboxFileLock<'a> {
+    file: &'a std::fs::File,
+    path: &'a std::path::Path,
+}
+
+impl<'a> InboxFileLock<'a> {
+    fn acquire(file: &'a std::fs::File, path: &'a std::path::Path) -> anyhow::Result<Self> {
+        if let Err(error) = fs2::FileExt::lock_exclusive(file) {
+            anyhow::bail!("Failed to lock inbox file {:?}: {}", path, error);
+        }
+        Ok(Self { file, path })
+    }
+}
+
+impl Drop for InboxFileLock<'_> {
+    fn drop(&mut self) {
+        if let Err(error) = fs2::FileExt::unlock(self.file) {
+            // Never panic in Drop: this may run while propagating the
+            // serialize/write error that caused us to leave the critical
+            // section. A second panic during unwinding would abort CAS.
+            tracing::error!(
+                inbox_path = %self.path.display(),
+                error = %error,
+                "failed to release teams inbox lock"
+            );
+        }
+    }
+}
+
 /// Manages the native Agent Teams file structure for a factory session.
 pub struct TeamsManager {
     team_name: String,
@@ -753,21 +782,8 @@ impl TeamsManager {
             .read(true)
             .write(true)
             .open(inbox_path)?;
-
-        use std::os::unix::io::AsRawFd;
-        let fd = file.as_raw_fd();
-        let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
-        if ret != 0 {
-            anyhow::bail!(
-                "Failed to lock inbox file {:?}: {}",
-                inbox_path,
-                std::io::Error::last_os_error()
-            );
-        }
-
-        let result = operation()?;
-        unsafe { libc::flock(fd, libc::LOCK_UN) };
-        Ok(result)
+        let _lock = InboxFileLock::acquire(&file, inbox_path)?;
+        operation()
     }
 
     fn write_to_inbox_impl(

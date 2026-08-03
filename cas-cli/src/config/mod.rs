@@ -110,6 +110,12 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code_review: Option<CodeReviewConfig>,
 
+    /// `[issues]` — project-scoped GitHub repository for CAS-system bug
+    /// intake. No repository is inferred when this is unset because a
+    /// downstream project's origin is not necessarily the CAS upstream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issues: Option<IssuesConfig>,
+
     /// `[memory]` — opt-in auto-extraction via the `session-learn` skill
     /// (cas-39f5, EPIC cas-ebea). Defaults to `None` (i.e. the auto-trigger
     /// from the `Stop` hook is disabled); set `session_learn_auto = true`
@@ -159,6 +165,7 @@ impl Config {
         merge_option!(llm);
         merge_option!(integrations);
         merge_option!(code_review);
+        merge_option!(issues);
         merge_option!(project);
         changed
     }

@@ -7,6 +7,7 @@ impl Config {
         let tasks = self.tasks.clone().unwrap_or_default();
         let dev = self.dev.clone().unwrap_or_default();
         let staging = self.staging.clone().unwrap_or_default();
+        let issues = self.issues.clone().unwrap_or_default();
         let notifications = self.notifications.clone().unwrap_or_default();
         vec![
             // Sync section
@@ -164,6 +165,8 @@ impl Config {
                 "staging.tmpfs_warning_threshold_bytes".to_string(),
                 staging.tmpfs_warning_threshold_bytes.to_string(),
             ),
+            // Issues section
+            ("issues.repo".to_string(), issues.repo.unwrap_or_default()),
             // Notifications section
             (
                 "notifications.enabled".to_string(),

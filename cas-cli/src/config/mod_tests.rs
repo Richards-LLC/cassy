@@ -209,6 +209,48 @@ fn test_config_get_set() {
 }
 
 #[test]
+fn issues_repo_is_project_local_config_with_no_inferred_default() {
+    let temp = TempDir::new().unwrap();
+    let mut config = Config::default();
+
+    assert_eq!(config.get("issues.repo"), Some(String::new()));
+    assert!(
+        config
+            .list()
+            .contains(&("issues.repo".to_string(), String::new()))
+    );
+
+    config.set("issues.repo", " owner/example-cas ").unwrap();
+    assert_eq!(
+        config.get("issues.repo"),
+        Some("owner/example-cas".to_string())
+    );
+    config.save(temp.path()).unwrap();
+
+    let raw = std::fs::read_to_string(temp.path().join("config.toml")).unwrap();
+    assert!(raw.contains("[issues]"));
+    assert!(raw.contains("repo = \"owner/example-cas\""));
+    let loaded = Config::load(temp.path()).unwrap();
+    assert_eq!(
+        loaded
+            .issues
+            .as_ref()
+            .and_then(|issues| issues.repo.as_deref()),
+        Some("owner/example-cas")
+    );
+
+    config.set("issues.repo", "").unwrap();
+    assert_eq!(config.get("issues.repo"), Some(String::new()));
+    assert!(config.issues.as_ref().unwrap().repo.is_none());
+
+    let meta = meta::registry()
+        .get("issues.repo")
+        .expect("issues.repo registry metadata");
+    assert_eq!(meta.section, "issues");
+    assert_eq!(meta.default, "");
+}
+
+#[test]
 fn test_worktrees_abandon_ttl_hours_default() {
     let config = Config::default();
     assert_eq!(

@@ -19,6 +19,10 @@ pub(super) fn add_section_descriptions(registry: &mut ConfigRegistry) {
     registry
         .section_descriptions
         .insert("tasks", "Task management settings");
+    registry.section_descriptions.insert(
+        "issues",
+        "GitHub repository routing for CAS-system bug reports",
+    );
     registry
         .section_descriptions
         .insert("dev", "Development and tracing options");

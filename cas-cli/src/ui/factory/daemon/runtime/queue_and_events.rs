@@ -780,17 +780,13 @@ impl FactoryDaemon {
                     });
 
                 if let Some(MergeRequestDecision::AlreadyIntegrated { target_tip }) = decision {
-                    let _ = queue.mark_suppressed(
-                        queued.id,
-                        Some("merge request branch tip already integrated into target"),
-                    );
                     let guidance = merge_landed_guidance(
                         &envelope.task_id,
                         &envelope.branch_tip,
                         &envelope.target_branch,
                         &target_tip,
                     );
-                    if let Err(error) = queue.enqueue_urgent_with_outcome(
+                    match queue.enqueue_urgent_with_outcome(
                         "supervisor",
                         &queued.source,
                         &guidance,
@@ -799,14 +795,22 @@ impl FactoryDaemon {
                         Some(cas_store::NotificationPriority::High),
                         false,
                     ) {
-                        tracing::warn!(
-                            prompt_id = queued.id,
-                            task_id = %envelope.task_id,
-                            error = %error,
-                            "cas-bc8c: stale merge request suppressed but worker guidance enqueue failed"
-                        );
+                        Ok(_) => {
+                            let _ = queue.mark_suppressed(
+                                queued.id,
+                                Some("merge request branch tip already integrated into target"),
+                            );
+                            continue;
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                prompt_id = queued.id,
+                                task_id = %envelope.task_id,
+                                error = %error,
+                                "cas-bc8c: worker guidance enqueue failed; retaining original merge request for delivery"
+                            );
+                        }
                     }
-                    continue;
                 }
             }
 

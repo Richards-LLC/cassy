@@ -2058,28 +2058,38 @@ fn atomic_write_session_metadata(path: &std::path::Path, contents: &str) -> std:
         }
     }
 
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let tmp_path = parent.join(format!(
-        ".{file_name}.cas-session.{}.{nanos}.tmp",
+        ".{file_name}.cas-session.{}.{sequence}.tmp",
         std::process::id()
     ));
 
+    atomic_write_session_metadata_via_temp_path(path, contents, &tmp_path)
+}
+
+fn atomic_write_session_metadata_via_temp_path(
+    path: &std::path::Path,
+    contents: &str,
+    tmp_path: &std::path::Path,
+) -> std::io::Result<()> {
+    // A failed create_new means another writer owns the path. Return without
+    // cleanup so this invocation can never delete a peer's tempfile.
+    let mut f = File::options()
+        .create_new(true)
+        .write(true)
+        .open(tmp_path)?;
+
     let result = (|| -> std::io::Result<()> {
-        {
-            let mut f = File::options()
-                .create_new(true)
-                .write(true)
-                .open(&tmp_path)?;
-            f.write_all(contents.as_bytes())?;
-            f.flush()?;
-        }
-        fs::rename(&tmp_path, path)
+        f.write_all(contents.as_bytes())?;
+        f.flush()?;
+        drop(f);
+        fs::rename(tmp_path, path)
     })();
     if let Err(err) = result {
-        let _ = fs::remove_file(&tmp_path);
+        let _ = fs::remove_file(tmp_path);
         return Err(err);
     }
     Ok(())
@@ -3883,6 +3893,66 @@ mod tests {
                 .all(|entry| !entry.file_name().to_string_lossy().ends_with(".tmp")),
             "atomic write helper must not leave temp files behind"
         );
+    }
+
+    #[test]
+    fn session_metadata_collision_never_removes_unowned_tempfile() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("session.json");
+        let occupied = dir.path().join(".session.json.cas-session.forced.tmp");
+        std::fs::write(&occupied, "peer-owned").unwrap();
+
+        let error = super::atomic_write_session_metadata_via_temp_path(
+            &target,
+            "mine",
+            &occupied,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read_to_string(&occupied).unwrap(),
+            "peer-owned",
+            "a writer that loses create_new must not delete the winner's tempfile"
+        );
+    }
+
+    #[test]
+    fn session_metadata_atomic_write_supports_concurrent_writers() {
+        use std::thread;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("session.json");
+        let candidates: Vec<String> =
+            (0..16).map(|index| format!("session-{index:03}")).collect();
+        let handles: Vec<_> = candidates
+            .iter()
+            .map(|candidate| {
+                let target = target.clone();
+                let candidate = candidate.clone();
+                thread::spawn(move || {
+                    for _ in 0..8 {
+                        super::atomic_write_session_metadata(&target, &candidate).unwrap();
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let contents = std::fs::read_to_string(&target).unwrap();
+        assert!(candidates.contains(&contents), "unexpected contents: {contents:?}");
+        let stragglers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".cas-session.")
+            })
+            .collect();
+        assert!(stragglers.is_empty(), "leftover tempfiles: {stragglers:?}");
     }
 
     #[test]

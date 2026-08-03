@@ -82,8 +82,8 @@ pub fn read_capped(path: &Path) -> anyhow::Result<String> {
 ///
 /// Implemented with `std::fs` only to avoid pulling `tempfile` into the
 /// runtime dependency tree (it is dev-only here). The temp name is salted
-/// with the process id + a nanosecond timestamp so two concurrent invocations
-/// pick distinct names.
+/// with the process id + a process-local sequence so concurrent invocations
+/// pick distinct names without depending on wall-clock resolution.
 pub fn atomic_write(path: &Path, contents: &str) -> anyhow::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         anyhow!("refusing to write to a root-less path: {}", path.display())
@@ -106,33 +106,43 @@ pub fn atomic_write(path: &Path, contents: &str) -> anyhow::Result<()> {
         }
     }
 
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let tmp_name = format!(
-        ".{}.cas-integrate.{}.{nanos}.tmp",
+        ".{}.cas-integrate.{}.{sequence}.tmp",
         file_name,
         std::process::id()
     );
     let tmp_path = parent.join(tmp_name);
 
-    // Ensure the temp file is removed on any failure path before rename.
+    atomic_write_via_temp_path(path, contents, &tmp_path)
+}
+
+fn atomic_write_via_temp_path(
+    path: &Path,
+    contents: &str,
+    tmp_path: &Path,
+) -> anyhow::Result<()> {
+    // Do not arm cleanup until create_new succeeds: an AlreadyExists path is
+    // owned by another writer and must never be removed by this invocation.
+    let mut f = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(tmp_path)
+        .with_context(|| format!("failed to atomically write {}", path.display()))?;
+
+    // Once creation succeeds, this invocation owns tmp_path and may clean it
+    // up on a write, flush, or rename failure.
     let result = (|| -> std::io::Result<()> {
-        // Use OpenOptions for the write so we can control symlink-follow on
-        // the tempfile too (defensive — the parent should be a normal dir).
-        {
-            let mut f = fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&tmp_path)?;
-            f.write_all(contents.as_bytes())?;
-            f.flush()?;
-        }
-        fs::rename(&tmp_path, path)
+        f.write_all(contents.as_bytes())?;
+        f.flush()?;
+        drop(f);
+        fs::rename(tmp_path, path)
     })();
     if let Err(e) = result {
-        let _ = fs::remove_file(&tmp_path);
+        let _ = fs::remove_file(tmp_path);
         return Err(anyhow!(
             "failed to atomically write {}: {e}",
             path.display()
@@ -353,10 +363,27 @@ mod tests {
     }
 
     #[test]
-    // cas-d963 owns the production temp-name collision and ownership-safe
-    // cleanup fix. Keep this regression visible without conflating it with
-    // the macOS test-hygiene changes in cas-859b.
-    #[ignore = "cas-d963: production atomic_write temp-name collision"]
+    fn atomic_write_collision_never_removes_unowned_tempfile() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("out.txt");
+        let occupied = tmp.path().join(".out.txt.cas-integrate.forced.tmp");
+        fs::write(&occupied, "peer-owned").unwrap();
+
+        let error = atomic_write_via_temp_path(&target, "mine", &occupied).unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::AlreadyExists)
+        );
+        assert_eq!(
+            fs::read_to_string(&occupied).unwrap(),
+            "peer-owned",
+            "a writer that loses create_new must not delete the winner's tempfile"
+        );
+    }
+
+    #[test]
     fn atomic_write_under_concurrent_writers_never_tears() {
         // Spawn N threads each writing a distinct, deterministic content.
         // After the join, the file must equal exactly one of the candidates

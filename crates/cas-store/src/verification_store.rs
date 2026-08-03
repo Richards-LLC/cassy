@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::Result;
 use crate::SqliteEventStore;
+use crate::TaskStore;
 use crate::agent_store::register_agent_with_conn;
 use crate::error::StoreError;
 use crate::event_store::record_event_with_conn;
@@ -24,10 +25,10 @@ use crate::supervisor_queue_store::{
 use crate::task_store::SqliteTaskStore;
 use cas_types::{
     Agent, AgentRole, AgentStatus, AgentType, Dependency, DependencyType, Event, EventEntityType,
-    EventType, IssueSeverity, RecordingEventType, Task, TaskStatus, Verification,
+    EventType, IssueSeverity, RecordingEventType, Task, TaskDeliverables, TaskStatus, Verification,
     VerificationDispatch, VerificationDispatchState, VerificationIssue, VerificationProofBoundary,
     VerificationProvenance, VerificationRecoveryAction, VerificationStatus, VerificationType,
-    VerifierCapability,
+    VerifierCapability, WorkerDeliveryState,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1432,6 +1433,181 @@ pub fn invalidate_verification_dispatch_and_reopen_task_exact(
     let _ = capture_task_event(&tx, RecordingEventType::TaskCreated, &task.id, None);
     tx.commit()?;
     Ok(dispatch)
+}
+
+/// Record a supervisor's negative review of one exact, unmerged delivery.
+///
+/// This is deliberately separate from generic task updates: the delivery
+/// proof lock must not prevent recording a negative verdict, but only this
+/// exact AwaitingMerge boundary may yield. The worker keeps ownership and its
+/// branch history; CAS invalidates the rejected anchor so a new close cycle
+/// requires corrective commits rather than reusing the declined proof.
+pub fn request_changes_for_worker_delivery_exact(
+    cas_dir: &Path,
+    task_id: &str,
+    dispatch_id: &str,
+    delivery_transaction_id: &str,
+    supervisor_agent_id: &str,
+    reason: &str,
+) -> Result<()> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err(StoreError::Parse(
+            "request_changes requires a non-empty supervisor reason".to_string(),
+        ));
+    }
+    if supervisor_agent_id.trim().is_empty() {
+        return Err(StoreError::Parse(
+            "request_changes requires an authenticated supervisor".to_string(),
+        ));
+    }
+
+    SqliteTaskStore::open(cas_dir)?.init()?;
+    SqliteEventStore::open(cas_dir)?;
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let conn = store.conn.lock().map_err(lock_err)?;
+    conn.execute_batch(crate::delivery_store::DELIVERY_SCHEMA)?;
+    let tx = ImmediateTx::new(&conn)?;
+
+    let dispatch = get_verification_dispatch_with_conn(&tx, dispatch_id)?;
+    let latest = get_latest_verification_dispatch_with_conn(&tx, task_id)?
+        .ok_or_else(|| StoreError::NotFound("latest verification dispatch".to_string()))?;
+    if latest.id != dispatch.id
+        || dispatch.task_id != task_id
+        || dispatch.delivery_transaction_id.as_deref() != Some(delivery_transaction_id)
+        || dispatch.state != VerificationDispatchState::Resolved
+    {
+        return Err(StoreError::Parse(
+            "request_changes requires the exact latest Resolved delivery proof".to_string(),
+        ));
+    }
+
+    let delivery: (String, String, String) = tx
+        .query_row(
+            "SELECT receipt_id, task_id, state FROM worker_delivery_transactions WHERE id = ?1",
+            params![delivery_transaction_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => {
+                StoreError::NotFound("worker delivery transaction".to_string())
+            }
+            other => StoreError::Database(other),
+        })?;
+    if delivery.0 != dispatch.receipt_id.as_deref().unwrap_or_default()
+        || delivery.1 != task_id
+        || delivery.2 != WorkerDeliveryState::AwaitingMerge.to_string()
+    {
+        return Err(StoreError::Parse(
+            "request_changes requires an exact worker delivery still in awaiting_merge".to_string(),
+        ));
+    }
+
+    let (status, notes, deliverables_json): (String, String, String) = tx
+        .query_row(
+            "SELECT status, notes, deliverables FROM tasks WHERE id = ?1",
+            params![task_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => StoreError::TaskNotFound(task_id.to_string()),
+            other => StoreError::Database(other),
+        })?;
+    if status != TaskStatus::AwaitingMerge.to_string() {
+        return Err(StoreError::Parse(format!(
+            "request_changes requires task status awaiting_merge, found {status}"
+        )));
+    }
+    let mut deliverables: TaskDeliverables = serde_json::from_str(&deliverables_json)
+        .map_err(|error| StoreError::Parse(format!("invalid task deliverables: {error}")))?;
+    let rejected_branch = deliverables
+        .parked_branch
+        .as_deref()
+        .unwrap_or("the factory branch")
+        .to_string();
+    deliverables.factory_branch_anchor = None;
+    deliverables.parked_branch = None;
+    deliverables.merge_conflicted = false;
+    deliverables.review_envelope = None;
+
+    let now = Utc::now();
+    let note = format!(
+        "[{}] Decision: changes requested by supervisor. {reason}\n\nBranch handling: prior commits remain on {rejected_branch}; the assigned worker must add corrective commits (including an explicit revert commit when requested) before re-delivery.",
+        now.format("%Y-%m-%d %H:%M")
+    );
+    let notes = if notes.is_empty() {
+        note.clone()
+    } else {
+        format!("{notes}\n\n{note}")
+    };
+
+    let dispatch = invalidate_verification_dispatch_for_new_cycle_with_conn(&tx, dispatch_id)?;
+    if dispatch.state != VerificationDispatchState::Invalidated {
+        return Err(StoreError::Parse(
+            "request_changes could not invalidate the exact delivery proof".to_string(),
+        ));
+    }
+    let delivery_changed = tx.execute(
+        "UPDATE worker_delivery_transactions
+         SET state = ?2, supervisor_agent_id = ?3,
+             last_error_code = 'changes_requested', last_error_detail = ?4, updated_at = ?5
+         WHERE id = ?1 AND task_id = ?6 AND state = 'awaiting_merge'",
+        params![
+            delivery_transaction_id,
+            WorkerDeliveryState::ChangesRequested.to_string(),
+            supervisor_agent_id,
+            reason,
+            now.to_rfc3339(),
+            task_id,
+        ],
+    )?;
+    if delivery_changed != 1 {
+        return Err(StoreError::Parse(
+            "request_changes delivery transition raced".to_string(),
+        ));
+    }
+    tx.execute(
+        "INSERT INTO worker_delivery_events
+         (id, transaction_id, state, actor_agent_id, detail, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            format!("wde-{:032x}", rand::random::<u128>()),
+            delivery_transaction_id,
+            WorkerDeliveryState::ChangesRequested.to_string(),
+            supervisor_agent_id,
+            reason,
+            now.to_rfc3339(),
+        ],
+    )?;
+    let task_changed = tx.execute(
+        "UPDATE tasks
+         SET status = 'open', notes = ?2, deliverables = ?3,
+             pending_verification = 0, pending_worktree_merge = 0, updated_at = ?4
+         WHERE id = ?1 AND status = 'awaiting_merge'",
+        params![
+            task_id,
+            notes,
+            serde_json::to_string(&deliverables).map_err(|error| {
+                StoreError::Parse(format!("failed to serialize task deliverables: {error}"))
+            })?,
+            now.to_rfc3339(),
+        ],
+    )?;
+    if task_changed != 1 {
+        return Err(StoreError::Parse(
+            "request_changes task transition raced".to_string(),
+        ));
+    }
+    let event = Event::new(
+        EventType::TaskNoteAdded,
+        EventEntityType::Task,
+        task_id,
+        note,
+    );
+    record_event_with_conn(&tx, &event)?;
+    let _ = capture_task_event(&tx, RecordingEventType::Custom, task_id, None);
+    tx.commit()?;
+    Ok(())
 }
 
 fn invalidate_verification_dispatch_for_new_cycle_with_conn(

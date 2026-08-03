@@ -776,6 +776,31 @@ mod tests {
                 .state,
             VerificationDispatchState::Invalidated
         );
+
+        let rejected_retry = create_worker_delivery_with_dispatch(
+            root.path(),
+            &receipt,
+            WorkerDeliveryState::AwaitingVerification,
+            "worker-session",
+            "supervisor-session",
+            Utc::now() + chrono::Duration::minutes(10),
+        )
+        .expect_err("the rejected receipt cannot become a fresh close authority");
+        assert!(rejected_retry.to_string().contains("initial state mismatch"));
+
+        let mut corrected_input = input();
+        corrected_input.commit_sha = "c".repeat(40);
+        let corrected_receipt =
+            build_worker_completion_receipt(&corrected_input, "worker", Utc::now());
+        create_worker_delivery_with_dispatch(
+            root.path(),
+            &corrected_receipt,
+            WorkerDeliveryState::AwaitingVerification,
+            "worker-session",
+            "supervisor-session",
+            Utc::now() + chrono::Duration::minutes(10),
+        )
+        .expect("a new corrective commit opens a fresh delivery cycle");
     }
 
     #[test]
@@ -799,6 +824,16 @@ mod tests {
             Utc::now() + chrono::Duration::minutes(10),
         )
         .unwrap();
+        let conn = Connection::open(root.path().join("cas.db")).unwrap();
+        crate::resolve_verification_dispatch_with_conn(
+            &conn,
+            &dispatch.id,
+            "supervisor-session",
+            None,
+            true,
+        )
+        .unwrap();
+        drop(conn);
         transition_worker_delivery(
             root.path(),
             &delivery.id,

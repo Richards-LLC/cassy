@@ -49,6 +49,7 @@ pub enum WorkerDeliveryState {
     CloseReady,
     Delivered,
     VerificationFailed,
+    ChangesRequested,
     Conflict,
     Stale,
     RepoMismatch,
@@ -60,6 +61,7 @@ impl WorkerDeliveryState {
         matches!(
             self,
             Self::VerificationFailed
+                | Self::ChangesRequested
                 | Self::Conflict
                 | Self::Stale
                 | Self::RepoMismatch
@@ -78,6 +80,7 @@ impl fmt::Display for WorkerDeliveryState {
             Self::CloseReady => "close_ready",
             Self::Delivered => "delivered",
             Self::VerificationFailed => "verification_failed",
+            Self::ChangesRequested => "changes_requested",
             Self::Conflict => "conflict",
             Self::Stale => "stale",
             Self::RepoMismatch => "repo_mismatch",
@@ -98,6 +101,7 @@ impl FromStr for WorkerDeliveryState {
             "close_ready" => Ok(Self::CloseReady),
             "delivered" => Ok(Self::Delivered),
             "verification_failed" => Ok(Self::VerificationFailed),
+            "changes_requested" => Ok(Self::ChangesRequested),
             "conflict" => Ok(Self::Conflict),
             "stale" => Ok(Self::Stale),
             "repo_mismatch" => Ok(Self::RepoMismatch),

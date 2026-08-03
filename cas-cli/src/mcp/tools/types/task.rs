@@ -232,6 +232,19 @@ pub struct TaskReopenRequest {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct TaskRequestChangesRequest {
+    /// Task ID whose unmerged delivery was declined
+    #[schemars(description = "AwaitingMerge task ID whose delivery needs changes")]
+    pub id: String,
+
+    /// Required supervisor verdict and branch-handling instruction
+    #[schemars(
+        description = "Required supervisor review reason. State what prior work may remain and what must be corrected or reverted before re-delivery."
+    )]
+    pub reason: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct TaskUpdateRequest {
     /// Task ID to update
     #[schemars(description = "ID of the task to update")]

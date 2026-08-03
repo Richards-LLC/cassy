@@ -98,6 +98,16 @@ fn delivery_audit_text_is_portable(value: &str) -> bool {
     })
 }
 
+fn request_changes_role_gate(is_supervisor: bool, task_id: &str) -> Result<(), String> {
+    if is_supervisor {
+        Ok(())
+    } else {
+        Err(format!(
+            "task request_changes rejected: only supervisors may decline an AwaitingMerge delivery. Task {task_id} stays parked; a worker cannot reject its own work to escape the delivery proof boundary."
+        ))
+    }
+}
+
 #[cfg(test)]
 mod delivery_audit_text_tests {
     use super::{delivery_audit_text_is_portable, request_changes_role_gate};
@@ -629,6 +639,7 @@ impl CasCore {
                 "No action; the exact immutable delivery is already complete."
             }
             cas_types::WorkerDeliveryState::VerificationFailed
+            | cas_types::WorkerDeliveryState::ChangesRequested
             | cas_types::WorkerDeliveryState::Conflict
             | cas_types::WorkerDeliveryState::Stale
             | cas_types::WorkerDeliveryState::RepoMismatch
@@ -881,6 +892,7 @@ impl CasCore {
                 "A registered supervisor must resume this immutable delivery with worktree_merge and its task_id."
             }
             cas_types::WorkerDeliveryState::VerificationFailed
+            | cas_types::WorkerDeliveryState::ChangesRequested
             | cas_types::WorkerDeliveryState::Conflict
             | cas_types::WorkerDeliveryState::Stale
             | cas_types::WorkerDeliveryState::RepoMismatch
@@ -3832,6 +3844,106 @@ impl CasCore {
         )))
     }
 
+    /// Record a supervisor's negative review before the worker delivery merges.
+    ///
+    /// This is the one sanctioned exception to the delivery-proof scope lock:
+    /// a negative verdict invalidates the exact proof it rejects, reopens the
+    /// task without changing its assignee, and clears the parked anchor. It is
+    /// intentionally distinct from `reopen`, which handles closed/blocked and
+    /// amendment-after-merge work, and from `reset`, which remains orphan
+    /// recovery and clears ownership.
+    pub async fn cas_task_request_changes(
+        &self,
+        Parameters(req): Parameters<TaskRequestChangesRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        request_changes_role_gate(is_supervisor_from_env(), &req.id)
+            .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+        if req.reason.trim().is_empty() {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "task request_changes rejected: reason must explain what must change and whether prior commits should stand or be reverted",
+            ));
+        }
+
+        let task_store = self.open_task_store()?;
+        let task = task_store.get(&req.id).map_err(|error| {
+            Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!("Task not found: {error}"),
+            )
+        })?;
+        if task.status != TaskStatus::AwaitingMerge {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!(
+                    "task request_changes rejected: {} is {} rather than awaiting_merge. This action only declines work before merge; use reopen/fresh-scope recovery for amendment after merge.",
+                    task.id, task.status
+                ),
+            ));
+        }
+        let (_, delivery) = cas_store::get_latest_worker_delivery(&self.cas_root, &task.id)
+            .map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Failed to read worker delivery: {error}"),
+                )
+            })?
+            .ok_or_else(|| {
+                Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!(
+                        "task request_changes rejected: {} has no exact worker delivery boundary",
+                        task.id
+                    ),
+                )
+            })?;
+        let dispatch = cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id)
+            .map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Failed to read delivery verification: {error}"),
+                )
+            })?
+            .ok_or_else(|| {
+                Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!(
+                        "task request_changes rejected: {} has no exact verification dispatch",
+                        task.id
+                    ),
+                )
+            })?;
+        let supervisor_id = self.get_agent_id().map_err(|error| {
+            Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!("task request_changes requires registered supervisor identity: {error}"),
+            )
+        })?;
+
+        cas_store::request_changes_for_worker_delivery_exact(
+            &self.cas_root,
+            &task.id,
+            &dispatch.id,
+            &delivery.id,
+            &supervisor_id,
+            &req.reason,
+        )
+        .map_err(|error| {
+            Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!("task request_changes rejected: {error}"),
+            )
+        })?;
+
+        Ok(Self::success(format!(
+            "Changes requested for task: {} - {}\n\nThe task is Open with assignee {} preserved. Prior commits remain on the worker branch, but the rejected delivery anchor and proof were invalidated. Tell the assigned worker to start the task and add corrective commits (including an explicit revert commit if your reason requests one) before re-delivery.\n\nDecision: {}",
+            task.id,
+            task.title,
+            task.assignee.as_deref().unwrap_or("unassigned"),
+            req.reason.trim(),
+        )))
+    }
+
     /// Emit a `DaemonEvent::WorkerActivity { event_type = "audit_trail_gap" }` to
     /// the supervisor TUI, fire-and-forget.
     ///
@@ -4432,7 +4544,11 @@ pub(crate) fn run_factory_branch_merge_gate(
              merge into {parent_branch} if still needed\"`). \
              They merge with \
              `git merge --no-ff {factory_branch}` on the epic branch.\n\
-             5. Once merged, retry mcp__cas__task action=close",
+             5. Once merged, retry mcp__cas__task action=close. If the supervisor \
+             declines the unmerged delivery instead, the supervisor runs \
+             `mcp__cas__task action=request_changes id={} reason=\"state what prior work remains and what must be corrected or reverted\"`; \
+             only after that verdict may the assigned worker start a fresh cycle.",
+            task.id,
             task.id,
         )
     } else {
@@ -4448,7 +4564,11 @@ pub(crate) fn run_factory_branch_merge_gate(
              3. Open a PR targeting {parent_branch}\n\
              4. Merge the PR (or `git fetch --prune` if it was already merged \
              and your local ref is stale)\n\
-             5. Retry mcp__cas__task action=close",
+             5. Retry mcp__cas__task action=close. If the supervisor declines \
+             the unmerged delivery instead, the supervisor runs \
+             `mcp__cas__task action=request_changes id={} reason=\"state what prior work remains and what must be corrected or reverted\"`; \
+             only after that verdict may the assigned worker start a fresh cycle.",
+            task.id,
         )
     };
 

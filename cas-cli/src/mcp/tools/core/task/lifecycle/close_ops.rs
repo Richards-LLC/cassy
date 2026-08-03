@@ -13810,6 +13810,26 @@ mod zero_change_close_tests {
         git(dir.path(), &["checkout", "-q", "factory/test-worker"]);
         git(dir.path(), &["reset", "--hard", "main"]);
 
+        let context = crate::mcp::tools::core::task::repo_context::RepoContext {
+            repo_selector: "remote:example.invalid/cas77af".to_string(),
+            repo_root: dir.path().to_path_buf(),
+            git_common_dir: dir.path().join(".git"),
+            target_branch: "main".to_string(),
+        };
+        let task = Task::new("cas-77af".to_string(), "short receipt".to_string());
+        let evidence = run_declared_pre_close_hook(
+            &task,
+            &context,
+            Some(dir.path()),
+            Some(short_receipt),
+        )
+        .expect("short receipt must select a valid close-hook scope");
+        assert_eq!(
+            evidence.task_tip.as_deref(),
+            Some(full_receipt.as_str()),
+            "durable hook evidence must store the canonical full object ID"
+        );
+
         let note = validate_task_commit_receipt(
             dir.path(),
             short_receipt,
@@ -13855,6 +13875,53 @@ mod zero_change_close_tests {
         assert!(message.contains("INVALID TASK COMMIT RECEIPT"), "{message}");
         assert!(!message.contains("MERGE REQUIRED"), "{message}");
         assert!(message.contains("not an ancestor of main"), "{message}");
+    }
+
+    #[test]
+    fn cas77af_receipt_must_name_a_commit_object_not_a_tree_or_tag_object() {
+        let dir = init_worker_repo();
+        let tree = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD^{tree}"])
+                .current_dir(dir.path())
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        let tree_error = validate_task_commit_receipt(
+            dir.path(),
+            &tree,
+            "main",
+            &test_receipt_window(),
+        )
+        .expect_err("a tree object is not immutable commit evidence");
+        assert!(tree_error.contains("tree object"), "{tree_error}");
+        assert!(tree_error.contains("not a commit"), "{tree_error}");
+
+        git(dir.path(), &["tag", "-a", "receipt-tag", "-m", "receipt tag"]);
+        let tag = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "receipt-tag"])
+                .current_dir(dir.path())
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        let tag_error = validate_task_commit_receipt(
+            dir.path(),
+            &tag,
+            "main",
+            &test_receipt_window(),
+        )
+        .expect_err("an annotated tag object is not immutable commit evidence");
+        assert!(tag_error.contains("tag object"), "{tag_error}");
+        assert!(tag_error.contains("not a commit"), "{tag_error}");
     }
 
     /// cas-7308a: conflict resume clears the parked anchor, then the

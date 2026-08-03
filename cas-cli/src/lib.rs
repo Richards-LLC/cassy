@@ -100,6 +100,7 @@ pub(crate) mod test_support {
         _nesting: TestEnvGuardNesting,
         saved: Vec<(OsString, Option<OsString>)>,
         temp_home: Option<TempDir>,
+        temp_home_path: Option<std::path::PathBuf>,
         saved_cwd: Option<std::path::PathBuf>,
     }
 
@@ -114,6 +115,7 @@ pub(crate) mod test_support {
                 _nesting: nesting,
                 saved: Vec::new(),
                 temp_home: None,
+                temp_home_path: None,
                 saved_cwd: None,
             }
         }
@@ -121,9 +123,14 @@ pub(crate) mod test_support {
         pub fn temp_home() -> Self {
             let mut guard = Self::new();
             let temp = TempDir::new().expect("temp HOME");
-            let path = temp.path().to_path_buf();
+            // TempDir may expose a symlinked platform spelling (notably
+            // macOS `/var` -> `/private/var`). Keep test HOME and every path
+            // derived from it in the same canonical namespace production
+            // path validation uses.
+            let path = temp.path().canonicalize().expect("canonical temp HOME");
             guard.temp_home = Some(temp);
-            guard.set("HOME", path);
+            guard.temp_home_path = Some(path.clone());
+            guard.set("HOME", &path);
             guard
         }
 
@@ -152,10 +159,10 @@ pub(crate) mod test_support {
         }
 
         pub fn home(&self) -> &Path {
-            self.temp_home
+            self.temp_home_path
                 .as_ref()
                 .expect("TestEnvGuard has no temp HOME")
-                .path()
+                .as_path()
         }
 
         pub fn set(&mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) {
@@ -248,6 +255,16 @@ pub(crate) mod test_support {
     fn nested_test_env_guard_panics_with_clear_message() {
         let _outer = TestEnvGuard::new();
         let _inner = TestEnvGuard::new();
+    }
+
+    #[test]
+    fn temp_home_uses_canonical_path_namespace() {
+        let guard = TestEnvGuard::temp_home();
+        assert_eq!(guard.home(), guard.home().canonicalize().unwrap());
+        assert_eq!(
+            std::env::var_os("HOME").as_deref(),
+            Some(guard.home().as_os_str())
+        );
     }
 
     #[test]

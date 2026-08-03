@@ -5405,7 +5405,7 @@ mod parent_branch_resolver_tests {
         std::fs::create_dir_all(&cas_root).unwrap();
 
         let resolved = resolve_close_gate_repo_root(&cas_root).expect("ancestor repo must resolve");
-        assert_eq!(resolved, dir.path());
+        assert_eq!(resolved, dir.path().canonicalize().unwrap());
     }
 
     #[test]
@@ -12015,7 +12015,7 @@ mod system_b_worktree_resolution_tests {
     #[test]
     fn agrees_with_worktree_manager_worktree_path_for_worker_default() {
         let sandbox = tempfile::tempdir().unwrap();
-        let repo_root = sandbox.path().join("myrepo");
+        let repo_root = sandbox.path().canonicalize().unwrap().join("myrepo");
         std::fs::create_dir_all(&repo_root).unwrap();
         git(&repo_root, &["init", "-q", "-b", "main"]);
         let cas_root = repo_root.join(".cas");
@@ -12044,7 +12044,7 @@ mod system_b_worktree_resolution_tests {
     #[test]
     fn agrees_with_worktree_manager_worktree_path_for_worker_configured_override() {
         let sandbox = tempfile::tempdir().unwrap();
-        let repo_root = sandbox.path().join("myrepo");
+        let repo_root = sandbox.path().canonicalize().unwrap().join("myrepo");
         std::fs::create_dir_all(&repo_root).unwrap();
         git(&repo_root, &["init", "-q", "-b", "main"]);
         let cas_root = repo_root.join(".cas");

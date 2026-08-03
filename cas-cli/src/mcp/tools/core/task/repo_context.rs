@@ -1009,7 +1009,8 @@ mod tests {
     #[test]
     fn binding_cli_identity_rejects_symlinks_nested_paths_and_linked_worktrees() {
         let dir = tempfile::TempDir::new().unwrap();
-        let main = dir.path().join("main");
+        let root = dir.path().canonicalize().unwrap();
+        let main = root.join("main");
         std::fs::create_dir(&main).unwrap();
         git(&main, &["init", "-q", "-b", "main"]);
         git(
@@ -1017,10 +1018,10 @@ mod tests {
             &["remote", "add", "origin", "git@github.com:org/shared.git"],
         );
         std::fs::create_dir(main.join("nested")).unwrap();
-        std::os::unix::fs::symlink(&main, dir.path().join("alias")).unwrap();
-        let parent_alias = dir.path().join("parent-alias");
-        std::os::unix::fs::symlink(dir.path(), &parent_alias).unwrap();
-        assert!(binding_identity_for_path(&dir.path().join("alias")).is_err());
+        std::os::unix::fs::symlink(&main, root.join("alias")).unwrap();
+        let parent_alias = root.join("parent-alias");
+        std::os::unix::fs::symlink(&root, &parent_alias).unwrap();
+        assert!(binding_identity_for_path(&root.join("alias")).is_err());
         assert!(binding_identity_for_path(&parent_alias.join("main")).is_err());
         assert!(binding_identity_for_path(&main.join("nested")).is_err());
 
@@ -1039,7 +1040,7 @@ mod tests {
                 "base",
             ],
         );
-        let linked = dir.path().join("linked");
+        let linked = root.join("linked");
         git(
             &main,
             &[

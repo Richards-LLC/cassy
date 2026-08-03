@@ -717,6 +717,9 @@ mod tests {
         assert_eq!(report.caches[0].bytes, 8);
     }
 
+    // Process liveness is read from Linux `/proc`; other platforms
+    // intentionally fail closed and cannot exercise these dispositions.
+    #[cfg(target_os = "linux")]
     #[test]
     fn live_and_recent_caches_are_fail_closed() {
         let temp = tempfile::tempdir().unwrap();
@@ -763,7 +766,8 @@ mod tests {
         assert!(worker.join("target/artifact").exists());
     }
 
-    #[cfg(unix)]
+    // The implementation discovers process cwd through Linux `/proc`.
+    #[cfg(target_os = "linux")]
     #[test]
     fn os_process_cwd_marks_cache_live_without_registry_evidence() {
         let temp = tempfile::tempdir().unwrap();
@@ -797,6 +801,9 @@ mod tests {
         assert!(worker.join("target/artifact").exists());
     }
 
+    // Non-Linux hosts intentionally treat unknown process liveness as live,
+    // so destructive cleanup cannot be asserted safely there.
+    #[cfg(target_os = "linux")]
     #[test]
     fn cleanup_removes_only_target_and_resumes_interrupted_quarantine() {
         let temp = tempfile::tempdir().unwrap();

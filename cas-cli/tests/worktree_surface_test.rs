@@ -62,7 +62,7 @@ struct GitRepo {
 impl GitRepo {
     fn new() -> Self {
         let temp = TempDir::new().expect("TempDir");
-        let root = temp.path().to_path_buf();
+        let root = temp.path().canonicalize().expect("canonical repo fixture");
 
         let run = |args: &[&str]| {
             let out = Command::new("git")

@@ -2179,6 +2179,48 @@ mod tests {
         assert_eq!(removed, 0, "a read row must never be retracted");
     }
 
+    #[test]
+    fn cas06ca_epic_completion_row_carries_identity_and_retracts_only_on_positive_staleness() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = manager_in(tmp.path(), "t_epic_completion_prune");
+        std::fs::create_dir_all(&mgr.inboxes_dir).unwrap();
+
+        mgr.write_to_inbox_for_epic_completion(
+            "supervisor",
+            DIRECTOR_AGENT_NAME,
+            "All subtasks of cas-epic are now closed.",
+            None,
+            None,
+            "cas-epic",
+        )
+        .unwrap();
+
+        let inbox_path = mgr.inboxes_dir.join("supervisor.json");
+        let inbox: Vec<InboxMessage> =
+            serde_json::from_str(&std::fs::read_to_string(&inbox_path).unwrap()).unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].retract_epic.as_deref(), Some("cas-epic"));
+        assert_eq!(inbox[0].retract_worker, None);
+        assert_eq!(inbox[0].retract_task, None);
+
+        let removed = mgr
+            .prune_stale_epic_completion_alerts("supervisor", |_epic_id| false)
+            .unwrap();
+        assert_eq!(
+            removed, 0,
+            "current or unverifiable epic state must preserve the delivered row"
+        );
+
+        let removed = mgr
+            .prune_stale_epic_completion_alerts("supervisor", |epic_id| epic_id == "cas-epic")
+            .unwrap();
+        assert_eq!(removed, 1, "positive stale evidence must retract the unread row");
+
+        let inbox: Vec<InboxMessage> =
+            serde_json::from_str(&std::fs::read_to_string(&inbox_path).unwrap()).unwrap();
+        assert!(inbox.is_empty());
+    }
+
     /// Missing inbox file: `prune_stale_merge_alerts` returns `Ok(0)`.
     #[test]
     fn prune_stale_merge_alerts_missing_inbox_is_a_noop() {

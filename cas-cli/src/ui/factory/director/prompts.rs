@@ -4950,6 +4950,117 @@ mod tests {
         assert!(prompt.text.contains("task action=close id=epic-456"));
     }
 
+    fn cas06ca_epic_summary(status: TaskStatus) -> TaskSummary {
+        TaskSummary {
+            id: "cas-epic".to_string(),
+            title: "Epic completion currency".to_string(),
+            status,
+            priority: Priority::HIGH,
+            assignee: None,
+            task_type: TaskType::Epic,
+            epic: None,
+            branch: Some("epic/currency".to_string()),
+            updated_at: None,
+            epic_verification_owner: Some("supervisor".to_string()),
+        }
+    }
+
+    fn cas06ca_reopened_subtask() -> TaskSummary {
+        TaskSummary {
+            id: "cas-child".to_string(),
+            title: "Reopened work".to_string(),
+            status: TaskStatus::Open,
+            priority: Priority::HIGH,
+            assignee: None,
+            task_type: TaskType::Bug,
+            epic: Some("cas-epic".to_string()),
+            branch: None,
+            updated_at: None,
+            epic_verification_owner: None,
+        }
+    }
+
+    #[test]
+    fn cas06ca_epic_completion_revalidation_uses_authoritative_current_state() {
+        let event = DirectorEvent::EpicAllSubtasksClosed {
+            epic_id: "cas-epic".to_string(),
+            epic_title: "Epic completion currency".to_string(),
+        };
+
+        let mut current = make_data(0);
+        current.epic_tasks = vec![cas06ca_epic_summary(TaskStatus::InProgress)];
+        assert!(
+            revalidate_event_for_delivery_with_focus(&event, &current, "supervisor", None)
+                .is_some(),
+            "a still-open epic with no active subtasks remains actionable"
+        );
+
+        let mut closed = current.clone();
+        closed.epic_tasks[0].status = TaskStatus::Closed;
+        assert!(
+            revalidate_event_for_delivery_with_focus(&event, &closed, "supervisor", None).is_none(),
+            "an epic closed after detection must suppress its delayed completion prompt"
+        );
+
+        let mut reopened = current.clone();
+        reopened.ready_tasks.push(cas06ca_reopened_subtask());
+        assert!(
+            revalidate_event_for_delivery_with_focus(&event, &reopened, "supervisor", None)
+                .is_none(),
+            "a newly actionable subtask makes the old all-subtasks-closed occurrence stale"
+        );
+
+        let missing = make_data(0);
+        assert!(
+            revalidate_event_for_delivery_with_focus(&event, &missing, "supervisor", None)
+                .is_some(),
+            "missing epic state is unverifiable and must deliver, never suppress"
+        );
+    }
+
+    #[test]
+    fn cas06ca_last_mile_recheck_uses_the_same_epic_identity() {
+        let event = DirectorEvent::EpicAllSubtasksClosed {
+            epic_id: "cas-epic".to_string(),
+            epic_title: "Epic completion currency".to_string(),
+        };
+        let mut current = make_data(0);
+        current.epic_tasks = vec![cas06ca_epic_summary(TaskStatus::InProgress)];
+        let prompt = generate_prompt(
+            &event,
+            &current,
+            &current,
+            "supervisor",
+            &default_config(),
+            codex(),
+            codex(),
+            &HashSet::new(),
+            None,
+        )
+        .expect("current epic completion should render");
+
+        assert!(prompt_is_still_deliverable(&prompt, &current));
+
+        let mut closed = current.clone();
+        closed.epic_tasks[0].status = TaskStatus::Closed;
+        assert!(
+            !prompt_is_still_deliverable(&prompt, &closed),
+            "the epic id carried by the prompt must stop close-before-transport delivery"
+        );
+
+        let mut reopened = current.clone();
+        reopened.ready_tasks.push(cas06ca_reopened_subtask());
+        assert!(
+            !prompt_is_still_deliverable(&prompt, &reopened),
+            "the same epic id must stop delivery if a subtask reopens"
+        );
+
+        assert!(
+            prompt_is_still_deliverable(&prompt, &make_data(0)),
+            "unavailable epic state must preserve the prompt"
+        );
+    }
+
     /// cas-6883: send-time freshness re-check for MERGE REQUIRED alerts.
     /// Uses real git repos (same style as `close_ops.rs`'s
     /// `run_factory_branch_merge_gate` tests) since

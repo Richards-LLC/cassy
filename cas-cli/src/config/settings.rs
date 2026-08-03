@@ -1,6 +1,19 @@
 use cas_factory::AutoPromptConfig;
 use serde::{Deserialize, Serialize};
 
+/// Project-scoped GitHub issue intake configuration. Lives at `[issues]` in
+/// `.cas/config.toml`.
+///
+/// `repo` is deliberately optional: CAS installations do not share one
+/// upstream repository, and inferring the current git origin would route CAS
+/// bugs into a downstream consumer's issue tracker.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IssuesConfig {
+    /// GitHub repository in `owner/repo` form used by CAS-system bug filing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+}
+
 /// Project-scoped configuration. Lives at `[project]` in `.cas/config.toml`.
 ///
 /// `canonical_id` is the project's canonical slug used to scope cloud-sync

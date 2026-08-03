@@ -41,20 +41,30 @@ fn assert_config_driven_issue_intake(harness: SupervisorCli, content: &str) {
         content.contains("not installed") && content.contains("not authenticated"),
         "{harness:?} filing directive must preserve reports when gh is missing or unauthenticated"
     );
+    let installation_specific_repo = ["pippenz", "cas"].join("/");
     assert!(
-        !content.contains("pippenz/cas"),
+        !content.contains(&installation_specific_repo),
         "{harness:?} filing directive must never hardcode one user's repository"
     );
 }
 
 #[test]
 fn every_shipped_harness_embeds_and_syncs_config_driven_issue_intake() {
+    let mut canonical_directive = None;
     for harness in SHIPPED_HARNESSES {
         let embedded = skill_catalog_for_harness(harness)
             .iter()
             .find(|file| file.path == DIRECTIVE_PATH)
             .unwrap_or_else(|| panic!("{harness:?} catalog is missing {DIRECTIVE_PATH}"));
         assert_config_driven_issue_intake(harness, embedded.content);
+        if let Some(canonical) = canonical_directive {
+            assert_eq!(
+                embedded.content, canonical,
+                "{harness:?} filing directive drifted from the other shipped harnesses"
+            );
+        } else {
+            canonical_directive = Some(embedded.content);
+        }
 
         // A fresh, otherwise empty target models a downstream project that has
         // no cas-src checkout. Sync must still render the complete directive.

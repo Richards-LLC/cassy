@@ -452,7 +452,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Coordination operations combining agent, factory, and worktree management. Agent actions: register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message, message_ack, message_status. Factory actions: spawn_workers, shutdown_workers, worker_status, worker_activity, clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, epic_status (per-child branch merge state for an epic), focus_epic, remind, remind_list, remind_cancel. Worktree actions: worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status. Only available in factory mode. For shutdown_workers, supervisor should verify worktree cleanliness/policy before issuing shutdown."
+        description = "Coordination operations combining agent, factory, and worktree management. Agent actions: register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message, message_ack, message_status. Factory actions: spawn_workers, shutdown_workers, hold_worker, release_worker, worker_status, worker_activity, clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, epic_status (per-child branch merge state for an epic), focus_epic, remind, remind_list, remind_cancel. Worktree actions: worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status. Only available in factory mode. For shutdown_workers, supervisor should verify worktree cleanliness/policy before issuing shutdown."
     )]
     pub async fn coordination(
         &self,
@@ -512,7 +512,8 @@ impl CasService {
                 }
 
                 // ---- Factory domain ----
-                "spawn_workers" | "shutdown_workers" | "worker_status" | "worker_activity"
+                "spawn_workers" | "shutdown_workers" | "hold_worker" | "release_worker"
+                | "worker_status" | "worker_activity"
                 | "clear_context" | "my_context" | "sync_all_workers" | "gc_report"
                 | "gc_cleanup" | "epic_status" | "focus_epic" | "remind" | "remind_list"
                 | "remind_cancel" => {
@@ -520,6 +521,8 @@ impl CasService {
                     match action.as_str() {
                         "spawn_workers" => this.factory_spawn_workers(factory_req).await,
                         "shutdown_workers" => this.factory_shutdown_workers(factory_req).await,
+                        "hold_worker" => this.factory_set_worker_hold(factory_req, true).await,
+                        "release_worker" => this.factory_set_worker_hold(factory_req, false).await,
                         "worker_status" => this.factory_worker_status(factory_req).await,
                         "clear_context" => this.factory_clear_context(factory_req).await,
                         "my_context" => this.factory_my_context(factory_req).await,
@@ -620,7 +623,7 @@ impl CasService {
                     format!(
                         "Unknown coordination action: '{action}'. Valid actions:\n\
                          Agent: register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message, message_ack, message_status\n\
-                         Factory: spawn_workers, shutdown_workers, worker_status, worker_activity, clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, epic_status, focus_epic, remind, remind_list, remind_cancel\n\
+                         Factory: spawn_workers, shutdown_workers, hold_worker, release_worker, worker_status, worker_activity, clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, epic_status, focus_epic, remind, remind_list, remind_cancel\n\
                          Worktree: worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status"
                     ),
                 )),
@@ -647,6 +650,8 @@ impl CasService {
                 action.as_str(),
                 "spawn_workers"
                     | "shutdown_workers"
+                    | "hold_worker"
+                    | "release_worker"
                     | "worker_status"
                     | "worker_activity"
                     | "clear_context"
@@ -1082,6 +1087,8 @@ impl CasService {
         let result = match action.as_str() {
             "spawn_workers" => self.factory_spawn_workers(req).await,
             "shutdown_workers" => self.factory_shutdown_workers(req).await,
+            "hold_worker" => self.factory_set_worker_hold(req, true).await,
+            "release_worker" => self.factory_set_worker_hold(req, false).await,
             "worker_status" => self.factory_worker_status(req).await,
             "clear_context" => self.factory_clear_context(req).await,
             "my_context" => self.factory_my_context(req).await,

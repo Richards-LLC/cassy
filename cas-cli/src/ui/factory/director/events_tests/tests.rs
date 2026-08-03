@@ -823,7 +823,12 @@ fn test_idle_events_suppressed_for_removed_workers() {
     detector.initialize(&data1);
 
     // Shut down swift-fox
+    detector.mark_worker_hold("swift-fox");
     detector.remove_worker("swift-fox");
+    assert!(
+        !detector.is_worker_held("swift-fox"),
+        "removing a worker must also clear its in-memory hold"
+    );
 
     // New state: both workers idle (swift-fox's agent might still linger in data)
     let data2 = DirectorData {
@@ -3021,6 +3026,35 @@ fn test_09d0_held_worker_never_flags_idle() {
         }
     }
     assert!(!saw_idle, "a held worker must never emit WorkerIdle");
+}
+
+/// The same production read gate also suppresses stall auto-nudges. A hold is
+/// a deliberate supervisor pause, so neither idle nor stale-activity signals
+/// should contact the worker until release.
+#[test]
+fn test_60dd_held_worker_never_flags_stalled() {
+    let base_utc = chrono::Utc::now();
+    let mut detector =
+        DirectorEventDetector::new(vec!["lively-crow".to_string()], "supervisor".to_string());
+    detector.set_stall_threshold_secs(300);
+    detector.mark_worker_hold("lively-crow");
+    let data = stalled_data_for(make_agent_working_stalled(
+        "agent-1",
+        "lively-crow",
+        "cas-held",
+        5,
+        Some(900),
+        base_utc,
+    ));
+    detector.initialize(&data);
+
+    let events = detector.detect_changes_at(&data, None, std::time::Instant::now(), base_utc);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, DirectorEvent::WorkerStalled { .. })),
+        "a held worker must not receive stall nudges: {events:?}"
+    );
 }
 
 /// Clearing a hold resumes normal idle detection on subsequent ticks.

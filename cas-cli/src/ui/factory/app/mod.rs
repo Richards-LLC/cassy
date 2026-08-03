@@ -986,6 +986,7 @@ impl FactoryApp {
         // Sync session_id → pane_name mappings from agent store
         self.sync_session_mappings();
         self.apply_session_metadata_focus();
+        self.apply_session_metadata_worker_holds();
 
         // cas-e98e AC3: drop phantom worker panes when registry says the
         // worker is no longer supervision-live (Shutdown, or Stale/dead with
@@ -1049,7 +1050,7 @@ impl FactoryApp {
                 "cas-e98e: dropping phantom worker pane (registry non-live)"
             );
             self.worker_names.retain(|n| n != name);
-            self.event_detector.remove_worker(name);
+            self.remove_worker_from_event_detector(name);
         }
 
         self.pane_grid = PaneGrid::new(&self.worker_names, &self.supervisor_name, self.is_tabbed);
@@ -1161,6 +1162,47 @@ impl FactoryApp {
             .map(|_| focus.source.unwrap_or(EpicFocusSource::Inference));
         self.epic_branch = epic_branch_for_state(&self.director_data, &epic_state);
         self.epic_state = epic_state;
+    }
+
+    /// Reconcile the durable, session-scoped supervisor hold set into the
+    /// director's live idle/stall gate. A transient metadata read failure is
+    /// deliberately a no-op: it must not silently release an existing hold.
+    fn apply_session_metadata_worker_holds(&mut self) {
+        let Some(session_name) = self.factory_session.as_deref() else {
+            return;
+        };
+        let Some(held_workers) = worker_holds_from_session_metadata_named(session_name) else {
+            return;
+        };
+
+        for worker in self.worker_names.clone() {
+            if held_workers.contains(&worker) && !self.event_detector.is_worker_held(&worker) {
+                self.event_detector.mark_worker_hold(&worker);
+            } else if !held_workers.contains(&worker)
+                && self.event_detector.is_worker_held(&worker)
+            {
+                self.event_detector.clear_worker_hold(&worker);
+            }
+        }
+    }
+
+    /// Remove a worker from the detector and its durable session hold set.
+    /// This prevents a later worker that reuses the same friendly name from
+    /// inheriting a hold it never received.
+    pub(crate) fn remove_worker_from_event_detector(&mut self, worker_name: &str) {
+        self.event_detector.remove_worker(worker_name);
+        let Some(session_name) = self.factory_session.as_deref() else {
+            return;
+        };
+        let path = metadata_path(session_name);
+        if let Err(error) = persist_session_metadata_worker_hold_at(&path, worker_name, false) {
+            tracing::warn!(
+                worker = %worker_name,
+                factory_session = %session_name,
+                error = %error,
+                "failed to clear removed worker from durable hold set"
+            );
+        }
     }
 
     /// Get the focused pane kind
@@ -1442,6 +1484,7 @@ impl FactoryApp {
         }
 
         self.factory_session = Some(name);
+        self.apply_session_metadata_worker_holds();
         for worker in self.worker_names.clone() {
             self.track_worker_process_group(&worker);
         }
@@ -2027,6 +2070,34 @@ pub(crate) fn persist_session_metadata_pinned_epic_id_at(
     })
 }
 
+/// Read the worker hold set for one factory session.
+///
+/// `None` distinguishes unavailable/malformed metadata from an intentionally
+/// empty set, allowing the live detector to preserve holds across a transient
+/// read failure rather than releasing them accidentally.
+pub(crate) fn worker_holds_from_session_metadata_named(
+    session_name: &str,
+) -> Option<HashSet<String>> {
+    let data = fs::read_to_string(metadata_path(session_name)).ok()?;
+    let metadata = serde_json::from_str::<SessionMetadata>(&data).ok()?;
+    Some(metadata.held_workers.into_iter().collect())
+}
+
+pub(crate) fn persist_session_metadata_worker_hold_at(
+    path: &std::path::Path,
+    worker_name: &str,
+    held: bool,
+) -> std::io::Result<()> {
+    update_session_metadata_at(path, |metadata| {
+        metadata.held_workers.retain(|name| name != worker_name);
+        if held {
+            metadata.held_workers.push(worker_name.to_string());
+        }
+        metadata.held_workers.sort();
+        metadata.held_workers.dedup();
+    })
+}
+
 pub(crate) fn update_session_metadata_at(
     path: &std::path::Path,
     mutator: impl FnOnce(&mut SessionMetadata),
@@ -2049,13 +2120,23 @@ pub(crate) fn update_session_metadata_at(
         .open(&lock_path)?;
     lock_file.lock_exclusive()?;
 
-    let data = fs::read_to_string(path)?;
-    let mut metadata = serde_json::from_str::<SessionMetadata>(&data)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    mutator(&mut metadata);
-    let json = serde_json::to_string_pretty(&metadata)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    atomic_write_session_metadata(path, &json)
+    let result = (|| {
+        let data = fs::read_to_string(path)?;
+        let mut metadata = serde_json::from_str::<SessionMetadata>(&data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        mutator(&mut metadata);
+        let json = serde_json::to_string_pretty(&metadata)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        atomic_write_session_metadata(path, &json)
+    })();
+    // cas-cef2: release explicitly so a forked child cannot extend this
+    // metadata critical section merely by inheriting the descriptor.
+    let unlock_result = FileExt::unlock(&lock_file);
+    match (result, unlock_result) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+        (Ok(()), Err(error)) => Err(error),
+    }
 }
 
 fn atomic_write_session_metadata(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
@@ -2936,6 +3017,7 @@ mod tests {
                 workers: Vec::new(),
                 epic_id: None,
                 pinned_epic_id: None,
+                held_workers: Vec::new(),
                 project_dir: None,
                 team_name: None,
             }
@@ -2992,6 +3074,57 @@ mod tests {
                     .with_timezone(&chrono::Utc)
             ),
             "valid RFC3339 created_at must populate session_created_at"
+        );
+    }
+
+    /// cas-60dd: exercise the production bridge between the supervisor's
+    /// persisted control state and the detector's live hold gate. Direct
+    /// detector tests alone cannot prove the MCP-written state is consumed.
+    #[test]
+    fn session_worker_holds_reconcile_into_detector_and_clear_on_removal() {
+        let home = tempfile::tempdir().unwrap();
+        let _guard = TestEnvGuard::with_vars(&[("HOME", home.path().to_str().unwrap())]);
+        let session = "worker-hold-reconcile";
+        let worker = "lively-crow";
+        let path = crate::ui::factory::session::metadata_path(session);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let metadata = crate::ui::factory::session::create_metadata(
+            session,
+            1,
+            "supervisor",
+            &[worker.to_string()],
+            None,
+            None,
+            None,
+        );
+        std::fs::write(&path, serde_json::to_string_pretty(&metadata).unwrap()).unwrap();
+        super::persist_session_metadata_worker_hold_at(&path, worker, true).unwrap();
+
+        let mut app = super::FactoryApp::for_test();
+        app.worker_names = vec![worker.to_string()];
+        app.event_detector.add_worker(worker.to_string());
+        app.set_factory_session(session.to_string());
+        assert!(
+            app.event_detector.is_worker_held(worker),
+            "set_factory_session must rehydrate a hold before the first refresh tick"
+        );
+
+        super::persist_session_metadata_worker_hold_at(&path, worker, false).unwrap();
+        app.apply_session_metadata_worker_holds();
+        assert!(
+            !app.event_detector.is_worker_held(worker),
+            "release state must reconcile into the live gate"
+        );
+
+        super::persist_session_metadata_worker_hold_at(&path, worker, true).unwrap();
+        app.apply_session_metadata_worker_holds();
+        app.remove_worker_from_event_detector(worker);
+        assert!(!app.event_detector.is_worker_held(worker));
+        let metadata: crate::ui::factory::protocol::SessionMetadata =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(
+            metadata.held_workers.is_empty(),
+            "worker removal must clear durable state so a reused name cannot inherit it"
         );
     }
 

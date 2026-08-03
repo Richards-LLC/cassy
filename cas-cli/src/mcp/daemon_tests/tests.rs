@@ -185,8 +185,9 @@ async fn embedded_daemon_cloud_cycle_drains_team_queue() {
     const TEAM_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
     let server = MockServer::start().await;
+    let personal_pull_path = ["/api/sync", "pull"].join("/");
     Mock::given(method("GET"))
-        .and(path("/api/sync/pull"))
+        .and(path(personal_pull_path))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "entries": [], "tasks": [], "rules": [], "skills": [],
             "specs": [], "events": [], "prompts": [],

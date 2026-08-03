@@ -286,15 +286,15 @@ fn pid_alive_self_is_live() {
 fn pid_alive_dead_child_is_dead() {
     // Spawn a short-lived child, wait for it to exit, then confirm its PID
     // is reported dead. `waitpid`/`Child::wait` returning Ok guarantees the
-    // child has been reaped — on Linux the kernel removes the task_struct
-    // synchronously at reap time, so the very next `kill(pid, 0)` sees
+    // child has been reaped — the kernel removes the process synchronously
+    // at reap time, so the very next `kill(pid, 0)` sees
     // ESRCH. No poll loop is needed (cas-8240: the prior 200ms poll was
     // defensive against a kernel behavior that does not actually occur on
-    // Linux post-reap; the stronger synchronous assertion catches
+    // post-reap; the stronger synchronous assertion catches
     // regressions a forgiving poll would mask).
-    let mut child = std::process::Command::new("/bin/true")
+    let mut child = std::process::Command::new("true")
         .spawn()
-        .expect("spawn /bin/true");
+        .expect("spawn true from PATH");
     let pid = child.id();
     child.wait().expect("wait for child");
     assert!(

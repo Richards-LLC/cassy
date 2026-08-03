@@ -1316,7 +1316,7 @@ mod spawn_base_tests {
     #[test]
     fn daemon_started_before_nested_git_init_rechecks_repo_context_per_spawn() {
         let tmp = TempDir::new().unwrap();
-        let parent = tmp.path().join("parent");
+        let parent = tmp.path().canonicalize().unwrap().join("parent");
         std::fs::create_dir(&parent).unwrap();
         init_repo(&parent);
         let project = parent.join("new-project");

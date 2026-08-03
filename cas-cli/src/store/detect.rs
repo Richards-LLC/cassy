@@ -705,8 +705,9 @@ mod tests {
         // /main_repo/.git/worktrees/wt1/  <- Worktree git data
         // /worktrees/wt1/.git    <- File pointing to main repo
         let temp = TempDir::new().unwrap();
-        let main_repo = temp.path().join("main_repo");
-        let worktree = temp.path().join("worktrees/wt1");
+        let temp_root = temp.path().canonicalize().unwrap();
+        let main_repo = temp_root.join("main_repo");
+        let worktree = temp_root.join("worktrees/wt1");
 
         // Create main repo with .cas
         std::fs::create_dir_all(&main_repo).unwrap();
@@ -737,8 +738,9 @@ mod tests {
     #[test]
     fn test_find_main_repo_from_worktree() {
         let temp = TempDir::new().unwrap();
-        let main_repo = temp.path().join("main_repo");
-        let worktree = temp.path().join("worktrees/wt1");
+        let temp_root = temp.path().canonicalize().unwrap();
+        let main_repo = temp_root.join("main_repo");
+        let worktree = temp_root.join("worktrees/wt1");
 
         // Create main repo's .git directory and worktrees subdir
         let git_dir = main_repo.join(".git");
@@ -756,13 +758,13 @@ mod tests {
         assert_eq!(found, Some(main_repo));
 
         // Should return None for regular git repo
-        let regular_repo = temp.path().join("regular_repo");
+        let regular_repo = temp_root.join("regular_repo");
         std::fs::create_dir_all(regular_repo.join(".git")).unwrap();
         let found = find_main_repo_from_worktree(&regular_repo);
         assert!(found.is_none());
 
         // Should return None for non-git directory
-        let non_git = temp.path().join("non_git");
+        let non_git = temp_root.join("non_git");
         std::fs::create_dir_all(&non_git).unwrap();
         let found = find_main_repo_from_worktree(&non_git);
         assert!(found.is_none());

@@ -2128,6 +2128,9 @@ async fn test_gc_report_shows_pending_prompts() {
     );
 }
 
+// Target-cache process liveness is implemented with Linux `/proc`; other
+// platforms intentionally fail closed and cannot select a cache for cleanup.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
     let env = FactoryTestEnv::new();

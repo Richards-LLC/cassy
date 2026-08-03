@@ -76,13 +76,13 @@ fn nonexistent_file_outside_project_is_not_within() {
 #[test]
 fn nonexistent_file_inside_project_is_within() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let project_root = tmp.path();
+    let project_root = tmp.path().canonicalize().expect("canonical project root");
 
     // File that doesn't exist yet, but its path is inside the project.
     let file = project_root.join("src").join("lib.rs");
 
     assert!(
-        is_file_within_project(&file, project_root),
+        is_file_within_project(&file, &project_root),
         "non-existent file whose path is under project root must be within the project"
     );
 }

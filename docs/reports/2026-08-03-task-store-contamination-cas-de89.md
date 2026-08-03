@@ -64,6 +64,13 @@ Approximately 18 additional stores contained no tasks. The identical 1,525-ID
 overlap in cas-src, tmp-bugrepro, and a disposable demo store rules out an
 isolated restore error. Every heavily used project is affected.
 
+The duplicated cas-src tasks are sharply bounded by creation date: 665 were
+created in March 2026, 859 in April, and one in July. In cutoff terms, 1,524 of
+1,525 were created before push stopped on 2026-05-12; one was created on or
+after that date. This is a systemic **historical event**, not evidence of an
+ongoing leak. Its residue is widespread, but the unscoped pull window closed in
+May and the later local-only pull apply fix closed the feedback loop in July.
+
 ## Why the pending queue is unsafe
 
 Until commit `0f2f7fc4` (2026-07-09), pull apply opened the normal syncing task
@@ -105,15 +112,20 @@ should not be re-investigated during recovery.
 
 The cloud is the only system that recorded `project_canonical_id`, because the
 client adds it to the push envelope at send time. Cloud provenance ends when
-push stopped on 2026-05-12, but it may cover a substantial share of the older
-1,525 duplicated tasks. A recovery export must be obtained by an authorized
-operator after credential rotation; this report does not query the service.
-For every relevant task ID, the export must return the owning account/team,
-`project_canonical_id`, task body or stable semantic-body hash, cloud creation
-and update times, deletion/tombstone state, and the server-side receipt or
-version identifying the accepted push. Results must be grouped by project and
-must expose IDs that appear under more than one cloud project rather than
-silently choosing one.
+push stopped on 2026-05-12, but 1,524 of the 1,525 duplicated tasks predate that
+cutoff. An authorized recovery query is therefore expected to cover 99.9% of
+the affected IDs, leaving one known post-cutoff exception for manual review. A
+recovery export must be obtained by an authorized operator after credential
+rotation; this report does not query the service.
+
+At minimum, the recovery query must return `task_id` and
+`project_canonical_id`. It should also return the owning account/team, cloud
+`created_at` and `updated_at`, task body or stable semantic-body hash,
+deletion/tombstone state, and the server-side receipt or version identifying
+the accepted push. `updated_at` plus a semantic hash lets recovery distinguish
+an identical duplicate from a local copy that later diverged. Results must be
+grouped by project and must expose IDs that appear under more than one cloud
+project rather than silently choosing one.
 
 Tasks not covered by cloud provenance require content-based heuristics followed
 by human review. Heuristics may rank likely owners using product names, paths,
@@ -134,30 +146,42 @@ machines.
 2. **Retain the pull protections.** The scoped request, fail-closed entity
    filter, and local-only pull-apply stores are prerequisites. The regression
    in `cas-cli/tests/pull_scoping_regression_test.rs` must remain green.
-3. **Snapshot before classification.** With CAS stopped, create verified,
+3. **Recover cloud provenance for the pre-cutoff set.** After credential
+   rotation and explicit user authorization, export the
+   `task_id -> project_canonical_id` mapping and divergence fields specified
+   above for the 1,524 duplicated tasks created before 2026-05-12. This is a
+   read/export operation, not a sync or drain.
+4. **Hand-adjudicate the one post-cutoff task.** Cloud cannot be assumed to
+   know its origin. Use content-based evidence and explicit user review; if
+   ownership remains ambiguous, preserve every copy and make no queue decision
+   for that ID.
+5. **Snapshot before local remediation.** With CAS stopped, create verified,
    read-only copies of every database and its WAL/SHM state using SQLite's
    online backup API or a checkpointed copy procedure. Record checksums. All
    inventory and comparison work runs against copies, never the live files.
-4. **Build an ownership and conflict manifest.** Inventory each task ID across
+6. **Build an ownership and conflict manifest.** Inventory each task ID across
    global, every project store, cloud exports grouped by project, and queue
    payloads. Record locations, semantic-body hashes, timestamps, operations,
    and queue/team IDs. Cloud push receipts are the authoritative source where
    available. Uncovered IDs require heuristic ranking and human approval. Do
    not include sensitive task text in a public report.
-5. **Classify the queue before enabling its drain.** Upsert payloads may be
+7. **Classify the queue before enabling its drain.** Upsert payloads may be
    compared directly with the manifest. Deletes require ID-based ownership.
    Quarantine every row whose ownership is absent, ambiguous, or inconsistent
    with the queue's current project; no timestamp-based exemption is allowed.
-6. **Resolve database copies only after explicit user approval.** Produce a
+   Because 1,524 duplicates were created by April, exact-body comparison
+   against cloud and queue payloads should classify most unchanged rows without
+   judgment; any mismatch remains a human-reviewed conflict.
+8. **Resolve database copies only after explicit user approval.** Produce a
    dry-run plan and new verified backups. Apply changes per store in a
    transaction, then run integrity checks and compare counts/hashes against the
    approved manifest. The implementation of this repair is a separate task.
-7. **Deploy the drain fix only after stores and queue are safe.** First deploy
+9. **Deploy the drain fix only after stores and queue are safe.** First deploy
    the already-landed pull/feedback-loop protections and the approved isolation
    remediation. Then deploy cas-8248. Flush only rows explicitly classified for
    that project, in bounded batches with retry/error observation.
-8. **Verify propagation before normal operation.** Confirm cloud counts and a
-   clean second-machine pull for each project before lifting the hold.
+10. **Verify propagation before normal operation.** Confirm cloud counts and a
+    clean second-machine pull for each project before lifting the hold.
 
 At present, **flush the queue has no safe automated form**. The 3,245 rows must
 stay in place and the affected host must remain on its pre-cas-8248 binary until

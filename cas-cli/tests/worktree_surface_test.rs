@@ -2060,6 +2060,133 @@ async fn test_worktree_merge_uses_assignee_epic_when_no_task_id_cas_0b32() {
     );
 }
 
+/// cas-b86e: a stale session focus is a TUI attention hint, never merge
+/// authority. Reproduce the live incident: the worker finished a task in epic
+/// A, was reassigned to a standalone task, epic A was closed, and the session
+/// remained focused on A. Explicit `allow_trunk=true` must merge the worker's
+/// new commits to trunk rather than contaminating the closed epic branch.
+#[tokio::test]
+async fn test_worktree_merge_reassignment_ignores_closed_focused_epic_and_honors_trunk() {
+    let repo = GitRepo::new();
+    let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
+    disable_system_a(&cas_root);
+
+    Command::new("git")
+        .args(["branch", "epic/completed-a"])
+        .current_dir(&repo.root)
+        .output()
+        .unwrap();
+
+    let task_store = open_task_store(&cas_root).expect("open_task_store");
+    let mut epic = Task::new("epic-a".to_string(), "Completed epic A".to_string());
+    epic.task_type = TaskType::Epic;
+    epic.branch = Some("epic/completed-a".to_string());
+    task_store.add(&epic).expect("add epic A");
+
+    let mut old_task = Task::new("task-in-a".to_string(), "Earlier epic task".to_string());
+    old_task.assignee = Some("reassigned-worker".to_string());
+    old_task.status = TaskStatus::Closed;
+    task_store
+        .create_atomic(&old_task, &[], Some(&epic.id), None)
+        .expect("create completed task under epic A");
+
+    epic.status = TaskStatus::Closed;
+    task_store.update(&epic).expect("close epic A");
+
+    let mut current_task = Task::new(
+        "standalone-current".to_string(),
+        "Current standalone task".to_string(),
+    );
+    current_task.assignee = Some("reassigned-worker".to_string());
+    current_task.status = TaskStatus::InProgress;
+    task_store
+        .add(&current_task)
+        .expect("add current standalone task");
+
+    let session = "test-reassignment-focus-b86e";
+    let home = TempDir::new().expect("home");
+    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _cwd = CwdGuard::enter(&repo.root);
+    let prev_session = std::env::var("CAS_FACTORY_SESSION").ok();
+    let prev_home = std::env::var("HOME").ok();
+    // SAFETY: exclusive merge_cwd_lock serializes env mutation in this file.
+    unsafe {
+        std::env::set_var("CAS_FACTORY_SESSION", session);
+        std::env::set_var("HOME", home.path());
+    }
+    let meta_path = cas::ui::factory::metadata_path(session);
+    std::fs::create_dir_all(meta_path.parent().expect("metadata parent")).unwrap();
+    let workers = vec!["reassigned-worker".to_string()];
+    let mut meta = cas::ui::factory::create_metadata(
+        session,
+        1,
+        "supervisor",
+        &workers,
+        None,
+        Some(repo.root.to_str().unwrap()),
+        None,
+    );
+    // Seed directly to model a focus that was valid before epic A closed.
+    meta.pinned_epic_id = Some(epic.id.clone());
+    std::fs::write(
+        &meta_path,
+        serde_json::to_string_pretty(&meta).expect("serialize metadata"),
+    )
+    .expect("write stale session focus");
+
+    let wt_path = cas_root.join("worktrees").join("reassigned-worker");
+    repo.add_worktree(&wt_path, "factory/reassigned-worker");
+    std::fs::write(wt_path.join("new-task-work.txt"), "new task work").unwrap();
+    run_git(&["add", "."], &wt_path);
+    run_git(&["commit", "-m", "new standalone task work"], &wt_path);
+
+    let svc = make_service(cas_root);
+    let mut req = coord_req("worktree_merge");
+    req.id = Some("factory/reassigned-worker".to_string());
+    req.allow_trunk = Some(true);
+    let result = svc.coordination(Parameters(req)).await;
+
+    unsafe {
+        match prev_session {
+            Some(v) => std::env::set_var("CAS_FACTORY_SESSION", v),
+            None => std::env::remove_var("CAS_FACTORY_SESSION"),
+        }
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    let text = get_text(&result.expect("allow_trunk merge should succeed"));
+    assert!(
+        text.contains("to main") && text.contains("allow_trunk=true"),
+        "standalone task must resolve to explicitly-authorized trunk. Got:\n{text}"
+    );
+    assert!(
+        text.contains(&current_task.id),
+        "resolution reason must identify the current assignee task. Got:\n{text}"
+    );
+
+    let main_tree = Command::new("git")
+        .args(["ls-tree", "-r", "--name-only", "main"])
+        .current_dir(&repo.root)
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&main_tree.stdout).contains("new-task-work.txt"),
+        "trunk must contain the new task's commit"
+    );
+    let closed_epic_tree = Command::new("git")
+        .args(["ls-tree", "-r", "--name-only", "epic/completed-a"])
+        .current_dir(&repo.root)
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&closed_epic_tree.stdout).contains("new-task-work.txt"),
+        "closed epic A must not receive the reassigned worker's new commits"
+    );
+}
+
 /// cas-0b32 AC2: focused epic is honored when unambiguous (no assignee epic).
 #[tokio::test]
 async fn test_worktree_merge_uses_focused_epic_when_unambiguous_cas_0b32() {

@@ -1,3 +1,5 @@
+> Migrated to GitHub Issues: [#62](https://github.com/pippenz/cas/issues/62)
+
 # BUG: close path for a zero-diff spike in supervisor-review mode is a two-stage trap
 
 **Observed:** 2026-07-31, Penguinz factory session `Penguinz-proud-crane-49`, task cas-208b, cas 2.30.0. Project runs `[code_review] owner = "supervisor"`. Worker ran in **shared mode** (no worktree) in a main checkout carrying ~64 files of pre-existing prior-factory WIP. Task was a characterization-only spike: description mandated no commits; worker's fresh proof recorded `in_scope_git_diff=clean`.

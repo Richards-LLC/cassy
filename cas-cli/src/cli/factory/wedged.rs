@@ -1123,6 +1123,7 @@ pub(crate) fn decide_post_kill_action(verdict: &KillVerdict, death_confirmed_aft
 /// `daemon::parse_starttime_from_stat` (`comm` is parenthesized and may
 /// itself contain spaces/parens) — split on the LAST `)` before reading
 /// fields from the tail. Field 3 is the first field after the parens.
+#[cfg(target_os = "linux")]
 fn is_zombie_state(raw: &str) -> bool {
     let Some(last_paren) = raw.rfind(')') else {
         return false;
@@ -2827,6 +2828,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn is_zombie_state_parses_z_state_from_stat_line() {
         // Pure-function coverage independent of a real /proc round-trip.
         // Synthetic stat line: "pid (comm) state ppid ...".
@@ -2836,6 +2838,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn is_zombie_state_handles_comm_with_parens_and_spaces() {
         // comm can itself contain spaces/parens — must split on the LAST
         // `)`, same caveat as daemon::parse_starttime_from_stat.

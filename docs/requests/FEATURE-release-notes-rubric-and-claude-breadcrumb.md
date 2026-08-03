@@ -4,6 +4,8 @@ date: 2026-06-25
 priority: P2
 ---
 
+> Migrated to GitHub Issues: [#65](https://github.com/pippenz/cas/issues/65)
+
 # Feature Request: ship a release-notes / Slack-announcement rubric + a CAS-managed CLAUDE.md breadcrumb to it
 
 ## What we need

@@ -1,3 +1,5 @@
+> Migrated to GitHub Issues: [#60](https://github.com/pippenz/cas/issues/60)
+
 # BUG: `spawn_workers` receipt does not confirm worker liveness
 
 **Component:** factory spawn queue, MCP coordination API, factory daemon logging  

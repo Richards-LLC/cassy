@@ -155,6 +155,7 @@ fn current_num_threads() -> Option<u32> {
 /// `num_threads` is field 20 in the overall record (4th after `comm`), which
 /// is index 17 after the split since the trailing fields start at index 0 =
 /// field 3 (`state`).
+#[cfg(target_os = "linux")]
 fn parse_num_threads_from_proc_stat(data: &str) -> Option<u32> {
     let after_comm = data.rsplit_once(')')?.1.trim_start();
     // Index map (0-based, relative to after_comm):
@@ -1905,12 +1906,14 @@ mod tests {
     /// Fixture mirroring the shape of a real /proc/<pid>/stat line with
     /// `num_threads = 1`. Field 20 (num_threads) is the fourth numeric
     /// after the closing `)` in this layout.
+    #[cfg(target_os = "linux")]
     const PROC_STAT_FIXTURE_1_THREAD: &str = "12345 (cas) S 1 12345 12345 \
         0 -1 4194304 100 0 0 0 10 20 0 0 20 0 1 0 1000000 123456789 1024 \
         18446744073709551615 1 1 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 \
         0 0 0 0 0 0 0\n";
 
     /// Same shape but with `num_threads = 4`.
+    #[cfg(target_os = "linux")]
     const PROC_STAT_FIXTURE_4_THREADS: &str = "12345 (cas) S 1 12345 12345 \
         0 -1 4194304 100 0 0 0 10 20 0 0 20 0 4 0 1000000 123456789 1024 \
         18446744073709551615 1 1 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 \
@@ -1918,12 +1921,14 @@ mod tests {
 
     /// Fixture with a comm field containing spaces and inner parens,
     /// which must be handled by splitting on the **last** `)`.
+    #[cfg(target_os = "linux")]
     const PROC_STAT_FIXTURE_COMM_WITH_PARENS: &str = "42 (cas (factory)) S \
         1 42 42 0 -1 4194304 100 0 0 0 10 20 0 0 20 0 2 0 1000000 123456789 \
         1024 18446744073709551615 1 1 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 \
         0 0 0 0 0 0 0 0\n";
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn parse_num_threads_from_proc_stat_reads_field_20_when_one() {
         assert_eq!(
             parse_num_threads_from_proc_stat(PROC_STAT_FIXTURE_1_THREAD),
@@ -1932,6 +1937,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn parse_num_threads_from_proc_stat_reads_field_20_when_many() {
         assert_eq!(
             parse_num_threads_from_proc_stat(PROC_STAT_FIXTURE_4_THREADS),
@@ -1940,6 +1946,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn parse_num_threads_from_proc_stat_handles_comm_with_spaces_and_parens() {
         assert_eq!(
             parse_num_threads_from_proc_stat(PROC_STAT_FIXTURE_COMM_WITH_PARENS),
@@ -1948,6 +1955,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn parse_num_threads_from_proc_stat_rejects_malformed() {
         assert_eq!(parse_num_threads_from_proc_stat(""), None);
         assert_eq!(parse_num_threads_from_proc_stat("no closing paren"), None);

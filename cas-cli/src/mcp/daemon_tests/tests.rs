@@ -335,6 +335,7 @@ fn pid_matches_fingerprint_false_on_dead_pid() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn parse_starttime_from_stat_handles_comm_with_parens_and_spaces() {
     // Adversarial/testing review: /proc/<pid>/stat field 2 (`comm`) is wrapped
     // in parens and may itself contain spaces and parens. The parser splits
@@ -358,6 +359,7 @@ fn parse_starttime_from_stat_handles_comm_with_parens_and_spaces() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn parse_starttime_from_stat_returns_none_on_malformed_input() {
     // Garbage input must not panic and must not fabricate a starttime.
     assert_eq!(

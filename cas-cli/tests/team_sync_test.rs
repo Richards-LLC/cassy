@@ -221,6 +221,14 @@ async fn team_push_http_failure_is_isolated() {
         1,
         "team items remain pending on http failure (preserves data for next sync)"
     );
+    assert!(
+        remaining[0].retry_count > 0,
+        "an attempted team push must increment retry_count"
+    );
+    assert!(
+        remaining[0].last_error.is_some(),
+        "an attempted team push must persist last_error"
+    );
 }
 
 #[tokio::test]

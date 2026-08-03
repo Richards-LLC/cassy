@@ -2,10 +2,12 @@ use crate::mcp::daemon::*;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
-use crate::cloud::SyncQueue;
+use crate::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue};
 use crate::store::SqliteStore;
 use crate::store::init_cas_dir;
 use cas_types::{Agent, AgentRole, Session};
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::test_support::TestEnvGuard;
 
@@ -173,6 +175,89 @@ fn test_get_sessions_for_sync_uses_cas_root_directory_path() {
     let sessions = super::get_sessions_for_sync(&cas_root, &queue);
     assert_eq!(sessions.len(), 1, "expected one session from sqlite");
     assert_eq!(sessions[0].session_id, "session-for-sync");
+}
+
+/// cas-8248: the automatic daemon cycle must drain the same team queue that
+/// `cas cloud sync` drains.  This is deliberately a daemon-level regression
+/// test: direct `push_team` coverage cannot detect missing scheduler wiring.
+#[tokio::test]
+async fn embedded_daemon_cloud_cycle_drains_team_queue() {
+    const TEAM_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/sync/pull"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": [], "tasks": [], "rules": [], "skills": [],
+            "specs": [], "events": [], "prompts": [],
+            "file_changes": [], "commit_links": [],
+            "pulled_at": chrono::Utc::now().to_rfc3339(),
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/api/teams/{TEAM_ID}/sync/push")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "synced": {
+                "entries": 1, "tasks": 0, "rules": 0, "skills": 0,
+                "sessions": 0, "verifications": 0, "events": 0,
+                "prompts": 0, "file_changes": 0, "commit_links": 0,
+                "agents": 0, "worktrees": 0,
+            }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let temp = TempDir::new().expect("temp project");
+    let cas_root = init_cas_dir(temp.path()).expect("init cas dir");
+    let nonexistent_user_config = temp.path().join("no-user-cloud.json");
+    let cas_root_text = cas_root.to_string_lossy().into_owned();
+    let user_config_text = nonexistent_user_config.to_string_lossy().into_owned();
+    let _env = TestEnvGuard::with_optional_vars(&[
+        ("CAS_ROOT", Some(cas_root_text.as_str())),
+        ("CAS_USER_CLOUD_JSON", Some(user_config_text.as_str())),
+    ]);
+
+    let mut cloud = CloudConfig::default();
+    cloud.endpoint = server.uri();
+    cloud.token = Some("synthetic-test-token".to_string());
+    cloud.set_team(TEAM_ID, "synthetic-team");
+    cloud
+        .save_to_cas_dir(&cas_root)
+        .expect("save synthetic cloud config");
+
+    let queue = SyncQueue::open(&cas_root).expect("open sync queue");
+    queue.init().expect("init sync queue");
+    queue
+        .enqueue_for_team(
+            EntityType::Entry,
+            "daemon-team-entry",
+            SyncOperation::Upsert,
+            Some(r#"{"id":"daemon-team-entry","scope":"project","content":"queued"}"#),
+            TEAM_ID,
+        )
+        .expect("enqueue team item");
+
+    let daemon = EmbeddedDaemon::new(EmbeddedDaemonConfig {
+        cas_root: cas_root.clone(),
+        index_code: false,
+        ..Default::default()
+    });
+    let result = daemon
+        .trigger_cloud_sync()
+        .await
+        .expect("automatic cloud cycle");
+
+    assert_eq!(result.pushed_entries, 1);
+    assert!(
+        queue
+            .pending_for_team(TEAM_ID, 100, 5)
+            .expect("read team queue")
+            .is_empty(),
+        "automatic cloud cycle must drain team-scoped rows"
+    );
 }
 
 // =========================================================================

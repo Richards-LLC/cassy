@@ -552,27 +552,11 @@ fn capacity_from_bytes(
 
 #[cfg(unix)]
 fn filesystem_capacity(path: &Path) -> io::Result<(u64, u64)> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
+    crate::fs_space::fs_space(path).map(filesystem_capacity_from_space)
+}
 
-    let path = CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
-    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    // SAFETY: `path` is NUL-terminated and `stat` points to writable storage.
-    if unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: statvfs returned success and initialized the structure.
-    let stat = unsafe { stat.assume_init() };
-    // Widen before multiplying: statvfs field widths are platform-specific.
-    // Linux types f_blocks/f_bavail as u64, macOS as u32 (__darwin_fsblkcnt_t)
-    // while f_frsize stays u64, so the unwidened form only compiles on Linux.
-    // These casts are load-bearing on macOS and no-ops on Linux.
-    let frsize = stat.f_frsize as u64;
-    Ok((
-        (stat.f_blocks as u64).saturating_mul(frsize),
-        (stat.f_bavail as u64).saturating_mul(frsize),
-    ))
+fn filesystem_capacity_from_space(space: crate::fs_space::FsSpace) -> (u64, u64) {
+    (space.total_bytes, space.available_bytes)
 }
 
 #[cfg(not(unix))]
@@ -644,6 +628,46 @@ mod tests {
         assert!(at_watermark.pressure);
         assert_eq!(at_watermark.used_percent, 85);
         assert!(at_watermark.available_bytes > 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_capacity_reports_total_and_unprivileged_available_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let (total_bytes, available_bytes) =
+            filesystem_capacity(temp.path()).expect("statvfs should inspect a temp directory");
+
+        assert!(total_bytes > 0);
+        assert!(
+            available_bytes <= total_bytes,
+            "f_bavail-derived capacity cannot exceed total capacity"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_capacity_rejects_nul_path_as_invalid_input() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = Path::new(OsStr::from_bytes(b"/tmp/bad\0path"));
+        let error = filesystem_capacity(path).expect_err("NUL path must be rejected");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn filesystem_capacity_uses_bavail_not_bfree() {
+        let capacity = filesystem_capacity_from_space(crate::fs_space::FsSpace {
+            total_bytes: 1_000,
+            available_bytes: 200,
+            free_bytes: 300,
+        });
+
+        assert_eq!(capacity, (1_000, 200));
+        assert_ne!(
+            capacity.1, 300,
+            "factory pressure must use unprivileged-available bytes, not all free bytes"
+        );
     }
 
     #[cfg(unix)]

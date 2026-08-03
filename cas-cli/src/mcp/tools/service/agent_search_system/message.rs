@@ -22,7 +22,7 @@ impl CasService {
                 "target required (agent name, 'supervisor', or 'all_workers')",
             )
         })?;
-        let message = req.message.ok_or_else(|| {
+        let mut message = req.message.ok_or_else(|| {
             Self::error(
                 ErrorCode::INVALID_PARAMS,
                 "message required — full message body goes in `message`. \
@@ -260,6 +260,81 @@ impl CasService {
                 .or_else(|| env_agent_name.clone())
                 .unwrap_or_else(|| source.clone())
         };
+
+        // cas-bc8c: merge requests used to be indistinguishable from ordinary
+        // prose, so a request queued just after the supervisor merged remained
+        // actionable-looking when it eventually arrived. Give the parked task
+        // identity to the send path explicitly when supplied, or infer it only
+        // when this worker has exactly one AwaitingMerge task. CAS then derives
+        // both immutable tips itself; callers cannot forget or stale them.
+        // Untagged messages with zero/ambiguous parked tasks remain completely
+        // unchanged on this shared public surface.
+        if role == "worker" {
+            use crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha;
+            use crate::mcp::tools::core::task::repo_context::resolve_repo_context;
+            use crate::prompt_revalidation::{
+                MergeRequestDecision, MergeRequestEnvelope, attach_merge_request_envelope,
+                merge_landed_guidance, revalidate_merge_request, select_unambiguous_merge_task,
+            };
+            use crate::store::open_task_store_local;
+            use cas_types::TaskStatus;
+
+            let merge_task = open_task_store_local(&self.inner.cas_root).ok().and_then(|store| {
+                let parked = store.list(Some(TaskStatus::AwaitingMerge)).ok()?;
+                select_unambiguous_merge_task(
+                    &parked,
+                    &display_name,
+                    req.task_id.as_deref(),
+                )
+                .cloned()
+            });
+
+            if let Some(task) = merge_task
+                && let Some(work_target) = task.deliverables.work_target.as_ref()
+                && let Ok(repo) = resolve_repo_context(&self.inner.cas_root, work_target)
+            {
+                let branch = task
+                    .deliverables
+                    .parked_branch
+                    .clone()
+                    .or_else(|| task.assignee.as_ref().map(|name| format!("factory/{name}")));
+                if let Some(branch) = branch
+                    && let Some(branch_tip) = resolve_branch_sha(&repo.repo_root, &branch)
+                {
+                    match revalidate_merge_request(
+                        &repo.repo_root,
+                        &branch_tip,
+                        &repo.target_branch,
+                    ) {
+                        MergeRequestDecision::AlreadyIntegrated { target_tip } => {
+                            return Ok(Self::success(merge_landed_guidance(
+                                &task.id,
+                                &branch_tip,
+                                &repo.target_branch,
+                                &target_tip,
+                            )));
+                        }
+                        MergeRequestDecision::Pending { target_tip } => {
+                            message = attach_merge_request_envelope(
+                                &message,
+                                &MergeRequestEnvelope {
+                                    task_id: task.id,
+                                    branch_tip,
+                                    target_branch: repo.target_branch,
+                                    target_branch_tip: target_tip,
+                                },
+                            );
+                        }
+                        MergeRequestDecision::Unverifiable => {
+                            tracing::warn!(
+                                task_id = %task.id,
+                                "cas-bc8c: merge request tips could not be verified; delivering free-form message unchanged"
+                            );
+                        }
+                    }
+                }
+            }
+        }
 
         // cas-6913: "Message queued" reads as delivery confirmation, but a
         // message addressed to a not-yet-registered worker name (the common

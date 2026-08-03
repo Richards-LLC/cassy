@@ -44,6 +44,7 @@ pub mod migration;
 pub mod notifications;
 pub mod orchestration;
 pub mod otel;
+pub(crate) mod prompt_revalidation;
 pub mod rules;
 pub mod sentry;
 pub mod store;

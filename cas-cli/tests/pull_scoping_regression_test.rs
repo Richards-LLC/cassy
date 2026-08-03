@@ -253,6 +253,120 @@ async fn cloud_syncer_pull_request_carries_project_id_on_the_wire() {
     // If `project_id=` is missing or wrong, no mock matches → 404 → CasError.
 }
 
+/// cas-de89 regression: task ownership is the SQLite database selected by the
+/// caller, not a persisted `project_id` column. A scoped cloud pull must only
+/// admit rows for the current project into that database, and neither direct
+/// project writes nor direct global writes may bleed into the other store.
+#[tokio::test]
+async fn task_pull_and_direct_writes_remain_isolated_by_store() {
+    use std::sync::Arc;
+
+    use cas::types::Task;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let expected_project_id = cas::cloud::get_project_canonical_id()
+        .expect("get_project_canonical_id should succeed inside the cas-src checkout");
+
+    let task_json = |id: &str, project_id: Option<&str>| {
+        let mut value = serde_json::to_value(Task::new(id.to_string(), format!("task {id}")))
+            .expect("serialize task fixture");
+        if let Some(project_id) = project_id {
+            value.as_object_mut().expect("task fixture object").insert(
+                "project_canonical_id".to_string(),
+                serde_json::Value::String(project_id.to_string()),
+            );
+        }
+        value
+    };
+
+    let matching = task_json("cas-project-pull", Some(&expected_project_id));
+    let foreign = task_json("cas-foreign-pull", Some("unrelated/product"));
+    let unscoped = task_json("cas-unscoped-pull", None);
+
+    Mock::given(method("GET"))
+        .and(path("/api/sync/pull"))
+        .and(query_param("project_id", expected_project_id.as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": [],
+            "tasks": [matching, foreign, unscoped],
+            "rules": [],
+            "skills": [],
+            "pulled_at": chrono::Utc::now().to_rfc3339(),
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_root = tmp.path().join("project").join(".cas");
+    let global_root = tmp.path().join("global").join(".cas");
+    std::fs::create_dir_all(&project_root).expect("mkdir project .cas");
+    std::fs::create_dir_all(&global_root).expect("mkdir global .cas");
+
+    let project_tasks =
+        cas::store::open_task_store_local(&project_root).expect("open isolated project task store");
+    let global_tasks =
+        cas::store::open_task_store_local(&global_root).expect("open isolated global task store");
+
+    let global_only = Task::new("cas-global-only".to_string(), "global only".to_string());
+    global_tasks.add(&global_only).expect("seed global store");
+    let project_only = Task::new("cas-project-only".to_string(), "project only".to_string());
+    project_tasks
+        .add(&project_only)
+        .expect("seed project store");
+
+    let store = cas::store::open_store_local(&project_root).expect("open entry store");
+    let rule_store = cas::store::open_rule_store_local(&project_root).expect("open rule store");
+    let skill_store = cas::store::open_skill_store_local(&project_root).expect("open skill store");
+    let spec_store = cas::store::open_spec_store(&project_root).expect("open spec store");
+    let event_store = cas::store::open_event_store(&project_root).expect("open event store");
+    let prompt_store = cas::store::open_prompt_store(&project_root).expect("open prompt store");
+    let file_change_store =
+        cas::store::open_file_change_store(&project_root).expect("open file change store");
+    let commit_link_store =
+        cas::store::open_commit_link_store(&project_root).expect("open commit link store");
+    let queue = cas::cloud::SyncQueue::open(&project_root).expect("open queue");
+    queue.init().expect("init queue");
+
+    let syncer = cas::cloud::CloudSyncer::new(
+        Arc::new(queue),
+        cas::cloud::CloudConfig {
+            endpoint: server.uri(),
+            token: Some("synthetic-test-token".to_string()),
+            ..Default::default()
+        },
+        cas::cloud::CloudSyncerConfig::default(),
+    );
+    let result = syncer
+        .pull(
+            store.as_ref(),
+            project_tasks.as_ref(),
+            rule_store.as_ref(),
+            skill_store.as_ref(),
+            spec_store.as_ref(),
+            event_store.as_ref(),
+            prompt_store.as_ref(),
+            file_change_store.as_ref(),
+            commit_link_store.as_ref(),
+        )
+        .expect("scoped task pull");
+
+    assert_eq!(
+        result.pulled_tasks, 1,
+        "only the matching task may be imported"
+    );
+    assert!(project_tasks.get("cas-project-pull").is_ok());
+    assert!(project_tasks.get("cas-foreign-pull").is_err());
+    assert!(project_tasks.get("cas-unscoped-pull").is_err());
+    assert!(project_tasks.get("cas-global-only").is_err());
+
+    assert!(global_tasks.get("cas-global-only").is_ok());
+    assert!(global_tasks.get("cas-project-only").is_err());
+    assert!(global_tasks.get("cas-project-pull").is_err());
+}
+
 /// cas-bba4 regression: the 5 entity kinds re-added to `CloudSyncer::pull`
 /// (specs / events / prompts / file_changes / commit_links) must honor the
 /// same client-side `entity_matches_project` filter as entries/tasks/rules/

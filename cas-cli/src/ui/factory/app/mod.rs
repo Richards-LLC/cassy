@@ -758,8 +758,9 @@ impl FactoryApp {
     /// generation so the two steps can never observe two different
     /// snapshots.
     ///
-    /// cas-ed6c: also returns the `unfiltered_data` snapshot this tick
-    /// loaded (`None` on the empty-events short-circuit) so the caller can
+    /// cas-ed6c: also returns the authoritative `unfiltered_data` snapshot
+    /// this tick loaded (`None` on the empty-events short-circuit or store
+    /// load failure) so the caller can
     /// run `TeamsManager::prune_stale_idle_alerts` against the SAME
     /// snapshot instead of triggering a second full `DirectorData` reload
     /// just for the sweep — reusing this tick's data, not adding a new
@@ -772,7 +773,10 @@ impl FactoryApp {
             return (Vec::new(), Vec::new(), None);
         }
 
-        let unfiltered_data = self.load_unfiltered_director_data_for_delivery();
+        let loaded_data = self.try_load_unfiltered_director_data_for_delivery();
+        let delivery_state_is_authoritative = loaded_data.is_ok();
+        let unfiltered_data =
+            loaded_data.unwrap_or_else(|_| self.unfiltered_director_data.clone());
 
         // cas-9fff: pass session-focused epic so EpicAllSubtasksClosed can
         // use session-affinity routing (not just epic_verification_owner).
@@ -780,6 +784,15 @@ impl FactoryApp {
         let delivery_events: Vec<DirectorEvent> = events
             .iter()
             .filter_map(|event| {
+                // cas-06ca: an unavailable store snapshot is uncertainty,
+                // never positive evidence that an epic-completion occurrence
+                // is stale. Preserve the event rather than suppressing it
+                // against cached data that may itself be out of date.
+                if !delivery_state_is_authoritative
+                    && matches!(event, DirectorEvent::EpicAllSubtasksClosed { .. })
+                {
+                    return Some(event.clone());
+                }
                 if let DirectorEvent::WorkerIdle { worker, .. } = event {
                     revalidate_event_for_delivery_with_context(
                         event,
@@ -870,10 +883,11 @@ impl FactoryApp {
             }
         }
 
-        (delivery_events, prompts, Some(unfiltered_data))
+        let sweep_data = delivery_state_is_authoritative.then_some(unfiltered_data);
+        (delivery_events, prompts, sweep_data)
     }
 
-    fn load_unfiltered_director_data_for_delivery(&self) -> DirectorData {
+    fn try_load_unfiltered_director_data_for_delivery(&self) -> anyhow::Result<DirectorData> {
         let worktree_root = self.worktree_manager.as_ref().map(|m| m.worktree_root());
         DirectorData::load_with_stores(
             &self.cas_dir,
@@ -881,14 +895,26 @@ impl FactoryApp {
             false,
             self.director_stores.as_ref(),
         )
-        .unwrap_or_else(|_| self.unfiltered_director_data.clone())
     }
 
-    /// Re-check a taskless WorkerIdle prompt at the narrowest point before
-    /// transport injection. Batch revalidation happens earlier in the tick;
-    /// an assignment may land after that snapshot and before this prompt's
-    /// turn in the delivery loop.
+    fn load_unfiltered_director_data_for_delivery(&self) -> DirectorData {
+        self.try_load_unfiltered_director_data_for_delivery()
+            .unwrap_or_else(|_| self.unfiltered_director_data.clone())
+    }
+
+    /// Re-check a state-bearing prompt at the narrowest point before transport
+    /// injection. Batch revalidation happens earlier in the tick; a worker
+    /// assignment, epic close, or subtask reopen may land after that snapshot
+    /// and before this prompt's turn in the delivery loop.
     pub(crate) fn prompt_is_still_deliverable(&self, prompt: &Prompt) -> bool {
+        if prompt.retract_epic.is_some() {
+            // Failure to load authoritative state is uncertainty: deliver.
+            // Never remove a legitimate notification based on cached data.
+            return self
+                .try_load_unfiltered_director_data_for_delivery()
+                .map(|data| prompt_is_still_deliverable(prompt, &data))
+                .unwrap_or(true);
+        }
         if prompt.drop_if_worker_assigned.is_none() {
             return true;
         }

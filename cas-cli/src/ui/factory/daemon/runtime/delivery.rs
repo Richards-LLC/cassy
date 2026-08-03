@@ -216,6 +216,12 @@ impl FactoryDaemon {
     /// practice (callers pass at most one `Some`); both `None` for every
     /// other prompt kind. Ignored entirely on the `Pty` channel.
     ///
+    /// `retract_epic` (cas-06ca): `Some(epic_id)` for the typed
+    /// `EpicAllSubtasksClosed` occurrence. It tags a Teams inbox row for
+    /// best-effort retraction if the epic closes or a subtask reopens before
+    /// the recipient reads it. Already-consumed PTY/inbox messages cannot be
+    /// recalled.
+    ///
     /// Returns `Delivered` only after a successful write to the chosen
     /// channel. A composer-dirty PTY target returns `DeferredComposerDirty`
     /// so the durable prompt queue can leave its row pending.
@@ -228,6 +234,7 @@ impl FactoryDaemon {
         color: Option<&str>,
         retract_worker: Option<&str>,
         retract_task: Option<&str>,
+        retract_epic: Option<&str>,
     ) -> anyhow::Result<InjectOutcome> {
         // Normalise the target into the two name forms the two channels expect:
         //   - `pane_target`  : the real pane id `Mux::inject` routes on
@@ -253,8 +260,8 @@ impl FactoryDaemon {
                     .teams
                     .as_ref()
                     .expect("TeamsInbox channel requires active teams");
-                match (retract_worker, retract_task) {
-                    (Some(worker), _) => teams.write_to_inbox_for_worker_idle(
+                match (retract_worker, retract_task, retract_epic) {
+                    (Some(worker), _, _) => teams.write_to_inbox_for_worker_idle(
                         inbox_target,
                         source,
                         text,
@@ -262,7 +269,7 @@ impl FactoryDaemon {
                         color,
                         worker,
                     ),
-                    (None, Some(task_id)) => teams.write_to_inbox_for_merge_alert(
+                    (None, Some(task_id), _) => teams.write_to_inbox_for_merge_alert(
                         inbox_target,
                         source,
                         text,
@@ -270,7 +277,15 @@ impl FactoryDaemon {
                         color,
                         task_id,
                     ),
-                    (None, None) => {
+                    (None, None, Some(epic_id)) => teams.write_to_inbox_for_epic_completion(
+                        inbox_target,
+                        source,
+                        text,
+                        summary,
+                        color,
+                        epic_id,
+                    ),
+                    (None, None, None) => {
                         teams.write_to_inbox(inbox_target, source, text, summary, color)
                     }
                 }
@@ -332,7 +347,7 @@ impl FactoryDaemon {
         worker_is_idle: bool,
     ) -> anyhow::Result<InjectOutcome> {
         let primary_outcome = self
-            .deliver_to_worker(target, source, text, summary, color, None, None)
+            .deliver_to_worker(target, source, text, summary, color, None, None, None)
             .await?;
 
         if primary_outcome != InjectOutcome::Delivered || !worker_is_idle {

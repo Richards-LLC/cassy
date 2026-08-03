@@ -152,6 +152,35 @@ pub struct TeamConfig {
     pub members: Vec<TeamMember>,
 }
 
+struct InboxFileLock<'a> {
+    file: &'a std::fs::File,
+    path: &'a std::path::Path,
+}
+
+impl<'a> InboxFileLock<'a> {
+    fn acquire(file: &'a std::fs::File, path: &'a std::path::Path) -> anyhow::Result<Self> {
+        if let Err(error) = fs2::FileExt::lock_exclusive(file) {
+            anyhow::bail!("Failed to lock inbox file {:?}: {}", path, error);
+        }
+        Ok(Self { file, path })
+    }
+}
+
+impl Drop for InboxFileLock<'_> {
+    fn drop(&mut self) {
+        if let Err(error) = fs2::FileExt::unlock(self.file) {
+            // Never panic in Drop: this may run while propagating the
+            // serialize/write error that caused us to leave the critical
+            // section. A second panic during unwinding would abort CAS.
+            tracing::error!(
+                inbox_path = %self.path.display(),
+                error = %error,
+                "failed to release teams inbox lock"
+            );
+        }
+    }
+}
+
 /// Manages the native Agent Teams file structure for a factory session.
 pub struct TeamsManager {
     team_name: String,
@@ -745,6 +774,18 @@ impl TeamsManager {
         )
     }
 
+    fn with_exclusive_inbox_lock<T>(
+        inbox_path: &std::path::Path,
+        operation: impl FnOnce() -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(inbox_path)?;
+        let _lock = InboxFileLock::acquire(&file, inbox_path)?;
+        operation()
+    }
+
     fn write_to_inbox_impl(
         &self,
         target: &str,
@@ -763,115 +804,96 @@ impl TeamsManager {
             std::fs::write(&inbox_path, "[]")?;
         }
 
-        // Use file locking for safe concurrent access
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&inbox_path)?;
+        Self::with_exclusive_inbox_lock(&inbox_path, || {
+            // Read existing messages
+            let mut messages: Vec<InboxMessage> = {
+                let content =
+                    std::fs::read_to_string(&inbox_path).unwrap_or_else(|_| "[]".to_string());
+                serde_json::from_str(&content).unwrap_or_default()
+            };
 
-        // Acquire exclusive lock
-        use std::os::unix::io::AsRawFd;
-        let fd = file.as_raw_fd();
-        let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
-        if ret != 0 {
-            anyhow::bail!(
-                "Failed to lock inbox file {:?}: {}",
-                inbox_path,
-                std::io::Error::last_os_error()
-            );
-        }
+            let now_utc = chrono::Utc::now();
+            let now = now_utc.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let resolved_color = color.unwrap_or("green").to_string();
 
-        // Read existing messages
-        let mut messages: Vec<InboxMessage> = {
-            let content = std::fs::read_to_string(&inbox_path).unwrap_or_else(|_| "[]".to_string());
-            serde_json::from_str(&content).unwrap_or_default()
-        };
+            // Always set summary — native Claude Code expects it.
+            // Fall back to the message text when no explicit summary is provided.
+            let resolved_summary = summary.unwrap_or(message).to_string();
 
-        let now_utc = chrono::Utc::now();
-        let now = now_utc.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let resolved_color = color.unwrap_or("green").to_string();
+            // Prune messages older than INBOX_RETENTION so the file cannot grow
+            // unbounded across sessions — see cas-7f57 and the comment on
+            // INBOX_RETENTION above.
+            //
+            // Unread messages (`read: false`) are preserved regardless of age
+            // so a supervisor's recovery/unblock prompt to a wedged worker
+            // cannot silently evaporate after the 2h window. See
+            // memory `feedback_supervisor_stop_message_latency` — stale
+            // STOP messages are already a known delivery hazard, and age-only
+            // retention would strictly worsen that failure mode.
+            let retention_cutoff = now_utc - INBOX_RETENTION;
+            let messages_before_retain = messages.len();
+            messages.retain(|m| {
+                if !m.read {
+                    return true;
+                }
+                match chrono::DateTime::parse_from_rfc3339(&m.timestamp) {
+                    Ok(ts) => ts.with_timezone(&chrono::Utc) >= retention_cutoff,
+                    // Unparseable timestamp: keep the message rather than
+                    // silently drop real data; a future migration can clean
+                    // these up.
+                    Err(_) => true,
+                }
+            });
+            let retention_pruned = messages.len() != messages_before_retain;
 
-        // Always set summary — native Claude Code expects it.
-        // Fall back to the message text when no explicit summary is provided.
-        let resolved_summary = summary.unwrap_or(message).to_string();
+            // Dedup guard (cas-7f57 / cas-73c8): if an identical (from, text)
+            // message is still present in the inbox, skip the append — no
+            // time window. Prevents director/prompt_queue/outbox replay and
+            // post-handle redelivery without an intentional redelivery marker.
+            let is_content_duplicate = messages
+                .iter()
+                .rev()
+                .any(|m| m.from == from && m.text == message);
 
-        // Prune messages older than INBOX_RETENTION so the file cannot grow
-        // unbounded across sessions — see cas-7f57 and the comment on
-        // INBOX_RETENTION above.
-        //
-        // Unread messages (`read: false`) are preserved regardless of age
-        // so a supervisor's recovery/unblock prompt to a wedged worker
-        // cannot silently evaporate after the 2h window. See
-        // memory `feedback_supervisor_stop_message_latency` — stale
-        // STOP messages are already a known delivery hazard, and age-only
-        // retention would strictly worsen that failure mode.
-        let retention_cutoff = now_utc - INBOX_RETENTION;
-        let messages_before_retain = messages.len();
-        messages.retain(|m| {
-            if !m.read {
-                return true;
+            if is_content_duplicate {
+                tracing::debug!(
+                    target: "cas::coordination",
+                    stage = "dedup_skip",
+                    channel = "teams_inbox",
+                    from = from,
+                    target_agent = target,
+                    "inbox write skipped — identical message already present"
+                );
+                // Only re-serialize+write if the retention sweep actually
+                // removed anything; otherwise this is a pure no-op and we
+                // avoid a write storm on hot duplicate senders.
+                if retention_pruned {
+                    let json = serde_json::to_string_pretty(&messages)?;
+                    std::fs::write(&inbox_path, json)?;
+                }
+                return Ok(());
             }
-            match chrono::DateTime::parse_from_rfc3339(&m.timestamp) {
-                Ok(ts) => ts.with_timezone(&chrono::Utc) >= retention_cutoff,
-                // Unparseable timestamp: keep the message rather than
-                // silently drop real data; a future migration can clean
-                // these up.
-                Err(_) => true,
-            }
-        });
-        let retention_pruned = messages.len() != messages_before_retain;
 
-        // Dedup guard (cas-7f57 / cas-73c8): if an identical (from, text)
-        // message is still present in the inbox, skip the append — no
-        // time window. Prevents director/prompt_queue/outbox replay and
-        // post-handle redelivery without an intentional redelivery marker.
-        let is_content_duplicate = messages
-            .iter()
-            .rev()
-            .any(|m| m.from == from && m.text == message);
+            messages.push(InboxMessage {
+                from: from.to_string(),
+                text: message.to_string(),
+                summary: Some(resolved_summary),
+                timestamp: now,
+                color: resolved_color,
+                read: false,
+                retract_worker: retract_worker.map(str::to_string),
+                retract_task: retract_task.map(str::to_string),
+                retract_epic: retract_epic.map(str::to_string),
+            });
 
-        if is_content_duplicate {
-            tracing::debug!(
-                target: "cas::coordination",
-                stage = "dedup_skip",
-                channel = "teams_inbox",
-                from = from,
-                target_agent = target,
-                "inbox write skipped — identical message already present"
-            );
-            // Only re-serialize+write if the retention sweep actually
-            // removed anything; otherwise this is a pure no-op and we
-            // avoid a write storm on hot duplicate senders.
-            if retention_pruned {
-                let json = serde_json::to_string_pretty(&messages)?;
-                std::fs::write(&inbox_path, json)?;
-            }
-            unsafe { libc::flock(fd, libc::LOCK_UN) };
-            return Ok(());
-        }
+            // Write back
+            let json = serde_json::to_string_pretty(&messages)?;
+            std::fs::write(&inbox_path, json)?;
 
-        messages.push(InboxMessage {
-            from: from.to_string(),
-            text: message.to_string(),
-            summary: Some(resolved_summary),
-            timestamp: now,
-            color: resolved_color,
-            read: false,
-            retract_worker: retract_worker.map(str::to_string),
-            retract_task: retract_task.map(str::to_string),
-            retract_epic: retract_epic.map(str::to_string),
-        });
+            tracing::debug!("Wrote message to inbox: {} -> {}", from, target);
 
-        // Write back
-        let json = serde_json::to_string_pretty(&messages)?;
-        std::fs::write(&inbox_path, json)?;
-
-        // Release lock (automatic on drop, but be explicit)
-        unsafe { libc::flock(fd, libc::LOCK_UN) };
-
-        tracing::debug!("Wrote message to inbox: {} -> {}", from, target);
-
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Retract stale `WorkerIdle`-class rows from `target`'s inbox (cas-ed6c).
@@ -981,57 +1003,44 @@ impl TeamsManager {
             return Ok(0);
         }
 
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&inbox_path)?;
-        use std::os::unix::io::AsRawFd;
-        let fd = file.as_raw_fd();
-        let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
-        if ret != 0 {
-            anyhow::bail!(
-                "Failed to lock inbox file {:?}: {}",
-                inbox_path,
-                std::io::Error::last_os_error()
-            );
-        }
+        Self::with_exclusive_inbox_lock(&inbox_path, || {
+            let mut messages: Vec<InboxMessage> = {
+                let content =
+                    std::fs::read_to_string(&inbox_path).unwrap_or_else(|_| "[]".to_string());
+                serde_json::from_str(&content).unwrap_or_default()
+            };
 
-        let mut messages: Vec<InboxMessage> = {
-            let content = std::fs::read_to_string(&inbox_path).unwrap_or_else(|_| "[]".to_string());
-            serde_json::from_str(&content).unwrap_or_default()
-        };
-
-        let before = messages.len();
-        messages.retain(|m| {
-            if m.read {
-                return true;
-            }
-            match extract_key(m) {
-                Some(key) if is_stale(key) => {
-                    tracing::info!(
-                        target: "cas::coordination",
-                        stage = "retract_stale_alert",
-                        channel = "teams_inbox",
-                        alert_kind = alert_kind,
-                        key = %key,
-                        target_agent = target,
-                        reason = log_reason,
-                        "retracting queued alert before this row was read"
-                    );
-                    false
+            let before = messages.len();
+            messages.retain(|m| {
+                if m.read {
+                    return true;
                 }
-                _ => true,
+                match extract_key(m) {
+                    Some(key) if is_stale(key) => {
+                        tracing::info!(
+                            target: "cas::coordination",
+                            stage = "retract_stale_alert",
+                            channel = "teams_inbox",
+                            alert_kind = alert_kind,
+                            key = %key,
+                            target_agent = target,
+                            reason = log_reason,
+                            "retracting queued alert before this row was read"
+                        );
+                        false
+                    }
+                    _ => true,
+                }
+            });
+            let removed = before - messages.len();
+
+            if removed > 0 {
+                let json = serde_json::to_string_pretty(&messages)?;
+                std::fs::write(&inbox_path, json)?;
             }
-        });
-        let removed = before - messages.len();
 
-        if removed > 0 {
-            let json = serde_json::to_string_pretty(&messages)?;
-            std::fs::write(&inbox_path, json)?;
-        }
-
-        unsafe { libc::flock(fd, libc::LOCK_UN) };
-        Ok(removed)
+            Ok(removed)
+        })
     }
 
     /// Ensure an inbox file exists for the given agent.
@@ -1434,6 +1443,92 @@ mod tests {
             teams_dir,
             inboxes_dir,
         }
+    }
+
+    #[cfg(unix)]
+    struct ForkedDescriptorHolder {
+        pid: libc::pid_t,
+        release_fd: libc::c_int,
+    }
+
+    #[cfg(unix)]
+    impl Drop for ForkedDescriptorHolder {
+        fn drop(&mut self) {
+            let byte = 1u8;
+            unsafe {
+                let _ = libc::write(
+                    self.release_fd,
+                    (&byte as *const u8).cast::<libc::c_void>(),
+                    1,
+                );
+                libc::close(self.release_fd);
+                let mut status = 0;
+                let _ = libc::waitpid(self.pid, &mut status, 0);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn fork_while_lock_is_held() -> ForkedDescriptorHolder {
+        let mut pipe_fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0);
+        let child = unsafe { libc::fork() };
+        assert!(
+            child >= 0,
+            "fork failed: {}",
+            std::io::Error::last_os_error()
+        );
+        if child == 0 {
+            unsafe {
+                libc::close(pipe_fds[1]);
+                let mut byte = 0u8;
+                let _ = libc::read(
+                    pipe_fds[0],
+                    (&mut byte as *mut u8).cast::<libc::c_void>(),
+                    1,
+                );
+                libc::close(pipe_fds[0]);
+                libc::_exit(0);
+            }
+        }
+
+        unsafe { libc::close(pipe_fds[0]) };
+        ForkedDescriptorHolder {
+            pid: child,
+            release_fd: pipe_fds[1],
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inbox_lock_releases_after_post_lock_write_error_with_forked_child() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inbox_path = tmp.path().join("supervisor.json");
+        std::fs::write(&inbox_path, "[]").unwrap();
+        let invalid_write_target = tmp.path().join("write-target-is-a-directory");
+        std::fs::create_dir(&invalid_write_target).unwrap();
+
+        let mut child = None;
+        let error = TeamsManager::with_exclusive_inbox_lock(&inbox_path, || {
+            child = Some(fork_while_lock_is_held());
+            std::fs::write(&invalid_write_target, "force an error after LOCK_EX")?;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(
+            error.downcast_ref::<std::io::Error>().is_some(),
+            "the injected post-lock failure must remain an I/O error: {error:#}"
+        );
+
+        let contender = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&inbox_path)
+            .unwrap();
+        fs2::FileExt::try_lock_exclusive(&contender)
+            .expect("an error exit must release LOCK_EX even while a forked child retains the fd");
+        fs2::FileExt::unlock(&contender).unwrap();
+        drop(child.take());
     }
 
     /// `supervisor_settings_contents()` must cover every tool family whose

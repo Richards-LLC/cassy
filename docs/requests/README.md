@@ -1,67 +1,65 @@
-# Cross-Team Request Convention
+# Request Intake and Archive
 
-This directory is the **inbox** for work requests from other Petrastella teams.
+GitHub Issues is the primary intake and system of record for cross-team requests. Use the repository's [bug](../../.github/ISSUE_TEMPLATE/bug.yml) or [feature](../../.github/ISSUE_TEMPLATE/feature.yml) template when filing in the browser.
 
-## How It Works
+This directory remains the durable staging area for reports written before GitHub filing and the historical archive for completed file-based requests.
 
-- **Incoming requests:** Other teams drop `BUG-*.md` or `FEATURE-*.md` files here
-- **Completion:** Move finished requests to `completed/` with a completion note appended
-- **Your outbox:** To request work from another team, drop a file in *their* `docs/requests/` directory
+## Configure the Issue Target
 
-## File Naming
+The destination is project-local configuration in `.cas/config.toml`:
 
-```
-BUG-<slug>.md        # Bug fix request
-FEATURE-<slug>.md    # Feature request
+```toml
+[issues]
+repo = "owner/repo"
 ```
 
-Use lowercase kebab-case slugs. Keep names short and descriptive.
+Set or inspect the `issues.repo` key with:
 
-## Required Frontmatter
-
-```markdown
----
-from: CAS CLI team | Petra Stella Cloud team
-date: 2026-04-12
-priority: P0 | P1 | P2 | P3
-cas_task: cas-xxxx          # optional — tracking task in source repo
----
+```sh
+cas config set issues.repo owner/repo
+cas config get issues.repo
 ```
 
-## Completion Flow
+Use the issue tracker explicitly provided by the receiving team. Do not derive the target from the current repository's `origin`, and do not route requests through another machine's checkout or home-directory path.
 
-1. Pick up the request, create a task in your tracker
-2. Do the work, ship it
-3. Append a completion block to the bottom of the file:
+## Durable Write-First Flow
 
-```markdown
----
-completed: 2026-04-15
-completed_by: cas-xxxx | cloud-xxxx
-commit: abc1234
----
-```
+1. Write the complete, public-safe report to a new, uniquely named staging file in this directory:
 
-4. Move the file to `completed/`:
-   ```
-   git mv docs/requests/BUG-whatever.md docs/requests/completed/
+   ```text
+   BUG-<lowercase-kebab-slug>.md
+   FEATURE-<lowercase-kebab-slug>.md
    ```
 
-5. Commit the move
+   Never overwrite an existing report. Before upload, remove credentials, tokens, private URLs, customer names, and unrelated-product details.
 
-## Quick Check
+2. Read `issues.repo`. If it is unset, do not guess a destination; preserve and commit the staging file as described below.
 
-```bash
-# What's pending?
-ls docs/requests/*.md
+3. If `gh` is installed and `gh auth status` succeeds, file the staged report:
 
-# What's been done?
-ls docs/requests/completed/
+   ```sh
+   issues_repo="$(cas config get issues.repo)"
+   gh issue create \
+     --repo "$issues_repo" \
+     --title "<concise request title>" \
+     --body-file "docs/requests/BUG-<slug>.md"
+   ```
+
+4. Capture the issue URL. Remove the staging file only after `gh issue create` succeeds and the URL is known. If the file is intentionally retained as a historical source, add the issue backlink instead.
+
+## When GitHub Filing Cannot Complete
+
+If `issues.repo` is unset, `gh` is unavailable or unauthenticated, or issue creation fails, keep the staging file. **A local file is not visible to anyone else until it is committed.** When committing is authorized:
+
+```sh
+git add "docs/requests/BUG-<slug>.md"
+git commit -m "docs: preserve request report"
 ```
 
-## Repo Pairs
+If a commit is not authorized or cannot be created, report the exact uncommitted path and the filing failure; do not claim the request was filed or silently leave it behind.
 
-| Your Repo | Their Inbox |
-|---|---|
-| cas-src | ~/Petrastella/petra-stella-cloud/docs/requests/ |
-| petra-stella-cloud | ~/Petrastella/cas-src/docs/requests/ |
+## Historical Archive
+
+- `completed/` is the historical record for completed file-based requests. Keep it intact.
+- The 11 reports migrated to GitHub Issues #55–#65 remain in this directory with backlinks and must not be deleted or moved.
+- For any committed file-only fallback that completes before migration to an issue, append its existing completion note, move it to `completed/`, and commit the move.

@@ -1,3 +1,5 @@
+> Migrated to GitHub Issues: [#58](https://github.com/pippenz/cas/issues/58)
+
 # BUG: factory daemon enqueues spawn requests but never drains the queue
 
 **Observed:** 2026-07-31, project `/home/pippenz/Woodworking`, factory session `Woodworking-silent-cheetah-22`, supervisor `clever-tiger-89`, cas 2.37.0 (4be3086 2026-07-29).

@@ -279,6 +279,15 @@ impl Config {
                     .parse()
                     .map_err(|_| MemError::Parse(format!("Invalid integer value: {value}")))?;
             }
+            // Issues section
+            "issues.repo" => {
+                let issues = self.issues.get_or_insert_with(IssuesConfig::default);
+                issues.repo = if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value.trim().to_string())
+                };
+            }
             // Notifications section
             "notifications.enabled" => {
                 let notifications = self

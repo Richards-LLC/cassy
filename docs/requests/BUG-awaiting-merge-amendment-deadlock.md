@@ -1,3 +1,5 @@
+> Migrated to GitHub Issues: [#55](https://github.com/pippenz/cas/issues/55)
+
 # BUG: awaiting_merge has no lifecycle path for an amendment-required review verdict
 
 **Observed:** 2026-07-31, Penguinz factory session `Penguinz-proud-crane-49`, task cas-7088, cas 2.30.0.

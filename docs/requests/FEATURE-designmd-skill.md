@@ -4,6 +4,8 @@ date: 2026-06-22
 priority: P2
 ---
 
+> Migrated to GitHub Issues: [#64](https://github.com/pippenz/cas/issues/64)
+
 # Feature Request: `design-spec` skill — generate/maintain a `DESIGN.md` (UI/UX source of truth)
 
 ## What we need

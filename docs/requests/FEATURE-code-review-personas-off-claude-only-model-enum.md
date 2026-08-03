@@ -1,3 +1,5 @@
+> Migrated to GitHub Issues: [#63](https://github.com/pippenz/cas/issues/63)
+
 # FEATURE: route cas-code-review personas to `gpt-5.6-sol` medium (they are stranded on a Claude-only model enum)
 
 **Filed:** 2026-07-28

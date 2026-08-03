@@ -1,3 +1,5 @@
+> Migrated to GitHub Issues: [#59](https://github.com/pippenz/cas/issues/59)
+
 # BUG: spawn_workers creates worktree but never launches worker CLI after shutdown_workers count=0
 
 **Reported:** 2026-07-31, factory session `gabber-studio-agile-dragon-52`, supervisor swift-bear-25 (Claude).

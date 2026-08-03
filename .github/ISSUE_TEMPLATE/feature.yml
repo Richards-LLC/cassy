@@ -1,0 +1,131 @@
+name: Feature request
+description: Propose a CAS capability or product improvement
+title: "[Feature] "
+labels:
+  - "kind:feature"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing an improvement. This repository is public: redact credentials, tokens, private URLs, customer data, and sensitive context before submitting.
+
+  - type: input
+    id: from
+    attributes:
+      label: from
+      description: Reporting person, agent, or team.
+      placeholder: "person or team"
+    validations:
+      required: true
+
+  - type: input
+    id: date
+    attributes:
+      label: date
+      description: Request date, in YYYY-MM-DD form.
+      placeholder: "2026-08-03"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: priority
+      description: P0 is critical; P1 high; P2 medium; P3 low or backlog.
+      options:
+        - P0
+        - P1
+        - P2
+        - P3
+    validations:
+      required: true
+
+  - type: input
+    id: cas_version
+    attributes:
+      label: cas_version
+      description: CAS version this request was evaluated against, if relevant.
+      placeholder: "2.38.2"
+    validations:
+      required: false
+
+  - type: input
+    id: session
+    attributes:
+      label: session
+      description: Factory or CAS session identifier, if relevant.
+      placeholder: "project-session-name"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Select the closest CAS area.
+      options:
+        - factory
+        - close-path
+        - messaging
+        - sync
+        - hooks
+        - mcp
+        - skills
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or opportunity
+      description: Describe the current limitation or unmet need with concrete examples.
+    validations:
+      required: true
+
+  - type: textarea
+    id: desired_outcome
+    attributes:
+      label: Desired outcome
+      description: What should users be able to do when this is complete?
+    validations:
+      required: true
+
+  - type: textarea
+    id: why_it_matters
+    attributes:
+      label: Why it matters
+      description: Explain who benefits, how often, and what cost or risk this removes.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed_approach
+    attributes:
+      label: Proposed approach
+      description: Outline the smallest useful scope and important constraints.
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives, cheapest first
+      description: List workarounds or implementation options in increasing order of cost or scope.
+    validations:
+      required: false
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Give observable outcomes that demonstrate the feature works.
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Evidence and additional context
+      description: Add sanitized examples, prior art, commit SHAs, or related task IDs. Never paste credentials or `.cas/cloud.json`.
+    validations:
+      required: false

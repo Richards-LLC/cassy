@@ -1,0 +1,140 @@
+name: Bug report
+description: Report reproducible incorrect or unexpected CAS behavior
+title: "[Bug] "
+labels:
+  - "kind:bug"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a CAS bug. This repository is public: redact credentials, tokens, private URLs, customer data, and sensitive log content before submitting.
+
+  - type: input
+    id: from
+    attributes:
+      label: from
+      description: Reporting person, agent, or team.
+      placeholder: "agent-name (team or factory role)"
+    validations:
+      required: true
+
+  - type: input
+    id: date
+    attributes:
+      label: date
+      description: Date the behavior was observed, in YYYY-MM-DD form.
+      placeholder: "2026-08-03"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: priority
+      description: P0 is critical; P1 high; P2 medium; P3 low or backlog.
+      options:
+        - P0
+        - P1
+        - P2
+        - P3
+    validations:
+      required: true
+
+  - type: input
+    id: cas_version
+    attributes:
+      label: cas_version
+      description: Output of `cas --version`, if known.
+      placeholder: "2.38.2"
+    validations:
+      required: false
+
+  - type: input
+    id: session
+    attributes:
+      label: session
+      description: Factory or CAS session identifier, if relevant.
+      placeholder: "project-session-name"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Select the closest affected CAS area.
+      options:
+        - factory
+        - close-path
+        - messaging
+        - sync
+        - hooks
+        - mcp
+        - skills
+    validations:
+      required: true
+
+  - type: textarea
+    id: observed_behavior
+    attributes:
+      label: Observed behavior
+      description: What happened? Include the exact failure and relevant state.
+      placeholder: Describe the symptom and the sequence that produced it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Give the shortest reliable steps, commands, or event sequence.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected behavior
+      description: What should CAS have done instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: why_it_matters
+    attributes:
+      label: Why it matters
+      description: Explain user impact, frequency, severity, and workaround cost.
+    validations:
+      required: true
+
+  - type: textarea
+    id: probable_cause
+    attributes:
+      label: Probable cause
+      description: Optional evidence-backed diagnosis. Clearly distinguish facts from hypotheses.
+    validations:
+      required: false
+
+  - type: textarea
+    id: suggested_fixes
+    attributes:
+      label: Suggested fixes, cheapest first
+      description: List viable remediations in increasing order of cost or scope.
+      placeholder: |
+        1. Smallest safe fix...
+        2. More complete fix...
+        3. Longer-term redesign...
+    validations:
+      required: false
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence and additional context
+      description: Add sanitized logs, commit SHAs, screenshots, or related task IDs. Never paste credentials or `.cas/cloud.json`.
+    validations:
+      required: false

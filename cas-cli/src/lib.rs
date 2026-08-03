@@ -36,6 +36,7 @@ pub mod error;
 pub mod extraction;
 pub mod factory_preflight;
 pub mod factory_target_cache;
+pub mod fs_space;
 pub mod harness_policy;
 pub mod hooks;
 pub mod hybrid_search;

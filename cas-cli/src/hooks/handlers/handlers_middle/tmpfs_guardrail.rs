@@ -479,21 +479,15 @@ fn prune_old_state_files(dir: &Path, retention: Duration) {
 
 #[cfg(unix)]
 fn fs_usage(path: &Path) -> Option<MountUsage> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
+    crate::fs_space::fs_space(path)
+        .ok()
+        .map(mount_usage_from_space)
+}
 
-    let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
-    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    let rc = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
-    if rc != 0 {
-        return None;
+fn mount_usage_from_space(space: crate::fs_space::FsSpace) -> MountUsage {
+    MountUsage {
+        used_bytes: space.used_bytes(),
     }
-    let stat = unsafe { stat.assume_init() };
-    let block_size = stat.f_frsize as u64;
-    let used_blocks = (stat.f_blocks as u64).saturating_sub(stat.f_bfree as u64);
-    Some(MountUsage {
-        used_bytes: used_blocks.saturating_mul(block_size),
-    })
 }
 
 #[cfg(not(unix))]
@@ -550,5 +544,20 @@ mod tests {
 
         let path = Path::new(OsStr::from_bytes(b"/tmp/bad\0path"));
         assert_eq!(fs_usage(path), None);
+    }
+
+    #[test]
+    fn fs_usage_uses_bfree_not_bavail() {
+        let usage = mount_usage_from_space(crate::fs_space::FsSpace {
+            total_bytes: 1_000,
+            available_bytes: 200,
+            free_bytes: 300,
+        });
+
+        assert_eq!(usage.used_bytes, 700);
+        assert_ne!(
+            usage.used_bytes, 800,
+            "tmpfs usage must subtract all free bytes, not unprivileged-available bytes"
+        );
     }
 }

@@ -206,10 +206,10 @@ pub struct TaskCloseRequest {
 
     /// Task-attributed commit receipt for merged-before-close recovery.
     #[schemars(
-        description = "Full commit SHA produced by this task. CAS validates \
-                       that it exists, carries a non-empty diff, and is an \
-                       ancestor of the task's parent branch before allowing \
-                       a zero-commit close."
+        description = "Full commit SHA or unambiguous hexadecimal abbreviation produced by this \
+                       task. CAS resolves it to a full immutable commit ID, validates that it \
+                       carries a non-empty diff and is an ancestor of the task's parent branch, \
+                       and persists only the full ID."
     )]
     #[serde(default)]
     pub commit_receipt: Option<String>,

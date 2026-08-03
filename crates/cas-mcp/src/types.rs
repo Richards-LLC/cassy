@@ -242,16 +242,16 @@ pub struct TaskRequest {
 
     /// Task-attributed commit receipt for a merged-before-close recovery.
     ///
-    /// The close gate validates that this is a full commit SHA, resolves to
-    /// a commit with a non-empty diff, and is reachable from the task's
-    /// parent branch. It is only needed when no commit-time factory anchor
-    /// was captured.
+    /// The close gate accepts a full commit SHA or unambiguous hexadecimal
+    /// abbreviation, persists its full immutable ID, and verifies a non-empty
+    /// diff plus reachability from the task's parent branch. It is only needed
+    /// when no commit-time factory anchor was captured.
     #[schemars(
-        description = "Full commit SHA produced by this task. On close, CAS \
-                       validates that it exists, carries a non-empty diff, \
-                       and is an ancestor of the task's parent branch. Use \
-                       this for merged-before-close work when no automatic \
-                       factory anchor was captured."
+        description = "Full commit SHA or unambiguous hexadecimal abbreviation produced by this \
+                       task. On close, CAS resolves it to a full immutable commit ID, validates \
+                       that it carries a non-empty diff and is an ancestor of the task's parent \
+                       branch, and persists only the full ID. Use this for merged-before-close \
+                       work when no automatic factory anchor was captured."
     )]
     #[serde(default)]
     pub commit_receipt: Option<String>,

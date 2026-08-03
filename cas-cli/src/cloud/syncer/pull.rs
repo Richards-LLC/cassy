@@ -743,8 +743,24 @@ impl CloudSyncer {
     ) -> Result<SyncResult, CasError> {
         let start = Instant::now();
 
-        // Push first (with sessions)
+        // Push personal changes first (with sessions).
         let push_result = self.push_with_sessions(sessions)?;
+
+        // Team-scoped writes are queued separately from personal writes. The
+        // automatic daemon enters through this method, so omitting this drain
+        // leaves every team row untouched (retry_count=0, last_error=NULL)
+        // until somebody happens to run the manual CLI sync path.
+        //
+        // Keep team failure isolated from pull, matching `cas cloud sync`:
+        // push_team records per-row HTTP failures, while setup/config errors
+        // are surfaced in the aggregate result without suppressing pull.
+        let team_push_result = match self.cloud_config.active_team_id() {
+            Some(team_id) => self.push_team(&team_id).unwrap_or_else(|error| SyncResult {
+                errors: vec![format!("Team push failed: {error}")],
+                ..SyncResult::default()
+            }),
+            None => SyncResult::default(),
+        };
 
         // Then pull
         let pull_result = self.pull(
@@ -761,18 +777,21 @@ impl CloudSyncer {
 
         // Combine results
         Ok(SyncResult {
-            pushed_entries: push_result.pushed_entries,
-            pushed_tasks: push_result.pushed_tasks,
-            pushed_rules: push_result.pushed_rules,
-            pushed_skills: push_result.pushed_skills,
-            pushed_sessions: push_result.pushed_sessions,
-            pushed_verifications: push_result.pushed_verifications,
-            pushed_events: push_result.pushed_events,
-            pushed_prompts: push_result.pushed_prompts,
-            pushed_file_changes: push_result.pushed_file_changes,
-            pushed_commit_links: push_result.pushed_commit_links,
-            pushed_agents: push_result.pushed_agents,
-            pushed_worktrees: push_result.pushed_worktrees,
+            pushed_entries: push_result.pushed_entries + team_push_result.pushed_entries,
+            pushed_tasks: push_result.pushed_tasks + team_push_result.pushed_tasks,
+            pushed_rules: push_result.pushed_rules + team_push_result.pushed_rules,
+            pushed_skills: push_result.pushed_skills + team_push_result.pushed_skills,
+            pushed_sessions: push_result.pushed_sessions + team_push_result.pushed_sessions,
+            pushed_verifications: push_result.pushed_verifications
+                + team_push_result.pushed_verifications,
+            pushed_events: push_result.pushed_events + team_push_result.pushed_events,
+            pushed_prompts: push_result.pushed_prompts + team_push_result.pushed_prompts,
+            pushed_file_changes: push_result.pushed_file_changes
+                + team_push_result.pushed_file_changes,
+            pushed_commit_links: push_result.pushed_commit_links
+                + team_push_result.pushed_commit_links,
+            pushed_agents: push_result.pushed_agents + team_push_result.pushed_agents,
+            pushed_worktrees: push_result.pushed_worktrees + team_push_result.pushed_worktrees,
             pulled_entries: pull_result.pulled_entries,
             pulled_tasks: pull_result.pulled_tasks,
             pulled_rules: pull_result.pulled_rules,
@@ -783,7 +802,12 @@ impl CloudSyncer {
             pulled_file_changes: pull_result.pulled_file_changes,
             pulled_commit_links: pull_result.pulled_commit_links,
             conflicts_resolved: pull_result.conflicts_resolved,
-            errors: [push_result.errors, pull_result.errors].concat(),
+            errors: [
+                push_result.errors,
+                team_push_result.errors,
+                pull_result.errors,
+            ]
+            .concat(),
             duration_ms: start.elapsed().as_millis() as u64,
         })
     }

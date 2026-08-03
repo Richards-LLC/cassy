@@ -1848,6 +1848,55 @@ async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
 }
 
 #[tokio::test]
+async fn test_worktree_merge_refuses_explicit_task_whose_parent_epic_is_closed() {
+    let repo = GitRepo::new();
+    let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
+    disable_system_a(&cas_root);
+
+    Command::new("git")
+        .args(["branch", "epic/already-closed"])
+        .current_dir(&repo.root)
+        .output()
+        .unwrap();
+    let (epic_id, worker_task_id) =
+        create_epic_and_worker_task(&cas_root, "epic/already-closed", Some("closed-worker"));
+    let task_store = open_task_store(&cas_root).expect("open_task_store");
+    let mut epic = task_store.get(&epic_id).expect("get epic");
+    epic.status = TaskStatus::Closed;
+    task_store.update(&epic).expect("close epic");
+
+    let wt_path = cas_root.join("worktrees").join("closed-worker");
+    repo.add_worktree(&wt_path, "factory/closed-worker");
+    std::fs::write(wt_path.join("late-work.txt"), "must not merge").unwrap();
+    run_git(&["add", "."], &wt_path);
+    run_git(&["commit", "-m", "late work"], &wt_path);
+
+    let _lock = merge_cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _cwd = CwdGuard::enter(&repo.root);
+    let svc = make_service(cas_root);
+    let mut req = coord_req("worktree_merge");
+    req.id = Some("factory/closed-worker".to_string());
+    req.task_id = Some(worker_task_id);
+    let result = svc.coordination(Parameters(req)).await;
+
+    assert!(result.is_err(), "closed parent epic must reject the merge");
+    let message = format!("{:?}", result.unwrap_err());
+    assert!(
+        message.contains("Closed") && message.contains("close receipt"),
+        "refusal must explain closed-epic integrity. Got: {message}"
+    );
+    let epic_tree = Command::new("git")
+        .args(["ls-tree", "-r", "--name-only", "epic/already-closed"])
+        .current_dir(&repo.root)
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&epic_tree.stdout).contains("late-work.txt"),
+        "closed epic branch must remain unchanged"
+    );
+}
+
+#[tokio::test]
 async fn test_worktree_merge_standalone_task_requires_force_for_trunk() {
     // cas-0b32 AC4: standalone (no parent epic) trunk merge needs explicit intent.
     let repo = GitRepo::new();
@@ -2187,9 +2236,10 @@ async fn test_worktree_merge_reassignment_ignores_closed_focused_epic_and_honors
     );
 }
 
-/// cas-0b32 AC2: focused epic is honored when unambiguous (no assignee epic).
+/// cas-b86e: even a valid, open focused epic is not merge authority. Without
+/// task/assignee binding or explicit trunk authorization, merge must refuse.
 #[tokio::test]
-async fn test_worktree_merge_uses_focused_epic_when_unambiguous_cas_0b32() {
+async fn test_worktree_merge_ignores_focused_epic_without_task_authority() {
     let repo = GitRepo::new();
     let cas_root = init_cas_dir(&repo.root).expect("init_cas_dir");
     disable_system_a(&cas_root);
@@ -2259,11 +2309,12 @@ async fn test_worktree_merge_uses_focused_epic_when_unambiguous_cas_0b32() {
         }
     }
 
-    let result = result.expect("focused epic merge should succeed");
-    let text = get_text(&result);
+    let error = result.expect_err("focused epic alone must not authorize a merge");
+    let text = format!("{error:?}");
     assert!(
-        text.contains("epic/focused") && text.contains("focused epic"),
-        "must merge via focused epic. Got:\n{text}"
+        text.contains("Session focus is not merge authority")
+            && text.contains("allow_trunk was not set"),
+        "refusal must explain authoritative inputs. Got:\n{text}"
     );
 }
 

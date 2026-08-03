@@ -7,6 +7,10 @@ on:
       - main
   schedule:
     - cron: "0 8 * * 1"
+  # Manual trigger. Without this a run cannot be forced from the CLI or API,
+  # which matters on a fork: Actions start disabled and the first run can only
+  # arrive via a push, a PR, or the weekly cron.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always

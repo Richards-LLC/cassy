@@ -28,7 +28,10 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang lld
+          # Keep this aligned with .cargo/config.toml's gcc + mold toolchain.
+          sudo apt-get install -y gcc mold
+          gcc --version
+          mold --version
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -149,7 +152,10 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang lld
+          # Keep this aligned with .cargo/config.toml's gcc + mold toolchain.
+          sudo apt-get install -y gcc mold
+          gcc --version
+          mold --version
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

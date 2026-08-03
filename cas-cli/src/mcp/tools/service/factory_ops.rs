@@ -3424,13 +3424,6 @@ fn codex_rollout_metadata(path: &std::path::Path) -> CodexRolloutMetadata {
     }
 }
 
-/// Read `payload.cwd` from the first JSONL line when it is a `session_meta`
-/// event. Returns `None` on any parse/IO failure — callers treat that as
-/// "this rollout does not match by cwd".
-pub(crate) fn codex_rollout_cwd(path: &std::path::Path) -> Option<String> {
-    codex_rollout_metadata(path).cwd
-}
-
 /// Scan budget for `**/rollout-*.jsonl` under the sessions root. Codex hosts
 /// accumulate hundreds of historical rollouts; matching by cwd only needs
 /// recent ones, so we mtime-sort and cap the walk (cas-c655 / cas-900b cap
@@ -5863,18 +5856,6 @@ effort = "high"
             got,
             TranscriptResolution::Synthesized(synthesized_unknown_codex_clone_path(session))
         );
-    }
-
-    #[test]
-    fn codex_rollout_cwd_reads_session_meta() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("rollout.jsonl");
-        let meta = serde_json::json!({
-            "type": "session_meta",
-            "payload": { "cwd": "/work/tree", "session_id": "abc" }
-        });
-        std::fs::write(&path, format!("{meta}\n")).unwrap();
-        assert_eq!(codex_rollout_cwd(&path).as_deref(), Some("/work/tree"));
     }
 
     #[test]

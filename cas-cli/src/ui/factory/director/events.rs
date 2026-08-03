@@ -636,17 +636,23 @@ impl DirectorEventDetector {
     /// I sort out the merge base") — the task-level equivalent
     /// (`AwaitingMerge`) is already handled via `active_lease` informational
     /// framing in `prompts.rs` and doesn't need this.
+    // cas-60dd: retained until a supervisor control surface can arm the live hold gate.
+    #[allow(dead_code)]
     pub fn mark_worker_hold(&mut self, worker_name: &str) {
         self.held_workers.insert(worker_name.to_string());
     }
 
     /// Release a worker from hold — idle detection resumes normally on the
     /// next tick.
+    // cas-60dd: retained until a supervisor control surface can release the live hold gate.
+    #[allow(dead_code)]
     pub fn clear_worker_hold(&mut self, worker_name: &str) {
         self.held_workers.remove(worker_name);
     }
 
     /// Whether `worker_name` is currently held (test/inspection helper).
+    // cas-60dd: retained with the live hold gate for control-surface verification.
+    #[allow(dead_code)]
     pub fn is_worker_held(&self, worker_name: &str) -> bool {
         self.held_workers.contains(worker_name)
     }

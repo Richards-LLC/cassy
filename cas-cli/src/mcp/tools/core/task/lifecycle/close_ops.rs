@@ -100,7 +100,7 @@ fn delivery_audit_text_is_portable(value: &str) -> bool {
 
 #[cfg(test)]
 mod delivery_audit_text_tests {
-    use super::delivery_audit_text_is_portable;
+    use super::{delivery_audit_text_is_portable, request_changes_role_gate};
 
     #[test]
     fn receipt_audit_text_rejects_paths_secrets_and_payload_controls() {
@@ -119,6 +119,15 @@ mod delivery_audit_text_tests {
         assert!(!delivery_audit_text_is_portable("token=secret-value"));
         assert!(!delivery_audit_text_is_portable("ghp_secret-shaped"));
         assert!(!delivery_audit_text_is_portable("payload\nsecond line"));
+    }
+
+    #[test]
+    fn only_a_supervisor_can_request_changes_on_awaiting_merge_work() {
+        let worker_error = request_changes_role_gate(false, "cas-7484")
+            .expect_err("a worker must not escape awaiting_merge by rejecting itself");
+        assert!(worker_error.contains("only supervisors"));
+        assert!(worker_error.contains("cas-7484"));
+        request_changes_role_gate(true, "cas-7484").unwrap();
     }
 }
 
@@ -9913,6 +9922,11 @@ mod merge_state_gate_tests {
                         msg.contains("Open a PR targeting main"),
                         "plain (non-epic) parent branch must keep the PR-based \
                          remediation unchanged: {msg}"
+                    );
+                    assert!(
+                        msg.contains("task action=request_changes")
+                            && msg.contains("reason="),
+                        "declined-review remediation must name the supervisor verdict path: {msg}"
                     );
                     assert!(
                         msg.contains(&format!("`{coord} action=inbox_poll`"))

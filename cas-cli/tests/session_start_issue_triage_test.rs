@@ -126,7 +126,27 @@ fn issue_triage_is_silent_for_workers_and_when_repo_is_unset() {
 #[cfg(unix)]
 #[test]
 fn issue_triage_failures_are_silent_and_timeout_is_bounded() {
-    for (name, body) in [("gh-error", "exit 1"), ("slow-gh", "sleep 5")] {
+    let missing_project = TempDir::new().unwrap();
+    init(&missing_project);
+    cas_cmd(&missing_project)
+        .args(["config", "set", "issues.repo", "owner/cas"])
+        .assert()
+        .success();
+    let empty_bin = missing_project.path().join("empty-bin");
+    fs::create_dir(&empty_bin).unwrap();
+    let missing_log = missing_project.path().join("missing-gh.log");
+    let (missing, elapsed) =
+        session_start(&missing_project, "supervisor", &empty_bin, &missing_log);
+    assert!(!missing.contains("GitHub issue triage"), "{missing}");
+    assert!(elapsed < Duration::from_secs(3), "missing gh: {elapsed:?}");
+
+    // Authentication, network, and rate-limit failures all reach CAS as a
+    // non-successful `gh api` exit and must share the same silent path.
+    for (name, body) in [
+        ("unauthenticated", "exit 4"),
+        ("offline-or-rate-limited", "exit 1"),
+        ("slow-gh", "sleep 5"),
+    ] {
         let project = TempDir::new().unwrap();
         init(&project);
         cas_cmd(&project)

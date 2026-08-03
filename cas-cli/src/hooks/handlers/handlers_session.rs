@@ -273,6 +273,21 @@ pub fn handle_session_start(
         context
     };
 
+    // Read-only GitHub issue triage (cas-ce3d). Supervisors need the intake
+    // signal before assigning work; workers do not, and should not pay its
+    // latency or context cost. The helper is fully best-effort: unset config,
+    // cache/query/parse failures, and a hard subprocess timeout all emit
+    // nothing and cannot fail SessionStart.
+    let context = if is_supervisor {
+        match crate::hooks::handlers::issue_triage::build_session_start_banner(cas_root, &config) {
+            Some(banner) if context.is_empty() => banner,
+            Some(banner) => format!("{context}\n{banner}"),
+            None => context,
+        }
+    } else {
+        context
+    };
+
     // Phase 3 / cas-3efe: opt-in integrations staleness banner. Default
     // off — only fires when `[integrations] session_start_warn = true` in
     // .cas/config.toml *and* at least one platform reports a `Stale` ID.

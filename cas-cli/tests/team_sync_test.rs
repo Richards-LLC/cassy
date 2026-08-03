@@ -226,8 +226,11 @@ async fn team_push_http_failure_is_isolated() {
         "an attempted team push must increment retry_count"
     );
     assert!(
-        remaining[0].last_error.is_some(),
-        "an attempted team push must persist last_error"
+        remaining[0]
+            .last_error
+            .as_deref()
+            .is_some_and(|error| !error.is_empty()),
+        "an attempted team push must persist a non-empty last_error"
     );
 }
 

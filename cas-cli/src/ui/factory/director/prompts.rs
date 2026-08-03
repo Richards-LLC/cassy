@@ -11,8 +11,6 @@ use crate::mcp::tools::core::task::lifecycle::close_ops::{
     KnownUnmergedCount, fetch_parent_branch_best_effort, known_unmerged_factory_commits,
     resolve_ref_commit_sha,
 };
-#[cfg(test)]
-use crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_short_sha;
 use crate::ui::factory::director::data::{ActiveLeaseSummary, DirectorData, TaskSummary};
 use crate::ui::factory::director::events::DirectorEvent;
 use cas_mux::SupervisorCli;
@@ -284,21 +282,8 @@ pub fn epic_completion_context(
     }
 }
 
-pub fn revalidate_event_for_delivery(
-    event: &DirectorEvent,
-    unfiltered_data: &DirectorData,
-    supervisor_name: &str,
-) -> Option<DirectorEvent> {
-    revalidate_event_for_delivery_with_focus(
-        event,
-        unfiltered_data,
-        supervisor_name,
-        None,
-    )
-}
-
-/// Like [`revalidate_event_for_delivery`], but accepts the session's focused
-/// epic so session-affinity routing for epic completion can use it (cas-9fff).
+/// Revalidate an event with the session's focused epic so session-affinity
+/// routing for epic completion can use it (cas-9fff).
 pub fn revalidate_event_for_delivery_with_focus(
     event: &DirectorEvent,
     unfiltered_data: &DirectorData,
@@ -1782,7 +1767,8 @@ mod tests {
         let mut data = make_data(0);
         data.ready_tasks = vec![open_task("cas-next", Some("swift-fox"))];
 
-        let rechecked = revalidate_event_for_delivery(&event, &data, "supervisor");
+        let rechecked =
+            revalidate_event_for_delivery_with_focus(&event, &data, "supervisor", None);
 
         assert!(
             rechecked.is_none(),
@@ -1827,7 +1813,7 @@ mod tests {
             Some(registered_at + chrono::Duration::seconds(1));
 
         assert!(
-            revalidate_event_for_delivery(&event, &data, "supervisor").is_none(),
+            revalidate_event_for_delivery_with_focus(&event, &data, "supervisor", None).is_none(),
             "a supervisor message after registration makes the ready nudge stale"
         );
     }
@@ -1852,7 +1838,7 @@ mod tests {
         });
 
         assert!(
-            revalidate_event_for_delivery(&event, &data, "supervisor").is_none(),
+            revalidate_event_for_delivery_with_focus(&event, &data, "supervisor", None).is_none(),
             "an event enqueued while taskless must be dropped when any assignment lands"
         );
     }
@@ -1867,7 +1853,13 @@ mod tests {
         assigned_data.ready_tasks = vec![open_task("cas-next", Some("sess-id-abc123"))];
 
         assert!(
-            revalidate_event_for_delivery(&ready_event, &assigned_data, "supervisor").is_none(),
+            revalidate_event_for_delivery_with_focus(
+                &ready_event,
+                &assigned_data,
+                "supervisor",
+                None,
+            )
+            .is_none(),
             "ready notification must drop when delivery sees assigned work"
         );
 
@@ -1880,7 +1872,13 @@ mod tests {
         unblocked_data.ready_tasks = vec![open_task("cas-block", Some("swift-fox"))];
 
         assert!(
-            revalidate_event_for_delivery(&blocked_event, &unblocked_data, "supervisor").is_none(),
+            revalidate_event_for_delivery_with_focus(
+                &blocked_event,
+                &unblocked_data,
+                "supervisor",
+                None,
+            )
+            .is_none(),
             "blocked notification must drop when delivery sees the task is no longer blocked"
         );
 
@@ -1888,7 +1886,12 @@ mod tests {
         blocked_data.ready_tasks = vec![blocked_task("cas-block", Some("swift-fox"))];
         assert!(
             matches!(
-                revalidate_event_for_delivery(&blocked_event, &blocked_data, "supervisor"),
+                revalidate_event_for_delivery_with_focus(
+                    &blocked_event,
+                    &blocked_data,
+                    "supervisor",
+                    None,
+                ),
                 Some(DirectorEvent::TaskBlocked { .. })
             ),
             "blocked notification should remain when delivery still sees the blocked task"
@@ -1901,7 +1904,7 @@ mod tests {
     /// means this fires at most once per detector lifetime), but the task
     /// closed in the gap before `revalidate_and_prompt_for_delivery` loaded
     /// its fresh delivery-time snapshot. Before the fix, `TaskAssigned` fell
-    /// through the `_` catch-all in `revalidate_event_for_delivery` with no
+    /// through the `_` catch-all in `revalidate_event_for_delivery_with_focus` with no
     /// recheck, so the stale "You have been assigned a new task" prompt
     /// still went out for a task the worker (or supervisor) already closed.
     #[test]
@@ -1917,7 +1920,7 @@ mod tests {
         let data = make_data(0);
 
         assert!(
-            revalidate_event_for_delivery(&event, &data, "supervisor").is_none(),
+            revalidate_event_for_delivery_with_focus(&event, &data, "supervisor", None).is_none(),
             "TaskAssigned must be dropped when delivery sees the task is no longer active"
         );
     }
@@ -1942,7 +1945,7 @@ mod tests {
         data.ready_tasks = vec![open_task("cas-next", None)];
 
         assert!(
-            revalidate_event_for_delivery(&event, &data, "supervisor").is_none(),
+            revalidate_event_for_delivery_with_focus(&event, &data, "supervisor", None).is_none(),
             "AwaitingMerge is supervisor-owned merge work, never a worker assignment"
         );
 
@@ -1954,7 +1957,12 @@ mod tests {
         data.ready_tasks[0].assignee = Some("swift-fox".to_string());
         assert!(
             matches!(
-                revalidate_event_for_delivery(&open_event, &data, "supervisor"),
+                revalidate_event_for_delivery_with_focus(
+                    &open_event,
+                    &data,
+                    "supervisor",
+                    None,
+                ),
                 Some(DirectorEvent::TaskAssigned { .. })
             ),
             "a genuinely Open assignment must remain dispatchable"
@@ -1980,7 +1988,7 @@ mod tests {
         )];
 
         assert!(
-            revalidate_event_for_delivery(&event, &data, "supervisor").is_none(),
+            revalidate_event_for_delivery_with_focus(&event, &data, "supervisor", None).is_none(),
             "AwaitingMerge must never receive a worker-directed rescue nudge"
         );
     }
@@ -2008,11 +2016,12 @@ mod tests {
         };
 
         assert!(
-            revalidate_event_for_delivery(&assignment, &data, "supervisor").is_none(),
+            revalidate_event_for_delivery_with_focus(&assignment, &data, "supervisor", None)
+                .is_none(),
             "PendingSupervisorReview must not receive a TaskAssigned prompt"
         );
         assert!(
-            revalidate_event_for_delivery(&stalled, &data, "supervisor").is_none(),
+            revalidate_event_for_delivery_with_focus(&stalled, &data, "supervisor", None).is_none(),
             "PendingSupervisorReview must not receive a WorkerStalled rescue nudge"
         );
     }
@@ -2034,7 +2043,7 @@ mod tests {
         data.ready_tasks = vec![open_task("cas-9789", Some("other-worker"))];
 
         assert!(
-            revalidate_event_for_delivery(&event, &data, "supervisor").is_none(),
+            revalidate_event_for_delivery_with_focus(&event, &data, "supervisor", None).is_none(),
             "TaskAssigned must be dropped when delivery sees a different assignee"
         );
     }
@@ -2052,8 +2061,9 @@ mod tests {
         let mut data = make_data(0);
         data.ready_tasks = vec![open_task("cas-9789", Some("swift-fox"))];
 
-        let rechecked = revalidate_event_for_delivery(&event, &data, "supervisor")
-            .expect("still-assigned task must survive revalidation");
+        let rechecked =
+            revalidate_event_for_delivery_with_focus(&event, &data, "supervisor", None)
+                .expect("still-assigned task must survive revalidation");
 
         match rechecked {
             DirectorEvent::TaskAssigned {
@@ -2092,7 +2102,7 @@ mod tests {
 
         assert!(
             matches!(
-                revalidate_event_for_delivery(&event, &data, "supervisor"),
+                revalidate_event_for_delivery_with_focus(&event, &data, "supervisor", None),
                 Some(DirectorEvent::TaskAssigned { .. })
             ),
             "TaskAssigned must survive when delivery sees the task now InProgress"
@@ -2918,7 +2928,7 @@ mod tests {
 
     /// cas-627f: the flagship close-rejected notification, exercised end to
     /// end through BOTH pipeline steps a live director tick actually runs:
-    /// `revalidate_event_for_delivery` (delivery-time recheck) THEN
+    /// `revalidate_event_for_delivery_with_focus` (delivery-time recheck) THEN
     /// `generate_prompt`. Before the cas-627f fix, `active_lease` for a
     /// parked `AwaitingMerge` task resolved to `None` once
     /// `park_task_awaiting_merge` released the lease (confirmed P1,
@@ -2959,8 +2969,9 @@ mod tests {
         });
         let config = default_config();
 
-        let revalidated = revalidate_event_for_delivery(&event, &data, "supervisor")
-            .expect("close-rejected WorkerIdle must survive delivery-time revalidation");
+        let revalidated =
+            revalidate_event_for_delivery_with_focus(&event, &data, "supervisor", None)
+                .expect("close-rejected WorkerIdle must survive delivery-time revalidation");
 
         let prompt = generate_prompt(
             &revalidated,
@@ -4425,7 +4436,7 @@ mod tests {
         assert!(prompt.text.contains("assigned-but-unstarted and inactive"));
         assert!(prompt.text.contains("task action=start id=cas-unstarted"));
         assert!(
-            revalidate_event_for_delivery(&event, &data, "supervisor").is_some(),
+            revalidate_event_for_delivery_with_focus(&event, &data, "supervisor", None).is_some(),
             "the escalation must survive delivery revalidation while the task remains Open and assigned"
         );
     }
@@ -4857,12 +4868,14 @@ mod tests {
         let config = default_config();
 
         // Revalidation: only owner delivers
-        let owner_event = revalidate_event_for_delivery(&event, &owner_data, "owner-sup");
+        let owner_event =
+            revalidate_event_for_delivery_with_focus(&event, &owner_data, "owner-sup", None);
         assert!(
             owner_event.is_some(),
             "owning supervisor must receive EpicAllSubtasksClosed"
         );
-        let foreign_event = revalidate_event_for_delivery(&event, &foreign_data, "other-sup");
+        let foreign_event =
+            revalidate_event_for_delivery_with_focus(&event, &foreign_data, "other-sup", None);
         assert!(
             foreign_event.is_none(),
             "non-owning concurrent supervisor must NOT receive EpicAllSubtasksClosed"
@@ -5082,8 +5095,9 @@ mod tests {
             let remote = init_bare_remote();
             publish_branch(repo.path(), &remote, "epic/test-epic");
             publish_branch(repo.path(), &remote, "factory/recipe-be");
-            let local_epic_before =
-                resolve_branch_short_sha(repo.path(), "epic/test-epic").unwrap();
+            let local_epic_before = short_commit_id(
+                &resolve_ref_commit_sha(repo.path(), "epic/test-epic").unwrap(),
+            );
 
             let integrator = clone_epic(&remote);
             git(
@@ -5095,7 +5109,9 @@ mod tests {
                 &["push", "-q", "origin", "epic/test-epic"],
             );
             assert_eq!(
-                resolve_branch_short_sha(repo.path(), "epic/test-epic").unwrap(),
+                short_commit_id(
+                    &resolve_ref_commit_sha(repo.path(), "epic/test-epic").unwrap(),
+                ),
                 local_epic_before,
                 "precondition: local epic ref remains stale"
             );
@@ -5441,8 +5457,9 @@ mod tests {
             let remote = init_bare_remote();
             publish_branch(repo.path(), &remote, "epic/test-epic");
             publish_branch(repo.path(), &remote, "factory/recipe-be");
-            let local_epic_before =
-                resolve_branch_short_sha(repo.path(), "epic/test-epic").unwrap();
+            let local_epic_before = short_commit_id(
+                &resolve_ref_commit_sha(repo.path(), "epic/test-epic").unwrap(),
+            );
 
             let integrator = clone_epic(&remote);
             git(
@@ -5454,7 +5471,9 @@ mod tests {
                 &["push", "-q", "origin", "epic/test-epic"],
             );
             assert_eq!(
-                resolve_branch_short_sha(repo.path(), "epic/test-epic").unwrap(),
+                short_commit_id(
+                    &resolve_ref_commit_sha(repo.path(), "epic/test-epic").unwrap(),
+                ),
                 local_epic_before,
                 "precondition: queued-row sweep begins with stale local epic"
             );

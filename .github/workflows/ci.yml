@@ -89,7 +89,12 @@ jobs:
   # Linux test suite on a more expensive runner.
   macos-check:
     name: macOS Check
-    runs-on: macos-latest
+    # Zig 0.15.2 cannot link its build runner with the Xcode 26.6 / macOS 26.5
+    # SDK that macos-latest selected in 2026-07. Keep the known-good Xcode 26.3
+    # / macOS 26.2 SDK explicit until Zig is upgraded and verified against it.
+    runs-on: macos-26
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     steps:
       - uses: actions/checkout@v4
         with:
@@ -101,6 +106,18 @@ jobs:
       # ghostty_vt_sys builds its native library with Zig even for cargo check.
       - name: Install Zig
         run: ./scripts/bootstrap-zig.sh
+
+      # Zig discovers Darwin SDKs through xcrun, which follows DEVELOPER_DIR.
+      # Keep this visible so runner-image/toolchain drift is diagnosable.
+      - name: Report Apple and Zig toolchains
+        run: |
+          echo "DEVELOPER_DIR=$DEVELOPER_DIR"
+          xcode-select --print-path
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-path
+          xcrun --sdk macosx --show-sdk-version
+          ./.context/zig/zig version
+          ./.context/zig/zig env
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.5

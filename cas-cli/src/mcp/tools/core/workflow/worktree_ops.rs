@@ -107,13 +107,53 @@ fn merge_target_remediation(assignee: &str) -> String {
         "Remediation:\n\
          1. Prefer an explicit task: `coordination action=worktree_merge id={assignee} \
          task_id=<task-id>` (or `id=factory/{assignee}`).\n\
-         2. Or pin the epic: `coordination action=focus_epic id=<epic-id>` then retry \
-         when the worker is a member of that factory session and project_dir matches.\n\
-         3. Standalone / trunk merges require explicit intent: pass `allow_trunk=true` \
+         2. Standalone / trunk merges require explicit intent: pass `allow_trunk=true` \
          (and `task_id` when merging a non-epic task). `force=true` only bypasses dirty \
          worktree protection — it does NOT authorize trunk.\n\
-         Never relies on a silent default to main/master/staging."
+         Session `focus_epic` is a display filter and never authorizes a merge target. \
+         CAS never relies on a silent default to main/master/staging."
     )
+}
+
+/// Defense-in-depth for both registered (System A) and factory (System B)
+/// worktrees: once an epic is closed, its branch must not advance silently and
+/// invalidate the close receipt. Task-based System B resolution rejects this
+/// earlier; this final target check covers stored worktree records too.
+fn reject_closed_epic_merge_target(
+    task_store: &dyn cas_store::TaskStore,
+    target_branch: &str,
+) -> Result<(), McpError> {
+    let closed_epics = task_store
+        .list(None)
+        .map_err(|error| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!(
+                "Failed to validate merge target {target_branch} against closed epics: {error}"
+            )),
+            data: None,
+        })?
+        .into_iter()
+        .filter(|task| {
+            task.task_type == cas_types::TaskType::Epic
+                && task.status == cas_types::TaskStatus::Closed
+                && task.branch.as_deref() == Some(target_branch)
+        })
+        .map(|task| task.id)
+        .collect::<Vec<_>>();
+
+    if closed_epics.is_empty() {
+        return Ok(());
+    }
+
+    Err(McpError {
+        code: ErrorCode::INVALID_PARAMS,
+        message: Cow::from(format!(
+            "merge target {target_branch} belongs to closed epic(s) {} — refusing to \
+             advance the branch after its close receipt",
+            closed_epics.join(", ")
+        )),
+        data: None,
+    })
 }
 
 /// cas-369f: decide whether `worktree_merge` should remove the worktree after
@@ -500,15 +540,17 @@ fn collect_untracked_git_worktrees(
 ///   verifying the task belongs to the worker being merged — a caller could
 ///   pair worker A with task B and redirect A's branch into B's epic.
 ///
-/// Resolution order (cas-0b32 + cas-bd5f):
+/// Resolution order (cas-0b32 + cas-bd5f + cas-b86e):
 /// 1. Explicit `task_id` → **authorize worker ownership** (assignee/lease), then
 ///    parent epic branch; if none, **reject** unless `allow_trunk`.
-/// 2. Else unique parent-epic branch among the assignee's non-closed tasks
-///    (get_parent_epic errors and branchless parents reject — no fall-through).
-/// 3. Else focused epic when session project_dir matches cas_root and the
-///    worker is a member of that factory session.
+/// 2. Else resolve the assignee's non-closed tasks. A unique epic target wins;
+///    a unique standalone task may use trunk only with `allow_trunk`; mixed or
+///    multiple task targets reject as ambiguous.
+/// 3. Else trunk only when `allow_trunk` explicitly authorizes it.
 /// 4. Else reject with remediation — **never** silent trunk default.
-/// 5. Trunk only when `allow_trunk` and no epic context remains.
+///
+/// Session `focus_epic` is deliberately absent: it is a TUI attention hint,
+/// not merge authority. Any closed parent epic is rejected before git mutation.
 ///
 /// Always returns a human-readable reason on success.
 fn resolve_system_b_merge_target(
@@ -516,7 +558,6 @@ fn resolve_system_b_merge_target(
     agent_store: &dyn cas_store::AgentStore,
     task_id: Option<&str>,
     assignee: &str,
-    focused: Option<&ValidatedFocusedEpic>,
     allow_trunk: bool,
     trunk: impl FnOnce() -> String,
 ) -> Result<(String, String), McpError> {
@@ -538,6 +579,18 @@ fn resolve_system_b_merge_target(
             data: None,
         })?;
         if let Some(epic) = epic {
+            if epic.status == cas_types::TaskStatus::Closed {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "task {task_id}'s parent epic {} is Closed — refusing to advance \
+                         a branch after the epic's close receipt.\n\n{}",
+                        epic.id,
+                        merge_target_remediation(assignee)
+                    )),
+                    data: None,
+                });
+            }
             if let Some(branch) = epic.branch.clone() {
                 return Ok((
                     branch.clone(),
@@ -581,15 +634,18 @@ fn resolve_system_b_merge_target(
         });
     }
 
-    // No task_id: infer from assignee tasks + focused epic (cas-0b32).
+    // No task_id: infer only from current assignee tasks. Session focus is a
+    // display concern and must never redirect code (cas-b86e).
     let all_tasks = task_store.list(None).map_err(|e| McpError {
         code: ErrorCode::INTERNAL_ERROR,
         message: Cow::from(format!("Failed to list tasks for merge target: {e}")),
         data: None,
     })?;
 
-    let mut assignee_epic_branches: Vec<(String, String)> = Vec::new(); // (epic_id, branch)
+    let mut assignee_epic_branches: Vec<(String, String, String)> = Vec::new(); // epic, branch, task
+    let mut standalone_tasks: Vec<String> = Vec::new();
     let mut branchless_parent_epics: Vec<String> = Vec::new();
+    let mut closed_parent_epics: Vec<(String, String)> = Vec::new(); // task, epic
     for task in &all_tasks {
         if task.assignee.as_deref() != Some(assignee) {
             continue;
@@ -601,18 +657,24 @@ fn resolve_system_b_merge_target(
         // never silently fall through to trunk/focus (cas-0b32 review).
         match task_store.get_parent_epic(&task.id) {
             Ok(Some(epic)) => {
+                if epic.status == cas_types::TaskStatus::Closed {
+                    closed_parent_epics.push((task.id.clone(), epic.id.clone()));
+                    continue;
+                }
                 if let Some(branch) = epic.branch.clone() {
                     if !assignee_epic_branches
                         .iter()
-                        .any(|(id, b)| id == &epic.id && b == &branch)
+                        .any(|(id, b, task_id)| {
+                            id == &epic.id && b == &branch && task_id == &task.id
+                        })
                     {
-                        assignee_epic_branches.push((epic.id.clone(), branch));
+                        assignee_epic_branches.push((epic.id.clone(), branch, task.id.clone()));
                     }
                 } else if !branchless_parent_epics.contains(&epic.id) {
                     branchless_parent_epics.push(epic.id.clone());
                 }
             }
-            Ok(None) => {}
+            Ok(None) => standalone_tasks.push(task.id.clone()),
             Err(e) => {
                 return Err(McpError {
                     code: ErrorCode::INTERNAL_ERROR,
@@ -627,6 +689,23 @@ fn resolve_system_b_merge_target(
         }
     }
 
+    if !closed_parent_epics.is_empty() {
+        let targets = closed_parent_epics
+            .iter()
+            .map(|(task, epic)| format!("task {task}→epic {epic}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(format!(
+                "assignee {assignee} has merge-relevant task(s) whose parent epic is Closed \
+                 ({targets}) — refusing to advance a branch after an epic close receipt.\n\n{}",
+                merge_target_remediation(assignee)
+            )),
+            data: None,
+        });
+    }
+
     // Any branchless active parent is a hard reject — even when another
     // parent has a branch (mixed case must not silently pick the branchful
     // one; cas-0b32 second-review residual AC).
@@ -638,7 +717,7 @@ fn resolve_system_b_merge_target(
                 " Also has branchful parent(s): {}.",
                 assignee_epic_branches
                     .iter()
-                    .map(|(id, b)| format!("{id}→{b}"))
+                    .map(|(id, b, task)| format!("task {task}→{id}→{b}"))
                     .collect::<Vec<_>>()
                     .join(", ")
             )
@@ -661,36 +740,50 @@ fn resolve_system_b_merge_target(
         let mut seen = std::collections::BTreeSet::new();
         assignee_epic_branches
             .iter()
-            .filter_map(|(_, b)| seen.insert(b.clone()).then(|| b.clone()))
+            .filter_map(|(_, b, _)| seen.insert(b.clone()).then(|| b.clone()))
             .collect()
     };
 
-    if unique_branches.len() == 1 {
+    if unique_branches.len() == 1 && standalone_tasks.is_empty() {
         let branch = unique_branches[0].clone();
         let epic_id = assignee_epic_branches
             .iter()
-            .find(|(_, b)| b == &branch)
-            .map(|(id, _)| id.as_str())
+            .find(|(_, b, _)| b == &branch)
+            .map(|(id, _, _)| id.as_str())
             .unwrap_or("?");
+        let task_ids = assignee_epic_branches
+            .iter()
+            .filter(|(_, b, _)| b == &branch)
+            .map(|(_, _, task)| task.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
         return Ok((
             branch.clone(),
             format!(
-                "epic branch {branch} (assignee {assignee}'s task parent epic {epic_id}; \
-                 no task_id given)"
+                "epic branch {branch} (assignee {assignee}'s current task(s) [{task_ids}] \
+                 resolve through parent epic {epic_id}; no task_id given)"
             ),
         ));
     }
 
-    if unique_branches.len() > 1 {
+    if unique_branches.len() > 1
+        || (!unique_branches.is_empty() && !standalone_tasks.is_empty())
+        || standalone_tasks.len() > 1
+    {
         let list = assignee_epic_branches
             .iter()
-            .map(|(id, b)| format!("{id}→{b}"))
+            .map(|(id, b, task)| format!("task {task}→{id}→{b}"))
+            .chain(
+                standalone_tasks
+                    .iter()
+                    .map(|task| format!("task {task}→trunk")),
+            )
             .collect::<Vec<_>>()
             .join(", ");
         return Err(McpError {
             code: ErrorCode::INVALID_PARAMS,
             message: Cow::from(format!(
-                "ambiguous merge target for assignee {assignee}: multiple parent epics \
+                "ambiguous merge target for assignee {assignee}: multiple current task targets \
                  ({list}). Pass task_id= to disambiguate.\n\n{}",
                 merge_target_remediation(assignee)
             )),
@@ -698,63 +791,17 @@ fn resolve_system_b_merge_target(
         });
     }
 
-    // No assignee epic: try validated focused epic when unambiguous.
-    if let Some(focused) = focused {
-        match task_store.get(&focused.epic_id) {
-            Ok(epic) if epic.task_type == cas_types::TaskType::Epic => {
-                if let Some(branch) = epic.branch.clone() {
-                    return Ok((
-                        branch.clone(),
-                        format!(
-                            "epic branch {branch} (focused epic {} in session {}; \
-                             no task_id and no assignee epic assignment)",
-                            focused.epic_id, focused.session_name
-                        ),
-                    ));
-                }
-                return Err(McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(format!(
-                        "focused epic {} has no branch field — set it before merge.\n\n{}",
-                        focused.epic_id,
-                        merge_target_remediation(assignee)
-                    )),
-                    data: None,
-                });
-            }
-            Ok(other) => {
-                return Err(McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(format!(
-                        "focused id {} is not an Epic (task_type={:?}).\n\n{}",
-                        focused.epic_id,
-                        other.task_type,
-                        merge_target_remediation(assignee)
-                    )),
-                    data: None,
-                });
-            }
-            Err(e) => {
-                return Err(McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(format!(
-                        "focused epic {} not found in this project store: {e}\n\n{}",
-                        focused.epic_id,
-                        merge_target_remediation(assignee)
-                    )),
-                    data: None,
-                });
-            }
-        }
-    }
-
     if allow_trunk {
         let trunk = trunk();
+        let task_context = standalone_tasks
+            .first()
+            .map(|task| format!("assignee {assignee}'s current standalone task {task}"))
+            .unwrap_or_else(|| format!("no current task binding for assignee {assignee}"));
         return Ok((
             trunk.clone(),
             format!(
-                "trunk {trunk} (explicit allow_trunk=true; no task_id, no assignee epic, \
-                 no validated focused epic)"
+                "trunk {trunk} (explicit allow_trunk=true; {task_context}; no task_id and \
+                 no assignee epic binding; session focus is not merge authority)"
             ),
         ));
     }
@@ -763,77 +810,11 @@ fn resolve_system_b_merge_target(
         code: ErrorCode::INVALID_PARAMS,
         message: Cow::from(format!(
             "no merge target for worktree assignee {assignee}: no task_id, no assignee \
-             epic assignment, and no validated focused epic — refusing silent trunk \
-             default (cas-0b32).\n\n{}",
+             epic binding, and allow_trunk was not set — refusing silent trunk default \
+             (cas-0b32/cas-b86e). Session focus is not merge authority.\n\n{}",
             merge_target_remediation(assignee)
         )),
         data: None,
-    })
-}
-
-/// Focused epic that passed session project_dir + worker membership checks.
-#[derive(Debug, Clone)]
-struct ValidatedFocusedEpic {
-    epic_id: String,
-    session_name: String,
-}
-
-/// Load and validate focused epic for merge-target inference (cas-0b32 review).
-///
-/// Requires:
-/// - `CAS_FACTORY_SESSION` session metadata with a pinned/default epic id
-/// - `SessionMetadata.project_dir` matches this `cas_root`'s project (canonical)
-/// - `assignee` is a worker member of that session (metadata.workers or
-///   agent_store with matching factory_session)
-///
-/// Cross-project / stale pins return `None` (not used as a target).
-fn load_validated_focused_epic(
-    cas_root: &std::path::Path,
-    assignee: &str,
-) -> Option<ValidatedFocusedEpic> {
-    use crate::ui::factory::{SessionMetadata, metadata_path};
-
-    let session = std::env::var("CAS_FACTORY_SESSION").ok()?;
-    let data = std::fs::read_to_string(metadata_path(&session)).ok()?;
-    let meta: SessionMetadata = serde_json::from_str(&data).ok()?;
-    let epic_id = meta
-        .pinned_epic_id
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| meta.epic_id.filter(|s| !s.trim().is_empty()))?;
-
-    // project_dir must match this cas_root's project.
-    let project_root = cas_root.parent().unwrap_or(cas_root);
-    let meta_project = meta.project_dir.as_ref().filter(|s| !s.trim().is_empty())?;
-    let meta_canon = std::fs::canonicalize(meta_project).ok()?;
-    let cas_canon = std::fs::canonicalize(project_root).ok()?;
-    if meta_canon != cas_canon {
-        return None; // cross-project / stale pin
-    }
-
-    // Worker membership: session metadata workers list, else agent store.
-    let in_meta_workers = meta.workers.iter().any(|w| w.name == assignee);
-    if !in_meta_workers {
-        let agent_ok = crate::store::open_agent_store(cas_root)
-            .ok()
-            .and_then(|store| {
-                cas_store::AgentStore::list(store.as_ref(), None)
-                    .ok()
-                    .map(|agents| {
-                        agents.iter().any(|a| {
-                            a.name == assignee
-                                && a.factory_session.as_deref() == Some(session.as_str())
-                        })
-                    })
-            })
-            .unwrap_or(false);
-        if !agent_ok {
-            return None;
-        }
-    }
-
-    Some(ValidatedFocusedEpic {
-        epic_id,
-        session_name: session,
     })
 }
 
@@ -1328,11 +1309,12 @@ impl CasCore {
     /// refused every one of them — forcing a manual `git worktree add` +
     /// merge + push that bypassed factory tracking/lease/cleanup entirely.
     ///
-    /// A System-B merge target is resolved via `task_id`, assignee epic
-    /// assignment, and focused epic (cas-0938 + cas-0b32). Never silently
-    /// defaults a factory worker merge to trunk — trunk requires explicit
-    /// `allow_trunk=true` (independent of `force`, which only bypasses dirty
-    /// worktree protection). The resolved target is always surfaced.
+    /// A System-B merge target is resolved via `task_id`, then the assignee's
+    /// current task binding (cas-0938 + cas-0b32 + cas-b86e). Session epic
+    /// focus is never merge authority. Never silently defaults a factory
+    /// worker merge to trunk — trunk requires explicit `allow_trunk=true`
+    /// (independent of `force`, which only bypasses dirty worktree protection).
+    /// The resolved task/target is always surfaced.
     ///
     /// `cleanup` (cas-369f) is independent of `force`:
     /// - `force` only allows merging a dirty worktree
@@ -1506,13 +1488,11 @@ impl CasCore {
                         )),
                         data: None,
                     })?;
-                let focused = load_validated_focused_epic(&cas_root, assignee);
                 let (resolved_parent_branch, mut target_reason) = resolve_system_b_merge_target(
                     task_store.as_ref(),
                     agent_store.as_ref(),
                     task_id,
                     assignee,
-                    focused.as_ref(),
                     allow_trunk, // NOT force — dirty bypass stays separate (cas-0b32 review P1)
                     || {
                         Config::configured_epic_base_branch(&cwd)
@@ -1769,6 +1749,11 @@ impl CasCore {
                 &worktree.parent_branch,
             )
         } else {
+            reject_closed_epic_merge_target(
+                self.open_task_store()?.as_ref(),
+                &worktree.parent_branch,
+            )?;
+
             // cas-0a21: final compare-and-swap read of the target ref, taken
             // under the target lock immediately before Git runs. Any drift
             // that landed since preflight is refused here, so the common case

@@ -13787,6 +13787,76 @@ mod zero_change_close_tests {
         );
     }
 
+    #[test]
+    fn cas77af_valid_short_receipt_resolves_to_full_commit_and_proceeds() {
+        let dir = init_worker_repo();
+        std::fs::write(dir.path().join("short.rs"), "pub fn short_receipt() {}\n").unwrap();
+        git(dir.path(), &["add", "short.rs"]);
+        git(dir.path(), &["commit", "-q", "-m", "fix: short receipt work"]);
+        let full_receipt = head_sha(dir.path());
+        let short_receipt = &full_receipt[..8];
+
+        git(dir.path(), &["checkout", "-q", "main"]);
+        git(
+            dir.path(),
+            &[
+                "merge",
+                "--no-ff",
+                "-m",
+                "merge short receipt work",
+                "factory/test-worker",
+            ],
+        );
+        git(dir.path(), &["checkout", "-q", "factory/test-worker"]);
+        git(dir.path(), &["reset", "--hard", "main"]);
+
+        let note = validate_task_commit_receipt(
+            dir.path(),
+            short_receipt,
+            "main",
+            &test_receipt_window(),
+        )
+        .expect("an unambiguous Git abbreviation must be valid receipt input");
+        assert!(note.contains(short_receipt), "{note}");
+        assert!(note.contains(&full_receipt), "{note}");
+        assert!(
+            note.contains("resolved to full commit"),
+            "the audit note must preserve normalization evidence: {note}"
+        );
+    }
+
+    #[test]
+    fn cas77af_unmerged_short_receipt_reports_ancestry_not_format_or_merge_required() {
+        let dir = init_worker_repo();
+        std::fs::write(
+            dir.path().join("unmerged-short.rs"),
+            "pub fn unmerged_short_receipt() {}\n",
+        )
+        .unwrap();
+        git(dir.path(), &["add", "unmerged-short.rs"]);
+        git(
+            dir.path(),
+            &["commit", "-q", "-m", "fix: unmerged short receipt"],
+        );
+        let full_receipt = head_sha(dir.path());
+        let short_receipt = &full_receipt[..8];
+
+        let reason = validate_task_commit_receipt(
+            dir.path(),
+            short_receipt,
+            "main",
+            &test_receipt_window(),
+        )
+        .expect_err("a real but unmerged commit must remain invalid close evidence");
+        assert!(reason.contains("not an ancestor of main"), "{reason}");
+        assert!(!reason.contains("40- or 64-character"), "{reason}");
+
+        let message = commit_receipt_rejection(short_receipt, "main", &reason);
+        assert!(message.contains("INVALID TASK COMMIT RECEIPT"), "{message}");
+        assert!(!message.contains("MERGE REQUIRED"), "{message}");
+        assert!(message.contains("not an ancestor of main"), "{message}");
+    }
+
     /// cas-7308a: conflict resume clears the parked anchor, then the
     /// supervisor resolves and merges out-of-band while the worker branch
     /// has no commits beyond the parent. This fixture exercises the worker

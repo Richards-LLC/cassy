@@ -1,7 +1,7 @@
 //! `cas default <provider>` — persist the supervisor harness without launching.
 //!
 //! This is the standalone "persist + exit" surface of the provider-shortcut
-//! feature (cas-7f2c).  The `--default` flag on `cas claude` / `cas codex`
+//! feature (cas-7f2c). The `--default` flag on `cas factory --supervisor-cli`
 //! covers "launch AND persist"; this module covers "persist only" (no launch).
 
 use clap::Args;

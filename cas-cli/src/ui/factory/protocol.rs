@@ -424,6 +424,8 @@ mod tests {
             cli: SupervisorCli::Codex,
             model: Some("gpt-5.5".to_string()),
             effort: Some(cas_mux::Effort::Medium),
+            config_dir: None,
+            requester_config_dir: None,
         };
         let msg = ClientMessage::SpawnWorkers {
             count: 1,

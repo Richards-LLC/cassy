@@ -191,6 +191,7 @@ mod m212_worker_delivery_transactions;
 mod m213_verification_proof_boundaries;
 pub mod m214_known_repo_bindings;
 mod m215_verifier_server_handoffs;
+mod m216_spawn_queue_add_requester_config_dir;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -394,6 +395,8 @@ pub const MIGRATIONS: &[Migration] = &[
     m213_verification_proof_boundaries::MIGRATION,
     m214_known_repo_bindings::MIGRATION,
     m215_verifier_server_handoffs::MIGRATION,
+    // Preserve requesting supervisor CLAUDE_CONFIG_DIR across daemon queue consumption.
+    m216_spawn_queue_add_requester_config_dir::MIGRATION,
 ];
 
 #[cfg(test)]

@@ -1,13 +1,11 @@
-//! Integration + unit tests for the `cas claude` / `cas codex` / `cas grok` /
+//! Integration + unit tests for the `cas codex` / `cas grok` /
 //! `cas default` provider-shortcut feature (cas-7f2c, extended by EPIC cas-8888
 //! Phase 3 / cas-964a for Grok).
 //!
 //! Coverage:
-//! - CLI parse: `cas claude --help`, `cas codex --help`, `cas grok --help`, `cas default --help`
+//! - CLI parse: `cas codex --help`, `cas grok --help`, `cas default --help`
 //! - `cas default <provider>` round-trip: persists to config, confirmation printed
 //! - `cas default <invalid>` → non-zero exit + useful error
-//! - Precedence regression: `cas claude` with persisted codex default uses Claude
-//!   (i.e. `supervisor_cli_explicit` prevents config from overriding the shortcut)
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -21,16 +19,6 @@ fn cas_cmd() -> Command {
 }
 
 // ── Help / parse-level tests ──────────────────────────────────────────────────
-
-#[test]
-fn test_claude_help_shows_shortcut_description() {
-    cas_cmd()
-        .args(["claude", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("supervisor"))
-        .stdout(predicate::str::contains("--default"));
-}
 
 #[test]
 fn test_codex_help_shows_shortcut_description() {
@@ -62,16 +50,6 @@ fn test_default_help() {
         .stdout(predicate::str::contains("claude"))
         .stdout(predicate::str::contains("codex"))
         .stdout(predicate::str::contains("grok"));
-}
-
-// `cas claude` and `cas codex` pass all factory flags through.
-#[test]
-fn test_claude_accepts_factory_flags() {
-    // --workers 0 is the default; we just confirm the flag is accepted.
-    cas_cmd()
-        .args(["claude", "--workers", "0", "--help"])
-        .assert()
-        .success();
 }
 
 #[test]
@@ -216,61 +194,6 @@ model = "claude-sonnet-4-6"
     assert!(
         content.contains(r#"harness = "codex""#),
         "harness = \"codex\" not written:\n{content}"
-    );
-}
-
-// ── Precedence regression test (cas-7f2c AC-5) ───────────────────────────────
-//
-// `cas claude` must launch Claude even when `[llm.supervisor] harness = "codex"`
-// is persisted.  We cannot launch a real factory in a test, so we test the
-// resolution logic at the unit level:
-//
-//   Given FactoryArgs { supervisor_cli = "claude", supervisor_cli_explicit = true }
-//   And   a project config with [llm.supervisor] harness = "codex"
-//   Then  the effective supervisor_cli after the override block must still be "claude".
-
-#[test]
-fn test_supervisor_cli_explicit_prevents_config_override() {
-    use cas::config::{Config, LlmConfig, LlmRoleConfig};
-    use cas::cli::FactoryArgs;
-    use tempfile::TempDir;
-
-    // Build a project config with supervisor harness = codex
-    let cas_dir = TempDir::new().unwrap();
-    let mut project_cfg = Config::default();
-    project_cfg.llm = Some(LlmConfig {
-        harness: Some("claude".into()),
-        model: None,
-        reasoning_effort: None,
-        supervisor: Some(LlmRoleConfig {
-            harness: Some("codex".into()),
-            model: None,
-            reasoning_effort: None,
-        }),
-        worker: None,
-    });
-    project_cfg.save(cas_dir.path()).unwrap();
-
-    // Build FactoryArgs as the `cas claude` shortcut would set it.
-    let args = FactoryArgs {
-        supervisor_cli: "claude".to_string(),
-        supervisor_cli_explicit: true,
-        ..FactoryArgs::default()
-    };
-
-    // Simulate the override logic from factory::execute.
-    let mut effective = args.clone();
-    if let Ok(cfg) = Config::load(cas_dir.path()) {
-        let llm = cfg.llm();
-        if !effective.supervisor_cli_explicit {
-            effective.supervisor_cli = llm.harness_for_role("supervisor").to_string();
-        }
-    }
-
-    assert_eq!(
-        effective.supervisor_cli, "claude",
-        "`cas claude` must keep Claude even when config says codex; got {}",
-        effective.supervisor_cli
     );
 }
 

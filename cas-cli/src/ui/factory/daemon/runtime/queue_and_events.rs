@@ -1461,7 +1461,7 @@ impl FactoryDaemon {
                     // cas-2992: deserialize the optional WorkerSpec from the queue row.
                     // Invalid JSON is logged and treated as "no override" so a corrupt row
                     // does not block all subsequent spawns.
-                    let spec: Option<cas_mux::WorkerSpec> = request
+                    let mut spec: Option<cas_mux::WorkerSpec> = request
                         .worker_spec
                         .as_deref()
                         .and_then(|json| match serde_json::from_str(json) {
@@ -1474,6 +1474,9 @@ impl FactoryDaemon {
                                 None
                             }
                         });
+                    if let Some(spec) = spec.as_mut() {
+                        spec.requester_config_dir = request.requester_config_dir.clone();
+                    }
                     // cas-6913: task_id pre-assigns a task to the spawned
                     // worker. The MCP layer (factory_spawn_workers) already
                     // rejects any request where this would be ambiguous

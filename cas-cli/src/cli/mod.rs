@@ -5,6 +5,7 @@
 mod auth;
 pub(crate) mod bridge;
 mod changelog;
+mod claude;
 mod claude_md;
 mod codemap_cmd;
 mod known_repos;
@@ -46,6 +47,7 @@ use crate::store::find_cas_root;
 pub use auth::AuthCommands;
 pub use bridge::BridgeArgs;
 pub use changelog::ChangelogArgs;
+pub use claude::ClaudeArgs;
 pub use claude_md::ClaudeMdArgs;
 pub use config::ConfigCommands;
 pub use doctor::DoctorArgs;
@@ -123,11 +125,10 @@ pub enum Commands {
     /// Launch factory session (bare `cas` runs factory with defaults)
     Factory(FactoryArgs),
 
-    /// Launch factory with Claude as the supervisor (shortcut for `cas factory --supervisor-cli=claude`)
+    /// Launch Claude Code under an explicit account profile.
     ///
-    /// All `cas factory` flags pass through. Use `--default` to also persist
-    /// Claude as the default supervisor for future sessions.
-    Claude(FactoryArgs),
+    /// `main` uses ~/.claude; any other profile uses ~/.claude-<profile>.
+    Claude(ClaudeArgs),
 
     /// Launch factory with Codex as the supervisor (shortcut for `cas factory --supervisor-cli=codex`)
     ///
@@ -147,7 +148,7 @@ pub enum Commands {
     /// `cas default codex` — persists `[llm.supervisor] harness = "codex"` to
     /// `~/.cas/config.toml` and exits.  `cas default claude` is symmetric.
     /// `cas default grok` is symmetric. To launch immediately AND persist,
-    /// use `cas codex --default`, `cas claude --default`, or `cas grok --default`.
+    /// use `cas factory --supervisor-cli <provider> --default`.
     #[command(name = "default")]
     Default(DefaultArgs),
 
@@ -325,7 +326,6 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
     if matches!(
         cli.command,
         Some(Commands::Factory(_))
-            | Some(Commands::Claude(_))
             | Some(Commands::Codex(_))
             | Some(Commands::Grok(_))
             | None
@@ -492,12 +492,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Factory(args) => factory::execute(args, cli, cas_root),
         // cas-7f2c: provider shortcuts — preset supervisor_cli + explicit flag,
         // then delegate to the same factory::execute path.
-        Commands::Claude(args) => {
-            let mut a = args.clone();
-            a.supervisor_cli = "claude".to_string();
-            a.supervisor_cli_explicit = true;
-            factory::execute(&a, cli, cas_root)
-        }
+        Commands::Claude(args) => claude::execute(args),
         Commands::Codex(args) => {
             let mut a = args.clone();
             a.supervisor_cli = "codex".to_string();

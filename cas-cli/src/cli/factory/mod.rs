@@ -241,13 +241,13 @@ pub struct FactoryArgs {
     ///
     /// When set, writes `[llm.supervisor] harness = "<provider>"` to
     /// `~/.cas/config.toml` before launching, and prints a confirmation line.
-    /// Use with `cas claude --default` or `cas codex --default`.
+    /// Use with `cas factory --supervisor-cli <provider> --default`.
     #[arg(long = "default")]
     pub set_default: bool,
 
     /// Internal: whether `supervisor_cli` was explicitly specified by the
-    /// caller (shortcut command or programmatic use) rather than left at the
-    /// clap default.  Set to `true` by `cas claude` / `cas codex` so that the
+    /// caller (provider shortcut or programmatic use) rather than left at the
+    /// clap default. Set to `true` by provider shortcuts so that the
     /// config-harness override in `execute` does NOT clobber the explicit
     /// provider choice with the persisted default.
     ///
@@ -917,7 +917,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
     // distinguish "user explicitly chose claude" from "default 'claude' that
     // should be overridden by the persisted config value".  The old check
     // (`== "claude"`) silently ignored an explicit `--supervisor-cli=claude`
-    // or `cas claude` invocation when `[llm.supervisor] harness = "codex"` was
+    // invocation when `[llm.supervisor] harness = "codex"` was
     // persisted — the config value always won, even though the user asked for
     // Claude.
     let mut effective_args = args.clone();
@@ -942,7 +942,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
     }
 
     // cas-7f2c: persist the chosen provider to ~/.cas/config.toml when
-    // --default (or `cas claude --default` / `cas codex --default`) is set.
+    // --default is set.
     if effective_args.set_default {
         use crate::cli::provider_default::set_supervisor_harness;
         use crate::store::known_repos::host_cas_dir;

@@ -275,6 +275,72 @@ fn push_factory_worker_metadata_env(
     }
 }
 
+/// Add an explicit Claude account directory to a factory worker environment.
+///
+/// This deliberately does nothing for omitted values so ordinary process
+/// inheritance remains untouched for existing spawns.
+fn push_claude_config_dir_env(
+    env: &mut Vec<(String, String)>,
+    role: &str,
+    config_dir: Option<&str>,
+) {
+    if role != "worker" {
+        return;
+    }
+    let Some(config_dir) = config_dir else {
+        return;
+    };
+
+    let expanded = config_dir.strip_prefix('~').map_or_else(
+        || config_dir.to_string(),
+        |suffix| {
+            dirs::home_dir()
+                .map(|home| format!("{}{}", home.display(), suffix))
+                .unwrap_or_else(|| config_dir.to_string())
+        },
+    );
+    env.push(("CLAUDE_CONFIG_DIR".to_string(), expanded));
+}
+
+#[cfg(test)]
+mod claude_config_dir_contract_tests {
+    use super::*;
+
+    fn env_value(env: &[(String, String)], key: &str) -> Option<String> {
+        env.iter()
+            .rev()
+            .find_map(|(candidate, value)| (candidate == key).then(|| value.clone()))
+    }
+
+    #[test]
+    fn explicit_claude_config_dir_expands_tilde_into_worker_env() {
+        let mut env = Vec::new();
+        push_claude_config_dir_env(&mut env, "worker", Some("~/.claude-alt"));
+
+        let home = dirs::home_dir().expect("test host has a home directory");
+        assert_eq!(
+            env_value(&env, "CLAUDE_CONFIG_DIR").as_deref(),
+            Some(home.join(".claude-alt").to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn omitted_claude_config_dir_adds_no_env_entry() {
+        let mut env = Vec::new();
+        push_claude_config_dir_env(&mut env, "worker", None);
+
+        assert_eq!(env_value(&env, "CLAUDE_CONFIG_DIR"), None);
+    }
+
+    #[test]
+    fn non_worker_claude_config_dir_adds_no_env_entry() {
+        let mut env = Vec::new();
+        push_claude_config_dir_env(&mut env, "supervisor", Some("~/.claude-alt"));
+
+        assert_eq!(env_value(&env, "CLAUDE_CONFIG_DIR"), None);
+    }
+}
+
 /// Configuration for spawning an agent with native Claude Code Agent Teams flags.
 #[derive(Debug, Clone)]
 pub struct TeamsSpawnConfig {
@@ -321,6 +387,23 @@ impl Default for PtyConfig {
 }
 
 impl PtyConfig {
+    /// Apply the Claude-only account directory override to this worker config.
+    ///
+    /// `Pty::spawn` detects the resulting environment entry and removes any
+    /// inherited `ANTHROPIC_API_KEY` from the child command, allowing the
+    /// selected Claude subscription account to take effect.
+    pub fn apply_claude_config_dir(&mut self, config_dir: Option<&str>, source: Option<&str>) {
+        push_claude_config_dir_env(&mut self.env, "worker", config_dir);
+        if config_dir.is_some() {
+            if let Some(source) = source {
+                self.env.push((
+                    "CAS_FACTORY_CLAUDE_CONFIG_DIR_SOURCE".to_string(),
+                    source.to_string(),
+                ));
+            }
+        }
+    }
+
     /// Create config for a Claude CLI instance
     ///
     /// # Arguments
@@ -1164,6 +1247,49 @@ impl Pty {
 
         // Strip CLAUDECODE to prevent nested-session detection in spawned Claude CLI
         cmd.env_remove("CLAUDECODE");
+
+        // An explicit CLAUDE_CONFIG_DIR selects a subscription account. An inherited
+        // ANTHROPIC_API_KEY would override that OAuth selection, so remove it only
+        // for the new explicit-config-dir path. Omitted config_dir remains pure
+        // inheritance, byte-for-byte with existing spawns.
+        if config.env.iter().any(|(key, value)| {
+            key == "CAS_FACTORY_CLAUDE_CONFIG_DIR_SOURCE" && value == "explicit"
+        }) {
+            cmd.env_remove("ANTHROPIC_API_KEY");
+        }
+
+        if config
+            .env
+            .iter()
+            .any(|(key, value)| key == "CAS_AGENT_ROLE" && value == "worker")
+        {
+            let explicit =
+                config.env.iter().rev().find_map(|(key, value)| {
+                    (key == "CLAUDE_CONFIG_DIR").then_some(value.as_str())
+                });
+            let inherited = std::env::var("CLAUDE_CONFIG_DIR").ok();
+            let pushed_source = config.env.iter().rev().find_map(|(key, value)| {
+                (key == "CAS_FACTORY_CLAUDE_CONFIG_DIR_SOURCE").then_some(value.as_str())
+            });
+            let (config_dir, source) = match (explicit, pushed_source, inherited.as_deref()) {
+                (Some(dir), Some("explicit"), _) => (dir, "explicit param"),
+                (Some(dir), Some("supervisor"), _) => (dir, "supervisor session"),
+                (Some(dir), _, _) => (dir, "explicit param"),
+                (None, _, Some(dir)) => (dir, "host env"),
+                (None, _, None) => ("default (~/.claude)", "default"),
+            };
+            let worker = config
+                .env
+                .iter()
+                .find_map(|(key, value)| (key == "CAS_AGENT_NAME").then_some(value.as_str()))
+                .unwrap_or("unknown");
+            tracing::info!(
+                worker,
+                claude_config_dir = config_dir,
+                source,
+                "factory worker spawn: effective Claude account directory"
+            );
+        }
 
         // Spawn the child process
         let child = pair

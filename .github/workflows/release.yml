@@ -63,9 +63,58 @@ jobs:
           name: cas-x86_64-unknown-linux-gnu
           path: cas-x86_64-unknown-linux-gnu.tar.gz
 
+  build-macos:
+    name: Build macOS ARM64
+    # Zig 0.15.2 needs the Xcode 26.3 / macOS 26.2 SDK; macos-latest uses an
+    # incompatible newer SDK. Keep this aligned with ci.yml's macos-check.
+    runs-on: macos-26
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Install Zig
+        run: ./scripts/bootstrap-zig.sh
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.5
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Build
+        env:
+          ZIG: ${{ github.workspace }}/.context/zig/zig
+        run: cargo build -p cas --release --target aarch64-apple-darwin
+
+      - name: Package
+        run: |
+          mkdir -p package
+          cp target/aarch64-apple-darwin/release/cas package/
+          cp LICENSE package/
+          cd package
+          tar -czvf cas-aarch64-apple-darwin.tar.gz cas LICENSE
+          mv cas-aarch64-apple-darwin.tar.gz ../
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cas-aarch64-apple-darwin
+          path: cas-aarch64-apple-darwin.tar.gz
+
   release:
     name: Create Release
-    needs: build
+    needs: [build, build-macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write

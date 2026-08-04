@@ -697,6 +697,38 @@ impl FactoryDaemon {
                     );
                 }
             }
+
+            // cas-d047 (GH #69): the sweep above only covers rows tagged with
+            // THIS session whose target left the roster. The item that was
+            // actually delivered months late was neither — an untagged
+            // (NULL-session) row addressed to a worker name that a later
+            // session happened to reuse. Age is the property that makes such a
+            // row undeliverable, so bound it directly and name every row that
+            // gets quarantined.
+            match queue.expire_stale_pending(cas_store::PROMPT_QUEUE_STALE_TTL_SECS) {
+                Ok(stale) => {
+                    for row in &stale {
+                        tracing::warn!(
+                            prompt_id = row.id,
+                            source = %row.source,
+                            target = %row.target,
+                            created_at = %row.created_at.to_rfc3339(),
+                            age_secs = (chrono::Utc::now() - row.created_at).num_seconds(),
+                            factory_session = ?row.factory_session,
+                            "cas-d047: quarantined stale prompt_queue item instead of delivering \
+                             it — it was queued more than the staleness TTL ago and never \
+                             consumed by any recipient"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "cas-d047: stale prompt_queue sweep failed; stale rows stay withheld \
+                         from delivery by the selection guard"
+                    );
+                }
+            }
         }
 
         let targets: Vec<&str> = valid_targets
@@ -2765,6 +2797,115 @@ mod tests {
         );
         let report = queue.message_delivery_report(row_id).unwrap().unwrap();
         assert_eq!(report.stage, DeliveryStage::Abandoned);
+    }
+
+    /// cas-d047 / GH #69, reproduced at the daemon's own sweep + selection
+    /// composition: an untagged row addressed to a worker name that a LATER
+    /// session reuses is in-roster (so the roster sweep leaves it alone) but
+    /// must still never be injected into that worker's pane.
+    #[test]
+    fn stale_untagged_row_for_a_reused_worker_name_is_swept_not_injected() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+
+        let ancient = queue
+            .enqueue("supervisor", "wise-raven-21", "verify+close cas-85c0")
+            .unwrap();
+        {
+            let old = (chrono::Utc::now() - chrono::Duration::days(130)).to_rfc3339();
+            let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+            conn.execute(
+                "UPDATE prompt_queue SET created_at = ? WHERE id = ?",
+                rusqlite::params![old, ancient],
+            )
+            .unwrap();
+        }
+        let live = queue
+            .enqueue_with_session(
+                "supervisor",
+                "wise-raven-21",
+                "start cas-4717",
+                "factory-session",
+            )
+            .unwrap();
+
+        // The worker name IS in this session's roster, so the roster-scoped
+        // sweep correctly declines to touch either row.
+        let valid_target_names =
+            prompt_poison_sweep_targets("lead", &["wise-raven-21".to_string()], &[]);
+        let valid_targets: Vec<&str> = valid_target_names.iter().map(String::as_str).collect();
+        assert_eq!(
+            queue
+                .abandon_ineligible_session_targets(
+                    &valid_targets,
+                    "factory-session",
+                    cas_store::PROMPT_RETRY_MAX_AGE_SECS
+                )
+                .unwrap(),
+            0
+        );
+
+        let expired = queue
+            .expire_stale_pending(cas_store::PROMPT_QUEUE_STALE_TTL_SECS)
+            .unwrap();
+        assert_eq!(expired.len(), 1, "only the ancient row is stale");
+        assert_eq!(expired[0].id, ancient);
+        assert_eq!(
+            queue
+                .message_delivery_report(ancient)
+                .unwrap()
+                .unwrap()
+                .stage,
+            DeliveryStage::Abandoned
+        );
+
+        let selected = queue
+            .peek_for_targets(&valid_targets, Some("factory-session"), 10)
+            .unwrap();
+        let selected_ids: Vec<i64> = selected.iter().map(|row| row.id).collect();
+        assert_eq!(
+            selected_ids,
+            vec![live],
+            "the daemon must inject only this session's live row"
+        );
+    }
+
+    /// cas-d047 / GH #70 at the daemon boundary: a message the worker already
+    /// drained through its inbox poll must not appear in the daemon's next
+    /// selection — that re-selection is what re-wrote the message to the inbox
+    /// and re-typed it into an idle pane.
+    #[test]
+    fn message_drained_by_worker_is_not_reselected_for_injection() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        queue
+            .enqueue_with_session(
+                "supervisor",
+                "calm-heron-93",
+                "contract addendum",
+                "factory-session",
+            )
+            .unwrap();
+        let valid_target_names =
+            prompt_poison_sweep_targets("lead", &["calm-heron-93".to_string()], &[]);
+        let valid_targets: Vec<&str> = valid_target_names.iter().map(String::as_str).collect();
+
+        assert_eq!(
+            queue
+                .poll_unseen_for_recipient("calm-heron-93", Some("factory-session"), 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            queue
+                .peek_for_targets(&valid_targets, Some("factory-session"), 10)
+                .unwrap()
+                .is_empty(),
+            "an already-drained message must never be selected for a second delivery"
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -194,6 +194,12 @@ pub(crate) enum VerificationSkipReason {
     /// `bypass_code_review=true`. Separate from `AssigneeInactive` so
     /// the audit note reflects supervisor intent, not worker state.
     SupervisorBypass,
+    /// cas-1932 (GH #62, minor): an assignee-lookup failure would have
+    /// reported "verification skipped", but a current-cycle APPROVED
+    /// verification for this task already exists. The close is authorized
+    /// by that verdict, so name it instead of claiming nothing verified
+    /// the work.
+    ExistingApprovedVerification { verification_id: String },
 }
 
 impl VerificationSkipReason {
@@ -235,6 +241,9 @@ impl VerificationSkipReason {
                 " (verification skipped — supervisor bypass via bypass_code_review=true)"
                     .to_string()
             }
+            VerificationSkipReason::ExistingApprovedVerification { verification_id } => {
+                format!(" (verified — approved verification {verification_id} on record)")
+            }
         }
     }
 
@@ -270,7 +279,112 @@ impl VerificationSkipReason {
                  supervisor while assignee was still active."
                     .to_string()
             }
+            VerificationSkipReason::ExistingApprovedVerification { verification_id } => {
+                format!(
+                    "Closed on the approved verification {verification_id} already recorded for \
+                     this task's current work cycle; the assignee lookup could not resolve a live \
+                     verifier, but the verdict exists and authorizes the close."
+                )
+            }
         }
+    }
+}
+
+/// cas-1932 (GH #62 symptom 1): does an existing verification row authorize
+/// the close that would otherwise be re-queued for supervisor review?
+///
+/// Accepted only when the verdict is `Approved`, matches the verification
+/// type the task requires, and was recorded inside the task's current work
+/// cycle (same `TaskCommitReceiptWindow` used to attribute commits, with the
+/// same clock-skew allowance). A verdict from an earlier cycle — for example
+/// one that predates a reopen and its rework — can never authorize a fresh
+/// close.
+pub(crate) fn approved_verification_satisfies_review_queue(
+    verification: &Verification,
+    window: Option<&TaskCommitReceiptWindow>,
+    required_type: VerificationType,
+) -> bool {
+    if verification.status != VerificationStatus::Approved {
+        return false;
+    }
+    if verification.verification_type != required_type {
+        return false;
+    }
+    match window {
+        Some(window) => {
+            verification.created_at.timestamp()
+                >= window.not_before.timestamp() - COMMIT_RECEIPT_CLOCK_SKEW_SECS
+        }
+        None => true,
+    }
+}
+
+/// cas-1932 (GH #62, minor): the close path reported
+/// "verification skipped — assignee unknown" while verification
+/// `ver-fd59de6ef422` existed for the task. An assignee-resolution failure is
+/// not evidence that nothing verified the work — when a current-cycle
+/// approved verdict is on record, cite it instead.
+///
+/// Only *lookup-failure* reasons are replaced. `SupervisorBypass` and
+/// `EpicOwnerClosed` are deliberate decisions and keep their own audit text;
+/// `None` is not a skip at all.
+pub(crate) fn skip_reason_with_existing_verification(
+    reason: VerificationSkipReason,
+    approved: Option<&Verification>,
+) -> VerificationSkipReason {
+    let is_lookup_failure = matches!(
+        reason,
+        VerificationSkipReason::NoAssignee
+            | VerificationSkipReason::AssigneeUnknown
+            | VerificationSkipReason::AssigneeInactive { .. }
+    );
+    match approved {
+        Some(verification) if is_lookup_failure => {
+            VerificationSkipReason::ExistingApprovedVerification {
+                verification_id: verification.id.clone(),
+            }
+        }
+        _ => reason,
+    }
+}
+
+/// cas-1932 (GH #62 symptom 2): inputs for the shared-checkout
+/// reviewable-change routing decision.
+///
+/// `attributable_reviewable_changes` is `Some(true|false)` when git could
+/// answer whether this task's own work cycle produced reviewable commits, and
+/// `None` when it could not.
+pub(crate) struct SharedCheckoutReviewScope<'a> {
+    pub task_type: TaskType,
+    pub execution_note: Option<&'a str>,
+    pub attributable_reviewable_changes: Option<bool>,
+    pub checkout_has_reviewable_changes: bool,
+}
+
+/// Decide whether a non-isolated (shared-checkout) close has reviewable
+/// changes *of its own*.
+///
+/// A shared worker's checkout is not a task diff: in the GH #62 incident it
+/// carried ~64 files of prior-factory WIP, which the gate read as the spike's
+/// output and answered with `CODE_REVIEW_REQUIRED` on a task that produced
+/// nothing. Commits this task made in its work cycle always count. When it
+/// made none AND the task's own spec declares no-code work (Spike/Chore, or
+/// any `execution_note`), the checkout's dirty state is not attributed to it.
+/// Every other shape keeps the previous signal, so no code task silently
+/// escapes review, and unknowable git state falls back to the old behavior.
+pub(crate) fn shared_checkout_has_reviewable_changes(scope: SharedCheckoutReviewScope<'_>) -> bool {
+    match scope.attributable_reviewable_changes {
+        Some(true) => true,
+        Some(false) => {
+            let declares_no_code_work = matches!(scope.task_type, TaskType::Spike | TaskType::Chore)
+                || scope.execution_note.is_some_and(|note| !note.trim().is_empty());
+            if declares_no_code_work {
+                false
+            } else {
+                scope.checkout_has_reviewable_changes
+            }
+        }
+        None => scope.checkout_has_reviewable_changes,
     }
 }
 
@@ -1602,7 +1716,21 @@ impl CasCore {
                 // would mislabel a healthy owner-close as orphan recovery.
                 VerificationSkipReason::EpicOwnerClosed
             } else {
-                self.compute_verification_skip_reason(&task, &req)
+                // cas-1932 (GH #62, minor): an assignee that cannot be
+                // resolved is not evidence that nothing verified the work.
+                // The incident close reported "verification skipped —
+                // assignee unknown" while verification ver-fd59de6ef422 was
+                // on record for the task, losing the audit linkage. When a
+                // current-cycle approved verdict exists, cite it instead.
+                skip_reason_with_existing_verification(
+                    self.compute_verification_skip_reason(&task, &req),
+                    self.current_cycle_approved_verification(
+                        &req.id,
+                        required_verification_type(task.task_type),
+                        commit_receipt_window.as_ref(),
+                    )
+                    .as_ref(),
+                )
             }
         } else {
             VerificationSkipReason::None
@@ -2655,10 +2783,33 @@ impl CasCore {
         // common System-B factory-isolation case (`spawn_workers
         // isolate=true` almost never sets `task.worktree_id`; see
         // `resolve_close_parent_branch`).
+        //
+        // cas-1932 (GH #62 symptom 2): the shared-checkout branch above read
+        // "the checkout is dirty" as "the task wrote code". In the incident a
+        // characterization-only spike closed in a main checkout carrying ~64
+        // files of prior-factory WIP and was answered with
+        // CODE_REVIEW_REQUIRED for changes it never made. Shared closes now
+        // route on commits attributable to this task's work cycle; see
+        // `shared_checkout_has_reviewable_changes` for the exact fallbacks
+        // (code tasks with no no-code declaration, and unknowable git state,
+        // keep the previous signal).
         let effective_has_reviewable = if let Some(worker_wt) = worker_worktree_path.as_ref() {
             has_worker_committed_reviewable_changes(worker_wt, &resolved_parent_branch)
         } else {
-            has_reviewable_changes(&close_project_root)
+            shared_checkout_has_reviewable_changes(SharedCheckoutReviewScope {
+                task_type: task.task_type,
+                execution_note: task.execution_note.as_deref(),
+                attributable_reviewable_changes: commit_receipt_window.as_ref().and_then(
+                    |window| {
+                        has_task_attributable_reviewable_changes(
+                            &close_project_root,
+                            &resolved_parent_branch,
+                            window,
+                        )
+                    },
+                ),
+                checkout_has_reviewable_changes: has_reviewable_changes(&close_project_root),
+            })
         };
 
         // cas-762e (B2): factory branch merge-reality gate.
@@ -2741,6 +2892,31 @@ impl CasCore {
         // so skip the pend-transition and let the close complete immediately
         // (AC: "close succeeds", demo: "closes immediately"). `Deep`/unset is
         // unaffected — `!depth_light` keeps the transition firing as today.
+        // cas-1932 (GH #62 symptom 1): the queue hop is the review gate for
+        // this mode — but once the supervisor has recorded an APPROVED verdict
+        // for this work cycle, that gate is satisfied. Before this fix the
+        // worker's re-close re-queued the task to `PendingSupervisorReview`
+        // forever: the approved verification on record was never consulted
+        // here, so no close by the worker could ever complete and the
+        // supervisor had to close on their behalf.
+        //
+        // Deliberately scoped to the supervisor-owned review path: there the
+        // supervisor's verdict IS the code review. Under `owner = "worker"`
+        // the verification jail and the cas-code-review envelope remain two
+        // independent gates and neither may stand in for the other.
+        let review_queue_verdict = if supervisor_review_mode
+            && is_factory_worker
+            && task.task_type != TaskType::Epic
+            && !bypass_close_gates
+        {
+            self.current_cycle_approved_verification(
+                &req.id,
+                required_verification_type(task.task_type),
+                commit_receipt_window.as_ref(),
+            )
+        } else {
+            None
+        };
         if supervisor_review_mode
             && is_factory_worker
             && task.task_type != TaskType::Epic
@@ -2748,6 +2924,7 @@ impl CasCore {
             && !bypass_close_gates
             && effective_has_reviewable
             && !depth_light
+            && review_queue_verdict.is_none()
         {
             // cas-dc5d: scope lightweight lint to the closing worker's
             // worktree + committed task range (merge-base..HEAD), never
@@ -2871,6 +3048,14 @@ impl CasCore {
             // direct close that reaches the gate must not be blocked by a
             // missing review envelope. `Deep`/unset falls through to the
             // existing routing, so the gate enforces exactly as today.
+            CodeReviewGateOutcome::Proceed
+        } else if review_queue_verdict.is_some() {
+            // cas-1932: in supervisor-owned mode the recorded approval IS the
+            // completed review, so it satisfies this gate too — otherwise the
+            // close would clear the queue hop only to be refused for a missing
+            // review envelope the supervisor already replaced. The audit note
+            // naming the verdict is written further below, on the same task
+            // the final store write uses.
             CodeReviewGateOutcome::Proceed
         } else if epic_subtask_receipts_cover {
             CodeReviewGateOutcome::Proceed
@@ -3051,6 +3236,26 @@ impl CasCore {
                 task.notes = decision_note;
             } else {
                 task.notes = format!("{}\n\n{}", task.notes, decision_note);
+            }
+        }
+
+        // cas-1932: record which supervisor verdict authorized this close on
+        // the same in-memory task the final write uses. The code-review gate's
+        // eager clone-persist above is overwritten by that write, and this
+        // audit linkage — the thing GH #62's "verification skipped" minor was
+        // about — has to survive the close.
+        if let Some(verdict) = review_queue_verdict.as_ref() {
+            let timestamp = now.format("%Y-%m-%d %H:%M");
+            let note = format!(
+                "[{timestamp}] DECISION: close authorized by approved verification {} \
+                 recorded {} — supervisor review already complete, task not re-queued.",
+                verdict.id,
+                verdict.created_at.to_rfc3339(),
+            );
+            if task.notes.is_empty() {
+                task.notes = note;
+            } else {
+                task.notes = format!("{}\n\n{}", task.notes, note);
             }
         }
 
@@ -3491,6 +3696,27 @@ impl CasCore {
             validate_pre_close_worktree(path, expected, Some(&expected_branch))?;
         }
         Ok(system_b)
+    }
+
+    /// cas-1932 (GH #62): the APPROVED verification for this task's current
+    /// work cycle, if one is on record.
+    ///
+    /// Two close-path questions share this lookup: whether the supervisor's
+    /// verdict already satisfies the review queue (so the worker's re-close
+    /// completes instead of re-queuing), and whether a "verification skipped"
+    /// message would be lying about a verdict that exists. Store failures are
+    /// treated as "no verdict" — this only ever *grants* an exit, so an
+    /// unreadable store must never manufacture one.
+    pub(crate) fn current_cycle_approved_verification(
+        &self,
+        task_id: &str,
+        required_type: VerificationType,
+        window: Option<&TaskCommitReceiptWindow>,
+    ) -> Option<Verification> {
+        let store = self.open_verification_store().ok()?;
+        let latest = store.get_latest_for_task(task_id).ok()??;
+        approved_verification_satisfies_review_queue(&latest, window, required_type)
+            .then_some(latest)
     }
 
     /// Compute why (if at all) the task-verifier step should be skipped
@@ -7595,6 +7821,69 @@ pub(crate) fn has_worker_committed_reviewable_changes(
         }
         _ => false,
     }
+}
+
+/// cas-1932 (GH #62 symptom 2): do the commits this task made during its own
+/// work cycle touch reviewable code?
+///
+/// Scoped exactly like the cas-e74c merge guard: commits reachable from HEAD
+/// but not from `parent_branch`, whose committer date falls at or after the
+/// work-cycle start (same clock-skew allowance). Uncommitted working-tree
+/// state is deliberately ignored — in a shared checkout it belongs to whoever
+/// left it there, not to the closing task.
+///
+/// `None` means git could not answer (no repo, no merge-base, failed log);
+/// callers fall back to the unscoped checkout signal rather than treating an
+/// unknown as "nothing to review".
+pub(crate) fn has_task_attributable_reviewable_changes(
+    repo_path: &std::path::Path,
+    parent_branch: &str,
+    window: &TaskCommitReceiptWindow,
+) -> Option<bool> {
+    use std::process::Command;
+
+    if !is_safe_git_refname(parent_branch) {
+        return None;
+    }
+
+    let merge_base_out = Command::new("git")
+        .args(["merge-base", "HEAD", parent_branch])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if !merge_base_out.status.success() {
+        return None;
+    }
+    let merge_base = String::from_utf8_lossy(&merge_base_out.stdout)
+        .trim()
+        .to_string();
+    if merge_base.is_empty() {
+        return None;
+    }
+
+    let since = format!(
+        "@{}",
+        window.not_before.timestamp() - COMMIT_RECEIPT_CLOCK_SKEW_SECS
+    );
+    let log_out = Command::new("git")
+        .args([
+            "log",
+            &format!("--since={since}"),
+            "--name-only",
+            "--pretty=format:",
+            &format!("{merge_base}..HEAD"),
+        ])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if !log_out.status.success() {
+        return None;
+    }
+    let output = String::from_utf8_lossy(&log_out.stdout);
+    Some(output.lines().any(|line| {
+        let trimmed = line.trim();
+        !trimmed.is_empty() && is_reviewable_path(trimmed)
+    }))
 }
 
 /// Parse the output of `git diff --name-status` into violations. Only rows
@@ -15237,6 +15526,330 @@ mod epic_close_owner_gate_tests {
         );
         assert!(
             epic_close_owner_gate("cas-epic", "owner-id", Some("  owner-id  "), None, None).is_ok()
+        );
+    }
+}
+
+#[cfg(test)]
+mod zero_diff_spike_close_tests {
+    //! cas-1932 (GH #62 symptoms 1-2 + minor): a zero-diff spike closed in a
+    //! dirty shared checkout was a two-stage trap.
+    //!
+    //! - Symptom 1: after the supervisor recorded an APPROVED verification,
+    //!   the worker's re-close re-queued to `PendingSupervisorReview` forever.
+    //!   The review-queue hop now consumes a current-cycle approved verdict.
+    //! - Symptom 2: `CODE_REVIEW_REQUIRED` fired because reviewable-change
+    //!   detection read the shared checkout's pre-existing WIP as the task's
+    //!   diff. Detection is now scoped to commits attributable to this task's
+    //!   work cycle for tasks whose own spec declares no-code work.
+    //! - Minor: close reported "verification skipped — assignee unknown"
+    //!   although a verification row existed; the lookup now finds it.
+    use super::*;
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    fn git(dir: &std::path::Path, args: &[&str], date: &str) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test")
+            .env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    const PRIOR_CYCLE: &str = "2020-01-01T00:00:00Z";
+    const THIS_CYCLE: &str = "2026-08-04T12:00:00Z";
+    /// Between PRIOR_CYCLE and THIS_CYCLE (2023-11-14T22:13:20Z).
+    const CYCLE_START_EPOCH: i64 = 1_700_000_000;
+
+    fn window() -> TaskCommitReceiptWindow {
+        TaskCommitReceiptWindow {
+            not_before: chrono::DateTime::from_timestamp(CYCLE_START_EPOCH, 0).unwrap(),
+            basis: "latest task lease claim/transfer",
+        }
+    }
+
+    /// Shared main checkout on `main` with one old commit, then N dirty
+    /// (uncommitted) reviewable files — the pre-existing prior-factory WIP
+    /// from the incident.
+    fn init_shared_checkout_with_dirty_wip() -> TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "main"], PRIOR_CYCLE);
+        std::fs::write(p.join("seed.rs"), "// seed\n").unwrap();
+        git(p, &["add", "seed.rs"], PRIOR_CYCLE);
+        git(p, &["commit", "-q", "-m", "seed"], PRIOR_CYCLE);
+        // Prior-factory WIP left dirty in the shared checkout: an uncommitted
+        // edit to a tracked source file, which is what `has_reviewable_changes`
+        // sees and what the incident's ~64 dirty files looked like.
+        std::fs::write(p.join("seed.rs"), "// seed\n// someone else's WIP\n").unwrap();
+        dir
+    }
+
+    // --- symptom 2: task-attributable reviewable detection -------------------
+
+    #[test]
+    fn dirty_shared_checkout_with_no_task_commits_is_not_task_attributable() {
+        let dir = init_shared_checkout_with_dirty_wip();
+        assert_eq!(
+            has_task_attributable_reviewable_changes(dir.path(), "main", &window()),
+            Some(false),
+            "pre-existing dirty WIP in a shared checkout is not this task's diff"
+        );
+        // The unscoped check is what used to drive CODE_REVIEW_REQUIRED.
+        assert!(
+            has_reviewable_changes(dir.path()),
+            "precondition: the unscoped checkout check still sees the dirty WIP"
+        );
+    }
+
+    #[test]
+    fn commit_made_during_this_work_cycle_is_task_attributable() {
+        let dir = init_shared_checkout_with_dirty_wip();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "-b", "work"], THIS_CYCLE);
+        std::fs::write(p.join("feature.rs"), "pub fn f() {}\n").unwrap();
+        git(p, &["add", "feature.rs"], THIS_CYCLE);
+        git(p, &["commit", "-q", "-m", "feat: f"], THIS_CYCLE);
+        assert_eq!(
+            has_task_attributable_reviewable_changes(p, "main", &window()),
+            Some(true),
+            "a reviewable commit made inside the work cycle IS the task's diff"
+        );
+    }
+
+    #[test]
+    fn commits_predating_the_work_cycle_are_not_task_attributable() {
+        let dir = init_shared_checkout_with_dirty_wip();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "-b", "work"], PRIOR_CYCLE);
+        std::fs::write(p.join("old_feature.rs"), "pub fn old() {}\n").unwrap();
+        git(p, &["add", "old_feature.rs"], PRIOR_CYCLE);
+        git(p, &["commit", "-q", "-m", "feat: old"], PRIOR_CYCLE);
+        assert_eq!(
+            has_task_attributable_reviewable_changes(p, "main", &window()),
+            Some(false),
+            "another task's earlier commits must not be attributed to this close"
+        );
+    }
+
+    #[test]
+    fn docs_only_commit_in_this_cycle_is_not_reviewable() {
+        let dir = init_shared_checkout_with_dirty_wip();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "-b", "work"], THIS_CYCLE);
+        std::fs::write(p.join("NOTES.md"), "# notes\n").unwrap();
+        git(p, &["add", "NOTES.md"], THIS_CYCLE);
+        git(p, &["commit", "-q", "-m", "docs: notes"], THIS_CYCLE);
+        assert_eq!(
+            has_task_attributable_reviewable_changes(p, "main", &window()),
+            Some(false),
+            "docs-only work is not reviewable code"
+        );
+    }
+
+    #[test]
+    fn attributable_detection_is_unknown_outside_a_git_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            has_task_attributable_reviewable_changes(dir.path(), "main", &window()),
+            None,
+            "unknowable git state must not be reported as 'nothing attributable'"
+        );
+    }
+
+    // --- symptom 2: the shared-checkout routing decision ---------------------
+
+    fn scope(
+        task_type: TaskType,
+        execution_note: Option<&'static str>,
+        attributable: Option<bool>,
+        dirty: bool,
+    ) -> bool {
+        shared_checkout_has_reviewable_changes(SharedCheckoutReviewScope {
+            task_type,
+            execution_note,
+            attributable_reviewable_changes: attributable,
+            checkout_has_reviewable_changes: dirty,
+        })
+    }
+
+    #[test]
+    fn zero_commit_spike_in_dirty_shared_checkout_has_no_reviewable_changes() {
+        // The GH #62 incident shape: characterization-only spike, no commits,
+        // shared main checkout carrying ~64 files of prior-factory WIP.
+        assert!(
+            !scope(TaskType::Spike, None, Some(false), true),
+            "a zero-commit spike must not inherit the checkout's dirty state"
+        );
+        assert!(
+            !scope(TaskType::Chore, None, Some(false), true),
+            "chores declare no-code work the same way spikes do"
+        );
+        assert!(
+            !scope(TaskType::Task, Some("characterization-first"), Some(false), true),
+            "an execution_note is the task's own declaration that no code is expected"
+        );
+    }
+
+    #[test]
+    fn code_task_without_a_no_code_declaration_keeps_the_checkout_signal() {
+        // Unchanged behavior: a Bug/Feature/Task with no execution_note still
+        // routes on the checkout diff, so nothing silently escapes review.
+        assert!(
+            scope(TaskType::Bug, None, Some(false), true),
+            "a code task with no no-code declaration must keep the existing signal"
+        );
+        assert!(
+            !scope(TaskType::Bug, None, Some(false), false),
+            "clean checkout stays clean"
+        );
+    }
+
+    #[test]
+    fn task_attributable_code_always_counts_as_reviewable() {
+        assert!(
+            scope(TaskType::Spike, Some("characterization-first"), Some(true), false),
+            "code this task actually committed is reviewable no matter its declared shape"
+        );
+    }
+
+    #[test]
+    fn unknowable_attribution_falls_back_to_the_checkout_signal() {
+        assert!(
+            scope(TaskType::Spike, None, None, true),
+            "if git state is unknowable the gate must fail closed on the old signal"
+        );
+    }
+
+    // --- symptom 1: approved verification satisfies the review queue ---------
+
+    fn approved_row(created_epoch: i64) -> Verification {
+        let mut row = Verification::new("ver-fd59de6ef422".to_string(), "cas-208b".to_string());
+        row.status = VerificationStatus::Approved;
+        row.verification_type = VerificationType::Task;
+        row.created_at = chrono::DateTime::from_timestamp(created_epoch, 0).unwrap();
+        row
+    }
+
+    #[test]
+    fn approved_verdict_from_this_cycle_satisfies_the_review_queue() {
+        let row = approved_row(CYCLE_START_EPOCH + 600);
+        assert!(
+            approved_verification_satisfies_review_queue(
+                &row,
+                Some(&window()),
+                VerificationType::Task
+            ),
+            "the supervisor's approval must let the worker's re-close complete"
+        );
+    }
+
+    #[test]
+    fn unapproved_or_stale_or_mistyped_verdicts_do_not_satisfy_the_queue() {
+        let mut rejected = approved_row(CYCLE_START_EPOCH + 600);
+        rejected.status = VerificationStatus::Rejected;
+        assert!(
+            !approved_verification_satisfies_review_queue(
+                &rejected,
+                Some(&window()),
+                VerificationType::Task
+            ),
+            "a rejected verdict must never satisfy the review queue"
+        );
+
+        let stale = approved_row(CYCLE_START_EPOCH - 86_400);
+        assert!(
+            !approved_verification_satisfies_review_queue(
+                &stale,
+                Some(&window()),
+                VerificationType::Task
+            ),
+            "an approval from a previous work cycle cannot authorize this close"
+        );
+
+        let mistyped = approved_row(CYCLE_START_EPOCH + 600);
+        assert!(
+            !approved_verification_satisfies_review_queue(
+                &mistyped,
+                Some(&window()),
+                VerificationType::Epic
+            ),
+            "a task verdict cannot stand in for the required epic verdict"
+        );
+    }
+
+    #[test]
+    fn approval_within_clock_skew_of_the_cycle_start_is_accepted() {
+        let row = approved_row(CYCLE_START_EPOCH - 1);
+        assert!(
+            approved_verification_satisfies_review_queue(
+                &row,
+                Some(&window()),
+                VerificationType::Task
+            ),
+            "a verdict recorded a second before the lease timestamp is the same cycle"
+        );
+    }
+
+    // --- minor: close must find an existing verification --------------------
+
+    #[test]
+    fn existing_approved_verification_replaces_a_lookup_failure_skip_reason() {
+        let row = approved_row(CYCLE_START_EPOCH + 600);
+        let resolved = skip_reason_with_existing_verification(
+            VerificationSkipReason::AssigneeUnknown,
+            Some(&row),
+        );
+        assert_eq!(
+            resolved,
+            VerificationSkipReason::ExistingApprovedVerification {
+                verification_id: "ver-fd59de6ef422".to_string()
+            },
+            "an existing approved verdict must be cited instead of an assignee-lookup failure"
+        );
+        let suffix = resolved.response_suffix(true);
+        assert!(
+            suffix.contains("ver-fd59de6ef422"),
+            "the close response must name the verification it found: {suffix}"
+        );
+        assert!(
+            !suffix.contains("assignee unknown"),
+            "the close response must stop claiming the verification was skipped: {suffix}"
+        );
+        assert!(
+            resolved.audit_reason().contains("ver-fd59de6ef422"),
+            "the audit row must record which verdict authorized the close"
+        );
+    }
+
+    #[test]
+    fn skip_reason_is_untouched_without_an_approved_verification() {
+        assert_eq!(
+            skip_reason_with_existing_verification(VerificationSkipReason::AssigneeUnknown, None),
+            VerificationSkipReason::AssigneeUnknown,
+            "with no verdict on record the real skip reason must survive"
+        );
+        assert_eq!(
+            skip_reason_with_existing_verification(
+                VerificationSkipReason::SupervisorBypass,
+                Some(&approved_row(CYCLE_START_EPOCH + 600)),
+            ),
+            VerificationSkipReason::SupervisorBypass,
+            "an explicit supervisor bypass is intent, not a lookup failure — keep it"
+        );
+        assert_eq!(
+            skip_reason_with_existing_verification(VerificationSkipReason::None, None),
+            VerificationSkipReason::None,
+            "the non-skip path is unaffected"
         );
     }
 }

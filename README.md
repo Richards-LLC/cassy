@@ -176,7 +176,8 @@ cargo build --release
 ```bash
 cas                   # Launch the factory TUI
 cas -w 3              # Launch with 3 workers
-cas claude alt --continue  # Launch Claude Code using ~/.claude-alt
+cas claude alt        # Factory + Claude supervisor on the ~/.claude-alt account
+cas claude --list-profiles  # Show detected Claude accounts and login state
 cas serve             # Start MCP server for Claude Code
 cas init              # Initialize CAS in your project
 cas attach            # Attach to a running factory session

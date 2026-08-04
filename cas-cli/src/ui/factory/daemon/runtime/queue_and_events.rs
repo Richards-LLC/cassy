@@ -325,6 +325,26 @@ fn append_spawn_audit(
         ],
     );
 
+    // GH #60: the same transition, persisted on the queue row so the
+    // supervisor can query "what became of request N?" instead of parsing
+    // these log lines or correlating inbox prose. Hooked here — the single
+    // choke point every spawn stage already flows through — so no call site
+    // can report a stage to the log and forget to report it to the store.
+    //
+    // Best-effort by design: an unwritable store must never break a spawn.
+    if let Some(id) = request_id {
+        if let Some(state) = cas_store::SpawnLifecycleState::from_stage_outcome(stage, outcome) {
+            if let Ok(queue) = crate::store::open_spawn_queue_store(cas_dir) {
+                let _ = queue.record_spawn_state(
+                    id,
+                    state,
+                    worker_name.filter(|name| !name.is_empty()),
+                    (!detail.is_empty()).then_some(detail),
+                );
+            }
+        }
+    }
+
     // Fork-first daemons can inherit an already-installed tracing subscriber;
     // replacing it after fork then fails, leaving daemon.log and
     // daemon-trace.log empty. Spawn audit is load-bearing, so append the
@@ -3000,7 +3020,8 @@ fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_spawn_audit_line, cancel_targeted_in_flight_spawn, enqueue_spawn_cancelled_notice,
+        append_spawn_audit, append_spawn_audit_line, cancel_targeted_in_flight_spawn,
+        enqueue_spawn_cancelled_notice,
         enqueue_spawn_outcome_notice, is_exact_agent_name_match, matches_event_filter,
         deliver_worker_task_brief, ensure_worker_preassignment, preassign_failure_reason,
         prompt_poison_sweep_due, prompt_poison_sweep_targets,
@@ -3654,6 +3675,114 @@ mod tests {
         assert_eq!(prompts[0].summary.as_deref(), Some("Worker spawn cancelled: clock-fixer"));
         assert!(prompts[0].prompt.contains("No worker pane was registered"));
         assert!(prompts[0].prompt.contains("worktree and branch were removed"));
+    }
+
+    /// GH #60: every audit stage the daemon logs is ALSO persisted on the
+    /// queue row, so `worker_status` can answer "what became of request N?".
+    /// Hooked inside `append_spawn_audit` precisely so no call site can report
+    /// a stage to the log and forget the store — this test pins that coupling.
+    #[test]
+    fn spawn_audit_persists_queryable_lifecycle_state() {
+        use cas_store::SpawnLifecycleState;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_spawn_queue_store(&cas_dir).unwrap();
+        let request_id = queue
+            .enqueue_spawn(1, &[], false, None, Some("session-a"), None)
+            .unwrap();
+
+        // The daemon's real stage sequence for a healthy anonymous spawn.
+        append_spawn_audit(
+            &cas_dir,
+            "session-a",
+            Some(request_id),
+            None,
+            "dequeue",
+            "accepted",
+            "spawn",
+        );
+        append_spawn_audit(
+            &cas_dir,
+            "session-a",
+            Some(request_id),
+            Some("brave-otter-9"),
+            "launch",
+            "started",
+            "Worker PTY process started; awaiting CAS registration.",
+        );
+
+        let rows = queue.recent_spawn_lifecycle("session-a", 10).unwrap();
+        let row = rows.iter().find(|r| r.id == request_id).unwrap();
+        assert_eq!(row.state, SpawnLifecycleState::Launched);
+        assert_eq!(row.worker_name.as_deref(), Some("brave-otter-9"));
+
+        // Registration timeout is the silence GH #60 reported — it must land
+        // as FAILED with a reason, not leave the row at `launched` forever.
+        append_spawn_audit(
+            &cas_dir,
+            "session-a",
+            Some(request_id),
+            Some("brave-otter-9"),
+            "register",
+            "timeout",
+            "did not register with CAS within 120 seconds",
+        );
+
+        let rows = queue.recent_spawn_lifecycle("session-a", 10).unwrap();
+        let row = rows.iter().find(|r| r.id == request_id).unwrap();
+        assert_eq!(row.state, SpawnLifecycleState::Failed);
+        assert!(row.detail.as_deref().unwrap().contains("did not register"));
+    }
+
+    /// A `preassign` failure reports a task-binding problem, not a spawn
+    /// failure — it must not mark a live, registered worker as FAILED.
+    #[test]
+    fn preassign_failure_does_not_fail_a_registered_spawn() {
+        use cas_store::SpawnLifecycleState;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_spawn_queue_store(&cas_dir).unwrap();
+        let request_id = queue
+            .enqueue_spawn(1, &[], false, None, Some("session-a"), Some("cas-1234"))
+            .unwrap();
+
+        append_spawn_audit(
+            &cas_dir,
+            "session-a",
+            Some(request_id),
+            Some("worker-x"),
+            "launch",
+            "started",
+            "",
+        );
+        append_spawn_audit(
+            &cas_dir,
+            "session-a",
+            Some(request_id),
+            Some("worker-x"),
+            "preassign",
+            "failed",
+            "task already assigned to another agent",
+        );
+        append_spawn_audit(
+            &cas_dir,
+            "session-a",
+            Some(request_id),
+            Some("worker-x"),
+            "register",
+            "confirmed",
+            "",
+        );
+
+        let rows = queue.recent_spawn_lifecycle("session-a", 10).unwrap();
+        let row = rows.iter().find(|r| r.id == request_id).unwrap();
+        assert_eq!(
+            row.state,
+            SpawnLifecycleState::Registered,
+            "a preassign failure must not mask a worker that really did come up"
+        );
     }
 
     #[test]

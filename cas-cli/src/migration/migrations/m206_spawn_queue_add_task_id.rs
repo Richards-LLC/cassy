@@ -141,7 +141,13 @@ mod tests {
         }
         // Newer spawn-queue migrations must be applied on the upgraded-db
         // path too: the fresh baseline already includes their columns.
-        for sql in crate::migration::migrations::m216_spawn_queue_add_requester_config_dir::MIGRATION.up {
+        for sql in
+            crate::migration::migrations::m216_spawn_queue_add_requester_config_dir::MIGRATION.up
+        {
+            upgraded.execute(sql, []).unwrap();
+        }
+        for sql in crate::migration::migrations::m217_spawn_queue_add_lifecycle_state::MIGRATION.up
+        {
             upgraded.execute(sql, []).unwrap();
         }
         let upgraded_cols = spawn_queue_columns(&upgraded);

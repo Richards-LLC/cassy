@@ -314,6 +314,144 @@ fn current_factory_session() -> Option<String> {
         .filter(|s| !s.trim().is_empty())
 }
 
+/// How long a spawn request may sit in a non-terminal state before
+/// `worker_status` calls it out as unconfirmed (GH #60).
+///
+/// Deliberately longer than a provisioning pass (git worktree add + submodule
+/// init + hook install) and shorter than a supervisor's patience. A request
+/// still `queued` past this point means nothing is consuming the queue at all —
+/// the original incident, where two requests returned success-shaped receipts
+/// and both daemon logs stayed zero bytes.
+const SPAWN_UNCONFIRMED_SECS: i64 = 90;
+
+/// Window of spawn history worth showing. Older terminal rows are noise.
+const SPAWN_HISTORY_WINDOW_SECS: i64 = 1800;
+
+/// Render the task a worker is holding, for `worker_status` (GH #67).
+///
+/// The roster already knew the assignment; it just never said so, and the
+/// documented workaround was `git -C .cas/worktrees/<name> log/status` plus a
+/// task lookup. An idle-looking worker with `cas-1234 (in progress)` next to it
+/// is a different conversation from one with nothing assigned — that
+/// distinction is the whole of GH #67 item 1.
+///
+/// Pure over its inputs so every branch is testable without a store.
+fn format_assigned_task_info(
+    in_progress: Option<(&str, &str)>,
+    assigned_open: Option<(&str, &str)>,
+) -> String {
+    const TITLE_CAP: usize = 60;
+    let truncate = |title: &str| -> String {
+        let title = title.trim();
+        if title.chars().count() <= TITLE_CAP {
+            return title.to_string();
+        }
+        let short: String = title.chars().take(TITLE_CAP).collect();
+        format!("{}…", short.trim_end())
+    };
+
+    match (in_progress, assigned_open) {
+        (Some((id, title)), _) => {
+            format!("\n    task: {id} (in progress) — {}", truncate(title))
+        }
+        // Assigned but not started: the dispatch grace window, or a worker that
+        // never picked the task up. Naming it lets the supervisor tell those
+        // apart without opening anything.
+        (None, Some((id, title))) => {
+            format!(
+                "\n    task: {id} (assigned, not started) — {}",
+                truncate(title)
+            )
+        }
+        (None, None) => "\n    task: none assigned".to_string(),
+    }
+}
+
+/// Render the recent spawn lifecycle for `worker_status` (GH #60).
+///
+/// The enqueue receipt proves only that a row was inserted. This section is
+/// what makes the documented supervisor guard — "call `worker_status` after
+/// every `spawn_workers` and don't report dispatch complete until the worker
+/// appears" — structural rather than a habit, and it names which worker each
+/// request produced so two in-flight anonymous spawns can never be
+/// cross-attributed.
+///
+/// Pure over its inputs so the interesting states are unit-testable without a
+/// daemon, a queue, or a clock.
+fn format_spawn_lifecycle_section(
+    rows: &[cas_store::SpawnLifecycle],
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    use cas_store::SpawnLifecycleState as State;
+
+    let recent: Vec<&cas_store::SpawnLifecycle> = rows
+        .iter()
+        .filter(|row| (now - row.created_at).num_seconds() <= SPAWN_HISTORY_WINDOW_SECS)
+        .collect();
+    if recent.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::from("\nRecent spawn requests:\n");
+    let mut unconfirmed = 0usize;
+    let mut failed = 0usize;
+
+    for row in recent {
+        let age = (now - row.created_at).num_seconds().max(0);
+        let stale = !row.state.is_terminal() && age >= SPAWN_UNCONFIRMED_SECS;
+        let who = row
+            .worker_name
+            .as_deref()
+            .map(|name| format!(" → {name}"))
+            .unwrap_or_else(|| {
+                if row.requested_names.is_empty() {
+                    String::new()
+                } else {
+                    format!(" → (requested {})", row.requested_names.join(", "))
+                }
+            });
+
+        let status = match row.state {
+            State::Registered => "registered".to_string(),
+            State::Failed => "FAILED".to_string(),
+            other if stale => format!("{} — UNCONFIRMED", other.as_str()),
+            other => other.as_str().to_string(),
+        };
+        if row.state == State::Failed {
+            failed += 1;
+        } else if stale {
+            unconfirmed += 1;
+        }
+
+        let reason = row
+            .detail
+            .as_deref()
+            .filter(|d| !d.is_empty())
+            .map(|d| format!(" — {d}"))
+            .unwrap_or_default();
+        let task = row
+            .task_id
+            .as_deref()
+            .map(|t| format!(" [task {t}]"))
+            .unwrap_or_default();
+
+        out.push_str(&format!(
+            "  • request {}{}: {} ({age}s ago){}{}\n",
+            row.id, who, status, task, reason
+        ));
+    }
+
+    if failed > 0 || unconfirmed > 0 {
+        out.push_str(&format!(
+            "  ⚠ {failed} failed, {unconfirmed} unconfirmed after {SPAWN_UNCONFIRMED_SECS}s. \
+             An UNCONFIRMED request means the worker never registered — treat it as not \
+             dispatched, and check the daemon logs before re-spawning.\n"
+        ));
+    }
+
+    out
+}
+
 fn worker_hold_role_gate(is_supervisor: bool, action: &str) -> Result<(), String> {
     if is_supervisor {
         Ok(())
@@ -675,13 +813,24 @@ impl CasService {
             ],
         );
 
+        // GH #60: the receipt confirms queue insertion and NOTHING about
+        // liveness — it had the same shape whether a worker registered or the
+        // queue was never consumed at all. Say so, and name the request id as
+        // the handle to resolve it with, so a caller cannot read "Queued" as
+        // "dispatched".
+        let liveness_note = format!(
+            "\nNOT YET CONFIRMED: this only means the request was queued. Call worker_status \
+             to resolve request {request_id} to a worker and a state (registered / FAILED); \
+             do not report dispatch complete until it shows registered."
+        );
+
         let msg = if worker_names.is_empty() {
             format!(
-                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{task_id_note}"
+                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{task_id_note}{liveness_note}"
             )
         } else {
             format!(
-                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{task_id_note}",
+                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{task_id_note}{liveness_note}",
                 worker_names.join(", "),
                 request_id
             )
@@ -1096,10 +1245,25 @@ impl CasService {
             3600, // 1h window
         );
 
+        // GH #60: recent spawn lifecycle, resolved once for both render paths.
+        // Load it BEFORE the empty-roster early return — "no agents" is
+        // precisely the case where a failed or unconsumed spawn is the answer,
+        // and the old output said only "None active", which reads like an
+        // empty fleet rather than a spawn that died.
+        let spawn_section = current_factory_session()
+            .and_then(|session| {
+                crate::store::open_spawn_queue_store(&self.inner.cas_root)
+                    .ok()
+                    .and_then(|queue| queue.recent_spawn_lifecycle(&session, 10).ok())
+            })
+            .map(|rows| format_spawn_lifecycle_section(&rows, chrono::Utc::now()))
+            .unwrap_or_default();
+
         if agents.is_empty() {
             let mut msg = String::from(
                 "No active agents registered.\n\nNote: Factory TUI must be running for agents to be registered.",
             );
+            msg.push_str(&spawn_section);
             msg.push_str(&died_section);
             if stale_pruned > 0 {
                 msg.push_str(&format!(
@@ -1120,16 +1284,23 @@ impl CasService {
         // silently expire under a genuinely working agent. Real task
         // assignment is the ground truth; a lease is corroborating (and
         // currently the only) evidence *before* that expiry.
-        let in_progress_assignees: std::collections::HashSet<String> = {
+        // GH #67: keep the whole task, not just the assignee name. The
+        // supervisor had to open the task store (or the worktree) to learn
+        // WHICH task a worker was holding; the roster knew all along.
+        let in_progress_tasks: Vec<cas_types::Task> = {
             use crate::store::open_task_store;
             open_task_store(&self.inner.cas_root)
                 .ok()
                 .and_then(|ts| ts.list(Some(cas_types::TaskStatus::InProgress)).ok())
                 .unwrap_or_default()
                 .into_iter()
-                .filter_map(|t| t.assignee)
+                .filter(|t| t.assignee.is_some())
                 .collect()
         };
+        let in_progress_assignees: std::collections::HashSet<String> = in_progress_tasks
+            .iter()
+            .filter_map(|t| t.assignee.clone())
+            .collect();
         // cas-78bf: retain assigned Open tasks (including their assignment
         // timestamp) so worker_status can distinguish the normal dispatch
         // grace window from a worker that has held work without ever
@@ -1464,8 +1635,19 @@ impl CasService {
                         }
                     }
                 };
+                // GH #67: name the assignment on the roster row itself.
+                let matches_agent = |assignee: Option<&str>| {
+                    assignee == Some(agent.name.as_str()) || assignee == Some(agent.id.as_str())
+                };
+                let task_info = format_assigned_task_info(
+                    in_progress_tasks
+                        .iter()
+                        .find(|t| matches_agent(t.assignee.as_deref()))
+                        .map(|t| (t.id.as_str(), t.title.as_str())),
+                    assigned_open_task.map(|t| (t.id.as_str(), t.title.as_str())),
+                );
                 output.push_str(&format!(
-                    "  • {} (heartbeat: {}){}{}{}{}{}{}{}{}{}\n    session: {}\n",
+                    "  • {} (heartbeat: {}){}{}{}{}{}{}{}{}{}{}\n    session: {}\n",
                     &agent.name,
                     since,
                     liveness_label,
@@ -1477,10 +1659,15 @@ impl CasService {
                     context_info,
                     activity_info,
                     harness_turn_info,
+                    task_info,
                     session_uuid
                 ));
             }
         }
+
+        // GH #60: spawn lifecycle — which request produced which worker, and
+        // which never registered.
+        output.push_str(&spawn_section);
 
         // cas-2e81: died-while-leased section (empty-fleet vs crash distinction).
         output.push_str(&died_section);
@@ -4372,6 +4559,250 @@ pub(crate) fn format_worker_git_status(gs: &WorkerGitStatus) -> String {
 }
 
 // =============================================================================
+
+#[cfg(test)]
+mod spawn_lifecycle_tests {
+    use super::*;
+    use cas_store::{SpawnLifecycle, SpawnLifecycleState};
+
+    fn row(
+        id: i64,
+        worker: Option<&str>,
+        state: SpawnLifecycleState,
+        age_secs: i64,
+        detail: Option<&str>,
+    ) -> SpawnLifecycle {
+        SpawnLifecycle {
+            id,
+            worker_name: worker.map(str::to_string),
+            state,
+            detail: detail.map(str::to_string),
+            requested_names: Vec::new(),
+            task_id: None,
+            created_at: chrono::Utc::now() - chrono::Duration::seconds(age_secs),
+            state_at: None,
+        }
+    }
+
+    fn render(rows: &[SpawnLifecycle]) -> String {
+        format_spawn_lifecycle_section(rows, chrono::Utc::now())
+    }
+
+    /// No spawn history → no section. `worker_status` must not grow a stub
+    /// heading on every poll in a session that never spawned.
+    #[test]
+    fn empty_history_renders_nothing() {
+        assert!(render(&[]).is_empty());
+    }
+
+    /// The core GH #60 requirement: a request that launched but never
+    /// registered is reported as FAILED with its reason — not as silence.
+    #[test]
+    fn failed_spawn_is_named_with_its_reason() {
+        let out = render(&[row(
+            417,
+            Some("quiet-lynx-3"),
+            SpawnLifecycleState::Failed,
+            200,
+            Some("did not register with CAS within 120 seconds"),
+        )]);
+        assert!(out.contains("request 417"), "{out}");
+        assert!(out.contains("quiet-lynx-3"), "{out}");
+        assert!(out.contains("FAILED"), "{out}");
+        assert!(out.contains("did not register"), "{out}");
+        assert!(
+            out.contains("⚠"),
+            "a failure must carry the warning line: {out}"
+        );
+    }
+
+    /// A request still sitting in a non-terminal state past the threshold is
+    /// UNCONFIRMED. This is the 2026-07-27 incident shape: success-shaped
+    /// receipt, nothing consuming the queue, both daemon logs zero bytes.
+    #[test]
+    fn stale_queued_request_is_flagged_unconfirmed() {
+        let out = render(&[row(43, None, SpawnLifecycleState::Queued, 600, None)]);
+        assert!(out.contains("UNCONFIRMED"), "{out}");
+        assert!(out.contains("treat it as not dispatched"), "{out}");
+    }
+
+    /// A spawn still provisioning inside the normal window is NOT flagged —
+    /// the signal has to stay quiet during ordinary git worktree setup or
+    /// supervisors will learn to ignore it.
+    #[test]
+    fn fresh_in_flight_request_is_not_flagged() {
+        let out = render(&[row(
+            44,
+            Some("brave-otter-9"),
+            SpawnLifecycleState::Provisioning,
+            5,
+            None,
+        )]);
+        assert!(out.contains("provisioning"), "{out}");
+        assert!(!out.contains("UNCONFIRMED"), "{out}");
+        assert!(!out.contains("⚠"), "{out}");
+    }
+
+    /// A registered spawn is never flagged, however old it is.
+    #[test]
+    fn registered_spawn_is_never_flagged() {
+        let out = render(&[row(
+            45,
+            Some("steady-crane-1"),
+            SpawnLifecycleState::Registered,
+            1500,
+            None,
+        )]);
+        assert!(out.contains("registered"), "{out}");
+        assert!(!out.contains("UNCONFIRMED"), "{out}");
+        assert!(!out.contains("⚠"), "{out}");
+    }
+
+    /// Each request renders its OWN worker. The live defect this fixes:
+    /// four spawn-verified receipts attributed requests 414-417 to the wrong
+    /// workers, and two batch receipts both claimed request 417.
+    #[test]
+    fn every_request_renders_its_own_worker_and_id() {
+        let out = render(&[
+            row(
+                414,
+                Some("worker-a"),
+                SpawnLifecycleState::Registered,
+                60,
+                None,
+            ),
+            row(
+                415,
+                Some("worker-b"),
+                SpawnLifecycleState::Registered,
+                50,
+                None,
+            ),
+            row(
+                416,
+                Some("worker-c"),
+                SpawnLifecycleState::Registered,
+                40,
+                None,
+            ),
+            row(
+                417,
+                Some("worker-d"),
+                SpawnLifecycleState::Registered,
+                30,
+                None,
+            ),
+        ]);
+        for (id, worker) in [
+            (414, "worker-a"),
+            (415, "worker-b"),
+            (416, "worker-c"),
+            (417, "worker-d"),
+        ] {
+            let line = out
+                .lines()
+                .find(|l| l.contains(&format!("request {id}")))
+                .unwrap_or_else(|| panic!("request {id} missing from:\n{out}"));
+            assert!(
+                line.contains(worker),
+                "request {id} must name {worker}, got: {line}"
+            );
+        }
+        // And no line may name a worker belonging to a different request.
+        let line_414 = out.lines().find(|l| l.contains("request 414")).unwrap();
+        assert!(
+            !line_414.contains("worker-d"),
+            "cross-attribution: {line_414}"
+        );
+    }
+
+    /// Ancient history is dropped so the section stays scannable.
+    #[test]
+    fn requests_outside_the_window_are_dropped() {
+        let out = render(&[row(
+            1,
+            Some("ancient-worker"),
+            SpawnLifecycleState::Registered,
+            SPAWN_HISTORY_WINDOW_SECS + 60,
+            None,
+        )]);
+        assert!(out.is_empty(), "{out}");
+    }
+
+    /// A pre-assigned task travels with the request so the supervisor can see
+    /// which dispatch died without opening the task store.
+    #[test]
+    fn preassigned_task_is_shown() {
+        let mut r = row(
+            418,
+            Some("worker-e"),
+            SpawnLifecycleState::Failed,
+            200,
+            None,
+        );
+        r.task_id = Some("cas-1234".to_string());
+        let out = render(&[r]);
+        assert!(out.contains("[task cas-1234]"), "{out}");
+    }
+
+    // ===== GH #67: the roster names the assignment =====
+
+    /// An in-progress assignment is named on the worker's own row, so a
+    /// supervisor never has to open the task store or the worktree to learn
+    /// what a worker is doing.
+    #[test]
+    fn in_progress_task_is_named_on_the_row() {
+        let out =
+            format_assigned_task_info(Some(("cas-8b84", "Worker lifecycle observability")), None);
+        assert!(out.contains("cas-8b84"), "{out}");
+        assert!(out.contains("in progress"), "{out}");
+        assert!(out.contains("Worker lifecycle observability"), "{out}");
+    }
+
+    /// Assigned-but-not-started is a DIFFERENT state from in-progress: it is
+    /// either the dispatch grace window or a worker that never picked the task
+    /// up, and the supervisor must be able to tell those from an idle row.
+    #[test]
+    fn assigned_but_unstarted_is_distinguished_from_in_progress() {
+        let out = format_assigned_task_info(None, Some(("cas-4242", "Fix the thing")));
+        assert!(out.contains("cas-4242"), "{out}");
+        assert!(out.contains("assigned, not started"), "{out}");
+        assert!(!out.contains("in progress"), "{out}");
+    }
+
+    /// In-progress wins when a worker somehow holds both — the started task is
+    /// the one it is actually working.
+    #[test]
+    fn in_progress_takes_precedence_over_open_assignment() {
+        let out = format_assigned_task_info(
+            Some(("cas-1111", "Started work")),
+            Some(("cas-2222", "Also assigned")),
+        );
+        assert!(out.contains("cas-1111"), "{out}");
+        assert!(!out.contains("cas-2222"), "{out}");
+    }
+
+    /// A worker with nothing assigned says so explicitly. An absent line reads
+    /// as missing data; "none assigned" is an answer.
+    #[test]
+    fn unassigned_worker_says_none_assigned() {
+        let out = format_assigned_task_info(None, None);
+        assert!(out.contains("none assigned"), "{out}");
+    }
+
+    /// Long titles are capped so one verbose task cannot wreck the roster.
+    #[test]
+    fn long_titles_are_truncated() {
+        let long = "x".repeat(200);
+        let out = format_assigned_task_info(Some(("cas-9999", &long)), None);
+        assert!(out.contains('…'), "{out}");
+        assert!(
+            out.len() < 140,
+            "row must stay scannable, got {} chars",
+            out.len()
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {

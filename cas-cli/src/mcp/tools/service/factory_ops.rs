@@ -81,6 +81,52 @@ fn default_worker_effort_for_cli(_cli: cas_mux::SupervisorCli) -> cas_mux::Effor
         .unwrap_or(cas_mux::Effort::Medium)
 }
 
+/// cas-28a4 (GH #71): which worker CLI a model slug belongs to.
+///
+/// Deliberately conservative — an unrecognized slug returns `None` and is
+/// accepted as-is, because this gate exists to catch obviously-crossed wires
+/// (a Claude slug queued onto Codex), not to police the model catalog and
+/// reject a model the day it ships.
+fn cli_for_model_slug(model: &str) -> Option<cas_mux::SupervisorCli> {
+    let model = model.trim().to_ascii_lowercase();
+    if model.is_empty() {
+        return None;
+    }
+    if model.starts_with("grok") {
+        return Some(cas_mux::SupervisorCli::Grok);
+    }
+    if model.starts_with("claude")
+        || model.starts_with("opus")
+        || model.starts_with("sonnet")
+        || model.starts_with("haiku")
+        || model.starts_with("fable")
+    {
+        return Some(cas_mux::SupervisorCli::Claude);
+    }
+    if model.starts_with("gpt") || model.starts_with("codex") || model.starts_with("o3") {
+        return Some(cas_mux::SupervisorCli::Codex);
+    }
+    None
+}
+
+/// cas-28a4 (GH #71): reject a model slug that belongs to a different CLI than
+/// the one being spawned, naming both sides and the fix.
+fn validate_model_matches_cli(cli: cas_mux::SupervisorCli, model: &str) -> Result<(), String> {
+    match cli_for_model_slug(model) {
+        Some(model_cli) if model_cli != cli => Err(format!(
+            "invalid spawn_workers combination: model {model:?} is a {} model but \
+             cli={} was requested. \
+             Pass cli={} to spawn it on its own harness, or choose a {} model (e.g. {}).",
+            model_cli.as_str(),
+            cli.as_str(),
+            model_cli.as_str(),
+            cli.as_str(),
+            default_worker_model_for_cli(cli),
+        )),
+        _ => Ok(()),
+    }
+}
+
 fn is_frontier_model(model: &str) -> bool {
     let model = model.to_ascii_lowercase();
     model.contains("opus") || model.contains("fable") || model.contains("mythos")
@@ -114,6 +160,13 @@ pub(crate) fn build_spawn_spec_json_with_project_config(
     let parsed_cli = parse_spawn_cli(cli)?;
     let parsed_effort = parse_spawn_effort(effort)?;
 
+    // cas-28a4 (GH #71): an explicitly requested cli/model pair that crosses
+    // harnesses is rejected here — before anything is queued — instead of
+    // surfacing as workers that boot on the wrong CLI.
+    if let (Some(requested_cli), Some(model)) = (parsed_cli, model) {
+        validate_model_matches_cli(requested_cli, model)?;
+    }
+
     let sources = cas_factory::ConfigSources {
         project_config,
         cli_flag: parsed_cli,
@@ -138,6 +191,24 @@ pub(crate) fn build_spawn_spec_json_with_project_config(
     // phase), so no Grok arm is needed here.
     if cli.is_none() && !configured_cli && spec.cli == cas_mux::SupervisorCli::Claude {
         spec.cli = cas_mux::SupervisorCli::Codex;
+    }
+    // cas-28a4 (GH #71): with no explicit `cli=`, an unambiguous model slug is
+    // the strongest statement of intent the caller made — it decides the
+    // harness rather than being dragged onto whatever the default resolved to
+    // (the live report: `model=claude-opus-4-5` spawned on Codex).
+    if cli.is_none() {
+        if let Some(model_cli) = model.and_then(cli_for_model_slug) {
+            if model_cli != spec.cli {
+                tracing::info!(
+                    target: "cas::factory",
+                    requested_model = %model.unwrap_or_default(),
+                    resolved_cli = %spec.cli.as_str(),
+                    model_cli = %model_cli.as_str(),
+                    "cas-28a4: explicit model slug overrides the resolved default cli"
+                );
+                spec.cli = model_cli;
+            }
+        }
     }
     if model.is_none() && spec.model.is_none() {
         spec.model = Some(default_worker_model_for_cli(spec.cli).to_string());
@@ -4446,6 +4517,96 @@ mod tests {
         assert_eq!(spec.cli, cas_mux::SupervisorCli::Claude);
         assert_eq!(spec.model.as_deref(), Some("opus"));
         assert_eq!(spec.effort, Some(cas_mux::Effort::High));
+    }
+
+    // -----------------------------------------------------------------------
+    // cas-28a4 / GH #71: an invalid cli+model pairing must never reach the
+    // spawn queue. The live report: `model=claude-opus-4-5` with no `cli=`
+    // resolved to the stock Codex default and spawned two Codex workers
+    // carrying a Claude slug, with no error.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn spawn_spec_rejects_claude_model_on_explicit_codex_cli() {
+        let _home = TestEnvGuard::temp_home();
+        let err = build_spawn_spec_json(Some("codex"), Some("claude-opus-4-5"), None)
+            .expect_err("codex + claude slug must be rejected at enqueue");
+
+        assert!(err.contains("claude-opus-4-5"), "{err}");
+        assert!(err.contains("codex"), "names the requested cli: {err}");
+        assert!(
+            err.contains("cli=claude"),
+            "error must state the actionable fix: {err}"
+        );
+    }
+
+    #[test]
+    fn spawn_spec_rejects_codex_model_on_explicit_claude_cli() {
+        let _home = TestEnvGuard::temp_home();
+        let err = build_spawn_spec_json(Some("claude"), Some("gpt-5.6-terra"), None)
+            .expect_err("claude + codex slug must be rejected at enqueue");
+
+        assert!(err.contains("gpt-5.6-terra"), "{err}");
+        assert!(err.contains("cli=codex"), "{err}");
+    }
+
+    /// The live #71 case: no `cli=` at all. The model slug is unambiguous, so
+    /// it — not the stock Codex default — decides the harness.
+    #[test]
+    fn spawn_spec_omitted_cli_follows_an_explicit_claude_model() {
+        let _home = TestEnvGuard::temp_home();
+        let json = build_spawn_spec_json(None, Some("claude-opus-4-5"), None).unwrap();
+        let spec = decoded_spawn_spec(&json);
+
+        assert_eq!(
+            spec.cli,
+            cas_mux::SupervisorCli::Claude,
+            "an explicit claude model must not be spawned on codex"
+        );
+        assert_eq!(spec.model.as_deref(), Some("claude-opus-4-5"));
+    }
+
+    #[test]
+    fn spawn_spec_omitted_cli_follows_an_explicit_grok_model() {
+        let _home = TestEnvGuard::temp_home();
+        let json = build_spawn_spec_json(None, Some("grok-4.5"), None).unwrap();
+        let spec = decoded_spawn_spec(&json);
+        assert_eq!(spec.cli, cas_mux::SupervisorCli::Grok);
+    }
+
+    /// Matching pairs and unrecognized slugs must stay untouched — validation
+    /// rejects known-bad combinations, it does not police the model catalog.
+    #[test]
+    fn spawn_spec_accepts_matching_and_unknown_model_slugs() {
+        let _home = TestEnvGuard::temp_home();
+        for (cli, model) in [
+            ("claude", "claude-opus-5"),
+            ("claude", "opus"),
+            ("codex", "gpt-5.6-terra"),
+            ("grok", "grok-4.5"),
+            ("codex", "some-unreleased-slug"),
+        ] {
+            let json = build_spawn_spec_json(Some(cli), Some(model), None)
+                .unwrap_or_else(|e| panic!("cli={cli} model={model} must be accepted: {e}"));
+            let spec = decoded_spawn_spec(&json);
+            assert_eq!(spec.model.as_deref(), Some(model));
+        }
+    }
+
+    #[test]
+    fn model_slug_families_are_classified_conservatively() {
+        use cas_mux::SupervisorCli;
+        assert_eq!(cli_for_model_slug("claude-opus-5"), Some(SupervisorCli::Claude));
+        assert_eq!(cli_for_model_slug("opus"), Some(SupervisorCli::Claude));
+        assert_eq!(cli_for_model_slug("SONNET"), Some(SupervisorCli::Claude));
+        assert_eq!(cli_for_model_slug("gpt-5.6-sol"), Some(SupervisorCli::Codex));
+        assert_eq!(cli_for_model_slug("gpt-5.6-terra"), Some(SupervisorCli::Codex));
+        assert_eq!(cli_for_model_slug("grok-4.5"), Some(SupervisorCli::Grok));
+        assert_eq!(
+            cli_for_model_slug("mystery-model-9"),
+            None,
+            "unknown slugs must not be guessed into a harness"
+        );
     }
 
     #[test]

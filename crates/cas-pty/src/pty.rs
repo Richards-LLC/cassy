@@ -275,6 +275,45 @@ fn push_factory_worker_metadata_env(
     }
 }
 
+#[cfg(test)]
+mod claude_config_dir_contract_tests {
+    use super::*;
+
+    fn env_value(env: &[(String, String)], key: &str) -> Option<String> {
+        env.iter()
+            .rev()
+            .find_map(|(candidate, value)| (candidate == key).then(|| value.clone()))
+    }
+
+    #[test]
+    fn explicit_claude_config_dir_expands_tilde_into_worker_env() {
+        let mut env = Vec::new();
+        push_claude_config_dir_env(&mut env, "worker", Some("~/.claude-alt"));
+
+        let home = dirs::home_dir().expect("test host has a home directory");
+        assert_eq!(
+            env_value(&env, "CLAUDE_CONFIG_DIR").as_deref(),
+            Some(home.join(".claude-alt").to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn omitted_claude_config_dir_adds_no_env_entry() {
+        let mut env = Vec::new();
+        push_claude_config_dir_env(&mut env, "worker", None);
+
+        assert_eq!(env_value(&env, "CLAUDE_CONFIG_DIR"), None);
+    }
+
+    #[test]
+    fn non_worker_claude_config_dir_adds_no_env_entry() {
+        let mut env = Vec::new();
+        push_claude_config_dir_env(&mut env, "supervisor", Some("~/.claude-alt"));
+
+        assert_eq!(env_value(&env, "CLAUDE_CONFIG_DIR"), None);
+    }
+}
+
 /// Configuration for spawning an agent with native Claude Code Agent Teams flags.
 #[derive(Debug, Clone)]
 pub struct TeamsSpawnConfig {

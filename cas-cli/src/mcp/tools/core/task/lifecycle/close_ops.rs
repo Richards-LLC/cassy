@@ -16226,9 +16226,15 @@ mod zero_diff_spike_close_tests {
     const CYCLE_START_EPOCH: i64 = 1_700_000_000;
 
     fn window() -> TaskCommitReceiptWindow {
+        let cycle_start = chrono::DateTime::from_timestamp(CYCLE_START_EPOCH, 0).unwrap();
         TaskCommitReceiptWindow {
-            not_before: chrono::DateTime::from_timestamp(CYCLE_START_EPOCH, 0).unwrap(),
+            not_before: cycle_start,
             basis: "latest task lease claim/transfer",
+            // cas-9596: these tests exercise cycle-scoped attribution only —
+            // the task floor sits at the cycle start and no durable task
+            // commit identity is recorded.
+            task_floor: cycle_start,
+            identity: TaskCommitIdentity::default(),
         }
     }
 

@@ -4589,25 +4589,61 @@ effort = "high"
         )));
     }
 
-    /// End-to-end and hermetic: HOME and PATH are both isolated, so neither
-    /// the host's Codex install nor its real `~/.codex/auth.json` can affect
-    /// the verdict. The two iterations also prove that an auth file in the
-    /// isolated HOME does not alter the result when the controlled PATH has
-    /// no Codex binary.
-    /// a spec that resolves to Codex, with Codex unavailable, must come
-    /// back rewritten to Claude via `apply_codex_fallback` — the same path
-    /// `factory_spawn_workers` drives. Exercises the resolver + fallback
-    /// composition directly (below the async MCP handler, which needs a
-    /// full task/spawn-queue store to invoke) so this stays a fast unit
-    /// test while still proving the two pieces compose correctly.
+    /// Run the real unavailable-Codex probe in a dedicated process. PATH is
+    /// process-global, so changing it inside this parallel lib-test process
+    /// can make unrelated subprocess spawns intermittently fail with ENOENT.
+    /// Supplying PATH/HOME on this one child command preserves the end-to-end
+    /// probe coverage without exposing the temporary environment to peers.
     #[test]
     fn resolved_codex_spec_falls_back_to_claude_when_codex_unavailable() {
-        let mut env = TestEnvGuard::temp_home();
-        let empty_path = env.home().join("empty-path");
+        const CHILD_TEST: &str = "mcp::tools::service::factory_ops::tests::\
+            resolved_codex_spec_falls_back_to_claude_when_codex_unavailable_in_isolated_child";
+
+        let home = tempfile::TempDir::new().expect("isolated child HOME");
+        let empty_path = home.path().join("empty-path");
         std::fs::create_dir(&empty_path).expect("empty PATH directory");
-        env.set("PATH", empty_path);
+
+        let output = std::process::Command::new(
+            std::env::current_exe().expect("current lib-test executable"),
+        )
+        .args(["--exact", CHILD_TEST, "--ignored", "--nocapture"])
+        .env("CAS_CODEX_FALLBACK_ISOLATED_CHILD", "1")
+        .env("HOME", home.path())
+        .env("PATH", &empty_path)
+        .output()
+        .expect("spawn isolated unavailable-Codex child test");
+
+        assert!(
+            output.status.success(),
+            "isolated unavailable-Codex child failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains(CHILD_TEST) && stdout.contains("test result: ok"),
+            "isolated helper did not execute the real probe assertions:\n{stdout}"
+        );
+    }
+
+    #[test]
+    #[ignore = "subprocess helper for the isolated unavailable-Codex probe"]
+    fn resolved_codex_spec_falls_back_to_claude_when_codex_unavailable_in_isolated_child() {
+        assert_eq!(
+            std::env::var("CAS_CODEX_FALLBACK_ISOLATED_CHILD").as_deref(),
+            Ok("1"),
+            "helper must run only through its isolated parent"
+        );
+        assert!(
+            !cas_factory::probe::codex_binary_present(),
+            "controlled child PATH must make the real Codex binary probe fail"
+        );
+
+        let home = std::path::PathBuf::from(
+            std::env::var_os("HOME").expect("isolated child HOME must be set"),
+        );
         for auth_present in [false, true] {
-            let auth_path = env.home().join(".codex/auth.json");
+            let auth_path = home.join(".codex/auth.json");
             if auth_present {
                 std::fs::create_dir_all(auth_path.parent().unwrap()).unwrap();
                 std::fs::write(&auth_path, "{}").unwrap();
@@ -4640,8 +4676,10 @@ effort = "high"
             assert_eq!(spec.model.as_deref(), Some(claude_default_model));
             assert_eq!(notices.len(), 1);
             assert!(
-                notices[0].starts_with("worker slot 1: codex unavailable ("),
-                "real spawn-path wrapper must identify the unnamed resolved slot — got: {}",
+                notices[0].starts_with(
+                    "worker slot 1: codex unavailable (codex binary not found on PATH)"
+                ),
+                "real probe must report the controlled missing binary — got: {}",
                 notices[0]
             );
             assert!(

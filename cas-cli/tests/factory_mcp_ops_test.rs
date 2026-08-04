@@ -32,6 +32,10 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::RawContent;
 use tempfile::TempDir;
 
+#[path = "../src/test_env_guard.rs"]
+mod test_env_guard;
+use test_env_guard::TestEnvGuard;
+
 // =============================================================================
 // Test Fixture
 // =============================================================================
@@ -40,6 +44,9 @@ struct FactoryTestEnv {
     _temp: TempDir,
     cas_root: PathBuf,
     service: CasService,
+    // Keep process-global HOME/PATH isolation alive for the full fixture
+    // lifetime. `None` means an explicit EnvGuard already owns that isolation.
+    _env_guard: Option<EnvGuard>,
 }
 
 impl FactoryTestEnv {
@@ -48,6 +55,17 @@ impl FactoryTestEnv {
     }
 
     fn with_agent_id(agent_id: &str) -> Self {
+        Self::with_agent_id_and_env(agent_id, EnvGuard::ensure_codex_available())
+    }
+
+    /// Build the standard service fixture with both Codex availability signals
+    /// deliberately absent. This exercises the real public probe + fallback
+    /// path without depending on the developer or runner host.
+    fn with_codex_unavailable() -> Self {
+        Self::with_agent_id_and_env("test-agent-id", Some(EnvGuard::codex_unavailable()))
+    }
+
+    fn with_agent_id_and_env(agent_id: &str, env_guard: Option<EnvGuard>) -> Self {
         let temp = TempDir::new().expect("Failed to create temp dir");
         let cas_root = init_cas_dir(temp.path()).expect("Failed to init CAS dir");
 
@@ -59,10 +77,12 @@ impl FactoryTestEnv {
             _temp: temp,
             cas_root,
             service,
+            _env_guard: env_guard,
         }
     }
 
     fn without_agent_id() -> Self {
+        let env_guard = EnvGuard::ensure_codex_available();
         let temp = TempDir::new().expect("Failed to create temp dir");
         let cas_root = init_cas_dir(temp.path()).expect("Failed to init CAS dir");
         let core = CasCore::with_daemon(cas_root.clone(), None, None);
@@ -71,6 +91,7 @@ impl FactoryTestEnv {
             _temp: temp,
             cas_root,
             service,
+            _env_guard: env_guard,
         }
     }
 
@@ -261,62 +282,102 @@ impl FactoryTestEnv {
     }
 }
 
-/// Serialize environment mutations across this entire integration-test process.
-///
-/// Poison-tolerant for the same reason as `hooks::test_env_lock`: a failed test
-/// must not turn one env-related failure into a cascade of mutex-poison panics.
-fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
-    use std::sync::{Mutex, OnceLock};
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
+thread_local! {
+    /// Existing tests sometimes apply request-specific environment overrides
+    /// before constructing `FactoryTestEnv`. Let the fixture reuse that guard
+    /// instead of attempting to nest the canonical non-reentrant lock.
+    static FACTORY_ENV_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// RAII guard for environment variables. Acquires the process-wide test lock.
+/// Factory-specific wrapper around the suite's canonical process-state guard.
+///
+/// Every `FactoryTestEnv` gets a temporary HOME and controlled PATH. The
+/// default state makes Codex deterministically available with a harmless fake
+/// binary and auth marker; `codex_unavailable` controls both signals absent.
 struct EnvGuard {
-    saved: Vec<(String, Option<String>)>,
-    _lock: std::sync::MutexGuard<'static, ()>,
+    _guard: TestEnvGuard,
 }
 
 impl EnvGuard {
     fn set(vars: &[(&str, &str)]) -> Self {
-        let lock = test_env_lock();
-        let mut saved = Vec::with_capacity(vars.len());
+        let mut guard = Self::begin();
         for (key, value) in vars {
-            let key = (*key).to_string();
-            let prev = std::env::var(&key).ok();
-            unsafe { std::env::set_var(&key, value) };
-            saved.push((key, prev));
+            guard.set(*key, *value);
         }
-        Self { saved, _lock: lock }
+        Self::install_fake_codex(&mut guard);
+        Self { _guard: guard }
     }
 
     fn set_optional(vars: &[(&str, Option<&str>)]) -> Self {
-        let lock = test_env_lock();
-        let mut saved = Vec::with_capacity(vars.len());
+        let mut guard = Self::begin();
         for (key, value) in vars {
-            let key = (*key).to_string();
-            let prev = std::env::var(&key).ok();
             match value {
-                Some(value) => unsafe { std::env::set_var(&key, value) },
-                None => unsafe { std::env::remove_var(&key) },
+                Some(value) => guard.set(*key, *value),
+                None => guard.remove(*key),
             }
-            saved.push((key, prev));
         }
-        Self { saved, _lock: lock }
+        Self::install_fake_codex(&mut guard);
+        Self { _guard: guard }
+    }
+
+    fn ensure_codex_available() -> Option<Self> {
+        if FACTORY_ENV_ACTIVE.with(std::cell::Cell::get) {
+            None
+        } else {
+            Some(Self::set(&[]))
+        }
+    }
+
+    fn codex_unavailable() -> Self {
+        let mut guard = Self::begin();
+        let empty_path = guard.home().join("empty-path");
+        std::fs::create_dir(&empty_path).expect("create controlled empty PATH");
+        guard.set("PATH", &empty_path);
+        Self { _guard: guard }
+    }
+
+    fn begin() -> TestEnvGuard {
+        FACTORY_ENV_ACTIVE.with(|active| {
+            assert!(
+                !active.replace(true),
+                "nested factory environment guard; reuse the active fixture guard"
+            );
+        });
+        TestEnvGuard::temp_home()
+    }
+
+    fn install_fake_codex(guard: &mut TestEnvGuard) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fake_bin = guard.home().join("fake-bin");
+        std::fs::create_dir(&fake_bin).expect("create fake binary directory");
+        let codex = fake_bin.join("codex");
+        std::fs::write(&codex, "#!/bin/sh\nprintf 'codex-cli 0.0.0-test\\n'\n")
+            .expect("write fake codex executable");
+        let mut permissions = std::fs::metadata(&codex)
+            .expect("stat fake codex executable")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&codex, permissions).expect("chmod fake codex executable");
+
+        let home = std::env::var_os("HOME").expect("factory test HOME");
+        let auth = PathBuf::from(home).join(".codex/auth.json");
+        std::fs::create_dir_all(auth.parent().expect("auth parent"))
+            .expect("create fake codex auth directory");
+        std::fs::write(auth, "{}").expect("write fake codex auth marker");
+
+        let mut paths = vec![fake_bin];
+        if let Some(path) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&path));
+        }
+        let path = std::env::join_paths(paths).expect("join controlled factory PATH");
+        guard.set("PATH", path);
     }
 }
 
 impl Drop for EnvGuard {
     fn drop(&mut self) {
-        for (key, prev) in self.saved.drain(..) {
-            match prev {
-                Some(val) => unsafe { std::env::set_var(&key, val) },
-                None => unsafe { std::env::remove_var(&key) },
-            }
-        }
-        // _lock drops here, releasing the mutex
+        FACTORY_ENV_ACTIVE.with(|active| active.set(false));
     }
 }
 
@@ -1079,11 +1140,25 @@ async fn test_spawn_workers_closed_epic_not_counted() {
 
 // cas-2992: spawn_workers with cli/model/effort overrides
 #[tokio::test]
-async fn test_spawn_workers_cli_codex_enqueues_spec() {
-    // Given a spawn_workers request with cli=codex,
-    // the queued SpawnRequest.worker_spec should contain "codex".
+async fn test_spawn_workers_codex_available_enqueues_codex_spec() {
+    // FactoryTestEnv provides both availability signals hermetically: a fake
+    // `codex --version` executable and a temp-HOME auth marker. The queued
+    // SpawnRequest.worker_spec must therefore preserve the requested harness.
     let env = FactoryTestEnv::new();
     env.create_epic("Test Epic");
+
+    let fake_version = std::process::Command::new("codex")
+        .arg("--version")
+        .output()
+        .expect("controlled fake codex must resolve");
+    assert_eq!(
+        String::from_utf8_lossy(&fake_version.stdout),
+        "codex-cli 0.0.0-test\n",
+        "the fixture must resolve its fake codex, never the host binary"
+    );
+    let auth = PathBuf::from(std::env::var_os("HOME").expect("controlled HOME"))
+        .join(".codex/auth.json");
+    assert!(auth.is_file(), "controlled auth marker must exist");
 
     let mut req = factory_req("spawn_workers");
     req.count = Some(1);
@@ -1106,6 +1181,51 @@ async fn test_spawn_workers_cli_codex_enqueues_spec() {
         spec_json.contains("codex"),
         "spec JSON should mention 'codex': {spec_json}"
     );
+}
+
+#[tokio::test]
+async fn test_spawn_workers_codex_unavailable_falls_back_to_claude() {
+    // The dedicated fixture removes BOTH independent availability signals:
+    // PATH has no codex executable and temp HOME has no auth marker. This
+    // deliberately exercises the real public probe + fallback composition.
+    let env = FactoryTestEnv::with_codex_unavailable();
+    env.create_epic("Test Epic");
+
+    let binary_error = std::process::Command::new("codex")
+        .arg("--version")
+        .output()
+        .expect_err("controlled unavailable PATH must not resolve host codex");
+    assert_eq!(binary_error.kind(), std::io::ErrorKind::NotFound);
+    let auth = PathBuf::from(std::env::var_os("HOME").expect("controlled HOME"))
+        .join(".codex/auth.json");
+    assert!(
+        !auth.is_file(),
+        "controlled unavailable HOME must not contain auth"
+    );
+
+    let mut req = factory_req("spawn_workers");
+    req.count = Some(1);
+    req.cli = Some("codex".to_string());
+
+    let result = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect("non-strict unavailable Codex should fall back");
+    let text = get_text(&result);
+    assert!(
+        text.contains("codex unavailable") && text.contains("falling back to claude"),
+        "caller must see the fallback reason: {text}"
+    );
+
+    let entries = env.spawn_queue().peek(10).expect("peek");
+    assert_eq!(entries.len(), 1, "should have one queue entry");
+    let spec_json = entries[0]
+        .worker_spec
+        .as_deref()
+        .expect("fallback spawn must queue a concrete worker spec");
+    let spec: cas_mux::WorkerSpec = serde_json::from_str(spec_json).expect("valid WorkerSpec");
+    assert_eq!(spec.cli, cas_mux::SupervisorCli::Claude);
 }
 
 #[tokio::test]

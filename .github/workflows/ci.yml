@@ -28,7 +28,10 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang lld
+          # Keep this aligned with .cargo/config.toml's gcc + mold toolchain.
+          sudo apt-get install -y gcc mold
+          gcc --version
+          mold --version
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -59,37 +62,22 @@ jobs:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo test -p cas
 
-      # EPIC cas-c351 / cas-9e02: run A2/A3/B3 panic-isolation tests
-      # under --release and --profile release-fast to catch any future
-      # profile change that silently re-introduces panic=abort or any
-      # release-mode codegen that breaks the tokio::spawn panic catcher.
-      - name: Panic-isolation tests (release profiles)
-        env:
-          ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: make -C cas-cli test-release-panic
-
       - name: Clippy (report warnings)
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo clippy -p cas --all-targets
-
-      - name: Build timings
-        env:
-          ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: cargo build -p cas --timings
-
-      - name: Upload timings
-        uses: actions/upload-artifact@v4
-        with:
-          name: cargo-timings
-          path: target/cargo-timings
 
   # Keep this compile-only: --all-targets catches Darwin-only type errors in
   # production, test, example, and benchmark code without duplicating the full
   # Linux test suite on a more expensive runner.
   macos-check:
     name: macOS Check
-    runs-on: macos-latest
+    # Zig 0.15.2 cannot link its build runner with the Xcode 26.6 / macOS 26.5
+    # SDK that macos-latest selected in 2026-07. Keep the known-good Xcode 26.3
+    # / macOS 26.2 SDK explicit until Zig is upgraded and verified against it.
+    runs-on: macos-26
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     steps:
       - uses: actions/checkout@v4
         with:
@@ -101,6 +89,18 @@ jobs:
       # ghostty_vt_sys builds its native library with Zig even for cargo check.
       - name: Install Zig
         run: ./scripts/bootstrap-zig.sh
+
+      # Zig discovers Darwin SDKs through xcrun, which follows DEVELOPER_DIR.
+      # Keep this visible so runner-image/toolchain drift is diagnosable.
+      - name: Report Apple and Zig toolchains
+        run: |
+          echo "DEVELOPER_DIR=$DEVELOPER_DIR"
+          xcode-select --print-path
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-path
+          xcrun --sdk macosx --show-sdk-version
+          ./.context/zig/zig version
+          ./.context/zig/zig env
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.5
@@ -132,7 +132,10 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang lld
+          # Keep this aligned with .cargo/config.toml's gcc + mold toolchain.
+          sudo apt-get install -y gcc mold
+          gcc --version
+          mold --version
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -153,6 +156,15 @@ jobs:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo test -p cas --no-run
 
+      # EPIC cas-c351 / cas-9e02: run A2/A3/B3 panic-isolation tests
+      # under --release and --profile release-fast to catch any future
+      # profile change that silently re-introduces panic=abort or any
+      # release-mode codegen that breaks the tokio::spawn panic catcher.
+      - name: Panic-isolation tests (release profiles)
+        env:
+          ZIG: ${{ github.workspace }}/.context/zig/zig
+        run: make -C cas-cli test-release-panic
+
       - name: Benchmark build
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
@@ -161,6 +173,17 @@ jobs:
 
       - name: Check build regression
         run: ./scripts/check-build-regression.sh
+
+      - name: Build timings
+        env:
+          ZIG: ${{ github.workspace }}/.context/zig/zig
+        run: cargo build -p cas --timings
+
+      - name: Upload timings
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-timings
+          path: target/cargo-timings
 
       - name: Upload benchmark
         uses: actions/upload-artifact@v4

@@ -62,30 +62,10 @@ jobs:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo test -p cas
 
-      # EPIC cas-c351 / cas-9e02: run A2/A3/B3 panic-isolation tests
-      # under --release and --profile release-fast to catch any future
-      # profile change that silently re-introduces panic=abort or any
-      # release-mode codegen that breaks the tokio::spawn panic catcher.
-      - name: Panic-isolation tests (release profiles)
-        env:
-          ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: make -C cas-cli test-release-panic
-
       - name: Clippy (report warnings)
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo clippy -p cas --all-targets
-
-      - name: Build timings
-        env:
-          ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: cargo build -p cas --timings
-
-      - name: Upload timings
-        uses: actions/upload-artifact@v4
-        with:
-          name: cargo-timings
-          path: target/cargo-timings
 
   # Keep this compile-only: --all-targets catches Darwin-only type errors in
   # production, test, example, and benchmark code without duplicating the full
@@ -176,6 +156,15 @@ jobs:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo test -p cas --no-run
 
+      # EPIC cas-c351 / cas-9e02: run A2/A3/B3 panic-isolation tests
+      # under --release and --profile release-fast to catch any future
+      # profile change that silently re-introduces panic=abort or any
+      # release-mode codegen that breaks the tokio::spawn panic catcher.
+      - name: Panic-isolation tests (release profiles)
+        env:
+          ZIG: ${{ github.workspace }}/.context/zig/zig
+        run: make -C cas-cli test-release-panic
+
       - name: Benchmark build
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
@@ -184,6 +173,17 @@ jobs:
 
       - name: Check build regression
         run: ./scripts/check-build-regression.sh
+
+      - name: Build timings
+        env:
+          ZIG: ${{ github.workspace }}/.context/zig/zig
+        run: cargo build -p cas --timings
+
+      - name: Upload timings
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-timings
+          path: target/cargo-timings
 
       - name: Upload benchmark
         uses: actions/upload-artifact@v4

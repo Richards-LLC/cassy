@@ -492,6 +492,69 @@ mod tests {
         );
     }
 
+    /// GH #82 steps 4-5: `update` refused because a proof boundary was ACTIVE
+    /// while `request_changes` refused because there was NO exact boundary.
+    /// The lock may keep freezing scope, but the negative-verdict path must be
+    /// exempt from it, so at least one recovery path always works.
+    #[test]
+    fn proof_scope_lock_and_request_changes_cannot_both_refuse_a_parked_task() {
+        for with_delivery in [false, true] {
+            let root = TempDir::new().unwrap();
+            let task_store = cas_store::SqliteTaskStore::open(root.path()).unwrap();
+            cas_store::TaskStore::init(&task_store).unwrap();
+            let mut task = Task::new("cas-deadlock".into(), "parked delivery".into());
+            task.status = TaskStatus::AwaitingMerge;
+            task.assignee = Some("worker".into());
+            task.deliverables.parked_branch = Some("factory/worker".into());
+            cas_store::TaskStore::add(&task_store, &task).unwrap();
+
+            if with_delivery {
+                // A delivery exists but its dispatch never resolved: the exact
+                // boundary lookup used to report "no boundary" here.
+                let receipt = cas_store::build_worker_completion_receipt(
+                    &receipt_input(&task.id),
+                    "worker",
+                    chrono::Utc::now(),
+                );
+                cas_store::create_worker_delivery_with_dispatch(
+                    root.path(),
+                    &receipt,
+                    WorkerDeliveryState::AwaitingMerge,
+                    "worker-session",
+                    "supervisor-session",
+                    chrono::Utc::now() + chrono::Duration::minutes(10),
+                )
+                .unwrap();
+            }
+
+            let mut update = empty_update();
+            update.execution_note = Some(String::new());
+            let locked = guard_task_proof_scope(
+                root.path(),
+                &task,
+                ProofScopeOperation::TaskUpdate {
+                    request: &update,
+                    target_repo_supplied: false,
+                    target_branch_supplied: false,
+                },
+            )
+            .expect_err("a parked delivery still freezes review-relevant update fields");
+            assert!(locked.contains("DELIVERY PROOF SCOPE LOCKED"));
+
+            cas_store::request_changes_for_parked_delivery(
+                root.path(),
+                &task.id,
+                "supervisor-session",
+                "Declining this delivery; the scope is not what was asked for.",
+            )
+            .expect("the negative-verdict path must be exempt from the proof scope lock");
+
+            let reopened = cas_store::TaskStore::get(&task_store, &task.id).unwrap();
+            assert_eq!(reopened.status, TaskStatus::Open);
+            assert_eq!(reopened.assignee.as_deref(), Some("worker"));
+        }
+    }
+
     #[test]
     fn task_only_exact_dispatch_also_freezes_review_scope() {
         let root = TempDir::new().unwrap();

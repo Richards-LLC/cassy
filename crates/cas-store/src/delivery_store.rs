@@ -746,15 +746,18 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        crate::request_changes_for_worker_delivery_exact(
+        let outcome = crate::request_changes_for_parked_delivery(
             root.path(),
             &task.id,
-            &dispatch.id,
-            &delivery.id,
             "supervisor-session",
             "Keep the parser refactor, but revert the public output change before re-delivery.",
         )
         .unwrap();
+        assert_eq!(outcome.boundary, crate::RequestChangesBoundary::Exact);
+        assert_eq!(
+            outcome.delivery_transaction_id.as_deref(),
+            Some(delivery.id.as_str())
+        );
 
         let reopened = task_store.get(&task.id).unwrap();
         assert_eq!(reopened.status, TaskStatus::Open);
@@ -803,8 +806,11 @@ mod tests {
         .expect("a new corrective commit opens a fresh delivery cycle");
     }
 
+    /// GH #55 case 1: post-merge review returns AMENDMENT REQUIRED while the
+    /// task is still parked AwaitingMerge. `request_changes` must reopen it
+    /// (assignee preserved) instead of deadlocking the task.
     #[test]
-    fn changes_request_rejects_already_merged_delivery_without_mutating_task() {
+    fn changes_request_reopens_parked_task_after_the_delivery_already_merged() {
         let root = TempDir::new().unwrap();
         let task_store = SqliteTaskStore::open(root.path()).unwrap();
         task_store.init().unwrap();
@@ -847,21 +853,153 @@ mod tests {
         )
         .unwrap();
 
-        let error = crate::request_changes_for_worker_delivery_exact(
+        let outcome = crate::request_changes_for_parked_delivery(
             root.path(),
             &task.id,
-            &dispatch.id,
-            &delivery.id,
             "supervisor-session",
-            "This verdict is too late; use the amendment-after-merge path.",
+            "Amendment required: the merged output drops the trailing summary row.",
         )
-        .expect_err("request_changes is only for work that has not merged");
-        assert!(error.to_string().contains("awaiting_merge"));
-        let unchanged = task_store.get(&task.id).unwrap();
-        assert_eq!(unchanged.status, TaskStatus::AwaitingMerge);
+        .expect("a post-merge amendment verdict must have a sanctioned exit");
+        assert_eq!(outcome.boundary, crate::RequestChangesBoundary::Merged);
+
+        let reopened = task_store.get(&task.id).unwrap();
+        assert_eq!(reopened.status, TaskStatus::Open);
+        assert_eq!(reopened.assignee.as_deref(), Some("worker"));
+        assert!(reopened.deliverables.factory_branch_anchor.is_none());
+        assert!(reopened.notes.contains("Decision: changes requested"));
+        assert!(reopened.notes.contains("already merged"));
+        assert!(reopened.notes.contains("trailing summary row"));
+
+        // The merge itself is a fact and stays recorded; only the proof that
+        // authorized close is invalidated so re-close needs a fresh cycle.
+        let (_, delivery) = get_worker_delivery_by_receipt(root.path(), &delivery.receipt_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(delivery.state, WorkerDeliveryState::Merged);
         assert_eq!(
-            unchanged.deliverables.factory_branch_anchor,
-            task.deliverables.factory_branch_anchor
+            crate::get_verification_dispatch(root.path(), &dispatch.id)
+                .unwrap()
+                .state,
+            VerificationDispatchState::Invalidated
+        );
+    }
+
+    /// GH #55 recurrence: the supervisor declines the merge on a task that
+    /// never produced an exact delivery boundary (legacy close path). The only
+    /// exit used to be `reset force=true`, which clears the assignee.
+    #[test]
+    fn changes_request_reopens_parked_task_with_no_delivery_boundary_at_all() {
+        let root = TempDir::new().unwrap();
+        let task_store = SqliteTaskStore::open(root.path()).unwrap();
+        task_store.init().unwrap();
+        let mut task = Task::new("cas-legacy".into(), "declined legacy work".into());
+        task.status = TaskStatus::AwaitingMerge;
+        task.assignee = Some("worker".into());
+        task.deliverables.factory_branch_anchor = Some("a".repeat(40));
+        task.deliverables.parked_branch = Some("factory/legacy-worker".into());
+        task.pending_worktree_merge = true;
+        task_store.add(&task).unwrap();
+
+        let outcome = crate::request_changes_for_parked_delivery(
+            root.path(),
+            &task.id,
+            "supervisor-session",
+            "The silhouettes are not cats; redraw before re-delivery.",
+        )
+        .expect("a parked task without an exact boundary still needs a sanctioned exit");
+        assert_eq!(outcome.boundary, crate::RequestChangesBoundary::Legacy);
+        assert!(outcome.delivery_transaction_id.is_none());
+
+        let reopened = task_store.get(&task.id).unwrap();
+        assert_eq!(reopened.status, TaskStatus::Open);
+        assert_eq!(reopened.assignee.as_deref(), Some("worker"));
+        assert!(reopened.deliverables.factory_branch_anchor.is_none());
+        assert!(reopened.deliverables.parked_branch.is_none());
+        assert!(!reopened.pending_worktree_merge);
+        assert!(reopened.notes.contains("Decision: changes requested"));
+        assert!(
+            reopened
+                .notes
+                .contains("prior commits remain on factory/legacy-worker")
+        );
+    }
+
+    /// GH #82 steps 4-5: the update path reported an ACTIVE proof boundary
+    /// while `request_changes` reported none. A delivery that exists but whose
+    /// dispatch is still unresolved/unbound must not be a recovery deadlock.
+    #[test]
+    fn changes_request_reopens_parked_task_whose_dispatch_is_unresolved() {
+        let root = TempDir::new().unwrap();
+        let task_store = SqliteTaskStore::open(root.path()).unwrap();
+        task_store.init().unwrap();
+        let mut task = Task::new("cas-delivery".into(), "unbound boundary work".into());
+        task.status = TaskStatus::AwaitingMerge;
+        task.assignee = Some("worker".into());
+        task.deliverables.parked_branch = Some("factory/worker".into());
+        task_store.add(&task).unwrap();
+
+        let receipt = build_worker_completion_receipt(&input(), "worker", Utc::now());
+        // Dispatch stays Pending: no verdict was ever resolved onto it.
+        let (delivery, dispatch) = create_worker_delivery_with_dispatch(
+            root.path(),
+            &receipt,
+            WorkerDeliveryState::AwaitingMerge,
+            "worker-session",
+            "supervisor-session",
+            Utc::now() + chrono::Duration::minutes(10),
+        )
+        .unwrap();
+
+        let outcome = crate::request_changes_for_parked_delivery(
+            root.path(),
+            &task.id,
+            "supervisor-session",
+            "Declining the merge; the diff touches unrelated files.",
+        )
+        .expect("an unbound/unresolved proof boundary must not deadlock recovery");
+        assert_eq!(
+            outcome.boundary,
+            crate::RequestChangesBoundary::UnboundDelivery
+        );
+
+        let reopened = task_store.get(&task.id).unwrap();
+        assert_eq!(reopened.status, TaskStatus::Open);
+        assert_eq!(reopened.assignee.as_deref(), Some("worker"));
+        assert!(reopened.notes.contains("Decision: changes requested"));
+
+        let (_, delivery) = get_worker_delivery_by_receipt(root.path(), &delivery.receipt_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(delivery.state, WorkerDeliveryState::ChangesRequested);
+        assert_eq!(
+            crate::get_verification_dispatch(root.path(), &dispatch.id)
+                .unwrap()
+                .state,
+            VerificationDispatchState::Invalidated
+        );
+    }
+
+    #[test]
+    fn changes_request_rejects_a_task_that_is_not_parked_awaiting_merge() {
+        let root = TempDir::new().unwrap();
+        let task_store = SqliteTaskStore::open(root.path()).unwrap();
+        task_store.init().unwrap();
+        let mut task = Task::new("cas-open".into(), "still in progress".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some("worker".into());
+        task_store.add(&task).unwrap();
+
+        let error = crate::request_changes_for_parked_delivery(
+            root.path(),
+            &task.id,
+            "supervisor-session",
+            "nothing to decline yet",
+        )
+        .expect_err("request_changes only declines a parked delivery");
+        assert!(error.to_string().contains("awaiting_merge"));
+        assert_eq!(
+            task_store.get(&task.id).unwrap().status,
+            TaskStatus::InProgress
         );
     }
 

@@ -126,7 +126,7 @@ pub(super) fn register_llm(registry: &mut ConfigRegistry) {
         key: "llm.worker.model",
         section: "llm",
         name: "Worker Model",
-        description: "Override model for worker agents. Fallback chain: [llm.worker.model] → [llm.model] → stock worker default (gpt-5.6-sol).",
+        description: "Override model for worker agents. Fallback chain: [llm.worker.model] → [llm.model] → stock worker default (gpt-5.6-terra).",
         value_type: ConfigType::String,
         default: "(inherit)",
         constraint: Constraint::None,

@@ -123,7 +123,7 @@ pub(crate) mod test_support {
     }
 
     #[test]
-    fn home_path_env_mutation_is_centralized_in_test_env_guard() {
+    fn lib_test_process_env_mutation_is_isolated() {
         fn visit(dir: &Path, hits: &mut Vec<String>) {
             for entry in std::fs::read_dir(dir).expect("read source directory") {
                 let path = entry.expect("source entry").path();
@@ -138,7 +138,9 @@ pub(crate) mod test_support {
                                 line.contains(&format!("std::env::set_var(\"{key}\""))
                                     || line.contains(&format!("std::env::remove_var(\"{key}\""))
                             });
-                        if mutates_sensitive_var {
+                        let mutates_path_through_guard = line.contains(".set(\"PATH\"")
+                            || line.contains(".remove(\"PATH\"");
+                        if mutates_sensitive_var || mutates_path_through_guard {
                             hits.push(format!("{}:{}", path.display(), line_index + 1));
                         }
                     }
@@ -150,7 +152,8 @@ pub(crate) mod test_support {
         visit(Path::new(env!("CARGO_MANIFEST_DIR")).join("src").as_path(), &mut hits);
         assert!(
             hits.is_empty(),
-            "HOME/XDG_CONFIG_HOME/PATH mutations must go through TestEnvGuard: {hits:?}"
+            "HOME/XDG_CONFIG_HOME mutations must use TestEnvGuard, and lib tests must not mutate \
+             process-global PATH; use per-Command environment instead: {hits:?}"
         );
     }
 }

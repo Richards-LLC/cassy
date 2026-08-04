@@ -22,6 +22,13 @@ pub(crate) struct TrackedProcessGroup {
     pub pgid: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid_starttime: Option<u64>,
+    /// cas-99f5 (GH #86): the worker's cgroup v2 scope, when the host provides
+    /// a writable delegated tree. This is the only containment tier that
+    /// reaches descendants which left the process group via `setsid` (Node's
+    /// `detached: true`). Absent on hosts without cgroup v2 delegation and on
+    /// records written before this field existed — both degrade to PGID-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cgroup: Option<PathBuf>,
     pub recorded_at: DateTime<Utc>,
 }
 
@@ -57,17 +64,75 @@ fn record_path(cas_root: &Path, pgid: u32) -> PathBuf {
 }
 
 /// Persist ownership immediately after a worker pane is spawned.
+/// Persist ownership, recording a cgroup scope the caller has already placed
+/// the worker into.
+///
+/// The scope is passed in rather than created here on purpose: writing a pid
+/// into `cgroup.procs` moves a live process, which is far too consequential to
+/// hide inside a registry write. [`contain_worker`] is the one place that
+/// performs it.
 pub(crate) fn track(
     cas_root: &Path,
     worker_name: &str,
     factory_session: &str,
     pgid: u32,
 ) -> io::Result<TrackedProcessGroup> {
+    track_contained(cas_root, worker_name, factory_session, pgid, None)
+}
+
+/// cas-99f5 (GH #86): put a freshly spawned worker in its own cgroup.
+///
+/// Called immediately after spawn, long before the worker CLI can launch a dev
+/// server: cgroup membership is inherited at fork, so everything the worker
+/// starts from here on is contained, including descendants that later call
+/// `setsid` and leave the process group.
+///
+/// Returns `None` when the host has no writable cgroup v2 delegation, which is
+/// a normal, logged outcome — process-group containment remains the floor.
+pub(crate) fn contain_worker(
+    worker_name: &str,
+    factory_session: &str,
+    pgid: u32,
+) -> Option<PathBuf> {
+    let dir = super::cgroup::create_scope(factory_session, worker_name)?;
+    match super::cgroup::add_pid(&dir, pgid) {
+        Ok(()) => {
+            tracing::info!(
+                worker = %worker_name,
+                pgid,
+                cgroup = %dir.display(),
+                "cas-99f5: worker contained in cgroup scope"
+            );
+            Some(dir)
+        }
+        Err(error) => {
+            tracing::warn!(
+                worker = %worker_name,
+                pgid,
+                cgroup = %dir.display(),
+                error = %error,
+                "cas-99f5: could not join worker cgroup scope; \
+                 falling back to process-group containment"
+            );
+            super::cgroup::remove_scope(&dir);
+            None
+        }
+    }
+}
+
+pub(crate) fn track_contained(
+    cas_root: &Path,
+    worker_name: &str,
+    factory_session: &str,
+    pgid: u32,
+    cgroup: Option<PathBuf>,
+) -> io::Result<TrackedProcessGroup> {
     let record = TrackedProcessGroup {
         worker_name: worker_name.to_string(),
         factory_session: factory_session.to_string(),
         pgid,
         pid_starttime: crate::mcp::daemon::read_pid_starttime(pgid),
+        cgroup,
         recorded_at: Utc::now(),
     };
     let dir = registry_dir(cas_root);
@@ -265,11 +330,54 @@ pub(crate) fn age(record: &TrackedProcessGroup) -> Duration {
         .unwrap_or_default()
 }
 
+/// cas-99f5 (GH #86): kill and remove a worker's cgroup scope, logging every
+/// process it reaped (pid, comm, listening ports).
+///
+/// Safe to call on every teardown path and on records that predate cgroup
+/// containment — a record without a scope, or a scope already gone, is a no-op.
+pub(crate) fn reap_cgroup_scope(record: &TrackedProcessGroup) {
+    let Some(ref dir) = record.cgroup else {
+        return;
+    };
+    match super::cgroup::kill_scope(dir) {
+        Ok(reaped) => {
+            if !reaped.is_empty() {
+                tracing::info!(
+                    worker = %record.worker_name,
+                    factory_session = %record.factory_session,
+                    pgid = record.pgid,
+                    cgroup = %dir.display(),
+                    reaped = %super::cgroup::describe_reaped(&reaped),
+                    "cas-99f5: worker teardown reaped contained processes"
+                );
+            }
+            super::cgroup::remove_scope(dir);
+        }
+        Err(error) => tracing::warn!(
+            worker = %record.worker_name,
+            cgroup = %dir.display(),
+            error = %error,
+            "cas-99f5: worker cgroup teardown failed; \
+             process-group containment still applies"
+        ),
+    }
+}
+
 /// Reclaim one fingerprint-matched orphan process group.
 pub(crate) async fn reap(
     cas_root: &Path,
     record: &TrackedProcessGroup,
 ) -> io::Result<ReapOutcome> {
+    // cas-99f5 (GH #86): kill the cgroup FIRST, before any process-group
+    // identity check can short-circuit.
+    //
+    // Ordering is load-bearing. A worker whose CLI has already exited reads as
+    // `Gone` below and returns early — but that is precisely the state in which
+    // an escaped `npm run dev` is still holding port 5173. The cgroup contains
+    // only processes this factory put there, so killing it is safe even when
+    // the PGID is unverifiable or has been recycled onto an unrelated process.
+    reap_cgroup_scope(record);
+
     match group_identity(record) {
         GroupIdentity::Original => {}
         GroupIdentity::Gone => {
@@ -340,6 +448,120 @@ mod tests {
         untrack(temp.path(), record.pgid).unwrap();
         untrack(temp.path(), record.pgid).unwrap();
         assert!(list(temp.path()).unwrap().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // cas-99f5 (GH #86): containment must survive a descendant that leaves the
+    // process group, on every teardown path.
+    // -----------------------------------------------------------------------
+
+    /// Records written before cgroup containment existed must still load and
+    /// tear down — the field is optional, and its absence means PGID-only.
+    #[test]
+    fn records_without_a_cgroup_still_load_and_reap() {
+        let temp = tempfile::tempdir().unwrap();
+        let legacy = r#"{
+            "worker_name": "legacy-worker",
+            "factory_session": "legacy-session",
+            "pgid": 4242,
+            "recorded_at": "2026-08-04T21:19:44Z"
+        }"#;
+        let record: TrackedProcessGroup = serde_json::from_str(legacy).unwrap();
+
+        assert_eq!(record.cgroup, None);
+        assert_eq!(record.worker_name, "legacy-worker");
+        // No scope to kill: a no-op, never an error.
+        reap_cgroup_scope(&record);
+        let _ = temp;
+    }
+
+    /// The crash path's exact shape: the worker CLI is already dead, so the
+    /// process group reads as `Gone` — but a dev server it detached is still
+    /// alive and holding a port. Teardown must reap it anyway.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn reap_kills_an_escaped_descendant_after_the_worker_cli_is_gone() {
+        use std::os::unix::process::CommandExt;
+        use std::process::Command;
+
+        let temp = tempfile::tempdir().unwrap();
+        let Some(record_scope) = super::super::cgroup::create_scope("reap-test", "escapee-host")
+        else {
+            eprintln!(
+                "skipping: no writable delegated cgroup v2 tree on this host — \
+                 PGID containment is the floor here"
+            );
+            return;
+        };
+
+        let pid_file = temp.path().join("escapee.pid");
+        let go_file = temp.path().join("go");
+        let script = format!(
+            "while [ ! -f '{}' ]; do sleep 0.02; done; \
+             setsid sleep 300 & echo $! > '{}'; sleep 0.3",
+            go_file.display(),
+            pid_file.display()
+        );
+        let mut command = Command::new("sh");
+        command.args(["-c", &script]);
+        // SAFETY: setsid between fork and exec, as the factory spawns a worker.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut leader = command.spawn().unwrap();
+        let pgid = leader.id();
+        super::super::cgroup::add_pid(&record_scope, pgid).unwrap();
+        fs::write(&go_file, b"go").unwrap();
+
+        let record = track_contained(
+            temp.path(),
+            "escapee-host",
+            "reap-test",
+            pgid,
+            Some(record_scope.clone()),
+        )
+        .unwrap();
+
+        // The worker CLI exits, leaving the detached descendant behind.
+        assert!(leader.wait().unwrap().success());
+        let escapee: u32 = fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
+        assert!(
+            crate::mcp::daemon::pid_alive(escapee),
+            "precondition: the detached descendant outlives the worker CLI"
+        );
+        // SAFETY: read-only process-table query.
+        let escapee_pgid = unsafe { libc::getpgid(escapee as libc::pid_t) };
+        assert_ne!(
+            escapee_pgid, pgid as libc::pid_t,
+            "precondition: the descendant escaped the worker's process group"
+        );
+
+        let outcome = reap(temp.path(), &record).await.unwrap();
+        assert!(
+            matches!(outcome, ReapOutcome::Reaped | ReapOutcome::AlreadyGone),
+            "unexpected teardown outcome: {outcome:?}"
+        );
+
+        let mut died = false;
+        for _ in 0..40 {
+            if !crate::mcp::daemon::pid_alive(escapee)
+                || process_state_and_group(escapee).is_some_and(|(state, _)| state == 'Z')
+            {
+                died = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        super::super::cgroup::remove_scope(&record_scope);
+        assert!(
+            died,
+            "GH #86: an escaped dev server must not outlive worker teardown"
+        );
     }
 
     #[cfg(target_os = "linux")]

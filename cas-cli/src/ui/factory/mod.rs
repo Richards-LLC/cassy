@@ -64,6 +64,7 @@ pub(crate) use director::effective_stall_threshold_secs;
 mod input;
 mod layout;
 mod notification;
+pub(crate) mod cgroup;
 pub(crate) mod process_groups;
 pub(crate) mod phoenix;
 mod protocol;

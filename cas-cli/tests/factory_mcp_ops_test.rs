@@ -474,6 +474,7 @@ fn factory_req(action: &str) -> FactoryRequest {
         cli: None,
         model: None,
         effort: None,
+        config_dir: None,
     }
 }
 
@@ -513,6 +514,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         cli: None,
         model: None,
         effort: None,
+        config_dir: None,
         remind_message: None,
         remind_delay_secs: None,
         remind_event: None,
@@ -2811,6 +2813,7 @@ fn coord_msg(
         cli: None,
         model: None,
         effort: None,
+        config_dir: None,
         remind_message: None,
         remind_delay_secs: None,
         remind_event: None,

@@ -343,12 +343,16 @@ fn factory_pane_configs_uses_per_worker_specs() {
                 cli: crate::harness::SupervisorCli::Codex,
                 model: None,
                 effort: None,
+                config_dir: None,
+                requester_config_dir: None,
             },
             WorkerSpec {
                 name: Some("worker-2".to_string()),
                 cli: crate::harness::SupervisorCli::Claude,
                 model: None,
                 effort: None,
+                config_dir: None,
+                requester_config_dir: None,
             },
         ],
         ..MuxConfig::default()
@@ -424,6 +428,8 @@ fn add_worker_uses_explicit_spec() {
         cli: crate::harness::SupervisorCli::Codex,
         model: None,
         effort: Some(Effort::High),
+        config_dir: None,
+        requester_config_dir: None,
     };
 
     let pty_config = mux.build_add_worker_config(
@@ -472,6 +478,8 @@ fn effective_worker_spec_uses_worker_specs_map() {
         cli: crate::harness::SupervisorCli::Codex,
         model: None,
         effort: None,
+        config_dir: None,
+        requester_config_dir: None,
     };
     mux.set_worker_spec("worker-map", codex_spec);
 
@@ -516,6 +524,8 @@ fn add_worker_persists_explicit_spec_so_effective_resolves_codex() {
         cli: crate::harness::SupervisorCli::Claude,
         model: None,
         effort: None,
+        config_dir: None,
+        requester_config_dir: None,
     });
 
     // Pre-condition: with nothing registered, an unknown worker resolves to the
@@ -596,6 +606,8 @@ fn add_worker_effort_propagates_to_pty_args() {
         cli: crate::harness::SupervisorCli::Claude,
         model: None,
         effort: Some(Effort::Low),
+        config_dir: None,
+        requester_config_dir: None,
     });
 
     let pty = mux.build_add_worker_config(
@@ -620,6 +632,124 @@ fn add_worker_effort_propagates_to_pty_args() {
         effort_val, "low",
         "Effort::Low must reach PTY args as \"low\" via the default spec path"
     );
+}
+
+fn spawned_env<'a>(config: &'a crate::pty::PtyConfig, key: &str) -> Option<&'a str> {
+    config
+        .env
+        .iter()
+        .rev()
+        .find_map(|(candidate, value)| (candidate == key).then_some(value.as_str()))
+}
+
+#[test]
+fn explicit_config_dir_beats_requester_config_dir() {
+    let mux = Mux::new(24, 80);
+    let config = mux.build_add_worker_config(
+        "claude-explicit",
+        PathBuf::from("/tmp/test"),
+        None,
+        "supervisor",
+        None,
+        Some(WorkerSpec {
+            name: None,
+            cli: crate::harness::SupervisorCli::Claude,
+            model: None,
+            effort: None,
+            config_dir: Some("~/.claude-explicit".to_string()),
+            requester_config_dir: Some("~/.claude-supervisor".to_string()),
+        }),
+    );
+
+    assert!(
+        spawned_env(&config, "CLAUDE_CONFIG_DIR")
+            .is_some_and(|dir| dir.ends_with("/.claude-explicit")),
+        "explicit config dir must be tilde-expanded: {:?}",
+        spawned_env(&config, "CLAUDE_CONFIG_DIR")
+    );
+    assert_eq!(
+        spawned_env(&config, "CAS_FACTORY_CLAUDE_CONFIG_DIR_SOURCE"),
+        Some("explicit")
+    );
+}
+
+#[test]
+fn requester_config_dir_applies_when_explicit_param_is_omitted() {
+    let mux = Mux::new(24, 80);
+    let config = mux.build_add_worker_config(
+        "claude-supervisor",
+        PathBuf::from("/tmp/test"),
+        None,
+        "supervisor",
+        None,
+        Some(WorkerSpec {
+            name: None,
+            cli: crate::harness::SupervisorCli::Claude,
+            model: None,
+            effort: None,
+            config_dir: None,
+            requester_config_dir: Some("~/.claude-supervisor".to_string()),
+        }),
+    );
+
+    assert!(
+        spawned_env(&config, "CLAUDE_CONFIG_DIR")
+            .is_some_and(|dir| dir.ends_with("/.claude-supervisor")),
+        "requester config dir must be tilde-expanded: {:?}",
+        spawned_env(&config, "CLAUDE_CONFIG_DIR")
+    );
+    assert_eq!(
+        spawned_env(&config, "CAS_FACTORY_CLAUDE_CONFIG_DIR_SOURCE"),
+        Some("supervisor")
+    );
+}
+
+#[test]
+fn omitted_config_dirs_leave_claude_environment_untouched() {
+    let mux = Mux::new(24, 80);
+    let config = mux.build_add_worker_config(
+        "claude-inherit",
+        PathBuf::from("/tmp/test"),
+        None,
+        "supervisor",
+        None,
+        Some(WorkerSpec {
+            name: None,
+            cli: crate::harness::SupervisorCli::Claude,
+            model: None,
+            effort: None,
+            config_dir: None,
+            requester_config_dir: None,
+        }),
+    );
+
+    assert_eq!(spawned_env(&config, "CLAUDE_CONFIG_DIR"), None);
+    assert_eq!(
+        spawned_env(&config, "CAS_FACTORY_CLAUDE_CONFIG_DIR_SOURCE"),
+        None
+    );
+}
+
+#[test]
+fn codex_ignores_resolved_claude_config_dir() {
+    let mux = Mux::new(24, 80);
+    let config = mux.build_add_worker_config(
+        "codex-no-claude-dir",
+        PathBuf::from("/tmp/test"),
+        None,
+        "supervisor",
+        None,
+        Some(WorkerSpec {
+            name: None,
+            cli: crate::harness::SupervisorCli::Codex,
+            model: None,
+            effort: None,
+            config_dir: Some("~/.claude-explicit".to_string()),
+            requester_config_dir: Some("~/.claude-supervisor".to_string()),
+        }),
+    );
+
+    assert_eq!(spawned_env(&config, "CLAUDE_CONFIG_DIR"), None);
 }
 
 // ── end cas-5175 ──────────────────────────────────────────────────────────────
@@ -1132,7 +1262,8 @@ fn ticking_pane(name: &str, harness: SupervisorCli) -> Option<Pane> {
 /// single-line probe can't re-certify this path as working (the original
 /// cas-8d76 live verification used exactly that too-simple single-line
 /// probe, which is why this regression shipped unnoticed).
-const MULTILINE_REDIRECT: &str = "STOP. Abandon that and instead run:\n\n  echo redirected\n\nThen reply INTERRUPTED-OK.";
+const MULTILINE_REDIRECT: &str =
+    "STOP. Abandon that and instead run:\n\n  echo redirected\n\nThen reply INTERRUPTED-OK.";
 
 #[tokio::test]
 async fn interrupt_and_inject_waits_for_real_output_quiescence_on_codex() {

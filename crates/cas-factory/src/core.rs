@@ -144,6 +144,8 @@ impl FactoryCore {
             cli: config.worker_cli,
             model: config.worker_model.clone(),
             effort: default_effort,
+            config_dir: None,
+            requester_config_dir: None,
         });
         for spec in &config.resolved_worker_specs {
             if let Some(ref name) = spec.name {

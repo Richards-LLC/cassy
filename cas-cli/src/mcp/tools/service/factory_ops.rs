@@ -519,6 +519,7 @@ impl CasService {
         // matters). Mirrors exactly where `cli/factory/mod.rs` applies the
         // same fallback: after cascade resolution, not inside it.
         let mut codex_fallback_notice = String::new();
+        let mut config_dir_notice = String::new();
         if let Ok(mut spec) = serde_json::from_str::<cas_mux::WorkerSpec>(&spec_json_owned) {
             let strict_cli =
                 strict_cli_from_project_config(Some(&self.inner.cas_root.join("config.toml")));
@@ -537,13 +538,25 @@ impl CasService {
                 // The fallback rewrote `cli` (and possibly `model`) — the
                 // queued spec and the summary shown back to the caller must
                 // reflect what will ACTUALLY spawn, not the pre-fallback request.
-                spec_json_owned = serde_json::to_string(&spec).map_err(|e| {
-                    Self::error(
-                        ErrorCode::INTERNAL_ERROR,
-                        format!("failed to re-serialize worker spec after codex fallback: {e}"),
-                    )
-                })?;
             }
+            spec.config_dir = req.config_dir.clone();
+            let requester_config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
+            if (spec.config_dir.is_some() || requester_config_dir.is_some())
+                && spec.cli != cas_mux::SupervisorCli::Claude
+            {
+                let warning = format!(
+                    "config_dir is Claude-only; resolved {} worker will not receive CLAUDE_CONFIG_DIR",
+                    spec.cli.as_str()
+                );
+                tracing::warn!(target: "cas::factory", "{warning}");
+                config_dir_notice = format!("\nWarning: {warning}");
+            }
+            spec_json_owned = serde_json::to_string(&spec).map_err(|e| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("failed to serialize worker spec with config_dir: {e}"),
+                )
+            })?;
         }
 
         let spec_summary = spawn_spec_summary(&spec_json_owned);
@@ -551,14 +564,18 @@ impl CasService {
             spawn_spec_warning(req.model.is_some(), req.effort.is_some(), &spec_json_owned);
 
         let factory_session = current_factory_session();
+        // Capture the requesting supervisor's account now. The daemon may run
+        // under a different environment by the time it consumes this queue row.
+        let requester_config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
         let request_id = queue
-            .enqueue_spawn(
+            .enqueue_spawn_with_requester_config_dir(
                 count,
                 &worker_names,
                 isolate,
                 Some(spec_json_owned.as_str()),
                 factory_session.as_deref(),
                 req.task_id.as_deref(),
+                requester_config_dir.as_deref(),
             )
             .map_err(|e| {
                 Self::error(
@@ -589,11 +606,11 @@ impl CasService {
 
         let msg = if worker_names.is_empty() {
             format!(
-                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{task_id_note}"
+                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{task_id_note}"
             )
         } else {
             format!(
-                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{task_id_note}",
+                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{task_id_note}",
                 worker_names.join(", "),
                 request_id
             )

@@ -139,10 +139,19 @@ mod tests {
         for sql in super::MIGRATION.up {
             upgraded.execute(sql, []).unwrap();
         }
+        // Newer spawn-queue migrations must be applied on the upgraded-db
+        // path too: the fresh baseline already includes their columns.
+        for sql in crate::migration::migrations::m216_spawn_queue_add_requester_config_dir::MIGRATION.up {
+            upgraded.execute(sql, []).unwrap();
+        }
         let upgraded_cols = spawn_queue_columns(&upgraded);
         assert!(
             upgraded_cols.contains(&"task_id".to_string()),
             "post-migration schema (existing-DB path) must include task_id: {upgraded_cols:?}"
+        );
+        assert!(
+            upgraded_cols.contains(&"requester_config_dir".to_string()),
+            "post-migration schema (existing-DB path) must include requester_config_dir: {upgraded_cols:?}"
         );
 
         // Column ORDER legitimately differs — ALTER TABLE ADD COLUMN always

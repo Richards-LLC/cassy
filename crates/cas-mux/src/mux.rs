@@ -320,6 +320,8 @@ impl Mux {
                 cli,
                 model_opt.as_deref(),
                 effort_opt.as_deref(),
+                None,
+                None,
                 teams,
             );
             let mut pty_config = pty_config;
@@ -366,6 +368,8 @@ impl Mux {
             cli: config.worker_cli,
             model: config.worker_model.clone(),
             effort: default_effort,
+            config_dir: None,
+            requester_config_dir: None,
         });
         mux.supervisor_cli = config.supervisor_cli;
 
@@ -408,6 +412,8 @@ impl Mux {
                 cli,
                 model_opt.as_deref(),
                 effort_opt.as_deref(),
+                None,
+                None,
                 pane_rows,
                 pane_cols,
                 teams,
@@ -654,6 +660,14 @@ impl Mux {
     ) -> PtyConfig {
         let effective = self.effective_worker_spec(name, spec);
         let effort_str = effective.effort.map(|e| e.as_claude_arg().to_string());
+        let (config_dir, config_dir_source) = match (
+            effective.config_dir.as_deref(),
+            effective.requester_config_dir.as_deref(),
+        ) {
+            (Some(dir), _) => (Some(dir), Some("explicit")),
+            (None, Some(dir)) => (Some(dir), Some("supervisor")),
+            (None, None) => (None, None),
+        };
         let mut config = Pane::build_worker_config(
             name,
             cwd,
@@ -663,6 +677,8 @@ impl Mux {
             effective.cli,
             effective.model.as_deref(),
             effort_str.as_deref(),
+            config_dir,
+            config_dir_source,
             teams,
         );
         push_factory_session_env(&mut config, effective.cli, self.factory_session.as_deref());
@@ -702,6 +718,14 @@ impl Mux {
 
         let effective = self.effective_worker_spec(name, spec);
         let effort_str = effective.effort.map(|e| e.as_claude_arg().to_string());
+        let (config_dir, config_dir_source) = match (
+            effective.config_dir.as_deref(),
+            effective.requester_config_dir.as_deref(),
+        ) {
+            (Some(dir), _) => (Some(dir), Some("explicit")),
+            (None, Some(dir)) => (Some(dir), Some("supervisor")),
+            (None, None) => (None, None),
+        };
         let pane = Pane::worker(
             name,
             cwd,
@@ -711,6 +735,8 @@ impl Mux {
             effective.cli,
             effective.model.as_deref(),
             effort_str.as_deref(),
+            config_dir,
+            config_dir_source,
             self.rows,
             self.cols,
             teams,

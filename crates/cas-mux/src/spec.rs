@@ -95,6 +95,14 @@ pub struct WorkerSpec {
     pub model: Option<String>,
     /// Reasoning effort. `None` = use the backend's own default.
     pub effort: Option<Effort>,
+    /// Explicit Claude account directory for this spawn. `None` preserves
+    /// inherited `CLAUDE_CONFIG_DIR` behavior.
+    #[serde(default)]
+    pub config_dir: Option<String>,
+    /// Requesting supervisor's Claude account directory, captured when the
+    /// spawn request was enqueued. Explicit `config_dir` takes precedence.
+    #[serde(default)]
+    pub requester_config_dir: Option<String>,
 }
 
 impl WorkerSpec {
@@ -105,6 +113,8 @@ impl WorkerSpec {
             cli: SupervisorCli::Claude,
             model: None,
             effort: Some(Effort::High),
+            config_dir: None,
+            requester_config_dir: None,
         }
     }
 
@@ -129,6 +139,8 @@ impl WorkerSpec {
             cli: SupervisorCli::Codex,
             model: None,
             effort: None,
+            config_dir: None,
+            requester_config_dir: None,
         }
     }
 }
@@ -205,6 +217,8 @@ mod tests {
             cli: SupervisorCli::Grok,
             model: Some("grok-4.5".to_string()),
             effort: Some(Effort::Medium),
+            config_dir: None,
+            requester_config_dir: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(

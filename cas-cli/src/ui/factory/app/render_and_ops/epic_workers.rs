@@ -528,6 +528,8 @@ impl FactoryApp {
             cli: live_cli,
             model: worker_model,
             effort: worker_effort,
+            config_dir: None,
+            requester_config_dir: None,
         });
     }
 

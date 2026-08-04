@@ -115,9 +115,10 @@ pub use verification_store::{
     invalidate_verification_dispatch_for_new_cycle, issue_server_verifier_handoff,
     issue_server_verifier_handoff_with_secret, issue_verifier_capability,
     resolve_verification_dispatch_with_conn, save_verification_issues_with_conn,
-    reopen_closed_task_atomic, request_changes_for_worker_delivery_exact,
+    reopen_closed_task_atomic, request_changes_for_parked_delivery,
     timeout_verification_dispatch, update_system_verification,
-    ParentDependencyUpdate, TaskReopenLifecycleOutbox,
+    ParentDependencyUpdate, RequestChangesBoundary, RequestChangesOutcome,
+    TaskReopenLifecycleOutbox,
 };
 
 // Worktree store for git worktree tracking

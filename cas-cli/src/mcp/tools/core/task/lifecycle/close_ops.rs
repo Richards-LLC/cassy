@@ -3844,14 +3844,16 @@ impl CasCore {
         )))
     }
 
-    /// Record a supervisor's negative review before the worker delivery merges.
+    /// Record a supervisor's negative review of a parked AwaitingMerge task.
     ///
     /// This is the one sanctioned exception to the delivery-proof scope lock:
-    /// a negative verdict invalidates the exact proof it rejects, reopens the
-    /// task without changing its assignee, and clears the parked anchor. It is
-    /// intentionally distinct from `reopen`, which handles closed/blocked and
-    /// amendment-after-merge work, and from `reset`, which remains orphan
-    /// recovery and clears ownership.
+    /// a negative verdict invalidates the proof it rejects, reopens the task
+    /// without changing its assignee, and clears the parked anchor. It applies
+    /// to every parked shape — declined-before-merge, amendment-after-merge
+    /// (GH #55), and deliveries whose proof boundary is unbound or absent
+    /// (GH #82) — so a failed review always has an exit. It stays distinct
+    /// from `reopen`, which handles closed/blocked work, and from `reset`,
+    /// which remains orphan recovery and clears ownership.
     pub async fn cas_task_request_changes(
         &self,
         Parameters(req): Parameters<TaskRequestChangesRequest>,
@@ -3876,43 +3878,11 @@ impl CasCore {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
                 format!(
-                    "task request_changes rejected: {} is {} rather than awaiting_merge. This action only declines work before merge; use reopen/fresh-scope recovery for amendment after merge.",
+                    "task request_changes rejected: {} is {} rather than awaiting_merge. This action declines a parked delivery; a task that is not parked is already actionable.",
                     task.id, task.status
                 ),
             ));
         }
-        let (_, delivery) = cas_store::get_latest_worker_delivery(&self.cas_root, &task.id)
-            .map_err(|error| {
-                Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("Failed to read worker delivery: {error}"),
-                )
-            })?
-            .ok_or_else(|| {
-                Self::error(
-                    ErrorCode::INVALID_PARAMS,
-                    format!(
-                        "task request_changes rejected: {} has no exact worker delivery boundary",
-                        task.id
-                    ),
-                )
-            })?;
-        let dispatch = cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id)
-            .map_err(|error| {
-                Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("Failed to read delivery verification: {error}"),
-                )
-            })?
-            .ok_or_else(|| {
-                Self::error(
-                    ErrorCode::INVALID_PARAMS,
-                    format!(
-                        "task request_changes rejected: {} has no exact verification dispatch",
-                        task.id
-                    ),
-                )
-            })?;
         let supervisor_id = self.get_agent_id().map_err(|error| {
             Self::error(
                 ErrorCode::INVALID_PARAMS,
@@ -3920,11 +3890,13 @@ impl CasCore {
             )
         })?;
 
-        cas_store::request_changes_for_worker_delivery_exact(
+        // Deliberately no delivery/dispatch precondition: GH #55 and #82 both
+        // deadlocked because the recovery action refused parked tasks whose
+        // proof boundary was merged, unbound, or legacy — exactly the states a
+        // failed review produces. Boundary shape is reported, never gating.
+        let outcome = cas_store::request_changes_for_parked_delivery(
             &self.cas_root,
             &task.id,
-            &dispatch.id,
-            &delivery.id,
             &supervisor_id,
             &req.reason,
         )
@@ -3936,10 +3908,11 @@ impl CasCore {
         })?;
 
         Ok(Self::success(format!(
-            "Changes requested for task: {} - {}\n\nThe task is Open with assignee {} preserved. Prior commits remain on the worker branch, but the rejected delivery anchor and proof were invalidated. Tell the assigned worker to start the task and add corrective commits (including an explicit revert commit if your reason requests one) before re-delivery.\n\nDecision: {}",
+            "Changes requested for task: {} - {}\n\nThe task is Open with assignee {} preserved. Branch handling: {} The declined delivery anchor and proof were invalidated, so re-close requires a fresh cycle.\n\nDecision: {}",
             task.id,
             task.title,
             task.assignee.as_deref().unwrap_or("unassigned"),
+            outcome.branch_handling,
             req.reason.trim(),
         )))
     }

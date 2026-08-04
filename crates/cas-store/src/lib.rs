@@ -165,7 +165,8 @@ pub use retrieval_store::{
 
 // Spawn queue store for worker lifecycle commands
 pub use spawn_queue_store::{
-    SPAWN_QUEUE_SCHEMA, SpawnAction, SpawnQueueStore, SpawnRequest, SqliteSpawnQueueStore,
+    SPAWN_QUEUE_SCHEMA, SpawnAction, SpawnLifecycle, SpawnLifecycleState, SpawnQueueStore,
+    SpawnRequest, SqliteSpawnQueueStore,
 };
 
 // Prompt store for tracking user prompts (code attribution)

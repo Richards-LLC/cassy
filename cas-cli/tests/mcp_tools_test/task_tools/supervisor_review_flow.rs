@@ -775,3 +775,247 @@ async fn test_psr_transition_releases_worker_lease() {
 fn task_req(value: serde_json::Value) -> cas_mcp::TaskRequest {
     serde_json::from_value(value).expect("TaskRequest should deserialize from test JSON")
 }
+
+// ---------------------------------------------------------------------------
+// cas-1932 (GH #62 symptoms 1-2): the zero-diff spike close trap
+// ---------------------------------------------------------------------------
+
+/// GH #62 symptom 1: after the supervisor records an APPROVED verification,
+/// the worker's re-close must COMPLETE the close instead of re-queuing to
+/// `pending_supervisor_review` forever.
+///
+/// Before the fix the second close ran the same queue-hop branch as the first
+/// — the approved verdict on record was never consulted — so no worker close
+/// could ever finish and the supervisor had to close on the worker's behalf.
+#[tokio::test]
+async fn test_worker_reclose_after_approved_verification_completes_close() {
+    let (temp, _core) = setup_cas();
+    let _env_lock = env_test_lock();
+
+    let cas_dir = temp.path().join(".cas");
+    write_supervisor_review_config(&cas_dir);
+    init_git_repo_with_staged_changes(temp.path());
+
+    let core = core_with_test_agent(&cas_dir);
+    let task_store = open_task_store(&cas_dir).unwrap();
+    let service = CasService::new(core, None);
+
+    let _worker_guard = FactoryWorkerGuard::enter();
+
+    let created = service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "create",
+            "title": "Spike closed under supervisor review",
+            "priority": 2,
+            "task_type": "task",
+        }))))
+        .await
+        .expect("task.create should succeed");
+    let id = extract_task_id(&extract_text(created))
+        .expect("should have task ID")
+        .to_string();
+
+    service
+        .task(Parameters(task_req(
+            serde_json::json!({ "action": "start", "id": id }),
+        )))
+        .await
+        .expect("task.start should succeed");
+
+    // First close: queues for supervisor review (unchanged behavior).
+    let first = extract_text(
+        service
+            .task(Parameters(task_req(serde_json::json!({
+                "action": "close",
+                "id": id,
+                "reason": "Characterization complete.",
+            }))))
+            .await
+            .expect("first close should return a result"),
+    );
+    assert!(
+        !first.contains("CODE_REVIEW_REQUIRED"),
+        "supervisor mode must not raise the worker-mode gate; got: {first}"
+    );
+    assert_eq!(
+        task_store.get(&id).expect("task should exist").status,
+        TaskStatus::PendingSupervisorReview,
+        "precondition: first close queues the task for supervisor review"
+    );
+
+    // Supervisor reviews and records an approved verdict (what
+    // `mcp__cas__verification action=add status=approved` persists).
+    let verification_store = open_verification_store(&cas_dir).unwrap();
+    let ver_id = verification_store.generate_id().expect("should generate ID");
+    let mut row = Verification::new(ver_id.clone(), id.clone());
+    row.status = VerificationStatus::Approved;
+    row.summary = "Reviewed off the queue — no findings.".to_string();
+    verification_store
+        .add(&row)
+        .expect("supervisor verdict should persist");
+
+    // Second close by the worker: must complete, not re-queue.
+    let second = extract_text(
+        service
+            .task(Parameters(task_req(serde_json::json!({
+                "action": "close",
+                "id": id,
+                "reason": "Characterization complete; supervisor approved.",
+            }))))
+            .await
+            .expect("second close should return a result"),
+    );
+    assert!(
+        !second.contains("CODE_REVIEW_REQUIRED"),
+        "an approved supervisor verdict must satisfy the review gate; got: {second}"
+    );
+
+    let task = task_store.get(&id).expect("task should exist");
+    assert_eq!(
+        task.status,
+        TaskStatus::Closed,
+        "worker re-close after an approved verification must close the task, \
+         not re-queue it; close said: {second}"
+    );
+    assert!(
+        task.notes.contains(&ver_id),
+        "the close must record which verdict authorized it; notes: {}",
+        task.notes
+    );
+}
+
+/// GH #62 symptom 1 (negative case): without an approved verdict the re-close
+/// must still queue for supervisor review. The consumption path is an exit for
+/// reviewed work only — it must not become a way to skip the queue.
+#[tokio::test]
+async fn test_worker_reclose_without_approved_verification_still_queues() {
+    let (temp, _core) = setup_cas();
+    let _env_lock = env_test_lock();
+
+    let cas_dir = temp.path().join(".cas");
+    write_supervisor_review_config(&cas_dir);
+    init_git_repo_with_staged_changes(temp.path());
+
+    let core = core_with_test_agent(&cas_dir);
+    let task_store = open_task_store(&cas_dir).unwrap();
+    let service = CasService::new(core, None);
+
+    let _worker_guard = FactoryWorkerGuard::enter();
+
+    let created = service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "create",
+            "title": "Unreviewed task",
+            "priority": 2,
+            "task_type": "task",
+        }))))
+        .await
+        .expect("task.create should succeed");
+    let id = extract_task_id(&extract_text(created))
+        .expect("should have task ID")
+        .to_string();
+
+    service
+        .task(Parameters(task_req(
+            serde_json::json!({ "action": "start", "id": id }),
+        )))
+        .await
+        .expect("task.start should succeed");
+
+    for attempt in ["first", "second"] {
+        service
+            .task(Parameters(task_req(serde_json::json!({
+                "action": "close",
+                "id": id,
+                "reason": "Done.",
+            }))))
+            .await
+            .unwrap_or_else(|_| panic!("{attempt} close should return a result"));
+    }
+
+    // A REJECTED verdict must not authorize the close either.
+    let verification_store = open_verification_store(&cas_dir).unwrap();
+    let ver_id = verification_store.generate_id().expect("should generate ID");
+    let mut row = Verification::new(ver_id, id.clone());
+    row.status = VerificationStatus::Rejected;
+    row.summary = "Needs rework.".to_string();
+    verification_store.add(&row).expect("verdict should persist");
+
+    service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "close",
+            "id": id,
+            "reason": "Done.",
+        }))))
+        .await
+        .expect("third close should return a result");
+
+    assert_eq!(
+        task_store.get(&id).expect("task should exist").status,
+        TaskStatus::PendingSupervisorReview,
+        "without an APPROVED verdict the task must stay in the review queue"
+    );
+}
+
+/// GH #62 symptom 2: a zero-commit spike closed in a dirty shared checkout
+/// must not trip `CODE_REVIEW_REQUIRED` — the checkout's pre-existing WIP is
+/// not the task's diff. Run in worker-owned review mode so the code-review
+/// gate itself (not the supervisor queue hop) is what would fire.
+#[tokio::test]
+async fn test_zero_commit_spike_in_dirty_shared_checkout_closes_without_code_review() {
+    let (temp, _core) = setup_cas();
+    let _env_lock = env_test_lock();
+
+    let cas_dir = temp.path().join(".cas");
+    write_worker_review_config(&cas_dir);
+    // Dirty shared checkout: staged reviewable changes the task never made.
+    init_git_repo_with_staged_changes(temp.path());
+
+    let core = core_with_test_agent(&cas_dir);
+    let task_store = open_task_store(&cas_dir).unwrap();
+    let service = CasService::new(core, None);
+
+    let _worker_guard = FactoryWorkerGuard::enter();
+
+    let created = service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "create",
+            "title": "Characterization-only spike",
+            "priority": 2,
+            "task_type": "spike",
+        }))))
+        .await
+        .expect("task.create should succeed");
+    let id = extract_task_id(&extract_text(created))
+        .expect("should have task ID")
+        .to_string();
+
+    service
+        .task(Parameters(task_req(
+            serde_json::json!({ "action": "start", "id": id }),
+        )))
+        .await
+        .expect("task.start should succeed");
+
+    let close_text = extract_text(
+        service
+            .task(Parameters(task_req(serde_json::json!({
+                "action": "close",
+                "id": id,
+                "reason": "Characterization written up in the task notes; no code changes.",
+            }))))
+            .await
+            .expect("close should return a result"),
+    );
+
+    assert!(
+        !close_text.contains("CODE_REVIEW_REQUIRED"),
+        "a spike that produced no commits must not be charged with the shared \
+         checkout's pre-existing WIP; got: {close_text}"
+    );
+    assert_eq!(
+        task_store.get(&id).expect("task should exist").status,
+        TaskStatus::Closed,
+        "the zero-diff spike close must complete"
+    );
+}

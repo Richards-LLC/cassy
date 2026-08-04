@@ -1420,6 +1420,19 @@ mod tests {
     #[cfg(feature = "mcp-proxy")]
     #[test]
     fn forged_cached_proxy_health_is_sanitized_before_preflight_json() {
+        // cas-c220 (GH #89): the snapshot below is only readable while its
+        // `config_fingerprint` still matches the merged USER + project proxy
+        // config, and the user half resolves through XDG_CONFIG_HOME/HOME at
+        // call time. Pin both for the whole body (fixture write through
+        // `collect_proxy_facts`) so a concurrent test repointing HOME cannot
+        // invalidate the fingerprint and empty out `optional_upstreams`.
+        let config_root = tempfile::tempdir().unwrap();
+        let config_home = config_root.path().join(".config");
+        std::fs::create_dir_all(&config_home).unwrap();
+        let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[
+            ("HOME", Some(config_root.path().to_str().unwrap())),
+            ("XDG_CONFIG_HOME", Some(config_home.to_str().unwrap())),
+        ]);
         let temp = tempfile::tempdir().unwrap();
         let first_name = "https://user:token@example.invalid/private";
         let second_name = "/home/operator/.config/secret-token";

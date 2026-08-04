@@ -125,9 +125,12 @@ pub enum Commands {
     /// Launch factory session (bare `cas` runs factory with defaults)
     Factory(FactoryArgs),
 
-    /// Launch Claude Code under an explicit account profile.
+    /// Launch factory with Claude as the supervisor on a chosen account profile
     ///
-    /// `main` uses ~/.claude; any other profile uses ~/.claude-<profile>.
+    /// `cas claude alt` runs CAS supervised by Claude, signed in as the account
+    /// in ~/.claude-alt; `main` uses ~/.claude. Spawned workers inherit the same
+    /// account. All `cas factory` flags pass through. Use `--list-profiles` to
+    /// see detected accounts, or `--bare` to open plain Claude Code instead.
     Claude(ClaudeArgs),
 
     /// Launch factory with Codex as the supervisor (shortcut for `cas factory --supervisor-cli=codex`)
@@ -328,10 +331,18 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         Some(Commands::Factory(_))
             | Some(Commands::Codex(_))
             | Some(Commands::Grok(_))
+            | Some(Commands::Claude(_))
             | None
     ) {
         let early_cas_root = find_cas_root().ok();
         factory::apply_resource_contention_env(early_cas_root.as_deref());
+    }
+
+    // Select the Claude account for `cas claude <profile>` here, for the same
+    // reason: `set_var` must land while the process is still single-threaded.
+    // The factory supervisor pane and every spawned worker inherit it.
+    if let Some(Commands::Claude(claude_args)) = &cli.command {
+        claude::apply_profile_env(claude_args)?;
     }
 
     initialize_telemetry();
@@ -492,7 +503,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Factory(args) => factory::execute(args, cli, cas_root),
         // cas-7f2c: provider shortcuts — preset supervisor_cli + explicit flag,
         // then delegate to the same factory::execute path.
-        Commands::Claude(args) => claude::execute(args),
+        Commands::Claude(args) => claude::execute(args, cli, cas_root),
         Commands::Codex(args) => {
             let mut a = args.clone();
             a.supervisor_cli = "codex".to_string();

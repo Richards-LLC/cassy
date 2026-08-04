@@ -7,6 +7,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+- **Choosing a Claude account starts CAS again.** `cas claude <profile>` resolved the account directory and then exec'd Claude Code directly, so the factory never started — selecting a second subscription and running CAS became two separate commands to be combined by hand with an environment variable. The account is now exported into the launching process before any thread or pane exists, and the command delegates to the same factory path as the other provider shortcuts with Claude pinned as the supervisor, so the supervisor and every worker it spawns land on the chosen account. Bare `cas claude` launches the factory on the ambient account, matching its siblings; the account listing moved to `--list-profiles`, and `--bare` keeps the plain Claude Code launcher with argument passthrough. Explicitly selecting an account now also scrubs an inherited `ANTHROPIC_API_KEY` on this path, which could otherwise override subscription OAuth and silently defeat the selection.
+
 ## [2.40.0] - 2026-08-04
 
 ### Changed

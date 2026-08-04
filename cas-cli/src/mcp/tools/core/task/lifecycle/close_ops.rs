@@ -990,7 +990,7 @@ impl CasCore {
             &resolved_parent_branch,
             &close_project_root,
         ) {
-            MergeStateGateOutcome::Proceed => Ok(()),
+            MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_) => Ok(()),
             MergeStateGateOutcome::Reject(message) => Err(message),
         }
     }
@@ -1428,7 +1428,11 @@ impl CasCore {
         // current task work cycle. The latest claim/transfer survives the
         // AwaitingMerge park path, while a reopened task gets a newer claim.
         // Fall back to task creation when lease history is unavailable.
-        let commit_receipt_window = if req.commit_receipt.is_some() {
+        // cas-e74c: resolved unconditionally (it used to be computed only
+        // when a receipt was supplied). The merge-state guard now needs the
+        // same work-cycle window to tell this task's commits apart from a
+        // reused lane's prior-task residue, receipt or no receipt.
+        let commit_receipt_window = {
             let lease_history = self
                 .open_agent_store()
                 .ok()
@@ -1438,17 +1442,25 @@ impl CasCore {
                 task.created_at,
                 &lease_history,
             ))
-        } else {
-            None
         };
         if task.task_type != TaskType::Epic && task.assignee.is_some() {
-            match run_factory_branch_merge_gate(
+            match run_factory_branch_merge_gate_with_attribution(
                 &task,
                 &req,
                 &resolved_parent_branch,
                 &close_project_root,
+                TaskCommitAttribution {
+                    receipt: req.commit_receipt.as_deref(),
+                    window: commit_receipt_window.as_ref(),
+                },
             ) {
                 MergeStateGateOutcome::Proceed => {}
+                // cas-e74c: the delivery is proven integrated (or nothing on
+                // the lane belongs to this task) — record the residue note
+                // on the task and let the close continue.
+                MergeStateGateOutcome::ProceedWithNote(note) => {
+                    append_close_decision_note(task_store.as_ref(), &mut task, &note);
+                }
                 MergeStateGateOutcome::Reject(msg) => {
                     // cas-a844: "MERGE REQUIRED" alone doesn't say whether the
                     // supervisor's merge will actually succeed — it fires for
@@ -4207,8 +4219,34 @@ pub(crate) enum MergeStateGateOutcome {
     /// task, no assignee, branch missing locally, or git history
     /// unknowable).
     Proceed,
+    /// cas-e74c: close may proceed because the *delivery* is proven
+    /// integrated (validated `commit_receipt`) or because no commit on
+    /// the lane is attributable to this task's work cycle — while the
+    /// lane itself still carries unmerged residue belonging to other
+    /// tasks. Carries the audit note the caller records on the task, so
+    /// the residue is logged rather than fatal.
+    ProceedWithNote(String),
     /// Close must be rejected with this user-facing error message.
     Reject(String),
+}
+
+/// cas-e74c: evidence that scopes the merge-state guard to the closing
+/// task's own delivery instead of the whole registered lane branch.
+///
+/// - `receipt`: the worker-supplied `commit_receipt` (if any). When it
+///   validates against the parent branch it IS the delivery evidence.
+/// - `window`: the task's current work-cycle lower bound (latest lease
+///   claim/transfer, falling back to task creation). Commits on the lane
+///   that predate it belong to other tasks and are not this task's to
+///   merge.
+///
+/// Both `None` reproduces the pre-cas-e74c whole-branch behavior, which
+/// is what the non-close callers (and the 4-arg
+/// [`run_factory_branch_merge_gate`] shim) use.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct TaskCommitAttribution<'a> {
+    pub receipt: Option<&'a str>,
+    pub window: Option<&'a TaskCommitReceiptWindow>,
 }
 
 /// Per-task close-time guard: reject `task.close` when the worker's
@@ -4373,11 +4411,91 @@ fn enrich_merge_required_with_conflict_check(
     }
 }
 
+/// Backwards-compatible shim: evaluate the gate with no delivery-scoping
+/// evidence (whole-branch semantics). Used by callers that have no close
+/// request in hand (e.g. the `AwaitingMerge` delivery precheck) and by the
+/// pre-cas-e74c unit tests.
 pub(crate) fn run_factory_branch_merge_gate(
+    task: &Task,
+    req: &TaskCloseRequest,
+    parent_branch: &str,
+    repo_path: &std::path::Path,
+) -> MergeStateGateOutcome {
+    run_factory_branch_merge_gate_with_attribution(
+        task,
+        req,
+        parent_branch,
+        repo_path,
+        TaskCommitAttribution::default(),
+    )
+}
+
+/// cas-e74c: count commits on `commit_ish` that are not on `parent_branch`
+/// AND fall inside this task's work cycle (committer date at or after
+/// `window.not_before`, with the same clock-skew allowance the commit
+/// receipt uses).
+///
+/// Returns `None` — "unknowable" — when the merge-base or the rev-list
+/// cannot be computed, so the caller falls back to the whole-branch count
+/// rather than treating unknown Git state as "nothing attributable".
+pub(crate) fn count_task_attributable_unmerged_commits(
+    repo_path: &std::path::Path,
+    commit_ish: &str,
+    parent_branch: &str,
+    window: &TaskCommitReceiptWindow,
+) -> Option<u32> {
+    use std::process::Command;
+
+    if !is_safe_git_refname(commit_ish) || !is_safe_git_refname(parent_branch) {
+        return None;
+    }
+
+    let merge_base_out = Command::new("git")
+        .args(["merge-base", parent_branch, commit_ish])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if !merge_base_out.status.success() {
+        return None;
+    }
+    let merge_base = String::from_utf8_lossy(&merge_base_out.stdout)
+        .trim()
+        .to_string();
+    if merge_base.is_empty() {
+        return None;
+    }
+
+    // Git parses `@<epoch>` as an absolute timestamp, so no locale- or
+    // timezone-dependent formatting is involved.
+    let since = format!(
+        "@{}",
+        window.not_before.timestamp() - COMMIT_RECEIPT_CLOCK_SKEW_SECS
+    );
+    let count_out = Command::new("git")
+        .args([
+            "rev-list",
+            "--count",
+            &format!("--since={since}"),
+            &format!("{merge_base}..{commit_ish}"),
+        ])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if !count_out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&count_out.stdout)
+        .trim()
+        .parse()
+        .ok()
+}
+
+pub(crate) fn run_factory_branch_merge_gate_with_attribution(
     task: &Task,
     _req: &TaskCloseRequest,
     parent_branch: &str,
     repo_path: &std::path::Path,
+    attribution: TaskCommitAttribution<'_>,
 ) -> MergeStateGateOutcome {
     if task.task_type == TaskType::Epic {
         return MergeStateGateOutcome::Proceed;
@@ -4500,6 +4618,65 @@ pub(crate) fn run_factory_branch_merge_gate(
         }
     }
 
+    // cas-e74c (GH #80): a valid `commit_receipt` IS the delivery evidence.
+    // When it resolves to a commit of this work cycle that carries a
+    // non-empty diff and is already reachable from `parent_branch` (or
+    // `origin/<parent_branch>`), the task's work has landed — regardless of
+    // what else the reused lane branch is still carrying. That residue
+    // belongs to other tasks (or to a supervisor decision not to merge the
+    // lane at all); it is logged on the closing task, not made fatal.
+    // Without this, a cherry-pick delivery from a dirty lane could never
+    // close: merging the lane would land unrelated commits on the target,
+    // and the receipt path — documented for exactly this case — did not
+    // exempt the close.
+    let mut receipt_rejection_reason: Option<String> = None;
+    if let Some(receipt) = attribution.receipt {
+        match attribution.window {
+            Some(window) => {
+                match validate_task_commit_receipt(repo_path, receipt, parent_branch, window) {
+                    Ok(note) => {
+                        return MergeStateGateOutcome::ProceedWithNote(format!(
+                            "{note} merge-state guard: cleared by delivery receipt; \
+                             {factory_branch} still carries {stranded} commit(s) not on \
+                             {parent_branch}, which are not attributable to this task's \
+                             delivery and remain the lane's own residue."
+                        ));
+                    }
+                    Err(reason) => receipt_rejection_reason = Some(reason),
+                }
+            }
+            None => {
+                receipt_rejection_reason =
+                    Some("task attribution window is unavailable".to_string());
+            }
+        }
+    }
+
+    // cas-e74c (GH #62 symptoms 3-4): scope the guard to commits made
+    // inside this task's own work cycle. A reused lane branch routinely
+    // carries commits from prior (already closed, already merged-elsewhere)
+    // tasks; demanding that the closing task merge them to its own target
+    // is both wrong and, for a zero-commit task, impossible to satisfy.
+    // Unknowable Git state falls back to the whole-branch count (fail
+    // closed), and commits this task actually made still reject below.
+    let attributable = attribution.window.and_then(|window| {
+        count_task_attributable_unmerged_commits(repo_path, commit_ish, parent_branch, window)
+    });
+    if attributable == Some(0) {
+        return MergeStateGateOutcome::ProceedWithNote(format!(
+            "decision: merge-state guard cleared — no commit on {factory_branch} is \
+             attributable to this task's work cycle (basis: {}). The branch still \
+             carries {stranded} commit(s) not on {parent_branch}; that residue \
+             belongs to other tasks and is recorded here rather than blocking this \
+             close.",
+            attribution
+                .window
+                .map(|window| window.basis)
+                .unwrap_or("task work cycle"),
+        ));
+    }
+    let stranded = attributable.unwrap_or(stranded);
+
     // cas-c631: `epic/<slug>` branches are created locally by the supervisor
     // (see cas-supervisor EPIC workflow) and are, by convention, never pushed
     // to origin — the epic ships to `main` as a single PR once complete, not
@@ -4572,10 +4749,21 @@ pub(crate) fn run_factory_branch_merge_gate(
         )
     };
 
+    // cas-e74c: when a receipt was supplied but did not validate, say why —
+    // otherwise the worker sees a bare MERGE REQUIRED and cannot tell that
+    // their receipt was even considered.
+    let receipt_note = match receipt_rejection_reason {
+        Some(reason) => format!(
+            "\nThe supplied commit_receipt was not accepted as merge evidence: \
+             {reason}.\n"
+        ),
+        None => String::new(),
+    };
+
     MergeStateGateOutcome::Reject(format!(
         "⚠️ MERGE REQUIRED\n\n\
-         task close rejected: {factory_branch} has {stranded} commit(s) not on \
-         {parent_branch}.\n\n\
+         task close rejected: {factory_branch} has {stranded} commit(s) from this task \
+         not on {parent_branch}.\n{receipt_note}\n\
          The branch must be merged into {parent_branch} before closing. This \
          guard cannot be bypassed (use of bypass_code_review=true does not \
          skip merge-state checks — it is a data-state guard, not a review \
@@ -10353,6 +10541,271 @@ mod merge_state_gate_tests {
         assert!(
             matches!(out, MergeStateGateOutcome::Proceed),
             "missing factory branch must be treated as merged (graceful pass), got {out:?}"
+        );
+    }
+
+    // --- cas-e74c (GH #80 / #62 symptoms 3-4): delivery-scoped guard -------
+    //
+    // The guard used to evaluate the worker's ENTIRE registered lane
+    // branch. Three real deadlocks followed: a cherry-pick delivery from a
+    // reused lane could never close even with a valid, target-reachable
+    // `commit_receipt`; a zero-commit task inherited the lane's unrelated
+    // commits; and work done on a clean task-local branch, merged before
+    // close, still bounced because the guard keyed on the lane name.
+
+    /// Commit with an explicit committer/author date so a test can place
+    /// commits before or after a task's attribution window.
+    fn git_at(dir: &std::path::Path, args: &[&str], date: &str) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test")
+            .env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn commit_file_at(dir: &std::path::Path, name: &str, body: &str, date: &str) {
+        std::fs::write(dir.join(name), body).unwrap();
+        git_at(dir, &["add", name], date);
+        git_at(dir, &["commit", "-q", "-m", &format!("feat: {name}")], date);
+    }
+
+    fn window_at(epoch: i64, basis: &'static str) -> TaskCommitReceiptWindow {
+        TaskCommitReceiptWindow {
+            not_before: chrono::DateTime::from_timestamp(epoch, 0).unwrap(),
+            basis,
+        }
+    }
+
+    fn head_sha(dir: &std::path::Path) -> String {
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir)
+            .output()
+            .expect("git rev-parse");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// GH #80: the lane carries prior-session commits the supervisor
+    /// deliberately refused to merge; the task's own work was cherry-picked
+    /// onto the parent and handed back as a `commit_receipt`. The receipt IS
+    /// the delivery evidence — close must pass, logging the lane residue.
+    #[test]
+    fn reused_lane_close_with_valid_receipt_proceeds_with_residue_note() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        // Two prior-session commits stranded on the reused lane.
+        commit_file_at(p, "old-a.rs", "// a\n", "2020-01-01T00:00:00Z");
+        commit_file_at(p, "old-b.rs", "// b\n", "2020-01-02T00:00:00Z");
+        // This task's delivery, cherry-picked onto main as a new SHA.
+        git(p, &["checkout", "-q", "main"]);
+        commit_file_at(p, "delivery.rs", "// delivered\n", "2026-08-04T12:00:00Z");
+        let receipt = head_sha(p);
+        git(p, &["checkout", "-q", "factory/worker"]);
+
+        let task = worker_task("worker");
+        let mut req = base_req(&task.id);
+        req.commit_receipt = Some(receipt.clone());
+        let window = window_at(1_000_000_000, "latest task lease claim/transfer");
+
+        let out = run_factory_branch_merge_gate_with_attribution(
+            &task,
+            &req,
+            "main",
+            p,
+            TaskCommitAttribution {
+                receipt: Some(&receipt),
+                window: Some(&window),
+            },
+        );
+        match out {
+            MergeStateGateOutcome::ProceedWithNote(note) => {
+                assert!(
+                    note.contains(&receipt),
+                    "note must record the accepted receipt: {note}"
+                );
+                assert!(
+                    note.contains("factory/worker") && note.contains("2 commit"),
+                    "note must log the unmerged lane residue: {note}"
+                );
+            }
+            other => panic!("valid receipt must clear the lane guard, got {other:?}"),
+        }
+    }
+
+    /// GH #62 symptom 4: the delivery lives on a clean task-local branch that
+    /// was merged into the parent BEFORE close. The guard must resolve merge
+    /// state from the receipt's ancestry, not the registered lane name.
+    #[test]
+    fn clean_task_local_branch_merged_before_close_proceeds() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        commit_file_at(p, "unrelated.rs", "// other task\n", "2020-03-01T00:00:00Z");
+        // Task work on its own branch, cut from main and merged into main.
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["checkout", "-q", "-b", "factory/worker-cas-test1"]);
+        commit_file_at(p, "scoped.rs", "// scoped\n", "2026-08-04T12:00:00Z");
+        let receipt = head_sha(p);
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "factory/worker-cas-test1",
+                "-m",
+                "merge",
+            ],
+        );
+        git(p, &["checkout", "-q", "factory/worker"]);
+
+        let task = worker_task("worker");
+        let mut req = base_req(&task.id);
+        req.commit_receipt = Some(receipt.clone());
+        let window = window_at(1_000_000_000, "latest task lease claim/transfer");
+
+        let out = run_factory_branch_merge_gate_with_attribution(
+            &task,
+            &req,
+            "main",
+            p,
+            TaskCommitAttribution {
+                receipt: Some(&receipt),
+                window: Some(&window),
+            },
+        );
+        assert!(
+            matches!(out, MergeStateGateOutcome::ProceedWithNote(_)),
+            "receipt merged into parent before close must clear the guard, got {out:?}"
+        );
+    }
+
+    /// GH #62 symptom 3: an epic-less, zero-commit task inherited the lane's
+    /// 34 unrelated commits. No commit is attributable to this task's work
+    /// cycle, so the guard must not fire.
+    #[test]
+    fn zero_task_attributable_commits_proceeds_despite_lane_residue() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        commit_file_at(p, "other-1.rs", "// 1\n", "2020-01-01T00:00:00Z");
+        commit_file_at(p, "other-2.rs", "// 2\n", "2020-01-02T00:00:00Z");
+
+        let task = worker_task("worker");
+        let req = base_req(&task.id);
+        // Work cycle started long after those commits were made.
+        let window = window_at(1_700_000_000, "latest task lease claim/transfer");
+
+        let out = run_factory_branch_merge_gate_with_attribution(
+            &task,
+            &req,
+            "main",
+            p,
+            TaskCommitAttribution {
+                receipt: None,
+                window: Some(&window),
+            },
+        );
+        match out {
+            MergeStateGateOutcome::ProceedWithNote(note) => {
+                assert!(
+                    note.contains("2 commit"),
+                    "residue must be logged, not fatal: {note}"
+                );
+            }
+            other => {
+                panic!("zero task-attributable commits must not trip the guard, got {other:?}")
+            }
+        }
+    }
+
+    /// The scoping must not become a bypass: commits made inside the task's
+    /// own work cycle and left unmerged still reject, and the count reported
+    /// is the task-attributable one (not the whole lane).
+    #[test]
+    fn task_attributable_unmerged_commits_still_reject() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        commit_file_at(p, "other-1.rs", "// 1\n", "2020-01-01T00:00:00Z");
+        commit_file_at(p, "mine.rs", "// mine\n", "2026-08-04T12:00:00Z");
+
+        let task = worker_task("worker");
+        let req = base_req(&task.id);
+        let window = window_at(1_700_000_000, "latest task lease claim/transfer");
+
+        let out = run_factory_branch_merge_gate_with_attribution(
+            &task,
+            &req,
+            "main",
+            p,
+            TaskCommitAttribution {
+                receipt: None,
+                window: Some(&window),
+            },
+        );
+        match out {
+            MergeStateGateOutcome::Reject(msg) => {
+                assert!(msg.contains("MERGE REQUIRED"), "missing header: {msg}");
+                assert!(
+                    msg.contains("1 commit(s) from this task"),
+                    "rejection must count only task-attributable commits: {msg}"
+                );
+            }
+            other => panic!("unmerged task-own commits must still reject, got {other:?}"),
+        }
+    }
+
+    /// A receipt that does not validate (here: not reachable from the parent)
+    /// must NOT clear the guard.
+    #[test]
+    fn invalid_receipt_does_not_clear_the_guard() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        commit_file_at(p, "mine.rs", "// mine\n", "2026-08-04T12:00:00Z");
+        let receipt = head_sha(p); // on the lane, never merged to main
+
+        let task = worker_task("worker");
+        let mut req = base_req(&task.id);
+        req.commit_receipt = Some(receipt.clone());
+        let window = window_at(1_000_000_000, "latest task lease claim/transfer");
+
+        let out = run_factory_branch_merge_gate_with_attribution(
+            &task,
+            &req,
+            "main",
+            p,
+            TaskCommitAttribution {
+                receipt: Some(&receipt),
+                window: Some(&window),
+            },
+        );
+        match out {
+            MergeStateGateOutcome::Reject(msg) => {
+                assert!(
+                    msg.contains("commit_receipt"),
+                    "rejection should explain why the supplied receipt was not accepted: {msg}"
+                );
+            }
+            other => panic!("unmerged receipt must not clear the guard, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attributable_count_is_none_when_git_state_is_unknowable() {
+        let dir = tempfile::tempdir().unwrap();
+        let window = window_at(1_700_000_000, "test");
+        assert!(
+            count_task_attributable_unmerged_commits(dir.path(), "factory/x", "main", &window)
+                .is_none(),
+            "non-git dir must be Unknown (fall back to whole-branch count), not Some(0)"
         );
     }
 

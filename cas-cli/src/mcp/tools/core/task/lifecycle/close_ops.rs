@@ -16229,6 +16229,18 @@ mod zero_diff_spike_close_tests {
         TaskCommitReceiptWindow {
             not_before: chrono::DateTime::from_timestamp(CYCLE_START_EPOCH, 0).unwrap(),
             basis: "latest task lease claim/transfer",
+            // cas-9596 added these two fields and updated every other
+            // constructor; this fixture was missed, which broke the whole
+            // `cargo test` build on the epic branch. An empty identity and a
+            // floor at the cycle start preserve this module's original
+            // meaning exactly: with no attributable evidence, cas-9596's
+            // relaxation never engages and these tests keep asserting the
+            // pure cycle-window behavior they were written for.
+            task_floor: chrono::DateTime::from_timestamp(CYCLE_START_EPOCH, 0).unwrap(),
+            identity: TaskCommitIdentity {
+                task_id: None,
+                known_commits: Vec::new(),
+            },
         }
     }
 

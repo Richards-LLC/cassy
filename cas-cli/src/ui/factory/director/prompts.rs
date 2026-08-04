@@ -610,14 +610,41 @@ pub struct Prompt {
 /// Last-mile predicate for a prompt that has already survived event-level
 /// revalidation. The caller supplies a snapshot loaded immediately before
 /// transport injection, not the earlier batch snapshot. Epic occurrence
-/// identity and worker identity are both checked here, through their single
-/// shared predicates.
-pub(crate) fn prompt_is_still_deliverable(prompt: &Prompt, data: &DirectorData) -> bool {
+/// identity, worker identity, and merge state are all checked here, through
+/// their single shared predicates.
+///
+/// cas-6eab (GH #74): `retract_task` was previously the one state-bearing tag
+/// with NO last-mile check. A MERGE REQUIRED alert was re-validated against
+/// live git when its prompt was GENERATED (`check_merge_alert_freshness`, at
+/// the top of the daemon tick) and could be retracted afterwards only if it
+/// was still sitting unread in a Teams inbox (`prune_stale_merge_alerts`) —
+/// so nothing covered the window in between, which is not idle time: the same
+/// tick runs `handle_epic_change`, and that performs merges. An alert whose
+/// premise was killed by the daemon's own merge, mid-tick, was still injected
+/// quoting the pre-merge tip. A PTY-delivered factory (no Teams inbox) had no
+/// retraction path at all, so for it this is the only check that ever runs.
+///
+/// `repo_root` is the main checkout all `factory/*` and `epic/*` branches live
+/// in. Only `Stale` — positive evidence that the merge landed or the task left
+/// `AwaitingMerge` — suppresses; `NotApplicable` (nothing to verify against)
+/// delivers, matching the fail-open stance of every other predicate here.
+pub(crate) fn prompt_is_still_deliverable(
+    prompt: &Prompt,
+    data: &DirectorData,
+    repo_root: &Path,
+) -> bool {
     let epic_is_current = prompt
         .retract_epic
         .as_deref()
         .is_none_or(|epic_id| epic_completion_is_current(data, epic_id));
+    let merge_is_still_required = prompt.retract_task.as_deref().is_none_or(|task_id| {
+        !matches!(
+            check_merge_alert_freshness_for_task(task_id, data, repo_root),
+            MergeAlertFreshness::Stale
+        )
+    });
     epic_is_current
+        && merge_is_still_required
         && prompt
         .drop_if_worker_assigned
         .as_deref()
@@ -1720,6 +1747,13 @@ mod tests {
     use cas_types::{AgentStatus, Priority, TaskStatus, TaskType};
     use std::collections::HashMap;
 
+    /// Repo root for prompts that carry no `retract_task` tag: the merge
+    /// re-check is never reached, so no real checkout is needed. Merge-alert
+    /// cases use a genuine git fixture (see `merge_alert_freshness_tests`).
+    fn no_repo() -> &'static Path {
+        Path::new("/nonexistent/cas-6eab")
+    }
+
     fn make_data(ready_count: usize) -> DirectorData {
         let ready_tasks: Vec<TaskSummary> = (0..ready_count)
             .map(|i| TaskSummary {
@@ -2440,7 +2474,7 @@ mod tests {
         assigned_data.agents[0].current_task = Some("cas-next".to_string());
 
         assert!(
-            !prompt_is_still_deliverable(&prompt, &assigned_data),
+            !prompt_is_still_deliverable(&prompt, &assigned_data, no_repo()),
             "last-mile delivery must drop an already-enqueued WorkerIdle after assignment"
         );
     }
@@ -2480,7 +2514,7 @@ mod tests {
         assigned_data.agents[0].current_task = Some("cas-next".to_string());
 
         assert!(
-            !prompt_is_still_deliverable(&prompt, &assigned_data),
+            !prompt_is_still_deliverable(&prompt, &assigned_data, no_repo()),
             "last-mile delivery must drop an already-enqueued ready alert after assignment"
         );
     }
@@ -5092,26 +5126,88 @@ mod tests {
         )
         .expect("current epic completion should render");
 
-        assert!(prompt_is_still_deliverable(&prompt, &current));
+        assert!(prompt_is_still_deliverable(&prompt, &current, no_repo()));
 
         let mut closed = current.clone();
         closed.epic_tasks[0].status = TaskStatus::Closed;
         assert!(
-            !prompt_is_still_deliverable(&prompt, &closed),
+            !prompt_is_still_deliverable(&prompt, &closed, no_repo()),
             "the epic id carried by the prompt must stop close-before-transport delivery"
         );
 
         let mut reopened = current.clone();
         reopened.ready_tasks.push(cas06ca_reopened_subtask());
         assert!(
-            !prompt_is_still_deliverable(&prompt, &reopened),
+            !prompt_is_still_deliverable(&prompt, &reopened, no_repo()),
             "the same epic id must stop delivery if a subtask reopens"
         );
 
         assert!(
-            prompt_is_still_deliverable(&prompt, &make_data(0)),
+            prompt_is_still_deliverable(&prompt, &make_data(0), no_repo()),
             "unavailable epic state must preserve the prompt"
         );
+    }
+
+    /// cas-6eab / GH #74, third occurrence: "all subtasks are closed → close
+    /// the epic" fired twice while subtasks were still being ADDED to that
+    /// epic. A supervisor following it verbatim would have closed a
+    /// half-finished epic.
+    ///
+    /// Distinct from the reopened-subtask case above: these children never
+    /// existed when the occurrence was detected, and they arrive in every
+    /// non-closed status. `DirectorData` files Open/Blocked into
+    /// `ready_tasks` and InProgress/PendingSupervisorReview/AwaitingMerge into
+    /// `in_progress_tasks`, so the last-mile check has to see all five — a
+    /// status landing in neither bucket would read as "no children left" and
+    /// let the prompt through.
+    #[test]
+    fn epic_complete_is_dropped_when_a_new_subtask_appears_in_any_open_status() {
+        let event = DirectorEvent::EpicAllSubtasksClosed {
+            epic_id: "cas-epic".to_string(),
+            epic_title: "Epic completion currency".to_string(),
+        };
+        let mut current = make_data(0);
+        current.epic_tasks = vec![cas06ca_epic_summary(TaskStatus::InProgress)];
+        let prompt = generate_prompt(
+            &event,
+            &current,
+            &current,
+            "supervisor",
+            &default_config(),
+            codex(),
+            codex(),
+            &HashSet::new(),
+            None,
+        )
+        .expect("current epic completion should render");
+        assert!(
+            prompt_is_still_deliverable(&prompt, &current, no_repo()),
+            "precondition: deliverable while every child really is closed"
+        );
+
+        for status in [
+            TaskStatus::Open,
+            TaskStatus::Blocked,
+            TaskStatus::InProgress,
+            TaskStatus::PendingSupervisorReview,
+            TaskStatus::AwaitingMerge,
+        ] {
+            let mut with_new_child = current.clone();
+            let mut child = cas06ca_reopened_subtask();
+            child.id = format!("cas-new-{status}");
+            child.title = "Subtask added after the occurrence".to_string();
+            child.status = status;
+            match status {
+                TaskStatus::Open | TaskStatus::Blocked => {
+                    with_new_child.ready_tasks.push(child)
+                }
+                _ => with_new_child.in_progress_tasks.push(child),
+            }
+            assert!(
+                !prompt_is_still_deliverable(&prompt, &with_new_child, no_repo()),
+                "a subtask added at {status} must stop the epic-complete instruction"
+            );
+        }
     }
 
     /// cas-6883: send-time freshness re-check for MERGE REQUIRED alerts.
@@ -5328,6 +5424,116 @@ mod tests {
             assert!(
                 matches!(outcome, MergeAlertFreshness::NotApplicable),
                 "task no longer AwaitingMerge must not produce a merge alert: {outcome:?}"
+            );
+        }
+
+        /// cas-6eab / GH #74, the load-bearing regression: a MERGE REQUIRED
+        /// alert generated while the merge was genuinely outstanding must be
+        /// dropped at the last mile if the merge lands before injection.
+        ///
+        /// Order matters here and mirrors production: the daemon tick
+        /// generates prompts FIRST, then runs `handle_epic_change` (which
+        /// performs merges), then injects. Before this fix `retract_task` was
+        /// the only state-bearing tag with no last-mile check, so this alert
+        /// was delivered quoting a tip the epic had already moved past.
+        #[test]
+        fn merge_alert_generated_before_the_merge_is_dropped_at_injection() {
+            let repo = init_repo("recipe-be");
+            commit_file(repo.path(), "a.rs");
+
+            let data = awaiting_merge_data("recipe-be");
+            let event = idle_event("recipe-be", TaskStatus::AwaitingMerge);
+            let evidence = match check_merge_alert_freshness(&event, &data, repo.path()) {
+                MergeAlertFreshness::Fresh(evidence) => evidence,
+                other => panic!("precondition: alert must be live when generated: {other:?}"),
+            };
+            let prompt = generate_prompt(
+                &event,
+                &data,
+                &data,
+                "supervisor",
+                &default_config(),
+                SupervisorCli::Claude,
+                SupervisorCli::Claude,
+                &HashSet::new(),
+                Some(&evidence),
+            )
+            .expect("live merge alert must render");
+            assert_eq!(
+                prompt.retract_task.as_deref(),
+                Some("cas-6883t"),
+                "the alert must carry its task identity for the last-mile check"
+            );
+            assert!(
+                prompt_is_still_deliverable(&prompt, &data, repo.path()),
+                "precondition: still deliverable while the merge is outstanding"
+            );
+
+            // The merge lands between generation and injection.
+            merge_worker_into_epic(repo.path(), "recipe-be");
+
+            assert!(
+                !prompt_is_still_deliverable(&prompt, &data, repo.path()),
+                "an alert whose merge landed mid-tick must not be injected"
+            );
+        }
+
+        /// The same last-mile check must not eat a legitimate alert: a task
+        /// that is still parked with unmerged commits survives, and so does
+        /// an unverifiable one (no assignee → nothing to diff).
+        #[test]
+        fn last_mile_check_preserves_live_and_unverifiable_merge_alerts() {
+            let repo = init_repo("recipe-be");
+            commit_file(repo.path(), "a.rs");
+            let data = awaiting_merge_data("recipe-be");
+            let prompt = Prompt {
+                target: "supervisor".to_string(),
+                text: "⚠️ MERGE REQUIRED".to_string(),
+                retract_worker: None,
+                retract_task: Some("cas-6883t".to_string()),
+                retract_epic: None,
+                drop_if_worker_assigned: None,
+            };
+            assert!(
+                prompt_is_still_deliverable(&prompt, &data, repo.path()),
+                "a genuinely outstanding merge must still reach the supervisor"
+            );
+
+            let mut unverifiable = data.clone();
+            unverifiable.in_progress_tasks[0].assignee = None;
+            assert!(
+                prompt_is_still_deliverable(&prompt, &unverifiable, repo.path()),
+                "no assignee means nothing to diff — uncertainty must deliver, not suppress"
+            );
+        }
+
+        /// GH #74's third occurrence, at the same last mile: the task left
+        /// `AwaitingMerge` (re-closed after the supervisor merged) while the
+        /// alert was queued behind other prompts in the injection loop.
+        #[test]
+        fn merge_alert_is_dropped_when_the_task_leaves_awaiting_merge() {
+            let repo = init_repo("recipe-be");
+            commit_file(repo.path(), "a.rs");
+            let mut data = awaiting_merge_data("recipe-be");
+            let prompt = Prompt {
+                target: "supervisor".to_string(),
+                text: "⚠️ MERGE REQUIRED".to_string(),
+                retract_worker: None,
+                retract_task: Some("cas-6883t".to_string()),
+                retract_epic: None,
+                drop_if_worker_assigned: None,
+            };
+
+            data.in_progress_tasks[0].status = TaskStatus::InProgress;
+            assert!(
+                !prompt_is_still_deliverable(&prompt, &data, repo.path()),
+                "a task no longer parked has no outstanding merge to demand"
+            );
+
+            data.in_progress_tasks.clear();
+            assert!(
+                !prompt_is_still_deliverable(&prompt, &data, repo.path()),
+                "a task gone from the snapshot entirely is likewise resolved"
             );
         }
 

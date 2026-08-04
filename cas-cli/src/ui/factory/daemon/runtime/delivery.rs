@@ -337,6 +337,11 @@ impl FactoryDaemon {
     /// runs — the message is not lost, only the idle fast-path failed and
     /// the worker will still see it whenever it next reaches a turn
     /// boundary on its own.
+    /// `retract_task` (cas-6eab): `Some(task_id)` when `text` is a worker's
+    /// merge request that was still live at transport time — tags the queued
+    /// `TeamsInbox` row so `prune_stale_merge_alerts` can retract it if the
+    /// merge lands before the supervisor ever reads it. `None` for every other
+    /// message. Ignored on the `Pty` channel (no queued row exists to tag).
     pub(crate) async fn deliver_to_worker_with_idle_nudge(
         &self,
         target: &str,
@@ -345,9 +350,10 @@ impl FactoryDaemon {
         summary: Option<&str>,
         color: Option<&str>,
         worker_is_idle: bool,
+        retract_task: Option<&str>,
     ) -> anyhow::Result<InjectOutcome> {
         let primary_outcome = self
-            .deliver_to_worker(target, source, text, summary, color, None, None, None)
+            .deliver_to_worker(target, source, text, summary, color, None, retract_task, None)
             .await?;
 
         if primary_outcome != InjectOutcome::Delivered || !worker_is_idle {

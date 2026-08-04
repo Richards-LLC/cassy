@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.40.0] - 2026-08-04
+
+### Changed
+- **The default worker tier is now `gpt-5.6-terra` at high effort.** The previous default is reserved for heavy and frontier work, and the supervisor guidance, model-selection reference and code-review workflow were retiered to match. Current Codex model slugs are documented alongside, so the available options are discoverable rather than folklore.
+
+### Fixed
+- **Releases now publish a macOS binary.** The release workflow built only `x86_64-unknown-linux-gnu`, so a tag produced a single asset — while the local release script targets both platforms and the Homebrew formula requests `cas-aarch64-apple-darwin.tar.gz`. Mac users had no download path from a published release. A macOS job now builds and packages that artifact, using the pinned runner and explicit Xcode selection that Zig requires to link against a compatible SDK. The release step depends on both builds, so a macOS failure blocks the release rather than publishing a partial one — silently shipping an incomplete release is the defect, not the mitigation.
+
 ## [2.39.0] - 2026-08-04
 
 ### Fixed

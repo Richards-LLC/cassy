@@ -6773,42 +6773,88 @@ effort = "high"
         (tmp, sha)
     }
 
+    fn git_spawn_snapshot(project: &std::path::Path) -> String {
+        fn is_executable_file(path: &std::path::Path) -> bool {
+            let Ok(metadata) = path.metadata() else {
+                return false;
+            };
+            if !metadata.is_file() {
+                return false;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                return metadata.permissions().mode() & 0o111 != 0;
+            }
+            #[cfg(not(unix))]
+            true
+        }
+
+        let path = std::env::var_os("PATH");
+        let resolved_git = path.as_ref().and_then(|value| {
+            std::env::split_paths(value)
+                .flat_map(|directory| [directory.join("git"), directory.join("git.exe")])
+                .find(|candidate| is_executable_file(candidate))
+                .map(|candidate| {
+                    let canonical = candidate.canonicalize().ok();
+                    (candidate, canonical)
+                })
+        });
+        let project_metadata = std::fs::metadata(project)
+            .map(|metadata| {
+                format!(
+                    "is_dir={}, is_file={}, file_type={:?}",
+                    metadata.is_dir(),
+                    metadata.is_file(),
+                    metadata.file_type()
+                )
+            })
+            .map_err(|error| error.to_string());
+        let current_thread = std::thread::current();
+
+        format!(
+            "PATH={path:?}, resolved_git={resolved_git:?}, project_exists={}, \
+             project_is_dir={}, project_metadata={project_metadata:?}, process_cwd={:?}, \
+             thread_name={:?}, thread_id={:?}",
+            project.exists(),
+            project.is_dir(),
+            std::env::current_dir(),
+            current_thread.name(),
+            current_thread.id(),
+        )
+    }
+
+    fn run_git_with_spawn_diagnostics(
+        project: &std::path::Path,
+        args: &[&str],
+    ) -> std::process::Output {
+        let before = git_spawn_snapshot(project);
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(project)
+            .output()
+            .unwrap_or_else(|error| {
+                let after = git_spawn_snapshot(project);
+                panic!(
+                    "git spawn failed for args {args:?}: {error}; before=[{before}]; after=[{after}]"
+                )
+            })
+    }
+
     fn setup_factory_project_with_worker_worktrees(
         workers: &[&str],
     ) -> (tempfile::TempDir, std::path::PathBuf) {
-        use std::process::Command;
-
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let project = tmp.path().join("project");
         std::fs::create_dir_all(&project).unwrap();
 
-        Command::new("git")
-            .args(["init", "-b", "main"])
-            .current_dir(&project)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "user.email", "test@cas"])
-            .current_dir(&project)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "user.name", "CAS Test"])
-            .current_dir(&project)
-            .output()
-            .unwrap();
+        run_git_with_spawn_diagnostics(&project, &["init", "-b", "main"]);
+        run_git_with_spawn_diagnostics(&project, &["config", "user.email", "test@cas"]);
+        run_git_with_spawn_diagnostics(&project, &["config", "user.name", "CAS Test"]);
 
         std::fs::write(project.join("README"), "init").unwrap();
-        Command::new("git")
-            .args(["add", "README"])
-            .current_dir(&project)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "init"])
-            .current_dir(&project)
-            .output()
-            .unwrap();
+        run_git_with_spawn_diagnostics(&project, &["add", "README"]);
+        run_git_with_spawn_diagnostics(&project, &["commit", "-m", "init"]);
 
         let cas_root = project.join(".cas");
         let worktree_root = cas_root.join("worktrees");
@@ -6817,21 +6863,21 @@ effort = "high"
         for worker in workers {
             let branch = format!("factory/{worker}");
             let worktree_path = worktree_root.join(worker);
-            let status = Command::new("git")
-                .args([
+            let output = run_git_with_spawn_diagnostics(
+                &project,
+                &[
                     "worktree",
                     "add",
                     "-b",
                     &branch,
                     worktree_path.to_str().unwrap(),
                     "HEAD",
-                ])
-                .current_dir(&project)
-                .status()
-                .unwrap();
+                ],
+            );
             assert!(
-                status.success(),
-                "git worktree add must succeed for {worker}"
+                output.status.success(),
+                "git worktree add must succeed for {worker}: {}",
+                String::from_utf8_lossy(&output.stderr)
             );
         }
 

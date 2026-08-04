@@ -328,6 +328,9 @@ pub async fn run_daemon_after_fork(
         last_idle_message_times: HashMap::new(),
         last_prompt_poison_sweep: Some(Instant::now()),
         resumed_epic_ids: std::collections::HashSet::new(),
+        spawn_started_at: None,
+        last_spawn_queue_stall_scan: None,
+        reported_stalled_spawn_requests: std::collections::HashSet::new(),
     };
 
     daemon.run().await

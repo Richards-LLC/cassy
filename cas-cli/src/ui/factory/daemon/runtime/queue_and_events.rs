@@ -1064,51 +1064,102 @@ impl FactoryDaemon {
             // the last shared point before inbox/PTY transport, after any
             // queue delay. Ordinary free-form messages have no envelope and
             // deliberately bypass this block unchanged.
+            // cas-6eab (GH #61): tags the row so an unread merge request can
+            // still be retracted from the supervisor's inbox if the merge
+            // lands after this delivery. `None` for every other message.
+            let mut merge_request_task: Option<String> = None;
+
             if let Some(envelope) =
                 crate::prompt_revalidation::parse_merge_request_envelope(&queued.prompt)
             {
                 use crate::mcp::tools::core::task::repo_context::resolve_repo_context;
                 use crate::prompt_revalidation::{
-                    MergeRequestDecision, merge_landed_guidance, revalidate_merge_request,
+                    MergeRequestDelivery, merge_landed_guidance, merge_request_delivery_decision,
+                    merge_request_moot_guidance, revalidate_merge_request,
                 };
 
-                let decision = crate::store::open_task_store_local(self.app.cas_dir())
+                let task = crate::store::open_task_store_local(self.app.cas_dir())
                     .ok()
-                    .and_then(|store| store.get(&envelope.task_id).ok())
-                    .and_then(|task| task.deliverables.work_target)
+                    .and_then(|store| store.get(&envelope.task_id).ok());
+
+                // cas-6eab: revalidate against the branch the REQUEST names,
+                // in whichever checkout we can resolve. cas-bc8c required the
+                // task's resolved repo context to agree with the envelope's
+                // target branch and silently skipped the whole check when it
+                // didn't (or when `work_target` was unset) — a stale request
+                // then sailed through as actionable. The envelope's target is
+                // authoritative here: it is the branch the worker actually
+                // asked the supervisor to merge into. Falling back to the
+                // daemon's own checkout matches how `factory/*` and `epic/*`
+                // refs are resolved everywhere else (`.cas`'s parent).
+                let repo_root = task
+                    .as_ref()
+                    .and_then(|task| task.deliverables.work_target.clone())
                     .and_then(|work_target| {
                         resolve_repo_context(self.app.cas_dir(), &work_target).ok()
                     })
-                    .filter(|repo| repo.target_branch == envelope.target_branch)
-                    .map(|repo| {
-                        revalidate_merge_request(
-                            &repo.repo_root,
-                            &envelope.branch_tip,
-                            &repo.target_branch,
-                        )
+                    .map(|repo| repo.repo_root)
+                    .unwrap_or_else(|| {
+                        self.app
+                            .cas_dir()
+                            .parent()
+                            .unwrap_or(self.app.cas_dir())
+                            .to_path_buf()
                     });
+                let git = revalidate_merge_request(
+                    &repo_root,
+                    &envelope.branch_tip,
+                    &envelope.target_branch,
+                );
 
-                if let Some(MergeRequestDecision::AlreadyIntegrated { target_tip }) = decision {
-                    let guidance = merge_landed_guidance(
-                        &envelope.task_id,
-                        &envelope.branch_tip,
-                        &envelope.target_branch,
-                        &target_tip,
-                    );
+                let (suppress_detail, guidance, summary) = match merge_request_delivery_decision(
+                    task.as_ref().map(|task| task.status),
+                    &git,
+                ) {
+                    MergeRequestDelivery::Deliver => {
+                        merge_request_task = Some(envelope.task_id.clone());
+                        (None, None, "")
+                    }
+                    MergeRequestDelivery::SuppressLanded { target_tip } => (
+                        Some("merge request branch tip already integrated into target".to_string()),
+                        Some(merge_landed_guidance(
+                            &envelope.task_id,
+                            &envelope.branch_tip,
+                            &envelope.target_branch,
+                            &target_tip,
+                        )),
+                        "merge already landed — re-close task",
+                    ),
+                    MergeRequestDelivery::SuppressResolved { status } => (
+                        Some(format!(
+                            "merge request is moot: task is {status}, not awaiting merge"
+                        )),
+                        Some(merge_request_moot_guidance(&envelope.task_id, status)),
+                        "merge request no longer applies",
+                    ),
+                };
+
+                if let (Some(detail), Some(guidance)) = (suppress_detail, guidance) {
                     match queue.enqueue_urgent_with_outcome(
                         "supervisor",
                         &queued.source,
                         &guidance,
                         queued.factory_session.as_deref(),
-                        Some("merge already landed — re-close task"),
+                        Some(summary),
                         Some(cas_store::NotificationPriority::High),
                         false,
                     ) {
                         Ok(_) => {
-                            let _ = queue.mark_suppressed(
-                                queued.id,
-                                Some("merge request branch tip already integrated into target"),
+                            tracing::info!(
+                                target: "cas::coordination",
+                                stage = "suppress_stale_merge_request",
+                                prompt_id = queued.id,
+                                task_id = %envelope.task_id,
+                                detail = %detail,
+                                "cas-6eab: withheld a merge request whose premise no longer holds; \
+                                 notified the worker instead"
                             );
+                            let _ = queue.mark_suppressed(queued.id, Some(&detail));
                             continue;
                         }
                         Err(error) => {
@@ -1541,6 +1592,14 @@ impl FactoryDaemon {
                         self.app.supervisor_name(),
                         chrono::Utc::now(),
                     );
+                    // cas-6eab (GH #61): a merge request that is still live at
+                    // this instant can be satisfied while it sits unread in
+                    // the supervisor's inbox — Claude Code only polls at its
+                    // own turn boundaries. Tagging it with its task id puts it
+                    // under the same `prune_stale_merge_alerts` sweep that
+                    // already retracts the director's MERGE REQUIRED alerts,
+                    // so it withdraws itself once the merge lands instead of
+                    // being read later as an outstanding ask.
                     self.deliver_to_worker_with_idle_nudge(
                         target,
                         &inbox_source,
@@ -1548,6 +1607,7 @@ impl FactoryDaemon {
                         queued.summary.as_deref(),
                         None,
                         worker_is_idle,
+                        merge_request_task.as_deref(),
                     )
                     .await
                 };

@@ -904,22 +904,34 @@ impl FactoryApp {
 
     /// Re-check a state-bearing prompt at the narrowest point before transport
     /// injection. Batch revalidation happens earlier in the tick; a worker
-    /// assignment, epic close, or subtask reopen may land after that snapshot
-    /// and before this prompt's turn in the delivery loop.
+    /// assignment, epic close, subtask reopen, or — cas-6eab (GH #74) — the
+    /// merge this alert is asking for may all land after that snapshot and
+    /// before this prompt's turn in the delivery loop. The merge case is not
+    /// hypothetical: `handle_epic_change` runs merges inside the very same
+    /// tick, between prompt generation and this loop.
     pub(crate) fn prompt_is_still_deliverable(&self, prompt: &Prompt) -> bool {
-        if prompt.retract_epic.is_some() {
+        if prompt.retract_epic.is_some() || prompt.retract_task.is_some() {
             // Failure to load authoritative state is uncertainty: deliver.
             // Never remove a legitimate notification based on cached data.
             return self
                 .try_load_unfiltered_director_data_for_delivery()
-                .map(|data| prompt_is_still_deliverable(prompt, &data))
+                .map(|data| {
+                    prompt_is_still_deliverable(prompt, &data, &self.delivery_repo_root())
+                })
                 .unwrap_or(true);
         }
         if prompt.drop_if_worker_assigned.is_none() {
             return true;
         }
         let data = self.load_unfiltered_director_data_for_delivery();
-        prompt_is_still_deliverable(prompt, &data)
+        prompt_is_still_deliverable(prompt, &data, &self.delivery_repo_root())
+    }
+
+    /// The main checkout every `factory/*` and `epic/*` branch lives in — the
+    /// same derivation used by the send-time merge freshness check above and
+    /// by `close_ops`/`director.rs` (`.cas`'s parent).
+    fn delivery_repo_root(&self) -> std::path::PathBuf {
+        self.cas_dir.parent().unwrap_or(&self.cas_dir).to_path_buf()
     }
 
     /// Refresh CAS data from stores and detect state changes

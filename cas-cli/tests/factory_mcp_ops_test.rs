@@ -44,8 +44,9 @@ struct FactoryTestEnv {
     _temp: TempDir,
     cas_root: PathBuf,
     service: CasService,
-    // Keep process-global HOME/PATH isolation alive for the full fixture
-    // lifetime. `None` means an explicit EnvGuard already owns that isolation.
+    // Keep process-global HOME isolation alive for the full fixture lifetime.
+    // `None` means an explicit EnvGuard already owns that isolation, or an
+    // isolated child supplied HOME/PATH directly on its Command.
     _env_guard: Option<EnvGuard>,
 }
 
@@ -55,14 +56,7 @@ impl FactoryTestEnv {
     }
 
     fn with_agent_id(agent_id: &str) -> Self {
-        Self::with_agent_id_and_env(agent_id, EnvGuard::ensure_codex_available())
-    }
-
-    /// Build the standard service fixture with both Codex availability signals
-    /// deliberately absent. This exercises the real public probe + fallback
-    /// path without depending on the developer or runner host.
-    fn with_codex_unavailable() -> Self {
-        Self::with_agent_id_and_env("test-agent-id", Some(EnvGuard::codex_unavailable()))
+        Self::with_agent_id_and_env(agent_id, EnvGuard::ensure_isolated_home())
     }
 
     fn with_agent_id_and_env(agent_id: &str, env_guard: Option<EnvGuard>) -> Self {
@@ -82,7 +76,7 @@ impl FactoryTestEnv {
     }
 
     fn without_agent_id() -> Self {
-        let env_guard = EnvGuard::ensure_codex_available();
+        let env_guard = EnvGuard::ensure_isolated_home();
         let temp = TempDir::new().expect("Failed to create temp dir");
         let cas_root = init_cas_dir(temp.path()).expect("Failed to init CAS dir");
         let core = CasCore::with_daemon(cas_root.clone(), None, None);
@@ -291,9 +285,10 @@ thread_local! {
 
 /// Factory-specific wrapper around the suite's canonical process-state guard.
 ///
-/// Every `FactoryTestEnv` gets a temporary HOME and controlled PATH. The
-/// default state makes Codex deterministically available with a harmless fake
-/// binary and auth marker; `codex_unavailable` controls both signals absent.
+/// Every `FactoryTestEnv` gets a temporary HOME, making Codex deterministically
+/// unavailable without mutating process-global PATH. Tests that explicitly
+/// exercise Codex availability run in isolated children whose `Command`
+/// supplies both HOME and PATH.
 struct EnvGuard {
     _guard: TestEnvGuard,
 }
@@ -304,7 +299,6 @@ impl EnvGuard {
         for (key, value) in vars {
             guard.set(*key, *value);
         }
-        Self::install_fake_codex(&mut guard);
         Self { _guard: guard }
     }
 
@@ -316,24 +310,15 @@ impl EnvGuard {
                 None => guard.remove(*key),
             }
         }
-        Self::install_fake_codex(&mut guard);
         Self { _guard: guard }
     }
 
-    fn ensure_codex_available() -> Option<Self> {
+    fn ensure_isolated_home() -> Option<Self> {
         if FACTORY_ENV_ACTIVE.with(std::cell::Cell::get) {
             None
         } else {
             Some(Self::set(&[]))
         }
-    }
-
-    fn codex_unavailable() -> Self {
-        let mut guard = Self::begin();
-        let empty_path = guard.home().join("empty-path");
-        std::fs::create_dir(&empty_path).expect("create controlled empty PATH");
-        guard.set("PATH", &empty_path);
-        Self { _guard: guard }
     }
 
     fn begin() -> TestEnvGuard {
@@ -345,13 +330,37 @@ impl EnvGuard {
         });
         TestEnvGuard::temp_home()
     }
+}
 
-    fn install_fake_codex(guard: &mut TestEnvGuard) {
-        use std::os::unix::fs::PermissionsExt;
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        FACTORY_ENV_ACTIVE.with(|active| active.set(false));
+    }
+}
 
-        let fake_bin = guard.home().join("fake-bin");
-        std::fs::create_dir(&fake_bin).expect("create fake binary directory");
-        let codex = fake_bin.join("codex");
+#[derive(Clone, Copy)]
+enum IsolatedCodexState {
+    Available,
+    Unavailable,
+}
+
+/// Run one availability-sensitive integration test in its own process.
+///
+/// The production probe reads process HOME/PATH internally, so a per-Command
+/// environment can reach it only when the whole service call runs in this
+/// child. The parent test process never mutates PATH.
+fn run_isolated_codex_test(child_test: &str, state: IsolatedCodexState) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = TempDir::new().expect("isolated Codex child HOME");
+    let bin_dir = home.path().join(match state {
+        IsolatedCodexState::Available => "fake-bin",
+        IsolatedCodexState::Unavailable => "empty-path",
+    });
+    std::fs::create_dir(&bin_dir).expect("create isolated child PATH");
+
+    if matches!(state, IsolatedCodexState::Available) {
+        let codex = bin_dir.join("codex");
         std::fs::write(&codex, "#!/bin/sh\nprintf 'codex-cli 0.0.0-test\\n'\n")
             .expect("write fake codex executable");
         let mut permissions = std::fs::metadata(&codex)
@@ -360,25 +369,84 @@ impl EnvGuard {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&codex, permissions).expect("chmod fake codex executable");
 
-        let home = std::env::var_os("HOME").expect("factory test HOME");
-        let auth = PathBuf::from(home).join(".codex/auth.json");
+        let auth = home.path().join(".codex/auth.json");
         std::fs::create_dir_all(auth.parent().expect("auth parent"))
             .expect("create fake codex auth directory");
         std::fs::write(auth, "{}").expect("write fake codex auth marker");
-
-        let mut paths = vec![fake_bin];
-        if let Some(path) = std::env::var_os("PATH") {
-            paths.extend(std::env::split_paths(&path));
-        }
-        let path = std::env::join_paths(paths).expect("join controlled factory PATH");
-        guard.set("PATH", path);
     }
+
+    let output = std::process::Command::new(
+        std::env::current_exe().expect("current integration-test executable"),
+    )
+    .args(["--exact", child_test, "--ignored", "--nocapture"])
+    .env("CAS_FACTORY_CODEX_ISOLATED_CHILD", child_test)
+    .env("HOME", home.path())
+    .env("PATH", &bin_dir)
+    .output()
+    .expect("spawn isolated Codex integration test");
+
+    assert!(
+        output.status.success(),
+        "isolated Codex child {child_test} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(child_test) && stdout.contains("test result: ok"),
+        "isolated helper did not execute {child_test}:\n{stdout}"
+    );
 }
 
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        FACTORY_ENV_ACTIVE.with(|active| active.set(false));
+fn factory_env_in_isolated_codex_child(child_test: &str) -> FactoryTestEnv {
+    assert_eq!(
+        std::env::var("CAS_FACTORY_CODEX_ISOLATED_CHILD").as_deref(),
+        Ok(child_test),
+        "isolated helper must run only through its matching parent test"
+    );
+    FactoryTestEnv::with_agent_id_and_env("test-agent-id", None)
+}
+
+/// cas-5270: the lib-test invariant in `src/lib.rs` covers `src/`; this
+/// companion covers every integration test source. A guarded PATH writer is
+/// still observable by an unguarded subprocess spawn in another parallel test,
+/// so integration tests must use `Command::env` instead of process mutation.
+#[test]
+fn integration_test_process_path_mutation_is_isolated() {
+    fn visit(dir: &std::path::Path, hits: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).expect("read integration-test directory") {
+            let path = entry.expect("integration-test entry").path();
+            if path.is_dir() {
+                visit(&path, hits);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let source = std::fs::read_to_string(&path).expect("read integration-test source");
+                for (line_index, line) in source.lines().enumerate() {
+                    let mutates_process_path = line.contains("set_var(\"PATH\"")
+                        || line.contains("remove_var(\"PATH\"")
+                        || line.contains(".set(\"PATH\"")
+                        || line.contains(".remove(\"PATH\"")
+                        || (line.contains("(\"PATH\",")
+                            && !line.contains(".env(\"PATH\","));
+                    if mutates_process_path {
+                        hits.push(format!("{}:{}", path.display(), line_index + 1));
+                    }
+                }
+            }
+        }
     }
+
+    let mut hits = Vec::new();
+    visit(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .as_path(),
+        &mut hits,
+    );
+    assert!(
+        hits.is_empty(),
+        "integration tests must not mutate process-global PATH; use per-Command environment: \
+         {hits:?}"
+    );
 }
 
 fn factory_req(action: &str) -> FactoryRequest {
@@ -933,9 +1001,19 @@ async fn test_spawn_workers_enqueues_with_epic() {
     assert_eq!(entries[0].worker_names, vec!["alpha", "beta", "gamma"]);
 }
 
+#[test]
+fn test_spawn_workers_isolate_flag() {
+    run_isolated_codex_test(
+        "test_spawn_workers_isolate_flag_in_isolated_child",
+        IsolatedCodexState::Available,
+    );
+}
+
 #[tokio::test]
-async fn test_spawn_workers_isolate_flag() {
-    let env = FactoryTestEnv::new();
+#[ignore = "subprocess helper for deterministic available-Codex probe"]
+async fn test_spawn_workers_isolate_flag_in_isolated_child() {
+    let env =
+        factory_env_in_isolated_codex_child("test_spawn_workers_isolate_flag_in_isolated_child");
     env.create_epic("Test Epic");
 
     let mut req = factory_req("spawn_workers");
@@ -1139,12 +1217,23 @@ async fn test_spawn_workers_closed_epic_not_counted() {
 }
 
 // cas-2992: spawn_workers with cli/model/effort overrides
+#[test]
+fn test_spawn_workers_codex_available_enqueues_codex_spec() {
+    run_isolated_codex_test(
+        "test_spawn_workers_codex_available_enqueues_codex_spec_in_isolated_child",
+        IsolatedCodexState::Available,
+    );
+}
+
 #[tokio::test]
-async fn test_spawn_workers_codex_available_enqueues_codex_spec() {
-    // FactoryTestEnv provides both availability signals hermetically: a fake
+#[ignore = "subprocess helper for deterministic available-Codex probe"]
+async fn test_spawn_workers_codex_available_enqueues_codex_spec_in_isolated_child() {
+    // The child provides both availability signals hermetically: a fake
     // `codex --version` executable and a temp-HOME auth marker. The queued
     // SpawnRequest.worker_spec must therefore preserve the requested harness.
-    let env = FactoryTestEnv::new();
+    let env = factory_env_in_isolated_codex_child(
+        "test_spawn_workers_codex_available_enqueues_codex_spec_in_isolated_child",
+    );
     env.create_epic("Test Epic");
 
     let fake_version = std::process::Command::new("codex")
@@ -1156,8 +1245,8 @@ async fn test_spawn_workers_codex_available_enqueues_codex_spec() {
         "codex-cli 0.0.0-test\n",
         "the fixture must resolve its fake codex, never the host binary"
     );
-    let auth = PathBuf::from(std::env::var_os("HOME").expect("controlled HOME"))
-        .join(".codex/auth.json");
+    let auth =
+        PathBuf::from(std::env::var_os("HOME").expect("controlled HOME")).join(".codex/auth.json");
     assert!(auth.is_file(), "controlled auth marker must exist");
 
     let mut req = factory_req("spawn_workers");
@@ -1183,12 +1272,23 @@ async fn test_spawn_workers_codex_available_enqueues_codex_spec() {
     );
 }
 
+#[test]
+fn test_spawn_workers_codex_unavailable_falls_back_to_claude() {
+    run_isolated_codex_test(
+        "test_spawn_workers_codex_unavailable_falls_back_to_claude_in_isolated_child",
+        IsolatedCodexState::Unavailable,
+    );
+}
+
 #[tokio::test]
-async fn test_spawn_workers_codex_unavailable_falls_back_to_claude() {
-    // The dedicated fixture removes BOTH independent availability signals:
-    // PATH has no codex executable and temp HOME has no auth marker. This
-    // deliberately exercises the real public probe + fallback composition.
-    let env = FactoryTestEnv::with_codex_unavailable();
+#[ignore = "subprocess helper for deterministic unavailable-Codex probe"]
+async fn test_spawn_workers_codex_unavailable_falls_back_to_claude_in_isolated_child() {
+    // The child removes BOTH independent availability signals: PATH has no
+    // codex executable and temp HOME has no auth marker. This deliberately
+    // exercises the real public probe + fallback composition.
+    let env = factory_env_in_isolated_codex_child(
+        "test_spawn_workers_codex_unavailable_falls_back_to_claude_in_isolated_child",
+    );
     env.create_epic("Test Epic");
 
     let binary_error = std::process::Command::new("codex")
@@ -1196,8 +1296,8 @@ async fn test_spawn_workers_codex_unavailable_falls_back_to_claude() {
         .output()
         .expect_err("controlled unavailable PATH must not resolve host codex");
     assert_eq!(binary_error.kind(), std::io::ErrorKind::NotFound);
-    let auth = PathBuf::from(std::env::var_os("HOME").expect("controlled HOME"))
-        .join(".codex/auth.json");
+    let auth =
+        PathBuf::from(std::env::var_os("HOME").expect("controlled HOME")).join(".codex/auth.json");
     assert!(
         !auth.is_file(),
         "controlled unavailable HOME must not contain auth"
@@ -1248,11 +1348,22 @@ async fn test_spawn_workers_invalid_cli_returns_error() {
     );
 }
 
+#[test]
+fn test_spawn_workers_no_cli_override_queues_safe_worker_spec() {
+    run_isolated_codex_test(
+        "test_spawn_workers_no_cli_override_queues_safe_worker_spec_in_isolated_child",
+        IsolatedCodexState::Available,
+    );
+}
+
 #[tokio::test]
-async fn test_spawn_workers_no_cli_override_queues_safe_worker_spec() {
+#[ignore = "subprocess helper for deterministic available-Codex probe"]
+async fn test_spawn_workers_no_cli_override_queues_safe_worker_spec_in_isolated_child() {
     // Without cli/model/effort fields, worker_spec resolves to the safe worker
     // floor instead of inheriting the supervisor session defaults.
-    let env = FactoryTestEnv::new();
+    let env = factory_env_in_isolated_codex_child(
+        "test_spawn_workers_no_cli_override_queues_safe_worker_spec_in_isolated_child",
+    );
     env.create_epic("Test Epic");
 
     let mut req = factory_req("spawn_workers");
@@ -1269,10 +1380,7 @@ async fn test_spawn_workers_no_cli_override_queues_safe_worker_spec() {
         .expect("no cli/model/effort should still queue a resolved worker_spec");
     let spec: cas_mux::WorkerSpec = serde_json::from_str(spec_json).expect("valid WorkerSpec");
     assert_eq!(spec.cli, cas_mux::SupervisorCli::Codex);
-    assert_eq!(
-        spec.model.as_deref(),
-        Some(cas::config::STOCK_WORKER_MODEL)
-    );
+    assert_eq!(spec.model.as_deref(), Some(cas::config::STOCK_WORKER_MODEL));
     assert_eq!(spec.effort, Some(cas_mux::Effort::Medium));
 }
 
@@ -3536,9 +3644,20 @@ async fn test_coordination_interrupt_action_is_urgent() {
 /// This pins the spawn-queue contract for heterogeneous sessions so a
 /// regression in `build_spawn_spec_json` or the `spawn_workers` handler is
 /// caught at test time, not at factory-start time.
+#[test]
+fn test_efc4_heterogeneous_codex_then_claude_spawn_queued_correctly() {
+    run_isolated_codex_test(
+        "test_efc4_heterogeneous_codex_then_claude_spawn_queued_correctly_in_isolated_child",
+        IsolatedCodexState::Available,
+    );
+}
+
 #[tokio::test]
-async fn test_efc4_heterogeneous_codex_then_claude_spawn_queued_correctly() {
-    let env = FactoryTestEnv::new();
+#[ignore = "subprocess helper for deterministic available-Codex probe"]
+async fn test_efc4_heterogeneous_codex_then_claude_spawn_queued_correctly_in_isolated_child() {
+    let env = factory_env_in_isolated_codex_child(
+        "test_efc4_heterogeneous_codex_then_claude_spawn_queued_correctly_in_isolated_child",
+    );
     env.create_epic("Heterogeneous Smoke Epic");
 
     // --- Codex worker with model + effort overrides ---
@@ -3597,10 +3716,7 @@ async fn test_efc4_heterogeneous_codex_then_claude_spawn_queued_correctly() {
         .expect("cas-23dc: omitted overrides must still queue a resolved worker_spec");
     let spec: cas_mux::WorkerSpec = serde_json::from_str(spec_json).expect("valid WorkerSpec");
     assert_eq!(spec.cli, cas_mux::SupervisorCli::Codex);
-    assert_eq!(
-        spec.model.as_deref(),
-        Some(cas::config::STOCK_WORKER_MODEL)
-    );
+    assert_eq!(spec.model.as_deref(), Some(cas::config::STOCK_WORKER_MODEL));
     assert_eq!(spec.effort, Some(cas_mux::Effort::Medium));
 }
 
@@ -3608,9 +3724,20 @@ async fn test_efc4_heterogeneous_codex_then_claude_spawn_queued_correctly() {
 /// for both Codex and Claude harnesses.  Tests the cross-product so that a
 /// future change to `build_spawn_spec_json` for one harness doesn't silently
 /// break the other.
+#[test]
+fn test_efc4_model_and_effort_reach_spawn_spec_for_each_harness() {
+    run_isolated_codex_test(
+        "test_efc4_model_and_effort_reach_spawn_spec_for_each_harness_in_isolated_child",
+        IsolatedCodexState::Available,
+    );
+}
+
 #[tokio::test]
-async fn test_efc4_model_and_effort_reach_spawn_spec_for_each_harness() {
-    let env = FactoryTestEnv::new();
+#[ignore = "subprocess helper for deterministic available-Codex probe"]
+async fn test_efc4_model_and_effort_reach_spawn_spec_for_each_harness_in_isolated_child() {
+    let env = factory_env_in_isolated_codex_child(
+        "test_efc4_model_and_effort_reach_spawn_spec_for_each_harness_in_isolated_child",
+    );
     env.create_epic("Spec Propagation Epic");
 
     // Codex with model+effort

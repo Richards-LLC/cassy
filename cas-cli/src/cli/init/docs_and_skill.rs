@@ -17,7 +17,9 @@ First use each session — load MCP schemas: ToolSearch(query="select:mcp__cas__
 - `mcp__cas__memory` with action: remember - Store memories and learnings
 - `mcp__cas__search` with action: search - Search all context
 
-CAS provides persistent context across sessions. Built-in tools are ephemeral."#;
+CAS provides persistent context across sessions. Built-in tools are ephemeral.
+
+Release notes: every PR merged to `staging` or `main` must be announced in Slack per `docs/release-notes/RUBRIC.md` (run the `release-notes` skill; it installs the rubric if missing)."#;
 
 /// Build the full CAS section with markers
 pub(crate) fn build_cas_section() -> String {
@@ -305,6 +307,23 @@ mod tests {
         assert!(
             section.contains("ToolSearch only loads the schema — it does not call the tool"),
             "Managed block must clarify ToolSearch is a discovery step, not a call; got:\n{section}"
+        );
+    }
+
+    /// GH #65: the CAS-managed block must breadcrumb the release-notes rubric
+    /// so every CAS project inherits the "announce every staging/main merge"
+    /// expectation instead of it living only in one project's hand-edited
+    /// CLAUDE.md.
+    #[test]
+    fn template_breadcrumbs_release_notes_rubric() {
+        let section = build_cas_section();
+        assert!(
+            section.contains("docs/release-notes/RUBRIC.md"),
+            "Managed block must point at the release-notes rubric; got:\n{section}"
+        );
+        assert!(
+            section.contains("staging") && section.contains("main"),
+            "Managed block breadcrumb must name the staging/main merge trigger; got:\n{section}"
         );
     }
 

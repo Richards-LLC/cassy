@@ -1432,6 +1432,16 @@ impl CasCore {
         // when a receipt was supplied). The merge-state guard now needs the
         // same work-cycle window to tell this task's commits apart from a
         // reused lane's prior-task residue, receipt or no receipt.
+        // cas-9596: attribution evidence for commits this task produced in ANY
+        // cycle, under any assignee — the parked factory anchor, the durable
+        // worker delivery receipt, and the task id itself.
+        let task_commit_identity = task_commit_identity(
+            &task,
+            cas_store::get_latest_worker_delivery(&self.cas_root, &task.id)
+                .ok()
+                .flatten()
+                .map(|(receipt, _)| receipt.commit_sha),
+        );
         let commit_receipt_window = {
             let lease_history = self
                 .open_agent_store()
@@ -1441,6 +1451,7 @@ impl CasCore {
             Some(resolve_task_commit_receipt_window(
                 task.created_at,
                 &lease_history,
+                task_commit_identity.clone(),
             ))
         };
         if task.task_type != TaskType::Epic && task.assignee.is_some() {
@@ -2583,6 +2594,7 @@ impl CasCore {
                     worker_wt,
                     &resolved_parent_branch,
                     task.deliverables.factory_branch_anchor.as_deref(),
+                    &task_commit_identity,
                 );
                 if !violations.is_empty() {
                     let file_list = violations
@@ -4003,6 +4015,204 @@ pub(crate) struct AdditiveOnlyViolation {
     pub path: String,
 }
 
+/// cas-9596 (GH #82): evidence that a commit belongs to one task, regardless
+/// of which assignee produced it.
+///
+/// A task can span several workers and work cycles — worker 1 pushes WIP and
+/// dies, the supervisor preserves it, worker 2 finishes. Commits from those
+/// earlier cycles are still *this task's* work, so gates that ask "was this
+/// pre-existing / foreign?" must be able to recognize them.
+///
+/// Empty (`default()`) means "attribution unavailable", which reproduces the
+/// pre-cas-9596 behavior: nothing is recognized as the task's own.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct TaskCommitIdentity {
+    /// The task id, matched as a whole token against commit messages.
+    pub task_id: Option<String>,
+    /// Commit ids CAS durably recorded for this task (parked factory anchor,
+    /// worker delivery receipts). Exact evidence that needs no convention.
+    pub known_commits: Vec<String>,
+}
+
+impl TaskCommitIdentity {
+    fn is_empty(&self) -> bool {
+        self.task_id.is_none() && self.known_commits.is_empty()
+    }
+
+    /// True when `commit` is one of the durably recorded task commits.
+    ///
+    /// Both sides are git object ids, so a prefix match in either direction is
+    /// the same commit (CAS records full ids; git may hand back an
+    /// abbreviation).
+    fn matches_known_commit(&self, commit: &str) -> bool {
+        let commit = commit.trim().to_ascii_lowercase();
+        if commit.is_empty() {
+            return false;
+        }
+        self.known_commits.iter().any(|known| {
+            let known = known.trim().to_ascii_lowercase();
+            !known.is_empty() && (known.starts_with(&commit) || commit.starts_with(&known))
+        })
+    }
+}
+
+/// Collect every durable commit id CAS recorded for this task, plus the task
+/// id itself, into one attribution record.
+///
+/// `latest_delivery_commit` is the commit sha from the task's most recent
+/// worker delivery receipt (the caller reads it from the delivery store).
+pub(crate) fn task_commit_identity(
+    task: &Task,
+    latest_delivery_commit: Option<String>,
+) -> TaskCommitIdentity {
+    let mut known_commits: Vec<String> = task
+        .deliverables
+        .factory_branch_anchor
+        .iter()
+        .cloned()
+        .chain(latest_delivery_commit)
+        .map(|commit| commit.trim().to_string())
+        .filter(|commit| !commit.is_empty())
+        .collect();
+    known_commits.dedup();
+    TaskCommitIdentity {
+        task_id: Some(task.id.clone()),
+        known_commits,
+    }
+}
+
+/// True when `message` references `task_id` as a whole token.
+///
+/// Guards against prefix collisions: `cas-f1b12` must not be read as a
+/// reference to `cas-f1b1`.
+pub(crate) fn message_references_task(message: &str, task_id: &str) -> bool {
+    if task_id.is_empty() {
+        return false;
+    }
+    let haystack = message.to_ascii_lowercase();
+    let needle = task_id.to_ascii_lowercase();
+    let boundary = |character: Option<char>| {
+        character.is_none_or(|character| !character.is_ascii_alphanumeric() && character != '-')
+    };
+    let mut offset = 0;
+    while let Some(found) = haystack[offset..].find(&needle) {
+        let start = offset + found;
+        let end = start + needle.len();
+        let before = haystack[..start].chars().next_back();
+        let after = haystack[end..].chars().next();
+        if boundary(before) && boundary(after) {
+            return true;
+        }
+        offset = start + 1;
+    }
+    false
+}
+
+/// True when `commit` is attributable to the task described by `identity`.
+///
+/// Two independent signals, either sufficient: a durably recorded task commit
+/// id, or a commit message that names the task. Returns false when attribution
+/// evidence is unavailable — callers use this to *relax* a gate, so an unknown
+/// commit must stay unattributed.
+pub(crate) fn commit_is_task_attributable(
+    repo_path: &std::path::Path,
+    commit: &str,
+    identity: &TaskCommitIdentity,
+) -> bool {
+    use std::process::Command;
+
+    if commit.is_empty() || commit.starts_with('-') || identity.is_empty() {
+        return false;
+    }
+    if identity.matches_known_commit(commit) {
+        return true;
+    }
+    let Some(task_id) = identity.task_id.as_deref() else {
+        return false;
+    };
+    let message = Command::new("git")
+        .args(["log", "-1", "--format=%B", commit, "--"])
+        .current_dir(repo_path)
+        .output();
+    match message {
+        Ok(output) if output.status.success() => {
+            message_references_task(&String::from_utf8_lossy(&output.stdout), task_id)
+        }
+        _ => false,
+    }
+}
+
+/// True when every commit that ever touched `path` up to `base_rev` belongs to
+/// this task — i.e. the "pre-existing" version the diff compares against is the
+/// task's own earlier work (GH #82 step 3), not foreign code.
+///
+/// Fails closed: unknowable git state, no history for the path, or a single
+/// unattributable commit all mean "genuinely pre-existing".
+fn pre_image_is_task_owned(
+    repo_path: &std::path::Path,
+    base_rev: &str,
+    path: &str,
+    identity: &TaskCommitIdentity,
+) -> bool {
+    use std::process::Command;
+
+    /// A path touched by more commits than this was not produced by one task's
+    /// WIP; scanning further would only burn git calls. Fail closed instead.
+    const MAX_PRE_IMAGE_COMMITS: usize = 500;
+
+    if identity.is_empty() || base_rev.is_empty() || base_rev.starts_with('-') {
+        return false;
+    }
+    // One git call for the whole path history: `%H<US>%B<RS>` records, so
+    // attribution never costs a subprocess per commit.
+    let history = Command::new("git")
+        .args(["log", "--format=%H%x1f%B%x1e", base_rev, "--", path])
+        .current_dir(repo_path)
+        .output();
+    let Ok(history) = history else {
+        return false;
+    };
+    if !history.status.success() {
+        return false;
+    }
+    let stdout = String::from_utf8_lossy(&history.stdout);
+    let records: Vec<&str> = stdout
+        .split('\u{1e}')
+        .map(str::trim)
+        .filter(|record| !record.is_empty())
+        .collect();
+    if records.is_empty() || records.len() > MAX_PRE_IMAGE_COMMITS {
+        return false;
+    }
+    records.iter().all(|record| {
+        let (commit, message) = record.split_once('\u{1f}').unwrap_or((record, ""));
+        let commit = commit.trim();
+        identity.matches_known_commit(commit)
+            || identity
+                .task_id
+                .as_deref()
+                .is_some_and(|task_id| message_references_task(message, task_id))
+    })
+}
+
+/// Drop violations whose pre-existing version was produced by this same task.
+fn retain_foreign_violations(
+    repo_path: &std::path::Path,
+    base_rev: &str,
+    identity: &TaskCommitIdentity,
+    violations: Vec<AdditiveOnlyViolation>,
+) -> Vec<AdditiveOnlyViolation> {
+    if identity.is_empty() || violations.is_empty() {
+        return violations;
+    }
+    violations
+        .into_iter()
+        .filter(|violation| {
+            !pre_image_is_task_owned(repo_path, base_rev, &violation.path, identity)
+        })
+        .collect()
+}
+
 /// A single uncommitted-work entry: a tracked file that `git status` reports
 /// as modified, deleted, added-but-not-committed, renamed, or copied.
 ///
@@ -4089,10 +4299,16 @@ pub(crate) fn check_uncommitted_work(project_root: &std::path::Path) -> Vec<Unco
 /// Graceful degradation: if the worktree isn't a git repo, git can't
 /// find `parent_branch`, or the merge-base computation fails, returns
 /// an empty vec. The gate is advisory when git state is unknowable.
+/// cas-9596 (GH #82): whichever window is used, a file whose pre-existing
+/// version came from this same task's earlier commits (a dead worker's WIP
+/// that the supervisor preserved) is not "pre-existing code" — `identity`
+/// filters those out. Pass [`TaskCommitIdentity::default`] when attribution is
+/// unavailable; the gate then behaves exactly as it did before.
 pub(crate) fn check_additive_only_branch_violations(
     worker_worktree_path: &std::path::Path,
     parent_branch: &str,
     factory_branch_anchor: Option<&str>,
+    identity: &TaskCommitIdentity,
 ) -> Vec<AdditiveOnlyViolation> {
     use std::process::Command;
 
@@ -4123,9 +4339,12 @@ pub(crate) fn check_additive_only_branch_violations(
                                 .current_dir(worker_worktree_path)
                                 .output();
                             return match diff_out {
-                                Ok(o) if o.status.success() => {
-                                    parse_name_status(&String::from_utf8_lossy(&o.stdout))
-                                }
+                                Ok(o) if o.status.success() => retain_foreign_violations(
+                                    worker_worktree_path,
+                                    commits[1],
+                                    identity,
+                                    parse_name_status(&String::from_utf8_lossy(&o.stdout)),
+                                ),
                                 _ => Vec::new(),
                             };
                         }
@@ -4136,14 +4355,18 @@ pub(crate) fn check_additive_only_branch_violations(
             // Fast-forward or squash-less integration without a merge commit:
             // the parked tip itself is still the narrowest reliable task
             // window available (and is the documented fallback for cas-3f7f).
+            let anchor_parent = format!("{anchor}^");
             let diff_out = Command::new("git")
-                .args(["diff", "--name-status", &format!("{anchor}^"), anchor])
+                .args(["diff", "--name-status", &anchor_parent, anchor])
                 .current_dir(worker_worktree_path)
                 .output();
             return match diff_out {
-                Ok(o) if o.status.success() => {
-                    parse_name_status(&String::from_utf8_lossy(&o.stdout))
-                }
+                Ok(o) if o.status.success() => retain_foreign_violations(
+                    worker_worktree_path,
+                    &anchor_parent,
+                    identity,
+                    parse_name_status(&String::from_utf8_lossy(&o.stdout)),
+                ),
                 _ => Vec::new(),
             };
         }
@@ -4170,7 +4393,12 @@ pub(crate) fn check_additive_only_branch_violations(
         .current_dir(worker_worktree_path)
         .output();
     match diff_out {
-        Ok(o) if o.status.success() => parse_name_status(&String::from_utf8_lossy(&o.stdout)),
+        Ok(o) if o.status.success() => retain_foreign_violations(
+            worker_worktree_path,
+            &merge_base,
+            identity,
+            parse_name_status(&String::from_utf8_lossy(&o.stdout)),
+        ),
         _ => Vec::new(),
     }
 }
@@ -6109,6 +6337,13 @@ const COMMIT_RECEIPT_CLOCK_SKEW_SECS: i64 = 5;
 pub(crate) struct TaskCommitReceiptWindow {
     pub not_before: chrono::DateTime<chrono::Utc>,
     pub basis: &'static str,
+    /// cas-9596 (GH #82): lower bound of the task's ENTIRE life, not just the
+    /// current cycle. A restart moves `not_before` forward without producing
+    /// any commits; work from an earlier cycle of the same task still sits
+    /// above this floor and must remain valid evidence.
+    pub task_floor: chrono::DateTime<chrono::Utc>,
+    /// Evidence used to recognize an earlier cycle's commit as this task's own.
+    pub identity: TaskCommitIdentity,
 }
 
 /// Prefer the most recent claim/transfer (the current work cycle), falling
@@ -6116,6 +6351,7 @@ pub(crate) struct TaskCommitReceiptWindow {
 pub(crate) fn resolve_task_commit_receipt_window(
     task_created_at: chrono::DateTime<chrono::Utc>,
     lease_history: &[cas_store::LeaseHistoryEntry],
+    identity: TaskCommitIdentity,
 ) -> TaskCommitReceiptWindow {
     let cycle_start = lease_history
         .iter()
@@ -6126,10 +6362,14 @@ pub(crate) fn resolve_task_commit_receipt_window(
         Some(timestamp) if timestamp > task_created_at => TaskCommitReceiptWindow {
             not_before: timestamp,
             basis: "latest task lease claim/transfer",
+            task_floor: task_created_at,
+            identity,
         },
         _ => TaskCommitReceiptWindow {
             not_before: task_created_at,
             basis: "task creation time (lease-history fallback)",
+            task_floor: task_created_at,
+            identity,
         },
     }
 }
@@ -6297,13 +6537,35 @@ pub(crate) fn validate_task_commit_receipt(
         .trim()
         .parse::<i64>()
         .map_err(|_| "git returned an invalid commit timestamp".to_string())?;
+    // cas-9596 (GH #82 step 6): an administrative restart — supervisor clears a
+    // note, worker re-`start`s, no new commits — moves the work-cycle bound past
+    // a delivery that is already merged and ancestry-verified above. That
+    // receipt is still this task's own work, so the cycle bound yields when the
+    // commit is attributable to the task and postdates the task itself. A
+    // foreign commit, or one older than the task, is still refused.
     let earliest_allowed = window.not_before.timestamp() - COMMIT_RECEIPT_CLOCK_SKEW_SECS;
+    let mut prior_cycle_basis = None;
     if commit_epoch < earliest_allowed {
-        return Err(format!(
-            "the commit predates this task work cycle (commit epoch {commit_epoch}; \
-             earliest accepted epoch {earliest_allowed}, based on {})",
-            window.basis
-        ));
+        let task_floor = window.task_floor.timestamp() - COMMIT_RECEIPT_CLOCK_SKEW_SECS;
+        if commit_epoch >= task_floor
+            && commit_is_task_attributable(repo_path, &full_receipt, &window.identity)
+        {
+            prior_cycle_basis = Some(format!(
+                " The commit predates the current work cycle beginning {} ({}), but it is \
+                 attributable to an earlier work cycle of this task, postdates the task itself \
+                 ({}), and is already merged — an administrative restart does not invalidate a \
+                 delivery that already landed.",
+                window.not_before.to_rfc3339(),
+                window.basis,
+                window.task_floor.to_rfc3339(),
+            ));
+        } else {
+            return Err(format!(
+                "the commit predates this task work cycle (commit epoch {commit_epoch}; \
+                 earliest accepted epoch {earliest_allowed}, based on {})",
+                window.basis
+            ));
+        }
     }
 
     let diff = Command::new("git")
@@ -6332,10 +6594,11 @@ pub(crate) fn validate_task_commit_receipt(
          as task-attributed merge evidence; \
          commit epoch {commit_epoch} is within the current task work cycle beginning {} \
          (basis: {}; {}s clock-skew allowance), the commit is merged into \
-         {parent_branch}/origin/{parent_branch}, and its merge-aware file diff is non-empty.",
+         {parent_branch}/origin/{parent_branch}, and its merge-aware file diff is non-empty.{}",
         window.not_before.to_rfc3339(),
         window.basis,
-        COMMIT_RECEIPT_CLOCK_SKEW_SECS
+        COMMIT_RECEIPT_CLOCK_SKEW_SECS,
+        prior_cycle_basis.unwrap_or_default()
     ))
 }
 
@@ -7803,7 +8066,15 @@ mod additive_only_tests {
     #[test]
     fn branch_check_non_git_returns_empty() {
         let dir = tempdir().unwrap();
-        assert!(check_additive_only_branch_violations(dir.path(), "main", None).is_empty());
+        assert!(
+            check_additive_only_branch_violations(
+                dir.path(),
+                "main",
+                None,
+                &TaskCommitIdentity::default()
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -7812,7 +8083,12 @@ mod additive_only_tests {
         // fails → empty. The gate must not fire when it can't reason
         // about history.
         let dir = init_branched_repo();
-        let v = check_additive_only_branch_violations(dir.path(), "nope", None);
+        let v = check_additive_only_branch_violations(
+            dir.path(),
+            "nope",
+            None,
+            &TaskCommitIdentity::default(),
+        );
         assert!(v.is_empty(), "unknown parent must no-op, got: {v:?}");
     }
 
@@ -7821,7 +8097,12 @@ mod additive_only_tests {
         // factory/worker has the same HEAD as main → no commits → no
         // violations.
         let dir = init_branched_repo();
-        let v = check_additive_only_branch_violations(dir.path(), "main", None);
+        let v = check_additive_only_branch_violations(
+            dir.path(),
+            "main",
+            None,
+            &TaskCommitIdentity::default(),
+        );
         assert!(v.is_empty(), "branch with no commits must be clean: {v:?}");
     }
 
@@ -7833,7 +8114,12 @@ mod additive_only_tests {
         std::fs::write(dir.path().join("new.rs"), "fn main() {}\n").unwrap();
         git(dir.path(), &["add", "new.rs"]);
         git(dir.path(), &["commit", "-q", "-m", "feat: new.rs"]);
-        let v = check_additive_only_branch_violations(dir.path(), "main", None);
+        let v = check_additive_only_branch_violations(
+            dir.path(),
+            "main",
+            None,
+            &TaskCommitIdentity::default(),
+        );
         assert!(
             v.is_empty(),
             "purely additive branch commit must pass: {v:?}"
@@ -7851,7 +8137,12 @@ mod additive_only_tests {
             dir.path(),
             &["commit", "-q", "-m", "fix: edit existing.txt"],
         );
-        let v = check_additive_only_branch_violations(dir.path(), "main", None);
+        let v = check_additive_only_branch_violations(
+            dir.path(),
+            "main",
+            None,
+            &TaskCommitIdentity::default(),
+        );
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].path, "existing.txt");
         assert!(v[0].status.starts_with('M'));
@@ -7880,11 +8171,236 @@ mod additive_only_tests {
             &["merge", "-q", "--no-ff", "factory/task", "-m", "merge task"],
         );
 
-        let v = check_additive_only_branch_violations(dir.path(), "epic", Some(anchor.as_str()));
+        let v = check_additive_only_branch_violations(
+            dir.path(),
+            "epic",
+            Some(anchor.as_str()),
+            &TaskCommitIdentity::default(),
+        );
         assert!(
             v.is_empty(),
             "pre-existing epic modifications must not count against the task: {v:?}"
         );
+    }
+
+    /// GH #82 steps 1-3: worker 1 commits a WIP file for THIS task and dies;
+    /// the supervisor merges the WIP into the epic to preserve it. Worker 2
+    /// finishes the same task, superseding that file. The epic diff then shows
+    /// the file as Modified — but its only prior version is the task's own WIP,
+    /// so an additive-only close must not be rejected for it.
+    ///
+    /// Fixture shape: WIP merged into the epic BEFORE worker 2 branches, then
+    /// worker 2's branch is merged and the anchor path scopes the diff.
+    fn init_same_task_wip_repo(wip_message: &str) -> (tempfile::TempDir, String, String) {
+        let dir = init_branched_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["checkout", "-q", "-b", "epic"]);
+        // Worker 1's preserved WIP for the same task.
+        std::fs::write(p.join("feature.rs"), "// wip\n").unwrap();
+        git(p, &["add", "feature.rs"]);
+        git(p, &["commit", "-q", "-m", wip_message]);
+        let wip_sha = git_output(p, &["rev-parse", "HEAD"]);
+        // Worker 2 branches from the epic that already carries the WIP.
+        git(p, &["checkout", "-q", "-b", "factory/worker-two"]);
+        std::fs::write(p.join("feature.rs"), "// finished\n").unwrap();
+        git(p, &["add", "feature.rs"]);
+        git(
+            p,
+            &["commit", "-q", "-m", "feat(cas-f1b1): finish the feature"],
+        );
+        let anchor = git_output(p, &["rev-parse", "HEAD"]);
+        git(p, &["checkout", "-q", "epic"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "factory/worker-two",
+                "-m",
+                "merge worker two",
+            ],
+        );
+        (dir, anchor, wip_sha)
+    }
+
+    #[test]
+    fn branch_check_same_task_wip_is_not_a_pre_existing_modification() {
+        let (dir, anchor, _) = init_same_task_wip_repo("wip(cas-f1b1): partial feature");
+
+        // Without attribution this is the GH #82 false positive.
+        let blind = check_additive_only_branch_violations(
+            dir.path(),
+            "epic",
+            Some(anchor.as_str()),
+            &TaskCommitIdentity::default(),
+        );
+        assert_eq!(
+            blind.len(),
+            1,
+            "fixture must reproduce the false positive when attribution is unavailable: {blind:?}"
+        );
+
+        let attributed = check_additive_only_branch_violations(
+            dir.path(),
+            "epic",
+            Some(anchor.as_str()),
+            &TaskCommitIdentity {
+                task_id: Some("cas-f1b1".to_string()),
+                known_commits: Vec::new(),
+            },
+        );
+        assert!(
+            attributed.is_empty(),
+            "a file whose only prior version is this task's own WIP is not pre-existing: {attributed:?}"
+        );
+    }
+
+    #[test]
+    fn branch_check_same_task_wip_is_attributable_by_recorded_commit_id() {
+        // The WIP commit message never names the task (a dying worker's
+        // scratch commit), but CAS durably recorded its commit id for this
+        // task — that is attribution evidence too.
+        let (dir, anchor, wip_sha) = init_same_task_wip_repo("wip: partial feature");
+        let attributed = check_additive_only_branch_violations(
+            dir.path(),
+            "epic",
+            Some(anchor.as_str()),
+            &TaskCommitIdentity {
+                task_id: Some("cas-f1b1".to_string()),
+                known_commits: vec![wip_sha],
+            },
+        );
+        assert!(
+            attributed.is_empty(),
+            "a recorded task commit id must attribute the prior version: {attributed:?}"
+        );
+    }
+
+    #[test]
+    fn branch_check_foreign_pre_existing_file_still_violates_under_attribution() {
+        // Same shape, but the prior version came from unrelated work. The
+        // gate must still reject: attribution relaxes only the task's own WIP.
+        let (dir, anchor, _) = init_same_task_wip_repo("chore: unrelated baseline file");
+        let violations = check_additive_only_branch_violations(
+            dir.path(),
+            "epic",
+            Some(anchor.as_str()),
+            &TaskCommitIdentity {
+                task_id: Some("cas-f1b1".to_string()),
+                known_commits: Vec::new(),
+            },
+        );
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert_eq!(violations[0].path, "feature.rs");
+    }
+
+    #[test]
+    fn branch_check_same_task_wip_is_not_pre_existing_before_the_merge() {
+        // Pre-merge path (merge-base..HEAD): worker 2's branch is not merged
+        // yet, and the merge base already carries the task's own WIP.
+        let dir = init_branched_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["checkout", "-q", "-b", "epic"]);
+        std::fs::write(p.join("feature.rs"), "// wip\n").unwrap();
+        git(p, &["add", "feature.rs"]);
+        git(p, &["commit", "-q", "-m", "wip(cas-f1b1): partial feature"]);
+        git(p, &["checkout", "-q", "-b", "factory/worker-two"]);
+        std::fs::write(p.join("feature.rs"), "// finished\n").unwrap();
+        git(p, &["add", "feature.rs"]);
+        git(p, &["commit", "-q", "-m", "feat(cas-f1b1): finish"]);
+
+        let attributed = check_additive_only_branch_violations(
+            p,
+            "epic",
+            None,
+            &TaskCommitIdentity {
+                task_id: Some("cas-f1b1".to_string()),
+                known_commits: Vec::new(),
+            },
+        );
+        assert!(
+            attributed.is_empty(),
+            "the unmerged path must attribute the task's own WIP too: {attributed:?}"
+        );
+    }
+
+    #[test]
+    fn branch_check_file_touched_by_foreign_history_still_violates() {
+        // The file was created by unrelated work and only LATER touched by
+        // this task. Its pre-image is genuinely foreign — fail closed.
+        let dir = init_branched_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["checkout", "-q", "-b", "epic"]);
+        std::fs::write(p.join("feature.rs"), "// baseline\n").unwrap();
+        git(p, &["add", "feature.rs"]);
+        git(p, &["commit", "-q", "-m", "chore: baseline feature"]);
+        std::fs::write(p.join("feature.rs"), "// task wip\n").unwrap();
+        git(p, &["add", "feature.rs"]);
+        git(p, &["commit", "-q", "-m", "wip(cas-f1b1): touch feature"]);
+        git(p, &["checkout", "-q", "-b", "factory/worker-two"]);
+        std::fs::write(p.join("feature.rs"), "// finished\n").unwrap();
+        git(p, &["add", "feature.rs"]);
+        git(p, &["commit", "-q", "-m", "feat(cas-f1b1): finish"]);
+
+        let violations = check_additive_only_branch_violations(
+            p,
+            "epic",
+            None,
+            &TaskCommitIdentity {
+                task_id: Some("cas-f1b1".to_string()),
+                known_commits: Vec::new(),
+            },
+        );
+        assert_eq!(
+            violations.len(),
+            1,
+            "a file with foreign history in its pre-image must still violate: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn task_commit_identity_collects_every_durable_task_commit() {
+        let mut task = Task::new("cas-f1b1".to_string(), "same-task WIP".to_string());
+        task.deliverables.factory_branch_anchor = Some("a".repeat(40));
+        let identity = task_commit_identity(&task, Some("b".repeat(40)));
+        assert_eq!(identity.task_id.as_deref(), Some("cas-f1b1"));
+        assert_eq!(
+            identity.known_commits,
+            vec!["a".repeat(40), "b".repeat(40)],
+            "anchor and delivery receipt are both task-owned commit evidence"
+        );
+
+        let bare = Task::new("cas-f1b1".to_string(), "no durable commits".to_string());
+        let identity = task_commit_identity(&bare, None);
+        assert!(identity.known_commits.is_empty());
+        assert!(
+            !identity.is_empty(),
+            "the task id alone still supports message attribution"
+        );
+    }
+
+    #[test]
+    fn task_id_attribution_requires_a_whole_token_match() {
+        assert!(message_references_task(
+            "feat(cas-f1b1): finish the feature",
+            "cas-f1b1"
+        ));
+        assert!(message_references_task(
+            "body mentions cas-f1b1.\n",
+            "cas-f1b1"
+        ));
+        assert!(
+            !message_references_task("feat(cas-f1b12): different task", "cas-f1b1"),
+            "a longer id must not be attributed to its prefix"
+        );
+        assert!(!message_references_task(
+            "no task reference here",
+            "cas-f1b1"
+        ));
     }
 
     #[test]
@@ -7903,7 +8419,12 @@ mod additive_only_tests {
             &["merge", "-q", "--no-ff", "factory/task", "-m", "merge task"],
         );
 
-        let v = check_additive_only_branch_violations(dir.path(), "epic", Some(anchor.as_str()));
+        let v = check_additive_only_branch_violations(
+            dir.path(),
+            "epic",
+            Some(anchor.as_str()),
+            &TaskCommitIdentity::default(),
+        );
         assert_eq!(v.len(), 1, "task modification must still be rejected");
         assert_eq!(v[0].path, "existing.txt");
         assert!(v[0].status.starts_with('M'));
@@ -7917,7 +8438,12 @@ mod additive_only_tests {
             dir.path(),
             &["commit", "-q", "-m", "chore: drop existing.txt"],
         );
-        let v = check_additive_only_branch_violations(dir.path(), "main", None);
+        let v = check_additive_only_branch_violations(
+            dir.path(),
+            "main",
+            None,
+            &TaskCommitIdentity::default(),
+        );
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].path, "existing.txt");
         assert!(v[0].status.starts_with('D'));
@@ -7947,7 +8473,12 @@ mod additive_only_tests {
         // leave it unstaged. The legacy `git diff HEAD` path would see
         // this and reject. The branch-diff path must not.
         std::fs::write(dir.path().join("existing.txt"), "drift\n").unwrap();
-        let v = check_additive_only_branch_violations(dir.path(), "main", None);
+        let v = check_additive_only_branch_violations(
+            dir.path(),
+            "main",
+            None,
+            &TaskCommitIdentity::default(),
+        );
         assert!(
             v.is_empty(),
             "uncommitted drift must not count against the branch: {v:?}"
@@ -10555,6 +11086,8 @@ mod merge_state_gate_tests {
         TaskCommitReceiptWindow {
             not_before: chrono::DateTime::from_timestamp(epoch, 0).unwrap(),
             basis,
+            task_floor: chrono::DateTime::from_timestamp(epoch, 0).unwrap(),
+            identity: TaskCommitIdentity::default(),
         }
     }
 
@@ -13766,6 +14299,8 @@ mod zero_change_close_tests {
         TaskCommitReceiptWindow {
             not_before: chrono::Utc::now() - chrono::Duration::hours(1),
             basis: "test fixture",
+            task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
+            identity: TaskCommitIdentity::default(),
         }
     }
 
@@ -14690,6 +15225,10 @@ mod zero_change_close_tests {
             // reproduces copying an arbitrary old merged SHA from git log.
             not_before: chrono::Utc::now() + chrono::Duration::hours(1),
             basis: "latest task lease claim/transfer",
+            // cas-9596: the task itself is younger than the borrowed commit, so
+            // the prior-cycle relaxation cannot rescue it either.
+            task_floor: chrono::Utc::now() + chrono::Duration::hours(1),
+            identity: TaskCommitIdentity::default(),
         };
 
         let zero_outcome = check_zero_commit_close(
@@ -14734,6 +15273,120 @@ mod zero_change_close_tests {
         }
     }
 
+    /// GH #82 step 6: an administrative restart (supervisor clears a note, the
+    /// worker re-`start`s) moves the work-cycle window forward without any new
+    /// commits. The receipt from before that restart is still this task's own
+    /// merged work and must remain valid close evidence.
+    #[test]
+    fn gh82_receipt_from_a_prior_work_cycle_survives_an_administrative_restart() {
+        let dir = init_worker_repo();
+        std::fs::write(dir.path().join("finished.rs"), "pub fn finished() {}\n").unwrap();
+        git(dir.path(), &["add", "finished.rs"]);
+        git(
+            dir.path(),
+            &["commit", "-q", "-m", "feat(cas-f1b1): finished delivery"],
+        );
+        let receipt = head_sha(dir.path());
+        git(dir.path(), &["checkout", "-q", "main"]);
+        git(
+            dir.path(),
+            &[
+                "merge",
+                "--no-ff",
+                "-m",
+                "merge finished delivery",
+                "factory/test-worker",
+            ],
+        );
+
+        // The restart put the current cycle after the commit; the task itself
+        // is older than it.
+        let window = TaskCommitReceiptWindow {
+            not_before: chrono::Utc::now() + chrono::Duration::hours(1),
+            basis: "latest task lease claim/transfer",
+            task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
+            identity: TaskCommitIdentity {
+                task_id: Some("cas-f1b1".to_string()),
+                known_commits: Vec::new(),
+            },
+        };
+
+        let note = validate_task_commit_receipt(dir.path(), &receipt, "main", &window)
+            .expect("an already-merged receipt for this task must survive a restart");
+        assert!(note.contains(&receipt), "{note}");
+        assert!(
+            note.contains("earlier work cycle of this task"),
+            "the audit note must record why the cycle bound was relaxed: {note}"
+        );
+    }
+
+    /// The relaxation is bounded by attribution: a merged commit that neither
+    /// names the task nor is a recorded task commit stays rejected.
+    #[test]
+    fn gh82_unattributable_pre_cycle_commit_is_still_rejected() {
+        let dir = init_worker_repo();
+        std::fs::write(dir.path().join("foreign.rs"), "pub fn foreign() {}\n").unwrap();
+        git(dir.path(), &["add", "foreign.rs"]);
+        git(dir.path(), &["commit", "-q", "-m", "chore: someone else"]);
+        let receipt = head_sha(dir.path());
+        git(dir.path(), &["checkout", "-q", "main"]);
+        git(
+            dir.path(),
+            &[
+                "merge",
+                "--no-ff",
+                "-m",
+                "merge foreign work",
+                "factory/test-worker",
+            ],
+        );
+
+        let window = TaskCommitReceiptWindow {
+            not_before: chrono::Utc::now() + chrono::Duration::hours(1),
+            basis: "latest task lease claim/transfer",
+            task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
+            identity: TaskCommitIdentity {
+                task_id: Some("cas-f1b1".to_string()),
+                known_commits: Vec::new(),
+            },
+        };
+        let reason = validate_task_commit_receipt(dir.path(), &receipt, "main", &window)
+            .expect_err("an unattributable pre-cycle commit must stay rejected");
+        assert!(reason.contains("predates this task work cycle"), "{reason}");
+    }
+
+    /// A commit that predates the task itself is never this task's work, even
+    /// when it happens to name the task id.
+    #[test]
+    fn gh82_commit_predating_the_task_is_still_rejected() {
+        let dir = init_worker_repo();
+        std::fs::write(dir.path().join("old.rs"), "pub fn old() {}\n").unwrap();
+        git(dir.path(), &["add", "old.rs"]);
+        git(
+            dir.path(),
+            &["commit", "-q", "-m", "feat(cas-f1b1): borrowed reference"],
+        );
+        let receipt = head_sha(dir.path());
+        git(dir.path(), &["checkout", "-q", "main"]);
+        git(
+            dir.path(),
+            &["merge", "--no-ff", "-m", "merge old", "factory/test-worker"],
+        );
+
+        let window = TaskCommitReceiptWindow {
+            not_before: chrono::Utc::now() + chrono::Duration::hours(2),
+            basis: "latest task lease claim/transfer",
+            task_floor: chrono::Utc::now() + chrono::Duration::hours(1),
+            identity: TaskCommitIdentity {
+                task_id: Some("cas-f1b1".to_string()),
+                known_commits: Vec::new(),
+            },
+        };
+        let reason = validate_task_commit_receipt(dir.path(), &receipt, "main", &window)
+            .expect_err("a commit older than the task cannot be its delivery");
+        assert!(reason.contains("predates this task work cycle"), "{reason}");
+    }
+
     #[test]
     fn cas5626_merge_commit_receipt_is_valid_and_auditable() {
         let dir = init_worker_repo();
@@ -14762,6 +15415,8 @@ mod zero_change_close_tests {
         let window = TaskCommitReceiptWindow {
             not_before: chrono::Utc::now() - chrono::Duration::hours(1),
             basis: "latest task lease claim/transfer",
+            task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
+            identity: TaskCommitIdentity::default(),
         };
         let outcome = check_zero_commit_close(
             dir.path(),

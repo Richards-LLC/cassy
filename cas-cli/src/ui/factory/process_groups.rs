@@ -71,6 +71,11 @@ fn record_path(cas_root: &Path, pgid: u32) -> PathBuf {
 /// into `cgroup.procs` moves a live process, which is far too consequential to
 /// hide inside a registry write. [`contain_worker`] is the one place that
 /// performs it.
+///
+/// Production always goes through [`track_contained`] so containment and the
+/// record that describes it are established together; this uncontained form
+/// remains for tests that only exercise the registry.
+#[cfg(test)]
 pub(crate) fn track(
     cas_root: &Path,
     worker_name: &str,

@@ -1027,7 +1027,7 @@ async fn test_spawn_workers_isolate_flag_in_isolated_child() {
         .expect("stock spawn should succeed");
     let text = get_text(&result);
     assert!(
-        text.contains("policy default codex/gpt-5.6-sol/medium"),
+        text.contains("policy default codex/gpt-5.6-terra/high"),
         "caller-facing response must name the resolved policy fallback: {text}"
     );
 
@@ -1381,7 +1381,7 @@ async fn test_spawn_workers_no_cli_override_queues_safe_worker_spec_in_isolated_
     let spec: cas_mux::WorkerSpec = serde_json::from_str(spec_json).expect("valid WorkerSpec");
     assert_eq!(spec.cli, cas_mux::SupervisorCli::Codex);
     assert_eq!(spec.model.as_deref(), Some(cas::config::STOCK_WORKER_MODEL));
-    assert_eq!(spec.effort, Some(cas_mux::Effort::Medium));
+    assert_eq!(spec.effort, Some(cas_mux::Effort::High));
 }
 
 // =============================================================================
@@ -3717,7 +3717,7 @@ async fn test_efc4_heterogeneous_codex_then_claude_spawn_queued_correctly_in_iso
     let spec: cas_mux::WorkerSpec = serde_json::from_str(spec_json).expect("valid WorkerSpec");
     assert_eq!(spec.cli, cas_mux::SupervisorCli::Codex);
     assert_eq!(spec.model.as_deref(), Some(cas::config::STOCK_WORKER_MODEL));
-    assert_eq!(spec.effort, Some(cas_mux::Effort::Medium));
+    assert_eq!(spec.effort, Some(cas_mux::Effort::High));
 }
 
 /// cas-efc4 AC2: Model and effort overrides must reach the spawn-queue spec

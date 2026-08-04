@@ -1944,9 +1944,9 @@ This is the body content."#;
             "model-selection.md",
             // cas-b342/cas-96ea: Codex-first tier table + exception/capacity lanes in the body.
             "Codex-first tiers",
-            "codex/gpt-5.6-sol/low",
+            "codex/gpt-5.6-terra/low",
             "codex/gpt-5.6-sol/high",
-            "codex/gpt-5.6-sol/medium",
+            "codex/gpt-5.6-terra/high",
             "Opus",
             "capacity route",
         ] {
@@ -2763,7 +2763,7 @@ This is the body content."#;
             for required in [
                 "gpt-5.6-sol:independent",
                 "one shared schema shim",
-                "codex exec -s read-only -m gpt-5.6-sol -c model_reasoning_effort=medium",
+                "codex exec -s read-only -m gpt-5.6-sol -c model_reasoning_effort=high",
                 "`--output-schema`",
                 "two bounded schema-mismatch retries",
                 "one separately-budgeted timeout retry",
@@ -3437,17 +3437,17 @@ This is the body content."#;
             "model-selection.md .claude and .grok copies must be identical apart from \
              the mcp__cas__/cas__ tool prefix",
         );
-        // cas-b342/cas-b4ea: the Codex-first tier table is the contract of the
-        // rubric. Every positive Codex worker rung uses the exact gpt-5.6-sol
-        // slug; effort selects light/standard/heavy/frontier capability.
+        // The Codex-first tier table is the contract: Terra serves light,
+        // standard, and taste work, while Sol/high is heavy/frontier only.
         for required in [
             // Codex-first tier table (AC2)
             "Codex-first",
-            "cli=codex model=gpt-5.6-sol effort=low",
-            "cli=codex model=gpt-5.6-sol effort=medium",
+            "cli=codex model=gpt-5.6-terra effort=low",
+            "cli=codex model=gpt-5.6-terra effort=high",
             "cli=codex model=gpt-5.6-sol effort=high",
-            // cas-96ea: routine taste/general judgment uses Sol medium.
-            "cli=codex model=gpt-5.6-sol effort=medium",
+            "cli=codex model=gpt-5.6-terra effort=high",
+            "gpt-5.6-luna",
+            "gpt-5.4-mini to Luna",
             "Sonnet is not a normal worker lane",
             "not Sonnet",
             // Claude Opus exceptional lane (AC3 revised)
@@ -3475,7 +3475,7 @@ This is the body content."#;
             "Cost",
             "Intelligence",
             "Taste",
-            "Taste-sensitive work routes to Codex GPT-5.6 Sol at medium effort",
+            "Taste-sensitive work routes to Codex GPT-5.6 Terra at high effort",
             "effort=high` is the ceiling",
             "Escalate on judgment",
             "Cost is a tiebreaker only",
@@ -3489,10 +3489,13 @@ This is the body content."#;
         // `gpt-5.6` must never appear as a spawn recipe (`model=gpt-5.6` or the
         // `codex/gpt-5.6` tier shorthand). Documentation may still mention the
         // bare slug to warn against it, so we only forbid the recipe forms.
-        let stripped = claude.content.replace("gpt-5.6-sol", "SOLSLUG");
+        let stripped = claude
+            .content
+            .replace("gpt-5.6-sol", "SOLSLUG")
+            .replace("gpt-5.6-terra", "TERRASLUG");
         assert!(
             !stripped.contains("model=gpt-5.6") && !stripped.contains("codex/gpt-5.6"),
-            "model-selection.md must not use a bare gpt-5.6 spawn recipe — exact slug is gpt-5.6-sol"
+            "model-selection.md must not use a bare gpt-5.6 spawn recipe"
         );
         // cas-b4ea: GPT-5.5 is no longer a positive supervisor worker route.
         // Keep this scoped to the supervisor rubric files so unrelated
@@ -3647,11 +3650,14 @@ This is the body content."#;
                     }
                     if line.contains("cli=codex") {
                         assert!(
-                            line.contains("model=gpt-5.6-sol")
-                                && ["effort=low", "effort=medium", "effort=high"]
-                                    .iter()
-                                    .any(|effort| line.contains(effort)),
-                            "{label}:{} Codex spawn must use the GPT-5.6 Sol tier matrix: {line:?}",
+                            [
+                                ("model=gpt-5.6-terra", "effort=low"),
+                                ("model=gpt-5.6-terra", "effort=high"),
+                                ("model=gpt-5.6-sol", "effort=high")
+                            ]
+                            .iter()
+                                .any(|(model, effort)| line.contains(model) && line.contains(effort)),
+                            "{label}:{} Codex spawn must use the Terra/Sol tier matrix: {line:?}",
                             index + 1
                         );
                     }
@@ -4318,9 +4324,9 @@ This is the body content."#;
             "frontier",
             // cas-b342/cas-96ea: Codex-first tier table + exception/capacity lanes in the body.
             "Codex-first tiers",
-            "codex/gpt-5.6-sol/low",
+            "codex/gpt-5.6-terra/low",
             "codex/gpt-5.6-sol/high",
-            "codex/gpt-5.6-sol/medium",
+            "codex/gpt-5.6-terra/high",
             "Opus",
             "capacity route",
         ] {

@@ -1514,11 +1514,17 @@ impl FactoryApp {
             );
             return;
         };
-        if let Err(error) = crate::ui::factory::process_groups::track(
+        // cas-99f5 (GH #86): contain first, record second — the durable record
+        // must name the scope that already holds the worker, so a teardown by a
+        // later process (or after a daemon crash) can find and kill it.
+        let cgroup =
+            crate::ui::factory::process_groups::contain_worker(worker_name, factory_session, pgid);
+        if let Err(error) = crate::ui::factory::process_groups::track_contained(
             self.cas_dir(),
             worker_name,
             factory_session,
             pgid,
+            cgroup,
         ) {
             tracing::warn!(
                 worker = %worker_name,
@@ -1541,6 +1547,11 @@ impl FactoryApp {
         let Some(record) = record else {
             return;
         };
+        // cas-99f5 (GH #86): `shutdown_workers` and session end reach this
+        // after killpg has already run. killpg cannot touch descendants that
+        // left the process group (Node's `detached: true` dev servers), so the
+        // cgroup scope is torn down here too — and it reports what it reaped.
+        crate::ui::factory::process_groups::reap_cgroup_scope(&record);
         for _ in 0..20 {
             if !crate::ui::factory::process_groups::is_live(&record) {
                 if let Err(error) =

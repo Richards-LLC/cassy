@@ -1,6 +1,6 @@
 ---
 name: cas-supervisor
-description: Factory supervisor guide for multi-agent EPIC orchestration. Use when acting as supervisor to plan EPICs, spawn and coordinate workers, assign tasks, monitor progress, and merge completed work. Covers worker count strategy, conflict-free task coordination, epic branch workflow, and completion verification.
+description: Factory supervisor guide for multi-agent EPIC orchestration. Use when acting as supervisor to plan EPICs, spawn and coordinate workers, assign tasks, monitor progress, and merge completed work. Covers worker count strategy, conflict-free task coordination, epic branch workflow, and completion verification. Includes worker model/effort tier routing and valid Codex model slugs (gpt-5.6 sol/terra/luna).
 managed_by: cas
 ---
 

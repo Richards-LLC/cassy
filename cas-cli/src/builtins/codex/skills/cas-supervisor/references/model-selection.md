@@ -24,7 +24,7 @@ This default reflects the operator decision and published benchmarks: Terra is c
 | **light** | `cli=codex model=gpt-5.6-terra effort=low` | Chores, docs, mechanical renames, config bumps, `depth=light` tasks, test backfill that mirrors existing patterns. |
 | **standard** | `cli=codex model=gpt-5.6-terra effort=high` | Normal feature/bug work with a clear spec and bounded blast radius. The stock floor. |
 | **heavy** | `cli=codex model=gpt-5.6-sol effort=high` | Cross-cutting refactors, concurrency/lifecycle code, migrations, gnarly debugging, P0/P1 critical-path units. |
-| **frontier** | `cli=codex model=gpt-5.6-sol effort=high` | Architecture-defining units, high-blast-radius changes, tasks that already bounced twice. Sparingly — every frontier worker should map to named tasks. The exact slug is `gpt-5.6-sol`; a bare `gpt-5.6` is **not** a valid spawn recipe. |
+| **frontier** | `cli=codex model=gpt-5.6-sol effort=high` | Architecture-defining units, high-blast-radius changes, tasks that already bounced twice. Sparingly — every frontier worker should map to named tasks. The heavy/frontier slug is `gpt-5.6-sol`; bare `gpt-5.6` is **not** a valid spawn recipe. |
 
 Token-heavy read-only investigation belongs in a `cas-codex-exec` shell-out, not a worker and not your own context window.
 
@@ -55,7 +55,7 @@ Health check before routing to Grok: credits/quota available, auth valid, throug
 
 | `cli=` | Accepted `model=` slugs | Notes |
 |---|---|---|
-| `codex` | `gpt-5.6-terra`, `gpt-5.6-sol` | Plain slugs only — `-codex`-suffixed slugs are rejected by the API. Terra is the light/standard/taste route; Sol/high is the heavy/frontier route. Bare `gpt-5.6` is invalid. |
+| `codex` | `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` | Plain slugs only — `-codex`-suffixed slugs are rejected by the API, and bare `gpt-5.6` is invalid. Sol/high is the heavy/frontier route; Terra is the light/standard default and taste/judgment route; Luna is the gpt-5.4-mini successor and valid but not assigned a tier yet. The gpt-5.5/gpt-5.4 family is superseded: gpt-5.4 upgrades to Terra and gpt-5.4-mini to Luna. |
 | `claude` | `opus` (full Anthropic ids also ok) | Supervisor docs only expose Opus for exceptional architecture/safety/rescue/challenge; Sonnet is not a normal worker lane. |
 | `grok` | `grok-4.5`, `grok-composer-2.5-fast` | From live `grok models`. Composer is a **model id on the Grok harness** — never invent `cli=cursor`. |
 

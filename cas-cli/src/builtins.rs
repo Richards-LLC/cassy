@@ -3446,6 +3446,8 @@ This is the body content."#;
             "cli=codex model=gpt-5.6-terra effort=high",
             "cli=codex model=gpt-5.6-sol effort=high",
             "cli=codex model=gpt-5.6-terra effort=high",
+            "gpt-5.6-luna",
+            "gpt-5.4-mini to Luna",
             "Sonnet is not a normal worker lane",
             "not Sonnet",
             // Claude Opus exceptional lane (AC3 revised)

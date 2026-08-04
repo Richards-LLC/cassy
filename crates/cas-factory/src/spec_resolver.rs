@@ -878,7 +878,7 @@ mod codex_fallback_tests {
     #[test]
     fn non_claude_model_falls_back_to_default_model_on_rewrite() {
         let mut specs = vec![WorkerSpec {
-            model: Some("gpt-5.6-sol".to_string()),
+            model: Some("gpt-5.6-terra".to_string()),
             ..codex_spec("frank")
         }];
         apply_codex_fallback_with(&mut specs, false, Some("sonnet"), WORKER_LABEL, || false, || false)
@@ -935,7 +935,7 @@ mod codex_fallback_tests {
         for m in ["sonnet", "claude-opus-4-5", "Fable-5", "MYTHOS-5", "haiku"] {
             assert!(model_is_claude_compatible(m), "{m} should match");
         }
-        for m in ["gpt-5.6-sol", "o3", "grok-4.5"] {
+        for m in ["gpt-5.6-terra", "o3", "grok-4.5"] {
             assert!(!model_is_claude_compatible(m), "{m} should not match");
         }
     }

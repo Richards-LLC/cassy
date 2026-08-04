@@ -43,14 +43,14 @@ In shared mode, file-overlap analysis is even more critical — two workers edit
 
 1. Spawn workers:
    ```
-   cas__coordination action=spawn_workers count=N isolate=true cli=codex model=gpt-5.6-sol effort=medium
+   cas__coordination action=spawn_workers count=N isolate=true cli=codex model=gpt-5.6-terra effort=high
    ```
    Omit `isolate` for shared mode.
 
    **Hard rule:** every `spawn_workers` call MUST include explicit `cli=`,
    `model=`, and `effort=`. Codex is the default matrix
-   (`cli=codex model=gpt-5.6-sol`); taste/judgment uses
-   `cli=codex model=gpt-5.6-sol effort=medium`, Opus is exceptional, and Grok
+   (`cli=codex model=gpt-5.6-terra` for light/standard); taste/judgment uses
+   `cli=codex model=gpt-5.6-terra effort=high`, while Sol/high is heavy/frontier only; Opus is exceptional, and Grok
    is the health-gated capacity route.
    Omitted fields fall back through the factory config cascade and stock floor;
    the spawn acknowledgement nags because supervisors should make worker tier
@@ -58,11 +58,11 @@ In shared mode, file-overlap analysis is even more critical — two workers edit
 
    **Tiered mix example** — Codex-first standard floor + light + heavy:
    ```
-   # Standard floor (Codex gpt-5.6-sol medium)
-   cas__coordination action=spawn_workers count=2 cli=codex model=gpt-5.6-sol effort=medium isolate=true
+   # Standard floor (Codex gpt-5.6-terra high)
+   cas__coordination action=spawn_workers count=2 cli=codex model=gpt-5.6-terra effort=high isolate=true
 
-   # Light / bulk (Codex gpt-5.6-sol low)
-   cas__coordination action=spawn_workers count=1 cli=codex model=gpt-5.6-sol effort=low worker_names="lt-ada" isolate=true
+   # Light / bulk (Codex gpt-5.6-terra low)
+   cas__coordination action=spawn_workers count=1 cli=codex model=gpt-5.6-terra effort=low worker_names="lt-ada" isolate=true
 
    # Heavy (Codex gpt-5.6-sol high); frontier is model=gpt-5.6-sol
    cas__coordination action=spawn_workers count=1 cli=codex model=gpt-5.6-sol effort=high worker_names="hv-ada" isolate=true

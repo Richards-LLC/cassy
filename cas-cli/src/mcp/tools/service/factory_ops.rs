@@ -4417,7 +4417,7 @@ mod tests {
 
         assert_eq!(spec.cli, cas_mux::SupervisorCli::Claude);
         assert_eq!(spec.model.as_deref(), Some("opus"));
-        assert_eq!(spec.effort, Some(cas_mux::Effort::Medium));
+        assert_eq!(spec.effort, Some(cas_mux::Effort::High));
     }
 
     #[test]
@@ -4492,7 +4492,7 @@ mod tests {
         let warning = spawn_spec_warning(false, false, &json);
 
         assert!(
-            warning.contains("policy default codex/gpt-5.6-sol/medium"),
+            warning.contains("policy default codex/gpt-5.6-terra/high"),
             "{warning}"
         );
         assert!(

@@ -39,7 +39,7 @@ export const meta = {
 
 const ALWAYS_ON_PERSONAS = ['correctness', 'testing', 'maintainability', 'project-standards']
 const CODEX_PERSONA_MODEL = 'gpt-5.6-sol'
-const CODEX_PERSONA_EFFORT = 'medium'
+const CODEX_PERSONA_EFFORT = 'high'
 const CODEX_PERSONA_TIMEOUT_SECONDS = 600
 const CODEX_SCHEMA_RETRIES = 2
 const CODEX_TIMEOUT_RETRIES = 1

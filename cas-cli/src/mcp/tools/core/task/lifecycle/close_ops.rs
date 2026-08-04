@@ -1568,6 +1568,22 @@ impl CasCore {
                 task_commit_identity.clone(),
             ))
         };
+        // cas-fdc9 (GH #56): a receipt is only evidence if it exists in the
+        // repository this close is bound to. The cross-repo delivery in the
+        // report supplied a SHA that lived solely in the repo where the work
+        // landed, and no gate on that path happened to need the receipt — so
+        // an unverifiable commit id was recorded as proof. Check it up front,
+        // for every caller and every bypass level, because the failure this
+        // prevents is false assurance in the audit trail rather than a
+        // premature close. Ancestry, diff and work-cycle checks stay with the
+        // gates below; this asks only whether the receipt is ours to verify.
+        if let Some(receipt) = req.commit_receipt.as_deref()
+            && close_repo_verified
+            && let Some(message) = commit_receipt_repo_binding_error(&close_project_root, receipt)
+        {
+            return Ok(Self::tool_error(message));
+        }
+
         if task.task_type != TaskType::Epic && task.assignee.is_some() {
             match run_factory_branch_merge_gate_with_attribution(
                 &task,
@@ -4898,13 +4914,19 @@ pub(crate) fn count_task_attributable_unmerged_commits(
         "@{}",
         window.not_before.timestamp() - COMMIT_RECEIPT_CLOCK_SKEW_SECS
     );
+    // cas-fdc9 (GH #66): exclude the remote-tracking target too. Measuring
+    // this task's commits against a stale local ref alone counts work that
+    // already landed on `origin/<parent>` as stranded.
+    let since_arg = format!("--since={since}");
+    let range = format!("{merge_base}..{commit_ish}");
+    let origin_parent = format!("origin/{parent_branch}");
+    let mut args = vec!["rev-list", "--count", since_arg.as_str(), range.as_str()];
+    if git_ref_exists(repo_path, &origin_parent) {
+        args.push("--not");
+        args.push(origin_parent.as_str());
+    }
     let count_out = Command::new("git")
-        .args([
-            "rev-list",
-            "--count",
-            &format!("--since={since}"),
-            &format!("{merge_base}..{commit_ish}"),
-        ])
+        .args(&args)
         .current_dir(repo_path)
         .output()
         .ok()?;
@@ -4997,6 +5019,20 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
     {
         return MergeStateGateOutcome::Proceed;
     }
+
+    // cas-fdc9 (GH #66): re-measure against BOTH target refs now that the
+    // fetch has refreshed `origin/<parent_branch>`. The count above came from
+    // the local ref alone, which a factory worktree never advances — that is
+    // how a worker with one unmerged commit was told nine were stranded. A
+    // commit reachable from either ref is merged; only what is on neither is
+    // this branch's stranded work. Unknowable git state keeps the local
+    // measurement (fail closed), and a partially-merged branch now reports the
+    // real remainder instead of stale-base arithmetic.
+    let remote_aware_stranded = count_unmerged_against_targets(repo_path, commit_ish, parent_branch);
+    if remote_aware_stranded == Some(0) {
+        return MergeStateGateOutcome::Proceed;
+    }
+    let stranded = remote_aware_stranded.unwrap_or(stranded);
 
     // cas-2938 / cas-5485: when a trusted historical anchor still looks
     // stranded by ancestry (squash A→B, or rebase A→A'), accept close if
@@ -5166,8 +5202,13 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
              messages in case the MCP response was lost after claiming rows.\n\
              2. Push {factory_branch} to its remote\n\
              3. Open a PR targeting {parent_branch}\n\
-             4. Merge the PR (or `git fetch --prune` if it was already merged \
-             and your local ref is stale)\n\
+             4. Merge the PR. CAS already fetched and measured this branch \
+             against BOTH {parent_branch} and origin/{parent_branch}, so a \
+             merge that has landed on either one is already counted — running \
+             `git fetch` again will not change this number, and a stale local \
+             {parent_branch} ref cannot be the cause (fetch never moves a local \
+             branch ref). If you believe the work is merged, check it directly: \
+             `git merge-base --is-ancestor {factory_branch} origin/{parent_branch}`.\n\
              5. Retry mcp__cas__task action=close. If the supervisor declines \
              the unmerged delivery instead, the supervisor runs \
              `mcp__cas__task action=request_changes id={} reason=\"state what prior work remains and what must be corrected or reverted\"`; \
@@ -5372,6 +5413,88 @@ fn commit_patches_cherry_equivalent_on_parent(
     // Empty output is not positive proof (already-ancestor cases are
     // handled by the primary ancestry path; fail closed here).
     saw_equivalent
+}
+
+/// cas-fdc9 (GH #66): count commits on `commit_ish` that are on NEITHER the
+/// local `parent_branch` ref NOR its remote-tracking `origin/<parent_branch>`.
+///
+/// A factory worktree is cut with whatever the local target ref pointed at and
+/// never advances it. On a repository whose target moves often, that ref is
+/// stale within minutes, so a count measured against it is arithmetic about a
+/// base nobody merges into — the reported "9 commits not on staging" when
+/// exactly one was unmerged. Both refs are consulted because either one can be
+/// the current truth: origin is ahead when merges land elsewhere, and the local
+/// ref is ahead for a local-only epic branch that is never pushed.
+///
+/// Returns `None` when git cannot answer (missing ref, failed rev-list), so
+/// callers keep their existing fail-closed local measurement instead of
+/// treating "couldn't tell" as "nothing stranded".
+pub(crate) fn count_unmerged_against_targets(
+    repo_path: &std::path::Path,
+    commit_ish: &str,
+    parent_branch: &str,
+) -> Option<u32> {
+    use std::process::Command;
+
+    if !is_safe_git_refname(commit_ish) || !is_safe_git_refname(parent_branch) {
+        return None;
+    }
+    if !git_ref_exists(repo_path, commit_ish) || !git_ref_exists(repo_path, parent_branch) {
+        return None;
+    }
+
+    let origin_parent = format!("origin/{parent_branch}");
+    let mut args = vec!["rev-list", "--count", commit_ish, "--not", parent_branch];
+    if git_ref_exists(repo_path, &origin_parent) {
+        args.push(origin_parent.as_str());
+    }
+
+    let out = Command::new("git")
+        .args(&args)
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+/// cas-fdc9 (GH #56): is a supplied `commit_receipt` even present in the
+/// repository this close is bound to?
+///
+/// A cross-repo delivery reported a receipt for a commit that existed only in
+/// the repo where the work actually landed. Nothing refused it — no gate
+/// happened to need the receipt on that path — so an unverifiable SHA entered
+/// the audit trail as if it had been checked. A receipt is evidence; when it
+/// cannot be resolved here, say so and point at the declared-target-repo
+/// mechanism instead of recording false assurance.
+///
+/// Returns `Some(message)` when the receipt does not resolve in `repo_path`,
+/// `None` when it does. Ancestry, diff and work-cycle semantics stay with
+/// [`validate_task_commit_receipt`]; this is only the repo-binding question.
+pub(crate) fn commit_receipt_repo_binding_error(
+    repo_path: &std::path::Path,
+    receipt: &str,
+) -> Option<String> {
+    let reason = resolve_task_commit_receipt_sha(repo_path, receipt).err()?;
+    Some(format!(
+        "⚠️ RECEIPT NOT FOUND IN THIS REPOSITORY\n\n\
+         task close rejected: commit_receipt `{receipt}` does not resolve in the \
+         repository this close is bound to ({}): {reason}.\n\n\
+         A receipt is merge evidence, so CAS refuses to record one it cannot \
+         verify here — a receipt from another repository would read as proof \
+         while proving nothing.\n\n\
+         To resolve:\n\
+         1. If the work landed in a DIFFERENT repository, declare it on the task \
+            so every close gate runs there: \
+            `mcp__cas__task action=update id=<task> target_repo=<path-or-selector> \
+            target_branch=<branch>`, then retry close.\n\
+         2. If the work is in this repository, re-copy the SHA \
+            (`git log --oneline --all`) — full or an unambiguous abbreviation \
+            both work.",
+        repo_path.display(),
+    ))
 }
 
 /// Explicit success-bearing counterpart to [`count_unmerged_factory_commits`].
@@ -11601,6 +11724,228 @@ mod merge_state_gate_tests {
             count_task_attributable_unmerged_commits(dir.path(), "factory/x", "main", &window)
                 .is_none(),
             "non-git dir must be Unknown (fall back to whole-branch count), not Some(0)"
+        );
+    }
+
+    // --- cas-fdc9 (GH #66 / #56): target-ref resolution ---------------------
+    //
+    // #66: the guard measured "N commits not on staging" against the LOCAL
+    // staging ref, which a factory worktree never advances. A worker was told
+    // 9 commits were unmerged when exactly one was — and the printed
+    // remediation said to `git fetch`, which updates `origin/staging` and
+    // never moves the local branch the guard was reading. The advice could
+    // not fix the measurement, so workers chased merges that had landed.
+    //
+    // #56: a receipt naming a commit that does not exist in the repository
+    // the close is bound to was accepted as evidence.
+
+    /// Build a repo with an `origin` remote so the guard can see both a local
+    /// and a remote-tracking ref for `main`. Returns (worktree, origin).
+    fn init_repo_with_origin(worker: &str) -> (TempDir, TempDir) {
+        let origin = tempfile::tempdir().unwrap();
+        git(origin.path(), &["init", "-q", "--bare", "-b", "main"]);
+        let dir = init_factory_repo(worker);
+        git(
+            dir.path(),
+            &["remote", "add", "origin", origin.path().to_str().unwrap()],
+        );
+        git(dir.path(), &["push", "-q", "origin", "main"]);
+        git(dir.path(), &["fetch", "-q", "origin"]);
+        (dir, origin)
+    }
+
+    /// Advance `origin/main` beyond the local `main` ref, optionally merging
+    /// the worker's branch into it. The local `main` ref is deliberately left
+    /// where it was — that staleness is the whole bug.
+    fn advance_origin_main(dir: &std::path::Path, extra_commits: usize, merge_factory: Option<&str>) {
+        git(dir, &["checkout", "-q", "-b", "origin-work", "main"]);
+        for i in 0..extra_commits {
+            let name = format!("other_{i}.rs");
+            std::fs::write(dir.join(&name), format!("// other {i}\n")).unwrap();
+            git(dir, &["add", &name]);
+            git(dir, &["commit", "-q", "-m", &format!("feat: other {i}")]);
+        }
+        if let Some(branch) = merge_factory {
+            git(dir, &["merge", "-q", "--no-ff", branch, "-m", "merge worker"]);
+        }
+        git(dir, &["push", "-q", "origin", "origin-work:main"]);
+        git(dir, &["fetch", "-q", "origin"]);
+        git(dir, &["checkout", "-q", branch_of_first_factory(dir)]);
+    }
+
+    /// The factory branch created by `init_factory_repo` — resolved back from
+    /// the repo so the helper above can return to it.
+    fn branch_of_first_factory(dir: &std::path::Path) -> &'static str {
+        let _ = dir;
+        "factory/worker"
+    }
+
+    #[test]
+    fn merged_work_is_zero_ahead_once_origin_is_consulted_even_with_a_stale_local_ref() {
+        let (dir, _origin) = init_repo_with_origin("worker");
+        let p = dir.path();
+        std::fs::write(p.join("mine.rs"), "// mine\n").unwrap();
+        git(p, &["add", "mine.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: mine"]);
+        // Someone else advanced origin/main 8 times and merged this branch.
+        advance_origin_main(p, 8, Some("factory/worker"));
+
+        assert!(
+            count_unmerged_factory_commits(p, "factory/worker", "main") > 0,
+            "precondition: measured against the stale LOCAL ref the work looks unmerged"
+        );
+        assert_eq!(
+            count_unmerged_against_targets(p, "factory/worker", "main"),
+            Some(0),
+            "work merged into origin/main must read as zero ahead"
+        );
+    }
+
+    #[test]
+    fn reported_count_excludes_commits_already_on_the_remote_target() {
+        // The #66 shape: local ref stale by 8 commits, exactly one commit of
+        // this branch genuinely unmerged. The old measurement reported the
+        // stale-base arithmetic; the fix must report 1.
+        let (dir, _origin) = init_repo_with_origin("worker");
+        let p = dir.path();
+        advance_origin_main(p, 8, None);
+        // The worker syncs onto the advanced remote target (fast-forward, so
+        // no extra merge commit), then makes exactly one commit of their own.
+        // The LOCAL `main` ref still points at the pre-advance tip.
+        git(p, &["merge", "-q", "--ff-only", "origin/main"]);
+        std::fs::write(p.join("mine.rs"), "// mine\n").unwrap();
+        git(p, &["add", "mine.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: mine"]);
+
+        let local = count_unmerged_factory_commits(p, "factory/worker", "main");
+        assert!(
+            local > 1,
+            "precondition: the stale local ref inflates the count (got {local})"
+        );
+        assert_eq!(
+            count_unmerged_against_targets(p, "factory/worker", "main"),
+            Some(1),
+            "only the genuinely unmerged commit may be counted"
+        );
+    }
+
+    #[test]
+    fn target_count_matches_local_when_no_remote_ref_exists() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        std::fs::write(p.join("a.rs"), "// a\n").unwrap();
+        git(p, &["add", "a.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: a"]);
+        assert_eq!(
+            count_unmerged_against_targets(p, "factory/worker", "main"),
+            Some(1),
+            "a local-only epic branch has no origin ref and must measure locally"
+        );
+    }
+
+    #[test]
+    fn target_count_is_unknown_when_git_cannot_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            count_unmerged_against_targets(dir.path(), "factory/worker", "main"),
+            None,
+            "unknowable git state must stay Unknown, never a manufactured zero"
+        );
+    }
+
+    #[test]
+    fn merge_required_reports_the_remote_aware_count_and_no_fetch_advice() {
+        let (dir, _origin) = init_repo_with_origin("worker");
+        let p = dir.path();
+        advance_origin_main(p, 8, None);
+        git(p, &["merge", "-q", "--ff-only", "origin/main"]);
+        std::fs::write(p.join("mine.rs"), "// mine\n").unwrap();
+        git(p, &["add", "mine.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: mine"]);
+
+        let task = worker_task("worker");
+        let req = base_req(&task.id);
+        match run_factory_branch_merge_gate(&task, &req, "main", p) {
+            MergeStateGateOutcome::Reject(msg) => {
+                assert!(
+                    msg.contains("1 commit(s)"),
+                    "count must be measured against the remote target, not the stale \
+                     local ref: {msg}"
+                );
+                assert!(
+                    !msg.contains("git fetch --prune` if it was already merged"),
+                    "must not tell the worker a fetch fixes a stale LOCAL branch ref — \
+                     fetch never moves it, and following that advice manufactures \
+                     merge requests for work already landed: {msg}"
+                );
+                assert!(
+                    msg.contains("origin/main"),
+                    "the refusal must name the remote ref it measured against: {msg}"
+                );
+            }
+            other => panic!("genuinely unmerged commit must still reject, got {other:?}"),
+        }
+    }
+
+    // --- GH #56: a receipt must exist in the repository the close is bound to
+
+    #[test]
+    fn receipt_absent_from_the_bound_repo_is_refused_not_silently_accepted() {
+        let (dir, _origin) = init_repo_with_origin("worker");
+        let other_repo = init_factory_repo("elsewhere");
+        std::fs::write(other_repo.path().join("cross.rs"), "// cross-repo\n").unwrap();
+        git(other_repo.path(), &["add", "cross.rs"]);
+        git(other_repo.path(), &["commit", "-q", "-m", "feat: cross"]);
+        let foreign_sha = {
+            let out = Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(other_repo.path())
+                .output()
+                .expect("git rev-parse");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        let refusal = commit_receipt_repo_binding_error(dir.path(), &foreign_sha)
+            .expect("a receipt that does not exist in the bound repo must be refused");
+        assert!(
+            refusal.contains(&foreign_sha[..12]),
+            "refusal must name the receipt it could not find: {refusal}"
+        );
+        assert!(
+            refusal.contains("target_repo"),
+            "refusal must point cross-repo work at the declared target repo: {refusal}"
+        );
+
+        // A receipt that does resolve locally is not refused by this check —
+        // ancestry/window semantics stay with the existing gates.
+        let local_sha = {
+            let out = Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(dir.path())
+                .output()
+                .expect("git rev-parse");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        assert!(
+            commit_receipt_repo_binding_error(dir.path(), &local_sha).is_none(),
+            "a resolvable receipt must pass the repo-binding check"
+        );
+    }
+
+    #[test]
+    fn receipt_repo_binding_check_accepts_an_unambiguous_abbreviation() {
+        // GH #57 is already fixed (abbreviations resolve); the binding check
+        // must not regress that by demanding a full SHA.
+        let (dir, _origin) = init_repo_with_origin("worker");
+        let out = Command::new("git")
+            .args(["rev-parse", "--short", "HEAD"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git rev-parse");
+        let short = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert!(
+            commit_receipt_repo_binding_error(dir.path(), &short).is_none(),
+            "short receipt `{short}` must resolve in the bound repo"
         );
     }
 

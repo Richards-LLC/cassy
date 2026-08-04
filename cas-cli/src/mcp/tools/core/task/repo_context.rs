@@ -1310,6 +1310,8 @@ mod tests {
             let window = TaskCommitReceiptWindow {
                 not_before: chrono::DateTime::from_timestamp(0, 0).unwrap(),
                 basis: "test task creation",
+                task_floor: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+                identity: Default::default(),
             };
             assert!(
                 validate_task_commit_receipt(&repo_a, &receipt, "master", &window).is_err(),

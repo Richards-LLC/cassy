@@ -3,6 +3,11 @@
 **This is a hard rule. Runtime releases and harness-diary updates each have a
 mandatory #cas-internal publication workflow. They are separate duties.**
 
+> This file defines **what** to post. For **how** to post it when the session has
+> no working Slack connection of its own — the Codex `codex_apps` Slack plugin,
+> and the stdin / approval / buffering traps that make it look broken — see
+> [docs/SLACK_POSTING_RUNBOOK.md](SLACK_POSTING_RUNBOOK.md).
+
 ## Runtime releases: two top-level posts
 
 After a release is pushed + tagged, post to **#cas-internal** (`C0B44GUKDK2`). Always **two distinct top-level posts** (not threaded replies) — one per audience:

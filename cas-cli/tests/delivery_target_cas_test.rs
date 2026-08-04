@@ -99,16 +99,22 @@ impl GitRepo {
         );
     }
 
-    /// Install a `post-checkout` hook that lands exactly one commit on the
-    /// target branch. `merge_preserving_worktree` runs `checkout(parent)`
-    /// immediately before `merge_branch`, so this fires inside the
-    /// preflight -> merge window on the real production path.
-    fn arm_post_checkout_drift(&self, marker: &str) {
+    /// Install a `post-checkout` hook that lands exactly one commit on
+    /// `branch`, simulating a concurrent actor.
+    ///
+    /// cas-4702: `merge_preserving_worktree` no longer checks the target out
+    /// in the shared checkout (that flipped the operator's HEAD — GH #68); it
+    /// creates an ephemeral detached worktree instead. `git worktree add`
+    /// still fires `post-checkout`, so this hook still lands inside the
+    /// preflight -> merge window on the real production path. It advances the
+    /// branch ref with plumbing rather than committing on HEAD, so it drifts
+    /// the target from wherever it happens to run.
+    fn arm_post_checkout_drift(&self, marker: &str, branch: &str) {
         let hooks = self.root.join(".git").join("hooks");
         std::fs::create_dir_all(&hooks).unwrap();
         let hook = hooks.join("post-checkout");
-        // The marker lives under .git/ so firing the hook never dirties the
-        // work tree that the merge is about to operate on.
+        // The marker lives under .git/ so firing the hook never dirties any
+        // work tree the merge is about to operate on.
         std::fs::write(
             &hook,
             format!(
@@ -117,11 +123,11 @@ impl GitRepo {
                  marker=\"$(git rev-parse --git-common-dir)/{marker}\"\n\
                  [ -e \"$marker\" ] && exit 0\n\
                  : > \"$marker\"\n\
-                 root=\"$(git rev-parse --show-toplevel)\"\n\
-                 printf 'concurrent\\n' > \"$root/concurrent-{marker}.txt\"\n\
-                 git add \"$root/concurrent-{marker}.txt\"\n\
-                 git -c user.email=drift@test.com -c user.name=Drift \\\n\
-                     commit --no-verify -q -m 'concurrent target commit'\n\
+                 tip=\"$(git rev-parse refs/heads/{branch})\"\n\
+                 tree=\"$(git rev-parse refs/heads/{branch}^{{tree}})\"\n\
+                 new=\"$(git -c user.email=drift@test.com -c user.name=Drift \\\n\
+                     commit-tree \"$tree\" -p \"$tip\" -m 'concurrent target commit')\"\n\
+                 git update-ref refs/heads/{branch} \"$new\" \"$tip\"\n\
                  exit 0\n"
             ),
         )
@@ -426,7 +432,15 @@ async fn delivery_merge_refuses_target_drift_injected_between_preflight_and_merg
         git_stdout(&fixture.repo.root, &["rev-parse", "main"]),
         reviewed
     );
-    fixture.repo.arm_post_checkout_drift("cas0a21drift");
+    // cas-4702 / GH #68: the supervisor's shared checkout sits on its own
+    // branch, never on the delivery target — that is precisely why the merge
+    // must run in an ephemeral worktree. Park HEAD off `main` before arming
+    // the drift so the production venue is the one under test.
+    run_git(
+        &["checkout", "-q", "-b", "supervisor-parking"],
+        &fixture.repo.root,
+    );
+    fixture.repo.arm_post_checkout_drift("cas0a21drift", "main");
 
     env.set_current_dir(&fixture.repo.root);
     let output = run_merge(&fixture).await;

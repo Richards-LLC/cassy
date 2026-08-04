@@ -222,10 +222,31 @@ fn worktree_merge_mcp_error(
         ),
         WorktreeError::Git(GitError::MergeCheckoutDirty(details)) => format!(
             "PRE-EXISTING TARGET CHECKOUT RESIDUE: the shared target checkout has \
-             tracked changes from an earlier operation: {details}.\n\n\
-             worktree_merge did not attempt {source_branch}. Restore, commit, or move \
-             those changes before retrying the merge into {target_branch}; `force=true` \
-             does not bypass shared-checkout residue."
+             tracked changes on paths this merge would write: {details}.\n\n\
+             worktree_merge did not attempt {source_branch}. Residue on paths the merge \
+             does NOT touch is ignored — the merge runs in an ephemeral worktree and \
+             never moves the shared checkout's HEAD — so only these intersecting paths \
+             block it.\n\n\
+             Sanctioned fallback:\n\
+             1. Commit, stash, or move just the listed paths, then retry the merge into \
+             {target_branch}.\n\
+             2. Or merge out of band without touching the shared checkout: \
+             `git worktree add --detach /tmp/cas-merge {target_branch}`, merge \
+             {source_branch} there, then move the branch ref and \
+             `git worktree remove /tmp/cas-merge`.\n\n\
+             `force=true` does not bypass shared-checkout residue."
+        ),
+        WorktreeError::Git(GitError::TargetTipChanged {
+            ref branch,
+            ref expected,
+            ref actual,
+        }) => format!(
+            "TARGET TIP CHANGED: {branch} moved from {expected} to {actual} while \
+             {source_branch} was being merged.\n\n\
+             The merge ran in an ephemeral worktree and was discarded rather than \
+             published over the concurrent update — {target_branch} still points at the \
+             other writer's commit and no shared checkout was touched. Re-run the merge \
+             against the new tip."
         ),
         other => format!("Failed to merge worktree: {other}"),
     };
@@ -1799,6 +1820,45 @@ impl CasCore {
             };
             match merge_result {
                 Ok(commit) => commit,
+                // cas-4702: the ephemeral-worktree merge lost its
+                // compare-and-swap because the target ref moved while Git was
+                // running. That is target drift, not a content conflict — it
+                // must reach the supervisor as the recoverable TipChanged
+                // state, exactly like drift caught before the merge.
+                Err(crate::worktree::WorktreeError::Git(
+                    crate::worktree::GitError::TargetTipChanged { .. },
+                )) => {
+                    if let (Some((_, transaction)), Some(authority)) =
+                        (transactional_delivery.as_ref(), delivery_authority.as_ref())
+                    {
+                        let _ = cas_store::transition_worker_delivery(
+                            &cas_root,
+                            &transaction.id,
+                            &[
+                                cas_types::WorkerDeliveryState::AwaitingMerge,
+                                cas_types::WorkerDeliveryState::MergeAuthorized,
+                            ],
+                            cas_types::WorkerDeliveryState::TipChanged,
+                            &authority.agent_id,
+                            Some(&authority.agent_id),
+                            None,
+                            None,
+                            Some((
+                                "target_tip_changed",
+                                "target ref moved while the merge ran; the merge was discarded",
+                            )),
+                        );
+                    }
+                    return Ok(Self::tool_error(
+                        "TRANSACTIONAL DELIVERY tip_changed: the target ref moved while the \
+                         merge was running.\n\nThe merge was computed in an ephemeral worktree \
+                         and discarded rather than published over the concurrent update, so no \
+                         delivery was recorded and the target still carries the other writer's \
+                         commit. Re-review the worker commit against the new target tip, then \
+                         retry."
+                            .to_string(),
+                    ));
+                }
                 Err(error) => {
                     if let (Some((_, transaction)), Some(authority)) =
                         (transactional_delivery.as_ref(), delivery_authority.as_ref())
@@ -2440,5 +2500,10 @@ mod tests {
         assert!(dirty_message.contains("PRE-EXISTING TARGET CHECKOUT RESIDUE"));
         assert!(dirty_message.contains("src/staged.rs"));
         assert!(dirty_message.contains("force=true"));
+        // cas-4702 / GH #73: the refusal must say it is scoped to the
+        // intersecting paths and name the sanctioned fallback.
+        assert!(dirty_message.contains("paths this merge would write"));
+        assert!(dirty_message.contains("does NOT touch is ignored"));
+        assert!(dirty_message.contains("git worktree add --detach"));
     }
 }

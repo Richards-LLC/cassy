@@ -65,10 +65,22 @@ pub enum GitError {
     /// checkout. This is distinct from source-worktree dirt and cannot be
     /// bypassed with `force`; attempting a merge on top would either fail
     /// opaquely or risk mixing unrelated staged work into the merge.
-    #[error(
-        "The shared target checkout has pre-existing tracked changes and was not touched: {0}"
-    )]
+    #[error("The shared target checkout has pre-existing tracked changes and was not touched: {0}")]
     MergeCheckoutDirty(String),
+
+    /// cas-4702: the ephemeral-worktree merge completed, but the target
+    /// branch had moved since it was read, so the compare-and-swap that would
+    /// have published the merge declined. A concurrent writer is never
+    /// clobbered — the merge is simply discarded with the temp worktree.
+    #[error(
+        "target branch {branch} moved during the merge (expected {expected}, found {actual}) — \
+         the merge was discarded rather than clobbering the concurrent update"
+    )]
+    TargetTipChanged {
+        branch: String,
+        expected: String,
+        actual: String,
+    },
 
     #[error("Uncommitted changes in worktree")]
     UncommittedChanges,
@@ -207,6 +219,50 @@ pub struct ResolvedBase {
     /// (true) or fell back to the local branch (false — offline, no
     /// remote, remote ref missing, OR local carries commits origin lacks).
     pub used_remote: bool,
+}
+
+/// Monotonic suffix so two ephemeral merge worktrees created inside the same
+/// nanosecond still get distinct paths.
+static TEMP_WORKTREE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// RAII handle for the ephemeral detached worktree used to merge without
+/// touching the main checkout (cas-4702). Removal is best-effort on drop:
+/// a leaked directory is recoverable with `git worktree prune`, whereas
+/// failing the merge because cleanup hiccuped is not what the caller asked
+/// for.
+struct TempWorktree {
+    repo_root: PathBuf,
+    path: PathBuf,
+}
+
+impl TempWorktree {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempWorktree {
+    fn drop(&mut self) {
+        let removed = Command::new("git")
+            .args([
+                "worktree",
+                "remove",
+                "--force",
+                &self.path.to_string_lossy(),
+            ])
+            .current_dir(&self.repo_root)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+
+        if !removed {
+            let _ = std::fs::remove_dir_all(&self.path);
+            let _ = Command::new("git")
+                .args(["worktree", "prune"])
+                .current_dir(&self.repo_root)
+                .output();
+        }
+    }
 }
 
 /// Git operations wrapper
@@ -842,9 +898,16 @@ impl GitOperations {
     /// Callers should check this before attempting a merge and report it
     /// distinctly rather than letting git's own error surface unexplained.
     pub fn merge_in_progress(&self) -> bool {
+        Self::merge_in_progress_in(&self.repo_root)
+    }
+
+    /// `merge_in_progress` for an arbitrary checkout directory (main
+    /// checkout, linked worktree, or the ephemeral merge worktree used by
+    /// [`Self::merge_branch_via_temp_worktree`]).
+    fn merge_in_progress_in(dir: &Path) -> bool {
         Command::new("git")
             .args(["rev-parse", "--verify", "-q", "MERGE_HEAD"])
-            .current_dir(&self.repo_root)
+            .current_dir(dir)
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
@@ -876,10 +939,10 @@ impl GitOperations {
     /// unconditionally after any merge failure. The result is intentionally
     /// discarded: if there was nothing to abort (e.g. the failure happened
     /// before git entered a merge state), `--abort` itself fails harmlessly.
-    fn abort_merge_best_effort(&self) {
+    fn abort_merge_best_effort_in(dir: &Path) {
         let _ = Command::new("git")
             .args(["merge", "--abort"])
-            .current_dir(&self.repo_root)
+            .current_dir(dir)
             .output();
     }
 
@@ -936,18 +999,29 @@ impl GitOperations {
         Ok(paths)
     }
 
-    /// Merge a branch into the current branch
+    /// Merge a branch into the current branch of the main checkout.
     pub fn merge_branch(&self, branch: &str, no_ff: bool) -> Result<Option<String>> {
+        let repo_root = self.repo_root.clone();
+        self.merge_branch_in_dir(&repo_root, branch, no_ff)
+    }
+
+    /// Merge `branch` into whatever `dir`'s HEAD points at.
+    ///
+    /// `dir` is the main checkout for the in-place path and the ephemeral
+    /// detached worktree for [`Self::merge_branch_via_temp_worktree`]
+    /// (cas-4702 / GH #68) — the merge mechanics, conflict detection and
+    /// abort-on-failure guarantees are identical either way.
+    fn merge_branch_in_dir(&self, dir: &Path, branch: &str, no_ff: bool) -> Result<Option<String>> {
         // cas-e18f: a merge left over from a previous, un-aborted failure
         // must be reported distinctly, not surfaced as an opaque failure of
         // *this* (unrelated) merge attempt.
-        if self.merge_in_progress() {
+        if Self::merge_in_progress_in(dir) {
             return Err(GitError::MergeInProgress(self.describe_merge_in_progress()));
         }
 
         // Fix symlinked submodules before merge to avoid:
         // "error: expected submodule path 'vendor/...' not to be a symbolic link"
-        self.fix_symlinked_submodules(&self.repo_root)?;
+        self.fix_symlinked_submodules(dir)?;
 
         let mut args = vec!["merge"];
         if no_ff {
@@ -955,10 +1029,7 @@ impl GitOperations {
         }
         args.push(branch);
 
-        let output = Command::new("git")
-            .args(&args)
-            .current_dir(&self.repo_root)
-            .output()?;
+        let output = Command::new("git").args(&args).current_dir(dir).output()?;
 
         if !output.status.success() {
             // cas-e18f: git prints "CONFLICT ..." / "Automatic merge
@@ -975,7 +1046,7 @@ impl GitOperations {
             // cas-e18f fix (a): a failed merge must leave no trace. Abort
             // unconditionally before returning — this is what removes the
             // factory-wide cascade, regardless of which branch below fires.
-            self.abort_merge_best_effort();
+            Self::abort_merge_best_effort_in(dir);
 
             if is_conflict {
                 let paths = Self::extract_conflict_paths(&combined);
@@ -990,7 +1061,7 @@ impl GitOperations {
         // Get the merge commit hash
         let commit_output = Command::new("git")
             .args(["rev-parse", "HEAD"])
-            .current_dir(&self.repo_root)
+            .current_dir(dir)
             .output()?;
 
         if commit_output.status.success() {
@@ -1002,6 +1073,154 @@ impl GitOperations {
         } else {
             Ok(None)
         }
+    }
+
+    /// Paths a merge of `source` into `target` would actually touch
+    /// (cas-4702 / GH #73).
+    ///
+    /// Uses the three-dot diff — everything changed on `source` since the
+    /// merge base with `target` — which is exactly the set of paths the
+    /// merge can write. Callers scope shared-checkout residue checks to this
+    /// set instead of refusing on any dirty path at all.
+    pub fn merge_touched_paths(&self, target: &str, source: &str) -> Result<Vec<String>> {
+        let output = Command::new("git")
+            .args(["diff", "--name-only", &format!("{target}...{source}"), "--"])
+            .current_dir(&self.repo_root)
+            .output()?;
+
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            ));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// Merge `source_branch` into `target_branch` **without touching the
+    /// main checkout** (cas-4702 / GH #68, #73).
+    ///
+    /// The merge runs in an ephemeral detached worktree created at the
+    /// target branch's current tip, and the branch ref is then advanced with
+    /// a compare-and-swap (`update-ref <ref> <new> <old>`), so:
+    ///
+    /// - the main checkout's HEAD, index and working tree are never moved —
+    ///   a supervisor's next commit still lands on the branch they were on;
+    /// - residue in the shared checkout cannot block or contaminate the
+    ///   merge;
+    /// - a concurrent writer that moved the target branch is never
+    ///   clobbered (the CAS declines instead).
+    ///
+    /// Detaching at the resolved SHA (rather than checking out the branch in
+    /// the temp worktree) also means this works when the target branch is
+    /// already checked out somewhere else.
+    ///
+    /// Returns the resulting tip of `target_branch`, or `None` when the
+    /// merge produced no commit.
+    pub fn merge_branch_via_temp_worktree(
+        &self,
+        target_branch: &str,
+        source_branch: &str,
+        no_ff: bool,
+    ) -> Result<Option<String>> {
+        let old_tip = self
+            .resolve_commit(target_branch)
+            .ok_or_else(|| GitError::BranchNotFound(target_branch.to_string()))?;
+
+        let guard = self.add_temp_worktree(&old_tip)?;
+        let merged = self.merge_branch_in_dir(guard.path(), source_branch, no_ff)?;
+
+        let new_tip = match merged {
+            Some(ref tip) if *tip != old_tip => tip.clone(),
+            // "Already up to date" — nothing to advance, and nothing to
+            // compare-and-swap.
+            _ => return Ok(Some(old_tip)),
+        };
+
+        if self
+            .compare_and_swap_ref(target_branch, &new_tip, &old_tip)
+            .is_err()
+        {
+            // The target moved under us. Report it as the typed tip change it
+            // is — the merge commit stays unreferenced and dies with the temp
+            // worktree, and the concurrent writer's ref is untouched.
+            return Err(GitError::TargetTipChanged {
+                branch: target_branch.to_string(),
+                expected: old_tip,
+                actual: self
+                    .resolve_commit(target_branch)
+                    .unwrap_or_else(|| "<unresolvable>".to_string()),
+            });
+        }
+        Ok(Some(new_tip))
+    }
+
+    /// Absolute path of the repository's *common* git dir — shared by the
+    /// main checkout and every linked worktree.
+    fn git_common_dir(&self) -> Option<PathBuf> {
+        let output = Command::new("git")
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .current_dir(&self.repo_root)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        (!dir.is_empty()).then(|| PathBuf::from(dir))
+    }
+
+    /// Create an ephemeral detached worktree at `start_point`. The returned
+    /// guard removes it (and prunes the admin entry) on drop.
+    ///
+    /// The worktree is created under the repository's git dir, not the system
+    /// temp dir: `/tmp` is tmpfs (RAM) on many hosts, and checking out a large
+    /// repository there for the duration of a merge can wedge the machine.
+    /// Inside `.git/` it also stays invisible to `git status` in every
+    /// checkout.
+    fn add_temp_worktree(&self, start_point: &str) -> Result<TempWorktree> {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let base = self
+            .git_common_dir()
+            .map(|dir| dir.join("cas-merge"))
+            .unwrap_or_else(std::env::temp_dir);
+        std::fs::create_dir_all(&base)?;
+        let path = base.join(format!(
+            "cas-merge-{}-{}-{}",
+            std::process::id(),
+            unique,
+            TEMP_WORKTREE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+
+        let path_str = path.to_str().ok_or_else(|| {
+            GitError::CommandFailed(format!("Path contains invalid UTF-8: {}", path.display()))
+        })?;
+
+        let output = Command::new("git")
+            .args(["worktree", "add", "--detach", path_str, start_point])
+            .current_dir(&self.repo_root)
+            .output()?;
+
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(format!(
+                "failed to create ephemeral merge worktree at {}: {}",
+                path.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+
+        Ok(TempWorktree {
+            repo_root: self.repo_root.clone(),
+            path,
+        })
     }
 
     /// Check if the worktree has uncommitted changes

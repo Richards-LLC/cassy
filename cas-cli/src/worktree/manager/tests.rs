@@ -1582,9 +1582,11 @@ fn merge_and_cleanup_detects_pre_existing_dirty_target_index() {
     commit_file(&wt_path, "worker.txt", "worker\n", "worker work");
     worktree.parent_branch = epic_branch;
 
-    std::fs::write(repo_path.join("leftover.txt"), "staged residue\n").unwrap();
+    // Residue on the exact path the merge brings in — this genuinely
+    // collides and must still refuse.
+    std::fs::write(repo_path.join("worker.txt"), "staged residue\n").unwrap();
     Command::new("git")
-        .args(["add", "leftover.txt"])
+        .args(["add", "worker.txt"])
         .current_dir(&repo_path)
         .output()
         .unwrap();
@@ -1597,7 +1599,7 @@ fn merge_and_cleanup_detects_pre_existing_dirty_target_index() {
     match err {
         WorktreeError::Git(GitError::MergeCheckoutDirty(details)) => {
             assert!(
-                details.contains("leftover.txt"),
+                details.contains("worker.txt"),
                 "dirty-index error must name the staged path: {details}"
             );
         }
@@ -1605,4 +1607,259 @@ fn merge_and_cleanup_detects_pre_existing_dirty_target_index() {
     }
     assert_eq!(manager.git().ref_sha("HEAD").unwrap(), pre_head);
     assert!(!manager.git().merge_in_progress());
+}
+
+/// Current branch of a checkout, or "HEAD" when detached.
+fn head_branch(path: &Path) -> String {
+    let output = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(path)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// cas-4702 / GH #73: the reported shape — the shared checkout sits on some
+/// other branch carrying unrelated operator residue while a worker branch is
+/// merged into the epic branch. The merge happens in an ephemeral worktree,
+/// so the residue neither blocks it nor is disturbed by it.
+#[test]
+fn merge_proceeds_when_target_residue_is_disjoint_from_merge_paths() {
+    let (_temp, repo_path) = create_test_repo();
+    let mut config = WorktreeConfig::default();
+    config.auto_merge = true;
+    let mut manager = WorktreeManager::new(&repo_path, config).unwrap();
+
+    let epic_branch = manager.create_epic_branch("Disjoint Residue").unwrap();
+
+    let mut worktree = manager.create_for_worker("disjoint-worker").unwrap();
+    let wt_path = worktree.path.clone();
+    commit_file(&wt_path, "worker.txt", "worker\n", "worker work");
+    worktree.parent_branch = epic_branch.clone();
+
+    // Operator residue unrelated to the merge (the GH #73 shape).
+    std::fs::write(repo_path.join("operator-notes.txt"), "operator residue\n").unwrap();
+    Command::new("git")
+        .args(["add", "operator-notes.txt"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+
+    let merged = manager
+        .merge_and_cleanup(&mut worktree, false, false)
+        .expect("disjoint residue must not refuse the merge");
+    assert!(merged.is_some(), "merge should have produced a commit");
+
+    // The residue is still exactly where the operator left it.
+    let status = manager.git().classify_dirty_status(&repo_path).unwrap();
+    assert!(
+        status
+            .blocking
+            .iter()
+            .any(|entry| entry.path == "operator-notes.txt"),
+        "operator residue must survive the merge untouched: {:?}",
+        status.blocking
+    );
+    // The merge landed on the epic branch, not in the shared checkout.
+    assert!(!repo_path.join("worker.txt").exists());
+    assert!(
+        manager
+            .is_branch_merged(&worktree.branch, &epic_branch)
+            .unwrap()
+    );
+}
+
+/// cas-4702 / GH #73: when the shared checkout IS the merge target, residue on
+/// a path the merge writes still refuses — but the refusal names that path.
+#[test]
+fn merge_refuses_when_shared_checkout_residue_intersects_merge_paths() {
+    let (_temp, repo_path) = create_test_repo();
+    let mut config = WorktreeConfig::default();
+    config.auto_merge = true;
+    let mut manager = WorktreeManager::new(&repo_path, config).unwrap();
+
+    let epic_branch = manager.create_epic_branch("Intersecting Residue").unwrap();
+    manager.git().checkout(&epic_branch).unwrap();
+
+    let mut worktree = manager.create_for_worker("intersect-worker").unwrap();
+    let wt_path = worktree.path.clone();
+    commit_file(&wt_path, "collide.txt", "worker\n", "worker work");
+    worktree.parent_branch = epic_branch;
+
+    std::fs::write(repo_path.join("collide.txt"), "operator edit\n").unwrap();
+    Command::new("git")
+        .args(["add", "collide.txt"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+
+    let err = manager
+        .merge_and_cleanup(&mut worktree, false, false)
+        .expect_err("residue on a merged path must refuse");
+
+    match err {
+        WorktreeError::Git(GitError::MergeCheckoutDirty(details)) => {
+            assert!(
+                details.contains("collide.txt"),
+                "refusal must name the intersecting path: {details}"
+            );
+        }
+        other => panic!("expected MergeCheckoutDirty, got {other:?}"),
+    }
+}
+
+/// cas-4702 / GH #68: merging into a branch the main checkout is NOT on must
+/// leave the main checkout's HEAD exactly where it was — the supervisor's
+/// next commit still lands on their branch, not the epic branch.
+#[test]
+fn merge_never_moves_main_checkout_head() {
+    let (_temp, repo_path) = create_test_repo();
+    let mut config = WorktreeConfig::default();
+    config.auto_merge = true;
+    let mut manager = WorktreeManager::new(&repo_path, config).unwrap();
+
+    let trunk = head_branch(&repo_path);
+    let epic_branch = manager.create_epic_branch("Head Preservation").unwrap();
+
+    let mut worktree = manager.create_for_worker("head-worker").unwrap();
+    let wt_path = worktree.path.clone();
+    commit_file(&wt_path, "worker.txt", "worker\n", "worker work");
+    worktree.parent_branch = epic_branch.clone();
+
+    let trunk_tip_before = manager.git().ref_sha(&trunk).unwrap();
+
+    let merged = manager
+        .merge_and_cleanup(&mut worktree, false, false)
+        .expect("merge into a non-checked-out branch must succeed");
+    let merge_commit = merged.expect("merge should have produced a commit");
+
+    // HEAD untouched: same branch, same tip, clean tree.
+    assert_eq!(
+        head_branch(&repo_path),
+        trunk,
+        "main checkout must still be on {trunk} after the merge"
+    );
+    assert_eq!(
+        manager.git().ref_sha(&trunk).unwrap(),
+        trunk_tip_before,
+        "trunk tip must not move"
+    );
+    assert!(
+        !repo_path.join("worker.txt").exists(),
+        "merged content must not appear in the main checkout's working tree"
+    );
+    assert!(
+        manager
+            .git()
+            .classify_dirty_status(&repo_path)
+            .unwrap()
+            .blocking
+            .is_empty(),
+        "main checkout must be left clean"
+    );
+
+    // The epic branch really did advance to the merge commit.
+    assert_eq!(manager.git().ref_sha(&epic_branch).unwrap(), merge_commit);
+    assert!(
+        manager
+            .is_branch_merged(&worktree.branch, &epic_branch)
+            .unwrap(),
+        "worker branch must be merged into the epic branch"
+    );
+
+    // And no ephemeral merge worktree is left behind.
+    let worktrees = manager.list_git_worktrees().unwrap();
+    assert!(
+        !worktrees
+            .iter()
+            .any(|wt| wt.path.to_string_lossy().contains("cas-merge-")),
+        "ephemeral merge worktree must be removed: {worktrees:?}"
+    );
+}
+
+/// cas-4702 / GH #68: the epic-close path (merge every worker branch into the
+/// epic branch) must not flip the main checkout onto the epic branch either.
+#[test]
+fn merge_workers_to_epic_leaves_main_checkout_head_untouched() {
+    let (_temp, repo_path) = create_test_repo();
+    let config = WorktreeConfig::default();
+    let mut manager = WorktreeManager::new(&repo_path, config).unwrap();
+
+    let trunk = head_branch(&repo_path);
+    let epic_branch = manager.create_epic_branch("Epic Close Head").unwrap();
+
+    let worktree = manager.create_for_worker("epic-close-worker").unwrap();
+    commit_file(&worktree.path, "worker-file.txt", "worker\n", "worker work");
+
+    let results = manager.merge_workers_to_epic(&epic_branch).unwrap();
+    assert_eq!(results.len(), 1);
+    assert!(results[0].1, "merge should succeed: {:?}", results[0].2);
+
+    assert_eq!(
+        head_branch(&repo_path),
+        trunk,
+        "epic close must leave the main checkout on {trunk}"
+    );
+    assert!(
+        !repo_path.join("worker-file.txt").exists(),
+        "epic content must not land in the main checkout's working tree"
+    );
+    assert!(
+        manager
+            .is_branch_merged(&worktree.branch, &epic_branch)
+            .unwrap(),
+        "worker branch must be merged into the epic branch"
+    );
+}
+
+#[test]
+fn merge_venue_is_shared_checkout_only_when_head_is_on_the_target() {
+    assert_eq!(
+        decide_merge_venue(Some("epic/x"), "epic/x"),
+        MergeVenue::SharedCheckout
+    );
+    assert_eq!(
+        decide_merge_venue(Some("staging"), "epic/x"),
+        MergeVenue::TempWorktree
+    );
+    // Detached / unresolvable HEAD is never the shared-checkout venue.
+    assert_eq!(decide_merge_venue(None, "epic/x"), MergeVenue::TempWorktree);
+}
+
+#[test]
+fn residue_overlap_is_scoped_to_merge_touched_paths() {
+    use crate::hooks::handlers::session_hygiene::PorcelainEntry;
+
+    let entry = |path: &str| PorcelainEntry {
+        status: "A ".to_string(),
+        path: path.to_string(),
+    };
+    let residue = vec![
+        entry(".claude/skills/foo.md"),
+        entry("scripts/deploy.sh"),
+        entry("soundwave-config/tmp-watch/a.json"),
+    ];
+    let merge_paths = vec![
+        "soundwave-config/tmp-watch/a.json".to_string(),
+        "src/lib.rs".to_string(),
+    ];
+
+    let overlap = residue_overlapping_merge(&residue, &merge_paths);
+    assert_eq!(overlap.len(), 1);
+    assert_eq!(overlap[0].path, "soundwave-config/tmp-watch/a.json");
+
+    // Nothing in common => nothing blocks.
+    assert!(residue_overlapping_merge(&residue, &["src/lib.rs".to_string()]).is_empty());
+
+    // Directory containment counts in both directions.
+    assert_eq!(
+        residue_overlapping_merge(&[entry(".claude/")], &[".claude/skills/foo.md".to_string()])
+            .len(),
+        1
+    );
+    assert_eq!(
+        residue_overlapping_merge(&[entry(".claude/skills/foo.md")], &[".claude".to_string()])
+            .len(),
+        1
+    );
 }

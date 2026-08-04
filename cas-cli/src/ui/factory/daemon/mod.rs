@@ -144,6 +144,10 @@ enum PendingSpawn {
 struct SpawnVerification {
     request_id: Option<i64>,
     launched_at: Instant,
+    /// cas-28a4 (GH #84): task this spawn promised to pre-assign. Carried to
+    /// registration so the binding is re-confirmed (and the worker briefed)
+    /// at the only moment the worker is provably alive.
+    task_id: Option<String>,
 }
 
 /// Factory daemon state

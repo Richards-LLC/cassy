@@ -158,6 +158,74 @@ fn stalled_spawn_requests<'a>(
         .collect()
 }
 
+/// cas-28a4 (GH #84): bind `task_id` to the worker that just registered, and
+/// prove it stuck.
+///
+/// The prepare-time bind is optimistic — it runs before the worker process
+/// exists, so anything that touches the task in between (a competing claim, a
+/// failed write, a store that was never reachable) leaves the promise in the
+/// spawn receipt unfulfilled with nobody the wiser. Re-running it at
+/// registration makes the assignment self-healing, and the returned title is
+/// what the worker's brief is built from.
+///
+/// `Ok(title)` when the task is bound to this worker; `Err(reason)` carries
+/// supervisor-facing text explaining why it is not.
+fn ensure_worker_preassignment(
+    cas_dir: &std::path::Path,
+    task_id: &str,
+    worker_name: &str,
+) -> Result<String, String> {
+    let assigned = crate::ui::factory::app::render_and_ops::epic_workers::assign_task_to_new_worker(
+        cas_dir,
+        task_id,
+        worker_name,
+    );
+    if let Some(reason) = preassign_failure_reason(cas_dir, task_id, worker_name) {
+        return Err(reason);
+    }
+    if !assigned {
+        tracing::debug!(
+            task_id,
+            worker_name,
+            "cas-28a4: pre-assignment reported no write but the binding is already correct"
+        );
+    }
+    let store = crate::store::open_task_store(cas_dir)
+        .map_err(|e| format!("task {task_id} is bound but unreadable: {e}"))?;
+    store
+        .get(task_id)
+        .map(|task| task.title)
+        .map_err(|e| format!("task {task_id} is bound but unreadable: {e}"))
+}
+
+/// cas-28a4 (GH #84): tell the newly-registered worker what it was spawned for.
+///
+/// A pre-assigned worker that boots with no message sits idle burning a seat —
+/// the assignment alone is invisible from inside the worker's session.
+fn deliver_worker_task_brief(
+    cas_dir: &std::path::Path,
+    factory_session: &str,
+    worker_name: &str,
+    task_id: &str,
+    task_title: &str,
+) -> anyhow::Result<i64> {
+    let queue = open_prompt_queue_store(cas_dir)?;
+    let summary = format!("Assigned task: {task_id}");
+    let message = format!(
+        "You were spawned for task {task_id} — \"{task_title}\" — and it is assigned to \
+         you now.\n\
+         Start with `mcp__cas__task action=show id={task_id}`, then \
+         `mcp__cas__task action=start id={task_id}` before you change any code."
+    );
+    Ok(queue.enqueue_with_summary(
+        "director",
+        worker_name,
+        &message,
+        Some(factory_session),
+        Some(&summary),
+    )?)
+}
+
 /// cas-2702: verify a spawn-time `task_id` pre-assignment actually landed on
 /// the worker that was launched. Returns `Some(reason)` when it did not, so the
 /// daemon can surface it instead of leaving a booted worker with no task and a
@@ -519,6 +587,124 @@ impl FactoryDaemon {
                 &detail,
             ) {
                 tracing::warn!(worker = %worker, error = %error, "failed to enqueue spawn outcome");
+            }
+
+            // cas-28a4 (GH #84): registration is the only moment the worker is
+            // provably alive, so it is where the promised pre-assignment is
+            // settled — bound and briefed, or reported as failed. Never silence.
+            if let Some(ref task_id) = verification.task_id {
+                if success {
+                    self.settle_worker_preassignment(&worker, task_id, verification.request_id);
+                } else {
+                    let detail = format!(
+                        "Task {task_id} was promised to worker '{worker}', which never registered \
+                         with CAS. The task is not being worked — re-assign it or re-spawn."
+                    );
+                    append_spawn_audit(
+                        self.app.cas_dir(),
+                        &self.session_name,
+                        verification.request_id,
+                        Some(&worker),
+                        "preassign",
+                        "failed",
+                        &detail,
+                    );
+                    let _ = enqueue_spawn_outcome_notice(
+                        self.app.cas_dir(),
+                        self.app.supervisor_name(),
+                        &self.session_name,
+                        verification.request_id,
+                        &worker,
+                        "preassign",
+                        false,
+                        &detail,
+                    );
+                }
+            }
+        }
+    }
+
+    /// cas-28a4 (GH #84): bind the promised task to a worker that has just
+    /// registered, brief it, and record the outcome either way.
+    fn settle_worker_preassignment(
+        &mut self,
+        worker: &str,
+        task_id: &str,
+        request_id: Option<i64>,
+    ) {
+        match ensure_worker_preassignment(self.app.cas_dir(), task_id, worker) {
+            Ok(title) => {
+                tracing::info!(
+                    worker = %worker,
+                    task_id = %task_id,
+                    "cas-28a4: pre-assignment confirmed at registration"
+                );
+                let mut detail =
+                    format!("Task {task_id} (\"{title}\") is assigned to this worker.");
+                match deliver_worker_task_brief(
+                    self.app.cas_dir(),
+                    &self.session_name,
+                    worker,
+                    task_id,
+                    &title,
+                ) {
+                    Ok(_) => detail.push_str(" Task brief delivered to the worker."),
+                    Err(e) => {
+                        tracing::warn!(
+                            worker = %worker,
+                            task_id = %task_id,
+                            error = %e,
+                            "cas-28a4: pre-assignment bound but the task brief could not be queued"
+                        );
+                        detail.push_str(&format!(
+                            " WARNING: the task brief could not be delivered ({e}) — the worker \
+                             may sit idle until you message it."
+                        ));
+                    }
+                }
+                append_spawn_audit(
+                    self.app.cas_dir(),
+                    &self.session_name,
+                    request_id,
+                    Some(worker),
+                    "preassign",
+                    "confirmed",
+                    &detail,
+                );
+            }
+            Err(reason) => {
+                let detail = format!(
+                    "Worker '{worker}' registered but the promised pre-assignment of task \
+                     {task_id} did not stick: {reason}. The worker is idle without it — assign \
+                     the task explicitly (mcp__cas__task action=update id={task_id} \
+                     assignee={worker})."
+                );
+                tracing::warn!(
+                    worker = %worker,
+                    task_id = %task_id,
+                    reason = %reason,
+                    "cas-28a4: pre-assignment failed at registration"
+                );
+                append_spawn_audit(
+                    self.app.cas_dir(),
+                    &self.session_name,
+                    request_id,
+                    Some(worker),
+                    "preassign",
+                    "failed",
+                    &detail,
+                );
+                self.app.set_error(detail.clone());
+                let _ = enqueue_spawn_outcome_notice(
+                    self.app.cas_dir(),
+                    self.app.supervisor_name(),
+                    &self.session_name,
+                    request_id,
+                    worker,
+                    "preassign",
+                    false,
+                    &detail,
+                );
             }
         }
     }
@@ -1891,59 +2077,20 @@ impl FactoryDaemon {
                                 "started",
                                 "Worker PTY process started; awaiting CAS registration.",
                             );
-                            // cas-2702: a launched worker whose requested task
-                            // never bound is a silent half-success. Confirm the
-                            // pre-assignment landed, or say why it didn't.
-                            if let Some(ref task_id) = pending_task_id {
-                                match preassign_failure_reason(self.app.cas_dir(), task_id, &name) {
-                                    None => append_spawn_audit(
-                                        self.app.cas_dir(),
-                                        &self.session_name,
-                                        request_id,
-                                        Some(&name),
-                                        "preassign",
-                                        "confirmed",
-                                        &format!("Task {task_id} is assigned to this worker."),
-                                    ),
-                                    Some(reason) => {
-                                        let detail = format!(
-                                            "Worker launched but the requested task \
-                                             pre-assignment did not stick: {reason}. The worker \
-                                             boots without the task — re-assign it explicitly."
-                                        );
-                                        tracing::warn!(
-                                            worker = %name,
-                                            task_id = %task_id,
-                                            reason = %reason,
-                                            "cas-2702: spawn-time task pre-assignment did not stick"
-                                        );
-                                        append_spawn_audit(
-                                            self.app.cas_dir(),
-                                            &self.session_name,
-                                            request_id,
-                                            Some(&name),
-                                            "preassign",
-                                            "failed",
-                                            &detail,
-                                        );
-                                        let _ = enqueue_spawn_outcome_notice(
-                                            self.app.cas_dir(),
-                                            self.app.supervisor_name(),
-                                            &self.session_name,
-                                            request_id,
-                                            &name,
-                                            "preassign",
-                                            false,
-                                            &detail,
-                                        );
-                                    }
-                                }
-                            }
+                            // cas-28a4 (GH #84): the pre-assignment is confirmed
+                            // at REGISTRATION, not here. A launched PTY is not
+                            // yet a live agent, and the optimistic prepare-time
+                            // bind can be lost before the worker exists — so
+                            // `task_id` rides along in the verification record
+                            // and `reconcile_spawn_verifications` re-confirms it
+                            // (and briefs the worker) once registration proves
+                            // the worker is really there.
                             self.spawn_verifications.insert(
                                 name.clone(),
                                 SpawnVerification {
                                     request_id,
                                     launched_at: Instant::now(),
+                                    task_id: pending_task_id.clone(),
                                 },
                             );
                             // A worker may reuse a retired name (e.g. a Codex worker
@@ -2823,7 +2970,8 @@ mod tests {
     use super::{
         append_spawn_audit_line, cancel_targeted_in_flight_spawn, enqueue_spawn_cancelled_notice,
         enqueue_spawn_outcome_notice, is_exact_agent_name_match, matches_event_filter,
-        preassign_failure_reason, prompt_poison_sweep_due, prompt_poison_sweep_targets,
+        deliver_worker_task_brief, ensure_worker_preassignment, preassign_failure_reason,
+        prompt_poison_sweep_due, prompt_poison_sweep_targets,
         registered_prompt_sweep_agents, reminder_matches_factory_session,
         report_stale_reminder_expiry, shutdown_targets, spawn_predates_shutdown,
         spawn_provisioning_timed_out, stalled_spawn_requests, take_next_pending_spawn,
@@ -3376,6 +3524,7 @@ mod tests {
             SpawnVerification {
                 request_id: Some(407),
                 launched_at: Instant::now(),
+                task_id: None,
             },
         )]);
 
@@ -3535,6 +3684,139 @@ mod tests {
         assert!(
             preassign_failure_reason(&cas_dir, "cas-missing", "cosmic-crow-41").is_some(),
             "a missing task must surface as a pre-assign failure, not silence"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // cas-28a4 (GH #84): the pre-assignment promised in the spawn receipt must
+    // actually execute once the worker registers — or fail loudly. Reproduced
+    // live in session cas-src-mighty-crane-74 (requests 414-416): three
+    // task_id spawns booted healthy workers, every pre-assignment no-oped, and
+    // nothing was surfaced to the supervisor.
+    // -----------------------------------------------------------------------
+
+    /// Registration-time pre-assignment binds a free task and reports the
+    /// title, so the worker can be briefed with real context.
+    #[test]
+    fn registration_preassignment_binds_a_free_task() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        store
+            .add(&Task::new("cas-aee6".to_string(), "awaiting_merge lifecycle".to_string()))
+            .unwrap();
+
+        let title = ensure_worker_preassignment(&cas_dir, "cas-aee6", "cosmic-crow-41")
+            .expect("a free task must bind at registration");
+
+        assert_eq!(title, "awaiting_merge lifecycle");
+        assert_eq!(
+            store.get("cas-aee6").unwrap().assignee.as_deref(),
+            Some("cosmic-crow-41"),
+            "GH #84: the promised assignee must actually be persisted"
+        );
+    }
+
+    /// The spawn path attempts the bind twice (once optimistically at prepare
+    /// time, once at registration). The second attempt must confirm, not fail.
+    #[test]
+    fn registration_preassignment_is_idempotent() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut task = Task::new("cas-2702".to_string(), "spawn queue".to_string());
+        task.assignee = Some("cosmic-crow-41".to_string());
+        store.add(&task).unwrap();
+
+        assert!(
+            ensure_worker_preassignment(&cas_dir, "cas-2702", "cosmic-crow-41").is_ok(),
+            "re-confirming our own binding must succeed"
+        );
+    }
+
+    /// Never steal another agent's work — but never stay silent about it
+    /// either: the reason is what reaches the supervisor.
+    #[test]
+    fn registration_preassignment_reports_a_conflicting_holder() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut task = Task::new("cas-e74c".to_string(), "merge guard".to_string());
+        task.assignee = Some("happy-owl-73".to_string());
+        store.add(&task).unwrap();
+
+        let reason = ensure_worker_preassignment(&cas_dir, "cas-e74c", "young-jay-62")
+            .expect_err("a task held by someone else must not silently no-op");
+        assert!(reason.contains("happy-owl-73"), "{reason}");
+        assert_eq!(
+            store.get("cas-e74c").unwrap().assignee.as_deref(),
+            Some("happy-owl-73"),
+            "the existing holder must be preserved"
+        );
+
+        assert!(
+            ensure_worker_preassignment(&cas_dir, "cas-missing", "young-jay-62").is_err(),
+            "a vanished task must surface as a failure, not silence"
+        );
+    }
+
+    /// GH #84's other half: workers "booted with zero context". A confirmed
+    /// pre-assignment must also deliver the task brief to that worker.
+    #[test]
+    fn registration_preassignment_delivers_the_task_brief() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+
+        deliver_worker_task_brief(
+            &cas_dir,
+            "factory-session",
+            "cosmic-crow-41",
+            "cas-aee6",
+            "awaiting_merge lifecycle",
+        )
+        .unwrap();
+
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let prompts = queue.peek_all(10).unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].target, "cosmic-crow-41");
+        assert_eq!(
+            prompts[0].summary.as_deref(),
+            Some("Assigned task: cas-aee6")
+        );
+        assert!(prompts[0].prompt.contains("cas-aee6"), "{}", prompts[0].prompt);
+        assert!(
+            prompts[0].prompt.contains("awaiting_merge lifecycle"),
+            "the brief must carry the task title: {}",
+            prompts[0].prompt
+        );
+        assert!(
+            prompts[0].prompt.contains("action=start"),
+            "the brief must tell the worker how to pick the task up: {}",
+            prompts[0].prompt
+        );
+    }
+
+    /// The verification record is what carries `task_id` from launch to
+    /// registration — without it the daemon has nothing to re-confirm.
+    #[test]
+    fn spawn_verification_carries_the_task_id_to_registration() {
+        let mut verifications = HashMap::from([(
+            "cosmic-crow-41".to_string(),
+            SpawnVerification {
+                request_id: Some(414),
+                launched_at: Instant::now(),
+                task_id: Some("cas-aee6".to_string()),
+            },
+        )]);
+
+        let verification = take_unverified_spawn_on_exit(&mut verifications, "cosmic-crow-41")
+            .expect("verification must be retrievable at registration/exit");
+        assert_eq!(verification.request_id, Some(414));
+        assert_eq!(
+            verification.task_id.as_deref(),
+            Some("cas-aee6"),
+            "request 414 carried cas-aee6 — that pairing must survive to registration"
         );
     }
 

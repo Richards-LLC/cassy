@@ -292,6 +292,8 @@ mod tests {
             cli: SupervisorCli::Codex,
             model: Some("gpt-5o".to_string()),
             effort: Some(Effort::Medium),
+            config_dir: None,
+            requester_config_dir: None,
         };
 
         // Step 1: handler pushes PendingSpawn with the spec (simulates ws_client / gui_client).
@@ -324,6 +326,8 @@ mod tests {
             cli: SupervisorCli::Claude,
             model: None,
             effort: None,
+            config_dir: None,
+            requester_config_dir: None,
         });
         let tmpdir = tempfile::TempDir::new().unwrap();
         let config = mux

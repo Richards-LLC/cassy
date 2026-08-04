@@ -75,6 +75,9 @@ pub struct SpawnRequest {
     /// `factory_spawn_workers`). `None` preserves the pre-cas-6913 behavior
     /// of no auto-assignment.
     pub task_id: Option<String>,
+    /// Requesting supervisor's Claude account directory, captured at enqueue
+    /// time so the daemon does not substitute its own environment.
+    pub requester_config_dir: Option<String>,
     /// When the request was queued
     pub created_at: DateTime<Utc>,
     /// When the request was processed (None if pending)
@@ -101,6 +104,7 @@ CREATE TABLE IF NOT EXISTS spawn_queue (
     worker_spec TEXT,
     factory_session TEXT,
     task_id TEXT,
+    requester_config_dir TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     processed_at TEXT
 );
@@ -135,6 +139,29 @@ pub trait SpawnQueueStore: Send + Sync {
         factory_session: Option<&str>,
         task_id: Option<&str>,
     ) -> Result<i64>;
+
+    /// Queue a spawn request while preserving the requesting supervisor's
+    /// effective Claude account directory for daemon-side spawning.
+    fn enqueue_spawn_with_requester_config_dir(
+        &self,
+        count: i32,
+        worker_names: &[String],
+        isolate: bool,
+        spec_json: Option<&str>,
+        factory_session: Option<&str>,
+        task_id: Option<&str>,
+        requester_config_dir: Option<&str>,
+    ) -> Result<i64> {
+        let _ = requester_config_dir;
+        self.enqueue_spawn(
+            count,
+            worker_names,
+            isolate,
+            spec_json,
+            factory_session,
+            task_id,
+        )
+    }
 
     /// Queue a shutdown request
     fn enqueue_shutdown(
@@ -218,7 +245,8 @@ impl SqliteSpawnQueueStore {
         let worker_spec: Option<String> = row.get(6).unwrap_or_default();
         let factory_session: Option<String> = row.get(7).unwrap_or_default();
         let task_id: Option<String> = row.get(8).unwrap_or_default();
-        let processed_at_str: Option<String> = row.get(10)?;
+        let requester_config_dir: Option<String> = row.get(9).unwrap_or_default();
+        let processed_at_str: Option<String> = row.get(11)?;
 
         Ok(SpawnRequest {
             id: row.get(0)?,
@@ -230,7 +258,8 @@ impl SqliteSpawnQueueStore {
             worker_spec,
             factory_session,
             task_id,
-            created_at: Self::parse_datetime(&row.get::<_, String>(9)?).unwrap_or_else(Utc::now),
+            requester_config_dir,
+            created_at: Self::parse_datetime(&row.get::<_, String>(10)?).unwrap_or_else(Utc::now),
             processed_at: processed_at_str.and_then(|s| Self::parse_datetime(&s)),
         })
     }
@@ -245,6 +274,7 @@ impl SqliteSpawnQueueStore {
         spec_json: Option<&str>,
         factory_session: Option<&str>,
         task_id: Option<&str>,
+        requester_config_dir: Option<&str>,
     ) -> Result<i64> {
         crate::shared_db::with_write_retry(|| {
             let conn = self.conn.lock().unwrap();
@@ -256,7 +286,7 @@ impl SqliteSpawnQueueStore {
             };
 
             conn.execute(
-                "INSERT INTO spawn_queue (action, count, worker_names, force, isolate, worker_spec, factory_session, task_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO spawn_queue (action, count, worker_names, force, isolate, worker_spec, factory_session, task_id, requester_config_dir, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     action.as_str(),
                     count,
@@ -266,6 +296,7 @@ impl SqliteSpawnQueueStore {
                     spec_json,
                     factory_session,
                     task_id,
+                    requester_config_dir,
                     now
                 ],
             )?;
@@ -303,6 +334,30 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
             spec_json,
             factory_session,
             task_id,
+            None,
+        )
+    }
+
+    fn enqueue_spawn_with_requester_config_dir(
+        &self,
+        count: i32,
+        worker_names: &[String],
+        isolate: bool,
+        spec_json: Option<&str>,
+        factory_session: Option<&str>,
+        task_id: Option<&str>,
+        requester_config_dir: Option<&str>,
+    ) -> Result<i64> {
+        self.enqueue(
+            SpawnAction::Spawn,
+            Some(count),
+            worker_names,
+            false,
+            isolate,
+            spec_json,
+            factory_session,
+            task_id,
+            requester_config_dir,
         )
     }
 
@@ -322,6 +377,7 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
             None,
             factory_session,
             None,
+            None,
         )
     }
 
@@ -339,6 +395,7 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
             None,
             factory_session,
             None,
+            None,
         )
     }
 
@@ -347,7 +404,7 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
         let now = Utc::now().to_rfc3339();
 
         let mut stmt = conn.prepare_cached(
-            "SELECT id, action, count, worker_names, force, isolate, worker_spec, factory_session, task_id, created_at, processed_at
+            "SELECT id, action, count, worker_names, force, isolate, worker_spec, factory_session, task_id, requester_config_dir, created_at, processed_at
              FROM spawn_queue
              WHERE processed_at IS NULL
                AND (factory_session = ? OR factory_session IS NULL)
@@ -389,7 +446,7 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
         let conn = self.conn.lock().unwrap();
 
         let mut stmt = conn.prepare_cached(
-            "SELECT id, action, count, worker_names, force, isolate, worker_spec, factory_session, task_id, created_at, processed_at
+            "SELECT id, action, count, worker_names, force, isolate, worker_spec, factory_session, task_id, requester_config_dir, created_at, processed_at
              FROM spawn_queue
              WHERE processed_at IS NULL
              ORDER BY created_at ASC
@@ -673,6 +730,38 @@ mod tests {
     }
 
     #[test]
+    fn test_enqueue_spawn_preserves_requester_config_dir() {
+        let (_temp, store) = create_test_store();
+        let spec_json = r#"{"name":null,"cli":"claude","model":null,"effort":"high","config_dir":"~/.claude-explicit"}"#;
+
+        store
+            .enqueue_spawn_with_requester_config_dir(
+                1,
+                &[],
+                false,
+                Some(spec_json),
+                Some("session-a"),
+                None,
+                Some("~/.claude-supervisor"),
+            )
+            .unwrap();
+
+        let requests = store.peek(10).unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].requester_config_dir.as_deref(),
+            Some("~/.claude-supervisor")
+        );
+        assert!(
+            requests[0]
+                .worker_spec
+                .as_deref()
+                .is_some_and(|spec| spec.contains(".claude-explicit")),
+            "explicit config_dir must remain in worker_spec"
+        );
+    }
+
+    #[test]
     fn test_enqueue_spawn_without_spec_is_none() {
         // Backwards compat: enqueue without spec → worker_spec is None.
         let (_temp, store) = create_test_store();
@@ -742,7 +831,9 @@ mod tests {
     fn test_legacy_null_session_rows_keep_single_session_behavior() {
         let (_temp, store) = create_test_store();
 
-        store.enqueue_spawn(2, &[], false, None, None, None).unwrap();
+        store
+            .enqueue_spawn(2, &[], false, None, None, None)
+            .unwrap();
         store.enqueue_shutdown(Some(1), &[], true, None).unwrap();
 
         let requests = store.poll("any-session", 10).unwrap();

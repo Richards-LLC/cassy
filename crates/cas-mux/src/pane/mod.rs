@@ -233,9 +233,7 @@ impl Pane {
             partial_esc: Vec::new(),
             partial_osc8: Vec::new(),
             harness,
-            paste_tracker: std::sync::Mutex::new(
-                crate::input_stream::BracketedPasteTracker::new(),
-            ),
+            paste_tracker: std::sync::Mutex::new(crate::input_stream::BracketedPasteTracker::new()),
             composer_dirty: std::sync::atomic::AtomicBool::new(false),
             composer_dirty_since: std::sync::Mutex::new(None),
         })
@@ -298,7 +296,14 @@ impl Pane {
         };
         let pty = Pty::spawn(name, config)?;
         // Shell has no agent harness; Claude cancel-key (Esc) is a no-op on shells.
-        Self::with_pty(name, PaneKind::Shell, pty, rows, cols, SupervisorCli::Claude)
+        Self::with_pty(
+            name,
+            PaneKind::Shell,
+            pty,
+            rows,
+            cols,
+            SupervisorCli::Claude,
+        )
     }
 
     /// Build the `PtyConfig` that `worker()` would spawn, without actually
@@ -313,6 +318,8 @@ impl Pane {
         cli: SupervisorCli,
         model: Option<&str>,
         effort: Option<&str>,
+        config_dir: Option<&str>,
+        config_dir_source: Option<&str>,
         teams: Option<&TeamsSpawnConfig>,
     ) -> PtyConfig {
         let mut config = match cli {
@@ -353,6 +360,9 @@ impl Pane {
                 teams,
             ),
         };
+        if cli == SupervisorCli::Claude {
+            config.apply_claude_config_dir(config_dir, config_dir_source);
+        }
         config.env.push((
             "CAS_FACTORY_SUPERVISOR_CLI".to_string(),
             supervisor_cli.as_str().to_string(),
@@ -389,6 +399,8 @@ impl Pane {
         cli: SupervisorCli,
         model: Option<&str>,
         effort: Option<&str>,
+        config_dir: Option<&str>,
+        config_dir_source: Option<&str>,
         rows: u16,
         cols: u16,
         teams: Option<&TeamsSpawnConfig>,
@@ -403,6 +415,8 @@ impl Pane {
             cli,
             model,
             effort,
+            config_dir,
+            config_dir_source,
             teams,
         );
         push_factory_session_env(&mut config, cli, factory_session);
@@ -1147,10 +1161,7 @@ impl Pane {
 
     /// Harness session id, if known.
     pub fn harness_session_id(&self) -> Option<String> {
-        self.harness_session_id
-            .lock()
-            .ok()
-            .and_then(|g| g.clone())
+        self.harness_session_id.lock().ok().and_then(|g| g.clone())
     }
 
     /// Override the harness events path (tests only).

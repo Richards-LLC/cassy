@@ -719,6 +719,8 @@ mod codex_fallback_tests {
             cli: SupervisorCli::Codex,
             model: None,
             effort: Some(Effort::High),
+            config_dir: None,
+            requester_config_dir: None,
         }
     }
 
@@ -751,6 +753,8 @@ mod codex_fallback_tests {
             cli: SupervisorCli::Codex,
             model: None,
             effort: Some(Effort::High),
+            config_dir: None,
+            requester_config_dir: None,
         }];
 
         let notices =
@@ -788,8 +792,9 @@ mod codex_fallback_tests {
     #[test]
     fn codex_missing_in_strict_mode_errors_without_mutating_spec() {
         let mut specs = vec![codex_spec("carol")];
-        let err = apply_codex_fallback_with(&mut specs, true, None, WORKER_LABEL, || false, || false)
-            .expect_err("strict mode must error, not fall back");
+        let err =
+            apply_codex_fallback_with(&mut specs, true, None, WORKER_LABEL, || false, || false)
+                .expect_err("strict mode must error, not fall back");
         assert!(matches!(
             err,
             SpecResolverError::CodexUnavailableStrict { .. }
@@ -810,6 +815,8 @@ mod codex_fallback_tests {
             cli: SupervisorCli::Codex,
             model: None,
             effort: None,
+            config_dir: None,
+            requester_config_dir: None,
         }];
 
         let err =
@@ -863,6 +870,8 @@ mod codex_fallback_tests {
             cli: SupervisorCli::Claude,
             model: Some("sonnet".to_string()),
             effort: Some(Effort::Medium),
+            config_dir: None,
+            requester_config_dir: None,
         }];
         let before = specs[0].clone();
         let notices =
@@ -881,8 +890,15 @@ mod codex_fallback_tests {
             model: Some("gpt-5.6-terra".to_string()),
             ..codex_spec("frank")
         }];
-        apply_codex_fallback_with(&mut specs, false, Some("sonnet"), WORKER_LABEL, || false, || false)
-            .unwrap();
+        apply_codex_fallback_with(
+            &mut specs,
+            false,
+            Some("sonnet"),
+            WORKER_LABEL,
+            || false,
+            || false,
+        )
+        .unwrap();
         assert_eq!(specs[0].model.as_deref(), Some("sonnet"));
     }
 
@@ -917,6 +933,8 @@ mod codex_fallback_tests {
             cli: SupervisorCli::Claude,
             model: None,
             effort: None,
+            config_dir: None,
+            requester_config_dir: None,
         }];
         let notices = apply_codex_fallback_with(
             &mut specs,
@@ -953,6 +971,8 @@ mod codex_fallback_tests {
             cli: SupervisorCli::Codex,
             model: None,
             effort: Some(Effort::High),
+            config_dir: None,
+            requester_config_dir: None,
         };
         let notices = apply_codex_fallback_with(
             std::slice::from_mut(&mut spec),
@@ -987,6 +1007,8 @@ mod codex_fallback_tests {
             cli: SupervisorCli::Codex,
             model: None,
             effort: None,
+            config_dir: None,
+            requester_config_dir: None,
         };
         let err = apply_codex_fallback_with(
             std::slice::from_mut(&mut spec),
@@ -1017,6 +1039,8 @@ mod codex_fallback_tests {
             cli: SupervisorCli::Claude,
             model: None,
             effort: None,
+            config_dir: None,
+            requester_config_dir: None,
         };
         let notices = apply_codex_fallback_for_supervisor(&mut spec, false, None).unwrap();
         assert!(notices.is_empty(), "claude spec must never be touched");

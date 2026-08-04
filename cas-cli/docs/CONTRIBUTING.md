@@ -51,6 +51,19 @@ silently reintroduce fixed bugs.
 
 **New migration**: Create file in `cas-cli/src/migration/migrations/` following naming convention `m{NNN}_{table}_{description}.rs`. Add to the `MIGRATIONS` array in `migrations/mod.rs`. Each migration needs: unique sequential ID, up SQL, and a detect query. See `cas-cli/docs/MIGRATIONS.md` for full details. Migration ID ranges: Entries 1-50, Rules 51-70, Skills 71-90, Agents 91-110, Entities/Worktrees 111+, Verification 131+, Loops/Events 151+.
 
+### Factory worker account selection
+
+`coordination action=spawn_workers` accepts an optional `config_dir` for all
+workers in the request. Claude workers use the tilde-expanded directory as
+`CLAUDE_CONFIG_DIR`; an explicit parameter wins over the requesting
+supervisor's own `CLAUDE_CONFIG_DIR`, which is captured when the request is
+queued so the daemon cannot silently substitute its environment. With neither
+value, spawning retains ordinary daemon-environment inheritance. Codex and
+Grok workers ignore a resolved Claude directory and emit a warning. Only an
+explicit `config_dir` removes `ANTHROPIC_API_KEY`, because that key overrides
+Claude subscription OAuth; propagated supervisor settings retain existing API
+key inheritance.
+
 ## Testing
 
 Integration tests are in `cas-cli/tests/`. Key test files:

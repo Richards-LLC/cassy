@@ -539,6 +539,14 @@ pub struct FactoryRequest {
     )]
     #[serde(default)]
     pub effort: Option<String>,
+
+    /// Claude configuration directory override for spawn_workers. Applies to
+    /// every spawned worker in this request; only Claude workers use it.
+    #[schemars(
+        description = "Claude configuration directory for spawned Claude workers (for example '~/.claude-alt'). Applies to all workers in this spawn request. Claude-only: Codex/Grok workers ignore it and emit a warning. An explicit value also removes inherited ANTHROPIC_API_KEY so the selected OAuth account is used."
+    )]
+    #[serde(default)]
+    pub config_dir: Option<String>,
 }
 
 /// Unified coordination operations request combining agent, factory, and worktree operations.
@@ -771,6 +779,14 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub effort: Option<String>,
 
+    /// Claude configuration directory override for spawn_workers. Applies to
+    /// every spawned worker in this request; only Claude workers use it.
+    #[schemars(
+        description = "Claude configuration directory for spawned Claude workers (for example '~/.claude-alt'). Applies to all workers in this spawn_workers request. Claude-only: Codex/Grok workers ignore it and emit a warning. An explicit value also removes inherited ANTHROPIC_API_KEY so the selected OAuth account is used."
+    )]
+    #[serde(default)]
+    pub config_dir: Option<String>,
+
     /// Reminder message to deliver when triggered
     #[schemars(description = "Reminder message to deliver when triggered")]
     #[serde(default)]
@@ -908,6 +924,7 @@ impl CoordinationRequest {
             cli: self.cli.clone(),
             model: self.model.clone(),
             effort: self.effort.clone(),
+            config_dir: self.config_dir.clone(),
         }
     }
 }

@@ -2656,8 +2656,21 @@ This is the body content."#;
                 "action=blocked",
                 "action=dep_remove",
                 "Merged is the bar, not closed",
-                // Step 6 — file what you observed since the last sweep.
+                // Step 6 — file what you observed since the last sweep, using
+                // the same six-heading body every other issue in the tracker
+                // uses.
                 "gh issue create",
+                "**Environment**",
+                "**Repro**",
+                "**Actual**",
+                "**Expected**",
+                "**Impact**",
+                "**Suggested fix**",
+                // The cron contract: the entry expires, and an expired sweep
+                // is indistinguishable from a clean one.
+                ".claude/scheduled_tasks.json",
+                "7-day auto-expiry",
+                "recreate it if it expired",
                 // The sweep's success case is silence.
                 "end the turn silently",
             ] {

@@ -157,11 +157,38 @@ create is the duplicate you have to dedupe next hour:
 
 ```bash
 gh issue list --state all --search "<distinctive symptom>" --limit 20
-gh issue create --title "<surface>: <what goes wrong>" --body "<repro, observed, expected, version>"
 ```
 
-Include the version (`cas --version` or equivalent) and the exact command and
-output. Then task it in step 4's format if it is actionable now.
+If it is genuinely new, file it with the standard body — six headings, in this
+order, every one filled in:
+
+| Heading | What goes in it |
+|---|---|
+| **Environment** | Version (`cas --version` or equivalent), OS, harness/CLI, and anything about the machine that could matter. |
+| **Repro** | The exact commands, in order, that someone else can paste. Not a description of them. |
+| **Actual** | What happened, quoted from the real output — not paraphrased. |
+| **Expected** | What should have happened, and why you believe that. |
+| **Impact** | Who is blocked and how badly. This is what sets the priority in step 4. |
+| **Suggested fix** | Where you think it lives (file:line if you found it) — or "unknown", which is a legitimate answer. |
+
+```bash
+gh issue create --title "<surface>: <what goes wrong>" --body-file /tmp/issue.md
+```
+
+Write the body to a file rather than splicing a multi-line string through the
+shell. Then task it in step 4's format if it is actionable now.
+
+## The recurring sweep
+
+This sweep normally runs from a cron entry in `.claude/scheduled_tasks.json`,
+hourly. That file is **untracked runtime state**, and the entry carries a
+**7-day auto-expiry** — when it lapses, the sweep silently stops happening and
+nothing announces it.
+
+So: if you are reading this skill because someone asked "is the sweep still
+running?", check the job is there and has fired recently (`lastFiredAt`), and
+**recreate it if it expired**. A sweep nobody re-armed is the failure mode this
+whole loop has — it degrades to silence, which is also what success looks like.
 
 ## Ending the sweep
 

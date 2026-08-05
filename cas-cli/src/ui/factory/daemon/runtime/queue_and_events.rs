@@ -16,6 +16,27 @@ const SPAWN_QUEUE_STALL_AGE_SECS: i64 = 60;
 /// shared store's 5-second busy timeout (plus blocking retries) on this path.
 const REMINDER_EXPIRY_BUSY_BUDGET: Duration = Duration::from_millis(100);
 
+/// Operator-facing detail for a worker that launched but never registered.
+///
+/// cas-28a49 (GH #97): for `cli=codex` the overwhelmingly likely cause is an
+/// untrusted working directory — Codex parks on its interactive trust prompt
+/// before it can start `cas serve`, so the generic "inspect the pane" advice
+/// sends the operator hunting. CAS pre-trusts the cwd at launch
+/// (`cas_pty::codex_trust`), so a Codex timeout that still happens means that
+/// write did not take, and the message says so. Non-Codex harnesses keep the
+/// previous wording verbatim.
+fn registration_timeout_detail(timeout: Duration, cli: cas_mux::SupervisorCli) -> String {
+    let base = format!(
+        "Worker process launched but did not register with CAS within {} seconds; \
+         inspect the worker pane/process and daemon logs.",
+        timeout.as_secs()
+    );
+    match cli {
+        cas_mux::SupervisorCli::Codex => format!("{base} {}", cas_pty::CODEX_TRUST_TIMEOUT_HINT),
+        _ => base,
+    }
+}
+
 fn prompt_poison_sweep_due(last: Option<Instant>, now: Instant) -> bool {
     last.is_some_and(|last| now.saturating_duration_since(last) >= PROMPT_POISON_SWEEP_INTERVAL)
 }
@@ -580,10 +601,9 @@ impl FactoryDaemon {
             } else {
                 (
                     "timeout",
-                    format!(
-                        "Worker process launched but did not register with CAS within {} seconds; \
-                         inspect the worker pane/process and daemon logs.",
-                        SPAWN_REGISTRATION_TIMEOUT.as_secs()
+                    registration_timeout_detail(
+                        SPAWN_REGISTRATION_TIMEOUT,
+                        self.app.harness_for(&worker),
                     ),
                 )
             };
@@ -3084,7 +3104,7 @@ mod tests {
         enqueue_spawn_cancelled_notice,
         enqueue_spawn_outcome_notice, is_exact_agent_name_match, matches_event_filter,
         deliver_worker_task_brief, ensure_worker_preassignment, preassign_failure_reason,
-        prompt_poison_sweep_due, prompt_poison_sweep_targets,
+        prompt_poison_sweep_due, prompt_poison_sweep_targets, registration_timeout_detail,
         registered_prompt_sweep_agents, reminder_matches_factory_session,
         report_stale_reminder_expiry, shutdown_targets, spawn_predates_shutdown,
         spawn_provisioning_timed_out, stalled_spawn_requests, take_next_pending_spawn,
@@ -3111,6 +3131,38 @@ mod tests {
 
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
+        }
+    }
+
+    /// cas-28a49 (GH #97): a Codex worker that launches but never registers is
+    /// almost always parked on Codex's interactive trust prompt. The timeout
+    /// diagnostic must name that cause and the file to fix; other harnesses keep
+    /// the original wording.
+    #[test]
+    fn registration_timeout_names_the_codex_trust_cause() {
+        let codex =
+            registration_timeout_detail(Duration::from_secs(60), cas_mux::SupervisorCli::Codex);
+        assert!(
+            codex.contains("did not register with CAS within 60 seconds"),
+            "must keep the base diagnostic: {codex}"
+        );
+        assert!(
+            codex.contains("config.toml") && codex.contains("[projects]"),
+            "codex timeout must name the trust-list file and table: {codex}"
+        );
+        assert!(
+            codex.contains("trust prompt"),
+            "codex timeout must name the interactive trust prompt: {codex}"
+        );
+
+        for other in [cas_mux::SupervisorCli::Claude, cas_mux::SupervisorCli::Grok] {
+            let detail = registration_timeout_detail(Duration::from_secs(60), other);
+            assert_eq!(
+                detail,
+                "Worker process launched but did not register with CAS within 60 seconds; \
+                 inspect the worker pane/process and daemon logs.",
+                "{other:?} must keep the pre-cas-28a49 wording verbatim"
+            );
         }
     }
 

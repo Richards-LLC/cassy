@@ -28,9 +28,15 @@ fall back to guessing from local files.
 Then load the CAS side once, so every later step reads from the same picture:
 
 ```
-mcp__cas__task action=list status=open limit=100
+mcp__cas__task action=list limit=100
 mcp__cas__search action=search query="<the issue's subject in your own words>"
 ```
+
+**Do not filter this list by `status=open`.** The status filter is a single
+substring match, so `status=open` returns *only* untouched tasks — every task
+someone is actually working on (`in_progress`, `blocked`, `awaiting_merge`,
+`pending_supervisor_review`) drops out, and the sweep concludes an in-flight
+issue was never tasked. List everything and ignore the closed ones yourself.
 
 ## 1. List open issues
 
@@ -77,14 +83,18 @@ reproduction. Do not close on "the task that mentions this issue is closed".
 
 ## 4. Task new issues into the active epic
 
-Find the active epic for this intake lane:
+Find the active epic for this intake lane. List **every** epic and judge the
+status yourself — an epic is auto-promoted to `in_progress` the moment a
+supervisor starts any of its subtasks, so `status=open` hides exactly the epics
+that are most alive:
 
 ```
-mcp__cas__task action=list task_type=epic status=open
+mcp__cas__task action=list task_type=epic limit=50
 ```
 
-- **An open epic exists** → task into it.
-- **No open epic** (the previous one closed with a release) →
+- **An epic for this lane is not closed** (`open`, `in_progress`, `blocked`) →
+  task into it.
+- **Every epic for this lane is closed** (the last one closed with a release) →
   **create a successor epic first.** Never task into a closed epic — a child of
   a closed epic is invisible to the ready queue and will never be picked up.
 

@@ -2640,9 +2640,15 @@ This is the body content."#;
                 // Step 4 — task into the ACTIVE epic, creating a successor when
                 // none is open. This is the branch that was exercised for real
                 // and the one an agent gets wrong by default.
-                "No open epic",
+                "Every epic for this lane is closed",
                 "create a successor epic first",
                 "Never task into a closed epic",
+                // The status filter is a substring match, so `status=open`
+                // hides every task/epic somebody is actually working on. A
+                // sweep that filters that way invents a duplicate successor
+                // epic while the real one is mid-flight.
+                "Do not filter this list by `status=open`",
+                "auto-promoted to `in_progress`",
                 "action=create",
                 "external_ref",
                 "gh issue comment",

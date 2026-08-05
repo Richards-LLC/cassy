@@ -452,6 +452,7 @@ async fn test_task_update_depth_to_light() {
     let update_text = extract_text(
         service
             .cas_task_update(Parameters(TaskUpdateRequest {
+                blocked_by: None,
                 id: id.clone(),
                 title: None,
                 notes: None,

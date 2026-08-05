@@ -870,6 +870,15 @@ impl CasCore {
             }
         }
 
+        // Captured before `req.epic` is consumed below — the blocked_by guard
+        // (cas-d45f) needs to know the epic this same call is establishing.
+        let req_epic_for_blocker_guard: Option<String> = req
+            .epic
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+
         // Handle epic association change
         if let Some(epic_id) = req.epic {
             let epic_id = epic_id.trim();
@@ -951,6 +960,144 @@ impl CasCore {
                     }
                 }
                 changes.push("epic");
+            }
+        }
+
+        // cas-d45f (GH #98): honour `blocked_by` on update instead of silently
+        // dropping it. Ordering is correctness-critical, so a supplied value
+        // must either create the Blocks edge or fail loudly — never report
+        // "No changes specified".
+        if let Some(raw_blocked_by) = req.blocked_by.as_deref() {
+            let mut blocker_ids: Vec<String> = Vec::new();
+            for candidate in raw_blocked_by
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                if !blocker_ids.iter().any(|existing| existing == candidate) {
+                    blocker_ids.push(candidate.to_string());
+                }
+            }
+
+            if blocker_ids.is_empty() {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "blocked_by was supplied but named no task IDs (got {raw_blocked_by:?}). \
+                         Pass a comma-separated list of blocker task IDs, or use \
+                         `dep_remove dep_type=blocks` to drop an existing blocker."
+                    )),
+                    data: None,
+                });
+            }
+
+            if blocker_ids.iter().any(|id| id == &req.id) {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!("Task {} cannot block itself.", req.id)),
+                    data: None,
+                });
+            }
+
+            // Reopening rewrites the task atomically as Open; a fresh blocker
+            // would immediately contradict that status. Reject the combination
+            // explicitly rather than persisting an Open-but-blocked task.
+            if reopening_closed {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "blocked_by cannot be combined with reopening a closed task \
+                         (status=open). Reopen first, then add blockers with a second \
+                         `update blocked_by=...` call."
+                            .to_string(),
+                    ),
+                    data: None,
+                });
+            }
+
+            let existing_deps = task_store.get_dependencies(&req.id).map_err(|e| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Failed to read dependencies: {e}")),
+                data: None,
+            })?;
+
+            // Same guard as create (cas-6009): a task must not be both a child
+            // of and blocked by the same task.
+            let effective_epic = req_epic_for_blocker_guard.clone().or_else(|| {
+                existing_deps
+                    .iter()
+                    .find(|dep| dep.dep_type == DependencyType::ParentChild)
+                    .map(|dep| dep.to_id.clone())
+            });
+            if let Some(epic) = effective_epic.as_deref()
+                && blocker_ids.iter().any(|id| id == epic)
+            {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "Task cannot be both a child of and blocked by the same task ({epic}). \
+                         Use `blocked_by` for peer tasks only."
+                    )),
+                    data: None,
+                });
+            }
+
+            for blocker_id in &blocker_ids {
+                let already_present = existing_deps
+                    .iter()
+                    .any(|dep| dep.dep_type == DependencyType::Blocks && &dep.to_id == blocker_id);
+                if already_present {
+                    warnings.push(format!(
+                        "Already blocked by {blocker_id} — dependency left unchanged."
+                    ));
+                    continue;
+                }
+                let dep = Dependency {
+                    from_id: req.id.clone(),
+                    to_id: blocker_id.clone(),
+                    dep_type: DependencyType::Blocks,
+                    created_at: chrono::Utc::now(),
+                    created_by: Some("mcp".to_string()),
+                };
+                task_store.add_dependency(&dep).map_err(|e| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "Failed to add blocker {blocker_id} to task {}: {e}",
+                        req.id
+                    )),
+                    data: None,
+                })?;
+            }
+            changes.push("blocked_by");
+
+            // A late blocking edge must re-arm an open task (same rule as
+            // dep_add), otherwise the task stays claimable despite a blocker.
+            if task.status == TaskStatus::Open {
+                let has_open_blocker = task_store
+                    .get_blockers(&req.id)
+                    .map_err(|e| McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!(
+                            "Blockers were added, but failed to evaluate them: {e}"
+                        )),
+                        data: None,
+                    })?
+                    .iter()
+                    .any(|blocker| blocker_ids.iter().any(|id| id == &blocker.id));
+                if has_open_blocker {
+                    let previous = lifecycle_status_change
+                        .map(|(old, _)| old)
+                        .unwrap_or(task.status);
+                    task.status = TaskStatus::Blocked;
+                    if previous != TaskStatus::Blocked {
+                        lifecycle_status_change = Some((previous, TaskStatus::Blocked));
+                    } else {
+                        lifecycle_status_change = None;
+                    }
+                    if !changes.contains(&"status") {
+                        changes.push("status");
+                    }
+                }
             }
         }
 

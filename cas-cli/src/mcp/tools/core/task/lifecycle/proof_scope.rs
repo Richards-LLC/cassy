@@ -52,6 +52,9 @@ impl ProofScopeOperation<'_> {
         supplied!(execution_note);
         supplied!(external_ref);
         supplied!(assignee);
+        // cas-d45f: blocked_by mutates ordering semantics, so it is scoped
+        // like any other semantic field while proof is outstanding.
+        supplied!(blocked_by);
         // Closing consumes the exact proof rather than changing what it
         // reviewed. The direct-close handler applies its verification,
         // delivery, repository, and hook gates after this scope guard.
@@ -303,6 +306,7 @@ mod tests {
 
     fn empty_update() -> TaskUpdateRequest {
         TaskUpdateRequest {
+            blocked_by: None,
             id: "cas-scope".to_string(),
             title: None,
             notes: None,

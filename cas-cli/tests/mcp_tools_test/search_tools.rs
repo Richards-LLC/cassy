@@ -319,6 +319,7 @@ async fn test_versioned_provenance_feedback_and_offline_metrics_flow() {
         .expect("created task should expose its ID")
         .to_string();
     core.cas_task_update(Parameters(TaskUpdateRequest {
+        blocked_by: None,
         depth: None,
         id: task_id.clone(),
         title: None,

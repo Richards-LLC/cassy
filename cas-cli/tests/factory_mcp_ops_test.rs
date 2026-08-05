@@ -3947,6 +3947,7 @@ async fn test_062d_lifecycle_start_and_blocked_push_session_isolated() {
         .service
         .inner
         .cas_task_update(Parameters(cas::mcp::tools::TaskUpdateRequest {
+            blocked_by: None,
             id: "cas-062d-start".to_string(),
             title: None,
             notes: None,

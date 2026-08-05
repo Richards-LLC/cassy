@@ -150,6 +150,7 @@ impl ClosedFixture {
 
     fn update_request(&self) -> TaskUpdateRequest {
         TaskUpdateRequest {
+            blocked_by: None,
             id: self.task_id.clone(),
             title: None,
             notes: None,

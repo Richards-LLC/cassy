@@ -406,6 +406,7 @@ impl Pane {
         teams: Option<&TeamsSpawnConfig>,
         factory_session: Option<&str>,
     ) -> Result<Self> {
+        Self::pre_trust_codex_workdir(cli, &cwd);
         let mut config = Self::build_worker_config(
             name,
             cwd,
@@ -509,6 +510,7 @@ impl Pane {
         teams: Option<&TeamsSpawnConfig>,
         factory_session: Option<&str>,
     ) -> Result<Self> {
+        Self::pre_trust_codex_workdir(cli, &cwd);
         let mut config = Self::build_supervisor_config(
             name,
             cwd,
@@ -528,6 +530,27 @@ impl Pane {
             pane.set_harness_session_id(sid);
         }
         Ok(pane)
+    }
+
+    /// cas-28a49 (GH #97): make the pane's cwd trusted for Codex **before** the
+    /// process starts.
+    ///
+    /// Codex CLI parks on its interactive "do you trust this folder?" prompt
+    /// when the directory is absent from `[projects]` in
+    /// `$CODEX_HOME/config.toml`. It parks before rendering, before writing a
+    /// session file, and before starting `cas serve` — so the worker never
+    /// registers and the spawn dies at `stage=register` with a generic 60s
+    /// timeout. Verified against codex-cli 0.146.0; see
+    /// `cas_pty::codex_trust` for the measurements and for why the `-c`
+    /// config-override flag cannot be used instead.
+    ///
+    /// Best effort by design: a failure here is logged with the manual fix and
+    /// the spawn proceeds, which is exactly the pre-fix behaviour.
+    fn pre_trust_codex_workdir(cli: SupervisorCli, cwd: &std::path::Path) {
+        if cli != SupervisorCli::Codex {
+            return;
+        }
+        let _ = cas_pty::ensure_project_trusted(cwd);
     }
 
     fn push_supervisor_env(

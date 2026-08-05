@@ -42,9 +42,14 @@
 //! }
 //! ```
 
+pub mod codex_trust;
 pub mod conformance;
 mod error;
 mod pty;
+
+pub use codex_trust::{
+    CODEX_TRUST_TIMEOUT_HINT, CodexTrustOutcome, codex_home, ensure_project_trusted,
+};
 
 pub use conformance::{
     ConformanceCheck, ConformanceEvidence, ConformanceStatus, Harness, HarnessConformanceReceipt,

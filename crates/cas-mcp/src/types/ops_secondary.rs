@@ -398,7 +398,7 @@ pub struct TeamRequest {
 pub struct FactoryRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'spawn_workers', 'shutdown_workers', 'hold_worker', 'release_worker', 'worker_status', 'worker_activity', 'clear_context', 'my_context', 'sync_all_workers', 'gc_report', 'gc_cleanup', 'epic_status' (per-child branch merge state), 'focus_epic' (pin or clear displayed epic focus), 'remind' (create reminder), 'remind_list' (list reminders), 'remind_cancel' (cancel a reminder)"
+        description = "Action: 'spawn_workers', 'shutdown_workers', 'hold_worker', 'release_worker', 'worker_status', 'worker_activity', 'clear_context', 'my_context', 'sync_all_workers', 'gc_report', 'gc_cleanup', 'epic_status' (per-child branch merge state), 'focus_epic' (pin or clear displayed epic focus), 'remind' (create reminder), 'remind_list' (list reminders), 'remind_cancel' (cancel a reminder), 'server_start' (run a long-lived server under CAS), 'server_stop', 'server_list' (what is listening and who started it)"
     )]
     pub action: String,
 
@@ -547,6 +547,35 @@ pub struct FactoryRequest {
     )]
     #[serde(default)]
     pub config_dir: Option<String>,
+
+    // ========== Server registry (cas-7c93, GH #87) ==========
+    /// Shell command for `server_start`.
+    #[schemars(
+        description = "server_start: the shell command to run (for example 'npm run dev'). Runs under `sh -c` from the given cwd; stdout/stderr are captured to a log file, never inherited."
+    )]
+    #[serde(default)]
+    pub command: Option<String>,
+
+    /// Working directory for `server_start`.
+    #[schemars(
+        description = "server_start: working directory to run the command in (defaults to the current directory)"
+    )]
+    #[serde(default)]
+    pub cwd: Option<String>,
+
+    /// Expected listening port for `server_start`.
+    #[schemars(
+        description = "server_start: the port the server is expected to listen on. Advisory only — server_list reports the ports actually bound, observed from the process itself."
+    )]
+    #[serde(default, deserialize_with = "deser::option_i32")]
+    pub port: Option<i32>,
+
+    /// Whether a registered server outlives its worker.
+    #[schemars(
+        description = "server_start: true to place the server outside worker containment so it survives worker teardown (shared/long-lived services). Default false: the server stays in the worker's containment scope and dies with it."
+    )]
+    #[serde(default)]
+    pub shared: Option<bool>,
 }
 
 /// Unified coordination operations request combining agent, factory, and worktree operations.
@@ -845,6 +874,35 @@ pub struct CoordinationRequest {
     #[schemars(description = "Preview cleanup without making changes (worktree_cleanup; gc_cleanup target caches default to preview unless explicitly false)")]
     #[serde(default)]
     pub dry_run: Option<bool>,
+
+    // ========== Server registry (cas-7c93, GH #87) ==========
+    /// Shell command for `server_start`.
+    #[schemars(
+        description = "server_start: the shell command to run (for example 'npm run dev'). Runs under `sh -c` from the given cwd; stdout/stderr are captured to a log file, never inherited."
+    )]
+    #[serde(default)]
+    pub command: Option<String>,
+
+    /// Working directory for `server_start`.
+    #[schemars(
+        description = "server_start: working directory to run the command in (defaults to the current directory)"
+    )]
+    #[serde(default)]
+    pub cwd: Option<String>,
+
+    /// Expected listening port for `server_start`.
+    #[schemars(
+        description = "server_start: the port the server is expected to listen on. Advisory only — server_list reports the ports actually bound, observed from the process itself."
+    )]
+    #[serde(default, deserialize_with = "deser::option_i32")]
+    pub port: Option<i32>,
+
+    /// Whether a registered server outlives its worker.
+    #[schemars(
+        description = "server_start: true to place the server outside worker containment so it survives worker teardown (shared/long-lived services). Default false: the server stays in the worker's containment scope and dies with it."
+    )]
+    #[serde(default)]
+    pub shared: Option<bool>,
 }
 
 /// Request type for MCP proxy execute/search operations.
@@ -925,6 +983,10 @@ impl CoordinationRequest {
             model: self.model.clone(),
             effort: self.effort.clone(),
             config_dir: self.config_dir.clone(),
+            command: self.command.clone(),
+            cwd: self.cwd.clone(),
+            port: self.port,
+            shared: self.shared,
         }
     }
 }

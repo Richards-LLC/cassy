@@ -102,6 +102,16 @@ fn socket_inode(link_target: &str) -> Option<u64> {
 /// clearly safe becomes `-`, so a hostile or merely unusual session/worker name
 /// cannot escape the parent directory.
 fn scope_name(factory_session: &str, worker_name: &str) -> String {
+    prefixed_scope_name("cas-worker", factory_session, worker_name)
+}
+
+/// Scope directory name for any containment kind.
+///
+/// `kind` separates the namespaces: a worker scope (`cas-worker-…`, reaped at
+/// teardown) and a shared server's own scope (`cas-server-…`, deliberately not
+/// reaped — cas-7c93 / GH #87) must never collide, or teardown would take the
+/// server with it.
+fn prefixed_scope_name(kind: &str, factory_session: &str, name: &str) -> String {
     let sanitize = |value: &str| -> String {
         value
             .chars()
@@ -114,11 +124,7 @@ fn scope_name(factory_session: &str, worker_name: &str) -> String {
             })
             .collect()
     };
-    format!(
-        "cas-worker-{}-{}",
-        sanitize(factory_session),
-        sanitize(worker_name)
-    )
+    format!("{kind}-{}-{}", sanitize(factory_session), sanitize(name))
 }
 
 /// Human-readable teardown summary: what died, and what it was holding.
@@ -182,8 +188,25 @@ fn writable_parent() -> Option<PathBuf> {
 /// `None` means the host has no usable cgroup v2 delegation; the caller keeps
 /// PGID containment and logs the downgrade once per worker.
 pub(crate) fn create_scope(factory_session: &str, worker_name: &str) -> Option<PathBuf> {
+    create_named_scope(scope_name(factory_session, worker_name), worker_name)
+}
+
+/// Create a leaf cgroup for a **shared registered server** (cas-7c93, GH #87).
+///
+/// Deliberately a sibling of the worker scopes rather than a child: worker
+/// teardown kills its own scope's entire subtree, so a server nested under it
+/// would die with the worker no matter what the registry says. This is the
+/// placement that makes "registered-shared servers survive teardown" true.
+pub(crate) fn create_server_scope(factory_session: &str, server_name: &str) -> Option<PathBuf> {
+    create_named_scope(
+        prefixed_scope_name("cas-server", factory_session, server_name),
+        server_name,
+    )
+}
+
+fn create_named_scope(scope: String, label: &str) -> Option<PathBuf> {
     let parent = writable_parent()?;
-    let dir = parent.join(scope_name(factory_session, worker_name));
+    let dir = parent.join(scope);
     match std::fs::create_dir(&dir) {
         Ok(()) => Some(dir),
         // A reused worker name in the same session: adopt the existing scope
@@ -191,10 +214,10 @@ pub(crate) fn create_scope(factory_session: &str, worker_name: &str) -> Option<P
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Some(dir),
         Err(error) => {
             tracing::warn!(
-                worker = %worker_name,
+                scope_for = %label,
                 dir = %dir.display(),
                 error = %error,
-                "cas-99f5: could not create worker cgroup scope; falling back to process-group containment"
+                "cas-99f5: could not create cgroup scope; falling back to process-group containment"
             );
             None
         }
@@ -236,6 +259,15 @@ fn listening_ports_by_inode() -> HashMap<u64, u16> {
         }
     }
     map
+}
+
+/// TCP ports `pid` is listening on right now (cas-7c93, GH #87).
+///
+/// The registry needs the same `/proc` answer teardown reports, so
+/// `server_list` says "listening on 5173" from observation rather than from
+/// what the caller claimed at registration time.
+pub(crate) fn listening_ports_for_pid_public(pid: u32) -> Vec<u16> {
+    listening_ports_for_pid(pid, &listening_ports_by_inode())
 }
 
 fn listening_ports_for_pid(pid: u32, listening: &HashMap<u64, u16>) -> Vec<u16> {

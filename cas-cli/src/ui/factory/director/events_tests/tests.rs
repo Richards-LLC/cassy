@@ -1373,8 +1373,81 @@ fn test_no_worker_idle_while_pending_messages_in_queue() {
     );
 }
 
+/// cas-acb4: `DirectorData` agent visibility is decided by the *process-global*
+/// `CAS_FACTORY_SESSION`, read at two different moments — and that is why any
+/// test touching `DirectorData::load_with_stores` must pin it.
+///
+/// - `AgentStore::register` stamps an agent's `factory_session` from the env
+///   var when the agent carries none (agent_store/ops_agent.rs).
+/// - `DirectorData::load_with_stores` then filters agents through
+///   `visible_to_factory_session(env)`, and `Some(session)` demands an exact
+///   match (director.rs).
+///
+/// Consistent value at both moments → the agent is visible. A value that
+/// CHANGES in between → every agent registered under the old value vanishes
+/// from the snapshot, and any assertion about worker state fails with a
+/// message about the worker being absent, pointing nowhere near the cause.
+///
+/// This is the production rule and it is deliberate (strict same-session
+/// isolation); the hazard is purely that a test can observe a flip caused by a
+/// *different* test mutating the same variable. Pinned here so the next reader
+/// of a "worker is present in director data" failure finds the mechanism
+/// instead of re-deriving it.
+#[test]
+fn factory_session_flip_between_registration_and_load_hides_the_agent() {
+    use crate::test_support::TestEnvGuard;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let stores = DirectorStores::open(temp_dir.path()).unwrap();
+    stores.task_store.init().unwrap();
+    stores.agent_store.init().unwrap();
+    stores.event_store.init().unwrap();
+
+    // One guard for the whole test: it owns the shared env lock, so the flip
+    // below is ours and cannot be interleaved with another test's.
+    let mut env = TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_SESSION", None)]);
+
+    let worker = Agent::new_with_role(
+        "worker-session".to_string(),
+        "flip-worker".to_string(),
+        AgentRole::Worker,
+    );
+    stores.agent_store.register(&worker).unwrap();
+
+    // Same value at both moments: visible.
+    let data = DirectorData::load_with_stores(temp_dir.path(), None, false, Some(&stores)).unwrap();
+    assert!(
+        data.agents.iter().any(|a| a.id == "worker-session"),
+        "an agent registered and loaded under the same session value must be visible"
+    );
+
+    // The flip a concurrent test would cause: registration happened with no
+    // session, the load now sees one.
+    env.set("CAS_FACTORY_SESSION", "someone-elses-session");
+    let data = DirectorData::load_with_stores(temp_dir.path(), None, false, Some(&stores)).unwrap();
+    assert!(
+        !data.agents.iter().any(|a| a.id == "worker-session"),
+        "a session-scoped load must not see agents from another session — this is \
+         the exact disappearance that made the idle-suppression test flaky"
+    );
+}
+
 #[test]
 fn long_backoff_supervisor_message_does_not_permanently_suppress_worker_idle() {
+    // cas-acb4: pin `CAS_FACTORY_SESSION` for the whole test. This test
+    // registers agents and then loads a `DirectorData` snapshot, and both
+    // steps read that process-global variable (see
+    // `factory_session_flip_between_registration_and_load_hides_the_agent`).
+    // Unpinned, a concurrent test mutating it between the two reads erased
+    // every agent from the snapshot and this test failed with "worker is
+    // present in director data" — nothing to do with idle suppression, which
+    // is what made the failure so misleading. The guard also owns the shared
+    // env lock for the duration, so no other test can mutate it mid-body.
+    let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[(
+        "CAS_FACTORY_SESSION",
+        None,
+    )]);
+
     let temp_dir = tempfile::tempdir().unwrap();
     let stores = DirectorStores::open(temp_dir.path()).unwrap();
     stores.task_store.init().unwrap();

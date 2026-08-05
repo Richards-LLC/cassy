@@ -1,0 +1,6 @@
+---
+source: src/ui/components/snapshot_tests.rs
+assertion_line: 182
+expression: tf.output()
+---
+Description: A very long description that exceeds the terminal width

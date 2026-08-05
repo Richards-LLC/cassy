@@ -1,0 +1,8 @@
+---
+source: src/ui/components/snapshot_tests.rs
+assertion_line: 661
+expression: tf.output()
+---
+- First item
+- Second item
+- Third item

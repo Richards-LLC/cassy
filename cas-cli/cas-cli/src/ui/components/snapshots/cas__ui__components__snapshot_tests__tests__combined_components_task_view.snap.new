@@ -1,0 +1,14 @@
+---
+source: src/ui/components/snapshot_tests.rs
+assertion_line: 853
+expression: tf.output()
+---
+--- Task Details
+      ID: cas-10a4
+   Title: Build testing harness
+  Status: in_progress
+Priority: P1
+
+Dependencies
+- cas-277c (closed)
+- cas-737b (blocked)

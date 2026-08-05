@@ -1,0 +1,6 @@
+---
+source: src/ui/components/snapshot_tests.rs
+assertion_line: 145
+expression: tf.output()
+---
+[INFO] 3 tasks pending

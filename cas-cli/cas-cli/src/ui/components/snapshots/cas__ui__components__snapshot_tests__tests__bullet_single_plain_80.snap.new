@@ -1,0 +1,6 @@
+---
+source: src/ui/components/snapshot_tests.rs
+assertion_line: 211
+expression: tf.output()
+---
+  - First item

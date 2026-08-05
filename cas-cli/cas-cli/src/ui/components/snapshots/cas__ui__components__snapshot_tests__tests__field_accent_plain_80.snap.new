@@ -1,0 +1,6 @@
+---
+source: src/ui/components/snapshot_tests.rs
+assertion_line: 193
+expression: tf.output()
+---
+ID: cas-1234

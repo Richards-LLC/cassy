@@ -364,6 +364,7 @@ mod tests {
         all.execution_note = Some("test-first".into());
         all.external_ref = Some("ref".into());
         all.assignee = Some("worker".into());
+        all.blocked_by = Some("cas-blocker".into());
         all.status = Some("open".into());
         all.epic = Some("cas-epic".into());
         all.epic_verification_owner = Some("supervisor".into());
@@ -386,6 +387,7 @@ mod tests {
                 "execution_note",
                 "external_ref",
                 "assignee",
+                "blocked_by",
                 "status",
                 "epic",
                 "epic_verification_owner",

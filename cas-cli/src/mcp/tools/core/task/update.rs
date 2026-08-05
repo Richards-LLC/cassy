@@ -1042,6 +1042,37 @@ impl CasCore {
                 });
             }
 
+            // Validate every blocker BEFORE writing any edge. `add_dependency`
+            // commits one row per call, so validating inside the write loop
+            // would leave the earlier edges of a multi-ID list persisted while
+            // the call reports failure.
+            for blocker_id in &blocker_ids {
+                task_store.get(blocker_id).map_err(|e| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!("Blocker task not found: {blocker_id} ({e})")),
+                    data: None,
+                })?;
+                if task_store
+                    .would_create_cycle(&req.id, blocker_id)
+                    .map_err(|e| McpError {
+                        code: ErrorCode::INTERNAL_ERROR,
+                        message: Cow::from(format!(
+                            "Failed to check blocker {blocker_id} for a dependency cycle: {e}"
+                        )),
+                        data: None,
+                    })?
+                {
+                    return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(format!(
+                            "Blocking task {} on {blocker_id} would create a dependency cycle.",
+                            req.id
+                        )),
+                        data: None,
+                    });
+                }
+            }
+
             for blocker_id in &blocker_ids {
                 let already_present = existing_deps
                     .iter()
@@ -1070,32 +1101,52 @@ impl CasCore {
             }
             changes.push("blocked_by");
 
-            // A late blocking edge must re-arm an open task (same rule as
+            // A late blocking edge must re-arm a claimable task (same rule as
             // dep_add), otherwise the task stays claimable despite a blocker.
-            if task.status == TaskStatus::Open {
-                let has_open_blocker = task_store
-                    .get_blockers(&req.id)
-                    .map_err(|e| McpError {
-                        code: ErrorCode::INTERNAL_ERROR,
-                        message: Cow::from(format!(
-                            "Blockers were added, but failed to evaluate them: {e}"
-                        )),
-                        data: None,
-                    })?
-                    .iter()
-                    .any(|blocker| blocker_ids.iter().any(|id| id == &blocker.id));
-                if has_open_blocker {
-                    let previous = lifecycle_status_change
-                        .map(|(old, _)| old)
-                        .unwrap_or(task.status);
-                    task.status = TaskStatus::Blocked;
-                    if previous != TaskStatus::Blocked {
-                        lifecycle_status_change = Some((previous, TaskStatus::Blocked));
-                    } else {
-                        lifecycle_status_change = None;
+            // `get_blockers` already excludes closed blockers, so naming a
+            // finished task leaves the status alone.
+            //
+            // The check deliberately runs against the status this call is
+            // about to persist, including a status the same call requested:
+            // `update status=in_progress blocked_by=<open task>` must not be
+            // able to start work that is genuinely gated.
+            let has_open_blocker = task_store
+                .get_blockers(&req.id)
+                .map_err(|e| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!(
+                        "Blockers were added, but failed to evaluate them: {e}"
+                    )),
+                    data: None,
+                })?
+                .iter()
+                .any(|blocker| blocker_ids.iter().any(|id| id == &blocker.id));
+            if has_open_blocker {
+                match task.status {
+                    TaskStatus::Blocked => {}
+                    TaskStatus::Open | TaskStatus::InProgress => {
+                        let previous = lifecycle_status_change
+                            .map(|(old, _)| old)
+                            .unwrap_or(task.status);
+                        task.status = TaskStatus::Blocked;
+                        if previous == TaskStatus::Blocked {
+                            lifecycle_status_change = None;
+                        } else {
+                            lifecycle_status_change = Some((previous, TaskStatus::Blocked));
+                        }
+                        if !changes.contains(&"status") {
+                            changes.push("status");
+                        }
                     }
-                    if !changes.contains(&"status") {
-                        changes.push("status");
+                    other => {
+                        // Delivery/close-side statuses are owned by the
+                        // verification pipeline; surface the contradiction
+                        // instead of silently rewriting it.
+                        warnings.push(format!(
+                            "Task {} now has an open blocker but its status ({other}) was left \
+                             unchanged — resolve the blocker or correct the status explicitly.",
+                            req.id
+                        ));
                     }
                 }
             }

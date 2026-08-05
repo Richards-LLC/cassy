@@ -420,6 +420,11 @@ async fn task_update_blocked_by_applies_alongside_another_field() {
 
     let dependent = task_store.get(&dependent_id).expect("dependent");
     assert_eq!(dependent.priority.0, 0, "priority must still be applied");
+    assert_eq!(
+        dependent.status,
+        TaskStatus::Blocked,
+        "the blocker must still re-arm the task when combined with another field"
+    );
     assert!(
         task_store
             .get_dependencies(&dependent_id)
@@ -565,5 +570,234 @@ async fn task_update_blocked_by_rejects_the_parent_epic() {
         error.message.contains("child of and blocked by"),
         "epic/blocker conflict must be explicit: {}",
         error.message
+    );
+}
+
+#[tokio::test]
+async fn task_update_blocked_by_overrides_a_status_that_would_start_gated_work() {
+    let (temp, core) = setup_cas();
+    let task_store = open_task_store(&temp.path().join(".cas")).expect("task store");
+    let service = cas::mcp::CasService::new(core, None);
+
+    let dependent_id = create_task_via_service(&service, "Dependent task").await;
+    let blocker_id = create_task_via_service(&service, "Blocker task").await;
+
+    // status=in_progress in the same call must not smuggle a genuinely
+    // blocked task past the gate.
+    service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "update",
+            "id": dependent_id,
+            "status": "in_progress",
+            "blocked_by": blocker_id,
+        }))))
+        .await
+        .expect("update should succeed");
+
+    assert_eq!(
+        task_store.get(&dependent_id).expect("dependent").status,
+        TaskStatus::Blocked,
+        "an open blocker must win over a same-call status=in_progress"
+    );
+}
+
+#[tokio::test]
+async fn task_update_blocked_by_closed_blocker_leaves_the_task_open() {
+    let (temp, core) = setup_cas();
+    let task_store = open_task_store(&temp.path().join(".cas")).expect("task store");
+    let service = cas::mcp::CasService::new(core, None);
+
+    let dependent_id = create_task_via_service(&service, "Dependent task").await;
+    let blocker_id = create_task_via_service(&service, "Finished blocker").await;
+
+    let mut blocker = task_store.get(&blocker_id).expect("blocker");
+    blocker.status = cas::types::TaskStatus::Closed;
+    blocker.closed_at = Some(chrono::Utc::now());
+    task_store.update(&blocker).expect("close blocker");
+
+    service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "update",
+            "id": dependent_id,
+            "blocked_by": blocker_id,
+        }))))
+        .await
+        .expect("update should succeed");
+
+    assert_eq!(
+        task_store.get(&dependent_id).expect("dependent").status,
+        TaskStatus::Open,
+        "an already-closed blocker must not re-arm the task"
+    );
+}
+
+#[tokio::test]
+async fn task_update_blocked_by_rejects_the_epic_set_in_the_same_call() {
+    let (_temp, core) = setup_cas();
+    let service = cas::mcp::CasService::new(core, None);
+
+    let epic = service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "create",
+            "title": "Epic parent",
+            "task_type": "epic",
+        }))))
+        .await
+        .expect("epic create should succeed");
+    let epic_id = extract_task_id(&extract_text(epic))
+        .expect("epic id")
+        .to_string();
+    let child_id = create_task_via_service(&service, "Child task").await;
+
+    let error = service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "update",
+            "id": child_id,
+            "epic": epic_id,
+            "blocked_by": epic_id,
+        }))))
+        .await
+        .expect_err("epic and blocker must not be the same task in one call");
+    assert!(
+        error.message.contains("child of and blocked by"),
+        "same-call epic/blocker conflict must be explicit: {}",
+        error.message
+    );
+}
+
+#[tokio::test]
+async fn task_update_blocked_by_is_rejected_when_reopening_a_closed_task() {
+    let (temp, core) = setup_cas();
+    let task_store = open_task_store(&temp.path().join(".cas")).expect("task store");
+    let service = cas::mcp::CasService::new(core, None);
+
+    let dependent_id = create_task_via_service(&service, "Dependent task").await;
+    let blocker_id = create_task_via_service(&service, "Blocker task").await;
+
+    let mut dependent = task_store.get(&dependent_id).expect("dependent");
+    dependent.status = cas::types::TaskStatus::Closed;
+    dependent.closed_at = Some(chrono::Utc::now());
+    task_store.update(&dependent).expect("close dependent");
+
+    let error = service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "update",
+            "id": dependent_id,
+            "status": "open",
+            "blocked_by": blocker_id,
+        }))))
+        .await
+        .expect_err("reopen + blocked_by must be rejected explicitly");
+    assert!(
+        error.message.contains("reopening a closed task"),
+        "reopen/blocked_by rejection must explain the combination: {}",
+        error.message
+    );
+    assert!(
+        task_store
+            .get_dependencies(&dependent_id)
+            .expect("deps")
+            .is_empty(),
+        "a rejected reopen+blocked_by call must not write any dependency"
+    );
+
+    // Reopen first, then add the blocker: the documented two-call path works.
+    service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "update",
+            "id": dependent_id,
+            "status": "open",
+        }))))
+        .await
+        .expect("reopen should succeed on its own");
+    service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "update",
+            "id": dependent_id,
+            "blocked_by": blocker_id,
+        }))))
+        .await
+        .expect("blocker should apply after the reopen");
+    assert_eq!(
+        task_store.get(&dependent_id).expect("dependent").status,
+        TaskStatus::Blocked,
+        "the two-call path must end up blocked"
+    );
+}
+
+#[tokio::test]
+async fn task_update_blocked_by_writes_nothing_when_one_id_in_the_list_is_invalid() {
+    let (temp, core) = setup_cas();
+    let task_store = open_task_store(&temp.path().join(".cas")).expect("task store");
+    let service = cas::mcp::CasService::new(core, None);
+
+    let dependent_id = create_task_via_service(&service, "Dependent task").await;
+    let valid_blocker = create_task_via_service(&service, "Valid blocker").await;
+
+    let error = service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "update",
+            "id": dependent_id,
+            "blocked_by": format!("{valid_blocker},cas-totally-unknown"),
+        }))))
+        .await
+        .expect_err("an unknown ID anywhere in the list must fail the call");
+    assert!(
+        error.message.contains("cas-totally-unknown"),
+        "error must name the offending id: {}",
+        error.message
+    );
+    assert!(
+        task_store
+            .get_dependencies(&dependent_id)
+            .expect("deps")
+            .is_empty(),
+        "no partial dependency may survive a rejected blocked_by list"
+    );
+    assert_eq!(
+        task_store.get(&dependent_id).expect("dependent").status,
+        TaskStatus::Open,
+        "a rejected call must leave the task untouched"
+    );
+}
+
+#[tokio::test]
+async fn task_update_blocked_by_rejects_a_dependency_cycle_without_writing() {
+    let (temp, core) = setup_cas();
+    let task_store = open_task_store(&temp.path().join(".cas")).expect("task store");
+    let service = cas::mcp::CasService::new(core, None);
+
+    let first = create_task_via_service(&service, "First").await;
+    let second = create_task_via_service(&service, "Second").await;
+
+    service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "update",
+            "id": second,
+            "blocked_by": first,
+        }))))
+        .await
+        .expect("second blocked_by first should succeed");
+
+    let error = service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "update",
+            "id": first,
+            "blocked_by": second,
+        }))))
+        .await
+        .expect_err("the reverse edge would close a cycle");
+    assert!(
+        error.message.to_lowercase().contains("cycle"),
+        "cycle rejection must say so: {}",
+        error.message
+    );
+    assert!(
+        task_store
+            .get_dependencies(&first)
+            .expect("deps")
+            .iter()
+            .all(|dep| dep.dep_type != cas::types::DependencyType::Blocks),
+        "a rejected cycle must not leave an edge behind"
     );
 }

@@ -162,6 +162,93 @@ pub(crate) fn idle_nudge_applies(channel: DeliveryChannel) -> bool {
     channel == DeliveryChannel::TeamsInbox
 }
 
+/// How a director-generated prompt should reach its recipient this tick
+/// (cas-ae6d / GH #100).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DirectorPromptRoute {
+    /// Hand the payload straight to the recipient's channel now.
+    InjectNow,
+    /// Park it in the durable `prompt_queue` instead, so the queue lane
+    /// (readiness-gated + retrying, see [`classify_queued_delivery`]) delivers
+    /// it on a later tick.
+    DurableQueue,
+}
+
+/// Pure routing decision for a director prompt (cas-ae6d, GH #100).
+///
+/// The director prompt lane in `lifecycle.rs` is a **one-shot** `Mux::inject`
+/// with no readiness gate and no retry, unlike the durable `prompt_queue` lane
+/// which has both. For a Claude recipient under teams that costs nothing: the
+/// prompt is a file write into an inbox that survives until the worker's next
+/// turn boundary. For a **Codex** (or Grok) recipient the same lane is a raw
+/// PTY write — if the pane isn't ready for injection yet, or the write fails,
+/// the wake-up is gone forever, because the event detector's
+/// `task_assigned_announced` guard never re-emits that (task, assignee) pair.
+/// That asymmetry is exactly the reported failure: assignment silently fails to
+/// wake codex workers while an identical assignment wakes a claude worker.
+///
+/// `durable` marks prompts whose loss is a stuck worker rather than a missed
+/// FYI (today: `TaskAssigned`). Such a prompt bound for a PTY pane that isn't
+/// ready goes to the durable queue rather than being written into the void.
+/// Everything else keeps its historical behavior byte-for-byte.
+pub(crate) fn route_director_prompt(
+    channel: DeliveryChannel,
+    pane_ready: bool,
+    durable: bool,
+) -> DirectorPromptRoute {
+    if durable && channel == DeliveryChannel::Pty && !pane_ready {
+        DirectorPromptRoute::DurableQueue
+    } else {
+        DirectorPromptRoute::InjectNow
+    }
+}
+
+/// Whether a direct inject counts as a landed durable delivery (cas-ae6d).
+///
+/// `Mux::inject` reports `Delivered` the moment the write syscall returns — it
+/// cannot observe whether the harness's readline was up yet. So a write into a
+/// pane we already determined was NOT ready for injection (reached only when
+/// the durable enqueue itself failed) must not be treated as delivery, or the
+/// enqueue-failure path silently reinstates the very loss this fixes.
+pub(crate) fn durable_delivery_landed(inject_delivered: bool, pane_was_unready: bool) -> bool {
+    inject_delivered && !pane_was_unready
+}
+
+/// Whether a director prompt that already attempted direct delivery must be
+/// re-queued on the durable lane (cas-ae6d).
+///
+/// True exactly when the prompt is loss-intolerant (`durable`) and the direct
+/// attempt did not land — a transport error, or a
+/// [`InjectOutcome::DeferredComposerDirty`] deferral that the director lane has
+/// no way to retry on its own.
+pub(crate) fn needs_durable_followup(delivered: bool, durable: bool) -> bool {
+    durable && !delivered
+}
+
+/// cas-ae6d: hand a director prompt to the durable `prompt_queue` so the
+/// readiness-gated, retrying queue lane delivers it instead of the one-shot
+/// director lane. Returns the queue row id.
+///
+/// Uses the same `"director"` source as the spawn-time task brief (cas-28a4),
+/// so `process_prompt_queue` applies identical recipient routing and Codex
+/// framing — a queued wake-up reaches a Codex worker exactly the way a direct
+/// one would have, only with retries behind it.
+pub(crate) fn enqueue_director_prompt(
+    cas_dir: &std::path::Path,
+    factory_session: &str,
+    target: &str,
+    text: &str,
+) -> anyhow::Result<i64> {
+    let queue = crate::store::open_prompt_queue_store(cas_dir)?;
+    Ok(queue.enqueue_with_summary(
+        super::teams::DIRECTOR_AGENT_NAME,
+        target,
+        text,
+        Some(factory_session),
+        Some("Task assignment"),
+    )?)
+}
+
 /// Prefix PTY-delivered text with literal sender attribution.
 ///
 /// Emits exactly `Message from <sender>: <text>` — no summary interpolation before
@@ -187,6 +274,42 @@ pub(crate) fn frame_pty_payload(harness: SupervisorCli, source: &str, text: &str
 }
 
 impl FactoryDaemon {
+    /// cas-ae6d (GH #100): should this director prompt be parked on the durable
+    /// `prompt_queue` instead of injected directly this tick?
+    ///
+    /// Resolves the recipient's harness and pane readiness, then defers to the
+    /// pure [`route_director_prompt`] decision.
+    pub(crate) fn route_director_prompt_to_queue(
+        &self,
+        prompt: &crate::ui::factory::director::Prompt,
+    ) -> bool {
+        if !prompt.durable_retry {
+            return false;
+        }
+        let pane_target = if prompt.target == "supervisor" {
+            self.app.supervisor_name()
+        } else {
+            prompt.target.as_str()
+        };
+        let channel = choose_channel(self.app.harness_for(pane_target), self.teams.is_some());
+        let pane_ready = self.app.mux.pane_ready_for_injection(pane_target);
+        route_director_prompt(channel, pane_ready, prompt.durable_retry)
+            == DirectorPromptRoute::DurableQueue
+    }
+
+    /// cas-ae6d: daemon-bound wrapper over [`enqueue_director_prompt`].
+    pub(crate) fn enqueue_director_prompt(
+        &self,
+        prompt: &crate::ui::factory::director::Prompt,
+    ) -> anyhow::Result<i64> {
+        enqueue_director_prompt(
+            self.app.cas_dir(),
+            self.session_name.as_str(),
+            &prompt.target,
+            &prompt.text,
+        )
+    }
+
     /// Deliver `text` to `target` over the channel the recipient can actually
     /// read, decided by the recipient's harness (cas-b68a).
     ///
@@ -447,6 +570,131 @@ mod tests {
         assert!(!requires_pty_readiness_gate(SupervisorCli::Claude, true));
         // Claude without teams → PTY → gated.
         assert!(requires_pty_readiness_gate(SupervisorCli::Claude, false));
+    }
+
+    /// cas-ae6d (GH #100): an assignment wake-up for a Codex worker whose pane
+    /// is not yet ready must be parked on the durable queue, not injected into
+    /// a PTY that will swallow it. The Claude-under-teams recipient keeps
+    /// direct delivery (inbox file write — durable by construction), which is
+    /// why the same assignment woke a claude worker and lost 2/2 codex ones.
+    #[test]
+    fn durable_director_prompt_queues_when_pty_pane_is_not_ready() {
+        assert_eq!(
+            route_director_prompt(DeliveryChannel::Pty, false, true),
+            DirectorPromptRoute::DurableQueue
+        );
+        assert_eq!(
+            route_director_prompt(DeliveryChannel::Pty, true, true),
+            DirectorPromptRoute::InjectNow
+        );
+        // Teams inbox never needs the queue: the write itself is durable.
+        assert_eq!(
+            route_director_prompt(DeliveryChannel::TeamsInbox, false, true),
+            DirectorPromptRoute::InjectNow
+        );
+        // Non-durable prompts keep their historical one-shot behavior.
+        assert_eq!(
+            route_director_prompt(DeliveryChannel::Pty, false, false),
+            DirectorPromptRoute::InjectNow
+        );
+    }
+
+    /// cas-ae6d (GH #100), end to end at the dispatch layer: an assignment
+    /// wake-up for a Codex worker whose pane is not ready is parked on the
+    /// durable queue as a real, pending, retryable row addressed to that
+    /// worker — not dropped. `process_prompt_queue` then delivers it over the
+    /// Codex PTY (with framing) once the pane is ready.
+    #[test]
+    fn assignment_wakeup_for_an_unready_codex_worker_lands_on_the_durable_queue() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+
+        let prompt = crate::ui::factory::director::generate_prompt_at(
+            &crate::ui::factory::director::DirectorEvent::TaskAssigned {
+                task_id: "cas-ae6d".to_string(),
+                task_title: "Wake the codex worker".to_string(),
+                worker: "cosmic-crow-41".to_string(),
+            },
+            &director_data_fixture(),
+            &director_data_fixture(),
+            "supervisor",
+            &crate::config::AutoPromptConfig::default(),
+            SupervisorCli::Claude,
+            SupervisorCli::Codex,
+            &std::collections::HashSet::new(),
+            None,
+            chrono::Utc::now(),
+        )
+        .expect("assignment prompt is generated");
+
+        // The routing decision the daemon makes for this prompt: codex worker
+        // (always PTY) whose pane has not signalled readiness.
+        assert_eq!(
+            route_director_prompt(
+                choose_channel(SupervisorCli::Codex, true),
+                false,
+                prompt.durable_retry,
+            ),
+            DirectorPromptRoute::DurableQueue
+        );
+
+        enqueue_director_prompt(&cas_dir, "factory-session", &prompt.target, &prompt.text).unwrap();
+
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let queued = queue.peek_all(10).unwrap();
+        assert_eq!(queued.len(), 1, "the wake-up must survive as a pending row");
+        assert_eq!(queued[0].target, "cosmic-crow-41");
+        assert_eq!(queued[0].source, super::super::teams::DIRECTOR_AGENT_NAME);
+        assert!(
+            queued[0].prompt.contains("cas-ae6d"),
+            "the queued wake-up must name the task: {}",
+            queued[0].prompt
+        );
+        assert!(
+            queued[0].prompt.contains("action=start"),
+            "the queued wake-up must tell the worker how to pick the task up: {}",
+            queued[0].prompt
+        );
+    }
+
+    fn director_data_fixture() -> crate::ui::factory::director::DirectorData {
+        crate::ui::factory::director::DirectorData {
+            ready_tasks: vec![],
+            in_progress_tasks: vec![],
+            epic_tasks: vec![],
+            agents: vec![],
+            activity: vec![],
+            agent_id_to_name: std::collections::HashMap::new(),
+            changes: vec![],
+            git_loaded: true,
+            reminders: vec![],
+            epic_closed_counts: std::collections::HashMap::new(),
+        }
+    }
+
+    /// cas-ae6d: a durable prompt whose direct attempt failed or was deferred
+    /// (composer dirty) must be re-queued — the director lane has no retry of
+    /// its own and the event detector will never re-emit the assignment.
+    #[test]
+    fn failed_durable_director_prompt_falls_back_to_the_queue() {
+        assert!(needs_durable_followup(false, true));
+        assert!(!needs_durable_followup(true, true));
+        assert!(!needs_durable_followup(false, false));
+        assert!(!needs_durable_followup(true, false));
+    }
+
+    /// cas-ae6d: the enqueue-failure path must not launder a delivered-looking
+    /// PTY write into an unready pane as a real delivery — `Mux::inject`
+    /// returns Delivered on write success, not on the harness reading it.
+    #[test]
+    fn write_into_a_known_unready_pane_is_not_a_landed_delivery() {
+        assert!(!durable_delivery_landed(true, true));
+        assert!(durable_delivery_landed(true, false));
+        assert!(!durable_delivery_landed(false, false));
+        assert!(needs_durable_followup(
+            durable_delivery_landed(true, true),
+            true
+        ));
     }
 
     #[test]

@@ -29,7 +29,7 @@ pub(crate) use events::{
 pub use panel::PanelRegistry;
 pub use prompts::{
     MergeAlertFreshness, Prompt, check_merge_alert_freshness, check_merge_alert_freshness_for_task,
-    compute_gated_task_ids, generate_prompt, revalidate_event_for_delivery_with_context,
+    compute_gated_task_ids, generate_prompt_at, revalidate_event_for_delivery_with_context,
     revalidate_event_for_delivery_with_focus, with_response_instructions,
     worker_now_has_real_assignment,
 };

@@ -538,6 +538,40 @@ impl FactoryDaemon {
                             );
                             continue;
                         }
+                        // cas-ae6d (GH #100): a loss-intolerant prompt (today:
+                        // the assignment wake-up) bound for a PTY pane that is
+                        // not ready for injection goes to the durable
+                        // prompt_queue instead of being written into a pane
+                        // that silently swallows it during harness startup.
+                        // The director lane has no readiness gate and no
+                        // retry; the queue lane has both. Claude-under-teams
+                        // recipients are unaffected — their inbox write is
+                        // durable by construction, which is exactly why the
+                        // same assignment woke a claude worker while codex
+                        // workers were left idle.
+                        let pane_was_unready = self.route_director_prompt_to_queue(&prompt);
+                        if pane_was_unready {
+                            match self.enqueue_director_prompt(&prompt) {
+                                Ok(id) => {
+                                    tracing::info!(
+                                        target: "cas::coordination",
+                                        stage = "director_prompt_queued",
+                                        channel = "prompt_queue",
+                                        target_agent = %prompt.target,
+                                        prompt_id = id,
+                                        "director prompt parked on the durable queue because the recipient's PTY pane is not ready"
+                                    );
+                                    continue;
+                                }
+                                Err(e) => tracing::warn!(
+                                    target: "cas::coordination",
+                                    stage = "director_prompt_queue_failed",
+                                    target_agent = %prompt.target,
+                                    error = %e,
+                                    "durable enqueue failed; attempting direct injection instead"
+                                ),
+                            }
+                        }
                         // cas-f9e8 telemetry: measure director prompt
                         // injection latency from the start of this refresh
                         // tick to the completion of the inbox write. This
@@ -574,6 +608,42 @@ impl FactoryDaemon {
                             .await;
                         let inject_ms = inject_started.elapsed().as_secs_f64() * 1000.0;
                         let total_ms = refresh_started.elapsed().as_secs_f64() * 1000.0;
+                        // cas-ae6d: a durable prompt that did not actually land
+                        // (transport error, or a composer-dirty deferral this
+                        // lane cannot retry) is re-queued rather than lost.
+                        //
+                        // `pane_was_unready` means we only reached this direct
+                        // inject because the durable enqueue itself failed.
+                        // `Mux::inject` reports Delivered as soon as the write
+                        // syscall returns, so a pane still flushing its startup
+                        // input buffer yields a delivered-looking write that the
+                        // harness never sees. Do not let that count as durable
+                        // delivery — retry it, and if the queue is still
+                        // unwritable, say so loudly rather than silently.
+                        let delivered = super::delivery::durable_delivery_landed(
+                            matches!(inject_result, Ok(cas_mux::InjectOutcome::Delivered)),
+                            pane_was_unready,
+                        );
+                        if super::delivery::needs_durable_followup(delivered, prompt.durable_retry)
+                        {
+                            match self.enqueue_director_prompt(&prompt) {
+                                Ok(id) => tracing::info!(
+                                    target: "cas::coordination",
+                                    stage = "director_prompt_requeued",
+                                    channel = "prompt_queue",
+                                    target_agent = %prompt.target,
+                                    prompt_id = id,
+                                    "director prompt re-queued after a direct delivery attempt did not land"
+                                ),
+                                Err(e) => tracing::warn!(
+                                    target: "cas::coordination",
+                                    stage = "director_prompt_requeue_failed",
+                                    target_agent = %prompt.target,
+                                    error = %e,
+                                    "durable re-queue failed; assignment wake-up may be lost"
+                                ),
+                            }
+                        }
                         match inject_result {
                             Ok(cas_mux::InjectOutcome::Delivered) => tracing::info!(
                                 target: "cas::coordination",

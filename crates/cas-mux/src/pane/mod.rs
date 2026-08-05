@@ -1299,11 +1299,31 @@ impl Pane {
                 // so we don't block the daemon event loop for 150-500ms.
                 let writer = pty.writer_handle();
                 let settle_ms = if pty.is_codex() { 500 } else { 150 };
+                // cas-ae6d (GH #100): the submit CR is what turns injected text
+                // into an actual turn. It is written from a detached task, so
+                // its failure cannot be returned to the caller — which already
+                // recorded the inject as Delivered and marked the pane
+                // turn-in-flight. Swallowing the error silently leaves the
+                // payload sitting in the harness composer as an unsubmitted
+                // draft while every observer believes the agent was woken (the
+                // "assignment delivered, worker still idle" shape). It stays
+                // detached (blocking the daemon loop 500ms per inject is worse),
+                // but the failure is now visible on the same
+                // `cas::coordination` lane the delivery telemetry uses.
+                let pane_id = self.id.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(settle_ms)).await;
                     let mut guard = writer.lock().await;
-                    let _ = guard.write_all(b"\r");
-                    let _ = guard.flush();
+                    if let Err(e) = guard.write_all(b"\r").and_then(|()| guard.flush()) {
+                        tracing::warn!(
+                            target: "cas::coordination",
+                            stage = "inject_submit_failed",
+                            target_agent = %pane_id,
+                            error = %e,
+                            "injected payload was written but its submit CR failed — the text is \
+                             sitting unsubmitted in the pane composer and no turn started"
+                        );
+                    }
                 });
                 self.clear_composer_dirty();
                 // Inject submits a prompt → turn is in flight (cas-7f6f).

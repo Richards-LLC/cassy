@@ -13,7 +13,7 @@ use ratatui::layout::Rect;
 use super::director::{
     DiffLine, DirectorData, DirectorEvent, DirectorEventDetector, DirectorStores,
     MergeAlertFreshness, PanelAreas, Prompt, SidecarFocus, ViewMode, check_merge_alert_freshness,
-    generate_prompt, prompt_is_still_deliverable, revalidate_event_for_delivery_with_context,
+    generate_prompt_at, prompt_is_still_deliverable, revalidate_event_for_delivery_with_context,
     revalidate_event_for_delivery_with_focus,
 };
 use crate::store::open_prompt_queue_store;
@@ -362,6 +362,14 @@ pub struct FactoryApp {
     /// (`generate_prompt`, cas-6aaf) must always read the true, unfiltered
     /// task state via this field instead.
     unfiltered_director_data: DirectorData,
+    /// Wall-clock instant `director_data` was last actually read from the task
+    /// store (cas-ae6d / GH #100).
+    ///
+    /// `director_data` is only reloaded on a `db_changed` tick, so "now" is not
+    /// a safe stand-in for its age. Notices that assert an ABSENCE — "no
+    /// dispatchable tasks" — quote this instant so the claim is attributable to
+    /// a real read instead of to render time.
+    director_data_loaded_at: chrono::DateTime<chrono::Utc>,
     /// Current input mode
     pub input_mode: InputMode,
     /// Buffer for inject mode text input
@@ -774,6 +782,13 @@ impl FactoryApp {
         }
 
         let loaded_data = self.try_load_unfiltered_director_data_for_delivery();
+        // cas-ae6d (GH #100): the instant the snapshot backing a "no
+        // dispatchable tasks" claim was actually read. That claim is counted
+        // from `director_data` (session/epic-scoped — see the comment on
+        // `dispatchable_ready_count`'s call site), which is reloaded only on a
+        // `db_changed` tick, so this is deliberately NOT `Utc::now()`: stamping
+        // render time would assert a freshness the data may not have.
+        let snapshot_at = self.director_data_loaded_at;
         let delivery_state_is_authoritative = loaded_data.is_ok();
         let unfiltered_data =
             loaded_data.unwrap_or_else(|_| self.unfiltered_director_data.clone());
@@ -868,7 +883,7 @@ impl FactoryApp {
                     }
                 };
 
-            if let Some(prompt) = generate_prompt(
+            if let Some(prompt) = generate_prompt_at(
                 event,
                 &self.director_data,
                 &unfiltered_data,
@@ -878,6 +893,7 @@ impl FactoryApp {
                 self.worker_cli,
                 &gated_task_ids,
                 merge_alert_evidence.as_ref(),
+                snapshot_at,
             ) {
                 prompts.push(prompt);
             }
@@ -975,6 +991,8 @@ impl FactoryApp {
             // info per worktree, potentially the largest field) here would
             // be pure waste.
             self.unfiltered_director_data = unfiltered_snapshot_from(&self.director_data);
+            // cas-ae6d: the only place `director_data` is genuinely re-read.
+            self.director_data_loaded_at = chrono::Utc::now();
             if git_due {
                 self.last_git_refresh = Instant::now();
             }

@@ -61,6 +61,14 @@ fn dispatchable_ready_count(data: &DirectorData, gated_task_ids: &HashSet<String
         .count()
 }
 
+/// Render the instant a delivery-time snapshot was read, for notices that
+/// report an absence ("no dispatchable tasks") — the one claim whose truth
+/// decays (cas-ae6d, GH #100). Second-resolution UTC keeps it readable and
+/// directly comparable to `task action=ready` output timestamps.
+pub(crate) fn snapshot_stamp(snapshot_at: chrono::DateTime<chrono::Utc>) -> String {
+    format!("snapshot {}", snapshot_at.format("%Y-%m-%d %H:%M:%SZ"))
+}
+
 fn live_worker_session_id(data: &DirectorData, worker_name: &str) -> Option<String> {
     data.agents
         .iter()
@@ -605,6 +613,15 @@ pub struct Prompt {
     /// prompts use `retract_epic` for the same last-mile race; this field is
     /// specific to worker-assignment currency.
     pub drop_if_worker_assigned: Option<String>,
+    /// cas-ae6d (GH #100): this prompt is loss-intolerant — dropping it leaves
+    /// a worker parked with an assignment it was never told about, and the
+    /// event detector's `task_assigned_announced` guard guarantees no second
+    /// chance. The daemon routes such a prompt through the durable
+    /// `prompt_queue` (readiness-gated + retrying) whenever the recipient's
+    /// channel is a PTY that cannot take it right now, and re-queues it if a
+    /// direct attempt fails or is deferred. `false` for informational prompts,
+    /// which keep their historical one-shot delivery.
+    pub durable_retry: bool,
 }
 
 /// Last-mile predicate for a prompt that has already survived event-level
@@ -1105,6 +1122,17 @@ fn merge_required_idle_prompt_text(
 /// (it stays a pure function over in-memory snapshots) — the freshness
 /// re-check, including the decision to drop a stale alert entirely, is the
 /// caller's responsibility (`revalidate_and_prompt_for_delivery`).
+/// Thin shim over [`generate_prompt_at`] that stamps taskless-worker notices
+/// with `Utc::now()`. Production callers use `generate_prompt_at` and pass the
+/// instant the delivery-time snapshot was actually read, so the stamp names the
+/// snapshot's age rather than the render's (cas-ae6d / GH #100). Mirrors the
+/// `detect_changes` / `detect_changes_at` clock-injection pattern in events.rs.
+///
+/// Test-only: every production caller has a real snapshot instant to pass, so
+/// keeping this out of non-test builds means no prompt can quietly stamp a
+/// notice with render time instead of read time.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub fn generate_prompt(
     event: &DirectorEvent,
     data: &DirectorData,
@@ -1115,6 +1143,39 @@ pub fn generate_prompt(
     worker_cli: SupervisorCli,
     gated_task_ids: &HashSet<String>,
     merge_alert_evidence: Option<&MergeAlertEvidence>,
+) -> Option<Prompt> {
+    generate_prompt_at(
+        event,
+        data,
+        unfiltered_data,
+        supervisor_name,
+        config,
+        supervisor_cli,
+        worker_cli,
+        gated_task_ids,
+        merge_alert_evidence,
+        chrono::Utc::now(),
+    )
+}
+
+/// [`generate_prompt`] with the snapshot instant injected.
+///
+/// `snapshot_at` is when `unfiltered_data` was read from the store. Idle /
+/// registration notices that report "nothing dispatchable" carry it verbatim so
+/// the recipient can tell a genuinely-empty queue from a notice built against a
+/// snapshot that has since been overtaken by an assignment (cas-ae6d, GH #100).
+#[allow(clippy::too_many_arguments)]
+pub fn generate_prompt_at(
+    event: &DirectorEvent,
+    data: &DirectorData,
+    unfiltered_data: &DirectorData,
+    supervisor_name: &str,
+    config: &AutoPromptConfig,
+    supervisor_cli: SupervisorCli,
+    worker_cli: SupervisorCli,
+    gated_task_ids: &HashSet<String>,
+    merge_alert_evidence: Option<&MergeAlertEvidence>,
+    snapshot_at: chrono::DateTime<chrono::Utc>,
 ) -> Option<Prompt> {
     // Check global enable flag first
     if !config.enabled {
@@ -1151,6 +1212,12 @@ pub fn generate_prompt(
                 retract_task: None,
                 retract_epic: None,
                 drop_if_worker_assigned: None,
+                // cas-ae6d (GH #100): the assignment wake-up is the one prompt
+                // whose loss strands a worker — the detector announces a
+                // (task, assignee) pair exactly once, so a swallowed PTY write
+                // is permanent. Make it durable so a Codex/Grok worker whose
+                // pane isn't ready still gets woken by the retrying queue lane.
+                durable_retry: true,
             })
         }
 
@@ -1226,6 +1293,7 @@ pub fn generate_prompt(
                 retract_task: None,
                 retract_epic: None,
                 drop_if_worker_assigned: None,
+                durable_retry: false,
             })
         }
 
@@ -1250,6 +1318,7 @@ pub fn generate_prompt(
                 retract_task: None,
                 retract_epic: None,
                 drop_if_worker_assigned: None,
+                durable_retry: false,
             })
         }
 
@@ -1300,20 +1369,30 @@ pub fn generate_prompt(
             // Checking by both display-name assignee (canonical DB path) and session-ID
             // assignee (legacy assignment path via agent_id_to_name) makes this robust
             // to either convention.
-            let worker_is_busy =
-                data.in_progress_tasks
-                    .iter()
-                    .chain(
-                        data.ready_tasks
+            //
+            // cas-ae6d (GH #100): checked against `unfiltered_data` — the
+            // delivery-time read — so an assignment outside the tracked epic
+            // still counts as busy. Defense-in-depth only: the primary guard is
+            // `revalidate_event_for_delivery_with_context`, which applies the
+            // same predicate to the same snapshot before this function is
+            // called. This arm is what remains reachable when the event carried
+            // an `active_task` whose lease has since expired.
+            let worker_is_busy = unfiltered_data
+                .in_progress_tasks
+                .iter()
+                .chain(
+                    unfiltered_data
+                        .ready_tasks
+                        .iter()
+                        .filter(|t| t.status == TaskStatus::Open),
+                )
+                .any(|t| {
+                    t.assignee.as_deref() == Some(worker.as_str())
+                        || unfiltered_data
+                            .agent_id_to_name
                             .iter()
-                            .filter(|t| t.status == TaskStatus::Open),
-                    )
-                    .any(|t| {
-                        t.assignee.as_deref() == Some(worker.as_str())
-                            || data.agent_id_to_name.iter().any(|(id, name)| {
-                                name == worker && t.assignee.as_deref() == Some(id)
-                            })
-                    });
+                            .any(|(id, name)| name == worker && t.assignee.as_deref() == Some(id))
+                });
             if worker_is_busy && active_task.is_none() {
                 return None;
             }
@@ -1386,11 +1465,22 @@ pub fn generate_prompt(
                     retract_task,
                     retract_epic: None,
                     drop_if_worker_assigned: None,
+                    durable_retry: false,
                 });
             }
 
             // Count only truly-dispatchable tasks (Open + unassigned). See
             // `dispatchable_ready_count` for why `ready_tasks.len()` is wrong.
+            //
+            // cas-ae6d (GH #100): deliberately still `data`, NOT
+            // `unfiltered_data`. The epic/session scoping is load-bearing here:
+            // `unfiltered_data` is the whole task DB, so counting from it makes
+            // every backlog task in the store — other epics, abandoned earlier
+            // sessions — read as dispatchable work for THIS worker, and the
+            // stand-down branch below becomes unreachable in any repo with a
+            // backlog. `data` is reloaded on this same tick whenever the DB
+            // changed (`refresh_data`), and `snapshot_at` below names exactly
+            // when that read happened.
             let ready_count = dispatchable_ready_count(data, gated_task_ids);
             let idle_summary = if data
                 .agents
@@ -1432,9 +1522,10 @@ pub fn generate_prompt(
                 // Direct the supervisor to verify with a live query instead.
                 format!(
                     "{idle_summary}\n\
-                     No dispatchable tasks in current snapshot — verify with \
+                     No dispatchable tasks in current snapshot ({}) — verify with \
                      `{supervisor_prefix}task action=ready` before acting.\n\
-                     If genuinely idle, assign new work or stand down this worker."
+                     If genuinely idle, assign new work or stand down this worker.",
+                    snapshot_stamp(snapshot_at)
                 )
             };
 
@@ -1445,6 +1536,7 @@ pub fn generate_prompt(
                 retract_task: None,
                 retract_epic: None,
                 drop_if_worker_assigned: Some(worker.clone()),
+                durable_retry: false,
             })
         }
 
@@ -1489,6 +1581,7 @@ pub fn generate_prompt(
                     retract_task: None,
                     retract_epic: None,
                     drop_if_worker_assigned: None,
+                    durable_retry: false,
                 });
             }
 
@@ -1512,6 +1605,7 @@ pub fn generate_prompt(
                     retract_task: None,
                     retract_epic: None,
                     drop_if_worker_assigned: None,
+                    durable_retry: false,
                 })
             } else {
                 // Still stalled after the nudge — escalate to the supervisor.
@@ -1545,6 +1639,7 @@ pub fn generate_prompt(
                     retract_task: None,
                     retract_epic: None,
                     drop_if_worker_assigned: None,
+                    durable_retry: false,
                 })
             }
         }
@@ -1585,6 +1680,9 @@ pub fn generate_prompt(
                 return None;
             }
 
+            // cas-ae6d: same scoping rule as WorkerIdle above — session/epic
+            // scope is load-bearing for dispatch advice; the notice is stamped
+            // with when that snapshot was read instead.
             let ready_count = dispatchable_ready_count(data, gated_task_ids);
             let text = if ready_count > 0 {
                 format!(
@@ -1595,8 +1693,9 @@ pub fn generate_prompt(
             } else {
                 format!(
                     "Worker {agent_name} has registered and is awaiting its first task.\n\
-                     No dispatchable tasks in current snapshot — verify with \
-                     `{supervisor_prefix}task action=ready` before acting."
+                     No dispatchable tasks in current snapshot ({}) — verify with \
+                     `{supervisor_prefix}task action=ready` before acting.",
+                    snapshot_stamp(snapshot_at)
                 )
             };
 
@@ -1607,6 +1706,7 @@ pub fn generate_prompt(
                 retract_task: None,
                 retract_epic: None,
                 drop_if_worker_assigned: Some(agent_name.clone()),
+                durable_retry: false,
             })
         }
 
@@ -1734,6 +1834,7 @@ pub fn generate_prompt(
                 retract_task: None,
                 retract_epic: Some(epic_id.clone()),
                 drop_if_worker_assigned: None,
+                durable_retry: false,
             })
         }
     }
@@ -1843,6 +1944,204 @@ mod tests {
 
     fn claude() -> SupervisorCli {
         SupervisorCli::Claude
+    }
+
+    /// cas-ae6d (GH #100): the assignment wake-up is the one prompt whose loss
+    /// strands a worker — the detector announces each (task, assignee) pair
+    /// exactly once — so it must be tagged for durable delivery. Every
+    /// informational prompt keeps its historical one-shot behavior.
+    #[test]
+    fn task_assignment_prompt_is_marked_durable() {
+        let event = DirectorEvent::TaskAssigned {
+            task_id: "cas-ae6d".to_string(),
+            task_title: "Wake the codex worker".to_string(),
+            worker: "swift-fox".to_string(),
+        };
+        let data = make_data(0);
+        let prompt = generate_prompt(
+            &event,
+            &data,
+            &data,
+            "supervisor",
+            &default_config(),
+            claude(),
+            codex(),
+            &HashSet::new(),
+            None,
+        )
+        .expect("assignment prompt is generated");
+
+        assert_eq!(prompt.target, "swift-fox");
+        assert!(
+            prompt.durable_retry,
+            "an assignment wake-up must survive a PTY pane that cannot take it yet"
+        );
+
+        // Contrast: an idle notice is informational and stays one-shot.
+        let idle = DirectorEvent::WorkerIdle {
+            worker: "swift-fox".to_string(),
+            active_task: None,
+        };
+        let idle_prompt = generate_prompt(
+            &idle,
+            &data,
+            &data,
+            "supervisor",
+            &default_config(),
+            claude(),
+            codex(),
+            &HashSet::new(),
+            None,
+        )
+        .expect("idle prompt is generated");
+        assert!(!idle_prompt.durable_retry);
+    }
+
+    /// cas-ae6d (GH #100): "no dispatchable tasks" is an absence claim whose
+    /// truth decays, so it must name the snapshot it was read from.
+    #[test]
+    fn idle_notice_carries_its_snapshot_timestamp() {
+        let event = DirectorEvent::WorkerIdle {
+            worker: "swift-fox".to_string(),
+            active_task: None,
+        };
+        let data = make_data(0);
+        let snapshot_at = chrono::DateTime::parse_from_rfc3339("2026-08-05T22:41:07Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        let prompt = generate_prompt_at(
+            &event,
+            &data,
+            &data,
+            "supervisor",
+            &default_config(),
+            claude(),
+            codex(),
+            &HashSet::new(),
+            None,
+            snapshot_at,
+        )
+        .expect("idle prompt is generated");
+
+        assert!(
+            prompt.text.contains("No dispatchable tasks"),
+            "expected the no-work wording: {}",
+            prompt.text
+        );
+        assert!(
+            prompt.text.contains("snapshot 2026-08-05 22:41:07Z"),
+            "the absence claim must be attributable to a known read: {}",
+            prompt.text
+        );
+    }
+
+    /// cas-ae6d: same stamp on the registration notice, which makes the
+    /// identical absence claim.
+    #[test]
+    fn registration_notice_carries_its_snapshot_timestamp() {
+        let event = DirectorEvent::AgentRegistered {
+            agent_id: "sess-id-abc123".to_string(),
+            agent_name: "swift-fox".to_string(),
+        };
+        let data = make_data(0);
+        let snapshot_at = chrono::DateTime::parse_from_rfc3339("2026-08-05T22:41:07Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        let prompt = generate_prompt_at(
+            &event,
+            &data,
+            &data,
+            "supervisor",
+            &default_config(),
+            claude(),
+            codex(),
+            &HashSet::new(),
+            None,
+            snapshot_at,
+        )
+        .expect("registration prompt is generated");
+
+        assert!(
+            prompt.text.contains("snapshot 2026-08-05 22:41:07Z"),
+            "{}",
+            prompt.text
+        );
+    }
+
+    /// cas-ae6d (GH #100): the dispatchability verdict must stay scoped to
+    /// this session's epic. `unfiltered_data` is the whole task DB — other
+    /// epics, abandoned earlier sessions — so counting from it would make the
+    /// notice advertise out-of-scope work and would make the stand-down
+    /// wording unreachable in any repo with a backlog.
+    #[test]
+    fn idle_notice_keeps_dispatchable_counting_session_scoped() {
+        let event = DirectorEvent::WorkerIdle {
+            worker: "swift-fox".to_string(),
+            active_task: None,
+        };
+        // Nothing dispatchable in this session's scope...
+        let scoped = make_data(0);
+        // ...while the unscoped store still holds unrelated open backlog.
+        let mut whole_store = make_data(0);
+        whole_store.ready_tasks = vec![open_task("cas-other-epic", None)];
+
+        let prompt = generate_prompt(
+            &event,
+            &scoped,
+            &whole_store,
+            "supervisor",
+            &default_config(),
+            claude(),
+            codex(),
+            &HashSet::new(),
+            None,
+        )
+        .expect("idle prompt is generated");
+
+        assert!(
+            prompt.text.contains("No dispatchable tasks"),
+            "out-of-scope backlog must not be advertised as this worker's work: {}",
+            prompt.text
+        );
+        assert!(
+            prompt.text.contains("stand down"),
+            "the stand-down branch must stay reachable: {}",
+            prompt.text
+        );
+    }
+
+    /// cas-ae6d: the in-function busy guard reads the delivery-time snapshot,
+    /// so an assignment outside the tracked epic still suppresses the notice.
+    /// (The primary guard is the earlier delivery revalidation, which this
+    /// direct call deliberately bypasses to exercise the fallback arm.)
+    #[test]
+    fn idle_notice_is_suppressed_by_an_assignment_only_the_fresh_snapshot_sees() {
+        let event = DirectorEvent::WorkerIdle {
+            worker: "swift-fox".to_string(),
+            active_task: None,
+        };
+        let stale = make_data(0);
+        let mut fresh = make_data(0);
+        fresh.ready_tasks = vec![open_task("cas-assigned", Some("swift-fox"))];
+
+        let prompt = generate_prompt(
+            &event,
+            &stale,
+            &fresh,
+            "supervisor",
+            &default_config(),
+            claude(),
+            codex(),
+            &HashSet::new(),
+            None,
+        );
+
+        assert!(
+            prompt.is_none(),
+            "an idle notice must never contradict a live assignee field"
+        );
     }
 
     #[test]
@@ -5493,6 +5792,7 @@ mod tests {
                 retract_task: Some("cas-6883t".to_string()),
                 retract_epic: None,
                 drop_if_worker_assigned: None,
+                durable_retry: false,
             };
             assert!(
                 prompt_is_still_deliverable(&prompt, &data, repo.path()),
@@ -5522,6 +5822,7 @@ mod tests {
                 retract_task: Some("cas-6883t".to_string()),
                 retract_epic: None,
                 drop_if_worker_assigned: None,
+                durable_retry: false,
             };
 
             data.in_progress_tasks[0].status = TaskStatus::InProgress;

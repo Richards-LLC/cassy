@@ -7,7 +7,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.41.0] - 2026-08-05
+
+### Added
+- **Long-running services get a registry instead of an ambush.** `server_start`/`server_stop`/`server_list` register agent-launched servers with ownership, logs, and a pid-identity fingerprint; registered shared servers live in their own cgroup scope so worker teardown deliberately spares them, and `stop` refuses to signal a reused pid rather than killing a bystander.
+- **Worker teardown now takes the whole process tree.** Everything a worker spawns dies with it — by process group everywhere, and by cgroup subtree on delegated cgroup-v2 hosts — so escaped `npm run dev`-style stragglers no longer outlive their worker. `gc_report`/`gc_cleanup` additionally sweep dead-parent processes and stale port squatters.
+- **A design-spec skill and a release-notes rubric** ship as builtins for every harness, so projects inherit a DESIGN.md generator and a publication rubric instead of reinventing them.
+
 ### Fixed
+- **Finished work closes.** The close guard scopes to task-attributed commits instead of the spawn-repo factory anchor, honors `target_repo`/`target_branch`, measures against fetched remote refs, and accepts unambiguous abbreviated commit receipts; `awaiting_merge` gained a sanctioned amendment path (`request_changes`); the additive-only gate no longer counts a task's own WIP against it; zero-diff investigation closes stopped being a two-stage trap.
+- **Requested workers arrive.** The spawn daemon's queue consumer survives `shutdown_workers count=0`, invalid cli/model combinations are rejected at the door instead of silently defaulting, pre-assigned tasks actually reach the worker, and spawn receipts report liveness instead of hope.
+- **Coordination messages stopped lying.** Drained messages are no longer re-delivered on the idle-nudge path, signals are computed from fresh state at send time, and months-old queue items no longer land on freshly spawned workers.
+- **Epic close keeps its hands off your checkout.** Closing out an epic no longer flips the main checkout's HEAD onto the epic branch.
+- **The test suite is hermetic against its host.** Close-path test outcomes no longer depend on the ambient `CAS_FACTORY_WORKER_CLI` of whoever runs `cargo test`, `cas doctor` prints its breakdowns in deterministic order, timing-budget assertions tolerate loaded hosts without weakening what they prove, and registry tests neither collide on cgroup scope names nor leak five-minute orphans that stall piped test runs.
 - **Choosing a Claude account starts CAS again.** `cas claude <profile>` resolved the account directory and then exec'd Claude Code directly, so the factory never started — selecting a second subscription and running CAS became two separate commands to be combined by hand with an environment variable. The account is now exported into the launching process before any thread or pane exists, and the command delegates to the same factory path as the other provider shortcuts with Claude pinned as the supervisor, so the supervisor and every worker it spawns land on the chosen account. Bare `cas claude` launches the factory on the ambient account, matching its siblings; the account listing moved to `--list-profiles`, and `--bare` keeps the plain Claude Code launcher with argument passthrough. Explicitly selecting an account now also scrubs an inherited `ANTHROPIC_API_KEY` on this path, which could otherwise override subscription OAuth and silently defeat the selection.
 
 ## [2.40.0] - 2026-08-04

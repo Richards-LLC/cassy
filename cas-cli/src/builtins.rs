@@ -343,6 +343,15 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/release-notes/references/RUBRIC-template.md",
         content: include_str!("builtins/skills/release-notes/references/RUBRIC-template.md"),
     },
+    // cas-github-issues skill (cas-ff2f, GH #94): the recurring GitHub Issues
+    // sweep — dedupe double-filings, verify-and-close fixed claims, task new
+    // issues into the active epic (successor epic when none is open), unblock
+    // chained tasks whose lane merged, and file observed defects. The hourly
+    // cron prompt invokes this skill by name, so it must resolve after sync.
+    BuiltinFile {
+        path: "skills/cas-github-issues/SKILL.md",
+        content: include_str!("builtins/skills/cas-github-issues/SKILL.md"),
+    },
     // cas-nuxt-playwright skill: unified Nuxt 3 + Playwright E2E testing
     // guide. Replaces the legacy user-level cas-playwright-debug skill with
     // a single builtin that covers both writing and debugging tests. Modeled
@@ -621,6 +630,12 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/release-notes/references/RUBRIC-template.md",
         content: include_str!("builtins/codex/skills/release-notes/references/RUBRIC-template.md"),
+    },
+    // cas-github-issues skill (cas-ff2f, GH #94) — codex mirror. Byte-identical
+    // to the claude copy except for the harness tool prefix.
+    BuiltinFile {
+        path: "skills/cas-github-issues/SKILL.md",
+        content: include_str!("builtins/codex/skills/cas-github-issues/SKILL.md"),
     },
     // cas-nuxt-playwright skill — codex mirror.
     BuiltinFile {
@@ -954,6 +969,11 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/fallow/references/patterns.md",
         content: include_str!("builtins/grok/skills/fallow/references/patterns.md"),
     },
+    // cas-github-issues skill (cas-ff2f, GH #94) — grok twin.
+    BuiltinFile {
+        path: "skills/cas-github-issues/SKILL.md",
+        content: include_str!("builtins/grok/skills/cas-github-issues/SKILL.md"),
+    },
     BuiltinFile {
         path: "skills/cas-nuxt-playwright/SKILL.md",
         content: include_str!("builtins/grok/skills/cas-nuxt-playwright/SKILL.md"),
@@ -1136,6 +1156,16 @@ pub const GENERAL_PARITY_CAPABILITIES: &[RequiredCapability] = &[
         claude: Some("skills/fallow"),
         codex: Some("skills/fallow"),
         grok: Some("skills/fallow"),
+        note: "",
+    },
+    RequiredCapability {
+        // cas-ff2f (GH #94): the recurring GitHub Issues sweep. The hourly cron
+        // prompt invokes it by name, and any harness can be the one holding the
+        // pane when it fires — so all three need the twin.
+        id: "cas-github-issues",
+        claude: Some("skills/cas-github-issues"),
+        codex: Some("skills/cas-github-issues"),
+        grok: Some("skills/cas-github-issues"),
         note: "",
     },
     RequiredCapability {
@@ -2571,6 +2601,97 @@ This is the body content."#;
                 *body, claude_body,
                 "{label} cas-servers SKILL.md must match the claude copy except for the \
                  harness tool prefix — the guidance itself must not drift per harness"
+            );
+        }
+    }
+
+    /// cas-ff2f (GH #94): the cas-github-issues sweep skill must ship for every
+    /// harness — the hourly cron prompt invokes it by name, and it previously
+    /// resolved to nothing. The body must cover all six sweep steps, including
+    /// the no-active-epic branch that is the easiest one to get wrong.
+    #[test]
+    fn test_builtin_skills_contains_cas_github_issues() {
+        let mut bodies = Vec::new();
+        for (label, catalog, prefix) in [
+            ("claude", BUILTIN_SKILLS, "mcp__cas__"),
+            ("codex", CODEX_BUILTIN_SKILLS, "mcp__cs__"),
+            ("grok", GROK_BUILTIN_SKILLS, "cas__"),
+        ] {
+            let entry = catalog
+                .iter()
+                .find(|b| b.path == "skills/cas-github-issues/SKILL.md")
+                .unwrap_or_else(|| {
+                    panic!("skills/cas-github-issues/SKILL.md missing from {label} catalog")
+                });
+            assert!(
+                is_managed_by_cas(entry.content),
+                "{label} cas-github-issues SKILL.md must be managed_by: cas"
+            );
+            for required in [
+                "name: cas-github-issues",
+                // Step 1 — enumerate the open issues.
+                "gh issue list --state open",
+                // Step 2 — dedupe double-filings (the multi-machine failure mode).
+                "Dedupe double-filings",
+                "Duplicate of #",
+                // Step 3 — a "fixed" claim is a claim, not a fact.
+                "Verify-and-close fixed claims",
+                "Verify against the code",
+                // Step 4 — task into the ACTIVE epic, creating a successor when
+                // none is open. This is the branch that was exercised for real
+                // and the one an agent gets wrong by default.
+                "Every epic for this lane is closed",
+                "create a successor epic first",
+                "Never task into a closed epic",
+                // The status filter is a substring match, so `status=open`
+                // hides every task/epic somebody is actually working on. A
+                // sweep that filters that way invents a duplicate successor
+                // epic while the real one is mid-flight.
+                "Do not filter this list by `status=open`",
+                "auto-promoted to `in_progress`",
+                "action=create",
+                "external_ref",
+                "gh issue comment",
+                // Step 5 — unblock chained tasks, and only on MERGED blockers.
+                "action=blocked",
+                "action=dep_remove",
+                "Merged is the bar, not closed",
+                // Step 6 — file what you observed since the last sweep, using
+                // the same six-heading body every other issue in the tracker
+                // uses.
+                "gh issue create",
+                "**Environment**",
+                "**Repro**",
+                "**Actual**",
+                "**Expected**",
+                "**Impact**",
+                "**Suggested fix**",
+                // The cron contract: the entry expires, and an expired sweep
+                // is indistinguishable from a clean one.
+                ".claude/scheduled_tasks.json",
+                "7-day auto-expiry",
+                "recreate it if it expired",
+                // The sweep's success case is silence.
+                "end the turn silently",
+            ] {
+                assert!(
+                    entry.content.contains(required),
+                    "{label} cas-github-issues SKILL.md missing required marker: {required:?}"
+                );
+            }
+            assert!(
+                entry.content.contains(&format!("{prefix}task")),
+                "{label} cas-github-issues SKILL.md must call {prefix}task"
+            );
+            bodies.push((label, entry.content.replace(prefix, "<PREFIX>")));
+        }
+
+        let claude_body = bodies[0].1.clone();
+        for (label, body) in &bodies[1..] {
+            assert_eq!(
+                *body, claude_body,
+                "{label} cas-github-issues SKILL.md must match the claude copy except for \
+                 the harness tool prefix — the sweep procedure must not drift per harness"
             );
         }
     }

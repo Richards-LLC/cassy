@@ -245,6 +245,7 @@ fn get_text(result: &rmcp::model::CallToolResult) -> String {
 
 fn close_update_request(id: String) -> TaskUpdateRequest {
     TaskUpdateRequest {
+        blocked_by: None,
         id,
         title: None,
         notes: None,

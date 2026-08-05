@@ -270,6 +270,17 @@ pub struct TaskUpdateRequest {
     #[serde(default)]
     pub labels: Option<String>,
 
+    /// Add blocking dependencies (cas-d45f / GH #98).
+    ///
+    /// Additive, like `labels`: each listed task becomes a blocker of this
+    /// task (`this blocked_by that`). Existing blockers are left in place;
+    /// use `dep_remove` to drop one.
+    #[schemars(
+        description = "Comma-separated task IDs that block this task (adds Blocks dependencies; existing blockers are kept)"
+    )]
+    #[serde(default)]
+    pub blocked_by: Option<String>,
+
     /// Update description
     #[schemars(description = "New description")]
     #[serde(default)]

@@ -19,17 +19,33 @@
 use cas_mux::{Pane, SupervisorCli};
 use std::path::{Path, PathBuf};
 
-fn unique_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "cas-28a49-{tag}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// Self-cleaning scratch dir — these tests would otherwise leave a handful of
+/// `/tmp` directories behind on every run.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new(tag: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "cas-28a49-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 fn trust_entry_present(config: &Path, workdir: &Path) -> bool {
@@ -39,29 +55,65 @@ fn trust_entry_present(config: &Path, workdir: &Path) -> bool {
 }
 
 /// Point Codex at a private config dir and guarantee the launch fails fast.
-fn isolate_codex_env(tag: &str) -> (PathBuf, PathBuf) {
-    let home = unique_dir(&format!("{tag}-home"));
-    let empty_path = unique_dir(&format!("{tag}-bin"));
+///
+/// The real `~/.codex/config.toml` is never touched: `CODEX_HOME` is resolved
+/// in-process at call time and is set before every phase. `PATH` is restored by
+/// [`EnvGuard`] so nothing added to this binary later inherits an empty `PATH`.
+fn isolate_codex_env(tag: &str) -> (Scratch, Scratch, PathBuf) {
+    let home = Scratch::new(&format!("{tag}-home"));
+    let empty_path = Scratch::new(&format!("{tag}-bin"));
     unsafe {
-        std::env::set_var("CODEX_HOME", &home);
-        std::env::set_var("PATH", &empty_path);
+        std::env::set_var("CODEX_HOME", home.path());
+        std::env::set_var("PATH", empty_path.path());
     }
-    let config = home.join("config.toml");
-    (home, config)
+    let config = home.path().join("config.toml");
+    (home, empty_path, config)
+}
+
+/// Restores `PATH` / `CODEX_HOME` when the test ends.
+struct EnvGuard {
+    path: Option<std::ffi::OsString>,
+    codex_home: Option<std::ffi::OsString>,
+}
+
+impl EnvGuard {
+    fn capture() -> Self {
+        Self {
+            path: std::env::var_os("PATH"),
+            codex_home: std::env::var_os("CODEX_HOME"),
+        }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.path {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+            match &self.codex_home {
+                Some(v) => std::env::set_var("CODEX_HOME", v),
+                None => std::env::remove_var("CODEX_HOME"),
+            }
+        }
+    }
 }
 
 /// All three phases run in one test: they mutate process-global env
 /// (`CODEX_HOME`, `PATH`), which cannot be done safely from parallel threads.
 #[tokio::test]
 async fn codex_panes_pre_trust_workdir_and_other_harnesses_do_not() {
+    let _env = EnvGuard::capture();
     codex_worker_pane_pre_trusts_workdir_before_launch().await;
     codex_supervisor_pane_pre_trusts_workdir_before_launch().await;
     claude_worker_pane_does_not_touch_codex_config().await;
 }
 
 async fn codex_worker_pane_pre_trusts_workdir_before_launch() {
-    let (_home, config) = isolate_codex_env("worker");
-    let workdir = unique_dir("worker-cwd");
+    let (_home, _bin, config) = isolate_codex_env("worker");
+    let workdir_dir = Scratch::new("worker-cwd");
+    let workdir = workdir_dir.path().to_path_buf();
 
     // The launch itself is expected to fail (no `codex` on PATH); the pre-trust
     // step runs first and is what we assert on.
@@ -92,8 +144,9 @@ async fn codex_worker_pane_pre_trusts_workdir_before_launch() {
 }
 
 async fn codex_supervisor_pane_pre_trusts_workdir_before_launch() {
-    let (_home, config) = isolate_codex_env("supervisor");
-    let workdir = unique_dir("supervisor-cwd");
+    let (_home, _bin, config) = isolate_codex_env("supervisor");
+    let workdir_dir = Scratch::new("supervisor-cwd");
+    let workdir = workdir_dir.path().to_path_buf();
 
     let _ = Pane::supervisor(
         "s1",
@@ -118,8 +171,9 @@ async fn codex_supervisor_pane_pre_trusts_workdir_before_launch() {
 }
 
 async fn claude_worker_pane_does_not_touch_codex_config() {
-    let (_home, config) = isolate_codex_env("claude");
-    let workdir = unique_dir("claude-cwd");
+    let (_home, _bin, config) = isolate_codex_env("claude");
+    let workdir_dir = Scratch::new("claude-cwd");
+    let workdir = workdir_dir.path().to_path_buf();
 
     let _ = Pane::worker(
         "w1",

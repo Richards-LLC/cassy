@@ -713,6 +713,10 @@ mod tests {
     /// `Command::output()` blocks until every writer closes it — i.e. until
     /// the `sleep` finishes. The first draft of this helper took 300 seconds
     /// per test and then asserted against an orphan that had already exited.
+    ///
+    /// Linux-only, like the two tests that call it: it polls `read_proc_stat`,
+    /// which reads `/proc` and does not exist on other targets (GH #93).
+    #[cfg(target_os = "linux")]
     fn plant_orphan(cwd: &Path) -> u32 {
         let output = Command::new("sh")
             .arg("-c")
@@ -738,6 +742,7 @@ mod tests {
         pid
     }
 
+    #[cfg(target_os = "linux")] // only the two /proc-based tests use it
     fn kill_if_alive(pid: u32) {
         #[cfg(unix)]
         unsafe {

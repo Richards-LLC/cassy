@@ -4,6 +4,14 @@ use crate::ui::factory::director::AgentSummary;
 
 const PROMPT_POISON_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 const SPAWN_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(60);
+/// cas-2702: hard ceiling on background worktree provisioning. Generous enough
+/// for a cold `git worktree add` on a large repo, short enough that a hung git
+/// process cannot wedge the spawn queue for a whole session.
+const SPAWN_PROVISION_TIMEOUT: Duration = Duration::from_secs(300);
+/// cas-2702: how often the daemon inspects the queue for rows it never drained.
+const SPAWN_QUEUE_STALL_SCAN_INTERVAL: Duration = Duration::from_secs(30);
+/// cas-2702: age at which an undrained queue row is reported as stalled.
+const SPAWN_QUEUE_STALL_AGE_SECS: i64 = 60;
 /// Stale expiry self-heals on the next 2-second tick, so never spend the
 /// shared store's 5-second busy timeout (plus blocking retries) on this path.
 const REMINDER_EXPIRY_BUSY_BUDGET: Duration = Duration::from_millis(100);
@@ -118,6 +126,137 @@ fn take_spawn_cancellation(
     cancelled_spawns.remove(worker_name)
 }
 
+/// cas-2702 (GH #59): a background provisioning task that never returns keeps
+/// `spawn_task` occupied, and `take_next_pending_spawn` refuses to pop while a
+/// spawn is in flight — so every later request accumulates silently for the
+/// rest of the session. Provisioning is bounded so the consumer always
+/// recovers and the supervisor always learns why.
+fn spawn_provisioning_timed_out(started_at: Instant, now: Instant, timeout: Duration) -> bool {
+    now.saturating_duration_since(started_at) >= timeout
+}
+
+/// cas-2702 (GH #58): pending queue rows this daemon has not drained. A healthy
+/// row lives for at most one poll interval, so anything older than `min_age` is
+/// an anomaly worth reporting — most often a request enqueued against a
+/// different factory session than the one the daemon is running.
+///
+/// `reported` holds request ids already surfaced, so a stalled row is reported
+/// once rather than on every tick.
+fn stalled_spawn_requests<'a>(
+    pending: &'a [cas_store::SpawnRequest],
+    now: chrono::DateTime<chrono::Utc>,
+    min_age: chrono::Duration,
+    reported: &std::collections::HashSet<i64>,
+) -> Vec<&'a cas_store::SpawnRequest> {
+    pending
+        .iter()
+        .filter(|request| {
+            !reported.contains(&request.id)
+                && request.processed_at.is_none()
+                && now.signed_duration_since(request.created_at) >= min_age
+        })
+        .collect()
+}
+
+/// cas-28a4 (GH #84): bind `task_id` to the worker that just registered, and
+/// prove it stuck.
+///
+/// The prepare-time bind is optimistic — it runs before the worker process
+/// exists, so anything that touches the task in between (a competing claim, a
+/// failed write, a store that was never reachable) leaves the promise in the
+/// spawn receipt unfulfilled with nobody the wiser. Re-running it at
+/// registration makes the assignment self-healing, and the returned title is
+/// what the worker's brief is built from.
+///
+/// `Ok(title)` when the task is bound to this worker; `Err(reason)` carries
+/// supervisor-facing text explaining why it is not.
+fn ensure_worker_preassignment(
+    cas_dir: &std::path::Path,
+    task_id: &str,
+    worker_name: &str,
+) -> Result<String, String> {
+    let assigned = crate::ui::factory::app::render_and_ops::epic_workers::assign_task_to_new_worker(
+        cas_dir,
+        task_id,
+        worker_name,
+    );
+    if let Some(reason) = preassign_failure_reason(cas_dir, task_id, worker_name) {
+        return Err(reason);
+    }
+    if !assigned {
+        tracing::debug!(
+            task_id,
+            worker_name,
+            "cas-28a4: pre-assignment reported no write but the binding is already correct"
+        );
+    }
+    let store = crate::store::open_task_store(cas_dir)
+        .map_err(|e| format!("task {task_id} is bound but unreadable: {e}"))?;
+    store
+        .get(task_id)
+        .map(|task| task.title)
+        .map_err(|e| format!("task {task_id} is bound but unreadable: {e}"))
+}
+
+/// cas-28a4 (GH #84): tell the newly-registered worker what it was spawned for.
+///
+/// A pre-assigned worker that boots with no message sits idle burning a seat —
+/// the assignment alone is invisible from inside the worker's session.
+fn deliver_worker_task_brief(
+    cas_dir: &std::path::Path,
+    factory_session: &str,
+    worker_name: &str,
+    task_id: &str,
+    task_title: &str,
+) -> anyhow::Result<i64> {
+    let queue = open_prompt_queue_store(cas_dir)?;
+    let summary = format!("Assigned task: {task_id}");
+    let message = format!(
+        "You were spawned for task {task_id} — \"{task_title}\" — and it is assigned to \
+         you now.\n\
+         Start with `mcp__cas__task action=show id={task_id}`, then \
+         `mcp__cas__task action=start id={task_id}` before you change any code."
+    );
+    Ok(queue.enqueue_with_summary(
+        "director",
+        worker_name,
+        &message,
+        Some(factory_session),
+        Some(&summary),
+    )?)
+}
+
+/// cas-2702: verify a spawn-time `task_id` pre-assignment actually landed on
+/// the worker that was launched. Returns `Some(reason)` when it did not, so the
+/// daemon can surface it instead of leaving a booted worker with no task and a
+/// supervisor that believes the task was handed over.
+fn preassign_failure_reason(
+    cas_dir: &std::path::Path,
+    task_id: &str,
+    worker_name: &str,
+) -> Option<String> {
+    let store = match crate::store::open_task_store(cas_dir) {
+        Ok(store) => store,
+        Err(e) => {
+            return Some(format!(
+                "could not open the task store to confirm the pre-assignment: {e}"
+            ));
+        }
+    };
+    match store.get(task_id) {
+        Ok(task) => match task.assignee.as_deref() {
+            Some(assignee) if assignee == worker_name => None,
+            Some(assignee) => Some(format!(
+                "task {task_id} is assigned to '{assignee}', not '{worker_name}'"
+            )),
+            None => Some(format!(
+                "task {task_id} has no assignee — the pre-assignment did not persist"
+            )),
+        },
+        Err(e) => Some(format!("task {task_id} could not be read: {e}")),
+    }
+}
+
 /// Whether a pending spawn existed when a shutdown request was issued.
 /// Queue IDs are monotonic. A direct GUI/WS action has no durable ID and is
 /// conservatively treated as already pending so interactive shutdown keeps its
@@ -185,6 +324,26 @@ fn append_spawn_audit(
             ("detail", detail),
         ],
     );
+
+    // GH #60: the same transition, persisted on the queue row so the
+    // supervisor can query "what became of request N?" instead of parsing
+    // these log lines or correlating inbox prose. Hooked here — the single
+    // choke point every spawn stage already flows through — so no call site
+    // can report a stage to the log and forget to report it to the store.
+    //
+    // Best-effort by design: an unwritable store must never break a spawn.
+    if let Some(id) = request_id {
+        if let Some(state) = cas_store::SpawnLifecycleState::from_stage_outcome(stage, outcome) {
+            if let Ok(queue) = crate::store::open_spawn_queue_store(cas_dir) {
+                let _ = queue.record_spawn_state(
+                    id,
+                    state,
+                    worker_name.filter(|name| !name.is_empty()),
+                    (!detail.is_empty()).then_some(detail),
+                );
+            }
+        }
+    }
 
     // Fork-first daemons can inherit an already-installed tracing subscriber;
     // replacing it after fork then fails, leaving daemon.log and
@@ -449,6 +608,124 @@ impl FactoryDaemon {
             ) {
                 tracing::warn!(worker = %worker, error = %error, "failed to enqueue spawn outcome");
             }
+
+            // cas-28a4 (GH #84): registration is the only moment the worker is
+            // provably alive, so it is where the promised pre-assignment is
+            // settled — bound and briefed, or reported as failed. Never silence.
+            if let Some(ref task_id) = verification.task_id {
+                if success {
+                    self.settle_worker_preassignment(&worker, task_id, verification.request_id);
+                } else {
+                    let detail = format!(
+                        "Task {task_id} was promised to worker '{worker}', which never registered \
+                         with CAS. The task is not being worked — re-assign it or re-spawn."
+                    );
+                    append_spawn_audit(
+                        self.app.cas_dir(),
+                        &self.session_name,
+                        verification.request_id,
+                        Some(&worker),
+                        "preassign",
+                        "failed",
+                        &detail,
+                    );
+                    let _ = enqueue_spawn_outcome_notice(
+                        self.app.cas_dir(),
+                        self.app.supervisor_name(),
+                        &self.session_name,
+                        verification.request_id,
+                        &worker,
+                        "preassign",
+                        false,
+                        &detail,
+                    );
+                }
+            }
+        }
+    }
+
+    /// cas-28a4 (GH #84): bind the promised task to a worker that has just
+    /// registered, brief it, and record the outcome either way.
+    fn settle_worker_preassignment(
+        &mut self,
+        worker: &str,
+        task_id: &str,
+        request_id: Option<i64>,
+    ) {
+        match ensure_worker_preassignment(self.app.cas_dir(), task_id, worker) {
+            Ok(title) => {
+                tracing::info!(
+                    worker = %worker,
+                    task_id = %task_id,
+                    "cas-28a4: pre-assignment confirmed at registration"
+                );
+                let mut detail =
+                    format!("Task {task_id} (\"{title}\") is assigned to this worker.");
+                match deliver_worker_task_brief(
+                    self.app.cas_dir(),
+                    &self.session_name,
+                    worker,
+                    task_id,
+                    &title,
+                ) {
+                    Ok(_) => detail.push_str(" Task brief delivered to the worker."),
+                    Err(e) => {
+                        tracing::warn!(
+                            worker = %worker,
+                            task_id = %task_id,
+                            error = %e,
+                            "cas-28a4: pre-assignment bound but the task brief could not be queued"
+                        );
+                        detail.push_str(&format!(
+                            " WARNING: the task brief could not be delivered ({e}) — the worker \
+                             may sit idle until you message it."
+                        ));
+                    }
+                }
+                append_spawn_audit(
+                    self.app.cas_dir(),
+                    &self.session_name,
+                    request_id,
+                    Some(worker),
+                    "preassign",
+                    "confirmed",
+                    &detail,
+                );
+            }
+            Err(reason) => {
+                let detail = format!(
+                    "Worker '{worker}' registered but the promised pre-assignment of task \
+                     {task_id} did not stick: {reason}. The worker is idle without it — assign \
+                     the task explicitly (mcp__cas__task action=update id={task_id} \
+                     assignee={worker})."
+                );
+                tracing::warn!(
+                    worker = %worker,
+                    task_id = %task_id,
+                    reason = %reason,
+                    "cas-28a4: pre-assignment failed at registration"
+                );
+                append_spawn_audit(
+                    self.app.cas_dir(),
+                    &self.session_name,
+                    request_id,
+                    Some(worker),
+                    "preassign",
+                    "failed",
+                    &detail,
+                );
+                self.app.set_error(detail.clone());
+                let _ = enqueue_spawn_outcome_notice(
+                    self.app.cas_dir(),
+                    self.app.supervisor_name(),
+                    &self.session_name,
+                    request_id,
+                    worker,
+                    "preassign",
+                    false,
+                    &detail,
+                );
+            }
         }
     }
 
@@ -697,6 +974,38 @@ impl FactoryDaemon {
                     );
                 }
             }
+
+            // cas-d047 (GH #69): the sweep above only covers rows tagged with
+            // THIS session whose target left the roster. The item that was
+            // actually delivered months late was neither — an untagged
+            // (NULL-session) row addressed to a worker name that a later
+            // session happened to reuse. Age is the property that makes such a
+            // row undeliverable, so bound it directly and name every row that
+            // gets quarantined.
+            match queue.expire_stale_pending(cas_store::PROMPT_QUEUE_STALE_TTL_SECS) {
+                Ok(stale) => {
+                    for row in &stale {
+                        tracing::warn!(
+                            prompt_id = row.id,
+                            source = %row.source,
+                            target = %row.target,
+                            created_at = %row.created_at.to_rfc3339(),
+                            age_secs = (chrono::Utc::now() - row.created_at).num_seconds(),
+                            factory_session = ?row.factory_session,
+                            "cas-d047: quarantined stale prompt_queue item instead of delivering \
+                             it — it was queued more than the staleness TTL ago and never \
+                             consumed by any recipient"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "cas-d047: stale prompt_queue sweep failed; stale rows stay withheld \
+                         from delivery by the selection guard"
+                    );
+                }
+            }
         }
 
         let targets: Vec<&str> = valid_targets
@@ -755,51 +1064,102 @@ impl FactoryDaemon {
             // the last shared point before inbox/PTY transport, after any
             // queue delay. Ordinary free-form messages have no envelope and
             // deliberately bypass this block unchanged.
+            // cas-6eab (GH #61): tags the row so an unread merge request can
+            // still be retracted from the supervisor's inbox if the merge
+            // lands after this delivery. `None` for every other message.
+            let mut merge_request_task: Option<String> = None;
+
             if let Some(envelope) =
                 crate::prompt_revalidation::parse_merge_request_envelope(&queued.prompt)
             {
                 use crate::mcp::tools::core::task::repo_context::resolve_repo_context;
                 use crate::prompt_revalidation::{
-                    MergeRequestDecision, merge_landed_guidance, revalidate_merge_request,
+                    MergeRequestDelivery, merge_landed_guidance, merge_request_delivery_decision,
+                    merge_request_moot_guidance, revalidate_merge_request,
                 };
 
-                let decision = crate::store::open_task_store_local(self.app.cas_dir())
+                let task = crate::store::open_task_store_local(self.app.cas_dir())
                     .ok()
-                    .and_then(|store| store.get(&envelope.task_id).ok())
-                    .and_then(|task| task.deliverables.work_target)
+                    .and_then(|store| store.get(&envelope.task_id).ok());
+
+                // cas-6eab: revalidate against the branch the REQUEST names,
+                // in whichever checkout we can resolve. cas-bc8c required the
+                // task's resolved repo context to agree with the envelope's
+                // target branch and silently skipped the whole check when it
+                // didn't (or when `work_target` was unset) — a stale request
+                // then sailed through as actionable. The envelope's target is
+                // authoritative here: it is the branch the worker actually
+                // asked the supervisor to merge into. Falling back to the
+                // daemon's own checkout matches how `factory/*` and `epic/*`
+                // refs are resolved everywhere else (`.cas`'s parent).
+                let repo_root = task
+                    .as_ref()
+                    .and_then(|task| task.deliverables.work_target.clone())
                     .and_then(|work_target| {
                         resolve_repo_context(self.app.cas_dir(), &work_target).ok()
                     })
-                    .filter(|repo| repo.target_branch == envelope.target_branch)
-                    .map(|repo| {
-                        revalidate_merge_request(
-                            &repo.repo_root,
-                            &envelope.branch_tip,
-                            &repo.target_branch,
-                        )
+                    .map(|repo| repo.repo_root)
+                    .unwrap_or_else(|| {
+                        self.app
+                            .cas_dir()
+                            .parent()
+                            .unwrap_or(self.app.cas_dir())
+                            .to_path_buf()
                     });
+                let git = revalidate_merge_request(
+                    &repo_root,
+                    &envelope.branch_tip,
+                    &envelope.target_branch,
+                );
 
-                if let Some(MergeRequestDecision::AlreadyIntegrated { target_tip }) = decision {
-                    let guidance = merge_landed_guidance(
-                        &envelope.task_id,
-                        &envelope.branch_tip,
-                        &envelope.target_branch,
-                        &target_tip,
-                    );
+                let (suppress_detail, guidance, summary) = match merge_request_delivery_decision(
+                    task.as_ref().map(|task| task.status),
+                    &git,
+                ) {
+                    MergeRequestDelivery::Deliver => {
+                        merge_request_task = Some(envelope.task_id.clone());
+                        (None, None, "")
+                    }
+                    MergeRequestDelivery::SuppressLanded { target_tip } => (
+                        Some("merge request branch tip already integrated into target".to_string()),
+                        Some(merge_landed_guidance(
+                            &envelope.task_id,
+                            &envelope.branch_tip,
+                            &envelope.target_branch,
+                            &target_tip,
+                        )),
+                        "merge already landed — re-close task",
+                    ),
+                    MergeRequestDelivery::SuppressResolved { status } => (
+                        Some(format!(
+                            "merge request is moot: task is {status}, not awaiting merge"
+                        )),
+                        Some(merge_request_moot_guidance(&envelope.task_id, status)),
+                        "merge request no longer applies",
+                    ),
+                };
+
+                if let (Some(detail), Some(guidance)) = (suppress_detail, guidance) {
                     match queue.enqueue_urgent_with_outcome(
                         "supervisor",
                         &queued.source,
                         &guidance,
                         queued.factory_session.as_deref(),
-                        Some("merge already landed — re-close task"),
+                        Some(summary),
                         Some(cas_store::NotificationPriority::High),
                         false,
                     ) {
                         Ok(_) => {
-                            let _ = queue.mark_suppressed(
-                                queued.id,
-                                Some("merge request branch tip already integrated into target"),
+                            tracing::info!(
+                                target: "cas::coordination",
+                                stage = "suppress_stale_merge_request",
+                                prompt_id = queued.id,
+                                task_id = %envelope.task_id,
+                                detail = %detail,
+                                "cas-6eab: withheld a merge request whose premise no longer holds; \
+                                 notified the worker instead"
                             );
+                            let _ = queue.mark_suppressed(queued.id, Some(&detail));
                             continue;
                         }
                         Err(error) => {
@@ -1232,6 +1592,14 @@ impl FactoryDaemon {
                         self.app.supervisor_name(),
                         chrono::Utc::now(),
                     );
+                    // cas-6eab (GH #61): a merge request that is still live at
+                    // this instant can be satisfied while it sits unread in
+                    // the supervisor's inbox — Claude Code only polls at its
+                    // own turn boundaries. Tagging it with its task id puts it
+                    // under the same `prune_stale_merge_alerts` sweep that
+                    // already retracts the director's MERGE REQUIRED alerts,
+                    // so it withdraws itself once the merge lands instead of
+                    // being read later as an outstanding ask.
                     self.deliver_to_worker_with_idle_nudge(
                         target,
                         &inbox_source,
@@ -1239,6 +1607,7 @@ impl FactoryDaemon {
                         queued.summary.as_deref(),
                         None,
                         worker_is_idle,
+                        merge_request_task.as_deref(),
                     )
                     .await
                 };
@@ -1433,14 +1802,114 @@ impl FactoryDaemon {
         Ok(())
     }
 
+    /// cas-2702 (GH #58): report queue rows that were never dequeued.
+    ///
+    /// Anything still pending well past a poll interval is an anomaly — most
+    /// often a request enqueued against a different factory session name than
+    /// the daemon is running under, which this daemon will never drain. Silent
+    /// accumulation is the worst outcome, so each such row is logged and
+    /// audited once.
+    fn report_stalled_spawn_requests(&mut self, queue: &dyn cas_store::SpawnQueueStore) {
+        let now = Instant::now();
+        if self.last_spawn_queue_stall_scan.is_some_and(|last| {
+            now.saturating_duration_since(last) < SPAWN_QUEUE_STALL_SCAN_INTERVAL
+        }) {
+            return;
+        }
+        self.last_spawn_queue_stall_scan = Some(now);
+
+        let Ok(pending) = queue.peek(50) else {
+            return;
+        };
+        let stalled = stalled_spawn_requests(
+            &pending,
+            chrono::Utc::now(),
+            chrono::Duration::seconds(SPAWN_QUEUE_STALL_AGE_SECS),
+            &self.reported_stalled_spawn_requests,
+        );
+        let reports: Vec<(i64, String)> = stalled
+            .into_iter()
+            .map(|request| {
+                let target = request.factory_session.as_deref().unwrap_or("(unscoped)");
+                (
+                    request.id,
+                    format!(
+                        "Spawn request {} ({}) has been queued since {} without being dequeued. \
+                         It targets factory session '{}' while this daemon is session '{}'. \
+                         No worker will start for it until a daemon for that session drains it.",
+                        request.id,
+                        request.action.as_str(),
+                        request.created_at.to_rfc3339(),
+                        target,
+                        self.session_name,
+                    ),
+                )
+            })
+            .collect();
+
+        for (id, detail) in reports {
+            self.reported_stalled_spawn_requests.insert(id);
+            tracing::warn!(
+                request_id = id,
+                "cas-2702: spawn request stalled in the queue without being dequeued"
+            );
+            append_spawn_audit(
+                self.app.cas_dir(),
+                &self.session_name,
+                Some(id),
+                None,
+                "dequeue",
+                "stalled",
+                &detail,
+            );
+        }
+    }
+
     /// Poll the spawn queue and enqueue individual actions (non-blocking).
     ///
     /// Instead of spawning workers synchronously (which blocks the TUI for seconds),
     /// this converts spawn requests into individual PendingSpawn items that are
     /// processed one-per-tick in the main loop.
     pub(super) fn enqueue_spawn_requests(&mut self) -> anyhow::Result<()> {
-        let queue = open_spawn_queue_store(self.app.cas_dir())?;
-        let requests = queue.poll(&self.session_name, 10)?;
+        // cas-2702 (GH #58): a failure here used to be swallowed by the caller,
+        // so a queue that stopped draining left no trace at all while the
+        // supervisor kept being told "Queued spawn request".
+        let queue = match open_spawn_queue_store(self.app.cas_dir()) {
+            Ok(queue) => queue,
+            Err(e) => {
+                let detail = format!("Could not open the spawn queue store: {e}");
+                tracing::error!(error = %e, "cas-2702: spawn queue unreadable — no requests can drain");
+                append_spawn_audit(
+                    self.app.cas_dir(),
+                    &self.session_name,
+                    None,
+                    None,
+                    "dequeue",
+                    "failed",
+                    &detail,
+                );
+                return Err(e.into());
+            }
+        };
+        let requests = match queue.poll(&self.session_name, 10) {
+            Ok(requests) => requests,
+            Err(e) => {
+                let detail = format!("Spawn queue poll failed: {e}");
+                tracing::error!(error = %e, "cas-2702: spawn queue poll failed — requests stay queued");
+                append_spawn_audit(
+                    self.app.cas_dir(),
+                    &self.session_name,
+                    None,
+                    None,
+                    "dequeue",
+                    "failed",
+                    &detail,
+                );
+                return Err(e.into());
+            }
+        };
+
+        self.report_stalled_spawn_requests(queue.as_ref());
 
         for request in requests {
             let action = request.action.as_str();
@@ -1541,9 +2010,83 @@ impl FactoryDaemon {
             .as_ref()
             .map(|(_, _, _, _, handle)| handle.is_finished())
             .unwrap_or(false);
+
+        // cas-2702 (GH #59): provisioning that never returns must not hold the
+        // FIFO hostage. Abandon the generation, tell the supervisor why, and let
+        // the queue keep draining.
+        if !spawn_finished
+            && self.spawn_task.is_some()
+            && self.spawn_started_at.is_some_and(|started| {
+                spawn_provisioning_timed_out(started, Instant::now(), SPAWN_PROVISION_TIMEOUT)
+            })
+        {
+            let (pending_name, request_id, _, pending_task_id, handle) =
+                self.spawn_task.take().unwrap();
+            self.spawn_started_at = None;
+            handle.abort();
+            self.app.remove_pending_worker(&pending_name);
+            take_spawn_cancellation(&mut self.cancelled_spawns, &pending_name);
+            let detail = format!(
+                "Worktree provisioning for worker '{pending_name}' did not finish within {} \
+                 seconds and was abandoned so the spawn queue keeps draining. Inspect the \
+                 repository for a hung git process or a stale lock, remove any partial \
+                 worktree/branch for this worker, then re-issue the spawn.",
+                SPAWN_PROVISION_TIMEOUT.as_secs()
+            );
+            tracing::error!(
+                worker = %pending_name,
+                timeout_secs = SPAWN_PROVISION_TIMEOUT.as_secs(),
+                "cas-2702: abandoned wedged spawn provisioning — spawn queue unblocked"
+            );
+            crate::telemetry::track(
+                "factory_worker_spawn_result",
+                vec![("success", "false"), ("reason", "provision_timeout")],
+            );
+            if let Some(ref task_id) = pending_task_id {
+                crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound(
+                    self.app.cas_dir(),
+                    task_id,
+                    &pending_name,
+                );
+            }
+            crate::ui::factory::app::render_and_ops::epic_workers::release_worker_task_bindings(
+                self.app.cas_dir(),
+                &pending_name,
+            );
+            append_spawn_audit(
+                self.app.cas_dir(),
+                &self.session_name,
+                request_id,
+                Some(&pending_name),
+                "provision",
+                "timeout",
+                &detail,
+            );
+            self.app.set_error(detail.clone());
+            if let Err(error) = enqueue_spawn_outcome_notice(
+                self.app.cas_dir(),
+                self.app.supervisor_name(),
+                &self.session_name,
+                request_id,
+                &pending_name,
+                "provision",
+                false,
+                &detail,
+            ) {
+                tracing::warn!(
+                    worker = %pending_name,
+                    %error,
+                    "cas-2702: failed to enqueue provisioning-timeout notice for the supervisor"
+                );
+            }
+            self.app.spawning_count = self.app.spawning_count.saturating_sub(1);
+            return;
+        }
+
         if spawn_finished {
             let (pending_name, request_id, pending_spec, pending_task_id, handle) =
                 self.spawn_task.take().unwrap();
+            self.spawn_started_at = None;
             // Remove from pending workers (boot pane transitions to real pane or disappears)
             self.app.remove_pending_worker(&pending_name);
             // cas-7a94 / cas-421c: cancellation is generation-scoped. A
@@ -1558,8 +2101,9 @@ impl FactoryDaemon {
                     );
                     let cleanup_status =
                         match self.app.cleanup_cancelled_spawn_worktree(&mut result) {
-                            Ok(true) => "The newly-created worktree and branch were removed."
-                                .to_string(),
+                            Ok(true) => {
+                                "The newly-created worktree and branch were removed.".to_string()
+                            }
                             Ok(false) => {
                                 "No worktree created by this spawn required cleanup.".to_string()
                             }
@@ -1645,11 +2189,20 @@ impl FactoryDaemon {
                                 "started",
                                 "Worker PTY process started; awaiting CAS registration.",
                             );
+                            // cas-28a4 (GH #84): the pre-assignment is confirmed
+                            // at REGISTRATION, not here. A launched PTY is not
+                            // yet a live agent, and the optimistic prepare-time
+                            // bind can be lost before the worker exists — so
+                            // `task_id` rides along in the verification record
+                            // and `reconcile_spawn_verifications` re-confirms it
+                            // (and briefs the worker) once registration proves
+                            // the worker is really there.
                             self.spawn_verifications.insert(
                                 name.clone(),
                                 SpawnVerification {
                                     request_id,
                                     launched_at: Instant::now(),
+                                    task_id: pending_task_id.clone(),
                                 },
                             );
                             // A worker may reuse a retired name (e.g. a Codex worker
@@ -1847,6 +2400,7 @@ impl FactoryDaemon {
                             );
                         }
                         self.app.add_pending_worker(worker_name.clone(), isolate);
+                        self.spawn_started_at = Some(Instant::now());
                         self.spawn_task = Some((
                             worker_name,
                             request_id,
@@ -1916,6 +2470,7 @@ impl FactoryDaemon {
                             );
                         }
                         self.app.add_pending_worker(worker_name.clone(), isolate);
+                        self.spawn_started_at = Some(Instant::now());
                         self.spawn_task = Some((
                             worker_name,
                             request_id,
@@ -2525,12 +3080,15 @@ fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_spawn_audit_line, cancel_targeted_in_flight_spawn, enqueue_spawn_cancelled_notice,
+        append_spawn_audit, append_spawn_audit_line, cancel_targeted_in_flight_spawn,
+        enqueue_spawn_cancelled_notice,
         enqueue_spawn_outcome_notice, is_exact_agent_name_match, matches_event_filter,
-        prompt_poison_sweep_due, prompt_poison_sweep_targets, registered_prompt_sweep_agents,
-        reminder_matches_factory_session, report_stale_reminder_expiry, shutdown_targets,
-        spawn_predates_shutdown, take_next_pending_spawn, take_spawn_cancellation,
-        take_unverified_spawn_on_exit,
+        deliver_worker_task_brief, ensure_worker_preassignment, preassign_failure_reason,
+        prompt_poison_sweep_due, prompt_poison_sweep_targets,
+        registered_prompt_sweep_agents, reminder_matches_factory_session,
+        report_stale_reminder_expiry, shutdown_targets, spawn_predates_shutdown,
+        spawn_provisioning_timed_out, stalled_spawn_requests, take_next_pending_spawn,
+        take_spawn_cancellation, take_unverified_spawn_on_exit,
     };
     use crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound;
     use crate::ui::factory::daemon::{FactoryDaemon, PendingSpawn, SpawnVerification};
@@ -2765,6 +3323,115 @@ mod tests {
         );
         let report = queue.message_delivery_report(row_id).unwrap().unwrap();
         assert_eq!(report.stage, DeliveryStage::Abandoned);
+    }
+
+    /// cas-d047 / GH #69, reproduced at the daemon's own sweep + selection
+    /// composition: an untagged row addressed to a worker name that a LATER
+    /// session reuses is in-roster (so the roster sweep leaves it alone) but
+    /// must still never be injected into that worker's pane.
+    #[test]
+    fn stale_untagged_row_for_a_reused_worker_name_is_swept_not_injected() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+
+        let ancient = queue
+            .enqueue("supervisor", "wise-raven-21", "verify+close cas-85c0")
+            .unwrap();
+        {
+            let old = (chrono::Utc::now() - chrono::Duration::days(130)).to_rfc3339();
+            let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+            conn.execute(
+                "UPDATE prompt_queue SET created_at = ? WHERE id = ?",
+                rusqlite::params![old, ancient],
+            )
+            .unwrap();
+        }
+        let live = queue
+            .enqueue_with_session(
+                "supervisor",
+                "wise-raven-21",
+                "start cas-4717",
+                "factory-session",
+            )
+            .unwrap();
+
+        // The worker name IS in this session's roster, so the roster-scoped
+        // sweep correctly declines to touch either row.
+        let valid_target_names =
+            prompt_poison_sweep_targets("lead", &["wise-raven-21".to_string()], &[]);
+        let valid_targets: Vec<&str> = valid_target_names.iter().map(String::as_str).collect();
+        assert_eq!(
+            queue
+                .abandon_ineligible_session_targets(
+                    &valid_targets,
+                    "factory-session",
+                    cas_store::PROMPT_RETRY_MAX_AGE_SECS
+                )
+                .unwrap(),
+            0
+        );
+
+        let expired = queue
+            .expire_stale_pending(cas_store::PROMPT_QUEUE_STALE_TTL_SECS)
+            .unwrap();
+        assert_eq!(expired.len(), 1, "only the ancient row is stale");
+        assert_eq!(expired[0].id, ancient);
+        assert_eq!(
+            queue
+                .message_delivery_report(ancient)
+                .unwrap()
+                .unwrap()
+                .stage,
+            DeliveryStage::Abandoned
+        );
+
+        let selected = queue
+            .peek_for_targets(&valid_targets, Some("factory-session"), 10)
+            .unwrap();
+        let selected_ids: Vec<i64> = selected.iter().map(|row| row.id).collect();
+        assert_eq!(
+            selected_ids,
+            vec![live],
+            "the daemon must inject only this session's live row"
+        );
+    }
+
+    /// cas-d047 / GH #70 at the daemon boundary: a message the worker already
+    /// drained through its inbox poll must not appear in the daemon's next
+    /// selection — that re-selection is what re-wrote the message to the inbox
+    /// and re-typed it into an idle pane.
+    #[test]
+    fn message_drained_by_worker_is_not_reselected_for_injection() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        queue
+            .enqueue_with_session(
+                "supervisor",
+                "calm-heron-93",
+                "contract addendum",
+                "factory-session",
+            )
+            .unwrap();
+        let valid_target_names =
+            prompt_poison_sweep_targets("lead", &["calm-heron-93".to_string()], &[]);
+        let valid_targets: Vec<&str> = valid_target_names.iter().map(String::as_str).collect();
+
+        assert_eq!(
+            queue
+                .poll_unseen_for_recipient("calm-heron-93", Some("factory-session"), 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            queue
+                .peek_for_targets(&valid_targets, Some("factory-session"), 10)
+                .unwrap()
+                .is_empty(),
+            "an already-drained message must never be selected for a second delivery"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -3070,6 +3737,114 @@ mod tests {
         assert!(prompts[0].prompt.contains("worktree and branch were removed"));
     }
 
+    /// GH #60: every audit stage the daemon logs is ALSO persisted on the
+    /// queue row, so `worker_status` can answer "what became of request N?".
+    /// Hooked inside `append_spawn_audit` precisely so no call site can report
+    /// a stage to the log and forget the store — this test pins that coupling.
+    #[test]
+    fn spawn_audit_persists_queryable_lifecycle_state() {
+        use cas_store::SpawnLifecycleState;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_spawn_queue_store(&cas_dir).unwrap();
+        let request_id = queue
+            .enqueue_spawn(1, &[], false, None, Some("session-a"), None)
+            .unwrap();
+
+        // The daemon's real stage sequence for a healthy anonymous spawn.
+        append_spawn_audit(
+            &cas_dir,
+            "session-a",
+            Some(request_id),
+            None,
+            "dequeue",
+            "accepted",
+            "spawn",
+        );
+        append_spawn_audit(
+            &cas_dir,
+            "session-a",
+            Some(request_id),
+            Some("brave-otter-9"),
+            "launch",
+            "started",
+            "Worker PTY process started; awaiting CAS registration.",
+        );
+
+        let rows = queue.recent_spawn_lifecycle("session-a", 10).unwrap();
+        let row = rows.iter().find(|r| r.id == request_id).unwrap();
+        assert_eq!(row.state, SpawnLifecycleState::Launched);
+        assert_eq!(row.worker_name.as_deref(), Some("brave-otter-9"));
+
+        // Registration timeout is the silence GH #60 reported — it must land
+        // as FAILED with a reason, not leave the row at `launched` forever.
+        append_spawn_audit(
+            &cas_dir,
+            "session-a",
+            Some(request_id),
+            Some("brave-otter-9"),
+            "register",
+            "timeout",
+            "did not register with CAS within 120 seconds",
+        );
+
+        let rows = queue.recent_spawn_lifecycle("session-a", 10).unwrap();
+        let row = rows.iter().find(|r| r.id == request_id).unwrap();
+        assert_eq!(row.state, SpawnLifecycleState::Failed);
+        assert!(row.detail.as_deref().unwrap().contains("did not register"));
+    }
+
+    /// A `preassign` failure reports a task-binding problem, not a spawn
+    /// failure — it must not mark a live, registered worker as FAILED.
+    #[test]
+    fn preassign_failure_does_not_fail_a_registered_spawn() {
+        use cas_store::SpawnLifecycleState;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_spawn_queue_store(&cas_dir).unwrap();
+        let request_id = queue
+            .enqueue_spawn(1, &[], false, None, Some("session-a"), Some("cas-1234"))
+            .unwrap();
+
+        append_spawn_audit(
+            &cas_dir,
+            "session-a",
+            Some(request_id),
+            Some("worker-x"),
+            "launch",
+            "started",
+            "",
+        );
+        append_spawn_audit(
+            &cas_dir,
+            "session-a",
+            Some(request_id),
+            Some("worker-x"),
+            "preassign",
+            "failed",
+            "task already assigned to another agent",
+        );
+        append_spawn_audit(
+            &cas_dir,
+            "session-a",
+            Some(request_id),
+            Some("worker-x"),
+            "register",
+            "confirmed",
+            "",
+        );
+
+        let rows = queue.recent_spawn_lifecycle("session-a", 10).unwrap();
+        let row = rows.iter().find(|r| r.id == request_id).unwrap();
+        assert_eq!(
+            row.state,
+            SpawnLifecycleState::Registered,
+            "a preassign failure must not mask a worker that really did come up"
+        );
+    }
+
     #[test]
     fn child_exits_immediately_before_registration_notifies_supervisor() {
         let temp = tempfile::TempDir::new().unwrap();
@@ -3079,6 +3854,7 @@ mod tests {
             SpawnVerification {
                 request_id: Some(407),
                 launched_at: Instant::now(),
+                task_id: None,
             },
         )]);
 
@@ -3107,6 +3883,271 @@ mod tests {
         );
         assert!(prompts[0].prompt.contains("request 407"));
         assert!(prompts[0].prompt.contains("stage=register"));
+    }
+
+    // -----------------------------------------------------------------------
+    // cas-2702 (GH #58 / #59): the spawn-queue consumer must never wedge, and
+    // every queued request must end in a launch or a supervisor-visible FAILED.
+    // -----------------------------------------------------------------------
+
+    /// GH #59: worktree provisioning that never returns (hung `git`, blocked
+    /// hook, stuck FD) leaves `spawn_task` occupied forever. Because the FIFO
+    /// refuses to pop while a spawn is in flight, every later spawn request
+    /// silently accumulates for the rest of the session. Provisioning must
+    /// therefore be bounded.
+    #[test]
+    fn provisioning_that_never_returns_is_declared_timed_out() {
+        let started = Instant::now();
+        let timeout = Duration::from_secs(300);
+
+        assert!(
+            !spawn_provisioning_timed_out(started, started + Duration::from_secs(30), timeout),
+            "a normal (slow) worktree build must not be killed"
+        );
+        assert!(
+            spawn_provisioning_timed_out(started, started + Duration::from_secs(301), timeout),
+            "a spawn stuck past the provisioning budget must be declared failed"
+        );
+    }
+
+    /// GH #59: once the wedged generation is cleared, the queued requests that
+    /// piled up behind it must drain — including one enqueued after a
+    /// `shutdown_workers count=0`.
+    #[test]
+    fn queue_drains_again_once_a_wedged_spawn_is_cleared() {
+        let mut pending = VecDeque::from([PendingSpawn::Named {
+            request_id: Some(368),
+            name: "strong-bear-16".into(),
+            isolate: true,
+            spec: None,
+            task_id: Some("cas-8f06".into()),
+        }]);
+
+        assert!(
+            take_next_pending_spawn(&mut pending, true).is_none(),
+            "a spawn in flight blocks the FIFO — this is what wedges the queue"
+        );
+        assert!(
+            matches!(
+                take_next_pending_spawn(&mut pending, false),
+                Some(PendingSpawn::Named { name, .. }) if name == "strong-bear-16"
+            ),
+            "clearing the wedged spawn must let the next request through"
+        );
+    }
+
+    /// GH #58: requests that reach the queue but are never dequeued are the
+    /// worst outcome — the supervisor believes workers are booting. Rows older
+    /// than the stall budget must be reported (once each).
+    #[test]
+    fn stalled_queue_rows_are_reported_once() {
+        let now = chrono::Utc::now();
+        let row = |id: i64, session: Option<&str>, age_secs: i64| cas_store::SpawnRequest {
+            id,
+            action: crate::store::SpawnAction::Spawn,
+            count: Some(1),
+            worker_names: vec![],
+            force: false,
+            isolate: true,
+            worker_spec: None,
+            factory_session: session.map(str::to_string),
+            task_id: None,
+            requester_config_dir: None,
+            created_at: now - chrono::Duration::seconds(age_secs),
+            processed_at: None,
+        };
+        let pending = vec![
+            row(1, Some("woodworking-silent-cheetah-22"), 900),
+            row(2, Some("woodworking-silent-cheetah-22"), 2),
+            row(3, None, 900),
+        ];
+        let mut reported = HashSet::new();
+
+        let stalled: Vec<i64> =
+            stalled_spawn_requests(&pending, now, chrono::Duration::seconds(60), &reported)
+                .iter()
+                .map(|r| r.id)
+                .collect();
+        assert_eq!(
+            stalled,
+            vec![1, 3],
+            "only rows older than the stall budget are anomalies"
+        );
+
+        reported.extend(stalled);
+        assert!(
+            stalled_spawn_requests(&pending, now, chrono::Duration::seconds(60), &reported)
+                .is_empty(),
+            "each stalled request must be reported once, not every tick"
+        );
+    }
+
+    /// Adjacent defect observed alongside GH #59: `task_id` pre-assignment can
+    /// silently fail to land (task already assigned), leaving a worker booted
+    /// with no task and the supervisor none the wiser.
+    #[test]
+    fn preassign_that_did_not_stick_is_reported_with_a_reason() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+
+        let mut mine = Task::new("cas-2702".to_string(), "assigned to me".to_string());
+        mine.assignee = Some("cosmic-crow-41".to_string());
+        store.add(&mine).unwrap();
+        let mut theirs = Task::new("cas-8f06".to_string(), "assigned elsewhere".to_string());
+        theirs.assignee = Some("quiet-swan-82".to_string());
+        store.add(&theirs).unwrap();
+
+        assert_eq!(
+            preassign_failure_reason(&cas_dir, "cas-2702", "cosmic-crow-41"),
+            None,
+            "a pre-assign that landed reports no failure"
+        );
+
+        let stolen = preassign_failure_reason(&cas_dir, "cas-8f06", "cosmic-crow-41")
+            .expect("a pre-assign that did not stick must report a reason");
+        assert!(
+            stolen.contains("quiet-swan-82"),
+            "reason names the holder: {stolen}"
+        );
+
+        assert!(
+            preassign_failure_reason(&cas_dir, "cas-missing", "cosmic-crow-41").is_some(),
+            "a missing task must surface as a pre-assign failure, not silence"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // cas-28a4 (GH #84): the pre-assignment promised in the spawn receipt must
+    // actually execute once the worker registers — or fail loudly. Reproduced
+    // live in session cas-src-mighty-crane-74 (requests 414-416): three
+    // task_id spawns booted healthy workers, every pre-assignment no-oped, and
+    // nothing was surfaced to the supervisor.
+    // -----------------------------------------------------------------------
+
+    /// Registration-time pre-assignment binds a free task and reports the
+    /// title, so the worker can be briefed with real context.
+    #[test]
+    fn registration_preassignment_binds_a_free_task() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        store
+            .add(&Task::new("cas-aee6".to_string(), "awaiting_merge lifecycle".to_string()))
+            .unwrap();
+
+        let title = ensure_worker_preassignment(&cas_dir, "cas-aee6", "cosmic-crow-41")
+            .expect("a free task must bind at registration");
+
+        assert_eq!(title, "awaiting_merge lifecycle");
+        assert_eq!(
+            store.get("cas-aee6").unwrap().assignee.as_deref(),
+            Some("cosmic-crow-41"),
+            "GH #84: the promised assignee must actually be persisted"
+        );
+    }
+
+    /// The spawn path attempts the bind twice (once optimistically at prepare
+    /// time, once at registration). The second attempt must confirm, not fail.
+    #[test]
+    fn registration_preassignment_is_idempotent() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut task = Task::new("cas-2702".to_string(), "spawn queue".to_string());
+        task.assignee = Some("cosmic-crow-41".to_string());
+        store.add(&task).unwrap();
+
+        assert!(
+            ensure_worker_preassignment(&cas_dir, "cas-2702", "cosmic-crow-41").is_ok(),
+            "re-confirming our own binding must succeed"
+        );
+    }
+
+    /// Never steal another agent's work — but never stay silent about it
+    /// either: the reason is what reaches the supervisor.
+    #[test]
+    fn registration_preassignment_reports_a_conflicting_holder() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let store = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut task = Task::new("cas-e74c".to_string(), "merge guard".to_string());
+        task.assignee = Some("happy-owl-73".to_string());
+        store.add(&task).unwrap();
+
+        let reason = ensure_worker_preassignment(&cas_dir, "cas-e74c", "young-jay-62")
+            .expect_err("a task held by someone else must not silently no-op");
+        assert!(reason.contains("happy-owl-73"), "{reason}");
+        assert_eq!(
+            store.get("cas-e74c").unwrap().assignee.as_deref(),
+            Some("happy-owl-73"),
+            "the existing holder must be preserved"
+        );
+
+        assert!(
+            ensure_worker_preassignment(&cas_dir, "cas-missing", "young-jay-62").is_err(),
+            "a vanished task must surface as a failure, not silence"
+        );
+    }
+
+    /// GH #84's other half: workers "booted with zero context". A confirmed
+    /// pre-assignment must also deliver the task brief to that worker.
+    #[test]
+    fn registration_preassignment_delivers_the_task_brief() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+
+        deliver_worker_task_brief(
+            &cas_dir,
+            "factory-session",
+            "cosmic-crow-41",
+            "cas-aee6",
+            "awaiting_merge lifecycle",
+        )
+        .unwrap();
+
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let prompts = queue.peek_all(10).unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].target, "cosmic-crow-41");
+        assert_eq!(
+            prompts[0].summary.as_deref(),
+            Some("Assigned task: cas-aee6")
+        );
+        assert!(prompts[0].prompt.contains("cas-aee6"), "{}", prompts[0].prompt);
+        assert!(
+            prompts[0].prompt.contains("awaiting_merge lifecycle"),
+            "the brief must carry the task title: {}",
+            prompts[0].prompt
+        );
+        assert!(
+            prompts[0].prompt.contains("action=start"),
+            "the brief must tell the worker how to pick the task up: {}",
+            prompts[0].prompt
+        );
+    }
+
+    /// The verification record is what carries `task_id` from launch to
+    /// registration — without it the daemon has nothing to re-confirm.
+    #[test]
+    fn spawn_verification_carries_the_task_id_to_registration() {
+        let mut verifications = HashMap::from([(
+            "cosmic-crow-41".to_string(),
+            SpawnVerification {
+                request_id: Some(414),
+                launched_at: Instant::now(),
+                task_id: Some("cas-aee6".to_string()),
+            },
+        )]);
+
+        let verification = take_unverified_spawn_on_exit(&mut verifications, "cosmic-crow-41")
+            .expect("verification must be retrievable at registration/exit");
+        assert_eq!(verification.request_id, Some(414));
+        assert_eq!(
+            verification.task_id.as_deref(),
+            Some("cas-aee6"),
+            "request 414 carried cas-aee6 — that pairing must survive to registration"
+        );
     }
 
     #[test]

@@ -904,22 +904,34 @@ impl FactoryApp {
 
     /// Re-check a state-bearing prompt at the narrowest point before transport
     /// injection. Batch revalidation happens earlier in the tick; a worker
-    /// assignment, epic close, or subtask reopen may land after that snapshot
-    /// and before this prompt's turn in the delivery loop.
+    /// assignment, epic close, subtask reopen, or — cas-6eab (GH #74) — the
+    /// merge this alert is asking for may all land after that snapshot and
+    /// before this prompt's turn in the delivery loop. The merge case is not
+    /// hypothetical: `handle_epic_change` runs merges inside the very same
+    /// tick, between prompt generation and this loop.
     pub(crate) fn prompt_is_still_deliverable(&self, prompt: &Prompt) -> bool {
-        if prompt.retract_epic.is_some() {
+        if prompt.retract_epic.is_some() || prompt.retract_task.is_some() {
             // Failure to load authoritative state is uncertainty: deliver.
             // Never remove a legitimate notification based on cached data.
             return self
                 .try_load_unfiltered_director_data_for_delivery()
-                .map(|data| prompt_is_still_deliverable(prompt, &data))
+                .map(|data| {
+                    prompt_is_still_deliverable(prompt, &data, &self.delivery_repo_root())
+                })
                 .unwrap_or(true);
         }
         if prompt.drop_if_worker_assigned.is_none() {
             return true;
         }
         let data = self.load_unfiltered_director_data_for_delivery();
-        prompt_is_still_deliverable(prompt, &data)
+        prompt_is_still_deliverable(prompt, &data, &self.delivery_repo_root())
+    }
+
+    /// The main checkout every `factory/*` and `epic/*` branch lives in — the
+    /// same derivation used by the send-time merge freshness check above and
+    /// by `close_ops`/`director.rs` (`.cas`'s parent).
+    fn delivery_repo_root(&self) -> std::path::PathBuf {
+        self.cas_dir.parent().unwrap_or(&self.cas_dir).to_path_buf()
     }
 
     /// Refresh CAS data from stores and detect state changes
@@ -1502,11 +1514,17 @@ impl FactoryApp {
             );
             return;
         };
-        if let Err(error) = crate::ui::factory::process_groups::track(
+        // cas-99f5 (GH #86): contain first, record second — the durable record
+        // must name the scope that already holds the worker, so a teardown by a
+        // later process (or after a daemon crash) can find and kill it.
+        let cgroup =
+            crate::ui::factory::process_groups::contain_worker(worker_name, factory_session, pgid);
+        if let Err(error) = crate::ui::factory::process_groups::track_contained(
             self.cas_dir(),
             worker_name,
             factory_session,
             pgid,
+            cgroup,
         ) {
             tracing::warn!(
                 worker = %worker_name,
@@ -1529,6 +1547,11 @@ impl FactoryApp {
         let Some(record) = record else {
             return;
         };
+        // cas-99f5 (GH #86): `shutdown_workers` and session end reach this
+        // after killpg has already run. killpg cannot touch descendants that
+        // left the process group (Node's `detached: true` dev servers), so the
+        // cgroup scope is torn down here too — and it reports what it reaped.
+        crate::ui::factory::process_groups::reap_cgroup_scope(&record);
         for _ in 0..20 {
             if !crate::ui::factory::process_groups::is_live(&record) {
                 if let Err(error) =

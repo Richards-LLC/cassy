@@ -144,6 +144,10 @@ enum PendingSpawn {
 struct SpawnVerification {
     request_id: Option<i64>,
     launched_at: Instant,
+    /// cas-28a4 (GH #84): task this spawn promised to pre-assign. Carried to
+    /// registration so the binding is re-confirmed (and the worker briefed)
+    /// at the only moment the worker is provably alive.
+    task_id: Option<String>,
 }
 
 /// Factory daemon state
@@ -237,6 +241,15 @@ pub struct FactoryDaemon {
     last_prompt_poison_sweep: Option<std::time::Instant>,
     /// Epic IDs already logged as "resuming" (prevents log spam every refresh cycle)
     resumed_epic_ids: std::collections::HashSet<String>,
+    /// cas-2702: when the current `spawn_task` started provisioning. Bounds the
+    /// background worktree build so a hung git process cannot wedge the spawn
+    /// queue for the rest of the session (GH #59).
+    spawn_started_at: Option<Instant>,
+    /// cas-2702: last scan for queue rows this daemon never drained (GH #58).
+    last_spawn_queue_stall_scan: Option<Instant>,
+    /// cas-2702: spawn queue request ids already reported as stalled, so the
+    /// warning is emitted once per request rather than every scan.
+    reported_stalled_spawn_requests: std::collections::HashSet<i64>,
 }
 
 /// Parsed control events from client

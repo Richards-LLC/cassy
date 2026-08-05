@@ -43,6 +43,118 @@ impl SpawnAction {
     }
 }
 
+/// Where a queued spawn request has actually got to (GH #60).
+///
+/// The enqueue receipt (`Queued spawn request ... (request ID: N)`) proves only
+/// that a row was inserted. This is the state the daemon observes as it drains
+/// that row, persisted so the supervisor can ask "what became of request N?"
+/// instead of correlating free-text notices — which is unanswerable when two
+/// anonymous spawns are in flight, since their worker names are not chosen
+/// until provisioning time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SpawnLifecycleState {
+    /// Row inserted; the daemon has not picked it up yet.
+    Queued,
+    /// Daemon dequeued the row and is provisioning (worktree, branch, hooks).
+    Provisioning,
+    /// Worker PTY process started; CAS registration not yet confirmed.
+    Launched,
+    /// Worker is live in the CAS agent registry — liveness confirmed.
+    Registered,
+    /// Terminal failure at some stage; `detail` carries the reason.
+    Failed,
+}
+
+impl SpawnLifecycleState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Provisioning => "provisioning",
+            Self::Launched => "launched",
+            Self::Registered => "registered",
+            Self::Failed => "failed",
+        }
+    }
+
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "queued" => Some(Self::Queued),
+            "provisioning" => Some(Self::Provisioning),
+            "launched" => Some(Self::Launched),
+            "registered" => Some(Self::Registered),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+
+    /// Monotonic rank. State only ever advances, so an out-of-order or
+    /// duplicated audit line (the daemon writes several per request) can never
+    /// walk a confirmed spawn backwards to `provisioning`.
+    pub fn rank(&self) -> u8 {
+        match self {
+            Self::Queued => 0,
+            Self::Provisioning => 1,
+            Self::Launched => 2,
+            Self::Registered => 3,
+            Self::Failed => 4,
+        }
+    }
+
+    /// Whether this state is terminal (no further transition expected).
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Registered | Self::Failed)
+    }
+
+    /// Classify a daemon audit `(stage, outcome)` pair into a lifecycle state.
+    ///
+    /// Returns `None` for pairs that carry information but do not move the
+    /// lifecycle — notably `preassign`, which reports whether a task binding
+    /// stuck and must not mark an otherwise-healthy spawn as failed.
+    pub fn from_stage_outcome(stage: &str, outcome: &str) -> Option<Self> {
+        let failed = matches!(
+            outcome,
+            "failed" | "timeout" | "cancelled" | "stalled" | "error"
+        );
+        match stage {
+            "preassign" => None,
+            "dequeue" if failed => Some(Self::Failed),
+            "dequeue" => Some(Self::Provisioning),
+            "prepare" | "provision" if failed => Some(Self::Failed),
+            "prepare" | "provision" => Some(Self::Provisioning),
+            "launch" if failed => Some(Self::Failed),
+            "launch" => Some(Self::Launched),
+            "register" if failed => Some(Self::Failed),
+            "register" => Some(Self::Registered),
+            _ if failed => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+
+/// The lifecycle view of one queued spawn request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpawnLifecycle {
+    /// Queue request id — the same id handed back by the enqueue receipt.
+    pub id: i64,
+    /// Worker this request actually produced. `None` until provisioning names
+    /// it (anonymous spawns are unnamed at enqueue time).
+    pub worker_name: Option<String>,
+    /// Current state.
+    pub state: SpawnLifecycleState,
+    /// Human-readable reason, most useful on `Failed`.
+    pub detail: Option<String>,
+    /// Requested worker names, if the caller named them.
+    pub requested_names: Vec<String>,
+    /// Task requested for pre-assignment, if any.
+    pub task_id: Option<String>,
+    /// When the request was queued.
+    pub created_at: DateTime<Utc>,
+    /// When the state was last advanced.
+    pub state_at: Option<DateTime<Utc>>,
+}
+
 /// A request in the spawn queue
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpawnRequest {
@@ -106,7 +218,11 @@ CREATE TABLE IF NOT EXISTS spawn_queue (
     task_id TEXT,
     requester_config_dir TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    processed_at TEXT
+    processed_at TEXT,
+    spawn_state TEXT,
+    spawn_worker TEXT,
+    spawn_detail TEXT,
+    spawn_state_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_spawn_queue_pending ON spawn_queue(action) WHERE processed_at IS NULL;
@@ -187,6 +303,31 @@ pub trait SpawnQueueStore: Send + Sync {
 
     /// Mark a request as processed
     fn mark_processed(&self, request_id: i64) -> Result<()>;
+
+    /// Record an observed lifecycle transition for a queued spawn request
+    /// (GH #60).
+    ///
+    /// Advancement is monotonic by [`SpawnLifecycleState::rank`]: the daemon
+    /// emits several audit lines per request and may repeat them, so a late
+    /// `provisioning` line must never overwrite a confirmed `registered`.
+    /// `worker_name` binds an anonymous spawn to the name provisioning chose —
+    /// this is the attribution that used to be reconstructed from message prose.
+    /// Best-effort by contract: callers on the daemon hot path ignore errors.
+    fn record_spawn_state(
+        &self,
+        request_id: i64,
+        state: SpawnLifecycleState,
+        worker_name: Option<&str>,
+        detail: Option<&str>,
+    ) -> Result<()>;
+
+    /// Most recent spawn requests for a session with their lifecycle state,
+    /// newest first. Powers the supervisor-visible post-spawn liveness check.
+    fn recent_spawn_lifecycle(
+        &self,
+        factory_session: &str,
+        limit: usize,
+    ) -> Result<Vec<SpawnLifecycle>>;
 
     /// Get count of pending requests
     fn pending_count(&self) -> Result<usize>;
@@ -470,6 +611,94 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
         )?;
 
         Ok(())
+    }
+
+    fn record_spawn_state(
+        &self,
+        request_id: i64,
+        state: SpawnLifecycleState,
+        worker_name: Option<&str>,
+        detail: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().to_rfc3339();
+
+        // Monotonic guard lives in SQL so concurrent daemon writes cannot
+        // interleave a stale state between a read and a write.
+        //
+        // The worker name is bound on FIRST sighting and then pinned
+        // (`COALESCE(spawn_worker, ?)`): provisioning names an anonymous
+        // spawn, and no later line may re-point that request at a different
+        // worker. That pinning is the fix for cross-request mis-attribution.
+        conn.execute(
+            "UPDATE spawn_queue
+             SET spawn_state = ?,
+                 spawn_worker = COALESCE(spawn_worker, ?),
+                 spawn_detail = COALESCE(?, spawn_detail),
+                 spawn_state_at = ?
+             WHERE id = ?
+               AND (spawn_state IS NULL
+                    OR CASE spawn_state
+                         WHEN 'queued' THEN 0
+                         WHEN 'provisioning' THEN 1
+                         WHEN 'launched' THEN 2
+                         WHEN 'registered' THEN 3
+                         WHEN 'failed' THEN 4
+                         ELSE 0
+                       END < ?)",
+            params![
+                state.as_str(),
+                worker_name,
+                detail,
+                now,
+                request_id,
+                state.rank() as i64
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    fn recent_spawn_lifecycle(
+        &self,
+        factory_session: &str,
+        limit: usize,
+    ) -> Result<Vec<SpawnLifecycle>> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, worker_names, task_id, created_at, spawn_state, spawn_worker, spawn_detail, spawn_state_at
+             FROM spawn_queue
+             WHERE action = 'spawn'
+               AND (factory_session = ? OR factory_session IS NULL)
+             ORDER BY id DESC
+             LIMIT ?",
+        )?;
+
+        let rows = stmt
+            .query_map(params![factory_session, limit as i64], |row| {
+                let created_at: String = row.get(3)?;
+                let state: Option<String> = row.get(4)?;
+                let state_at: Option<String> = row.get(7)?;
+                Ok(SpawnLifecycle {
+                    id: row.get(0)?,
+                    requested_names: Self::parse_worker_names(row.get(1)?),
+                    task_id: row.get(2)?,
+                    created_at: Self::parse_datetime(&created_at).unwrap_or_else(Utc::now),
+                    // A row the daemon has never touched is still `queued` —
+                    // never "unknown". Silence is the thing GH #60 is about.
+                    state: state
+                        .as_deref()
+                        .and_then(SpawnLifecycleState::from_str)
+                        .unwrap_or(SpawnLifecycleState::Queued),
+                    worker_name: row.get(5)?,
+                    detail: row.get(6)?,
+                    state_at: state_at.as_deref().and_then(Self::parse_datetime),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(rows)
     }
 
     fn pending_count(&self) -> Result<usize> {
@@ -843,5 +1072,281 @@ mod tests {
                 .iter()
                 .all(|request| request.factory_session.is_none())
         );
+    }
+
+    // ===== GH #60: spawn lifecycle state =====
+
+    /// A freshly-queued request the daemon has not touched reports `queued`,
+    /// never "unknown". The whole point of GH #60 is that the supervisor can
+    /// always name the state of a request id from its receipt.
+    #[test]
+    fn untouched_request_reports_queued_not_unknown() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_spawn(1, &[], false, None, Some("session-a"), None)
+            .unwrap();
+
+        let rows = store.recent_spawn_lifecycle("session-a", 10).unwrap();
+        let row = rows.iter().find(|r| r.id == id).expect("request missing");
+        assert_eq!(row.state, SpawnLifecycleState::Queued);
+        assert_eq!(row.worker_name, None);
+    }
+
+    /// The normal happy path advances queued → provisioning → launched →
+    /// registered, and binds the worker name that provisioning chose.
+    #[test]
+    fn lifecycle_advances_to_registered_and_binds_worker() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_spawn(1, &[], false, None, Some("session-a"), None)
+            .unwrap();
+
+        store
+            .record_spawn_state(
+                id,
+                SpawnLifecycleState::Provisioning,
+                Some("brave-otter-9"),
+                None,
+            )
+            .unwrap();
+        store
+            .record_spawn_state(
+                id,
+                SpawnLifecycleState::Launched,
+                Some("brave-otter-9"),
+                None,
+            )
+            .unwrap();
+        store
+            .record_spawn_state(
+                id,
+                SpawnLifecycleState::Registered,
+                Some("brave-otter-9"),
+                Some("Worker is active in the CAS agent registry."),
+            )
+            .unwrap();
+
+        let rows = store.recent_spawn_lifecycle("session-a", 10).unwrap();
+        let row = rows.iter().find(|r| r.id == id).unwrap();
+        assert_eq!(row.state, SpawnLifecycleState::Registered);
+        assert_eq!(row.worker_name.as_deref(), Some("brave-otter-9"));
+        assert!(row.state_at.is_some());
+    }
+
+    /// A spawn that launches but never registers is FAILED with a reason —
+    /// the exact silence GH #60 reported (receipt says queued, nothing else
+    /// ever contradicts it).
+    #[test]
+    fn launch_without_registration_records_failed_with_reason() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_spawn(1, &[], false, None, Some("session-a"), None)
+            .unwrap();
+
+        store
+            .record_spawn_state(
+                id,
+                SpawnLifecycleState::Launched,
+                Some("quiet-lynx-3"),
+                None,
+            )
+            .unwrap();
+        store
+            .record_spawn_state(
+                id,
+                SpawnLifecycleState::Failed,
+                Some("quiet-lynx-3"),
+                Some("did not register with CAS within 120 seconds"),
+            )
+            .unwrap();
+
+        let rows = store.recent_spawn_lifecycle("session-a", 10).unwrap();
+        let row = rows.iter().find(|r| r.id == id).unwrap();
+        assert_eq!(row.state, SpawnLifecycleState::Failed);
+        assert!(row.detail.as_deref().unwrap().contains("did not register"));
+        assert!(row.state.is_terminal());
+    }
+
+    /// State never walks backwards. The daemon emits several audit lines per
+    /// request and can repeat or reorder them; a late `provisioning` line must
+    /// not un-confirm a registered worker.
+    #[test]
+    fn state_advancement_is_monotonic() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_spawn(1, &[], false, None, Some("session-a"), None)
+            .unwrap();
+
+        store
+            .record_spawn_state(
+                id,
+                SpawnLifecycleState::Registered,
+                Some("steady-crane-1"),
+                None,
+            )
+            .unwrap();
+        // Late/duplicated earlier-stage lines arrive after the fact.
+        store
+            .record_spawn_state(
+                id,
+                SpawnLifecycleState::Provisioning,
+                Some("steady-crane-1"),
+                None,
+            )
+            .unwrap();
+        store
+            .record_spawn_state(
+                id,
+                SpawnLifecycleState::Launched,
+                Some("steady-crane-1"),
+                None,
+            )
+            .unwrap();
+
+        let rows = store.recent_spawn_lifecycle("session-a", 10).unwrap();
+        let row = rows.iter().find(|r| r.id == id).unwrap();
+        assert_eq!(row.state, SpawnLifecycleState::Registered);
+    }
+
+    /// Two concurrent anonymous spawns keep separate identities, and the
+    /// worker name is pinned on first sighting. This is the live failure the
+    /// supervisor reported: four requests attributed to the wrong workers,
+    /// and two receipts both claiming the same request id.
+    #[test]
+    fn concurrent_requests_do_not_cross_attribute_workers() {
+        let (_temp, store) = create_test_store();
+        let first = store
+            .enqueue_spawn(1, &[], false, None, Some("session-a"), None)
+            .unwrap();
+        let second = store
+            .enqueue_spawn(1, &[], false, None, Some("session-a"), None)
+            .unwrap();
+        assert_ne!(first, second, "each spawn request gets its own id");
+
+        // Interleaved exactly as two in-flight spawns would land.
+        store
+            .record_spawn_state(
+                first,
+                SpawnLifecycleState::Provisioning,
+                Some("worker-one"),
+                None,
+            )
+            .unwrap();
+        store
+            .record_spawn_state(
+                second,
+                SpawnLifecycleState::Provisioning,
+                Some("worker-two"),
+                None,
+            )
+            .unwrap();
+        store
+            .record_spawn_state(
+                second,
+                SpawnLifecycleState::Registered,
+                Some("worker-two"),
+                None,
+            )
+            .unwrap();
+        store
+            .record_spawn_state(
+                first,
+                SpawnLifecycleState::Registered,
+                Some("worker-one"),
+                None,
+            )
+            .unwrap();
+
+        let rows = store.recent_spawn_lifecycle("session-a", 10).unwrap();
+        let first_row = rows.iter().find(|r| r.id == first).unwrap();
+        let second_row = rows.iter().find(|r| r.id == second).unwrap();
+        assert_eq!(first_row.worker_name.as_deref(), Some("worker-one"));
+        assert_eq!(second_row.worker_name.as_deref(), Some("worker-two"));
+    }
+
+    /// A later line naming a different worker cannot re-point a request that
+    /// already bound one.
+    #[test]
+    fn worker_name_is_pinned_on_first_sighting() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_spawn(1, &[], false, None, Some("session-a"), None)
+            .unwrap();
+
+        store
+            .record_spawn_state(
+                id,
+                SpawnLifecycleState::Provisioning,
+                Some("the-real-worker"),
+                None,
+            )
+            .unwrap();
+        store
+            .record_spawn_state(
+                id,
+                SpawnLifecycleState::Launched,
+                Some("some-other-worker"),
+                None,
+            )
+            .unwrap();
+
+        let rows = store.recent_spawn_lifecycle("session-a", 10).unwrap();
+        let row = rows.iter().find(|r| r.id == id).unwrap();
+        assert_eq!(row.worker_name.as_deref(), Some("the-real-worker"));
+    }
+
+    /// Lifecycle queries are session-scoped so one factory never reports
+    /// another's spawns as its own.
+    #[test]
+    fn lifecycle_is_scoped_to_the_requesting_session() {
+        let (_temp, store) = create_test_store();
+        let mine = store
+            .enqueue_spawn(1, &[], false, None, Some("session-a"), None)
+            .unwrap();
+        let theirs = store
+            .enqueue_spawn(1, &[], false, None, Some("session-b"), None)
+            .unwrap();
+
+        let rows = store.recent_spawn_lifecycle("session-a", 10).unwrap();
+        assert!(rows.iter().any(|r| r.id == mine));
+        assert!(
+            !rows.iter().any(|r| r.id == theirs),
+            "session-a must not see session-b's spawn requests"
+        );
+    }
+
+    /// `preassign` reports whether a task binding stuck; it must never mark an
+    /// otherwise-healthy spawn as failed.
+    #[test]
+    fn stage_outcome_classification_covers_the_daemon_vocabulary() {
+        use SpawnLifecycleState as S;
+        assert_eq!(
+            S::from_stage_outcome("dequeue", "accepted"),
+            Some(S::Provisioning)
+        );
+        assert_eq!(
+            S::from_stage_outcome("prepare", "started"),
+            Some(S::Provisioning)
+        );
+        assert_eq!(
+            S::from_stage_outcome("launch", "started"),
+            Some(S::Launched)
+        );
+        assert_eq!(
+            S::from_stage_outcome("register", "confirmed"),
+            Some(S::Registered)
+        );
+        assert_eq!(
+            S::from_stage_outcome("register", "timeout"),
+            Some(S::Failed)
+        );
+        assert_eq!(
+            S::from_stage_outcome("launch", "cancelled"),
+            Some(S::Failed)
+        );
+        assert_eq!(S::from_stage_outcome("dequeue", "stalled"), Some(S::Failed));
+        // preassign never moves the lifecycle, in either direction.
+        assert_eq!(S::from_stage_outcome("preassign", "failed"), None);
+        assert_eq!(S::from_stage_outcome("preassign", "confirmed"), None);
     }
 }

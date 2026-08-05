@@ -460,8 +460,9 @@ impl CasCore {
                     format!(
                         "Cannot start a task that is awaiting merge. The worker work is \
                          already complete; wait for the supervisor to merge the factory \
-                         branch, then retry task close. If the supervisor declines the \
-                         unmerged delivery, they must first run \
+                         branch, then retry task close. If review fails — the supervisor \
+                         declines the delivery, or requires an amendment after merging — \
+                         they must first run \
                          `mcp__cas__task action=request_changes id={} reason=\"state what remains and what must be corrected or reverted\"`; \
                          a worker cannot self-reject or start a clean parked delivery. If \
                          that merge fails with a genuine \

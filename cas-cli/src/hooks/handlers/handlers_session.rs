@@ -265,6 +265,21 @@ pub fn handle_session_start(
         context
     };
 
+    // cas-b7dd (GH #88): leftovers from dead sessions — orphan processes still
+    // running in worktrees and stale server registrations. Surfaced here
+    // because a new session otherwise inherits them invisibly and meets them
+    // as an EADDRINUSE failure with no hint that the squatter is CAS's own.
+    // Visibility only: this banner never signals anything.
+    let context = if is_supervisor {
+        match crate::hooks::handlers::session_hygiene::build_session_start_orphan_banner(cas_root) {
+            Some(banner) if context.is_empty() => banner,
+            Some(banner) => format!("{context}\n{banner}"),
+            None => context,
+        }
+    } else {
+        context
+    };
+
     // Read-only GitHub issue triage (cas-ce3d). Supervisors need the intake
     // signal before assigning work; workers do not, and should not pay its
     // latency or context cost. The helper is fully best-effort: unset config,

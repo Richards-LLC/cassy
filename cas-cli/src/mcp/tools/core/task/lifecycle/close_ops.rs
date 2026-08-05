@@ -194,6 +194,12 @@ pub(crate) enum VerificationSkipReason {
     /// `bypass_code_review=true`. Separate from `AssigneeInactive` so
     /// the audit note reflects supervisor intent, not worker state.
     SupervisorBypass,
+    /// cas-1932 (GH #62, minor): an assignee-lookup failure would have
+    /// reported "verification skipped", but a current-cycle APPROVED
+    /// verification for this task already exists. The close is authorized
+    /// by that verdict, so name it instead of claiming nothing verified
+    /// the work.
+    ExistingApprovedVerification { verification_id: String },
 }
 
 impl VerificationSkipReason {
@@ -235,6 +241,9 @@ impl VerificationSkipReason {
                 " (verification skipped — supervisor bypass via bypass_code_review=true)"
                     .to_string()
             }
+            VerificationSkipReason::ExistingApprovedVerification { verification_id } => {
+                format!(" (verified — approved verification {verification_id} on record)")
+            }
         }
     }
 
@@ -270,7 +279,112 @@ impl VerificationSkipReason {
                  supervisor while assignee was still active."
                     .to_string()
             }
+            VerificationSkipReason::ExistingApprovedVerification { verification_id } => {
+                format!(
+                    "Closed on the approved verification {verification_id} already recorded for \
+                     this task's current work cycle; the assignee lookup could not resolve a live \
+                     verifier, but the verdict exists and authorizes the close."
+                )
+            }
         }
+    }
+}
+
+/// cas-1932 (GH #62 symptom 1): does an existing verification row authorize
+/// the close that would otherwise be re-queued for supervisor review?
+///
+/// Accepted only when the verdict is `Approved`, matches the verification
+/// type the task requires, and was recorded inside the task's current work
+/// cycle (same `TaskCommitReceiptWindow` used to attribute commits, with the
+/// same clock-skew allowance). A verdict from an earlier cycle — for example
+/// one that predates a reopen and its rework — can never authorize a fresh
+/// close.
+pub(crate) fn approved_verification_satisfies_review_queue(
+    verification: &Verification,
+    window: Option<&TaskCommitReceiptWindow>,
+    required_type: VerificationType,
+) -> bool {
+    if verification.status != VerificationStatus::Approved {
+        return false;
+    }
+    if verification.verification_type != required_type {
+        return false;
+    }
+    match window {
+        Some(window) => {
+            verification.created_at.timestamp()
+                >= window.not_before.timestamp() - COMMIT_RECEIPT_CLOCK_SKEW_SECS
+        }
+        None => true,
+    }
+}
+
+/// cas-1932 (GH #62, minor): the close path reported
+/// "verification skipped — assignee unknown" while verification
+/// `ver-fd59de6ef422` existed for the task. An assignee-resolution failure is
+/// not evidence that nothing verified the work — when a current-cycle
+/// approved verdict is on record, cite it instead.
+///
+/// Only *lookup-failure* reasons are replaced. `SupervisorBypass` and
+/// `EpicOwnerClosed` are deliberate decisions and keep their own audit text;
+/// `None` is not a skip at all.
+pub(crate) fn skip_reason_with_existing_verification(
+    reason: VerificationSkipReason,
+    approved: Option<&Verification>,
+) -> VerificationSkipReason {
+    let is_lookup_failure = matches!(
+        reason,
+        VerificationSkipReason::NoAssignee
+            | VerificationSkipReason::AssigneeUnknown
+            | VerificationSkipReason::AssigneeInactive { .. }
+    );
+    match approved {
+        Some(verification) if is_lookup_failure => {
+            VerificationSkipReason::ExistingApprovedVerification {
+                verification_id: verification.id.clone(),
+            }
+        }
+        _ => reason,
+    }
+}
+
+/// cas-1932 (GH #62 symptom 2): inputs for the shared-checkout
+/// reviewable-change routing decision.
+///
+/// `attributable_reviewable_changes` is `Some(true|false)` when git could
+/// answer whether this task's own work cycle produced reviewable commits, and
+/// `None` when it could not.
+pub(crate) struct SharedCheckoutReviewScope<'a> {
+    pub task_type: TaskType,
+    pub execution_note: Option<&'a str>,
+    pub attributable_reviewable_changes: Option<bool>,
+    pub checkout_has_reviewable_changes: bool,
+}
+
+/// Decide whether a non-isolated (shared-checkout) close has reviewable
+/// changes *of its own*.
+///
+/// A shared worker's checkout is not a task diff: in the GH #62 incident it
+/// carried ~64 files of prior-factory WIP, which the gate read as the spike's
+/// output and answered with `CODE_REVIEW_REQUIRED` on a task that produced
+/// nothing. Commits this task made in its work cycle always count. When it
+/// made none AND the task's own spec declares no-code work (Spike/Chore, or
+/// any `execution_note`), the checkout's dirty state is not attributed to it.
+/// Every other shape keeps the previous signal, so no code task silently
+/// escapes review, and unknowable git state falls back to the old behavior.
+pub(crate) fn shared_checkout_has_reviewable_changes(scope: SharedCheckoutReviewScope<'_>) -> bool {
+    match scope.attributable_reviewable_changes {
+        Some(true) => true,
+        Some(false) => {
+            let declares_no_code_work = matches!(scope.task_type, TaskType::Spike | TaskType::Chore)
+                || scope.execution_note.is_some_and(|note| !note.trim().is_empty());
+            if declares_no_code_work {
+                false
+            } else {
+                scope.checkout_has_reviewable_changes
+            }
+        }
+        None => scope.checkout_has_reviewable_changes,
     }
 }
 
@@ -990,7 +1104,7 @@ impl CasCore {
             &resolved_parent_branch,
             &close_project_root,
         ) {
-            MergeStateGateOutcome::Proceed => Ok(()),
+            MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_) => Ok(()),
             MergeStateGateOutcome::Reject(message) => Err(message),
         }
     }
@@ -1428,7 +1542,21 @@ impl CasCore {
         // current task work cycle. The latest claim/transfer survives the
         // AwaitingMerge park path, while a reopened task gets a newer claim.
         // Fall back to task creation when lease history is unavailable.
-        let commit_receipt_window = if req.commit_receipt.is_some() {
+        // cas-e74c: resolved unconditionally (it used to be computed only
+        // when a receipt was supplied). The merge-state guard now needs the
+        // same work-cycle window to tell this task's commits apart from a
+        // reused lane's prior-task residue, receipt or no receipt.
+        // cas-9596: attribution evidence for commits this task produced in ANY
+        // cycle, under any assignee — the parked factory anchor, the durable
+        // worker delivery receipt, and the task id itself.
+        let task_commit_identity = task_commit_identity(
+            &task,
+            cas_store::get_latest_worker_delivery(&self.cas_root, &task.id)
+                .ok()
+                .flatten()
+                .map(|(receipt, _)| receipt.commit_sha),
+        );
+        let commit_receipt_window = {
             let lease_history = self
                 .open_agent_store()
                 .ok()
@@ -1437,18 +1565,43 @@ impl CasCore {
             Some(resolve_task_commit_receipt_window(
                 task.created_at,
                 &lease_history,
+                task_commit_identity.clone(),
             ))
-        } else {
-            None
         };
+        // cas-fdc9 (GH #56): a receipt is only evidence if it exists in the
+        // repository this close is bound to. The cross-repo delivery in the
+        // report supplied a SHA that lived solely in the repo where the work
+        // landed, and no gate on that path happened to need the receipt — so
+        // an unverifiable commit id was recorded as proof. Check it up front,
+        // for every caller and every bypass level, because the failure this
+        // prevents is false assurance in the audit trail rather than a
+        // premature close. Ancestry, diff and work-cycle checks stay with the
+        // gates below; this asks only whether the receipt is ours to verify.
+        if let Some(receipt) = req.commit_receipt.as_deref()
+            && close_repo_verified
+            && let Some(message) = commit_receipt_repo_binding_error(&close_project_root, receipt)
+        {
+            return Ok(Self::tool_error(message));
+        }
+
         if task.task_type != TaskType::Epic && task.assignee.is_some() {
-            match run_factory_branch_merge_gate(
+            match run_factory_branch_merge_gate_with_attribution(
                 &task,
                 &req,
                 &resolved_parent_branch,
                 &close_project_root,
+                TaskCommitAttribution {
+                    receipt: req.commit_receipt.as_deref(),
+                    window: commit_receipt_window.as_ref(),
+                },
             ) {
                 MergeStateGateOutcome::Proceed => {}
+                // cas-e74c: the delivery is proven integrated (or nothing on
+                // the lane belongs to this task) — record the residue note
+                // on the task and let the close continue.
+                MergeStateGateOutcome::ProceedWithNote(note) => {
+                    append_close_decision_note(task_store.as_ref(), &mut task, &note);
+                }
                 MergeStateGateOutcome::Reject(msg) => {
                     // cas-a844: "MERGE REQUIRED" alone doesn't say whether the
                     // supervisor's merge will actually succeed — it fires for
@@ -1590,7 +1743,21 @@ impl CasCore {
                 // would mislabel a healthy owner-close as orphan recovery.
                 VerificationSkipReason::EpicOwnerClosed
             } else {
-                self.compute_verification_skip_reason(&task, &req)
+                // cas-1932 (GH #62, minor): an assignee that cannot be
+                // resolved is not evidence that nothing verified the work.
+                // The incident close reported "verification skipped —
+                // assignee unknown" while verification ver-fd59de6ef422 was
+                // on record for the task, losing the audit linkage. When a
+                // current-cycle approved verdict exists, cite it instead.
+                skip_reason_with_existing_verification(
+                    self.compute_verification_skip_reason(&task, &req),
+                    self.current_cycle_approved_verification(
+                        &req.id,
+                        required_verification_type(task.task_type),
+                        commit_receipt_window.as_ref(),
+                    )
+                    .as_ref(),
+                )
             }
         } else {
             VerificationSkipReason::None
@@ -2571,6 +2738,7 @@ impl CasCore {
                     worker_wt,
                     &resolved_parent_branch,
                     task.deliverables.factory_branch_anchor.as_deref(),
+                    &task_commit_identity,
                 );
                 if !violations.is_empty() {
                     let file_list = violations
@@ -2643,10 +2811,33 @@ impl CasCore {
         // common System-B factory-isolation case (`spawn_workers
         // isolate=true` almost never sets `task.worktree_id`; see
         // `resolve_close_parent_branch`).
+        //
+        // cas-1932 (GH #62 symptom 2): the shared-checkout branch above read
+        // "the checkout is dirty" as "the task wrote code". In the incident a
+        // characterization-only spike closed in a main checkout carrying ~64
+        // files of prior-factory WIP and was answered with
+        // CODE_REVIEW_REQUIRED for changes it never made. Shared closes now
+        // route on commits attributable to this task's work cycle; see
+        // `shared_checkout_has_reviewable_changes` for the exact fallbacks
+        // (code tasks with no no-code declaration, and unknowable git state,
+        // keep the previous signal).
         let effective_has_reviewable = if let Some(worker_wt) = worker_worktree_path.as_ref() {
             has_worker_committed_reviewable_changes(worker_wt, &resolved_parent_branch)
         } else {
-            has_reviewable_changes(&close_project_root)
+            shared_checkout_has_reviewable_changes(SharedCheckoutReviewScope {
+                task_type: task.task_type,
+                execution_note: task.execution_note.as_deref(),
+                attributable_reviewable_changes: commit_receipt_window.as_ref().and_then(
+                    |window| {
+                        has_task_attributable_reviewable_changes(
+                            &close_project_root,
+                            &resolved_parent_branch,
+                            window,
+                        )
+                    },
+                ),
+                checkout_has_reviewable_changes: has_reviewable_changes(&close_project_root),
+            })
         };
 
         // cas-762e (B2): factory branch merge-reality gate.
@@ -2729,6 +2920,31 @@ impl CasCore {
         // so skip the pend-transition and let the close complete immediately
         // (AC: "close succeeds", demo: "closes immediately"). `Deep`/unset is
         // unaffected — `!depth_light` keeps the transition firing as today.
+        // cas-1932 (GH #62 symptom 1): the queue hop is the review gate for
+        // this mode — but once the supervisor has recorded an APPROVED verdict
+        // for this work cycle, that gate is satisfied. Before this fix the
+        // worker's re-close re-queued the task to `PendingSupervisorReview`
+        // forever: the approved verification on record was never consulted
+        // here, so no close by the worker could ever complete and the
+        // supervisor had to close on their behalf.
+        //
+        // Deliberately scoped to the supervisor-owned review path: there the
+        // supervisor's verdict IS the code review. Under `owner = "worker"`
+        // the verification jail and the cas-code-review envelope remain two
+        // independent gates and neither may stand in for the other.
+        let review_queue_verdict = if supervisor_review_mode
+            && is_factory_worker
+            && task.task_type != TaskType::Epic
+            && !bypass_close_gates
+        {
+            self.current_cycle_approved_verification(
+                &req.id,
+                required_verification_type(task.task_type),
+                commit_receipt_window.as_ref(),
+            )
+        } else {
+            None
+        };
         if supervisor_review_mode
             && is_factory_worker
             && task.task_type != TaskType::Epic
@@ -2736,6 +2952,7 @@ impl CasCore {
             && !bypass_close_gates
             && effective_has_reviewable
             && !depth_light
+            && review_queue_verdict.is_none()
         {
             // cas-dc5d: scope lightweight lint to the closing worker's
             // worktree + committed task range (merge-base..HEAD), never
@@ -2859,6 +3076,14 @@ impl CasCore {
             // direct close that reaches the gate must not be blocked by a
             // missing review envelope. `Deep`/unset falls through to the
             // existing routing, so the gate enforces exactly as today.
+            CodeReviewGateOutcome::Proceed
+        } else if review_queue_verdict.is_some() {
+            // cas-1932: in supervisor-owned mode the recorded approval IS the
+            // completed review, so it satisfies this gate too — otherwise the
+            // close would clear the queue hop only to be refused for a missing
+            // review envelope the supervisor already replaced. The audit note
+            // naming the verdict is written further below, on the same task
+            // the final store write uses.
             CodeReviewGateOutcome::Proceed
         } else if epic_subtask_receipts_cover {
             CodeReviewGateOutcome::Proceed
@@ -3039,6 +3264,26 @@ impl CasCore {
                 task.notes = decision_note;
             } else {
                 task.notes = format!("{}\n\n{}", task.notes, decision_note);
+            }
+        }
+
+        // cas-1932: record which supervisor verdict authorized this close on
+        // the same in-memory task the final write uses. The code-review gate's
+        // eager clone-persist above is overwritten by that write, and this
+        // audit linkage — the thing GH #62's "verification skipped" minor was
+        // about — has to survive the close.
+        if let Some(verdict) = review_queue_verdict.as_ref() {
+            let timestamp = now.format("%Y-%m-%d %H:%M");
+            let note = format!(
+                "[{timestamp}] DECISION: close authorized by approved verification {} \
+                 recorded {} — supervisor review already complete, task not re-queued.",
+                verdict.id,
+                verdict.created_at.to_rfc3339(),
+            );
+            if task.notes.is_empty() {
+                task.notes = note;
+            } else {
+                task.notes = format!("{}\n\n{}", task.notes, note);
             }
         }
 
@@ -3481,6 +3726,27 @@ impl CasCore {
         Ok(system_b)
     }
 
+    /// cas-1932 (GH #62): the APPROVED verification for this task's current
+    /// work cycle, if one is on record.
+    ///
+    /// Two close-path questions share this lookup: whether the supervisor's
+    /// verdict already satisfies the review queue (so the worker's re-close
+    /// completes instead of re-queuing), and whether a "verification skipped"
+    /// message would be lying about a verdict that exists. Store failures are
+    /// treated as "no verdict" — this only ever *grants* an exit, so an
+    /// unreadable store must never manufacture one.
+    pub(crate) fn current_cycle_approved_verification(
+        &self,
+        task_id: &str,
+        required_type: VerificationType,
+        window: Option<&TaskCommitReceiptWindow>,
+    ) -> Option<Verification> {
+        let store = self.open_verification_store().ok()?;
+        let latest = store.get_latest_for_task(task_id).ok()??;
+        approved_verification_satisfies_review_queue(&latest, window, required_type)
+            .then_some(latest)
+    }
+
     /// Compute why (if at all) the task-verifier step should be skipped
     /// for this close attempt.
     ///
@@ -3844,14 +4110,16 @@ impl CasCore {
         )))
     }
 
-    /// Record a supervisor's negative review before the worker delivery merges.
+    /// Record a supervisor's negative review of a parked AwaitingMerge task.
     ///
     /// This is the one sanctioned exception to the delivery-proof scope lock:
-    /// a negative verdict invalidates the exact proof it rejects, reopens the
-    /// task without changing its assignee, and clears the parked anchor. It is
-    /// intentionally distinct from `reopen`, which handles closed/blocked and
-    /// amendment-after-merge work, and from `reset`, which remains orphan
-    /// recovery and clears ownership.
+    /// a negative verdict invalidates the proof it rejects, reopens the task
+    /// without changing its assignee, and clears the parked anchor. It applies
+    /// to every parked shape — declined-before-merge, amendment-after-merge
+    /// (GH #55), and deliveries whose proof boundary is unbound or absent
+    /// (GH #82) — so a failed review always has an exit. It stays distinct
+    /// from `reopen`, which handles closed/blocked work, and from `reset`,
+    /// which remains orphan recovery and clears ownership.
     pub async fn cas_task_request_changes(
         &self,
         Parameters(req): Parameters<TaskRequestChangesRequest>,
@@ -3876,43 +4144,11 @@ impl CasCore {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
                 format!(
-                    "task request_changes rejected: {} is {} rather than awaiting_merge. This action only declines work before merge; use reopen/fresh-scope recovery for amendment after merge.",
+                    "task request_changes rejected: {} is {} rather than awaiting_merge. This action declines a parked delivery; a task that is not parked is already actionable.",
                     task.id, task.status
                 ),
             ));
         }
-        let (_, delivery) = cas_store::get_latest_worker_delivery(&self.cas_root, &task.id)
-            .map_err(|error| {
-                Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("Failed to read worker delivery: {error}"),
-                )
-            })?
-            .ok_or_else(|| {
-                Self::error(
-                    ErrorCode::INVALID_PARAMS,
-                    format!(
-                        "task request_changes rejected: {} has no exact worker delivery boundary",
-                        task.id
-                    ),
-                )
-            })?;
-        let dispatch = cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id)
-            .map_err(|error| {
-                Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("Failed to read delivery verification: {error}"),
-                )
-            })?
-            .ok_or_else(|| {
-                Self::error(
-                    ErrorCode::INVALID_PARAMS,
-                    format!(
-                        "task request_changes rejected: {} has no exact verification dispatch",
-                        task.id
-                    ),
-                )
-            })?;
         let supervisor_id = self.get_agent_id().map_err(|error| {
             Self::error(
                 ErrorCode::INVALID_PARAMS,
@@ -3920,11 +4156,13 @@ impl CasCore {
             )
         })?;
 
-        cas_store::request_changes_for_worker_delivery_exact(
+        // Deliberately no delivery/dispatch precondition: GH #55 and #82 both
+        // deadlocked because the recovery action refused parked tasks whose
+        // proof boundary was merged, unbound, or legacy — exactly the states a
+        // failed review produces. Boundary shape is reported, never gating.
+        let outcome = cas_store::request_changes_for_parked_delivery(
             &self.cas_root,
             &task.id,
-            &dispatch.id,
-            &delivery.id,
             &supervisor_id,
             &req.reason,
         )
@@ -3936,10 +4174,11 @@ impl CasCore {
         })?;
 
         Ok(Self::success(format!(
-            "Changes requested for task: {} - {}\n\nThe task is Open with assignee {} preserved. Prior commits remain on the worker branch, but the rejected delivery anchor and proof were invalidated. Tell the assigned worker to start the task and add corrective commits (including an explicit revert commit if your reason requests one) before re-delivery.\n\nDecision: {}",
+            "Changes requested for task: {} - {}\n\nThe task is Open with assignee {} preserved. Branch handling: {} The declined delivery anchor and proof were invalidated, so re-close requires a fresh cycle.\n\nDecision: {}",
             task.id,
             task.title,
             task.assignee.as_deref().unwrap_or("unassigned"),
+            outcome.branch_handling,
             req.reason.trim(),
         )))
     }
@@ -4016,6 +4255,204 @@ pub(crate) fn escape_close_reason_for_quoted_command(reason: &str) -> String {
 pub(crate) struct AdditiveOnlyViolation {
     pub status: String,
     pub path: String,
+}
+
+/// cas-9596 (GH #82): evidence that a commit belongs to one task, regardless
+/// of which assignee produced it.
+///
+/// A task can span several workers and work cycles — worker 1 pushes WIP and
+/// dies, the supervisor preserves it, worker 2 finishes. Commits from those
+/// earlier cycles are still *this task's* work, so gates that ask "was this
+/// pre-existing / foreign?" must be able to recognize them.
+///
+/// Empty (`default()`) means "attribution unavailable", which reproduces the
+/// pre-cas-9596 behavior: nothing is recognized as the task's own.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct TaskCommitIdentity {
+    /// The task id, matched as a whole token against commit messages.
+    pub task_id: Option<String>,
+    /// Commit ids CAS durably recorded for this task (parked factory anchor,
+    /// worker delivery receipts). Exact evidence that needs no convention.
+    pub known_commits: Vec<String>,
+}
+
+impl TaskCommitIdentity {
+    fn is_empty(&self) -> bool {
+        self.task_id.is_none() && self.known_commits.is_empty()
+    }
+
+    /// True when `commit` is one of the durably recorded task commits.
+    ///
+    /// Both sides are git object ids, so a prefix match in either direction is
+    /// the same commit (CAS records full ids; git may hand back an
+    /// abbreviation).
+    fn matches_known_commit(&self, commit: &str) -> bool {
+        let commit = commit.trim().to_ascii_lowercase();
+        if commit.is_empty() {
+            return false;
+        }
+        self.known_commits.iter().any(|known| {
+            let known = known.trim().to_ascii_lowercase();
+            !known.is_empty() && (known.starts_with(&commit) || commit.starts_with(&known))
+        })
+    }
+}
+
+/// Collect every durable commit id CAS recorded for this task, plus the task
+/// id itself, into one attribution record.
+///
+/// `latest_delivery_commit` is the commit sha from the task's most recent
+/// worker delivery receipt (the caller reads it from the delivery store).
+pub(crate) fn task_commit_identity(
+    task: &Task,
+    latest_delivery_commit: Option<String>,
+) -> TaskCommitIdentity {
+    let mut known_commits: Vec<String> = task
+        .deliverables
+        .factory_branch_anchor
+        .iter()
+        .cloned()
+        .chain(latest_delivery_commit)
+        .map(|commit| commit.trim().to_string())
+        .filter(|commit| !commit.is_empty())
+        .collect();
+    known_commits.dedup();
+    TaskCommitIdentity {
+        task_id: Some(task.id.clone()),
+        known_commits,
+    }
+}
+
+/// True when `message` references `task_id` as a whole token.
+///
+/// Guards against prefix collisions: `cas-f1b12` must not be read as a
+/// reference to `cas-f1b1`.
+pub(crate) fn message_references_task(message: &str, task_id: &str) -> bool {
+    if task_id.is_empty() {
+        return false;
+    }
+    let haystack = message.to_ascii_lowercase();
+    let needle = task_id.to_ascii_lowercase();
+    let boundary = |character: Option<char>| {
+        character.is_none_or(|character| !character.is_ascii_alphanumeric() && character != '-')
+    };
+    let mut offset = 0;
+    while let Some(found) = haystack[offset..].find(&needle) {
+        let start = offset + found;
+        let end = start + needle.len();
+        let before = haystack[..start].chars().next_back();
+        let after = haystack[end..].chars().next();
+        if boundary(before) && boundary(after) {
+            return true;
+        }
+        offset = start + 1;
+    }
+    false
+}
+
+/// True when `commit` is attributable to the task described by `identity`.
+///
+/// Two independent signals, either sufficient: a durably recorded task commit
+/// id, or a commit message that names the task. Returns false when attribution
+/// evidence is unavailable — callers use this to *relax* a gate, so an unknown
+/// commit must stay unattributed.
+pub(crate) fn commit_is_task_attributable(
+    repo_path: &std::path::Path,
+    commit: &str,
+    identity: &TaskCommitIdentity,
+) -> bool {
+    use std::process::Command;
+
+    if commit.is_empty() || commit.starts_with('-') || identity.is_empty() {
+        return false;
+    }
+    if identity.matches_known_commit(commit) {
+        return true;
+    }
+    let Some(task_id) = identity.task_id.as_deref() else {
+        return false;
+    };
+    let message = Command::new("git")
+        .args(["log", "-1", "--format=%B", commit, "--"])
+        .current_dir(repo_path)
+        .output();
+    match message {
+        Ok(output) if output.status.success() => {
+            message_references_task(&String::from_utf8_lossy(&output.stdout), task_id)
+        }
+        _ => false,
+    }
+}
+
+/// True when every commit that ever touched `path` up to `base_rev` belongs to
+/// this task — i.e. the "pre-existing" version the diff compares against is the
+/// task's own earlier work (GH #82 step 3), not foreign code.
+///
+/// Fails closed: unknowable git state, no history for the path, or a single
+/// unattributable commit all mean "genuinely pre-existing".
+fn pre_image_is_task_owned(
+    repo_path: &std::path::Path,
+    base_rev: &str,
+    path: &str,
+    identity: &TaskCommitIdentity,
+) -> bool {
+    use std::process::Command;
+
+    /// A path touched by more commits than this was not produced by one task's
+    /// WIP; scanning further would only burn git calls. Fail closed instead.
+    const MAX_PRE_IMAGE_COMMITS: usize = 500;
+
+    if identity.is_empty() || base_rev.is_empty() || base_rev.starts_with('-') {
+        return false;
+    }
+    // One git call for the whole path history: `%H<US>%B<RS>` records, so
+    // attribution never costs a subprocess per commit.
+    let history = Command::new("git")
+        .args(["log", "--format=%H%x1f%B%x1e", base_rev, "--", path])
+        .current_dir(repo_path)
+        .output();
+    let Ok(history) = history else {
+        return false;
+    };
+    if !history.status.success() {
+        return false;
+    }
+    let stdout = String::from_utf8_lossy(&history.stdout);
+    let records: Vec<&str> = stdout
+        .split('\u{1e}')
+        .map(str::trim)
+        .filter(|record| !record.is_empty())
+        .collect();
+    if records.is_empty() || records.len() > MAX_PRE_IMAGE_COMMITS {
+        return false;
+    }
+    records.iter().all(|record| {
+        let (commit, message) = record.split_once('\u{1f}').unwrap_or((record, ""));
+        let commit = commit.trim();
+        identity.matches_known_commit(commit)
+            || identity
+                .task_id
+                .as_deref()
+                .is_some_and(|task_id| message_references_task(message, task_id))
+    })
+}
+
+/// Drop violations whose pre-existing version was produced by this same task.
+fn retain_foreign_violations(
+    repo_path: &std::path::Path,
+    base_rev: &str,
+    identity: &TaskCommitIdentity,
+    violations: Vec<AdditiveOnlyViolation>,
+) -> Vec<AdditiveOnlyViolation> {
+    if identity.is_empty() || violations.is_empty() {
+        return violations;
+    }
+    violations
+        .into_iter()
+        .filter(|violation| {
+            !pre_image_is_task_owned(repo_path, base_rev, &violation.path, identity)
+        })
+        .collect()
 }
 
 /// A single uncommitted-work entry: a tracked file that `git status` reports
@@ -4104,10 +4541,16 @@ pub(crate) fn check_uncommitted_work(project_root: &std::path::Path) -> Vec<Unco
 /// Graceful degradation: if the worktree isn't a git repo, git can't
 /// find `parent_branch`, or the merge-base computation fails, returns
 /// an empty vec. The gate is advisory when git state is unknowable.
+/// cas-9596 (GH #82): whichever window is used, a file whose pre-existing
+/// version came from this same task's earlier commits (a dead worker's WIP
+/// that the supervisor preserved) is not "pre-existing code" — `identity`
+/// filters those out. Pass [`TaskCommitIdentity::default`] when attribution is
+/// unavailable; the gate then behaves exactly as it did before.
 pub(crate) fn check_additive_only_branch_violations(
     worker_worktree_path: &std::path::Path,
     parent_branch: &str,
     factory_branch_anchor: Option<&str>,
+    identity: &TaskCommitIdentity,
 ) -> Vec<AdditiveOnlyViolation> {
     use std::process::Command;
 
@@ -4138,9 +4581,12 @@ pub(crate) fn check_additive_only_branch_violations(
                                 .current_dir(worker_worktree_path)
                                 .output();
                             return match diff_out {
-                                Ok(o) if o.status.success() => {
-                                    parse_name_status(&String::from_utf8_lossy(&o.stdout))
-                                }
+                                Ok(o) if o.status.success() => retain_foreign_violations(
+                                    worker_worktree_path,
+                                    commits[1],
+                                    identity,
+                                    parse_name_status(&String::from_utf8_lossy(&o.stdout)),
+                                ),
                                 _ => Vec::new(),
                             };
                         }
@@ -4151,14 +4597,18 @@ pub(crate) fn check_additive_only_branch_violations(
             // Fast-forward or squash-less integration without a merge commit:
             // the parked tip itself is still the narrowest reliable task
             // window available (and is the documented fallback for cas-3f7f).
+            let anchor_parent = format!("{anchor}^");
             let diff_out = Command::new("git")
-                .args(["diff", "--name-status", &format!("{anchor}^"), anchor])
+                .args(["diff", "--name-status", &anchor_parent, anchor])
                 .current_dir(worker_worktree_path)
                 .output();
             return match diff_out {
-                Ok(o) if o.status.success() => {
-                    parse_name_status(&String::from_utf8_lossy(&o.stdout))
-                }
+                Ok(o) if o.status.success() => retain_foreign_violations(
+                    worker_worktree_path,
+                    &anchor_parent,
+                    identity,
+                    parse_name_status(&String::from_utf8_lossy(&o.stdout)),
+                ),
                 _ => Vec::new(),
             };
         }
@@ -4185,7 +4635,12 @@ pub(crate) fn check_additive_only_branch_violations(
         .current_dir(worker_worktree_path)
         .output();
     match diff_out {
-        Ok(o) if o.status.success() => parse_name_status(&String::from_utf8_lossy(&o.stdout)),
+        Ok(o) if o.status.success() => retain_foreign_violations(
+            worker_worktree_path,
+            &merge_base,
+            identity,
+            parse_name_status(&String::from_utf8_lossy(&o.stdout)),
+        ),
         _ => Vec::new(),
     }
 }
@@ -4207,8 +4662,34 @@ pub(crate) enum MergeStateGateOutcome {
     /// task, no assignee, branch missing locally, or git history
     /// unknowable).
     Proceed,
+    /// cas-e74c: close may proceed because the *delivery* is proven
+    /// integrated (validated `commit_receipt`) or because no commit on
+    /// the lane is attributable to this task's work cycle — while the
+    /// lane itself still carries unmerged residue belonging to other
+    /// tasks. Carries the audit note the caller records on the task, so
+    /// the residue is logged rather than fatal.
+    ProceedWithNote(String),
     /// Close must be rejected with this user-facing error message.
     Reject(String),
+}
+
+/// cas-e74c: evidence that scopes the merge-state guard to the closing
+/// task's own delivery instead of the whole registered lane branch.
+///
+/// - `receipt`: the worker-supplied `commit_receipt` (if any). When it
+///   validates against the parent branch it IS the delivery evidence.
+/// - `window`: the task's current work-cycle lower bound (latest lease
+///   claim/transfer, falling back to task creation). Commits on the lane
+///   that predate it belong to other tasks and are not this task's to
+///   merge.
+///
+/// Both `None` reproduces the pre-cas-e74c whole-branch behavior, which
+/// is what the non-close callers (and the 4-arg
+/// [`run_factory_branch_merge_gate`] shim) use.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct TaskCommitAttribution<'a> {
+    pub receipt: Option<&'a str>,
+    pub window: Option<&'a TaskCommitReceiptWindow>,
 }
 
 /// Per-task close-time guard: reject `task.close` when the worker's
@@ -4373,11 +4854,97 @@ fn enrich_merge_required_with_conflict_check(
     }
 }
 
+/// Backwards-compatible shim: evaluate the gate with no delivery-scoping
+/// evidence (whole-branch semantics). Used by callers that have no close
+/// request in hand (e.g. the `AwaitingMerge` delivery precheck) and by the
+/// pre-cas-e74c unit tests.
 pub(crate) fn run_factory_branch_merge_gate(
+    task: &Task,
+    req: &TaskCloseRequest,
+    parent_branch: &str,
+    repo_path: &std::path::Path,
+) -> MergeStateGateOutcome {
+    run_factory_branch_merge_gate_with_attribution(
+        task,
+        req,
+        parent_branch,
+        repo_path,
+        TaskCommitAttribution::default(),
+    )
+}
+
+/// cas-e74c: count commits on `commit_ish` that are not on `parent_branch`
+/// AND fall inside this task's work cycle (committer date at or after
+/// `window.not_before`, with the same clock-skew allowance the commit
+/// receipt uses).
+///
+/// Returns `None` — "unknowable" — when the merge-base or the rev-list
+/// cannot be computed, so the caller falls back to the whole-branch count
+/// rather than treating unknown Git state as "nothing attributable".
+pub(crate) fn count_task_attributable_unmerged_commits(
+    repo_path: &std::path::Path,
+    commit_ish: &str,
+    parent_branch: &str,
+    window: &TaskCommitReceiptWindow,
+) -> Option<u32> {
+    use std::process::Command;
+
+    if !is_safe_git_refname(commit_ish) || !is_safe_git_refname(parent_branch) {
+        return None;
+    }
+
+    let merge_base_out = Command::new("git")
+        .args(["merge-base", parent_branch, commit_ish])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if !merge_base_out.status.success() {
+        return None;
+    }
+    let merge_base = String::from_utf8_lossy(&merge_base_out.stdout)
+        .trim()
+        .to_string();
+    if merge_base.is_empty() {
+        return None;
+    }
+
+    // Git parses `@<epoch>` as an absolute timestamp, so no locale- or
+    // timezone-dependent formatting is involved.
+    let since = format!(
+        "@{}",
+        window.not_before.timestamp() - COMMIT_RECEIPT_CLOCK_SKEW_SECS
+    );
+    // cas-fdc9 (GH #66): exclude the remote-tracking target too. Measuring
+    // this task's commits against a stale local ref alone counts work that
+    // already landed on `origin/<parent>` as stranded.
+    let since_arg = format!("--since={since}");
+    let range = format!("{merge_base}..{commit_ish}");
+    let origin_parent = format!("origin/{parent_branch}");
+    let mut args = vec!["rev-list", "--count", since_arg.as_str(), range.as_str()];
+    if git_ref_exists(repo_path, &origin_parent) {
+        args.push("--not");
+        args.push(origin_parent.as_str());
+    }
+    let count_out = Command::new("git")
+        .args(&args)
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if !count_out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&count_out.stdout)
+        .trim()
+        .parse()
+        .ok()
+}
+
+pub(crate) fn run_factory_branch_merge_gate_with_attribution(
     task: &Task,
     _req: &TaskCloseRequest,
     parent_branch: &str,
     repo_path: &std::path::Path,
+    attribution: TaskCommitAttribution<'_>,
 ) -> MergeStateGateOutcome {
     if task.task_type == TaskType::Epic {
         return MergeStateGateOutcome::Proceed;
@@ -4453,6 +5020,20 @@ pub(crate) fn run_factory_branch_merge_gate(
         return MergeStateGateOutcome::Proceed;
     }
 
+    // cas-fdc9 (GH #66): re-measure against BOTH target refs now that the
+    // fetch has refreshed `origin/<parent_branch>`. The count above came from
+    // the local ref alone, which a factory worktree never advances — that is
+    // how a worker with one unmerged commit was told nine were stranded. A
+    // commit reachable from either ref is merged; only what is on neither is
+    // this branch's stranded work. Unknowable git state keeps the local
+    // measurement (fail closed), and a partially-merged branch now reports the
+    // real remainder instead of stale-base arithmetic.
+    let remote_aware_stranded = count_unmerged_against_targets(repo_path, commit_ish, parent_branch);
+    if remote_aware_stranded == Some(0) {
+        return MergeStateGateOutcome::Proceed;
+    }
+    let stranded = remote_aware_stranded.unwrap_or(stranded);
+
     // cas-2938 / cas-5485: when a trusted historical anchor still looks
     // stranded by ancestry (squash A→B, or rebase A→A'), accept close if
     // tip-tree, live KnownZero, or cherry-equivalent patches of the
@@ -4499,6 +5080,65 @@ pub(crate) fn run_factory_branch_merge_gate(
             return MergeStateGateOutcome::Proceed;
         }
     }
+
+    // cas-e74c (GH #80): a valid `commit_receipt` IS the delivery evidence.
+    // When it resolves to a commit of this work cycle that carries a
+    // non-empty diff and is already reachable from `parent_branch` (or
+    // `origin/<parent_branch>`), the task's work has landed — regardless of
+    // what else the reused lane branch is still carrying. That residue
+    // belongs to other tasks (or to a supervisor decision not to merge the
+    // lane at all); it is logged on the closing task, not made fatal.
+    // Without this, a cherry-pick delivery from a dirty lane could never
+    // close: merging the lane would land unrelated commits on the target,
+    // and the receipt path — documented for exactly this case — did not
+    // exempt the close.
+    let mut receipt_rejection_reason: Option<String> = None;
+    if let Some(receipt) = attribution.receipt {
+        match attribution.window {
+            Some(window) => {
+                match validate_task_commit_receipt(repo_path, receipt, parent_branch, window) {
+                    Ok(note) => {
+                        return MergeStateGateOutcome::ProceedWithNote(format!(
+                            "{note} merge-state guard: cleared by delivery receipt; \
+                             {factory_branch} still carries {stranded} commit(s) not on \
+                             {parent_branch}, which are not attributable to this task's \
+                             delivery and remain the lane's own residue."
+                        ));
+                    }
+                    Err(reason) => receipt_rejection_reason = Some(reason),
+                }
+            }
+            None => {
+                receipt_rejection_reason =
+                    Some("task attribution window is unavailable".to_string());
+            }
+        }
+    }
+
+    // cas-e74c (GH #62 symptoms 3-4): scope the guard to commits made
+    // inside this task's own work cycle. A reused lane branch routinely
+    // carries commits from prior (already closed, already merged-elsewhere)
+    // tasks; demanding that the closing task merge them to its own target
+    // is both wrong and, for a zero-commit task, impossible to satisfy.
+    // Unknowable Git state falls back to the whole-branch count (fail
+    // closed), and commits this task actually made still reject below.
+    let attributable = attribution.window.and_then(|window| {
+        count_task_attributable_unmerged_commits(repo_path, commit_ish, parent_branch, window)
+    });
+    if attributable == Some(0) {
+        return MergeStateGateOutcome::ProceedWithNote(format!(
+            "decision: merge-state guard cleared — no commit on {factory_branch} is \
+             attributable to this task's work cycle (basis: {}). The branch still \
+             carries {stranded} commit(s) not on {parent_branch}; that residue \
+             belongs to other tasks and is recorded here rather than blocking this \
+             close.",
+            attribution
+                .window
+                .map(|window| window.basis)
+                .unwrap_or("task work cycle"),
+        ));
+    }
+    let stranded = attributable.unwrap_or(stranded);
 
     // cas-c631: `epic/<slug>` branches are created locally by the supervisor
     // (see cas-supervisor EPIC workflow) and are, by convention, never pushed
@@ -4562,8 +5202,13 @@ pub(crate) fn run_factory_branch_merge_gate(
              messages in case the MCP response was lost after claiming rows.\n\
              2. Push {factory_branch} to its remote\n\
              3. Open a PR targeting {parent_branch}\n\
-             4. Merge the PR (or `git fetch --prune` if it was already merged \
-             and your local ref is stale)\n\
+             4. Merge the PR. CAS already fetched and measured this branch \
+             against BOTH {parent_branch} and origin/{parent_branch}, so a \
+             merge that has landed on either one is already counted — running \
+             `git fetch` again will not change this number, and a stale local \
+             {parent_branch} ref cannot be the cause (fetch never moves a local \
+             branch ref). If you believe the work is merged, check it directly: \
+             `git merge-base --is-ancestor {factory_branch} origin/{parent_branch}`.\n\
              5. Retry mcp__cas__task action=close. If the supervisor declines \
              the unmerged delivery instead, the supervisor runs \
              `mcp__cas__task action=request_changes id={} reason=\"state what prior work remains and what must be corrected or reverted\"`; \
@@ -4572,10 +5217,21 @@ pub(crate) fn run_factory_branch_merge_gate(
         )
     };
 
+    // cas-e74c: when a receipt was supplied but did not validate, say why —
+    // otherwise the worker sees a bare MERGE REQUIRED and cannot tell that
+    // their receipt was even considered.
+    let receipt_note = match receipt_rejection_reason {
+        Some(reason) => format!(
+            "\nThe supplied commit_receipt was not accepted as merge evidence: \
+             {reason}.\n"
+        ),
+        None => String::new(),
+    };
+
     MergeStateGateOutcome::Reject(format!(
         "⚠️ MERGE REQUIRED\n\n\
-         task close rejected: {factory_branch} has {stranded} commit(s) not on \
-         {parent_branch}.\n\n\
+         task close rejected: {factory_branch} has {stranded} commit(s) from this task \
+         not on {parent_branch}.\n{receipt_note}\n\
          The branch must be merged into {parent_branch} before closing. This \
          guard cannot be bypassed (use of bypass_code_review=true does not \
          skip merge-state checks — it is a data-state guard, not a review \
@@ -4757,6 +5413,88 @@ fn commit_patches_cherry_equivalent_on_parent(
     // Empty output is not positive proof (already-ancestor cases are
     // handled by the primary ancestry path; fail closed here).
     saw_equivalent
+}
+
+/// cas-fdc9 (GH #66): count commits on `commit_ish` that are on NEITHER the
+/// local `parent_branch` ref NOR its remote-tracking `origin/<parent_branch>`.
+///
+/// A factory worktree is cut with whatever the local target ref pointed at and
+/// never advances it. On a repository whose target moves often, that ref is
+/// stale within minutes, so a count measured against it is arithmetic about a
+/// base nobody merges into — the reported "9 commits not on staging" when
+/// exactly one was unmerged. Both refs are consulted because either one can be
+/// the current truth: origin is ahead when merges land elsewhere, and the local
+/// ref is ahead for a local-only epic branch that is never pushed.
+///
+/// Returns `None` when git cannot answer (missing ref, failed rev-list), so
+/// callers keep their existing fail-closed local measurement instead of
+/// treating "couldn't tell" as "nothing stranded".
+pub(crate) fn count_unmerged_against_targets(
+    repo_path: &std::path::Path,
+    commit_ish: &str,
+    parent_branch: &str,
+) -> Option<u32> {
+    use std::process::Command;
+
+    if !is_safe_git_refname(commit_ish) || !is_safe_git_refname(parent_branch) {
+        return None;
+    }
+    if !git_ref_exists(repo_path, commit_ish) || !git_ref_exists(repo_path, parent_branch) {
+        return None;
+    }
+
+    let origin_parent = format!("origin/{parent_branch}");
+    let mut args = vec!["rev-list", "--count", commit_ish, "--not", parent_branch];
+    if git_ref_exists(repo_path, &origin_parent) {
+        args.push(origin_parent.as_str());
+    }
+
+    let out = Command::new("git")
+        .args(&args)
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+/// cas-fdc9 (GH #56): is a supplied `commit_receipt` even present in the
+/// repository this close is bound to?
+///
+/// A cross-repo delivery reported a receipt for a commit that existed only in
+/// the repo where the work actually landed. Nothing refused it — no gate
+/// happened to need the receipt on that path — so an unverifiable SHA entered
+/// the audit trail as if it had been checked. A receipt is evidence; when it
+/// cannot be resolved here, say so and point at the declared-target-repo
+/// mechanism instead of recording false assurance.
+///
+/// Returns `Some(message)` when the receipt does not resolve in `repo_path`,
+/// `None` when it does. Ancestry, diff and work-cycle semantics stay with
+/// [`validate_task_commit_receipt`]; this is only the repo-binding question.
+pub(crate) fn commit_receipt_repo_binding_error(
+    repo_path: &std::path::Path,
+    receipt: &str,
+) -> Option<String> {
+    let reason = resolve_task_commit_receipt_sha(repo_path, receipt).err()?;
+    Some(format!(
+        "⚠️ RECEIPT NOT FOUND IN THIS REPOSITORY\n\n\
+         task close rejected: commit_receipt `{receipt}` does not resolve in the \
+         repository this close is bound to ({}): {reason}.\n\n\
+         A receipt is merge evidence, so CAS refuses to record one it cannot \
+         verify here — a receipt from another repository would read as proof \
+         while proving nothing.\n\n\
+         To resolve:\n\
+         1. If the work landed in a DIFFERENT repository, declare it on the task \
+            so every close gate runs there: \
+            `mcp__cas__task action=update id=<task> target_repo=<path-or-selector> \
+            target_branch=<branch>`, then retry close.\n\
+         2. If the work is in this repository, re-copy the SHA \
+            (`git log --oneline --all`) — full or an unambiguous abbreviation \
+            both work.",
+        repo_path.display(),
+    ))
 }
 
 /// Explicit success-bearing counterpart to [`count_unmerged_factory_commits`].
@@ -5948,6 +6686,13 @@ const COMMIT_RECEIPT_CLOCK_SKEW_SECS: i64 = 5;
 pub(crate) struct TaskCommitReceiptWindow {
     pub not_before: chrono::DateTime<chrono::Utc>,
     pub basis: &'static str,
+    /// cas-9596 (GH #82): lower bound of the task's ENTIRE life, not just the
+    /// current cycle. A restart moves `not_before` forward without producing
+    /// any commits; work from an earlier cycle of the same task still sits
+    /// above this floor and must remain valid evidence.
+    pub task_floor: chrono::DateTime<chrono::Utc>,
+    /// Evidence used to recognize an earlier cycle's commit as this task's own.
+    pub identity: TaskCommitIdentity,
 }
 
 /// Prefer the most recent claim/transfer (the current work cycle), falling
@@ -5955,6 +6700,7 @@ pub(crate) struct TaskCommitReceiptWindow {
 pub(crate) fn resolve_task_commit_receipt_window(
     task_created_at: chrono::DateTime<chrono::Utc>,
     lease_history: &[cas_store::LeaseHistoryEntry],
+    identity: TaskCommitIdentity,
 ) -> TaskCommitReceiptWindow {
     let cycle_start = lease_history
         .iter()
@@ -5965,10 +6711,14 @@ pub(crate) fn resolve_task_commit_receipt_window(
         Some(timestamp) if timestamp > task_created_at => TaskCommitReceiptWindow {
             not_before: timestamp,
             basis: "latest task lease claim/transfer",
+            task_floor: task_created_at,
+            identity,
         },
         _ => TaskCommitReceiptWindow {
             not_before: task_created_at,
             basis: "task creation time (lease-history fallback)",
+            task_floor: task_created_at,
+            identity,
         },
     }
 }
@@ -6136,13 +6886,35 @@ pub(crate) fn validate_task_commit_receipt(
         .trim()
         .parse::<i64>()
         .map_err(|_| "git returned an invalid commit timestamp".to_string())?;
+    // cas-9596 (GH #82 step 6): an administrative restart — supervisor clears a
+    // note, worker re-`start`s, no new commits — moves the work-cycle bound past
+    // a delivery that is already merged and ancestry-verified above. That
+    // receipt is still this task's own work, so the cycle bound yields when the
+    // commit is attributable to the task and postdates the task itself. A
+    // foreign commit, or one older than the task, is still refused.
     let earliest_allowed = window.not_before.timestamp() - COMMIT_RECEIPT_CLOCK_SKEW_SECS;
+    let mut prior_cycle_basis = None;
     if commit_epoch < earliest_allowed {
-        return Err(format!(
-            "the commit predates this task work cycle (commit epoch {commit_epoch}; \
-             earliest accepted epoch {earliest_allowed}, based on {})",
-            window.basis
-        ));
+        let task_floor = window.task_floor.timestamp() - COMMIT_RECEIPT_CLOCK_SKEW_SECS;
+        if commit_epoch >= task_floor
+            && commit_is_task_attributable(repo_path, &full_receipt, &window.identity)
+        {
+            prior_cycle_basis = Some(format!(
+                " The commit predates the current work cycle beginning {} ({}), but it is \
+                 attributable to an earlier work cycle of this task, postdates the task itself \
+                 ({}), and is already merged — an administrative restart does not invalidate a \
+                 delivery that already landed.",
+                window.not_before.to_rfc3339(),
+                window.basis,
+                window.task_floor.to_rfc3339(),
+            ));
+        } else {
+            return Err(format!(
+                "the commit predates this task work cycle (commit epoch {commit_epoch}; \
+                 earliest accepted epoch {earliest_allowed}, based on {})",
+                window.basis
+            ));
+        }
     }
 
     let diff = Command::new("git")
@@ -6171,10 +6943,11 @@ pub(crate) fn validate_task_commit_receipt(
          as task-attributed merge evidence; \
          commit epoch {commit_epoch} is within the current task work cycle beginning {} \
          (basis: {}; {}s clock-skew allowance), the commit is merged into \
-         {parent_branch}/origin/{parent_branch}, and its merge-aware file diff is non-empty.",
+         {parent_branch}/origin/{parent_branch}, and its merge-aware file diff is non-empty.{}",
         window.not_before.to_rfc3339(),
         window.basis,
-        COMMIT_RECEIPT_CLOCK_SKEW_SECS
+        COMMIT_RECEIPT_CLOCK_SKEW_SECS,
+        prior_cycle_basis.unwrap_or_default()
     ))
 }
 
@@ -7436,6 +8209,69 @@ pub(crate) fn has_worker_committed_reviewable_changes(
     }
 }
 
+/// cas-1932 (GH #62 symptom 2): do the commits this task made during its own
+/// work cycle touch reviewable code?
+///
+/// Scoped exactly like the cas-e74c merge guard: commits reachable from HEAD
+/// but not from `parent_branch`, whose committer date falls at or after the
+/// work-cycle start (same clock-skew allowance). Uncommitted working-tree
+/// state is deliberately ignored — in a shared checkout it belongs to whoever
+/// left it there, not to the closing task.
+///
+/// `None` means git could not answer (no repo, no merge-base, failed log);
+/// callers fall back to the unscoped checkout signal rather than treating an
+/// unknown as "nothing to review".
+pub(crate) fn has_task_attributable_reviewable_changes(
+    repo_path: &std::path::Path,
+    parent_branch: &str,
+    window: &TaskCommitReceiptWindow,
+) -> Option<bool> {
+    use std::process::Command;
+
+    if !is_safe_git_refname(parent_branch) {
+        return None;
+    }
+
+    let merge_base_out = Command::new("git")
+        .args(["merge-base", "HEAD", parent_branch])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if !merge_base_out.status.success() {
+        return None;
+    }
+    let merge_base = String::from_utf8_lossy(&merge_base_out.stdout)
+        .trim()
+        .to_string();
+    if merge_base.is_empty() {
+        return None;
+    }
+
+    let since = format!(
+        "@{}",
+        window.not_before.timestamp() - COMMIT_RECEIPT_CLOCK_SKEW_SECS
+    );
+    let log_out = Command::new("git")
+        .args([
+            "log",
+            &format!("--since={since}"),
+            "--name-only",
+            "--pretty=format:",
+            &format!("{merge_base}..HEAD"),
+        ])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if !log_out.status.success() {
+        return None;
+    }
+    let output = String::from_utf8_lossy(&log_out.stdout);
+    Some(output.lines().any(|line| {
+        let trimmed = line.trim();
+        !trimmed.is_empty() && is_reviewable_path(trimmed)
+    }))
+}
+
 /// Parse the output of `git diff --name-status` into violations. Only rows
 /// whose status starts with M, D, or R are returned. A, C, T, U, and ?? are
 /// considered additive or uninteresting.
@@ -7642,7 +8478,15 @@ mod additive_only_tests {
     #[test]
     fn branch_check_non_git_returns_empty() {
         let dir = tempdir().unwrap();
-        assert!(check_additive_only_branch_violations(dir.path(), "main", None).is_empty());
+        assert!(
+            check_additive_only_branch_violations(
+                dir.path(),
+                "main",
+                None,
+                &TaskCommitIdentity::default()
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -7651,7 +8495,12 @@ mod additive_only_tests {
         // fails → empty. The gate must not fire when it can't reason
         // about history.
         let dir = init_branched_repo();
-        let v = check_additive_only_branch_violations(dir.path(), "nope", None);
+        let v = check_additive_only_branch_violations(
+            dir.path(),
+            "nope",
+            None,
+            &TaskCommitIdentity::default(),
+        );
         assert!(v.is_empty(), "unknown parent must no-op, got: {v:?}");
     }
 
@@ -7660,7 +8509,12 @@ mod additive_only_tests {
         // factory/worker has the same HEAD as main → no commits → no
         // violations.
         let dir = init_branched_repo();
-        let v = check_additive_only_branch_violations(dir.path(), "main", None);
+        let v = check_additive_only_branch_violations(
+            dir.path(),
+            "main",
+            None,
+            &TaskCommitIdentity::default(),
+        );
         assert!(v.is_empty(), "branch with no commits must be clean: {v:?}");
     }
 
@@ -7672,7 +8526,12 @@ mod additive_only_tests {
         std::fs::write(dir.path().join("new.rs"), "fn main() {}\n").unwrap();
         git(dir.path(), &["add", "new.rs"]);
         git(dir.path(), &["commit", "-q", "-m", "feat: new.rs"]);
-        let v = check_additive_only_branch_violations(dir.path(), "main", None);
+        let v = check_additive_only_branch_violations(
+            dir.path(),
+            "main",
+            None,
+            &TaskCommitIdentity::default(),
+        );
         assert!(
             v.is_empty(),
             "purely additive branch commit must pass: {v:?}"
@@ -7690,7 +8549,12 @@ mod additive_only_tests {
             dir.path(),
             &["commit", "-q", "-m", "fix: edit existing.txt"],
         );
-        let v = check_additive_only_branch_violations(dir.path(), "main", None);
+        let v = check_additive_only_branch_violations(
+            dir.path(),
+            "main",
+            None,
+            &TaskCommitIdentity::default(),
+        );
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].path, "existing.txt");
         assert!(v[0].status.starts_with('M'));
@@ -7719,11 +8583,236 @@ mod additive_only_tests {
             &["merge", "-q", "--no-ff", "factory/task", "-m", "merge task"],
         );
 
-        let v = check_additive_only_branch_violations(dir.path(), "epic", Some(anchor.as_str()));
+        let v = check_additive_only_branch_violations(
+            dir.path(),
+            "epic",
+            Some(anchor.as_str()),
+            &TaskCommitIdentity::default(),
+        );
         assert!(
             v.is_empty(),
             "pre-existing epic modifications must not count against the task: {v:?}"
         );
+    }
+
+    /// GH #82 steps 1-3: worker 1 commits a WIP file for THIS task and dies;
+    /// the supervisor merges the WIP into the epic to preserve it. Worker 2
+    /// finishes the same task, superseding that file. The epic diff then shows
+    /// the file as Modified — but its only prior version is the task's own WIP,
+    /// so an additive-only close must not be rejected for it.
+    ///
+    /// Fixture shape: WIP merged into the epic BEFORE worker 2 branches, then
+    /// worker 2's branch is merged and the anchor path scopes the diff.
+    fn init_same_task_wip_repo(wip_message: &str) -> (tempfile::TempDir, String, String) {
+        let dir = init_branched_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["checkout", "-q", "-b", "epic"]);
+        // Worker 1's preserved WIP for the same task.
+        std::fs::write(p.join("feature.rs"), "// wip\n").unwrap();
+        git(p, &["add", "feature.rs"]);
+        git(p, &["commit", "-q", "-m", wip_message]);
+        let wip_sha = git_output(p, &["rev-parse", "HEAD"]);
+        // Worker 2 branches from the epic that already carries the WIP.
+        git(p, &["checkout", "-q", "-b", "factory/worker-two"]);
+        std::fs::write(p.join("feature.rs"), "// finished\n").unwrap();
+        git(p, &["add", "feature.rs"]);
+        git(
+            p,
+            &["commit", "-q", "-m", "feat(cas-f1b1): finish the feature"],
+        );
+        let anchor = git_output(p, &["rev-parse", "HEAD"]);
+        git(p, &["checkout", "-q", "epic"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "factory/worker-two",
+                "-m",
+                "merge worker two",
+            ],
+        );
+        (dir, anchor, wip_sha)
+    }
+
+    #[test]
+    fn branch_check_same_task_wip_is_not_a_pre_existing_modification() {
+        let (dir, anchor, _) = init_same_task_wip_repo("wip(cas-f1b1): partial feature");
+
+        // Without attribution this is the GH #82 false positive.
+        let blind = check_additive_only_branch_violations(
+            dir.path(),
+            "epic",
+            Some(anchor.as_str()),
+            &TaskCommitIdentity::default(),
+        );
+        assert_eq!(
+            blind.len(),
+            1,
+            "fixture must reproduce the false positive when attribution is unavailable: {blind:?}"
+        );
+
+        let attributed = check_additive_only_branch_violations(
+            dir.path(),
+            "epic",
+            Some(anchor.as_str()),
+            &TaskCommitIdentity {
+                task_id: Some("cas-f1b1".to_string()),
+                known_commits: Vec::new(),
+            },
+        );
+        assert!(
+            attributed.is_empty(),
+            "a file whose only prior version is this task's own WIP is not pre-existing: {attributed:?}"
+        );
+    }
+
+    #[test]
+    fn branch_check_same_task_wip_is_attributable_by_recorded_commit_id() {
+        // The WIP commit message never names the task (a dying worker's
+        // scratch commit), but CAS durably recorded its commit id for this
+        // task — that is attribution evidence too.
+        let (dir, anchor, wip_sha) = init_same_task_wip_repo("wip: partial feature");
+        let attributed = check_additive_only_branch_violations(
+            dir.path(),
+            "epic",
+            Some(anchor.as_str()),
+            &TaskCommitIdentity {
+                task_id: Some("cas-f1b1".to_string()),
+                known_commits: vec![wip_sha],
+            },
+        );
+        assert!(
+            attributed.is_empty(),
+            "a recorded task commit id must attribute the prior version: {attributed:?}"
+        );
+    }
+
+    #[test]
+    fn branch_check_foreign_pre_existing_file_still_violates_under_attribution() {
+        // Same shape, but the prior version came from unrelated work. The
+        // gate must still reject: attribution relaxes only the task's own WIP.
+        let (dir, anchor, _) = init_same_task_wip_repo("chore: unrelated baseline file");
+        let violations = check_additive_only_branch_violations(
+            dir.path(),
+            "epic",
+            Some(anchor.as_str()),
+            &TaskCommitIdentity {
+                task_id: Some("cas-f1b1".to_string()),
+                known_commits: Vec::new(),
+            },
+        );
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert_eq!(violations[0].path, "feature.rs");
+    }
+
+    #[test]
+    fn branch_check_same_task_wip_is_not_pre_existing_before_the_merge() {
+        // Pre-merge path (merge-base..HEAD): worker 2's branch is not merged
+        // yet, and the merge base already carries the task's own WIP.
+        let dir = init_branched_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["checkout", "-q", "-b", "epic"]);
+        std::fs::write(p.join("feature.rs"), "// wip\n").unwrap();
+        git(p, &["add", "feature.rs"]);
+        git(p, &["commit", "-q", "-m", "wip(cas-f1b1): partial feature"]);
+        git(p, &["checkout", "-q", "-b", "factory/worker-two"]);
+        std::fs::write(p.join("feature.rs"), "// finished\n").unwrap();
+        git(p, &["add", "feature.rs"]);
+        git(p, &["commit", "-q", "-m", "feat(cas-f1b1): finish"]);
+
+        let attributed = check_additive_only_branch_violations(
+            p,
+            "epic",
+            None,
+            &TaskCommitIdentity {
+                task_id: Some("cas-f1b1".to_string()),
+                known_commits: Vec::new(),
+            },
+        );
+        assert!(
+            attributed.is_empty(),
+            "the unmerged path must attribute the task's own WIP too: {attributed:?}"
+        );
+    }
+
+    #[test]
+    fn branch_check_file_touched_by_foreign_history_still_violates() {
+        // The file was created by unrelated work and only LATER touched by
+        // this task. Its pre-image is genuinely foreign — fail closed.
+        let dir = init_branched_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["checkout", "-q", "-b", "epic"]);
+        std::fs::write(p.join("feature.rs"), "// baseline\n").unwrap();
+        git(p, &["add", "feature.rs"]);
+        git(p, &["commit", "-q", "-m", "chore: baseline feature"]);
+        std::fs::write(p.join("feature.rs"), "// task wip\n").unwrap();
+        git(p, &["add", "feature.rs"]);
+        git(p, &["commit", "-q", "-m", "wip(cas-f1b1): touch feature"]);
+        git(p, &["checkout", "-q", "-b", "factory/worker-two"]);
+        std::fs::write(p.join("feature.rs"), "// finished\n").unwrap();
+        git(p, &["add", "feature.rs"]);
+        git(p, &["commit", "-q", "-m", "feat(cas-f1b1): finish"]);
+
+        let violations = check_additive_only_branch_violations(
+            p,
+            "epic",
+            None,
+            &TaskCommitIdentity {
+                task_id: Some("cas-f1b1".to_string()),
+                known_commits: Vec::new(),
+            },
+        );
+        assert_eq!(
+            violations.len(),
+            1,
+            "a file with foreign history in its pre-image must still violate: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn task_commit_identity_collects_every_durable_task_commit() {
+        let mut task = Task::new("cas-f1b1".to_string(), "same-task WIP".to_string());
+        task.deliverables.factory_branch_anchor = Some("a".repeat(40));
+        let identity = task_commit_identity(&task, Some("b".repeat(40)));
+        assert_eq!(identity.task_id.as_deref(), Some("cas-f1b1"));
+        assert_eq!(
+            identity.known_commits,
+            vec!["a".repeat(40), "b".repeat(40)],
+            "anchor and delivery receipt are both task-owned commit evidence"
+        );
+
+        let bare = Task::new("cas-f1b1".to_string(), "no durable commits".to_string());
+        let identity = task_commit_identity(&bare, None);
+        assert!(identity.known_commits.is_empty());
+        assert!(
+            !identity.is_empty(),
+            "the task id alone still supports message attribution"
+        );
+    }
+
+    #[test]
+    fn task_id_attribution_requires_a_whole_token_match() {
+        assert!(message_references_task(
+            "feat(cas-f1b1): finish the feature",
+            "cas-f1b1"
+        ));
+        assert!(message_references_task(
+            "body mentions cas-f1b1.\n",
+            "cas-f1b1"
+        ));
+        assert!(
+            !message_references_task("feat(cas-f1b12): different task", "cas-f1b1"),
+            "a longer id must not be attributed to its prefix"
+        );
+        assert!(!message_references_task(
+            "no task reference here",
+            "cas-f1b1"
+        ));
     }
 
     #[test]
@@ -7742,7 +8831,12 @@ mod additive_only_tests {
             &["merge", "-q", "--no-ff", "factory/task", "-m", "merge task"],
         );
 
-        let v = check_additive_only_branch_violations(dir.path(), "epic", Some(anchor.as_str()));
+        let v = check_additive_only_branch_violations(
+            dir.path(),
+            "epic",
+            Some(anchor.as_str()),
+            &TaskCommitIdentity::default(),
+        );
         assert_eq!(v.len(), 1, "task modification must still be rejected");
         assert_eq!(v[0].path, "existing.txt");
         assert!(v[0].status.starts_with('M'));
@@ -7756,7 +8850,12 @@ mod additive_only_tests {
             dir.path(),
             &["commit", "-q", "-m", "chore: drop existing.txt"],
         );
-        let v = check_additive_only_branch_violations(dir.path(), "main", None);
+        let v = check_additive_only_branch_violations(
+            dir.path(),
+            "main",
+            None,
+            &TaskCommitIdentity::default(),
+        );
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].path, "existing.txt");
         assert!(v[0].status.starts_with('D'));
@@ -7786,7 +8885,12 @@ mod additive_only_tests {
         // leave it unstaged. The legacy `git diff HEAD` path would see
         // this and reject. The branch-diff path must not.
         std::fs::write(dir.path().join("existing.txt"), "drift\n").unwrap();
-        let v = check_additive_only_branch_violations(dir.path(), "main", None);
+        let v = check_additive_only_branch_violations(
+            dir.path(),
+            "main",
+            None,
+            &TaskCommitIdentity::default(),
+        );
         assert!(
             v.is_empty(),
             "uncommitted drift must not count against the branch: {v:?}"
@@ -10353,6 +11457,495 @@ mod merge_state_gate_tests {
         assert!(
             matches!(out, MergeStateGateOutcome::Proceed),
             "missing factory branch must be treated as merged (graceful pass), got {out:?}"
+        );
+    }
+
+    // --- cas-e74c (GH #80 / #62 symptoms 3-4): delivery-scoped guard -------
+    //
+    // The guard used to evaluate the worker's ENTIRE registered lane
+    // branch. Three real deadlocks followed: a cherry-pick delivery from a
+    // reused lane could never close even with a valid, target-reachable
+    // `commit_receipt`; a zero-commit task inherited the lane's unrelated
+    // commits; and work done on a clean task-local branch, merged before
+    // close, still bounced because the guard keyed on the lane name.
+
+    /// Commit with an explicit committer/author date so a test can place
+    /// commits before or after a task's attribution window.
+    fn git_at(dir: &std::path::Path, args: &[&str], date: &str) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test")
+            .env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn commit_file_at(dir: &std::path::Path, name: &str, body: &str, date: &str) {
+        std::fs::write(dir.join(name), body).unwrap();
+        git_at(dir, &["add", name], date);
+        git_at(dir, &["commit", "-q", "-m", &format!("feat: {name}")], date);
+    }
+
+    fn window_at(epoch: i64, basis: &'static str) -> TaskCommitReceiptWindow {
+        TaskCommitReceiptWindow {
+            not_before: chrono::DateTime::from_timestamp(epoch, 0).unwrap(),
+            basis,
+            task_floor: chrono::DateTime::from_timestamp(epoch, 0).unwrap(),
+            identity: TaskCommitIdentity::default(),
+        }
+    }
+
+    fn head_sha(dir: &std::path::Path) -> String {
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir)
+            .output()
+            .expect("git rev-parse");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// GH #80: the lane carries prior-session commits the supervisor
+    /// deliberately refused to merge; the task's own work was cherry-picked
+    /// onto the parent and handed back as a `commit_receipt`. The receipt IS
+    /// the delivery evidence — close must pass, logging the lane residue.
+    #[test]
+    fn reused_lane_close_with_valid_receipt_proceeds_with_residue_note() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        // Two prior-session commits stranded on the reused lane.
+        commit_file_at(p, "old-a.rs", "// a\n", "2020-01-01T00:00:00Z");
+        commit_file_at(p, "old-b.rs", "// b\n", "2020-01-02T00:00:00Z");
+        // This task's delivery, cherry-picked onto main as a new SHA.
+        git(p, &["checkout", "-q", "main"]);
+        commit_file_at(p, "delivery.rs", "// delivered\n", "2026-08-04T12:00:00Z");
+        let receipt = head_sha(p);
+        git(p, &["checkout", "-q", "factory/worker"]);
+
+        let task = worker_task("worker");
+        let mut req = base_req(&task.id);
+        req.commit_receipt = Some(receipt.clone());
+        let window = window_at(1_000_000_000, "latest task lease claim/transfer");
+
+        let out = run_factory_branch_merge_gate_with_attribution(
+            &task,
+            &req,
+            "main",
+            p,
+            TaskCommitAttribution {
+                receipt: Some(&receipt),
+                window: Some(&window),
+            },
+        );
+        match out {
+            MergeStateGateOutcome::ProceedWithNote(note) => {
+                assert!(
+                    note.contains(&receipt),
+                    "note must record the accepted receipt: {note}"
+                );
+                assert!(
+                    note.contains("factory/worker") && note.contains("2 commit"),
+                    "note must log the unmerged lane residue: {note}"
+                );
+            }
+            other => panic!("valid receipt must clear the lane guard, got {other:?}"),
+        }
+    }
+
+    /// GH #62 symptom 4: the delivery lives on a clean task-local branch that
+    /// was merged into the parent BEFORE close. The guard must resolve merge
+    /// state from the receipt's ancestry, not the registered lane name.
+    #[test]
+    fn clean_task_local_branch_merged_before_close_proceeds() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        commit_file_at(p, "unrelated.rs", "// other task\n", "2020-03-01T00:00:00Z");
+        // Task work on its own branch, cut from main and merged into main.
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["checkout", "-q", "-b", "factory/worker-cas-test1"]);
+        commit_file_at(p, "scoped.rs", "// scoped\n", "2026-08-04T12:00:00Z");
+        let receipt = head_sha(p);
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "factory/worker-cas-test1",
+                "-m",
+                "merge",
+            ],
+        );
+        git(p, &["checkout", "-q", "factory/worker"]);
+
+        let task = worker_task("worker");
+        let mut req = base_req(&task.id);
+        req.commit_receipt = Some(receipt.clone());
+        let window = window_at(1_000_000_000, "latest task lease claim/transfer");
+
+        let out = run_factory_branch_merge_gate_with_attribution(
+            &task,
+            &req,
+            "main",
+            p,
+            TaskCommitAttribution {
+                receipt: Some(&receipt),
+                window: Some(&window),
+            },
+        );
+        assert!(
+            matches!(out, MergeStateGateOutcome::ProceedWithNote(_)),
+            "receipt merged into parent before close must clear the guard, got {out:?}"
+        );
+    }
+
+    /// GH #62 symptom 3: an epic-less, zero-commit task inherited the lane's
+    /// 34 unrelated commits. No commit is attributable to this task's work
+    /// cycle, so the guard must not fire.
+    #[test]
+    fn zero_task_attributable_commits_proceeds_despite_lane_residue() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        commit_file_at(p, "other-1.rs", "// 1\n", "2020-01-01T00:00:00Z");
+        commit_file_at(p, "other-2.rs", "// 2\n", "2020-01-02T00:00:00Z");
+
+        let task = worker_task("worker");
+        let req = base_req(&task.id);
+        // Work cycle started long after those commits were made.
+        let window = window_at(1_700_000_000, "latest task lease claim/transfer");
+
+        let out = run_factory_branch_merge_gate_with_attribution(
+            &task,
+            &req,
+            "main",
+            p,
+            TaskCommitAttribution {
+                receipt: None,
+                window: Some(&window),
+            },
+        );
+        match out {
+            MergeStateGateOutcome::ProceedWithNote(note) => {
+                assert!(
+                    note.contains("2 commit"),
+                    "residue must be logged, not fatal: {note}"
+                );
+            }
+            other => {
+                panic!("zero task-attributable commits must not trip the guard, got {other:?}")
+            }
+        }
+    }
+
+    /// The scoping must not become a bypass: commits made inside the task's
+    /// own work cycle and left unmerged still reject, and the count reported
+    /// is the task-attributable one (not the whole lane).
+    #[test]
+    fn task_attributable_unmerged_commits_still_reject() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        commit_file_at(p, "other-1.rs", "// 1\n", "2020-01-01T00:00:00Z");
+        commit_file_at(p, "mine.rs", "// mine\n", "2026-08-04T12:00:00Z");
+
+        let task = worker_task("worker");
+        let req = base_req(&task.id);
+        let window = window_at(1_700_000_000, "latest task lease claim/transfer");
+
+        let out = run_factory_branch_merge_gate_with_attribution(
+            &task,
+            &req,
+            "main",
+            p,
+            TaskCommitAttribution {
+                receipt: None,
+                window: Some(&window),
+            },
+        );
+        match out {
+            MergeStateGateOutcome::Reject(msg) => {
+                assert!(msg.contains("MERGE REQUIRED"), "missing header: {msg}");
+                assert!(
+                    msg.contains("1 commit(s) from this task"),
+                    "rejection must count only task-attributable commits: {msg}"
+                );
+            }
+            other => panic!("unmerged task-own commits must still reject, got {other:?}"),
+        }
+    }
+
+    /// A receipt that does not validate (here: not reachable from the parent)
+    /// must NOT clear the guard.
+    #[test]
+    fn invalid_receipt_does_not_clear_the_guard() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        commit_file_at(p, "mine.rs", "// mine\n", "2026-08-04T12:00:00Z");
+        let receipt = head_sha(p); // on the lane, never merged to main
+
+        let task = worker_task("worker");
+        let mut req = base_req(&task.id);
+        req.commit_receipt = Some(receipt.clone());
+        let window = window_at(1_000_000_000, "latest task lease claim/transfer");
+
+        let out = run_factory_branch_merge_gate_with_attribution(
+            &task,
+            &req,
+            "main",
+            p,
+            TaskCommitAttribution {
+                receipt: Some(&receipt),
+                window: Some(&window),
+            },
+        );
+        match out {
+            MergeStateGateOutcome::Reject(msg) => {
+                assert!(
+                    msg.contains("commit_receipt"),
+                    "rejection should explain why the supplied receipt was not accepted: {msg}"
+                );
+            }
+            other => panic!("unmerged receipt must not clear the guard, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attributable_count_is_none_when_git_state_is_unknowable() {
+        let dir = tempfile::tempdir().unwrap();
+        let window = window_at(1_700_000_000, "test");
+        assert!(
+            count_task_attributable_unmerged_commits(dir.path(), "factory/x", "main", &window)
+                .is_none(),
+            "non-git dir must be Unknown (fall back to whole-branch count), not Some(0)"
+        );
+    }
+
+    // --- cas-fdc9 (GH #66 / #56): target-ref resolution ---------------------
+    //
+    // #66: the guard measured "N commits not on staging" against the LOCAL
+    // staging ref, which a factory worktree never advances. A worker was told
+    // 9 commits were unmerged when exactly one was — and the printed
+    // remediation said to `git fetch`, which updates `origin/staging` and
+    // never moves the local branch the guard was reading. The advice could
+    // not fix the measurement, so workers chased merges that had landed.
+    //
+    // #56: a receipt naming a commit that does not exist in the repository
+    // the close is bound to was accepted as evidence.
+
+    /// Build a repo with an `origin` remote so the guard can see both a local
+    /// and a remote-tracking ref for `main`. Returns (worktree, origin).
+    fn init_repo_with_origin(worker: &str) -> (TempDir, TempDir) {
+        let origin = tempfile::tempdir().unwrap();
+        git(origin.path(), &["init", "-q", "--bare", "-b", "main"]);
+        let dir = init_factory_repo(worker);
+        git(
+            dir.path(),
+            &["remote", "add", "origin", origin.path().to_str().unwrap()],
+        );
+        git(dir.path(), &["push", "-q", "origin", "main"]);
+        git(dir.path(), &["fetch", "-q", "origin"]);
+        (dir, origin)
+    }
+
+    /// Advance `origin/main` beyond the local `main` ref, optionally merging
+    /// the worker's branch into it. The local `main` ref is deliberately left
+    /// where it was — that staleness is the whole bug.
+    fn advance_origin_main(dir: &std::path::Path, extra_commits: usize, merge_factory: Option<&str>) {
+        git(dir, &["checkout", "-q", "-b", "origin-work", "main"]);
+        for i in 0..extra_commits {
+            let name = format!("other_{i}.rs");
+            std::fs::write(dir.join(&name), format!("// other {i}\n")).unwrap();
+            git(dir, &["add", &name]);
+            git(dir, &["commit", "-q", "-m", &format!("feat: other {i}")]);
+        }
+        if let Some(branch) = merge_factory {
+            git(dir, &["merge", "-q", "--no-ff", branch, "-m", "merge worker"]);
+        }
+        git(dir, &["push", "-q", "origin", "origin-work:main"]);
+        git(dir, &["fetch", "-q", "origin"]);
+        git(dir, &["checkout", "-q", branch_of_first_factory(dir)]);
+    }
+
+    /// The factory branch created by `init_factory_repo` — resolved back from
+    /// the repo so the helper above can return to it.
+    fn branch_of_first_factory(dir: &std::path::Path) -> &'static str {
+        let _ = dir;
+        "factory/worker"
+    }
+
+    #[test]
+    fn merged_work_is_zero_ahead_once_origin_is_consulted_even_with_a_stale_local_ref() {
+        let (dir, _origin) = init_repo_with_origin("worker");
+        let p = dir.path();
+        std::fs::write(p.join("mine.rs"), "// mine\n").unwrap();
+        git(p, &["add", "mine.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: mine"]);
+        // Someone else advanced origin/main 8 times and merged this branch.
+        advance_origin_main(p, 8, Some("factory/worker"));
+
+        assert!(
+            count_unmerged_factory_commits(p, "factory/worker", "main") > 0,
+            "precondition: measured against the stale LOCAL ref the work looks unmerged"
+        );
+        assert_eq!(
+            count_unmerged_against_targets(p, "factory/worker", "main"),
+            Some(0),
+            "work merged into origin/main must read as zero ahead"
+        );
+    }
+
+    #[test]
+    fn reported_count_excludes_commits_already_on_the_remote_target() {
+        // The #66 shape: local ref stale by 8 commits, exactly one commit of
+        // this branch genuinely unmerged. The old measurement reported the
+        // stale-base arithmetic; the fix must report 1.
+        let (dir, _origin) = init_repo_with_origin("worker");
+        let p = dir.path();
+        advance_origin_main(p, 8, None);
+        // The worker syncs onto the advanced remote target (fast-forward, so
+        // no extra merge commit), then makes exactly one commit of their own.
+        // The LOCAL `main` ref still points at the pre-advance tip.
+        git(p, &["merge", "-q", "--ff-only", "origin/main"]);
+        std::fs::write(p.join("mine.rs"), "// mine\n").unwrap();
+        git(p, &["add", "mine.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: mine"]);
+
+        let local = count_unmerged_factory_commits(p, "factory/worker", "main");
+        assert!(
+            local > 1,
+            "precondition: the stale local ref inflates the count (got {local})"
+        );
+        assert_eq!(
+            count_unmerged_against_targets(p, "factory/worker", "main"),
+            Some(1),
+            "only the genuinely unmerged commit may be counted"
+        );
+    }
+
+    #[test]
+    fn target_count_matches_local_when_no_remote_ref_exists() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        std::fs::write(p.join("a.rs"), "// a\n").unwrap();
+        git(p, &["add", "a.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: a"]);
+        assert_eq!(
+            count_unmerged_against_targets(p, "factory/worker", "main"),
+            Some(1),
+            "a local-only epic branch has no origin ref and must measure locally"
+        );
+    }
+
+    #[test]
+    fn target_count_is_unknown_when_git_cannot_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            count_unmerged_against_targets(dir.path(), "factory/worker", "main"),
+            None,
+            "unknowable git state must stay Unknown, never a manufactured zero"
+        );
+    }
+
+    #[test]
+    fn merge_required_reports_the_remote_aware_count_and_no_fetch_advice() {
+        let (dir, _origin) = init_repo_with_origin("worker");
+        let p = dir.path();
+        advance_origin_main(p, 8, None);
+        git(p, &["merge", "-q", "--ff-only", "origin/main"]);
+        std::fs::write(p.join("mine.rs"), "// mine\n").unwrap();
+        git(p, &["add", "mine.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: mine"]);
+
+        let task = worker_task("worker");
+        let req = base_req(&task.id);
+        match run_factory_branch_merge_gate(&task, &req, "main", p) {
+            MergeStateGateOutcome::Reject(msg) => {
+                assert!(
+                    msg.contains("1 commit(s)"),
+                    "count must be measured against the remote target, not the stale \
+                     local ref: {msg}"
+                );
+                assert!(
+                    !msg.contains("git fetch --prune` if it was already merged"),
+                    "must not tell the worker a fetch fixes a stale LOCAL branch ref — \
+                     fetch never moves it, and following that advice manufactures \
+                     merge requests for work already landed: {msg}"
+                );
+                assert!(
+                    msg.contains("origin/main"),
+                    "the refusal must name the remote ref it measured against: {msg}"
+                );
+            }
+            other => panic!("genuinely unmerged commit must still reject, got {other:?}"),
+        }
+    }
+
+    // --- GH #56: a receipt must exist in the repository the close is bound to
+
+    #[test]
+    fn receipt_absent_from_the_bound_repo_is_refused_not_silently_accepted() {
+        let (dir, _origin) = init_repo_with_origin("worker");
+        let other_repo = init_factory_repo("elsewhere");
+        std::fs::write(other_repo.path().join("cross.rs"), "// cross-repo\n").unwrap();
+        git(other_repo.path(), &["add", "cross.rs"]);
+        git(other_repo.path(), &["commit", "-q", "-m", "feat: cross"]);
+        let foreign_sha = {
+            let out = Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(other_repo.path())
+                .output()
+                .expect("git rev-parse");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        let refusal = commit_receipt_repo_binding_error(dir.path(), &foreign_sha)
+            .expect("a receipt that does not exist in the bound repo must be refused");
+        assert!(
+            refusal.contains(&foreign_sha[..12]),
+            "refusal must name the receipt it could not find: {refusal}"
+        );
+        assert!(
+            refusal.contains("target_repo"),
+            "refusal must point cross-repo work at the declared target repo: {refusal}"
+        );
+
+        // A receipt that does resolve locally is not refused by this check —
+        // ancestry/window semantics stay with the existing gates.
+        let local_sha = {
+            let out = Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(dir.path())
+                .output()
+                .expect("git rev-parse");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        assert!(
+            commit_receipt_repo_binding_error(dir.path(), &local_sha).is_none(),
+            "a resolvable receipt must pass the repo-binding check"
+        );
+    }
+
+    #[test]
+    fn receipt_repo_binding_check_accepts_an_unambiguous_abbreviation() {
+        // GH #57 is already fixed (abbreviations resolve); the binding check
+        // must not regress that by demanding a full SHA.
+        let (dir, _origin) = init_repo_with_origin("worker");
+        let out = Command::new("git")
+            .args(["rev-parse", "--short", "HEAD"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git rev-parse");
+        let short = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert!(
+            commit_receipt_repo_binding_error(dir.path(), &short).is_none(),
+            "short receipt `{short}` must resolve in the bound repo"
         );
     }
 
@@ -13340,6 +14933,8 @@ mod zero_change_close_tests {
         TaskCommitReceiptWindow {
             not_before: chrono::Utc::now() - chrono::Duration::hours(1),
             basis: "test fixture",
+            task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
+            identity: TaskCommitIdentity::default(),
         }
     }
 
@@ -14264,6 +15859,10 @@ mod zero_change_close_tests {
             // reproduces copying an arbitrary old merged SHA from git log.
             not_before: chrono::Utc::now() + chrono::Duration::hours(1),
             basis: "latest task lease claim/transfer",
+            // cas-9596: the task itself is younger than the borrowed commit, so
+            // the prior-cycle relaxation cannot rescue it either.
+            task_floor: chrono::Utc::now() + chrono::Duration::hours(1),
+            identity: TaskCommitIdentity::default(),
         };
 
         let zero_outcome = check_zero_commit_close(
@@ -14308,6 +15907,120 @@ mod zero_change_close_tests {
         }
     }
 
+    /// GH #82 step 6: an administrative restart (supervisor clears a note, the
+    /// worker re-`start`s) moves the work-cycle window forward without any new
+    /// commits. The receipt from before that restart is still this task's own
+    /// merged work and must remain valid close evidence.
+    #[test]
+    fn gh82_receipt_from_a_prior_work_cycle_survives_an_administrative_restart() {
+        let dir = init_worker_repo();
+        std::fs::write(dir.path().join("finished.rs"), "pub fn finished() {}\n").unwrap();
+        git(dir.path(), &["add", "finished.rs"]);
+        git(
+            dir.path(),
+            &["commit", "-q", "-m", "feat(cas-f1b1): finished delivery"],
+        );
+        let receipt = head_sha(dir.path());
+        git(dir.path(), &["checkout", "-q", "main"]);
+        git(
+            dir.path(),
+            &[
+                "merge",
+                "--no-ff",
+                "-m",
+                "merge finished delivery",
+                "factory/test-worker",
+            ],
+        );
+
+        // The restart put the current cycle after the commit; the task itself
+        // is older than it.
+        let window = TaskCommitReceiptWindow {
+            not_before: chrono::Utc::now() + chrono::Duration::hours(1),
+            basis: "latest task lease claim/transfer",
+            task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
+            identity: TaskCommitIdentity {
+                task_id: Some("cas-f1b1".to_string()),
+                known_commits: Vec::new(),
+            },
+        };
+
+        let note = validate_task_commit_receipt(dir.path(), &receipt, "main", &window)
+            .expect("an already-merged receipt for this task must survive a restart");
+        assert!(note.contains(&receipt), "{note}");
+        assert!(
+            note.contains("earlier work cycle of this task"),
+            "the audit note must record why the cycle bound was relaxed: {note}"
+        );
+    }
+
+    /// The relaxation is bounded by attribution: a merged commit that neither
+    /// names the task nor is a recorded task commit stays rejected.
+    #[test]
+    fn gh82_unattributable_pre_cycle_commit_is_still_rejected() {
+        let dir = init_worker_repo();
+        std::fs::write(dir.path().join("foreign.rs"), "pub fn foreign() {}\n").unwrap();
+        git(dir.path(), &["add", "foreign.rs"]);
+        git(dir.path(), &["commit", "-q", "-m", "chore: someone else"]);
+        let receipt = head_sha(dir.path());
+        git(dir.path(), &["checkout", "-q", "main"]);
+        git(
+            dir.path(),
+            &[
+                "merge",
+                "--no-ff",
+                "-m",
+                "merge foreign work",
+                "factory/test-worker",
+            ],
+        );
+
+        let window = TaskCommitReceiptWindow {
+            not_before: chrono::Utc::now() + chrono::Duration::hours(1),
+            basis: "latest task lease claim/transfer",
+            task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
+            identity: TaskCommitIdentity {
+                task_id: Some("cas-f1b1".to_string()),
+                known_commits: Vec::new(),
+            },
+        };
+        let reason = validate_task_commit_receipt(dir.path(), &receipt, "main", &window)
+            .expect_err("an unattributable pre-cycle commit must stay rejected");
+        assert!(reason.contains("predates this task work cycle"), "{reason}");
+    }
+
+    /// A commit that predates the task itself is never this task's work, even
+    /// when it happens to name the task id.
+    #[test]
+    fn gh82_commit_predating_the_task_is_still_rejected() {
+        let dir = init_worker_repo();
+        std::fs::write(dir.path().join("old.rs"), "pub fn old() {}\n").unwrap();
+        git(dir.path(), &["add", "old.rs"]);
+        git(
+            dir.path(),
+            &["commit", "-q", "-m", "feat(cas-f1b1): borrowed reference"],
+        );
+        let receipt = head_sha(dir.path());
+        git(dir.path(), &["checkout", "-q", "main"]);
+        git(
+            dir.path(),
+            &["merge", "--no-ff", "-m", "merge old", "factory/test-worker"],
+        );
+
+        let window = TaskCommitReceiptWindow {
+            not_before: chrono::Utc::now() + chrono::Duration::hours(2),
+            basis: "latest task lease claim/transfer",
+            task_floor: chrono::Utc::now() + chrono::Duration::hours(1),
+            identity: TaskCommitIdentity {
+                task_id: Some("cas-f1b1".to_string()),
+                known_commits: Vec::new(),
+            },
+        };
+        let reason = validate_task_commit_receipt(dir.path(), &receipt, "main", &window)
+            .expect_err("a commit older than the task cannot be its delivery");
+        assert!(reason.contains("predates this task work cycle"), "{reason}");
+    }
+
     #[test]
     fn cas5626_merge_commit_receipt_is_valid_and_auditable() {
         let dir = init_worker_repo();
@@ -14336,6 +16049,8 @@ mod zero_change_close_tests {
         let window = TaskCommitReceiptWindow {
             not_before: chrono::Utc::now() - chrono::Duration::hours(1),
             basis: "latest task lease claim/transfer",
+            task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
+            identity: TaskCommitIdentity::default(),
         };
         let outcome = check_zero_commit_close(
             dir.path(),
@@ -14811,6 +16526,336 @@ mod epic_close_owner_gate_tests {
         );
         assert!(
             epic_close_owner_gate("cas-epic", "owner-id", Some("  owner-id  "), None, None).is_ok()
+        );
+    }
+}
+
+#[cfg(test)]
+mod zero_diff_spike_close_tests {
+    //! cas-1932 (GH #62 symptoms 1-2 + minor): a zero-diff spike closed in a
+    //! dirty shared checkout was a two-stage trap.
+    //!
+    //! - Symptom 1: after the supervisor recorded an APPROVED verification,
+    //!   the worker's re-close re-queued to `PendingSupervisorReview` forever.
+    //!   The review-queue hop now consumes a current-cycle approved verdict.
+    //! - Symptom 2: `CODE_REVIEW_REQUIRED` fired because reviewable-change
+    //!   detection read the shared checkout's pre-existing WIP as the task's
+    //!   diff. Detection is now scoped to commits attributable to this task's
+    //!   work cycle for tasks whose own spec declares no-code work.
+    //! - Minor: close reported "verification skipped — assignee unknown"
+    //!   although a verification row existed; the lookup now finds it.
+    use super::*;
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    fn git(dir: &std::path::Path, args: &[&str], date: &str) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test")
+            .env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    const PRIOR_CYCLE: &str = "2020-01-01T00:00:00Z";
+    const THIS_CYCLE: &str = "2026-08-04T12:00:00Z";
+    /// Between PRIOR_CYCLE and THIS_CYCLE (2023-11-14T22:13:20Z).
+    const CYCLE_START_EPOCH: i64 = 1_700_000_000;
+
+    fn window() -> TaskCommitReceiptWindow {
+        let cycle_start = chrono::DateTime::from_timestamp(CYCLE_START_EPOCH, 0).unwrap();
+        TaskCommitReceiptWindow {
+            not_before: cycle_start,
+            basis: "latest task lease claim/transfer",
+            // cas-9596: these tests exercise cycle-scoped attribution only —
+            // the task floor sits at the cycle start and no durable task
+            // commit identity is recorded.
+            task_floor: cycle_start,
+            identity: TaskCommitIdentity::default(),
+        }
+    }
+
+    /// Shared main checkout on `main` with one old commit, then N dirty
+    /// (uncommitted) reviewable files — the pre-existing prior-factory WIP
+    /// from the incident.
+    fn init_shared_checkout_with_dirty_wip() -> TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "main"], PRIOR_CYCLE);
+        std::fs::write(p.join("seed.rs"), "// seed\n").unwrap();
+        git(p, &["add", "seed.rs"], PRIOR_CYCLE);
+        git(p, &["commit", "-q", "-m", "seed"], PRIOR_CYCLE);
+        // Prior-factory WIP left dirty in the shared checkout: an uncommitted
+        // edit to a tracked source file, which is what `has_reviewable_changes`
+        // sees and what the incident's ~64 dirty files looked like.
+        std::fs::write(p.join("seed.rs"), "// seed\n// someone else's WIP\n").unwrap();
+        dir
+    }
+
+    // --- symptom 2: task-attributable reviewable detection -------------------
+
+    #[test]
+    fn dirty_shared_checkout_with_no_task_commits_is_not_task_attributable() {
+        let dir = init_shared_checkout_with_dirty_wip();
+        assert_eq!(
+            has_task_attributable_reviewable_changes(dir.path(), "main", &window()),
+            Some(false),
+            "pre-existing dirty WIP in a shared checkout is not this task's diff"
+        );
+        // The unscoped check is what used to drive CODE_REVIEW_REQUIRED.
+        assert!(
+            has_reviewable_changes(dir.path()),
+            "precondition: the unscoped checkout check still sees the dirty WIP"
+        );
+    }
+
+    #[test]
+    fn commit_made_during_this_work_cycle_is_task_attributable() {
+        let dir = init_shared_checkout_with_dirty_wip();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "-b", "work"], THIS_CYCLE);
+        std::fs::write(p.join("feature.rs"), "pub fn f() {}\n").unwrap();
+        git(p, &["add", "feature.rs"], THIS_CYCLE);
+        git(p, &["commit", "-q", "-m", "feat: f"], THIS_CYCLE);
+        assert_eq!(
+            has_task_attributable_reviewable_changes(p, "main", &window()),
+            Some(true),
+            "a reviewable commit made inside the work cycle IS the task's diff"
+        );
+    }
+
+    #[test]
+    fn commits_predating_the_work_cycle_are_not_task_attributable() {
+        let dir = init_shared_checkout_with_dirty_wip();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "-b", "work"], PRIOR_CYCLE);
+        std::fs::write(p.join("old_feature.rs"), "pub fn old() {}\n").unwrap();
+        git(p, &["add", "old_feature.rs"], PRIOR_CYCLE);
+        git(p, &["commit", "-q", "-m", "feat: old"], PRIOR_CYCLE);
+        assert_eq!(
+            has_task_attributable_reviewable_changes(p, "main", &window()),
+            Some(false),
+            "another task's earlier commits must not be attributed to this close"
+        );
+    }
+
+    #[test]
+    fn docs_only_commit_in_this_cycle_is_not_reviewable() {
+        let dir = init_shared_checkout_with_dirty_wip();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "-b", "work"], THIS_CYCLE);
+        std::fs::write(p.join("NOTES.md"), "# notes\n").unwrap();
+        git(p, &["add", "NOTES.md"], THIS_CYCLE);
+        git(p, &["commit", "-q", "-m", "docs: notes"], THIS_CYCLE);
+        assert_eq!(
+            has_task_attributable_reviewable_changes(p, "main", &window()),
+            Some(false),
+            "docs-only work is not reviewable code"
+        );
+    }
+
+    #[test]
+    fn attributable_detection_is_unknown_outside_a_git_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            has_task_attributable_reviewable_changes(dir.path(), "main", &window()),
+            None,
+            "unknowable git state must not be reported as 'nothing attributable'"
+        );
+    }
+
+    // --- symptom 2: the shared-checkout routing decision ---------------------
+
+    fn scope(
+        task_type: TaskType,
+        execution_note: Option<&'static str>,
+        attributable: Option<bool>,
+        dirty: bool,
+    ) -> bool {
+        shared_checkout_has_reviewable_changes(SharedCheckoutReviewScope {
+            task_type,
+            execution_note,
+            attributable_reviewable_changes: attributable,
+            checkout_has_reviewable_changes: dirty,
+        })
+    }
+
+    #[test]
+    fn zero_commit_spike_in_dirty_shared_checkout_has_no_reviewable_changes() {
+        // The GH #62 incident shape: characterization-only spike, no commits,
+        // shared main checkout carrying ~64 files of prior-factory WIP.
+        assert!(
+            !scope(TaskType::Spike, None, Some(false), true),
+            "a zero-commit spike must not inherit the checkout's dirty state"
+        );
+        assert!(
+            !scope(TaskType::Chore, None, Some(false), true),
+            "chores declare no-code work the same way spikes do"
+        );
+        assert!(
+            !scope(TaskType::Task, Some("characterization-first"), Some(false), true),
+            "an execution_note is the task's own declaration that no code is expected"
+        );
+    }
+
+    #[test]
+    fn code_task_without_a_no_code_declaration_keeps_the_checkout_signal() {
+        // Unchanged behavior: a Bug/Feature/Task with no execution_note still
+        // routes on the checkout diff, so nothing silently escapes review.
+        assert!(
+            scope(TaskType::Bug, None, Some(false), true),
+            "a code task with no no-code declaration must keep the existing signal"
+        );
+        assert!(
+            !scope(TaskType::Bug, None, Some(false), false),
+            "clean checkout stays clean"
+        );
+    }
+
+    #[test]
+    fn task_attributable_code_always_counts_as_reviewable() {
+        assert!(
+            scope(TaskType::Spike, Some("characterization-first"), Some(true), false),
+            "code this task actually committed is reviewable no matter its declared shape"
+        );
+    }
+
+    #[test]
+    fn unknowable_attribution_falls_back_to_the_checkout_signal() {
+        assert!(
+            scope(TaskType::Spike, None, None, true),
+            "if git state is unknowable the gate must fail closed on the old signal"
+        );
+    }
+
+    // --- symptom 1: approved verification satisfies the review queue ---------
+
+    fn approved_row(created_epoch: i64) -> Verification {
+        let mut row = Verification::new("ver-fd59de6ef422".to_string(), "cas-208b".to_string());
+        row.status = VerificationStatus::Approved;
+        row.verification_type = VerificationType::Task;
+        row.created_at = chrono::DateTime::from_timestamp(created_epoch, 0).unwrap();
+        row
+    }
+
+    #[test]
+    fn approved_verdict_from_this_cycle_satisfies_the_review_queue() {
+        let row = approved_row(CYCLE_START_EPOCH + 600);
+        assert!(
+            approved_verification_satisfies_review_queue(
+                &row,
+                Some(&window()),
+                VerificationType::Task
+            ),
+            "the supervisor's approval must let the worker's re-close complete"
+        );
+    }
+
+    #[test]
+    fn unapproved_or_stale_or_mistyped_verdicts_do_not_satisfy_the_queue() {
+        let mut rejected = approved_row(CYCLE_START_EPOCH + 600);
+        rejected.status = VerificationStatus::Rejected;
+        assert!(
+            !approved_verification_satisfies_review_queue(
+                &rejected,
+                Some(&window()),
+                VerificationType::Task
+            ),
+            "a rejected verdict must never satisfy the review queue"
+        );
+
+        let stale = approved_row(CYCLE_START_EPOCH - 86_400);
+        assert!(
+            !approved_verification_satisfies_review_queue(
+                &stale,
+                Some(&window()),
+                VerificationType::Task
+            ),
+            "an approval from a previous work cycle cannot authorize this close"
+        );
+
+        let mistyped = approved_row(CYCLE_START_EPOCH + 600);
+        assert!(
+            !approved_verification_satisfies_review_queue(
+                &mistyped,
+                Some(&window()),
+                VerificationType::Epic
+            ),
+            "a task verdict cannot stand in for the required epic verdict"
+        );
+    }
+
+    #[test]
+    fn approval_within_clock_skew_of_the_cycle_start_is_accepted() {
+        let row = approved_row(CYCLE_START_EPOCH - 1);
+        assert!(
+            approved_verification_satisfies_review_queue(
+                &row,
+                Some(&window()),
+                VerificationType::Task
+            ),
+            "a verdict recorded a second before the lease timestamp is the same cycle"
+        );
+    }
+
+    // --- minor: close must find an existing verification --------------------
+
+    #[test]
+    fn existing_approved_verification_replaces_a_lookup_failure_skip_reason() {
+        let row = approved_row(CYCLE_START_EPOCH + 600);
+        let resolved = skip_reason_with_existing_verification(
+            VerificationSkipReason::AssigneeUnknown,
+            Some(&row),
+        );
+        assert_eq!(
+            resolved,
+            VerificationSkipReason::ExistingApprovedVerification {
+                verification_id: "ver-fd59de6ef422".to_string()
+            },
+            "an existing approved verdict must be cited instead of an assignee-lookup failure"
+        );
+        let suffix = resolved.response_suffix(true);
+        assert!(
+            suffix.contains("ver-fd59de6ef422"),
+            "the close response must name the verification it found: {suffix}"
+        );
+        assert!(
+            !suffix.contains("assignee unknown"),
+            "the close response must stop claiming the verification was skipped: {suffix}"
+        );
+        assert!(
+            resolved.audit_reason().contains("ver-fd59de6ef422"),
+            "the audit row must record which verdict authorized the close"
+        );
+    }
+
+    #[test]
+    fn skip_reason_is_untouched_without_an_approved_verification() {
+        assert_eq!(
+            skip_reason_with_existing_verification(VerificationSkipReason::AssigneeUnknown, None),
+            VerificationSkipReason::AssigneeUnknown,
+            "with no verdict on record the real skip reason must survive"
+        );
+        assert_eq!(
+            skip_reason_with_existing_verification(
+                VerificationSkipReason::SupervisorBypass,
+                Some(&approved_row(CYCLE_START_EPOCH + 600)),
+            ),
+            VerificationSkipReason::SupervisorBypass,
+            "an explicit supervisor bypass is intent, not a lookup failure — keep it"
+        );
+        assert_eq!(
+            skip_reason_with_existing_verification(VerificationSkipReason::None, None),
+            VerificationSkipReason::None,
+            "the non-skip path is unaffected"
         );
     }
 }

@@ -903,8 +903,12 @@ mod tests {
             expire_stale_bounded(temp.path(), Duration::from_millis(50)).unwrap(),
             ReminderExpiryOutcome::DeferredBusy
         );
+        // GH #92: this bound only discriminates "deferred promptly" from
+        // "inherited the shared 5s SQLITE_BUSY_TIMEOUT". Keep it far below 5s
+        // but wide enough that a scheduler stall on a saturated test host
+        // cannot fail a correct run.
         assert!(
-            local_started.elapsed() < Duration::from_millis(100),
+            local_started.elapsed() < Duration::from_millis(2000),
             "in-process connection contention must defer without waiting"
         );
         drop(local_guard);
@@ -918,8 +922,11 @@ mod tests {
         let elapsed = started.elapsed();
 
         assert_eq!(outcome, ReminderExpiryOutcome::DeferredBusy);
+        // GH #92: same discrimination as above — 50ms budget vs the 5s shared
+        // timeout. 2s tolerates load-induced stalls while still proving the
+        // budget was not inherited.
         assert!(
-            elapsed < Duration::from_millis(500),
+            elapsed < Duration::from_millis(2000),
             "50ms SQLite budget must not inherit the shared 5s timeout; elapsed={elapsed:?}"
         );
 

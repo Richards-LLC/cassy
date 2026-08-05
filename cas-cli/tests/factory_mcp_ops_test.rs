@@ -475,6 +475,10 @@ fn factory_req(action: &str) -> FactoryRequest {
         model: None,
         effort: None,
         config_dir: None,
+        command: None,
+        cwd: None,
+        port: None,
+        shared: None,
     }
 }
 
@@ -525,6 +529,10 @@ fn coord_req(action: &str) -> CoordinationRequest {
         status: None,
         orphans: None,
         dry_run: None,
+        command: None,
+        cwd: None,
+        port: None,
+        shared: None,
     }
 }
 
@@ -2824,6 +2832,10 @@ fn coord_msg(
         status: None,
         orphans: None,
         dry_run: None,
+        command: None,
+        cwd: None,
+        port: None,
+        shared: None,
     }
 }
 

@@ -317,6 +317,32 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/codemap/SKILL.md",
         content: include_str!("builtins/skills/codemap/SKILL.md"),
     },
+    // cas-servers skill (cas-7c93, GH #87): the sanctioned lifecycle for
+    // long-running servers. Registered servers are the only ones that survive
+    // worker containment teardown, so the guidance has to reach agents before
+    // they reach for `npm run dev &`.
+    BuiltinFile {
+        path: "skills/cas-servers/SKILL.md",
+        content: include_str!("builtins/skills/cas-servers/SKILL.md"),
+    },
+    // design-spec skill (GH #64): generates DESIGN.md — the UI/UX source of
+    // truth (normative token frontmatter + 8 sections). Design counterpart to
+    // codemap (structure) and project-overview (domain).
+    BuiltinFile {
+        path: "skills/design-spec/SKILL.md",
+        content: include_str!("builtins/skills/design-spec/SKILL.md"),
+    },
+    // release-notes skill (GH #65): drafts/posts the user + dev Slack threads
+    // for every staging/main merge and installs the canonical rubric template
+    // at docs/release-notes/RUBRIC.md when a project has none.
+    BuiltinFile {
+        path: "skills/release-notes/SKILL.md",
+        content: include_str!("builtins/skills/release-notes/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/release-notes/references/RUBRIC-template.md",
+        content: include_str!("builtins/skills/release-notes/references/RUBRIC-template.md"),
+    },
     // cas-nuxt-playwright skill: unified Nuxt 3 + Playwright E2E testing
     // guide. Replaces the legacy user-level cas-playwright-debug skill with
     // a single builtin that covers both writing and debugging tests. Modeled
@@ -575,6 +601,26 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/codemap/SKILL.md",
         content: include_str!("builtins/codex/skills/codemap/SKILL.md"),
+    },
+    // cas-servers skill (cas-7c93, GH #87) — codex mirror. Kept byte-identical
+    // to the .claude copy by `test_builtin_skills_contains_cas_servers`.
+    BuiltinFile {
+        path: "skills/cas-servers/SKILL.md",
+        content: include_str!("builtins/codex/skills/cas-servers/SKILL.md"),
+    },
+    // design-spec skill (GH #64) — codex mirror.
+    BuiltinFile {
+        path: "skills/design-spec/SKILL.md",
+        content: include_str!("builtins/codex/skills/design-spec/SKILL.md"),
+    },
+    // release-notes skill (GH #65) — codex mirror.
+    BuiltinFile {
+        path: "skills/release-notes/SKILL.md",
+        content: include_str!("builtins/codex/skills/release-notes/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/release-notes/references/RUBRIC-template.md",
+        content: include_str!("builtins/codex/skills/release-notes/references/RUBRIC-template.md"),
     },
     // cas-nuxt-playwright skill — codex mirror.
     BuiltinFile {
@@ -873,6 +919,25 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/project-overview/SKILL.md",
         content: include_str!("builtins/grok/skills/project-overview/SKILL.md"),
     },
+    // cas-servers skill (cas-7c93, GH #87) — grok twin.
+    BuiltinFile {
+        path: "skills/cas-servers/SKILL.md",
+        content: include_str!("builtins/grok/skills/cas-servers/SKILL.md"),
+    },
+    // design-spec skill (GH #64) — grok twin.
+    BuiltinFile {
+        path: "skills/design-spec/SKILL.md",
+        content: include_str!("builtins/grok/skills/design-spec/SKILL.md"),
+    },
+    // release-notes skill (GH #65) — grok twin.
+    BuiltinFile {
+        path: "skills/release-notes/SKILL.md",
+        content: include_str!("builtins/grok/skills/release-notes/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/release-notes/references/RUBRIC-template.md",
+        content: include_str!("builtins/grok/skills/release-notes/references/RUBRIC-template.md"),
+    },
     BuiltinFile {
         path: "skills/fallow/SKILL.md",
         content: include_str!("builtins/grok/skills/fallow/SKILL.md"),
@@ -1038,6 +1103,32 @@ pub const GENERAL_PARITY_CAPABILITIES: &[RequiredCapability] = &[
         claude: Some("skills/project-overview"),
         codex: Some("skills/project-overview"),
         grok: Some("skills/project-overview"),
+        note: "",
+    },
+    RequiredCapability {
+        // cas-7c93 (GH #87): sanctioned server lifecycle. Every harness needs
+        // it — an agent on any CLI can leave an orphaned dev server behind.
+        id: "cas-servers",
+        claude: Some("skills/cas-servers"),
+        codex: Some("skills/cas-servers"),
+        grok: Some("skills/cas-servers"),
+        note: "",
+    },
+    RequiredCapability {
+        // GH #64: design source of truth (DESIGN.md). Same shape as
+        // codemap/project-overview — every harness owns its own twin.
+        id: "design-spec",
+        claude: Some("skills/design-spec"),
+        codex: Some("skills/design-spec"),
+        grok: Some("skills/design-spec"),
+        note: "",
+    },
+    RequiredCapability {
+        // GH #65: release-notes rubric + Slack announcement workflow.
+        id: "release-notes",
+        claude: Some("skills/release-notes"),
+        codex: Some("skills/release-notes"),
+        grok: Some("skills/release-notes"),
         note: "",
     },
     RequiredCapability {
@@ -2409,6 +2500,180 @@ This is the body content."#;
                 assert!(
                     ref_content.contains(required),
                     "{label} cas-worker close-gate.md missing required marker: {required:?}"
+                );
+            }
+        }
+    }
+
+    /// cas-7c93 (GH #87): the cas-servers skill must ship for every harness
+    /// and must keep the content that makes it load-bearing — the anti-pattern
+    /// it replaces, the survival rule that is the whole reason to register,
+    /// and the three actions.
+    ///
+    /// The three copies are identical *modulo the harness tool prefix*: each
+    /// CLI resolves a different one (`mcp__cas__` / `mcp__cs__` / `cas__`), so
+    /// a byte-identical mirror would hand two of the three harnesses tool
+    /// names that do not resolve.
+    #[test]
+    fn test_builtin_skills_contains_cas_servers() {
+        let mut bodies = Vec::new();
+        for (label, catalog, prefix) in [
+            ("claude", BUILTIN_SKILLS, "mcp__cas__"),
+            ("codex", CODEX_BUILTIN_SKILLS, "mcp__cs__"),
+            ("grok", GROK_BUILTIN_SKILLS, "cas__"),
+        ] {
+            let entry = catalog
+                .iter()
+                .find(|b| b.path == "skills/cas-servers/SKILL.md")
+                .unwrap_or_else(|| {
+                    panic!("skills/cas-servers/SKILL.md missing from {label} catalog")
+                });
+            assert!(
+                is_managed_by_cas(entry.content),
+                "{label} cas-servers SKILL.md must be managed_by: cas"
+            );
+            for required in [
+                "name: cas-servers",
+                // The action surface.
+                "action=server_start",
+                "action=server_stop",
+                "action=server_list",
+                // The anti-pattern this skill exists to replace, named
+                // explicitly so an agent recognizes what it is doing wrong.
+                "npm run dev &",
+                "Never background a server yourself",
+                // The load-bearing rule: registration IS survival.
+                "Registered servers are the only ones that survive worker teardown",
+                // Attribution is what makes server_list answer "who started it".
+                "task_id",
+                // Shared vs private, and who owns the cleanup.
+                "shared=true",
+                "you are responsible for stopping it",
+                // Scope guard: one-shot commands do not belong in the registry.
+                "One-shot commands do not belong here",
+            ] {
+                assert!(
+                    entry.content.contains(required),
+                    "{label} cas-servers SKILL.md missing required marker: {required:?}"
+                );
+            }
+            // The tool calls must be spelled the way this harness resolves them.
+            assert!(
+                entry.content.contains(&format!("{prefix}coordination")),
+                "{label} cas-servers SKILL.md must call {prefix}coordination"
+            );
+            bodies.push((label, entry.content.replace(prefix, "<PREFIX>")));
+        }
+
+        let claude_body = bodies[0].1.clone();
+        for (label, body) in &bodies[1..] {
+            assert_eq!(
+                *body, claude_body,
+                "{label} cas-servers SKILL.md must match the claude copy except for the \
+                 harness tool prefix — the guidance itself must not drift per harness"
+            );
+        }
+    }
+
+    /// GH #64: the design-spec skill (DESIGN.md generator) must be registered
+    /// for every harness so `cas sync` installs it, and its body must keep the
+    /// contract that makes it useful: live-token grounding, the fixed 8
+    /// sections, keep-block preservation, and the memory pointer.
+    #[test]
+    fn test_builtin_skills_contains_design_spec() {
+        for (label, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ] {
+            let entry = catalog
+                .iter()
+                .find(|b| b.path == "skills/design-spec/SKILL.md")
+                .unwrap_or_else(|| {
+                    panic!("skills/design-spec/SKILL.md missing from {label} catalog")
+                });
+            assert!(
+                is_managed_by_cas(entry.content),
+                "{label} design-spec SKILL.md must be managed_by: cas"
+            );
+            for required in [
+                "name: design-spec",
+                "DESIGN.md",
+                // Token source is authoritative, not any prose design doc.
+                "The code is the source of truth",
+                // The fixed 8-section output contract.
+                "## Overview",
+                "## Colors",
+                "## Typography",
+                "## Layout",
+                "## Elevation & Depth",
+                "## Shapes",
+                "## Components",
+                "## Do's & Don'ts",
+                // Regeneration must not destroy hand edits.
+                "<!-- keep -->",
+                // Thin pointer so CAS search surfaces the doc.
+                "project_<slug>_designmd",
+            ] {
+                assert!(
+                    entry.content.contains(required),
+                    "{label} design-spec SKILL.md missing required marker: {required:?}"
+                );
+            }
+        }
+    }
+
+    /// GH #65: the release-notes skill plus its canonical rubric template must
+    /// ship for every harness, and both must keep the hard rules (Was → Now,
+    /// no ticket IDs, no process talk, two threads with one reply each).
+    #[test]
+    fn test_builtin_skills_contains_release_notes_rubric() {
+        for (label, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ] {
+            let skill = catalog
+                .iter()
+                .find(|b| b.path == "skills/release-notes/SKILL.md")
+                .unwrap_or_else(|| {
+                    panic!("skills/release-notes/SKILL.md missing from {label} catalog")
+                });
+            assert!(
+                is_managed_by_cas(skill.content),
+                "{label} release-notes SKILL.md must be managed_by: cas"
+            );
+            for required in [
+                "name: release-notes",
+                "docs/release-notes/RUBRIC.md",
+                "references/RUBRIC-template.md",
+                "Was → Now",
+                "Live on production",
+                "Staging",
+            ] {
+                assert!(
+                    skill.content.contains(required),
+                    "{label} release-notes SKILL.md missing required marker: {required:?}"
+                );
+            }
+
+            let template = catalog
+                .iter()
+                .find(|b| b.path == "skills/release-notes/references/RUBRIC-template.md")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "skills/release-notes/references/RUBRIC-template.md missing from \
+                         {label} catalog"
+                    )
+                });
+            for required in [
+                "Was → Now",
+                "no internal ticket labels",
+                "docs/release-notes/<date>-<topic>-slack.md",
+            ] {
+                assert!(
+                    template.content.to_lowercase().contains(&required.to_lowercase()),
+                    "{label} RUBRIC-template.md missing required rule: {required:?}"
                 );
             }
         }

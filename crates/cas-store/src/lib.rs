@@ -115,9 +115,10 @@ pub use verification_store::{
     invalidate_verification_dispatch_for_new_cycle, issue_server_verifier_handoff,
     issue_server_verifier_handoff_with_secret, issue_verifier_capability,
     resolve_verification_dispatch_with_conn, save_verification_issues_with_conn,
-    reopen_closed_task_atomic, request_changes_for_worker_delivery_exact,
+    reopen_closed_task_atomic, request_changes_for_parked_delivery,
     timeout_verification_dispatch, update_system_verification,
-    ParentDependencyUpdate, TaskReopenLifecycleOutbox,
+    ParentDependencyUpdate, RequestChangesBoundary, RequestChangesOutcome,
+    TaskReopenLifecycleOutbox,
 };
 
 // Worktree store for git worktree tracking
@@ -145,8 +146,8 @@ pub use supervisor_queue_store::{
 // (includes enqueue outcomes for message dedup and cas-ecff lifecycle outbox)
 pub use prompt_queue_store::{
     DeliveryStage, EnqueueIdempotentResult, EnqueueOutcome, MessageDeliveryReport, MessageStatus,
-    ObservationStatus, PROMPT_RETRY_MAX_AGE_SECS, PendingReason, PromptQueueStore,
-    PromptRetryDisposition, QueuedPrompt, SqlitePromptQueueStore,
+    ObservationStatus, PROMPT_QUEUE_STALE_TTL_SECS, PROMPT_RETRY_MAX_AGE_SECS, PendingReason,
+    PromptQueueStore, PromptRetryDisposition, QueuedPrompt, SqlitePromptQueueStore,
 };
 
 // Reminder store for supervisor "Remind Me" feature
@@ -164,7 +165,8 @@ pub use retrieval_store::{
 
 // Spawn queue store for worker lifecycle commands
 pub use spawn_queue_store::{
-    SPAWN_QUEUE_SCHEMA, SpawnAction, SpawnQueueStore, SpawnRequest, SqliteSpawnQueueStore,
+    SPAWN_QUEUE_SCHEMA, SpawnAction, SpawnLifecycle, SpawnLifecycleState, SpawnQueueStore,
+    SpawnRequest, SqliteSpawnQueueStore,
 };
 
 // Prompt store for tracking user prompts (code attribution)

@@ -1435,21 +1435,56 @@ pub fn invalidate_verification_dispatch_and_reopen_task_exact(
     Ok(dispatch)
 }
 
-/// Record a supervisor's negative review of one exact, unmerged delivery.
+/// Which proof boundary the declined delivery presented, if any.
 ///
-/// This is deliberately separate from generic task updates: the delivery
-/// proof lock must not prevent recording a negative verdict, but only this
-/// exact AwaitingMerge boundary may yield. The worker keeps ownership and its
-/// branch history; CAS invalidates the rejected anchor so a new close cycle
-/// requires corrective commits rather than reusing the declined proof.
-pub fn request_changes_for_worker_delivery_exact(
+/// GH #55 / #82: a parked AwaitingMerge task must have a working exit for a
+/// negative review verdict regardless of how much exact proof exists, so the
+/// boundary shape is reported rather than used as an admission gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestChangesBoundary {
+    /// Latest Resolved dispatch bound to an unmerged awaiting_merge delivery.
+    Exact,
+    /// A delivery transaction exists, but its dispatch is missing, unbound, or
+    /// not yet Resolved (GH #82 steps 4-5: the update lock claimed an active
+    /// boundary while request_changes claimed none existed).
+    UnboundDelivery,
+    /// The declined delivery already merged into the target branch
+    /// (GH #55: amendment-required after merge).
+    Merged,
+    /// The task parked awaiting_merge with no exact delivery record at all.
+    Legacy,
+}
+
+/// What `request_changes_for_parked_delivery` actually declined.
+#[derive(Debug, Clone)]
+pub struct RequestChangesOutcome {
+    pub boundary: RequestChangesBoundary,
+    pub delivery_transaction_id: Option<String>,
+    pub dispatch_id: Option<String>,
+    /// Human-readable branch handling recorded on the decision note.
+    pub branch_handling: String,
+}
+
+/// Record a supervisor's negative review of a parked AwaitingMerge delivery.
+///
+/// This is deliberately separate from generic task updates: the delivery proof
+/// lock must not prevent recording a negative verdict — recording a failed
+/// review is exactly when the proof boundary should yield. The worker keeps
+/// ownership and its branch history; CAS invalidates the rejected anchor and
+/// proof so a new close cycle requires corrective commits rather than reusing
+/// the declined proof.
+///
+/// It works for every parked shape: an exact Resolved delivery proof, a
+/// delivery whose dispatch never resolved or never bound (GH #82), a delivery
+/// that already merged before review failed (GH #55 amendment case), and a
+/// legacy park with no delivery record at all. Only the task status matters as
+/// an admission gate.
+pub fn request_changes_for_parked_delivery(
     cas_dir: &Path,
     task_id: &str,
-    dispatch_id: &str,
-    delivery_transaction_id: &str,
     supervisor_agent_id: &str,
     reason: &str,
-) -> Result<()> {
+) -> Result<RequestChangesOutcome> {
     let reason = reason.trim();
     if reason.is_empty() {
         return Err(StoreError::Parse(
@@ -1469,39 +1504,48 @@ pub fn request_changes_for_worker_delivery_exact(
     conn.execute_batch(crate::delivery_store::DELIVERY_SCHEMA)?;
     let tx = ImmediateTx::new(&conn)?;
 
-    let dispatch = get_verification_dispatch_with_conn(&tx, dispatch_id)?;
-    let latest = get_latest_verification_dispatch_with_conn(&tx, task_id)?
-        .ok_or_else(|| StoreError::NotFound("latest verification dispatch".to_string()))?;
-    if latest.id != dispatch.id
-        || dispatch.task_id != task_id
-        || dispatch.delivery_transaction_id.as_deref() != Some(delivery_transaction_id)
-        || dispatch.state != VerificationDispatchState::Resolved
-    {
-        return Err(StoreError::Parse(
-            "request_changes requires the exact latest Resolved delivery proof".to_string(),
-        ));
-    }
+    let dispatch = get_latest_verification_dispatch_with_conn(&tx, task_id)?
+        .filter(|dispatch| dispatch.task_id == task_id);
 
-    let delivery: (String, String, String) = tx
+    // Latest delivery transaction for this task, whatever state it is in.
+    let delivery: Option<(String, String, WorkerDeliveryState)> = tx
         .query_row(
-            "SELECT receipt_id, task_id, state FROM worker_delivery_transactions WHERE id = ?1",
-            params![delivery_transaction_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            "SELECT t.id, t.receipt_id, t.state
+             FROM worker_delivery_transactions t
+             JOIN worker_completion_receipts r ON t.receipt_id = r.id
+             WHERE t.task_id = ?1 ORDER BY r.created_at DESC LIMIT 1",
+            params![task_id],
+            |row| {
+                let id: String = row.get(0)?;
+                let receipt_id: String = row.get(1)?;
+                let state: String = row.get(2)?;
+                Ok((id, receipt_id, state))
+            },
         )
-        .map_err(|error| match error {
-            rusqlite::Error::QueryReturnedNoRows => {
-                StoreError::NotFound("worker delivery transaction".to_string())
-            }
-            other => StoreError::Database(other),
-        })?;
-    if delivery.0 != dispatch.receipt_id.as_deref().unwrap_or_default()
-        || delivery.1 != task_id
-        || delivery.2 != WorkerDeliveryState::AwaitingMerge.to_string()
-    {
-        return Err(StoreError::Parse(
-            "request_changes requires an exact worker delivery still in awaiting_merge".to_string(),
-        ));
-    }
+        .optional()?
+        .map(|(id, receipt_id, state)| {
+            WorkerDeliveryState::from_str(&state)
+                .map(|state| (id, receipt_id, state))
+                .map_err(|error| {
+                    StoreError::Parse(format!("invalid worker delivery state: {error}"))
+                })
+        })
+        .transpose()?;
+
+    let boundary = match (&delivery, &dispatch) {
+        (None, _) => RequestChangesBoundary::Legacy,
+        (Some((_, _, WorkerDeliveryState::Merged)), _) => RequestChangesBoundary::Merged,
+        (
+            Some((transaction_id, receipt_id, WorkerDeliveryState::AwaitingMerge)),
+            Some(dispatch),
+        ) if dispatch.state == VerificationDispatchState::Resolved
+            && dispatch.delivery_transaction_id.as_deref() == Some(transaction_id.as_str())
+            && dispatch.receipt_id.as_deref() == Some(receipt_id.as_str()) =>
+        {
+            RequestChangesBoundary::Exact
+        }
+        (Some(_), _) => RequestChangesBoundary::UnboundDelivery,
+    };
 
     let (status, notes, deliverables_json): (String, String, String) = tx
         .query_row(
@@ -1531,8 +1575,15 @@ pub fn request_changes_for_worker_delivery_exact(
     deliverables.review_envelope = None;
 
     let now = Utc::now();
+    let branch_handling = if boundary == RequestChangesBoundary::Merged {
+        "prior commits are already merged into the target branch; the assigned worker must land corrective commits (including an explicit revert commit when requested) as new work.".to_string()
+    } else {
+        format!(
+            "prior commits remain on {rejected_branch}; the assigned worker must add corrective commits (including an explicit revert commit when requested) before re-delivery."
+        )
+    };
     let note = format!(
-        "[{}] Decision: changes requested by supervisor. {reason}\n\nBranch handling: prior commits remain on {rejected_branch}; the assigned worker must add corrective commits (including an explicit revert commit when requested) before re-delivery.",
+        "[{}] Decision: changes requested by supervisor. {reason}\n\nBranch handling: {branch_handling}",
         now.format("%Y-%m-%d %H:%M")
     );
     let notes = if notes.is_empty() {
@@ -1541,44 +1592,78 @@ pub fn request_changes_for_worker_delivery_exact(
         format!("{notes}\n\n{note}")
     };
 
-    let dispatch = invalidate_verification_dispatch_for_new_cycle_with_conn(&tx, dispatch_id)?;
-    if dispatch.state != VerificationDispatchState::Invalidated {
-        return Err(StoreError::Parse(
-            "request_changes could not invalidate the exact delivery proof".to_string(),
-        ));
+    // Invalidate whatever proof authorized (or was about to authorize) the
+    // declined close, so re-close needs a fresh cycle. A Pending/Claimed
+    // dispatch is invalidated directly: the task is going back to the worker,
+    // so an in-flight verification for the rejected scope is stale either way.
+    if let Some(active) = dispatch.as_ref() {
+        let invalidated = match active.state {
+            VerificationDispatchState::Resolved | VerificationDispatchState::TimedOut => {
+                invalidate_verification_dispatch_for_new_cycle_with_conn(&tx, &active.id)?.state
+                    == VerificationDispatchState::Invalidated
+            }
+            VerificationDispatchState::Pending | VerificationDispatchState::Claimed => {
+                tx.execute(
+                    "UPDATE verification_dispatches
+                     SET state = 'invalidated', resolved_at = ?2
+                     WHERE id = ?1 AND state IN ('pending', 'claimed')",
+                    params![active.id, now.to_rfc3339()],
+                )? == 1
+            }
+            VerificationDispatchState::Invalidated => true,
+        };
+        if !invalidated {
+            return Err(StoreError::Parse(
+                "request_changes could not invalidate the declined delivery proof".to_string(),
+            ));
+        }
     }
-    let delivery_changed = tx.execute(
-        "UPDATE worker_delivery_transactions
-         SET state = ?2, supervisor_agent_id = ?3,
-             last_error_code = 'changes_requested', last_error_detail = ?4, updated_at = ?5
-         WHERE id = ?1 AND task_id = ?6 AND state = 'awaiting_merge'",
-        params![
-            delivery_transaction_id,
-            WorkerDeliveryState::ChangesRequested.to_string(),
-            supervisor_agent_id,
-            reason,
-            now.to_rfc3339(),
-            task_id,
-        ],
-    )?;
-    if delivery_changed != 1 {
-        return Err(StoreError::Parse(
-            "request_changes delivery transition raced".to_string(),
-        ));
+
+    // A delivery still in flight is declined; an already-merged one keeps its
+    // merged state because the merge is a fact the audit trail must retain.
+    if let Some((transaction_id, _, state)) = delivery.as_ref()
+        && matches!(
+            state,
+            WorkerDeliveryState::AwaitingVerification
+                | WorkerDeliveryState::AwaitingMerge
+                | WorkerDeliveryState::MergeAuthorized
+                | WorkerDeliveryState::CloseReady
+        )
+    {
+        let delivery_changed = tx.execute(
+            "UPDATE worker_delivery_transactions
+             SET state = ?2, supervisor_agent_id = ?3,
+                 last_error_code = 'changes_requested', last_error_detail = ?4, updated_at = ?5
+             WHERE id = ?1 AND task_id = ?6 AND state = ?7",
+            params![
+                transaction_id,
+                WorkerDeliveryState::ChangesRequested.to_string(),
+                supervisor_agent_id,
+                reason,
+                now.to_rfc3339(),
+                task_id,
+                state.to_string(),
+            ],
+        )?;
+        if delivery_changed != 1 {
+            return Err(StoreError::Parse(
+                "request_changes delivery transition raced".to_string(),
+            ));
+        }
+        tx.execute(
+            "INSERT INTO worker_delivery_events
+             (id, transaction_id, state, actor_agent_id, detail, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                format!("wde-{:032x}", rand::random::<u128>()),
+                transaction_id,
+                WorkerDeliveryState::ChangesRequested.to_string(),
+                supervisor_agent_id,
+                reason,
+                now.to_rfc3339(),
+            ],
+        )?;
     }
-    tx.execute(
-        "INSERT INTO worker_delivery_events
-         (id, transaction_id, state, actor_agent_id, detail, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            format!("wde-{:032x}", rand::random::<u128>()),
-            delivery_transaction_id,
-            WorkerDeliveryState::ChangesRequested.to_string(),
-            supervisor_agent_id,
-            reason,
-            now.to_rfc3339(),
-        ],
-    )?;
     let task_changed = tx.execute(
         "UPDATE tasks
          SET status = 'open', notes = ?2, deliverables = ?3,
@@ -1607,7 +1692,12 @@ pub fn request_changes_for_worker_delivery_exact(
     record_event_with_conn(&tx, &event)?;
     let _ = capture_task_event(&tx, RecordingEventType::Custom, task_id, None);
     tx.commit()?;
-    Ok(())
+    Ok(RequestChangesOutcome {
+        boundary,
+        delivery_transaction_id: delivery.map(|(id, _, _)| id),
+        dispatch_id: dispatch.map(|dispatch| dispatch.id),
+        branch_handling,
+    })
 }
 
 fn invalidate_verification_dispatch_for_new_cycle_with_conn(

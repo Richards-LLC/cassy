@@ -1,6 +1,8 @@
 use crate::config::Config;
 use crate::worktree::git::GitError;
-use crate::worktree::manager::{WorktreeError, WorktreeManager, WorktreeResult, slugify_title};
+use crate::worktree::manager::{
+    MergeVenue, WorktreeError, WorktreeManager, WorktreeResult, slugify_title,
+};
 
 /// First 7 chars of a SHA for log/echo output, or the whole string if shorter
 /// (e.g. the empty string when a ref couldn't be resolved).
@@ -67,7 +69,12 @@ impl WorktreeManager {
     ) -> WorktreeResult<Vec<(String, bool, Option<String>)>> {
         let mut results = Vec::new();
 
-        self.git.checkout(epic_branch)?;
+        // cas-4702 / GH #68: epic close must never leave the main checkout on
+        // the epic branch. When the checkout is already there the merges run
+        // in place; otherwise each merge runs in an ephemeral detached
+        // worktree and advances the epic ref by compare-and-swap, so HEAD is
+        // exactly where the operator left it when this returns.
+        let venue = self.merge_venue(epic_branch);
 
         for (name, worktree) in &self.workers {
             let worker_branch = &worktree.branch;
@@ -77,7 +84,15 @@ impl WorktreeManager {
                 continue;
             }
 
-            match self.git.merge_branch(worker_branch, true) {
+            let merge_result = match venue {
+                MergeVenue::SharedCheckout => self.git.merge_branch(worker_branch, true),
+                MergeVenue::TempWorktree => {
+                    self.git
+                        .merge_branch_via_temp_worktree(epic_branch, worker_branch, true)
+                }
+            };
+
+            match merge_result {
                 Ok(_commit) => {
                     tracing::info!("Merged {} into {}", worker_branch, epic_branch);
                     results.push((name.clone(), true, None));

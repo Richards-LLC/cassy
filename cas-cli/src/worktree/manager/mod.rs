@@ -118,11 +118,80 @@ pub mod worker_ops;
 
 pub use worker_ops::{CleanupReport, DirtyWorktreeWarning, ExternalSymlinkWarning, RemoveOutcome};
 
+/// Where a merge into a target branch is executed (cas-4702 / GH #68).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MergeVenue {
+    /// The main checkout is already on the target branch — merge in place.
+    /// HEAD does not move, and the working tree stays consistent with the
+    /// branch it tracks.
+    SharedCheckout,
+    /// The main checkout is on some other branch (or detached) — merge in an
+    /// ephemeral detached worktree and advance the branch ref, so the main
+    /// checkout's HEAD is never touched.
+    TempWorktree,
+}
+
+/// Pure venue decision — unit-tested. `main_head_branch` is the main
+/// checkout's current branch (`None` when detached or unresolvable).
+pub(crate) fn decide_merge_venue(
+    main_head_branch: Option<&str>,
+    target_branch: &str,
+) -> MergeVenue {
+    match main_head_branch {
+        Some(branch) if branch == target_branch => MergeVenue::SharedCheckout,
+        _ => MergeVenue::TempWorktree,
+    }
+}
+
+/// True when a dirty shared-checkout path is one this merge would write
+/// (cas-4702 / GH #73).
+///
+/// Matches exact paths and directory containment in either direction: a
+/// residue entry for `src/` covers a merge touching `src/lib.rs`, and residue
+/// on `src/lib.rs` conflicts with a merge that rewrites `src/`.
+fn path_intersects(residue_path: &str, merge_path: &str) -> bool {
+    let residue = residue_path.trim_end_matches('/');
+    let merge = merge_path.trim_end_matches('/');
+    residue == merge
+        || merge.starts_with(&format!("{residue}/"))
+        || residue.starts_with(&format!("{merge}/"))
+}
+
+/// Subset of shared-checkout residue that intersects the merge's touched
+/// paths. Empty means the merge and the residue are disjoint and the merge is
+/// safe to run (cas-4702 / GH #73).
+pub(crate) fn residue_overlapping_merge(
+    residue: &[crate::hooks::handlers::session_hygiene::PorcelainEntry],
+    merge_paths: &[String],
+) -> Vec<crate::hooks::handlers::session_hygiene::PorcelainEntry> {
+    residue
+        .iter()
+        .filter(|entry| {
+            merge_paths
+                .iter()
+                .any(|merge_path| path_intersects(&entry.path, merge_path))
+        })
+        .cloned()
+        .collect()
+}
+
 impl WorktreeManager {
     fn worker_ref(&self, worker_name: &str) -> WorktreeResult<&Worktree> {
         self.workers
             .get(worker_name)
             .ok_or_else(|| WorktreeError::NotFound(worker_name.to_string()))
+    }
+
+    /// Resolve the merge venue for `target_branch` against the main
+    /// checkout's live HEAD (cas-4702 / GH #68). A detached or unresolvable
+    /// HEAD, or one on any other branch, means the merge must not run here.
+    pub(crate) fn merge_venue(&self, target_branch: &str) -> MergeVenue {
+        let head = self
+            .git
+            .current_branch()
+            .ok()
+            .filter(|branch| branch != "HEAD");
+        decide_merge_venue(head.as_deref(), target_branch)
     }
 
     /// Shared dirty-check gate for force-free merge/removal (cas-006c).
@@ -347,7 +416,15 @@ impl WorktreeManager {
         force: bool,
         will_cleanup: bool,
     ) -> WorktreeResult<Option<String>> {
-        if self.config.auto_merge {
+        // cas-4702 / GH #68: where the merge runs decides everything below.
+        // `SharedCheckout` (the main checkout is already on the target branch)
+        // writes the shared working tree; `TempWorktree` runs in an ephemeral
+        // detached worktree and only moves the branch ref, so the shared
+        // checkout's HEAD, index and working tree are never touched — and its
+        // residue is therefore irrelevant.
+        let venue = self.merge_venue(&worktree.parent_branch);
+
+        if self.config.auto_merge && venue == MergeVenue::SharedCheckout {
             // cas-e18f/cas-09f2: inspect the shared merge point before even
             // evaluating the requested source worktree. Residue from an
             // earlier operation is the primary failure and must never be
@@ -363,11 +440,48 @@ impl WorktreeManager {
             // merge fail for reasons belonging to an earlier operation.
             // `force` intentionally does not bypass this gate; it applies
             // only to the source worktree.
+            //
+            // cas-4702 / GH #73: the gate is scoped to the paths this merge
+            // would actually touch. Operator residue elsewhere in a shared
+            // checkout (stray `.claude/` edits, unrelated scripts) is none
+            // of this merge's business and must not refuse it.
             let target_dirty = self.git.classify_dirty_status(&self.repo_root)?;
             if target_dirty.is_blocked() {
-                return Err(WorktreeError::Git(GitError::MergeCheckoutDirty(
-                    target_dirty.describe_blocking(),
-                )));
+                let merge_paths = self
+                    .git
+                    .merge_touched_paths(&worktree.parent_branch, &worktree.branch);
+                let blocking = target_dirty.blocking.clone();
+                let conflicting = match merge_paths {
+                    Ok(paths) => residue_overlapping_merge(&blocking, &paths),
+                    // Safe fallback: if the touched-path set can't be
+                    // computed (unresolvable refs, git failure), fall back to
+                    // the historical conservative behaviour and treat all
+                    // residue as conflicting rather than merging blind.
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "could not compute merge-touched paths; falling back to \
+                             unscoped shared-checkout residue refusal"
+                        );
+                        blocking.clone()
+                    }
+                };
+
+                if !conflicting.is_empty() {
+                    return Err(WorktreeError::Git(GitError::MergeCheckoutDirty(
+                        crate::worktree::git::DirtyClassification {
+                            blocking: conflicting,
+                            warnings: Vec::new(),
+                        }
+                        .describe_blocking(),
+                    )));
+                }
+
+                tracing::warn!(
+                    residue = %target_dirty.describe_blocking(),
+                    "shared checkout has tracked residue that does not intersect the \
+                     merge; proceeding without touching it"
+                );
             }
         }
 
@@ -397,16 +511,27 @@ impl WorktreeManager {
                 return Err(WorktreeError::Git(GitError::MergeConflictPaths(conflicts)));
             }
 
-            // Switch to parent branch in main repo
-            self.git.checkout(&worktree.parent_branch)?;
+            // cas-4702 / GH #68: never move the main checkout's HEAD. When
+            // the checkout already happens to be on the target branch the
+            // merge runs in place (no checkout needed, working tree stays in
+            // sync); otherwise it runs in an ephemeral detached worktree and
+            // the branch ref is advanced by compare-and-swap, so the
+            // supervisor's next commit still lands where they were.
+            let merge_result = match self.merge_venue(&worktree.parent_branch) {
+                MergeVenue::SharedCheckout => self.git.merge_branch(&worktree.branch, true),
+                MergeVenue::TempWorktree => self.git.merge_branch_via_temp_worktree(
+                    &worktree.parent_branch,
+                    &worktree.branch,
+                    true,
+                ),
+            };
 
-            // Merge the worktree branch. The pre-flight above should make
-            // this branch unreachable in the conflicting case, but
-            // `merge_branch` itself still aborts-on-failure (fix a) as a
-            // safety net — e.g. a conflict introduced by a concurrent
-            // change between pre-flight and this call, or anything
-            // merge-tree doesn't model identically to a real merge.
-            match self.git.merge_branch(&worktree.branch, true) {
+            // The pre-flight above should make the conflicting case
+            // unreachable, but the merge itself still aborts-on-failure
+            // (cas-e18f fix a) as a safety net — e.g. a conflict introduced
+            // by a concurrent change between pre-flight and this call, or
+            // anything merge-tree doesn't model identically to a real merge.
+            match merge_result {
                 Ok(commit) => {
                     worktree.mark_merged(commit.clone());
                     commit
@@ -414,6 +539,16 @@ impl WorktreeManager {
                 Err(e @ (GitError::MergeConflict | GitError::MergeConflictPaths(_))) => {
                     worktree.mark_conflict();
                     return Err(WorktreeError::Git(e));
+                }
+                // cas-4702: git's own working-tree guard fired in the shared
+                // checkout — residue the scoped gate let through (e.g. a
+                // staged add of a path the merge result does not contain)
+                // still cannot be checked out over. Report it as residue,
+                // with git's own path list, not as an opaque command failure.
+                Err(GitError::CommandFailed(details))
+                    if details.contains("would be overwritten by merge") =>
+                {
+                    return Err(WorktreeError::Git(GitError::MergeCheckoutDirty(details)));
                 }
                 Err(e) => return Err(WorktreeError::Git(e)),
             }

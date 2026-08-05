@@ -22,6 +22,71 @@ pub(crate) enum MergeRequestDecision {
     Unverifiable,
 }
 
+/// What the daemon should do with a worker→supervisor merge request at
+/// transport time (cas-6eab, GH #61).
+///
+/// The request is an instruction ("please merge `<tip>`"), so it is only worth
+/// delivering while its premise holds. Two things can kill that premise
+/// between the worker composing it and the supervisor reading it, and in the
+/// reported sessions both routinely did — the supervisor had already merged
+/// and already replied before the request arrived, on ~12 of ~20 closes:
+///
+/// - the branch tip is already an ancestor of the target branch (merged), or
+/// - the task is no longer parked awaiting a merge (re-closed, reopened,
+///   request_changes'd), so nothing is waiting on the supervisor at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MergeRequestDelivery {
+    /// Premise still holds — deliver, and tag the row so it can be retracted
+    /// if the merge lands before the supervisor reads it.
+    Deliver,
+    /// The merge already landed. Suppress and tell the WORKER instead.
+    SuppressLanded { target_tip: String },
+    /// The task left `AwaitingMerge` — the request is moot whatever git says.
+    SuppressResolved { status: TaskStatus },
+}
+
+/// Decide a merge request's fate from live state only (cas-6eab).
+///
+/// `task_status` is the task's status read fresh at transport time; `None`
+/// means the task could not be read at all. `git` is the live reachability
+/// check for the requested tip.
+///
+/// Fails open in exactly one direction: uncertainty (unreadable task,
+/// unverifiable git) delivers. A suppression requires positive evidence that
+/// the request is already satisfied, because the cost of wrongly suppressing
+/// a genuine merge request is a stalled task, while the cost of delivering a
+/// stale one is a supervisor round-trip.
+pub(crate) fn merge_request_delivery_decision(
+    task_status: Option<TaskStatus>,
+    git: &MergeRequestDecision,
+) -> MergeRequestDelivery {
+    if let Some(status) = task_status
+        && status != TaskStatus::AwaitingMerge
+    {
+        return MergeRequestDelivery::SuppressResolved { status };
+    }
+    match git {
+        MergeRequestDecision::AlreadyIntegrated { target_tip } => {
+            MergeRequestDelivery::SuppressLanded {
+                target_tip: target_tip.clone(),
+            }
+        }
+        MergeRequestDecision::Pending { .. } | MergeRequestDecision::Unverifiable => {
+            MergeRequestDelivery::Deliver
+        }
+    }
+}
+
+/// Guidance sent to the worker when its merge request is suppressed because
+/// the task is no longer parked (cas-6eab).
+pub(crate) fn merge_request_moot_guidance(task_id: &str, status: TaskStatus) -> String {
+    format!(
+        "CAS suppressed your merge request for {task_id}: the task is no longer awaiting a \
+         merge (current status: {status}). Nothing is queued for the supervisor. Re-read the \
+         task with `task action=show id={task_id}` before sending anything further about it."
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LifecycleEnvelope {
     pub task_id: String,
@@ -289,6 +354,90 @@ mod tests {
             None
         );
         assert_eq!(parse_lifecycle_envelope("ordinary free-form message"), None);
+    }
+
+    /// cas-6eab / GH #61: the reported sequence — supervisor merges and
+    /// replies, THEN the worker's already-composed request reaches transport.
+    /// It must be suppressed rather than delivered as an actionable ask.
+    #[test]
+    fn merge_request_delivered_after_the_merge_is_suppressed() {
+        assert_eq!(
+            merge_request_delivery_decision(
+                Some(TaskStatus::AwaitingMerge),
+                &MergeRequestDecision::AlreadyIntegrated {
+                    target_tip: "abc123".to_string(),
+                },
+            ),
+            MergeRequestDelivery::SuppressLanded {
+                target_tip: "abc123".to_string(),
+            }
+        );
+    }
+
+    /// The same class one step further along: the merge landed AND the task
+    /// was already re-closed. Status alone settles it without trusting git.
+    #[test]
+    fn merge_request_for_a_task_that_left_awaiting_merge_is_moot() {
+        for status in [
+            TaskStatus::Closed,
+            TaskStatus::InProgress,
+            TaskStatus::Open,
+            TaskStatus::PendingSupervisorReview,
+        ] {
+            assert_eq!(
+                merge_request_delivery_decision(
+                    Some(status),
+                    &MergeRequestDecision::Pending {
+                        target_tip: "abc123".to_string(),
+                    },
+                ),
+                MergeRequestDelivery::SuppressResolved { status },
+                "a task at {status} has nothing queued for the supervisor"
+            );
+        }
+        let guidance = merge_request_moot_guidance("cas-test", TaskStatus::Closed);
+        assert!(guidance.contains("cas-test"));
+        assert!(guidance.contains("no longer awaiting a merge"));
+    }
+
+    /// A genuinely outstanding merge must still reach the supervisor — and so
+    /// must anything CAS cannot verify. Suppression requires positive evidence.
+    #[test]
+    fn outstanding_and_unverifiable_merge_requests_are_delivered() {
+        assert_eq!(
+            merge_request_delivery_decision(
+                Some(TaskStatus::AwaitingMerge),
+                &MergeRequestDecision::Pending {
+                    target_tip: "abc123".to_string(),
+                },
+            ),
+            MergeRequestDelivery::Deliver
+        );
+        assert_eq!(
+            merge_request_delivery_decision(
+                Some(TaskStatus::AwaitingMerge),
+                &MergeRequestDecision::Unverifiable,
+            ),
+            MergeRequestDelivery::Deliver,
+            "unverifiable git state must never suppress a merge request"
+        );
+        assert_eq!(
+            merge_request_delivery_decision(None, &MergeRequestDecision::Unverifiable),
+            MergeRequestDelivery::Deliver,
+            "an unreadable task is uncertainty, not evidence of staleness"
+        );
+        assert_eq!(
+            merge_request_delivery_decision(
+                None,
+                &MergeRequestDecision::AlreadyIntegrated {
+                    target_tip: "abc123".to_string(),
+                },
+            ),
+            MergeRequestDelivery::SuppressLanded {
+                target_tip: "abc123".to_string(),
+            },
+            "git reachability is positive evidence even when the task is unreadable"
+        );
     }
 
     #[test]

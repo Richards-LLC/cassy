@@ -81,6 +81,52 @@ fn default_worker_effort_for_cli(_cli: cas_mux::SupervisorCli) -> cas_mux::Effor
         .unwrap_or(cas_mux::Effort::Medium)
 }
 
+/// cas-28a4 (GH #71): which worker CLI a model slug belongs to.
+///
+/// Deliberately conservative — an unrecognized slug returns `None` and is
+/// accepted as-is, because this gate exists to catch obviously-crossed wires
+/// (a Claude slug queued onto Codex), not to police the model catalog and
+/// reject a model the day it ships.
+fn cli_for_model_slug(model: &str) -> Option<cas_mux::SupervisorCli> {
+    let model = model.trim().to_ascii_lowercase();
+    if model.is_empty() {
+        return None;
+    }
+    if model.starts_with("grok") {
+        return Some(cas_mux::SupervisorCli::Grok);
+    }
+    if model.starts_with("claude")
+        || model.starts_with("opus")
+        || model.starts_with("sonnet")
+        || model.starts_with("haiku")
+        || model.starts_with("fable")
+    {
+        return Some(cas_mux::SupervisorCli::Claude);
+    }
+    if model.starts_with("gpt") || model.starts_with("codex") || model.starts_with("o3") {
+        return Some(cas_mux::SupervisorCli::Codex);
+    }
+    None
+}
+
+/// cas-28a4 (GH #71): reject a model slug that belongs to a different CLI than
+/// the one being spawned, naming both sides and the fix.
+fn validate_model_matches_cli(cli: cas_mux::SupervisorCli, model: &str) -> Result<(), String> {
+    match cli_for_model_slug(model) {
+        Some(model_cli) if model_cli != cli => Err(format!(
+            "invalid spawn_workers combination: model {model:?} is a {} model but \
+             cli={} was requested. \
+             Pass cli={} to spawn it on its own harness, or choose a {} model (e.g. {}).",
+            model_cli.as_str(),
+            cli.as_str(),
+            model_cli.as_str(),
+            cli.as_str(),
+            default_worker_model_for_cli(cli),
+        )),
+        _ => Ok(()),
+    }
+}
+
 fn is_frontier_model(model: &str) -> bool {
     let model = model.to_ascii_lowercase();
     model.contains("opus") || model.contains("fable") || model.contains("mythos")
@@ -114,6 +160,13 @@ pub(crate) fn build_spawn_spec_json_with_project_config(
     let parsed_cli = parse_spawn_cli(cli)?;
     let parsed_effort = parse_spawn_effort(effort)?;
 
+    // cas-28a4 (GH #71): an explicitly requested cli/model pair that crosses
+    // harnesses is rejected here — before anything is queued — instead of
+    // surfacing as workers that boot on the wrong CLI.
+    if let (Some(requested_cli), Some(model)) = (parsed_cli, model) {
+        validate_model_matches_cli(requested_cli, model)?;
+    }
+
     let sources = cas_factory::ConfigSources {
         project_config,
         cli_flag: parsed_cli,
@@ -138,6 +191,24 @@ pub(crate) fn build_spawn_spec_json_with_project_config(
     // phase), so no Grok arm is needed here.
     if cli.is_none() && !configured_cli && spec.cli == cas_mux::SupervisorCli::Claude {
         spec.cli = cas_mux::SupervisorCli::Codex;
+    }
+    // cas-28a4 (GH #71): with no explicit `cli=`, an unambiguous model slug is
+    // the strongest statement of intent the caller made — it decides the
+    // harness rather than being dragged onto whatever the default resolved to
+    // (the live report: `model=claude-opus-4-5` spawned on Codex).
+    if cli.is_none() {
+        if let Some(model_cli) = model.and_then(cli_for_model_slug) {
+            if model_cli != spec.cli {
+                tracing::info!(
+                    target: "cas::factory",
+                    requested_model = %model.unwrap_or_default(),
+                    resolved_cli = %spec.cli.as_str(),
+                    model_cli = %model_cli.as_str(),
+                    "cas-28a4: explicit model slug overrides the resolved default cli"
+                );
+                spec.cli = model_cli;
+            }
+        }
     }
     if model.is_none() && spec.model.is_none() {
         spec.model = Some(default_worker_model_for_cli(spec.cli).to_string());
@@ -241,6 +312,144 @@ fn current_factory_session() -> Option<String> {
     std::env::var("CAS_FACTORY_SESSION")
         .ok()
         .filter(|s| !s.trim().is_empty())
+}
+
+/// How long a spawn request may sit in a non-terminal state before
+/// `worker_status` calls it out as unconfirmed (GH #60).
+///
+/// Deliberately longer than a provisioning pass (git worktree add + submodule
+/// init + hook install) and shorter than a supervisor's patience. A request
+/// still `queued` past this point means nothing is consuming the queue at all —
+/// the original incident, where two requests returned success-shaped receipts
+/// and both daemon logs stayed zero bytes.
+const SPAWN_UNCONFIRMED_SECS: i64 = 90;
+
+/// Window of spawn history worth showing. Older terminal rows are noise.
+const SPAWN_HISTORY_WINDOW_SECS: i64 = 1800;
+
+/// Render the task a worker is holding, for `worker_status` (GH #67).
+///
+/// The roster already knew the assignment; it just never said so, and the
+/// documented workaround was `git -C .cas/worktrees/<name> log/status` plus a
+/// task lookup. An idle-looking worker with `cas-1234 (in progress)` next to it
+/// is a different conversation from one with nothing assigned — that
+/// distinction is the whole of GH #67 item 1.
+///
+/// Pure over its inputs so every branch is testable without a store.
+fn format_assigned_task_info(
+    in_progress: Option<(&str, &str)>,
+    assigned_open: Option<(&str, &str)>,
+) -> String {
+    const TITLE_CAP: usize = 60;
+    let truncate = |title: &str| -> String {
+        let title = title.trim();
+        if title.chars().count() <= TITLE_CAP {
+            return title.to_string();
+        }
+        let short: String = title.chars().take(TITLE_CAP).collect();
+        format!("{}…", short.trim_end())
+    };
+
+    match (in_progress, assigned_open) {
+        (Some((id, title)), _) => {
+            format!("\n    task: {id} (in progress) — {}", truncate(title))
+        }
+        // Assigned but not started: the dispatch grace window, or a worker that
+        // never picked the task up. Naming it lets the supervisor tell those
+        // apart without opening anything.
+        (None, Some((id, title))) => {
+            format!(
+                "\n    task: {id} (assigned, not started) — {}",
+                truncate(title)
+            )
+        }
+        (None, None) => "\n    task: none assigned".to_string(),
+    }
+}
+
+/// Render the recent spawn lifecycle for `worker_status` (GH #60).
+///
+/// The enqueue receipt proves only that a row was inserted. This section is
+/// what makes the documented supervisor guard — "call `worker_status` after
+/// every `spawn_workers` and don't report dispatch complete until the worker
+/// appears" — structural rather than a habit, and it names which worker each
+/// request produced so two in-flight anonymous spawns can never be
+/// cross-attributed.
+///
+/// Pure over its inputs so the interesting states are unit-testable without a
+/// daemon, a queue, or a clock.
+fn format_spawn_lifecycle_section(
+    rows: &[cas_store::SpawnLifecycle],
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    use cas_store::SpawnLifecycleState as State;
+
+    let recent: Vec<&cas_store::SpawnLifecycle> = rows
+        .iter()
+        .filter(|row| (now - row.created_at).num_seconds() <= SPAWN_HISTORY_WINDOW_SECS)
+        .collect();
+    if recent.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::from("\nRecent spawn requests:\n");
+    let mut unconfirmed = 0usize;
+    let mut failed = 0usize;
+
+    for row in recent {
+        let age = (now - row.created_at).num_seconds().max(0);
+        let stale = !row.state.is_terminal() && age >= SPAWN_UNCONFIRMED_SECS;
+        let who = row
+            .worker_name
+            .as_deref()
+            .map(|name| format!(" → {name}"))
+            .unwrap_or_else(|| {
+                if row.requested_names.is_empty() {
+                    String::new()
+                } else {
+                    format!(" → (requested {})", row.requested_names.join(", "))
+                }
+            });
+
+        let status = match row.state {
+            State::Registered => "registered".to_string(),
+            State::Failed => "FAILED".to_string(),
+            other if stale => format!("{} — UNCONFIRMED", other.as_str()),
+            other => other.as_str().to_string(),
+        };
+        if row.state == State::Failed {
+            failed += 1;
+        } else if stale {
+            unconfirmed += 1;
+        }
+
+        let reason = row
+            .detail
+            .as_deref()
+            .filter(|d| !d.is_empty())
+            .map(|d| format!(" — {d}"))
+            .unwrap_or_default();
+        let task = row
+            .task_id
+            .as_deref()
+            .map(|t| format!(" [task {t}]"))
+            .unwrap_or_default();
+
+        out.push_str(&format!(
+            "  • request {}{}: {} ({age}s ago){}{}\n",
+            row.id, who, status, task, reason
+        ));
+    }
+
+    if failed > 0 || unconfirmed > 0 {
+        out.push_str(&format!(
+            "  ⚠ {failed} failed, {unconfirmed} unconfirmed after {SPAWN_UNCONFIRMED_SECS}s. \
+             An UNCONFIRMED request means the worker never registered — treat it as not \
+             dispatched, and check the daemon logs before re-spawning.\n"
+        ));
+    }
+
+    out
 }
 
 fn worker_hold_role_gate(is_supervisor: bool, action: &str) -> Result<(), String> {
@@ -604,13 +813,24 @@ impl CasService {
             ],
         );
 
+        // GH #60: the receipt confirms queue insertion and NOTHING about
+        // liveness — it had the same shape whether a worker registered or the
+        // queue was never consumed at all. Say so, and name the request id as
+        // the handle to resolve it with, so a caller cannot read "Queued" as
+        // "dispatched".
+        let liveness_note = format!(
+            "\nNOT YET CONFIRMED: this only means the request was queued. Call worker_status \
+             to resolve request {request_id} to a worker and a state (registered / FAILED); \
+             do not report dispatch complete until it shows registered."
+        );
+
         let msg = if worker_names.is_empty() {
             format!(
-                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{task_id_note}"
+                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{task_id_note}{liveness_note}"
             )
         } else {
             format!(
-                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{task_id_note}",
+                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{spec_warning}{codex_fallback_notice}{config_dir_notice}{task_id_note}{liveness_note}",
                 worker_names.join(", "),
                 request_id
             )
@@ -1025,10 +1245,25 @@ impl CasService {
             3600, // 1h window
         );
 
+        // GH #60: recent spawn lifecycle, resolved once for both render paths.
+        // Load it BEFORE the empty-roster early return — "no agents" is
+        // precisely the case where a failed or unconsumed spawn is the answer,
+        // and the old output said only "None active", which reads like an
+        // empty fleet rather than a spawn that died.
+        let spawn_section = current_factory_session()
+            .and_then(|session| {
+                crate::store::open_spawn_queue_store(&self.inner.cas_root)
+                    .ok()
+                    .and_then(|queue| queue.recent_spawn_lifecycle(&session, 10).ok())
+            })
+            .map(|rows| format_spawn_lifecycle_section(&rows, chrono::Utc::now()))
+            .unwrap_or_default();
+
         if agents.is_empty() {
             let mut msg = String::from(
                 "No active agents registered.\n\nNote: Factory TUI must be running for agents to be registered.",
             );
+            msg.push_str(&spawn_section);
             msg.push_str(&died_section);
             if stale_pruned > 0 {
                 msg.push_str(&format!(
@@ -1049,16 +1284,23 @@ impl CasService {
         // silently expire under a genuinely working agent. Real task
         // assignment is the ground truth; a lease is corroborating (and
         // currently the only) evidence *before* that expiry.
-        let in_progress_assignees: std::collections::HashSet<String> = {
+        // GH #67: keep the whole task, not just the assignee name. The
+        // supervisor had to open the task store (or the worktree) to learn
+        // WHICH task a worker was holding; the roster knew all along.
+        let in_progress_tasks: Vec<cas_types::Task> = {
             use crate::store::open_task_store;
             open_task_store(&self.inner.cas_root)
                 .ok()
                 .and_then(|ts| ts.list(Some(cas_types::TaskStatus::InProgress)).ok())
                 .unwrap_or_default()
                 .into_iter()
-                .filter_map(|t| t.assignee)
+                .filter(|t| t.assignee.is_some())
                 .collect()
         };
+        let in_progress_assignees: std::collections::HashSet<String> = in_progress_tasks
+            .iter()
+            .filter_map(|t| t.assignee.clone())
+            .collect();
         // cas-78bf: retain assigned Open tasks (including their assignment
         // timestamp) so worker_status can distinguish the normal dispatch
         // grace window from a worker that has held work without ever
@@ -1393,8 +1635,19 @@ impl CasService {
                         }
                     }
                 };
+                // GH #67: name the assignment on the roster row itself.
+                let matches_agent = |assignee: Option<&str>| {
+                    assignee == Some(agent.name.as_str()) || assignee == Some(agent.id.as_str())
+                };
+                let task_info = format_assigned_task_info(
+                    in_progress_tasks
+                        .iter()
+                        .find(|t| matches_agent(t.assignee.as_deref()))
+                        .map(|t| (t.id.as_str(), t.title.as_str())),
+                    assigned_open_task.map(|t| (t.id.as_str(), t.title.as_str())),
+                );
                 output.push_str(&format!(
-                    "  • {} (heartbeat: {}){}{}{}{}{}{}{}{}{}\n    session: {}\n",
+                    "  • {} (heartbeat: {}){}{}{}{}{}{}{}{}{}{}\n    session: {}\n",
                     &agent.name,
                     since,
                     liveness_label,
@@ -1406,10 +1659,15 @@ impl CasService {
                     context_info,
                     activity_info,
                     harness_turn_info,
+                    task_info,
                     session_uuid
                 ));
             }
         }
+
+        // GH #60: spawn lifecycle — which request produced which worker, and
+        // which never registered.
+        output.push_str(&spawn_section);
 
         // cas-2e81: died-while-leased section (empty-fleet vs crash distinction).
         output.push_str(&died_section);
@@ -1908,10 +2166,13 @@ impl CasService {
             )
         };
         let host_registry_pids = crate::store::known_repos::host_registry_open_pids();
+        // cas-b7dd (GH #88): processes still alive inside a worktree with no
+        // live owner, plus registered servers whose session is gone.
+        let orphan_processes = scan_orphan_processes(&self.inner.cas_root, &live_workers);
 
         let mut out = String::from("Factory GC Report\n=================\n");
         out.push_str(&format!(
-            "\nStale agent threshold: {}s\nStale agents: {}\nPending prompts: {}\nActive worktrees: {}\nOrphan worktrees: {}\nOrphan worker process groups: {}\nLive-owned process groups skipped: {}\nUnverifiable process-group records preserved: {}\nStale process-group records: {}\nHost-registry open processes: {}\n",
+            "\nStale agent threshold: {}s\nStale agents: {}\nPending prompts: {}\nActive worktrees: {}\nOrphan worktrees: {}\nOrphan worker process groups: {}\nLive-owned process groups skipped: {}\nUnverifiable process-group records preserved: {}\nStale process-group records: {}\nHost-registry open processes: {}\nOrphan processes in worktrees: {}\nStale server registrations: {}\nReapable orphans: {}\n",
             stale_after,
             stale_agents.len(),
             pending_prompts,
@@ -1922,7 +2183,11 @@ impl CasService {
             unverifiable_process_groups.len(),
             stale_process_group_records,
             host_registry_pids.len(),
+            orphan_processes.processes.len(),
+            orphan_processes.servers.len(),
+            orphan_processes.reapable_count(),
         ));
+        out.push_str(&orphan_processes.render());
 
         if !stale_agents.is_empty() {
             out.push_str("\nStale agents:\n");
@@ -2402,6 +2667,20 @@ impl CasService {
         // for Cargo artifacts instead of unexpectedly deleting warm caches.
         let target_cache_mutation_authorized =
             req.force.unwrap_or(false) && req.dry_run == Some(false);
+
+        // cas-b7dd (GH #88): orphan processes use that same double gate, and
+        // for a stronger reason — this path sends SIGKILL to processes CAS did
+        // not start. A killed dev server cannot be un-killed, so `force=true`
+        // alone stays a preview here exactly as it does for warm caches.
+        // The scan is re-run now rather than reusing the report's snapshot, and
+        // each kill revalidates its own fingerprint again immediately before
+        // signalling (see `orphan_gc::cleanup`).
+        let orphan_processes = scan_orphan_processes(&self.inner.cas_root, &live_workers);
+        let orphan_process_summary = crate::ui::factory::orphan_gc::cleanup(
+            &self.inner.cas_root,
+            &orphan_processes,
+            target_cache_mutation_authorized,
+        );
         let target_cache_result = {
             let config = crate::config::Config::load(&self.inner.cas_root).unwrap_or_default();
             let policy = crate::factory_target_cache::TargetCachePolicy::from(config.factory());
@@ -2432,9 +2711,38 @@ impl CasService {
         };
 
         let mut output = format!(
-            "Factory GC cleanup complete.\n\nStale agents marked: {stale_marked}\nDead agent records purged: {dead_agent_records_purged}\nOrphan worktrees marked removed: {orphan_marked_removed}\nOrphan worker process groups reaped: {orphan_process_groups_reaped}\nLive-owned process groups skipped: {live_owned_process_groups_skipped}\nUnverifiable process-group records preserved: {}\nStale process-group records removed: {stale_process_group_records_removed}\nPrompt queue entries expired: {expired_prompts}\nPrompt queue entries cleared: {cleared_prompts}\nStale skill markers removed: {stale_skill_markers_removed}",
+            "Factory GC cleanup complete.\n\nStale agents marked: {stale_marked}\nDead agent records purged: {dead_agent_records_purged}\nOrphan worktrees marked removed: {orphan_marked_removed}\nOrphan worker process groups reaped: {orphan_process_groups_reaped}\nLive-owned process groups skipped: {live_owned_process_groups_skipped}\nUnverifiable process-group records preserved: {}\nStale process-group records removed: {stale_process_group_records_removed}\nPrompt queue entries expired: {expired_prompts}\nPrompt queue entries cleared: {cleared_prompts}\nStale skill markers removed: {stale_skill_markers_removed}\nOrphan processes killed: {}\nStale server registrations cleared: {}\nOrphan candidates spared or refused: {}",
             unverifiable_process_groups.len(),
+            orphan_process_summary.killed.len(),
+            orphan_process_summary.records_cleared.len(),
+            orphan_process_summary.skipped,
         );
+        if !orphan_process_summary.killed.is_empty() {
+            output.push_str(&format!(
+                "\nKilled pids: {}",
+                orphan_process_summary
+                    .killed
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        for error in &orphan_process_summary.errors {
+            output.push_str(&format!("\nOrphan cleanup error: {error}"));
+        }
+        if !target_cache_mutation_authorized && orphan_process_summary.would_kill > 0 {
+            output.push_str(&format!(
+                "\nOrphan processes previewed, not killed: {} (rerun with force=true dry_run=false)",
+                orphan_process_summary.would_kill
+            ));
+        }
+        // Always show WHY a candidate was left alone — a silently filtered
+        // orphan is indistinguishable from one CAS never saw, and that is the
+        // difference between "the port is free" and a wasted morning.
+        if !orphan_processes.is_empty() {
+            output.push_str(&orphan_processes.render());
+        }
         if !req.force.unwrap_or(false) && !orphan_process_groups.is_empty() {
             output.push_str(&format!(
                 "\nLive orphan process groups preserved: {} (rerun with force=true to reap)",
@@ -2569,6 +2877,39 @@ fn process_group_has_live_owner(
         record.worker_name.clone(),
         Some(record.factory_session.clone()),
     )) || live_workers.contains(&(record.worker_name.clone(), None))
+}
+
+/// Factory sessions currently running, by name.
+fn live_factory_sessions() -> std::collections::HashSet<String> {
+    crate::ui::factory::SessionManager::new()
+        .list_sessions()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|session| session.is_running)
+        .map(|session| session.name)
+        .collect()
+}
+
+/// Scan for orphan processes and stale server registrations (cas-b7dd, GH #88).
+///
+/// Process groups belonging to live workers are passed in as protected, so a
+/// running worker's own descendants are reported as owned rather than as
+/// orphans — that distinction is the difference between a GC and an outage.
+fn scan_orphan_processes(
+    cas_root: &std::path::Path,
+    live_workers: &LiveFactoryWorkers,
+) -> crate::ui::factory::orphan_gc::OrphanReport {
+    let protected_pgids: std::collections::HashSet<u32> =
+        crate::ui::factory::process_groups::list(cas_root)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|record| {
+                crate::ui::factory::process_groups::is_live(record)
+                    || process_group_has_live_owner(record, live_workers)
+            })
+            .map(|record| record.pgid)
+            .collect();
+    crate::ui::factory::orphan_gc::scan(cas_root, &live_factory_sessions(), &protected_pgids)
 }
 
 fn orphan_process_groups(
@@ -4303,6 +4644,250 @@ pub(crate) fn format_worker_git_status(gs: &WorkerGitStatus) -> String {
 // =============================================================================
 
 #[cfg(test)]
+mod spawn_lifecycle_tests {
+    use super::*;
+    use cas_store::{SpawnLifecycle, SpawnLifecycleState};
+
+    fn row(
+        id: i64,
+        worker: Option<&str>,
+        state: SpawnLifecycleState,
+        age_secs: i64,
+        detail: Option<&str>,
+    ) -> SpawnLifecycle {
+        SpawnLifecycle {
+            id,
+            worker_name: worker.map(str::to_string),
+            state,
+            detail: detail.map(str::to_string),
+            requested_names: Vec::new(),
+            task_id: None,
+            created_at: chrono::Utc::now() - chrono::Duration::seconds(age_secs),
+            state_at: None,
+        }
+    }
+
+    fn render(rows: &[SpawnLifecycle]) -> String {
+        format_spawn_lifecycle_section(rows, chrono::Utc::now())
+    }
+
+    /// No spawn history → no section. `worker_status` must not grow a stub
+    /// heading on every poll in a session that never spawned.
+    #[test]
+    fn empty_history_renders_nothing() {
+        assert!(render(&[]).is_empty());
+    }
+
+    /// The core GH #60 requirement: a request that launched but never
+    /// registered is reported as FAILED with its reason — not as silence.
+    #[test]
+    fn failed_spawn_is_named_with_its_reason() {
+        let out = render(&[row(
+            417,
+            Some("quiet-lynx-3"),
+            SpawnLifecycleState::Failed,
+            200,
+            Some("did not register with CAS within 120 seconds"),
+        )]);
+        assert!(out.contains("request 417"), "{out}");
+        assert!(out.contains("quiet-lynx-3"), "{out}");
+        assert!(out.contains("FAILED"), "{out}");
+        assert!(out.contains("did not register"), "{out}");
+        assert!(
+            out.contains("⚠"),
+            "a failure must carry the warning line: {out}"
+        );
+    }
+
+    /// A request still sitting in a non-terminal state past the threshold is
+    /// UNCONFIRMED. This is the 2026-07-27 incident shape: success-shaped
+    /// receipt, nothing consuming the queue, both daemon logs zero bytes.
+    #[test]
+    fn stale_queued_request_is_flagged_unconfirmed() {
+        let out = render(&[row(43, None, SpawnLifecycleState::Queued, 600, None)]);
+        assert!(out.contains("UNCONFIRMED"), "{out}");
+        assert!(out.contains("treat it as not dispatched"), "{out}");
+    }
+
+    /// A spawn still provisioning inside the normal window is NOT flagged —
+    /// the signal has to stay quiet during ordinary git worktree setup or
+    /// supervisors will learn to ignore it.
+    #[test]
+    fn fresh_in_flight_request_is_not_flagged() {
+        let out = render(&[row(
+            44,
+            Some("brave-otter-9"),
+            SpawnLifecycleState::Provisioning,
+            5,
+            None,
+        )]);
+        assert!(out.contains("provisioning"), "{out}");
+        assert!(!out.contains("UNCONFIRMED"), "{out}");
+        assert!(!out.contains("⚠"), "{out}");
+    }
+
+    /// A registered spawn is never flagged, however old it is.
+    #[test]
+    fn registered_spawn_is_never_flagged() {
+        let out = render(&[row(
+            45,
+            Some("steady-crane-1"),
+            SpawnLifecycleState::Registered,
+            1500,
+            None,
+        )]);
+        assert!(out.contains("registered"), "{out}");
+        assert!(!out.contains("UNCONFIRMED"), "{out}");
+        assert!(!out.contains("⚠"), "{out}");
+    }
+
+    /// Each request renders its OWN worker. The live defect this fixes:
+    /// four spawn-verified receipts attributed requests 414-417 to the wrong
+    /// workers, and two batch receipts both claimed request 417.
+    #[test]
+    fn every_request_renders_its_own_worker_and_id() {
+        let out = render(&[
+            row(
+                414,
+                Some("worker-a"),
+                SpawnLifecycleState::Registered,
+                60,
+                None,
+            ),
+            row(
+                415,
+                Some("worker-b"),
+                SpawnLifecycleState::Registered,
+                50,
+                None,
+            ),
+            row(
+                416,
+                Some("worker-c"),
+                SpawnLifecycleState::Registered,
+                40,
+                None,
+            ),
+            row(
+                417,
+                Some("worker-d"),
+                SpawnLifecycleState::Registered,
+                30,
+                None,
+            ),
+        ]);
+        for (id, worker) in [
+            (414, "worker-a"),
+            (415, "worker-b"),
+            (416, "worker-c"),
+            (417, "worker-d"),
+        ] {
+            let line = out
+                .lines()
+                .find(|l| l.contains(&format!("request {id}")))
+                .unwrap_or_else(|| panic!("request {id} missing from:\n{out}"));
+            assert!(
+                line.contains(worker),
+                "request {id} must name {worker}, got: {line}"
+            );
+        }
+        // And no line may name a worker belonging to a different request.
+        let line_414 = out.lines().find(|l| l.contains("request 414")).unwrap();
+        assert!(
+            !line_414.contains("worker-d"),
+            "cross-attribution: {line_414}"
+        );
+    }
+
+    /// Ancient history is dropped so the section stays scannable.
+    #[test]
+    fn requests_outside_the_window_are_dropped() {
+        let out = render(&[row(
+            1,
+            Some("ancient-worker"),
+            SpawnLifecycleState::Registered,
+            SPAWN_HISTORY_WINDOW_SECS + 60,
+            None,
+        )]);
+        assert!(out.is_empty(), "{out}");
+    }
+
+    /// A pre-assigned task travels with the request so the supervisor can see
+    /// which dispatch died without opening the task store.
+    #[test]
+    fn preassigned_task_is_shown() {
+        let mut r = row(
+            418,
+            Some("worker-e"),
+            SpawnLifecycleState::Failed,
+            200,
+            None,
+        );
+        r.task_id = Some("cas-1234".to_string());
+        let out = render(&[r]);
+        assert!(out.contains("[task cas-1234]"), "{out}");
+    }
+
+    // ===== GH #67: the roster names the assignment =====
+
+    /// An in-progress assignment is named on the worker's own row, so a
+    /// supervisor never has to open the task store or the worktree to learn
+    /// what a worker is doing.
+    #[test]
+    fn in_progress_task_is_named_on_the_row() {
+        let out =
+            format_assigned_task_info(Some(("cas-8b84", "Worker lifecycle observability")), None);
+        assert!(out.contains("cas-8b84"), "{out}");
+        assert!(out.contains("in progress"), "{out}");
+        assert!(out.contains("Worker lifecycle observability"), "{out}");
+    }
+
+    /// Assigned-but-not-started is a DIFFERENT state from in-progress: it is
+    /// either the dispatch grace window or a worker that never picked the task
+    /// up, and the supervisor must be able to tell those from an idle row.
+    #[test]
+    fn assigned_but_unstarted_is_distinguished_from_in_progress() {
+        let out = format_assigned_task_info(None, Some(("cas-4242", "Fix the thing")));
+        assert!(out.contains("cas-4242"), "{out}");
+        assert!(out.contains("assigned, not started"), "{out}");
+        assert!(!out.contains("in progress"), "{out}");
+    }
+
+    /// In-progress wins when a worker somehow holds both — the started task is
+    /// the one it is actually working.
+    #[test]
+    fn in_progress_takes_precedence_over_open_assignment() {
+        let out = format_assigned_task_info(
+            Some(("cas-1111", "Started work")),
+            Some(("cas-2222", "Also assigned")),
+        );
+        assert!(out.contains("cas-1111"), "{out}");
+        assert!(!out.contains("cas-2222"), "{out}");
+    }
+
+    /// A worker with nothing assigned says so explicitly. An absent line reads
+    /// as missing data; "none assigned" is an answer.
+    #[test]
+    fn unassigned_worker_says_none_assigned() {
+        let out = format_assigned_task_info(None, None);
+        assert!(out.contains("none assigned"), "{out}");
+    }
+
+    /// Long titles are capped so one verbose task cannot wreck the roster.
+    #[test]
+    fn long_titles_are_truncated() {
+        let long = "x".repeat(200);
+        let out = format_assigned_task_info(Some(("cas-9999", &long)), None);
+        assert!(out.contains('…'), "{out}");
+        assert!(
+            out.len() < 140,
+            "row must stay scannable, got {} chars",
+            out.len()
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -4382,6 +4967,133 @@ mod tests {
         );
         let _ = group.child.wait();
     }
+
+    /// cas-b7dd / GH #88 at the GC surface: a live worker's own process group
+    /// must never be reported as an orphan process, and a planted orphan in
+    /// the same worktree tree must be.
+    ///
+    /// This is the pairing that matters. A GC that finds orphans but also
+    /// "finds" live workers is not a GC, it is an outage generator, so both
+    /// halves are asserted against the same scan.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn orphan_process_scan_separates_live_worker_groups_from_real_orphans() {
+        use std::os::unix::process::CommandExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let cas_root = temp.path().to_path_buf();
+        let worktree = cas_root.join("worktrees/worker-a");
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        // A live worker: its own session/process group, tracked, still running.
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "sleep 120 & wait"]);
+        command.current_dir(&worktree);
+        // SAFETY: isolate this synthetic lane from cargo's process group.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = command.spawn().unwrap();
+        let live_pgid = child.id();
+        // RAII: `SyntheticProcessGroup::drop` killpg's the group and only then
+        // waits. Do NOT call `child.wait()` directly while it is still alive —
+        // that blocks for the full sleep and turns a fast test into a
+        // two-minute one.
+        let _group = SyntheticProcessGroup {
+            child,
+            pgid: live_pgid,
+        };
+        crate::ui::factory::process_groups::track(
+            &cas_root,
+            "worker-a",
+            "live-session",
+            live_pgid,
+        )
+        .unwrap();
+
+        // A genuine orphan in the same worktree: launcher exits, child adopted.
+        let planted = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 120 >/dev/null 2>&1 </dev/null & echo $!")
+            .current_dir(&worktree)
+            .output()
+            .unwrap();
+        let orphan_pid: u32 = String::from_utf8_lossy(&planted.stdout)
+            .trim()
+            .parse()
+            .unwrap();
+        // Let the launcher exit so the child is adopted.
+        for _ in 0..200 {
+            if !crate::mcp::daemon::pid_alive(orphan_pid) {
+                break;
+            }
+            let adopted = crate::ui::factory::orphan_gc::parent_state(
+                std::fs::read_to_string(format!("/proc/{orphan_pid}/stat"))
+                    .ok()
+                    .and_then(|stat| {
+                        stat.rsplit_once(')')?
+                            .1
+                            .split_whitespace()
+                            .nth(1)?
+                            .parse::<u32>()
+                            .ok()
+                    })
+                    .unwrap_or(1),
+            );
+            if adopted != crate::ui::factory::orphan_gc::ParentState::Alive {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+
+        let live_workers = live_factory_workers_from_agents([]);
+        let report = scan_orphan_processes(&cas_root, &live_workers);
+
+        let orphan = report
+            .processes
+            .iter()
+            .find(|p| p.pid == orphan_pid)
+            .expect("planted orphan must be reported");
+        assert!(
+            orphan.disposition.is_reapable(),
+            "planted orphan should be reapable, was {:?}",
+            orphan.disposition
+        );
+
+        // The live worker's group leader sits in the same worktree; it must be
+        // spared (reported as owned, never reapable).
+        let live_entry = report.processes.iter().find(|p| p.pid == live_pgid);
+        assert!(
+            live_entry.is_none_or(|p| !p.disposition.is_reapable()),
+            "a tracked live worker process must never be reapable: {live_entry:?}"
+        );
+
+        // Preview must kill nothing at all.
+        let preview = crate::ui::factory::orphan_gc::cleanup(&cas_root, &report, false);
+        assert!(preview.killed.is_empty());
+        assert!(crate::mcp::daemon::pid_alive(orphan_pid));
+
+        let done = crate::ui::factory::orphan_gc::cleanup(&cas_root, &report, true);
+        assert!(
+            done.killed.contains(&orphan_pid),
+            "authorized cleanup must reap the orphan; errors {:?}",
+            done.errors
+        );
+        assert!(
+            !done.killed.contains(&live_pgid),
+            "and must never reap the live worker"
+        );
+        assert!(crate::mcp::daemon::pid_alive(live_pgid));
+
+        // SAFETY: test cleanup for a pid this test planted.
+        unsafe { libc::kill(orphan_pid as libc::pid_t, libc::SIGKILL) };
+    }
+
     use crate::test_support::TestEnvGuard;
     use cas_types::AgentRole;
 
@@ -4446,6 +5158,96 @@ mod tests {
         assert_eq!(spec.cli, cas_mux::SupervisorCli::Claude);
         assert_eq!(spec.model.as_deref(), Some("opus"));
         assert_eq!(spec.effort, Some(cas_mux::Effort::High));
+    }
+
+    // -----------------------------------------------------------------------
+    // cas-28a4 / GH #71: an invalid cli+model pairing must never reach the
+    // spawn queue. The live report: `model=claude-opus-4-5` with no `cli=`
+    // resolved to the stock Codex default and spawned two Codex workers
+    // carrying a Claude slug, with no error.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn spawn_spec_rejects_claude_model_on_explicit_codex_cli() {
+        let _home = TestEnvGuard::temp_home();
+        let err = build_spawn_spec_json(Some("codex"), Some("claude-opus-4-5"), None)
+            .expect_err("codex + claude slug must be rejected at enqueue");
+
+        assert!(err.contains("claude-opus-4-5"), "{err}");
+        assert!(err.contains("codex"), "names the requested cli: {err}");
+        assert!(
+            err.contains("cli=claude"),
+            "error must state the actionable fix: {err}"
+        );
+    }
+
+    #[test]
+    fn spawn_spec_rejects_codex_model_on_explicit_claude_cli() {
+        let _home = TestEnvGuard::temp_home();
+        let err = build_spawn_spec_json(Some("claude"), Some("gpt-5.6-terra"), None)
+            .expect_err("claude + codex slug must be rejected at enqueue");
+
+        assert!(err.contains("gpt-5.6-terra"), "{err}");
+        assert!(err.contains("cli=codex"), "{err}");
+    }
+
+    /// The live #71 case: no `cli=` at all. The model slug is unambiguous, so
+    /// it — not the stock Codex default — decides the harness.
+    #[test]
+    fn spawn_spec_omitted_cli_follows_an_explicit_claude_model() {
+        let _home = TestEnvGuard::temp_home();
+        let json = build_spawn_spec_json(None, Some("claude-opus-4-5"), None).unwrap();
+        let spec = decoded_spawn_spec(&json);
+
+        assert_eq!(
+            spec.cli,
+            cas_mux::SupervisorCli::Claude,
+            "an explicit claude model must not be spawned on codex"
+        );
+        assert_eq!(spec.model.as_deref(), Some("claude-opus-4-5"));
+    }
+
+    #[test]
+    fn spawn_spec_omitted_cli_follows_an_explicit_grok_model() {
+        let _home = TestEnvGuard::temp_home();
+        let json = build_spawn_spec_json(None, Some("grok-4.5"), None).unwrap();
+        let spec = decoded_spawn_spec(&json);
+        assert_eq!(spec.cli, cas_mux::SupervisorCli::Grok);
+    }
+
+    /// Matching pairs and unrecognized slugs must stay untouched — validation
+    /// rejects known-bad combinations, it does not police the model catalog.
+    #[test]
+    fn spawn_spec_accepts_matching_and_unknown_model_slugs() {
+        let _home = TestEnvGuard::temp_home();
+        for (cli, model) in [
+            ("claude", "claude-opus-5"),
+            ("claude", "opus"),
+            ("codex", "gpt-5.6-terra"),
+            ("grok", "grok-4.5"),
+            ("codex", "some-unreleased-slug"),
+        ] {
+            let json = build_spawn_spec_json(Some(cli), Some(model), None)
+                .unwrap_or_else(|e| panic!("cli={cli} model={model} must be accepted: {e}"));
+            let spec = decoded_spawn_spec(&json);
+            assert_eq!(spec.model.as_deref(), Some(model));
+        }
+    }
+
+    #[test]
+    fn model_slug_families_are_classified_conservatively() {
+        use cas_mux::SupervisorCli;
+        assert_eq!(cli_for_model_slug("claude-opus-5"), Some(SupervisorCli::Claude));
+        assert_eq!(cli_for_model_slug("opus"), Some(SupervisorCli::Claude));
+        assert_eq!(cli_for_model_slug("SONNET"), Some(SupervisorCli::Claude));
+        assert_eq!(cli_for_model_slug("gpt-5.6-sol"), Some(SupervisorCli::Codex));
+        assert_eq!(cli_for_model_slug("gpt-5.6-terra"), Some(SupervisorCli::Codex));
+        assert_eq!(cli_for_model_slug("grok-4.5"), Some(SupervisorCli::Grok));
+        assert_eq!(
+            cli_for_model_slug("mystery-model-9"),
+            None,
+            "unknown slugs must not be guessed into a harness"
+        );
     }
 
     #[test]

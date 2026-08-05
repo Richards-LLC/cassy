@@ -30,6 +30,43 @@ const PROMPT_RETRY_MAX_DELAY_MS: i64 = 5_000;
 /// transport-delivered copy is still awaiting confirmation.
 const PROMPT_DUPLICATE_WINDOW_SECS: i64 = 30;
 
+/// Age after which an *undelivered* queue row is treated as stale and is
+/// quarantined instead of delivered (cas-d047, GH #69).
+///
+/// A row only reaches this age if no recipient ever consumed it — the bounded
+/// retry policy above already terminates rows whose delivery was *attempted*
+/// and failed. What survives is the misaddressed case: a row addressed to a
+/// name that no live agent holds, sitting until some future session happens to
+/// spawn a worker with the same name and hands it a months-old instruction
+/// from a different lane. 24h is comfortably longer than any legitimate
+/// spawn-then-assign or paused-session gap, and far shorter than the 4.5-month
+/// delivery that motivated this bound.
+pub const PROMPT_QUEUE_STALE_TTL_SECS: i64 = 24 * 60 * 60;
+
+/// Rows the daemon terminally quarantined are not deliverable content.
+const TERMINAL_NON_DELIVERY_STAGES: &str = "('dropped', 'suppressed', 'abandoned')";
+
+/// Daemon selection must skip rows the addressed recipient already consumed
+/// (cas-d047, GH #70).
+///
+/// Two independent consumption signals, both recorded *outside* the daemon's
+/// own `processed_at` bookkeeping, used to leave a row selectable:
+/// - the recipient drained it through `poll_unseen_for_recipient` (inbox poll),
+/// - the recipient acknowledged it (`ack` / `ack_delivered_for_recipient`).
+///
+/// Either way, re-selecting the row re-writes it to the recipient's inbox and,
+/// on the idle-nudge path, types it into the pane a second time — the exact
+/// duplicate deliveries reported in GH #70.
+///
+/// `all_workers` is deliberately exempt: broadcast read state is per-recipient
+/// (`prompt_queue_recipient_seen`), so one worker's drain must never hide the
+/// row from peers the daemon still has to deliver it to.
+const NOT_ALREADY_CONSUMED_SQL: &str =
+    "AND (target = 'all_workers' OR (acked_at IS NULL AND NOT EXISTS (
+                       SELECT 1 FROM prompt_queue_recipient_seen seen
+                       WHERE seen.prompt_id = prompt_queue.id
+                         AND seen.recipient = prompt_queue.target)))";
+
 /// Result of recording a failed daemon delivery attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptRetryDisposition {
@@ -818,6 +855,16 @@ pub trait PromptQueueStore: Send + Sync {
     /// it preserves rows and their forensic status instead of deleting them.
     fn abandon_pending_older_than(&self, older_than_secs: i64) -> Result<usize>;
 
+    /// Quarantine undelivered rows older than `older_than_secs` (cas-d047).
+    ///
+    /// Unlike [`PromptQueueStore::abandon_ineligible_session_targets`], this is
+    /// not scoped to a roster: a stale row is stale whatever its target and
+    /// whatever session tagged it (NULL-session rows are the ones that leaked
+    /// across sessions in GH #69). Rows are marked `Abandoned` with a forensic
+    /// detail — never deleted — and returned so the caller can log exactly what
+    /// was withheld from delivery.
+    fn expire_stale_pending(&self, older_than_secs: i64) -> Result<Vec<QueuedPrompt>>;
+
     /// Abandon aged, session-scoped rows whose target is no longer a member
     /// of that session. Fresh rows stay pending so pre-registration delivery
     /// retains its grace period.
@@ -1557,11 +1604,24 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         crate::shared_db::with_write_retry(|| {
             let conn = self.conn.lock().unwrap();
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            // cas-d047 (GH #69): never hand a recipient a months-old item, and
+            // (GH #70 sibling) never hand it a row the daemon already
+            // terminally quarantined as dropped/suppressed/abandoned — neither
+            // is actionable content, and both read as live instructions to the
+            // worker that receives them.
+            let stale_cutoff =
+                (Utc::now() - chrono::Duration::seconds(PROMPT_QUEUE_STALE_TTL_SECS)).to_rfc3339();
+            let deliverable_sql = format!(
+                "AND q.created_at >= ?
+                 AND (q.highest_stage IS NULL
+                      OR q.highest_stage NOT IN {TERMINAL_NON_DELIVERY_STAGES})"
+            );
 
-            let (sql, query_params): (&str, Vec<Box<dyn rusqlite::ToSql>>) =
+            let (sql, query_params): (String, Vec<Box<dyn rusqlite::ToSql>>) =
                 if let Some(session) = factory_session {
                     (
-                        "SELECT q.id, q.source, q.target, q.prompt, q.created_at,
+                        format!(
+                            "SELECT q.id, q.source, q.target, q.prompt, q.created_at,
                                 q.processed_at, q.summary, q.priority, q.acked_at,
                                 q.urgent, q.factory_session
                          FROM prompt_queue q
@@ -1569,12 +1629,15 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                            ON seen.prompt_id = q.id AND seen.recipient = ?
                          WHERE (q.target = 'all_workers' OR q.acked_at IS NULL)
                            AND seen.prompt_id IS NULL
+                           {deliverable_sql}
                            AND (q.target = ? OR q.target = 'all_workers')
                            AND (q.factory_session = ? OR q.factory_session IS NULL)
                          ORDER BY q.priority ASC, q.id ASC
-                         LIMIT ?",
+                         LIMIT ?"
+                        ),
                         vec![
                             Box::new(recipient.to_string()),
+                            Box::new(stale_cutoff.clone()),
                             Box::new(recipient.to_string()),
                             Box::new(session.to_string()),
                             Box::new(sql_limit),
@@ -1582,7 +1645,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     )
                 } else {
                     (
-                        "SELECT q.id, q.source, q.target, q.prompt, q.created_at,
+                        format!(
+                            "SELECT q.id, q.source, q.target, q.prompt, q.created_at,
                                 q.processed_at, q.summary, q.priority, q.acked_at,
                                 q.urgent, q.factory_session
                          FROM prompt_queue q
@@ -1590,12 +1654,15 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                            ON seen.prompt_id = q.id AND seen.recipient = ?
                          WHERE (q.target = 'all_workers' OR q.acked_at IS NULL)
                            AND seen.prompt_id IS NULL
+                           {deliverable_sql}
                            AND (q.target = ? OR q.target = 'all_workers')
                            AND q.factory_session IS NULL
                          ORDER BY q.priority ASC, q.id ASC
-                         LIMIT ?",
+                         LIMIT ?"
+                        ),
                         vec![
                             Box::new(recipient.to_string()),
+                            Box::new(stale_cutoff.clone()),
                             Box::new(recipient.to_string()),
                             Box::new(sql_limit),
                         ],
@@ -1603,7 +1670,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 };
 
             let prompts: Vec<QueuedPrompt> = {
-                let mut stmt = tx.prepare_cached(sql)?;
+                let mut stmt = tx.prepare_cached(&sql)?;
                 stmt.query_map(
                     rusqlite::params_from_iter(query_params.iter().map(|p| p.as_ref())),
                     Self::prompt_from_row,
@@ -1620,6 +1687,40 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 )?;
                 for prompt in &prompts {
                     stmt.execute(params![prompt.id, recipient, seen_at])?;
+                }
+                drop(stmt);
+
+                // cas-d047 (GH #70): a direct row the addressed recipient just
+                // pulled has been *received* — a stronger fact than transport
+                // handoff. Stamp it in the same transaction so it leaves the
+                // pending set; leaving it `processed_at IS NULL` is what let a
+                // later daemon tick re-write it to the inbox and re-type it
+                // into an idle pane. `all_workers` is excluded: its read state
+                // is per-recipient, so one drain must not consume the row for
+                // peers.
+                for prompt in &prompts {
+                    if prompt.target == "all_workers" {
+                        continue;
+                    }
+                    if let Err(error) = Self::atomic_stage_stamp_in_tx(
+                        &tx,
+                        prompt.id,
+                        DeliveryStage::Delivered,
+                        AtomicStampOpts::reason(
+                            PendingReason::AwaitingAck,
+                            Some("consumed by recipient inbox poll"),
+                        ),
+                    ) {
+                        // A row in a terminal non-delivery stage cannot advance
+                        // to Delivered. Those are filtered out above, so this is
+                        // defensive only: never fail the recipient's drain over
+                        // bookkeeping.
+                        tracing::debug!(
+                            prompt_id = prompt.id,
+                            %error,
+                            "cas-d047: could not stamp drained prompt as delivered"
+                        );
+                    }
                 }
             }
 
@@ -1705,6 +1806,12 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
         let conn = self.conn.lock().unwrap();
         let now = Utc::now().to_rfc3339();
+        // cas-d047 (GH #69): a row this old was never consumed by anyone;
+        // delivering it now would hand a live worker an instruction from a
+        // session that ended long ago. Withheld here even before the sweep
+        // that formally quarantines it has run.
+        let stale_cutoff =
+            (Utc::now() - chrono::Duration::seconds(PROMPT_QUEUE_STALE_TTL_SECS)).to_rfc3339();
 
         // Legacy path (no session): single-lane target filter.
         let Some(session) = factory_session else {
@@ -1718,14 +1825,18 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                      FROM prompt_queue
                      WHERE processed_at IS NULL
                        AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+                       AND created_at >= ?
+                       {NOT_ALREADY_CONSUMED_SQL}
                        AND target IN ({})
                  )
                  ORDER BY priority ASC, cas_target_rn ASC, id ASC
                  LIMIT ?",
                 placeholders.join(", ")
             );
-            let mut params: Vec<Box<dyn rusqlite::ToSql>> =
-                vec![Box::new(now.clone()) as Box<dyn rusqlite::ToSql>];
+            let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
+                Box::new(now.clone()) as Box<dyn rusqlite::ToSql>,
+                Box::new(stale_cutoff.clone()) as Box<dyn rusqlite::ToSql>,
+            ];
             params.extend(
                 targets
                     .iter()
@@ -1772,13 +1883,18 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                  FROM prompt_queue
                  WHERE processed_at IS NULL
                    AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+                   AND created_at >= ?
+                   {NOT_ALREADY_CONSUMED_SQL}
                    AND factory_session = ?
                    AND target IN ({})
              )
              ORDER BY priority ASC, cas_target_rn ASC, id ASC
              LIMIT ?", placeholders.join(", "));
-        let mut session_params: Vec<Box<dyn rusqlite::ToSql>> =
-            vec![Box::new(now.clone()), Box::new(session.to_string())];
+        let mut session_params: Vec<Box<dyn rusqlite::ToSql>> = vec![
+            Box::new(now.clone()),
+            Box::new(stale_cutoff.clone()),
+            Box::new(session.to_string()),
+        ];
         session_params.extend(
             targets
                 .iter()
@@ -1800,6 +1916,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                      FROM prompt_queue
                      WHERE processed_at IS NULL
                        AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+                       AND created_at >= ?
+                       {NOT_ALREADY_CONSUMED_SQL}
                        AND factory_session IS NULL
                        AND target IN ({})
                  )
@@ -1807,8 +1925,10 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                  LIMIT ?",
                 placeholders.join(", ")
             );
-            let mut legacy_params: Vec<Box<dyn rusqlite::ToSql>> =
-                vec![Box::new(now) as Box<dyn rusqlite::ToSql>];
+            let mut legacy_params: Vec<Box<dyn rusqlite::ToSql>> = vec![
+                Box::new(now) as Box<dyn rusqlite::ToSql>,
+                Box::new(stale_cutoff) as Box<dyn rusqlite::ToSql>,
+            ];
             legacy_params.extend(
                 targets
                     .iter()
@@ -2416,6 +2536,46 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 params![now, detail, cutoff],
             )?;
             Ok(rows)
+        })
+    }
+
+    fn expire_stale_pending(&self, older_than_secs: i64) -> Result<Vec<QueuedPrompt>> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = self.conn.lock().unwrap();
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            let cutoff = (Utc::now() - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
+            let now = Utc::now().to_rfc3339();
+
+            let stale: Vec<QueuedPrompt> = {
+                let mut stmt = tx.prepare_cached(
+                    "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session
+                     FROM prompt_queue
+                     WHERE processed_at IS NULL AND created_at < ?
+                     ORDER BY id ASC",
+                )?;
+                stmt.query_map(params![cutoff], Self::prompt_from_row)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?
+            };
+
+            if !stale.is_empty() {
+                let detail = format!(
+                    "stale queue item: pending {older_than_secs}s+ with no successful handoff — \
+                     quarantined instead of delivered (cas-d047)"
+                );
+                tx.execute(
+                    "UPDATE prompt_queue
+                     SET processed_at = COALESCE(processed_at, ?),
+                         highest_stage = 'abandoned',
+                         last_pending_reason = 'abandoned_unknown_target',
+                         last_pending_detail = ?,
+                         next_attempt_at = NULL
+                     WHERE processed_at IS NULL AND created_at < ?",
+                    params![now, detail, cutoff],
+                )?;
+            }
+
+            tx.commit()?;
+            Ok(stale)
         })
     }
 
@@ -4945,10 +5105,15 @@ mod tests {
                 .is_empty(),
             "the same recipient must not receive a second inbox-poll copy"
         );
+        // cas-d047 (GH #70) revises this for DIRECT rows only: a message the
+        // addressed recipient pulled itself has been received, so the row is
+        // consumed rather than left pending for a later daemon tick to write
+        // to the inbox again and re-type into an idle pane. Broadcast rows keep
+        // the original per-recipient contract asserted just below.
         assert_eq!(
             store.message_status(direct).unwrap(),
-            Some(MessageStatus::Pending),
-            "inbox polling must not consume daemon transport delivery"
+            Some(MessageStatus::Delivered),
+            "a direct row drained by its recipient is consumed, not left pending"
         );
         assert_eq!(
             store.message_status(broadcast).unwrap(),
@@ -5093,5 +5258,250 @@ mod tests {
             1,
             "the IMMEDIATE claim transaction must deliver a row to only one connection"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // cas-d047 — message-queue hygiene (GH #70 redelivery, GH #69 stale items)
+    // ---------------------------------------------------------------------
+
+    /// Backdate a row's `created_at` so age-based rules can be exercised
+    /// without sleeping.
+    fn backdate(store: &SqlitePromptQueueStore, id: i64, age_secs: i64) {
+        let created = (Utc::now() - chrono::Duration::seconds(age_secs)).to_rfc3339();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE prompt_queue SET created_at = ? WHERE id = ?",
+                params![created, id],
+            )
+            .unwrap();
+    }
+
+    /// GH #70 core: once the addressed recipient has drained a message through
+    /// its own inbox poll, the daemon must never select that row again — the
+    /// idle-nudge path re-delivered exactly these rows because a recipient
+    /// drain left `processed_at` NULL.
+    #[test]
+    fn drained_message_is_never_reselected_by_the_daemon() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_with_session("supervisor", "worker-a", "start cas-1234", "sess-1")
+            .unwrap();
+
+        let drained = store
+            .poll_unseen_for_recipient("worker-a", Some("sess-1"), 10)
+            .unwrap();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].id, id);
+
+        let peeked = store
+            .peek_for_targets(&["worker-a"], Some("sess-1"), 10)
+            .unwrap();
+        assert!(
+            peeked.is_empty(),
+            "a message already drained by its recipient must not be re-delivered, got {peeked:?}"
+        );
+        assert_eq!(
+            store.pending_count().unwrap(),
+            0,
+            "a drained direct row must leave the pending set instead of lingering forever"
+        );
+        let report = store.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(report.stage, DeliveryStage::Delivered);
+    }
+
+    /// A second poll by the same recipient is already suppressed by the seen
+    /// table; this pins that drain remains idempotent after the row is stamped.
+    #[test]
+    fn draining_twice_returns_nothing_the_second_time() {
+        let (_temp, store) = create_test_store();
+        store
+            .enqueue_with_session("supervisor", "worker-a", "contract addendum", "sess-1")
+            .unwrap();
+
+        assert_eq!(
+            store
+                .poll_unseen_for_recipient("worker-a", Some("sess-1"), 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            store
+                .poll_unseen_for_recipient("worker-a", Some("sess-1"), 10)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// GH #70, second shape: an acknowledged message (the recipient answered
+    /// the sender) must also drop out of daemon selection.
+    #[test]
+    fn acked_message_is_never_reselected_by_the_daemon() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_with_session("supervisor", "worker-a", "please merge", "sess-1")
+            .unwrap();
+        store.mark_transport_delivered(id).unwrap();
+        // Re-open the row for selection the way a retry would (processed_at is
+        // the daemon's own bookkeeping; the ack is the recipient's).
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE prompt_queue SET processed_at = NULL WHERE id = ?",
+                params![id],
+            )
+            .unwrap();
+        store.ack(id).unwrap();
+
+        assert!(
+            store
+                .peek_for_targets(&["worker-a"], Some("sess-1"), 10)
+                .unwrap()
+                .is_empty(),
+            "an acked message must not be re-delivered"
+        );
+    }
+
+    /// The recipient-scoped exclusion must not collapse broadcasts: one
+    /// worker draining an `all_workers` row cannot hide it from the daemon
+    /// (which still has to deliver it to every other worker).
+    #[test]
+    fn broadcast_row_survives_one_recipient_drain() {
+        let (_temp, store) = create_test_store();
+        store
+            .enqueue_with_session("supervisor", "all_workers", "standup", "sess-1")
+            .unwrap();
+
+        assert_eq!(
+            store
+                .poll_unseen_for_recipient("worker-a", Some("sess-1"), 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .peek_for_targets(&["worker-a", "worker-b", "all_workers"], Some("sess-1"), 10)
+                .unwrap()
+                .len(),
+            1,
+            "a broadcast must stay deliverable to peers after one recipient drains it"
+        );
+        assert_eq!(
+            store
+                .poll_unseen_for_recipient("worker-b", Some("sess-1"), 10)
+                .unwrap()
+                .len(),
+            1,
+            "peers must still see the broadcast"
+        );
+    }
+
+    /// GH #69: a months-old undelivered queue item must be expired with a
+    /// reportable record instead of waiting for any worker whose name matches.
+    #[test]
+    fn expire_stale_pending_quarantines_ancient_rows() {
+        let (_temp, store) = create_test_store();
+        let stale = store
+            .enqueue("supervisor", "wise-raven-21", "verify+close cas-85c0")
+            .unwrap();
+        backdate(&store, stale, 130 * 24 * 3600);
+        let fresh = store
+            .enqueue("supervisor", "wise-raven-21", "start cas-4717")
+            .unwrap();
+
+        let expired = store
+            .expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS)
+            .unwrap();
+        assert_eq!(expired.len(), 1, "only the ancient row expires");
+        assert_eq!(expired[0].id, stale);
+        assert_eq!(expired[0].target, "wise-raven-21");
+
+        let report = store.message_delivery_report(stale).unwrap().unwrap();
+        assert_eq!(report.stage, DeliveryStage::Abandoned);
+        assert_eq!(
+            report.pending_reason,
+            Some(PendingReason::AbandonedUnknownTarget)
+        );
+        assert!(
+            report
+                .pending_detail
+                .as_deref()
+                .is_some_and(|d| d.contains("stale")),
+            "expiry must leave a forensic detail, got {:?}",
+            report.pending_detail
+        );
+
+        // Idempotent: a second sweep has nothing left to expire.
+        assert!(
+            store
+                .expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS)
+                .unwrap()
+                .is_empty()
+        );
+
+        let peeked = store
+            .peek_for_targets(&["wise-raven-21"], None, 10)
+            .unwrap();
+        assert_eq!(peeked.len(), 1, "the fresh row is untouched");
+        assert_eq!(peeked[0].id, fresh);
+    }
+
+    /// GH #69, delivery-side guarantee: even if no sweep has run yet, a
+    /// freshly spawned worker's inbox poll must not hand it a months-old item,
+    /// and the daemon must not inject one either.
+    #[test]
+    fn stale_rows_are_not_delivered_to_a_newly_spawned_worker() {
+        let (_temp, store) = create_test_store();
+        let stale = store
+            .enqueue("supervisor", "wise-raven-21", "verify+close cas-85c0")
+            .unwrap();
+        backdate(&store, stale, 130 * 24 * 3600);
+
+        assert!(
+            store
+                .poll_unseen_for_recipient("wise-raven-21", None, 10)
+                .unwrap()
+                .is_empty(),
+            "a stale cross-session item must not reach a new worker's inbox"
+        );
+        assert!(
+            store
+                .peek_for_targets(&["wise-raven-21"], None, 10)
+                .unwrap()
+                .is_empty(),
+            "a stale item must not be injected by the daemon either"
+        );
+    }
+
+    /// A row the daemon terminally quarantined (dropped/suppressed/abandoned)
+    /// is not deliverable content: the recipient inbox poll must skip it.
+    #[test]
+    fn inbox_poll_skips_terminally_quarantined_rows() {
+        let (_temp, store) = create_test_store();
+        let abandoned = store.enqueue("supervisor", "worker-a", "ghost").unwrap();
+        store
+            .mark_abandoned(abandoned, Some("target not in session"))
+            .unwrap();
+        let suppressed = store
+            .enqueue("worker-a", "worker-a", "standing by")
+            .unwrap();
+        store
+            .mark_suppressed(suppressed, Some("duplicate idle"))
+            .unwrap();
+        let live = store
+            .enqueue("supervisor", "worker-a", "real work")
+            .unwrap();
+
+        let polled = store
+            .poll_unseen_for_recipient("worker-a", None, 10)
+            .unwrap();
+        assert_eq!(polled.len(), 1, "only the live row is deliverable");
+        assert_eq!(polled[0].id, live);
     }
 }

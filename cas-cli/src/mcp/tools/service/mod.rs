@@ -452,7 +452,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Coordination operations combining agent, factory, and worktree management. Agent actions: register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message, message_ack, message_status. Factory actions: spawn_workers, shutdown_workers, hold_worker, release_worker, worker_status, worker_activity, clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, epic_status (per-child branch merge state for an epic), focus_epic, remind, remind_list, remind_cancel. spawn_workers accepts config_dir for a Claude account directory: explicit config_dir wins, otherwise the requesting supervisor's CLAUDE_CONFIG_DIR is captured at enqueue time; Codex/Grok ignore it. Worktree actions: worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status. Only available in factory mode. For shutdown_workers, supervisor should verify worktree cleanliness/policy before issuing shutdown."
+        description = "Coordination operations combining agent, factory, and worktree management. Agent actions: register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message, message_ack, message_status. Factory actions: spawn_workers, shutdown_workers, hold_worker, release_worker, worker_status, worker_activity, clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, epic_status (per-child branch merge state for an epic), focus_epic, remind, remind_list, remind_cancel, server_start (run a long-lived server under CAS instead of a raw `npm run dev &` — registered servers are the only ones that survive worker teardown), server_stop, server_list (what is listening and who started it). spawn_workers accepts config_dir for a Claude account directory: explicit config_dir wins, otherwise the requesting supervisor's CLAUDE_CONFIG_DIR is captured at enqueue time; Codex/Grok ignore it. Worktree actions: worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status. Only available in factory mode. For shutdown_workers, supervisor should verify worktree cleanliness/policy before issuing shutdown."
     )]
     pub async fn coordination(
         &self,
@@ -516,7 +516,7 @@ impl CasService {
                 | "worker_status" | "worker_activity"
                 | "clear_context" | "my_context" | "sync_all_workers" | "gc_report"
                 | "gc_cleanup" | "epic_status" | "focus_epic" | "remind" | "remind_list"
-                | "remind_cancel" => {
+                | "remind_cancel" | "server_start" | "server_stop" | "server_list" => {
                     let factory_req = req.to_factory_request();
                     match action.as_str() {
                         "spawn_workers" => this.factory_spawn_workers(factory_req).await,
@@ -538,6 +538,11 @@ impl CasService {
                         "remind" => this.factory_remind(factory_req).await,
                         "remind_list" => this.factory_remind_list(factory_req).await,
                         "remind_cancel" => this.factory_remind_cancel(factory_req).await,
+                        // cas-7c93 (GH #87): sanctioned lifecycle for servers
+                        // that must outlive a task or be shared across workers.
+                        "server_start" => this.factory_server_start(factory_req).await,
+                        "server_stop" => this.factory_server_stop(factory_req).await,
+                        "server_list" => this.factory_server_list(factory_req).await,
                         _ => unreachable!(),
                     }
                 }
@@ -664,6 +669,9 @@ impl CasService {
                     | "remind"
                     | "remind_list"
                     | "remind_cancel"
+                    | "server_start"
+                    | "server_stop"
+                    | "server_list"
             ) {
                 "factory"
             } else {
@@ -1101,6 +1109,9 @@ impl CasService {
             "remind" => self.factory_remind(req).await,
             "remind_list" => self.factory_remind_list(req).await,
             "remind_cancel" => self.factory_remind_cancel(req).await,
+            "server_start" => self.factory_server_start(req).await,
+            "server_stop" => self.factory_server_stop(req).await,
+            "server_list" => self.factory_server_list(req).await,
             _ => Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
                 format!("Unknown factory action: {action}"),
@@ -1127,6 +1138,8 @@ mod panic_catch;
 mod panic_regression_test;
 mod pattern_ops;
 mod server_handler;
+/// cas-7c93 (GH #87): server_start / server_stop / server_list.
+mod server_ops;
 mod spec_ops;
 mod worktree_verification_team_ops;
 

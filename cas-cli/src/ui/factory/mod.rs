@@ -66,6 +66,8 @@ mod layout;
 mod notification;
 pub(crate) mod cgroup;
 pub(crate) mod process_groups;
+/// cas-7c93 (GH #87): sanctioned lifecycle for servers that outlive a task.
+pub(crate) mod server_registry;
 pub(crate) mod phoenix;
 mod protocol;
 pub mod renderer;

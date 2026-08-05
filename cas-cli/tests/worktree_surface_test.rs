@@ -206,6 +206,10 @@ fn coord_req(action: &str) -> CoordinationRequest {
         status: None,
         orphans: None,
         dry_run: None,
+        command: None,
+        cwd: None,
+        port: None,
+        shared: None,
     }
 }
 

@@ -1,6 +1,0 @@
----
-source: src/ui/components/snapshot_tests.rs
-assertion_line: 451
-expression: tf.output()
----
---- A Very Long Heading That Definitely Exceeds Width ---

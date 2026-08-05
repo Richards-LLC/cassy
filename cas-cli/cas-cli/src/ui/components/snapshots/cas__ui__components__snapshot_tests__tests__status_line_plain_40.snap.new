@@ -1,6 +1,0 @@
----
-source: src/ui/components/snapshot_tests.rs
-assertion_line: 573
-expression: tf.output()
----
-[OK] All checks passed

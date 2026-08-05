@@ -1,7 +1,0 @@
----
-source: src/ui/components/snapshot_tests.rs
-assertion_line: 721
-expression: tf.output()
----
-- Item A
-- Item B

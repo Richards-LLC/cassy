@@ -1,7 +1,0 @@
----
-source: src/ui/components/snapshot_tests.rs
-assertion_line: 235
-expression: tf.output()
----
-  - Short
-  - A longer bullet that wraps at narrow width

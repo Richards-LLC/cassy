@@ -1,8 +1,0 @@
----
-source: src/ui/components/snapshot_tests.rs
-assertion_line: 310
-expression: tf.output()
----
-[q] Quit
-[j/k] Navigate
-[Enter] Select

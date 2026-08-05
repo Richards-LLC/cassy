@@ -1,8 +1,0 @@
----
-source: src/ui/components/snapshot_tests.rs
-assertion_line: 463
-expression: tf.output()
----
---- ユニコード テスト ---
-名前: テスト
-[OK] 完了

@@ -1,6 +1,0 @@
----
-source: src/ui/components/snapshot_tests.rs
-assertion_line: 134
-expression: tf.output()
----
-[ERROR] Connection failed

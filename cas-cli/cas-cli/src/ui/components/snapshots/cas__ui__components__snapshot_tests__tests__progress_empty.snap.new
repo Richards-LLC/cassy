@@ -1,6 +1,0 @@
----
-source: src/ui/components/snapshot_tests.rs
-assertion_line: 328
-expression: tf.output()
----
-[....................] 0%

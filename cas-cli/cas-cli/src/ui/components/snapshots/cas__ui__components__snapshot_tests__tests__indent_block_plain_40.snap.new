@@ -1,7 +1,0 @@
----
-source: src/ui/components/snapshot_tests.rs
-assertion_line: 273
-expression: tf.output()
----
-  | Short
-  | Narrow block

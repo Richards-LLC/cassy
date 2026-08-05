@@ -752,3 +752,167 @@ fn test_classify_dirty_status_mixed_only_tracked_change_blocks() {
     assert_eq!(status.warnings.len(), 1);
     assert_eq!(status.warnings[0].path, "scratch.txt");
 }
+
+// ---------------------------------------------------------------------------
+// cas-a85e (GH #99): choosing the base for a NEW epic branch when the checkout
+// is already sitting on a prior epic branch. Trunk stays the default anchor
+// (cas-dc28); the previous-epic case must not be silent.
+// ---------------------------------------------------------------------------
+
+fn commit_on(repo: &std::path::Path, file: &str, contents: &str) {
+    std::fs::write(repo.join(file), contents).unwrap();
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", contents])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+}
+
+fn checkout_new(repo: &std::path::Path, branch: &str) {
+    Command::new("git")
+        .args(["checkout", "-q", "-b", branch])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+}
+
+fn trunk_of(repo: &std::path::Path) -> String {
+    let out = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[test]
+fn epic_base_prefers_the_active_epic_branch_when_head_is_ahead_of_trunk() {
+    let (_temp, repo_path) = create_test_repo();
+    let trunk = trunk_of(&repo_path);
+    checkout_new(&repo_path, "epic/first-cas-aaaa");
+    commit_on(&repo_path, "one.txt", "epic work 1");
+    commit_on(&repo_path, "two.txt", "epic work 2");
+
+    let git = GitOperations::new(repo_path);
+    let choice = git.resolve_epic_base(&trunk);
+
+    assert!(choice.used_head, "a prior epic branch must win over trunk");
+    assert_eq!(choice.base_ref, "epic/first-cas-aaaa");
+    assert_eq!(choice.head_ahead, 2, "commit count must be exact");
+    assert_eq!(choice.head_behind, 0);
+    let notice = choice.notice.expect("the decision must be stated");
+    assert!(
+        notice.contains("epic/first-cas-aaaa") && notice.contains('2'),
+        "notice must name the branch and the commit count: {notice}"
+    );
+}
+
+#[test]
+fn epic_base_keeps_trunk_and_warns_with_both_counts_when_epic_head_diverged() {
+    let (_temp, repo_path) = create_test_repo();
+    let trunk = trunk_of(&repo_path);
+    checkout_new(&repo_path, "epic/first-cas-aaaa");
+    commit_on(&repo_path, "one.txt", "epic only");
+
+    // Trunk moves on independently — now the two have genuinely diverged.
+    Command::new("git")
+        .args(["checkout", "-q", &trunk])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    commit_on(&repo_path, "trunk.txt", "trunk only");
+    Command::new("git")
+        .args(["checkout", "-q", "epic/first-cas-aaaa"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+
+    let git = GitOperations::new(repo_path);
+    let choice = git.resolve_epic_base(&trunk);
+
+    assert!(
+        !choice.used_head,
+        "auto-stacking a diverged epic would silently drop the trunk-only commit"
+    );
+    assert_eq!(choice.base_ref, trunk);
+    assert_eq!(choice.head_ahead, 1);
+    assert_eq!(choice.head_behind, 1);
+    let notice = choice.notice.expect("divergence must be surfaced");
+    assert!(
+        notice.contains("DIVERGED") && notice.contains("epic/first-cas-aaaa"),
+        "diverged notice must be explicit: {notice}"
+    );
+}
+
+#[test]
+fn epic_base_stays_on_trunk_for_a_non_epic_head_but_still_reports_the_gap() {
+    let (_temp, repo_path) = create_test_repo();
+    let trunk = trunk_of(&repo_path);
+    checkout_new(&repo_path, "feature/supervisor-head");
+    commit_on(&repo_path, "feature.txt", "feature only");
+
+    let git = GitOperations::new(repo_path);
+    let choice = git.resolve_epic_base(&trunk);
+
+    assert!(
+        !choice.used_head,
+        "an incidental feature HEAD must never seed an epic branch (cas-dc28)"
+    );
+    assert_eq!(choice.base_ref, trunk);
+    assert_eq!(choice.head_ahead, 1);
+    let notice = choice.notice.expect("a silent gap is the bug");
+    assert!(
+        notice.contains("feature/supervisor-head") && notice.contains("NOT included"),
+        "note must name the excluded branch: {notice}"
+    );
+}
+
+#[test]
+fn epic_base_is_silent_when_head_is_trunk_or_not_ahead() {
+    let (_temp, repo_path) = create_test_repo();
+    let trunk = trunk_of(&repo_path);
+
+    let git = GitOperations::new(repo_path.clone());
+    let on_trunk = git.resolve_epic_base(&trunk);
+    assert_eq!(on_trunk.base_ref, trunk);
+    assert!(on_trunk.notice.is_none(), "no divergence, no noise");
+    assert_eq!(on_trunk.head_ahead, 0);
+
+    // A branch that carries no commits of its own is equally uninteresting.
+    checkout_new(&repo_path, "epic/empty-cas-bbbb");
+    let no_commits = git.resolve_epic_base(&trunk);
+    assert!(!no_commits.used_head);
+    assert_eq!(no_commits.base_ref, trunk);
+    assert!(no_commits.notice.is_none());
+}
+
+#[test]
+fn epic_base_degrades_to_trunk_on_detached_head() {
+    let (_temp, repo_path) = create_test_repo();
+    let trunk = trunk_of(&repo_path);
+    checkout_new(&repo_path, "epic/first-cas-aaaa");
+    commit_on(&repo_path, "one.txt", "epic only");
+    let sha = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    let sha = String::from_utf8_lossy(&sha.stdout).trim().to_string();
+    Command::new("git")
+        .args(["checkout", "-q", "--detach", &sha])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+
+    let git = GitOperations::new(repo_path);
+    let choice = git.resolve_epic_base(&trunk);
+
+    assert!(!choice.used_head, "a detached HEAD names no epic to continue");
+    assert_eq!(choice.base_ref, trunk);
+    assert!(choice.notice.is_none());
+}

@@ -486,3 +486,168 @@ async fn test_task_update_depth_to_light() {
     );
     assert!(show.contains("Depth: light"), "expected light after update: {show}");
 }
+
+// ---------------------------------------------------------------------------
+// cas-a85e (GH #99): a follow-on epic created while the checkout is on the
+// previous epic branch was cut from main — 36 commits behind in the report —
+// so the new epic started empty and a worker could overwrite deliverables.
+// ---------------------------------------------------------------------------
+
+fn git_in(repo: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .unwrap_or_else(|e| panic!("git {args:?} failed to run: {e}"));
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn init_repo_with_commit(repo: &std::path::Path) {
+    git_in(repo, &["init", "-q"]);
+    git_in(repo, &["config", "user.email", "test@test.com"]);
+    git_in(repo, &["config", "user.name", "Test"]);
+    std::fs::write(repo.join("README.md"), "# Test").unwrap();
+    git_in(repo, &["add", "."]);
+    git_in(repo, &["commit", "-q", "-m", "Initial commit"]);
+}
+
+fn epic_create_request(title: &str) -> TaskCreateRequest {
+    TaskCreateRequest {
+        depth: None,
+        title: title.to_string(),
+        description: None,
+        priority: 1,
+        task_type: "epic".to_string(),
+        labels: None,
+        notes: None,
+        blocked_by: None,
+        design: None,
+        acceptance_criteria: None,
+        external_ref: None,
+        assignee: None,
+        demo_statement: None,
+        execution_note: None,
+        epic: None,
+    }
+}
+
+#[tokio::test]
+async fn test_follow_on_epic_continues_active_epic_branch_and_says_so() {
+    let (temp, service) = setup_cas();
+    let repo = temp.path();
+    init_repo_with_commit(repo);
+
+    // A prior epic accumulated work that trunk has never seen.
+    git_in(repo, &["checkout", "-q", "-b", "epic/first-cas-aaaa"]);
+    std::fs::write(repo.join("deliverable.txt"), "prior epic work").unwrap();
+    git_in(repo, &["add", "."]);
+    git_in(repo, &["commit", "-q", "-m", "prior epic work"]);
+    std::fs::write(repo.join("report.md"), "prior epic report").unwrap();
+    git_in(repo, &["add", "."]);
+    git_in(repo, &["commit", "-q", "-m", "prior epic report"]);
+    let prior_tip = git_in(repo, &["rev-parse", "HEAD"]);
+
+    let created = service
+        .cas_task_create(Parameters(epic_create_request("Follow On Epic")))
+        .await
+        .expect("epic create should succeed");
+    let text = extract_text(created);
+    let epic_id = extract_task_id(&text).expect("should have epic ID");
+    let branch = format!("epic/follow-on-epic-{epic_id}");
+
+    assert_eq!(
+        git_in(repo, &["rev-parse", &branch]),
+        prior_tip,
+        "the follow-on epic branch must continue the active epic branch: {text}"
+    );
+    let files = git_in(repo, &["ls-tree", "-r", "--name-only", &branch]);
+    assert!(
+        files.contains("deliverable.txt") && files.contains("report.md"),
+        "prior epic deliverables must be reachable from the new epic branch: {files}"
+    );
+    assert!(
+        text.contains("Base: 'epic/first-cas-aaaa'"),
+        "the creation message must name the base actually used: {text}"
+    );
+    assert!(
+        text.contains("2 commit(s) ahead"),
+        "the creation message must state the divergence with a commit count: {text}"
+    );
+}
+
+#[tokio::test]
+async fn test_epic_create_states_the_gap_when_head_is_ahead_but_not_an_epic() {
+    let (temp, service) = setup_cas();
+    let repo = temp.path();
+    init_repo_with_commit(repo);
+    let trunk = git_in(repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let trunk_sha = git_in(repo, &["rev-parse", &trunk]);
+
+    // An incidental worker/feature HEAD must never seed an epic (cas-dc28) —
+    // but the gap it leaves behind must be stated, not swallowed.
+    git_in(repo, &["checkout", "-q", "-b", "factory/some-worker"]);
+    std::fs::write(repo.join("wip.txt"), "worker wip").unwrap();
+    git_in(repo, &["add", "."]);
+    git_in(repo, &["commit", "-q", "-m", "worker wip"]);
+
+    let created = service
+        .cas_task_create(Parameters(epic_create_request("Unrelated Epic")))
+        .await
+        .expect("epic create should succeed");
+    let text = extract_text(created);
+    let epic_id = extract_task_id(&text).expect("should have epic ID");
+    let branch = format!("epic/unrelated-epic-{epic_id}");
+
+    assert_eq!(
+        git_in(repo, &["rev-parse", &branch]),
+        trunk_sha,
+        "a factory branch must not become an epic base: {text}"
+    );
+    assert!(
+        text.contains("factory/some-worker") && text.contains("1 commit(s) ahead"),
+        "the excluded commits must be named with a count: {text}"
+    );
+}
+
+#[tokio::test]
+async fn test_epic_create_keeps_trunk_and_warns_when_active_epic_has_diverged() {
+    let (temp, service) = setup_cas();
+    let repo = temp.path();
+    init_repo_with_commit(repo);
+    let trunk = git_in(repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
+
+    git_in(repo, &["checkout", "-q", "-b", "epic/first-cas-aaaa"]);
+    std::fs::write(repo.join("epic-only.txt"), "epic only").unwrap();
+    git_in(repo, &["add", "."]);
+    git_in(repo, &["commit", "-q", "-m", "epic only"]);
+
+    git_in(repo, &["checkout", "-q", &trunk]);
+    std::fs::write(repo.join("trunk-only.txt"), "trunk only").unwrap();
+    git_in(repo, &["add", "."]);
+    git_in(repo, &["commit", "-q", "-m", "trunk only"]);
+    let trunk_sha = git_in(repo, &["rev-parse", &trunk]);
+    git_in(repo, &["checkout", "-q", "epic/first-cas-aaaa"]);
+
+    let created = service
+        .cas_task_create(Parameters(epic_create_request("Diverged Follow On")))
+        .await
+        .expect("epic create should succeed");
+    let text = extract_text(created);
+    let epic_id = extract_task_id(&text).expect("should have epic ID");
+    let branch = format!("epic/diverged-follow-on-{epic_id}");
+
+    assert_eq!(
+        git_in(repo, &["rev-parse", &branch]),
+        trunk_sha,
+        "auto-stacking a diverged epic would drop the trunk-only commit: {text}"
+    );
+    assert!(
+        text.contains("DIVERGED") && text.contains("epic/first-cas-aaaa"),
+        "divergence must be surfaced for the supervisor to resolve: {text}"
+    );
+}

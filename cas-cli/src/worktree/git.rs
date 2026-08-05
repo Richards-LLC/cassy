@@ -221,6 +221,45 @@ pub struct ResolvedBase {
     pub used_remote: bool,
 }
 
+/// Outcome of choosing the start point for a NEW epic branch when the
+/// checkout may already be sitting on a prior epic branch (cas-a85e / GH #99).
+///
+/// Basing every epic branch on trunk (cas-dc28) is right when HEAD is some
+/// incidental branch, but it strands work when HEAD is the *previous epic*
+/// branch carrying commits trunk has never seen: the follow-on epic starts
+/// empty and a worker checking it out can re-create or overwrite deliverables.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpicBaseChoice {
+    /// Ref the new epic branch should actually be created from.
+    pub base_ref: String,
+    /// The checkout's branch at decision time, when it is a named branch
+    /// other than the trunk itself (`None` for detached HEAD or trunk).
+    pub head_branch: Option<String>,
+    /// Commits reachable from HEAD but not from the trunk base.
+    pub head_ahead: u32,
+    /// Commits reachable from the trunk base but not from HEAD.
+    pub head_behind: u32,
+    /// Whether `base_ref` is HEAD's branch rather than the trunk base.
+    pub used_head: bool,
+    /// Operator-facing sentence describing the decision, when there is
+    /// anything to say. Always populated when HEAD is ahead of the base.
+    pub notice: Option<String>,
+}
+
+impl EpicBaseChoice {
+    /// Trunk base with nothing noteworthy about HEAD.
+    pub(crate) fn plain(base_ref: impl Into<String>) -> Self {
+        Self {
+            base_ref: base_ref.into(),
+            head_branch: None,
+            head_ahead: 0,
+            head_behind: 0,
+            used_head: false,
+            notice: None,
+        }
+    }
+}
+
 /// Monotonic suffix so two ephemeral merge worktrees created inside the same
 /// nanosecond still get distinct paths.
 static TEMP_WORKTREE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

@@ -28,16 +28,33 @@ impl WorktreeManager {
             .resolve_fresh_base(&trunk)
             .map_err(WorktreeError::Git)?;
 
+        // cas-a85e (GH #99): prefer the active epic branch when the checkout
+        // is on one that trunk does not contain, so a follow-on epic does not
+        // start empty; otherwise keep trunk and say what was excluded.
+        let base_choice = self.git.resolve_epic_base(&resolved.branch_ref);
+        if let Some(notice) = base_choice.notice.as_deref() {
+            if base_choice.used_head {
+                tracing::info!("{}", notice);
+            } else {
+                tracing::warn!("{}", notice);
+            }
+        }
+        let base_sha = if base_choice.used_head {
+            self.git.ref_sha(&base_choice.base_ref).unwrap_or_default()
+        } else {
+            resolved.sha.clone()
+        };
+
         let newly_created = match self
             .git
-            .create_branch_from(&branch_name, &resolved.branch_ref)
+            .create_branch_from(&branch_name, &base_choice.base_ref)
         {
             Ok(true) => {
                 tracing::info!(
                     "Created epic branch {} from base '{}' (sha={}, behind={})",
                     branch_name,
-                    resolved.branch_ref,
-                    short_sha(&resolved.sha),
+                    base_choice.base_ref,
+                    short_sha(&base_sha),
                     resolved.behind_count,
                 );
                 true

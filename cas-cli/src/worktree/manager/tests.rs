@@ -1863,3 +1863,68 @@ fn residue_overlap_is_scoped_to_merge_touched_paths() {
         1
     );
 }
+
+/// cas-a85e (GH #99): the reported failure — a follow-on epic created while
+/// the checkout sits on the previous epic branch was cut from trunk, which was
+/// 36 commits behind, so the new epic started empty.
+#[test]
+fn test_create_epic_branch_continues_the_active_epic_branch_instead_of_stranding_it() {
+    let (_temp, repo_path) = create_test_repo();
+    let config = WorktreeConfig::default();
+
+    let trunk = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    let trunk = String::from_utf8_lossy(&trunk.stdout).trim().to_string();
+
+    Command::new("git")
+        .args(["checkout", "-q", "-b", "epic/first-cas-aaaa"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    std::fs::write(repo_path.join("deliverable.txt"), "prior epic work").unwrap();
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "prior epic work"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    let prior_tip = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    let prior_tip = String::from_utf8_lossy(&prior_tip.stdout).trim().to_string();
+
+    let manager = WorktreeManager::new(&repo_path, config).unwrap();
+    let branch = manager.create_epic_branch("Follow On Epic").unwrap();
+
+    let new_tip = Command::new("git")
+        .args(["rev-parse", &branch])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    let new_tip = String::from_utf8_lossy(&new_tip.stdout).trim().to_string();
+    assert_eq!(
+        new_tip, prior_tip,
+        "the follow-on epic must continue epic/first-cas-aaaa, not restart from {trunk}"
+    );
+
+    // The prior epic's deliverable is reachable from the new branch.
+    let files = Command::new("git")
+        .args(["ls-tree", "-r", "--name-only", &branch])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    let files = String::from_utf8_lossy(&files.stdout);
+    assert!(
+        files.contains("deliverable.txt"),
+        "prior epic work must be present on the new epic branch: {files}"
+    );
+}

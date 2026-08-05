@@ -65,6 +65,7 @@ mod input;
 mod layout;
 mod notification;
 pub(crate) mod cgroup;
+pub(crate) mod orphan_gc;
 pub(crate) mod process_groups;
 /// cas-7c93 (GH #87): sanctioned lifecycle for servers that outlive a task.
 pub(crate) mod server_registry;

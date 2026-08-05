@@ -431,6 +431,111 @@ pub fn build_session_start_wip_banner(cas_root: &Path) -> Option<String> {
     Some(out)
 }
 
+/// Maximum orphan rows the SessionStart banner renders inline (cas-b7dd).
+const ORPHAN_BANNER_MAX_ENTRIES: usize = 10;
+
+/// SessionStart banner for leftovers from dead sessions (cas-b7dd, GH #88).
+///
+/// A new session used to inherit the previous one's orphans silently and
+/// discover them as an `EADDRINUSE` failure several minutes later, with no
+/// hint that the squatter was CAS's own leftover. Stating them up front turns
+/// that into an explicit "adopt or kill" decision at the one moment the
+/// supervisor is deciding what this session will do.
+///
+/// Visibility only — this NEVER kills anything. Killing stays behind
+/// `gc_cleanup force=true dry_run=false`, because a session start is not
+/// consent to signal processes.
+///
+/// Returns `None` when there is nothing to report, which is the common case.
+pub fn build_session_start_orphan_banner(cas_root: &Path) -> Option<String> {
+    let report = crate::ui::factory::orphan_gc::scan(
+        cas_root,
+        &live_factory_session_names(),
+        &live_worker_pgids(cas_root),
+    );
+    if report.is_empty() {
+        return None;
+    }
+    let prefix = crate::harness_policy::own_tool_prefix();
+    let ports = report.squatted_ports();
+    let mut out = format!(
+        "⚠ Leftovers from earlier sessions: {} orphan process(es) in worktrees, \
+         {} stale server registration(s){}.\n",
+        report.processes.len(),
+        report.servers.len(),
+        if ports.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " — holding port(s) {}",
+                ports
+                    .iter()
+                    .map(u16::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    );
+
+    let shown: Vec<String> = report
+        .processes
+        .iter()
+        .map(|p| {
+            format!(
+                "  [process] pid {} ({}) — {}\n",
+                p.pid,
+                p.comm,
+                p.disposition.label()
+            )
+        })
+        .chain(report.servers.iter().map(|s| {
+            format!(
+                "  [server ] {} pid {} (session {}) — {}\n",
+                s.record.name,
+                s.record.pid,
+                s.record.factory_session.as_deref().unwrap_or("none"),
+                s.disposition.label()
+            )
+        }))
+        .collect();
+    let total = shown.len();
+    for line in shown.iter().take(ORPHAN_BANNER_MAX_ENTRIES) {
+        out.push_str(line);
+    }
+    if total > ORPHAN_BANNER_MAX_ENTRIES {
+        out.push_str(&format!(
+            "  ... and {} more\n",
+            total - ORPHAN_BANNER_MAX_ENTRIES
+        ));
+    }
+    out.push_str(&format!(
+        "\nAdopt or kill BEFORE starting work that binds these ports: review with \
+         `{prefix}coordination action=gc_report`, then reclaim with \
+         `{prefix}coordination action=gc_cleanup force=true dry_run=false`. \
+         Servers registered `shared` are left alone by design.\n"
+    ));
+    Some(out)
+}
+
+fn live_factory_session_names() -> std::collections::HashSet<String> {
+    crate::ui::factory::SessionManager::new()
+        .list_sessions()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|session| session.is_running)
+        .map(|session| session.name)
+        .collect()
+}
+
+fn live_worker_pgids(cas_root: &Path) -> std::collections::HashSet<u32> {
+    crate::ui::factory::process_groups::list(cas_root)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(crate::ui::factory::process_groups::is_live)
+        .map(|record| record.pgid)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -893,6 +998,75 @@ mod tests {
         assert!(
             build_session_start_wip_banner(&cas_root).is_none(),
             "clean tree must not emit a banner"
+        );
+    }
+
+    /// cas-b7dd (GH #88): a session starting with a leftover registration from
+    /// a dead session must be told, with the port named and an adopt-or-kill
+    /// instruction — the alternative is inheriting it silently and meeting it
+    /// as EADDRINUSE later.
+    #[test]
+    fn orphan_banner_names_dead_session_leftovers_and_never_kills() {
+        let temp = tempfile::tempdir().unwrap();
+        let cas_root = temp.path().join(".cas");
+        fs::create_dir_all(&cas_root).unwrap();
+
+        // A registration owned by a session that is not running, whose process
+        // is this test process (so it reads as genuinely live).
+        let self_pid = std::process::id();
+        let record = crate::ui::factory::server_registry::RegisteredServer {
+            id: "srv-banner".to_string(),
+            name: "vite".to_string(),
+            command: "npm run dev".to_string(),
+            cwd: cas_root.clone(),
+            pid: self_pid,
+            pgid: None,
+            pid_starttime: crate::mcp::daemon::read_pid_starttime(self_pid),
+            expected_port: Some(5173),
+            owner_task: None,
+            owner_worker: None,
+            factory_session: Some("session-that-died".to_string()),
+            shared: false,
+            cgroup: None,
+            log_path: None,
+            started_at: chrono::Utc::now(),
+            state: crate::ui::factory::server_registry::ServerState::Running,
+            ended_at: None,
+            ended_detail: None,
+        };
+        crate::ui::factory::server_registry::write_record(&cas_root, &record).unwrap();
+
+        let banner = build_session_start_orphan_banner(&cas_root)
+            .expect("leftover from a dead session must be surfaced");
+        assert!(banner.contains("vite"), "banner: {banner}");
+        assert!(banner.contains("session-that-died"), "banner: {banner}");
+        assert!(banner.contains("Adopt or kill"), "banner: {banner}");
+        assert!(
+            banner.contains("gc_cleanup"),
+            "the banner must name the reclaim command: {banner}"
+        );
+
+        // Visibility only: the banner must not have signalled anything.
+        assert!(
+            crate::mcp::daemon::pid_alive(self_pid),
+            "building a banner must never kill"
+        );
+        assert!(
+            crate::ui::factory::server_registry::find(&cas_root, &record.id)
+                .unwrap()
+                .is_some(),
+            "and must never clear records"
+        );
+    }
+
+    #[test]
+    fn orphan_banner_is_silent_when_there_is_nothing_to_report() {
+        let temp = tempfile::tempdir().unwrap();
+        let cas_root = temp.path().join(".cas");
+        fs::create_dir_all(&cas_root).unwrap();
+        assert!(
+            build_session_start_orphan_banner(&cas_root).is_none(),
+            "no leftovers must mean no banner — this fires on every session start"
         );
     }
 }

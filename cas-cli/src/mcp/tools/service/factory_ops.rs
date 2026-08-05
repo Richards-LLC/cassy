@@ -2166,10 +2166,13 @@ impl CasService {
             )
         };
         let host_registry_pids = crate::store::known_repos::host_registry_open_pids();
+        // cas-b7dd (GH #88): processes still alive inside a worktree with no
+        // live owner, plus registered servers whose session is gone.
+        let orphan_processes = scan_orphan_processes(&self.inner.cas_root, &live_workers);
 
         let mut out = String::from("Factory GC Report\n=================\n");
         out.push_str(&format!(
-            "\nStale agent threshold: {}s\nStale agents: {}\nPending prompts: {}\nActive worktrees: {}\nOrphan worktrees: {}\nOrphan worker process groups: {}\nLive-owned process groups skipped: {}\nUnverifiable process-group records preserved: {}\nStale process-group records: {}\nHost-registry open processes: {}\n",
+            "\nStale agent threshold: {}s\nStale agents: {}\nPending prompts: {}\nActive worktrees: {}\nOrphan worktrees: {}\nOrphan worker process groups: {}\nLive-owned process groups skipped: {}\nUnverifiable process-group records preserved: {}\nStale process-group records: {}\nHost-registry open processes: {}\nOrphan processes in worktrees: {}\nStale server registrations: {}\nReapable orphans: {}\n",
             stale_after,
             stale_agents.len(),
             pending_prompts,
@@ -2180,7 +2183,11 @@ impl CasService {
             unverifiable_process_groups.len(),
             stale_process_group_records,
             host_registry_pids.len(),
+            orphan_processes.processes.len(),
+            orphan_processes.servers.len(),
+            orphan_processes.reapable_count(),
         ));
+        out.push_str(&orphan_processes.render());
 
         if !stale_agents.is_empty() {
             out.push_str("\nStale agents:\n");
@@ -2660,6 +2667,20 @@ impl CasService {
         // for Cargo artifacts instead of unexpectedly deleting warm caches.
         let target_cache_mutation_authorized =
             req.force.unwrap_or(false) && req.dry_run == Some(false);
+
+        // cas-b7dd (GH #88): orphan processes use that same double gate, and
+        // for a stronger reason — this path sends SIGKILL to processes CAS did
+        // not start. A killed dev server cannot be un-killed, so `force=true`
+        // alone stays a preview here exactly as it does for warm caches.
+        // The scan is re-run now rather than reusing the report's snapshot, and
+        // each kill revalidates its own fingerprint again immediately before
+        // signalling (see `orphan_gc::cleanup`).
+        let orphan_processes = scan_orphan_processes(&self.inner.cas_root, &live_workers);
+        let orphan_process_summary = crate::ui::factory::orphan_gc::cleanup(
+            &self.inner.cas_root,
+            &orphan_processes,
+            target_cache_mutation_authorized,
+        );
         let target_cache_result = {
             let config = crate::config::Config::load(&self.inner.cas_root).unwrap_or_default();
             let policy = crate::factory_target_cache::TargetCachePolicy::from(config.factory());
@@ -2690,9 +2711,38 @@ impl CasService {
         };
 
         let mut output = format!(
-            "Factory GC cleanup complete.\n\nStale agents marked: {stale_marked}\nDead agent records purged: {dead_agent_records_purged}\nOrphan worktrees marked removed: {orphan_marked_removed}\nOrphan worker process groups reaped: {orphan_process_groups_reaped}\nLive-owned process groups skipped: {live_owned_process_groups_skipped}\nUnverifiable process-group records preserved: {}\nStale process-group records removed: {stale_process_group_records_removed}\nPrompt queue entries expired: {expired_prompts}\nPrompt queue entries cleared: {cleared_prompts}\nStale skill markers removed: {stale_skill_markers_removed}",
+            "Factory GC cleanup complete.\n\nStale agents marked: {stale_marked}\nDead agent records purged: {dead_agent_records_purged}\nOrphan worktrees marked removed: {orphan_marked_removed}\nOrphan worker process groups reaped: {orphan_process_groups_reaped}\nLive-owned process groups skipped: {live_owned_process_groups_skipped}\nUnverifiable process-group records preserved: {}\nStale process-group records removed: {stale_process_group_records_removed}\nPrompt queue entries expired: {expired_prompts}\nPrompt queue entries cleared: {cleared_prompts}\nStale skill markers removed: {stale_skill_markers_removed}\nOrphan processes killed: {}\nStale server registrations cleared: {}\nOrphan candidates spared or refused: {}",
             unverifiable_process_groups.len(),
+            orphan_process_summary.killed.len(),
+            orphan_process_summary.records_cleared.len(),
+            orphan_process_summary.skipped,
         );
+        if !orphan_process_summary.killed.is_empty() {
+            output.push_str(&format!(
+                "\nKilled pids: {}",
+                orphan_process_summary
+                    .killed
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        for error in &orphan_process_summary.errors {
+            output.push_str(&format!("\nOrphan cleanup error: {error}"));
+        }
+        if !target_cache_mutation_authorized && orphan_process_summary.would_kill > 0 {
+            output.push_str(&format!(
+                "\nOrphan processes previewed, not killed: {} (rerun with force=true dry_run=false)",
+                orphan_process_summary.would_kill
+            ));
+        }
+        // Always show WHY a candidate was left alone — a silently filtered
+        // orphan is indistinguishable from one CAS never saw, and that is the
+        // difference between "the port is free" and a wasted morning.
+        if !orphan_processes.is_empty() {
+            output.push_str(&orphan_processes.render());
+        }
         if !req.force.unwrap_or(false) && !orphan_process_groups.is_empty() {
             output.push_str(&format!(
                 "\nLive orphan process groups preserved: {} (rerun with force=true to reap)",
@@ -2827,6 +2877,39 @@ fn process_group_has_live_owner(
         record.worker_name.clone(),
         Some(record.factory_session.clone()),
     )) || live_workers.contains(&(record.worker_name.clone(), None))
+}
+
+/// Factory sessions currently running, by name.
+fn live_factory_sessions() -> std::collections::HashSet<String> {
+    crate::ui::factory::SessionManager::new()
+        .list_sessions()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|session| session.is_running)
+        .map(|session| session.name)
+        .collect()
+}
+
+/// Scan for orphan processes and stale server registrations (cas-b7dd, GH #88).
+///
+/// Process groups belonging to live workers are passed in as protected, so a
+/// running worker's own descendants are reported as owned rather than as
+/// orphans — that distinction is the difference between a GC and an outage.
+fn scan_orphan_processes(
+    cas_root: &std::path::Path,
+    live_workers: &LiveFactoryWorkers,
+) -> crate::ui::factory::orphan_gc::OrphanReport {
+    let protected_pgids: std::collections::HashSet<u32> =
+        crate::ui::factory::process_groups::list(cas_root)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|record| {
+                crate::ui::factory::process_groups::is_live(record)
+                    || process_group_has_live_owner(record, live_workers)
+            })
+            .map(|record| record.pgid)
+            .collect();
+    crate::ui::factory::orphan_gc::scan(cas_root, &live_factory_sessions(), &protected_pgids)
 }
 
 fn orphan_process_groups(
@@ -4884,6 +4967,133 @@ mod tests {
         );
         let _ = group.child.wait();
     }
+
+    /// cas-b7dd / GH #88 at the GC surface: a live worker's own process group
+    /// must never be reported as an orphan process, and a planted orphan in
+    /// the same worktree tree must be.
+    ///
+    /// This is the pairing that matters. A GC that finds orphans but also
+    /// "finds" live workers is not a GC, it is an outage generator, so both
+    /// halves are asserted against the same scan.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn orphan_process_scan_separates_live_worker_groups_from_real_orphans() {
+        use std::os::unix::process::CommandExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let cas_root = temp.path().to_path_buf();
+        let worktree = cas_root.join("worktrees/worker-a");
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        // A live worker: its own session/process group, tracked, still running.
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "sleep 120 & wait"]);
+        command.current_dir(&worktree);
+        // SAFETY: isolate this synthetic lane from cargo's process group.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = command.spawn().unwrap();
+        let live_pgid = child.id();
+        // RAII: `SyntheticProcessGroup::drop` killpg's the group and only then
+        // waits. Do NOT call `child.wait()` directly while it is still alive —
+        // that blocks for the full sleep and turns a fast test into a
+        // two-minute one.
+        let _group = SyntheticProcessGroup {
+            child,
+            pgid: live_pgid,
+        };
+        crate::ui::factory::process_groups::track(
+            &cas_root,
+            "worker-a",
+            "live-session",
+            live_pgid,
+        )
+        .unwrap();
+
+        // A genuine orphan in the same worktree: launcher exits, child adopted.
+        let planted = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 120 >/dev/null 2>&1 </dev/null & echo $!")
+            .current_dir(&worktree)
+            .output()
+            .unwrap();
+        let orphan_pid: u32 = String::from_utf8_lossy(&planted.stdout)
+            .trim()
+            .parse()
+            .unwrap();
+        // Let the launcher exit so the child is adopted.
+        for _ in 0..200 {
+            if !crate::mcp::daemon::pid_alive(orphan_pid) {
+                break;
+            }
+            let adopted = crate::ui::factory::orphan_gc::parent_state(
+                std::fs::read_to_string(format!("/proc/{orphan_pid}/stat"))
+                    .ok()
+                    .and_then(|stat| {
+                        stat.rsplit_once(')')?
+                            .1
+                            .split_whitespace()
+                            .nth(1)?
+                            .parse::<u32>()
+                            .ok()
+                    })
+                    .unwrap_or(1),
+            );
+            if adopted != crate::ui::factory::orphan_gc::ParentState::Alive {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+
+        let live_workers = live_factory_workers_from_agents([]);
+        let report = scan_orphan_processes(&cas_root, &live_workers);
+
+        let orphan = report
+            .processes
+            .iter()
+            .find(|p| p.pid == orphan_pid)
+            .expect("planted orphan must be reported");
+        assert!(
+            orphan.disposition.is_reapable(),
+            "planted orphan should be reapable, was {:?}",
+            orphan.disposition
+        );
+
+        // The live worker's group leader sits in the same worktree; it must be
+        // spared (reported as owned, never reapable).
+        let live_entry = report.processes.iter().find(|p| p.pid == live_pgid);
+        assert!(
+            live_entry.is_none_or(|p| !p.disposition.is_reapable()),
+            "a tracked live worker process must never be reapable: {live_entry:?}"
+        );
+
+        // Preview must kill nothing at all.
+        let preview = crate::ui::factory::orphan_gc::cleanup(&cas_root, &report, false);
+        assert!(preview.killed.is_empty());
+        assert!(crate::mcp::daemon::pid_alive(orphan_pid));
+
+        let done = crate::ui::factory::orphan_gc::cleanup(&cas_root, &report, true);
+        assert!(
+            done.killed.contains(&orphan_pid),
+            "authorized cleanup must reap the orphan; errors {:?}",
+            done.errors
+        );
+        assert!(
+            !done.killed.contains(&live_pgid),
+            "and must never reap the live worker"
+        );
+        assert!(crate::mcp::daemon::pid_alive(live_pgid));
+
+        // SAFETY: test cleanup for a pid this test planted.
+        unsafe { libc::kill(orphan_pid as libc::pid_t, libc::SIGKILL) };
+    }
+
     use crate::test_support::TestEnvGuard;
     use cas_types::AgentRole;
 

@@ -615,7 +615,6 @@ impl CasService {
         use crate::store::{open_spawn_queue_store, open_task_store};
         use cas_types::{TaskStatus, TaskType};
 
-        // Check that there's an active EPIC before spawning workers
         let task_store = open_task_store(&self.inner.cas_root).map_err(|e| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
@@ -623,41 +622,11 @@ impl CasService {
             )
         })?;
 
-        let open_epics: Vec<_> = task_store
-            .list(None)
-            .map_err(|e| {
-                Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("Failed to list tasks: {e}"),
-                )
-            })?
-            .into_iter()
-            .filter(|t| t.task_type == TaskType::Epic && t.status != TaskStatus::Closed)
-            .collect();
-
-        if open_epics.is_empty() {
-            return Err(Self::error(
-                ErrorCode::INVALID_REQUEST,
-                "No active EPIC found. Before spawning workers, create or assign an EPIC:\n\
-                 1. Create EPIC: mcp__cas__task action=create task_type=epic title=\"...\" description=\"...\"\n\
-                 2. Or assign existing EPIC: mcp__cas__task action=start id=<epic-id>\n\
-                 3. Optionally gather requirements using the epic-spec skill\n\
-                 4. Break into tasks using the epic-breakdown skill\n\
-                 5. Then spawn workers to work on the tasks",
-            ));
-        }
-
-        let queue = open_spawn_queue_store(&self.inner.cas_root).map_err(|e| {
-            Self::error(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Failed to open spawn queue: {e}"),
-            )
-        })?;
-
         let count = req.count.unwrap_or(1);
         let isolate = req.isolate.unwrap_or(false);
         let worker_names: Vec<String> = req
             .worker_names
+            .as_ref()
             .map(|names| {
                 names
                     .split(',')
@@ -673,6 +642,10 @@ impl CasService {
         // supervisor gets a clear error instead of silent no-op or a
         // surprising assignment to whichever worker happens to finish
         // spawning first.
+        //
+        // cas-549c (GH #96): this runs BEFORE the epic gate, because a
+        // validated open task_id is itself sufficient authorization to spawn.
+        let mut task_id_authorizes_spawn = false;
         if let Some(ref task_id) = req.task_id {
             let requested_worker_count = if worker_names.is_empty() {
                 count
@@ -700,10 +673,55 @@ impl CasService {
             if task.status == TaskStatus::Closed {
                 return Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
-                    format!("task_id {task_id} is already closed — cannot pre-assign it to a spawned worker."),
+                    format!(
+                        "task_id {task_id} is already closed — cannot pre-assign it to a spawned worker."
+                    ),
+                ));
+            }
+            task_id_authorizes_spawn = true;
+        }
+
+        // The epic gate exists to stop *unscoped* spawning — workers summoned
+        // with no stated work, which is how a factory ends up with idle panes
+        // and no plan. A concrete open task_id already states the work, so it
+        // satisfies that intent on its own (cas-549c, GH #96). Requiring an
+        // epic anyway forced a ceremonial single-child epic for every
+        // post-epic follow-up, which distorts epic reporting and the
+        // "all subtasks closed → verify and close the epic" flow.
+        if !task_id_authorizes_spawn {
+            let has_open_epic = task_store
+                .list(None)
+                .map_err(|e| {
+                    Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!("Failed to list tasks: {e}"),
+                    )
+                })?
+                .into_iter()
+                .any(|t| t.task_type == TaskType::Epic && t.status != TaskStatus::Closed);
+
+            if !has_open_epic {
+                return Err(Self::error(
+                    ErrorCode::INVALID_REQUEST,
+                    "No active EPIC found, and no task_id was supplied. Either name the work \
+                     directly or open an EPIC:\n\
+                     0. Spawn for one existing open task (no EPIC needed): \
+                     mcp__cas__coordination action=spawn_workers count=1 task_id=<task-id>\n\
+                     1. Create EPIC: mcp__cas__task action=create task_type=epic title=\"...\" description=\"...\"\n\
+                     2. Or assign existing EPIC: mcp__cas__task action=start id=<epic-id>\n\
+                     3. Optionally gather requirements using the epic-spec skill\n\
+                     4. Break into tasks using the epic-breakdown skill\n\
+                     5. Then spawn workers to work on the tasks",
                 ));
             }
         }
+
+        let queue = open_spawn_queue_store(&self.inner.cas_root).map_err(|e| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to open spawn queue: {e}"),
+            )
+        })?;
 
         // Resolve a concrete WorkerSpec for every queued spawn. Omitting model
         // or effort must never inherit the supervisor session's frontier-tier

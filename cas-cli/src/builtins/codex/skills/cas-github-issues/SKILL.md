@@ -1,0 +1,172 @@
+---
+name: cas-github-issues
+description: Sweep a project's GitHub Issues and reconcile them with CAS tasks — dedupe double-filed reports, verify-and-close issues that claim to be fixed, task genuinely new issues into the active epic (creating a successor epic when none is open), comment each issue with its task ID, unblock chained tasks whose lane has merged, and file issues for defects observed since the last sweep. Use when running the recurring issue sweep, when asked to triage/burn down GitHub issues, when a bug report needs to become a task, or when you observed a defect that belongs in the issue tracker.
+managed_by: cas
+---
+
+# GitHub Issues sweep
+
+GitHub Issues is the canonical intake when a project has more than one machine
+filing bugs. This skill is the reconciliation loop between that intake and the
+CAS task graph: **every open issue ends the sweep either closed, deduped, or
+pointing at a live CAS task.**
+
+Run all six steps in order. **If no step changed anything, end the turn without
+a report** — a silent sweep is the success case, and a "nothing to do" summary
+every hour is noise.
+
+## Before you start
+
+```bash
+gh repo view --json nameWithOwner -q .nameWithOwner   # which repo am I sweeping?
+gh issue list --state open --limit 100 --json number,title,body,labels,createdAt,comments
+```
+
+If `gh` is not authenticated (`gh auth status` fails), stop and say so — do not
+fall back to guessing from local files.
+
+Then load the CAS side once, so every later step reads from the same picture:
+
+```
+mcp__cs__task action=list status=open limit=100
+mcp__cs__search action=search query="<the issue's subject in your own words>"
+```
+
+## 1. List open issues
+
+Fetch the open issues with their bodies **and comment counts**. An issue whose
+last comment already carries a `cas-XXXX` task ID is already tasked — it is not
+new, and step 4 must not task it again. Build the working set:
+
+| Bucket | Meaning | Handled in |
+|---|---|---|
+| Duplicate | Same defect as another open issue | Step 2 |
+| Claims fixed | Body or comments assert the fix shipped | Step 3 |
+| New | Real, unduplicated, untasked | Step 4 |
+| Already tasked | Comment names a live CAS task | Step 5 |
+
+## 2. Dedupe double-filings
+
+Multi-machine intake means the *same* defect gets filed twice within minutes,
+with different wording. Compare by **symptom and failing surface, not by title
+text** — "worker never closes task" and "close hangs at AwaitingMerge" are one
+issue.
+
+Keep the issue with the better reproduction (or the earlier number if they are
+equal). On the loser:
+
+```bash
+gh issue comment <dup> --body "Duplicate of #<keeper> — same defect, tracking there."
+gh issue close <dup> --reason "not planned"
+```
+
+If the loser carries detail the keeper lacks, copy that detail into the keeper
+**before** closing. Never close a duplicate that has evidence nowhere else.
+
+## 3. Verify-and-close fixed claims
+
+An issue claiming to be fixed is a claim, not a fact. **Verify against the code
+or a run before closing** — find the commit, read the changed lines, or run the
+reproduction. Do not close on "the task that mentions this issue is closed".
+
+- **Verified fixed** — comment with the evidence (commit SHA, test name, or the
+  command you ran and its output), then
+  `gh issue close <n> --reason completed`.
+- **Cannot verify** — leave it open, comment what you checked and what is still
+  missing. A stale open issue is cheaper than a wrongly closed one.
+
+## 4. Task new issues into the active epic
+
+Find the active epic for this intake lane:
+
+```
+mcp__cs__task action=list task_type=epic status=open
+```
+
+- **An open epic exists** → task into it.
+- **No open epic** (the previous one closed with a release) →
+  **create a successor epic first.** Never task into a closed epic — a child of
+  a closed epic is invisible to the ready queue and will never be picked up.
+
+```
+mcp__cs__task action=create task_type=epic title="<intake> burn-down v<N>: <theme> (GH #<lo>–#<hi>)" priority=1
+```
+
+Then, for each new issue, one task:
+
+```
+mcp__cs__task action=create title="<what will be true when this is done> (GH #<n>)" \
+  task_type=bug priority=<0-3> epic=<epic id> \
+  external_ref="https://github.com/<owner>/<repo>/issues/<n>" \
+  description="<the reporter's symptom, the surface it fails on, and the repro>" \
+  acceptance_criteria="<the observable that proves it fixed>"
+```
+
+Priority from user impact, not from filing order: data loss / agent-stuck / the
+factory cannot make progress → P0–P1; degraded-but-workable → P2; polish → P3.
+
+Close the loop on GitHub so the reporter (and the next sweep) can see it:
+
+```bash
+gh issue comment <n> --body "Tracked as \`cas-XXXX\`. <one line on the plan.>"
+```
+
+The commit that fixes the issue should carry `Fixes #<n>` so GitHub closes it
+on merge.
+
+## 5. Unblock chained tasks whose lane merged
+
+Issues get tasked into lanes that block each other. When a lane merges, its
+dependents stay blocked until someone says so — that someone is this sweep.
+
+```
+mcp__cs__task action=blocked
+```
+
+For each blocked task, check whether its blocker actually landed:
+
+```bash
+git log --oneline origin/main -20        # or the project's integration branch
+gh pr list --state merged --limit 20 --json number,title,mergedAt
+```
+
+If the blocker is closed **and merged**, drop the edge:
+
+```
+mcp__cs__task action=dep_remove id=<blocked task> to_id=<merged blocker>
+```
+
+Merged is the bar, not closed. A closed-but-unmerged blocker still blocks —
+removing that edge sends a worker at a base that does not contain the fix.
+
+## 6. File issues for defects you observed
+
+Anything you hit since the last sweep that is a real defect belongs in the
+tracker, even if you already worked around it. Search first — the duplicate you
+create is the duplicate you have to dedupe next hour:
+
+```bash
+gh issue list --state all --search "<distinctive symptom>" --limit 20
+gh issue create --title "<surface>: <what goes wrong>" --body "<repro, observed, expected, version>"
+```
+
+Include the version (`cas --version` or equivalent) and the exact command and
+output. Then task it in step 4's format if it is actionable now.
+
+## Ending the sweep
+
+- **Something changed** — report only the deltas: issues closed, tasks created
+  (with IDs), edges dropped, issues filed. No restating the whole backlog.
+- **Nothing changed** — end the turn silently. No message.
+
+## Rules
+
+1. **Never task into a closed epic.** Create the successor first.
+2. **Never close on a claim.** Step 3 closes on evidence you gathered, or not
+   at all.
+3. **Dedupe before tasking.** Two tasks for one defect means two workers in the
+   same files.
+4. **Every tasked issue gets a comment with its task ID.** That comment is how
+   the next sweep knows the issue is not new.
+5. **Merged, not closed**, is the bar for unblocking.
+6. **Silence is a valid sweep result.**

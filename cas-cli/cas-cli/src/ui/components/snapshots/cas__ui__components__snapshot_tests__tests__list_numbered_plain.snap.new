@@ -1,0 +1,8 @@
+---
+source: src/ui/components/snapshot_tests.rs
+assertion_line: 686
+expression: tf.output()
+---
+1. Alpha
+2. Beta
+3. Gamma

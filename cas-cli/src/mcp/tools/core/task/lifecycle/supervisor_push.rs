@@ -735,14 +735,16 @@ mod tests {
         PromptQueueStore, SqliteAgentStore, SqlitePromptQueueStore, SqliteSupervisorQueueStore,
         SupervisorQueueStore,
     };
+    use crate::test_support::TestEnvGuard;
     use cas_types::{Agent, AgentRole, AgentStatus};
     use tempfile::TempDir;
 
-    /// Serialize `CAS_FACTORY_SESSION` mutations against every CAS env-mutating
-    /// test module. A module-local mutex does not prevent cross-module races.
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        crate::hooks::test_env_lock()
-    }
+    // cas-acb4: `CAS_FACTORY_SESSION` mutations here go through `TestEnvGuard`,
+    // which owns the same process-wide lock the old local `env_lock()` helper
+    // took AND restores every variable on drop, including during unwind. Do not
+    // reintroduce a bare lock + manual save/restore pair: a panic between the
+    // set and the restore leaked the session into every later test in this
+    // binary, and the tests that then failed were in unrelated modules.
 
     #[test]
     fn transition_key_includes_session_and_occurrence() {
@@ -858,11 +860,11 @@ mod tests {
 
     #[test]
     fn missing_prompt_queue_leaves_durable_unmarked() {
-        let _lock = env_lock();
-        let prior = std::env::var("CAS_FACTORY_SESSION").ok();
-        unsafe {
-            std::env::set_var("CAS_FACTORY_SESSION", "sess-no-pq");
-        }
+        // cas-acb4: one guard owns the shared env lock AND restores on
+        // unwind. The previous save/restore pair leaked the variable to
+        // every later test in this binary whenever an assertion panicked
+        // between the two halves.
+        let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "sess-no-pq")]);
 
         let temp = TempDir::new().unwrap();
         let agents = SqliteAgentStore::open(temp.path()).unwrap();
@@ -916,22 +918,16 @@ mod tests {
         assert_eq!(report2.attempted, 0);
         assert_eq!(pq.pending_count().unwrap(), 1);
 
-        unsafe {
-            match prior {
-                Some(v) => std::env::set_var("CAS_FACTORY_SESSION", v),
-                None => std::env::remove_var("CAS_FACTORY_SESSION"),
-            }
-        }
     }
 
     /// Stamp fails after enqueue: replay must not create a second prompt row.
     #[test]
     fn stamp_failure_replay_does_not_duplicate_prompt() {
-        let _lock = env_lock();
-        let prior = std::env::var("CAS_FACTORY_SESSION").ok();
-        unsafe {
-            std::env::set_var("CAS_FACTORY_SESSION", "sess-stamp");
-        }
+        // cas-acb4: one guard owns the shared env lock AND restores on
+        // unwind. The previous save/restore pair leaked the variable to
+        // every later test in this binary whenever an assertion panicked
+        // between the two halves.
+        let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "sess-stamp")]);
 
         let temp = TempDir::new().unwrap();
         let agents = SqliteAgentStore::open(temp.path()).unwrap();
@@ -1004,12 +1000,6 @@ mod tests {
         assert!(matches!(r, LifecyclePushResult::AlreadyComplete { .. }));
         assert_eq!(pq.pending_count().unwrap(), 1);
 
-        unsafe {
-            match prior {
-                Some(v) => std::env::set_var("CAS_FACTORY_SESSION", v),
-                None => std::env::remove_var("CAS_FACTORY_SESSION"),
-            }
-        }
     }
 
     /// cas-3a47 AC4: malformed payload stays pending; never fabricates Started/Open→InProgress.
@@ -1270,12 +1260,12 @@ mod tests {
 
     #[test]
     fn emit_enqueues_once_and_suppresses_same_occurrence() {
-        let _lock = env_lock();
-        let prior = std::env::var("CAS_FACTORY_SESSION").ok();
         // SAFETY: process-wide CAS env lock held for this test body.
-        unsafe {
-            std::env::set_var("CAS_FACTORY_SESSION", "sess-emit");
-        }
+        // cas-acb4: one guard owns the shared env lock AND restores on
+        // unwind. The previous save/restore pair leaked the variable to
+        // every later test in this binary whenever an assertion panicked
+        // between the two halves.
+        let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "sess-emit")]);
 
         let temp = TempDir::new().unwrap();
         let agents = SqliteAgentStore::open(temp.path()).unwrap();
@@ -1346,21 +1336,15 @@ mod tests {
         assert_eq!(pq.pending_count().unwrap(), 1);
 
         // SAFETY: restore env under the process-wide CAS env lock.
-        unsafe {
-            match prior {
-                Some(v) => std::env::set_var("CAS_FACTORY_SESSION", v),
-                None => std::env::remove_var("CAS_FACTORY_SESSION"),
-            }
-        }
     }
 
     #[test]
     fn emit_supervisor_actor_keeps_durable_event_without_prompt_self_echo() {
-        let _lock = env_lock();
-        let prior = std::env::var("CAS_FACTORY_SESSION").ok();
-        unsafe {
-            std::env::set_var("CAS_FACTORY_SESSION", "sess-self");
-        }
+        // cas-acb4: one guard owns the shared env lock AND restores on
+        // unwind. The previous save/restore pair leaked the variable to
+        // every later test in this binary whenever an assertion panicked
+        // between the two halves.
+        let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "sess-self")]);
 
         let temp = TempDir::new().unwrap();
         let agents = SqliteAgentStore::open(temp.path()).unwrap();
@@ -1409,21 +1393,15 @@ mod tests {
             "supervisor must not receive a prompt for its own transition"
         );
 
-        unsafe {
-            match prior {
-                Some(v) => std::env::set_var("CAS_FACTORY_SESSION", v),
-                None => std::env::remove_var("CAS_FACTORY_SESSION"),
-            }
-        }
     }
 
     #[test]
     fn emit_worker_actor_still_prompts_owning_supervisor() {
-        let _lock = env_lock();
-        let prior = std::env::var("CAS_FACTORY_SESSION").ok();
-        unsafe {
-            std::env::set_var("CAS_FACTORY_SESSION", "sess-worker");
-        }
+        // cas-acb4: one guard owns the shared env lock AND restores on
+        // unwind. The previous save/restore pair leaked the variable to
+        // every later test in this binary whenever an assertion panicked
+        // between the two halves.
+        let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "sess-worker")]);
 
         let temp = TempDir::new().unwrap();
         let agents = SqliteAgentStore::open(temp.path()).unwrap();
@@ -1462,21 +1440,15 @@ mod tests {
             "worker transition must still wake the owning supervisor"
         );
 
-        unsafe {
-            match prior {
-                Some(v) => std::env::set_var("CAS_FACTORY_SESSION", v),
-                None => std::env::remove_var("CAS_FACTORY_SESSION"),
-            }
-        }
     }
 
     #[test]
     fn emit_two_start_cycles_create_two_events() {
-        let _lock = env_lock();
-        let prior = std::env::var("CAS_FACTORY_SESSION").ok();
-        unsafe {
-            std::env::set_var("CAS_FACTORY_SESSION", "sess-cycle");
-        }
+        // cas-acb4: one guard owns the shared env lock AND restores on
+        // unwind. The previous save/restore pair leaked the variable to
+        // every later test in this binary whenever an assertion panicked
+        // between the two halves.
+        let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "sess-cycle")]);
 
         let temp = TempDir::new().unwrap();
         let agents = SqliteAgentStore::open(temp.path()).unwrap();
@@ -1564,21 +1536,15 @@ mod tests {
         assert_eq!(started.len(), 2, "two legitimate starts must both emit");
         assert_eq!(pq.pending_count().unwrap(), 4);
 
-        unsafe {
-            match prior {
-                Some(v) => std::env::set_var("CAS_FACTORY_SESSION", v),
-                None => std::env::remove_var("CAS_FACTORY_SESSION"),
-            }
-        }
     }
 
     #[test]
     fn emit_does_not_cross_factory_sessions() {
-        let _lock = env_lock();
-        let prior = std::env::var("CAS_FACTORY_SESSION").ok();
-        unsafe {
-            std::env::set_var("CAS_FACTORY_SESSION", "sess-a");
-        }
+        // cas-acb4: one guard owns the shared env lock AND restores on
+        // unwind. The previous save/restore pair leaked the variable to
+        // every later test in this binary whenever an assertion panicked
+        // between the two halves.
+        let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "sess-a")]);
 
         let temp = TempDir::new().unwrap();
         let agents = SqliteAgentStore::open(temp.path()).unwrap();
@@ -1622,22 +1588,16 @@ mod tests {
         assert_eq!(sq.pending_count("sup-a").unwrap(), 1);
         assert_eq!(sq.pending_count("sup-b").unwrap(), 0);
 
-        unsafe {
-            match prior {
-                Some(v) => std::env::set_var("CAS_FACTORY_SESSION", v),
-                None => std::env::remove_var("CAS_FACTORY_SESSION"),
-            }
-        }
     }
 
     /// Simulate partial failure: durable insert without prompt stamp, then recover.
     #[test]
     fn durable_without_prompt_recovers_exactly_once_on_replay() {
-        let _lock = env_lock();
-        let prior = std::env::var("CAS_FACTORY_SESSION").ok();
-        unsafe {
-            std::env::set_var("CAS_FACTORY_SESSION", "sess-outbox");
-        }
+        // cas-acb4: one guard owns the shared env lock AND restores on
+        // unwind. The previous save/restore pair leaked the variable to
+        // every later test in this binary whenever an assertion panicked
+        // between the two halves.
+        let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "sess-outbox")]);
 
         let temp = TempDir::new().unwrap();
         let agents = SqliteAgentStore::open(temp.path()).unwrap();
@@ -1713,11 +1673,5 @@ mod tests {
         assert!(matches!(r3, LifecyclePushResult::AlreadyComplete { .. }));
         assert_eq!(pq.pending_count().unwrap(), 1, "exactly-once prompt delivery");
 
-        unsafe {
-            match prior {
-                Some(v) => std::env::set_var("CAS_FACTORY_SESSION", v),
-                None => std::env::remove_var("CAS_FACTORY_SESSION"),
-            }
-        }
     }
 }

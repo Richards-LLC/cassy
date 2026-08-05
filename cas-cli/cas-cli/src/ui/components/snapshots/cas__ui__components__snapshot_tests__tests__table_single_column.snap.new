@@ -1,0 +1,12 @@
+---
+source: src/ui/components/snapshot_tests.rs
+assertion_line: 800
+expression: tf.output()
+---
+╭───────╮
+│ Items │
+├───────┤
+│ one   │
+│ two   │
+│ three │
+╰───────╯

@@ -1,0 +1,8 @@
+---
+source: src/ui/components/snapshot_tests.rs
+assertion_line: 777
+expression: tf.output()
+---
+Name   Value
+alpha  1    
+beta   2

@@ -1,0 +1,9 @@
+---
+source: src/ui/components/snapshot_tests.rs
+assertion_line: 586
+expression: tf.output()
+---
+[OK] Store connected
+[OK] Index healthy
+[WARN] Config missing
+[ERROR] Auth failed

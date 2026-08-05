@@ -1,0 +1,8 @@
+---
+source: src/ui/components/snapshot_tests.rs
+assertion_line: 627
+expression: tf.output()
+---
+x = 1
+y = 2
+z = 3

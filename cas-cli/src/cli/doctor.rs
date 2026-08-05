@@ -1,7 +1,7 @@
 //! Doctor command - diagnostics and repair
 
 use clap::Args;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::config::Config;
@@ -344,8 +344,10 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // Check 7: Memory statistics by type
     if let Ok(store) = open_store(&cas_root) {
         if let Ok(entries) = store.list() {
-            let mut by_type: HashMap<String, usize> = HashMap::new();
-            let mut by_tier: HashMap<String, usize> = HashMap::new();
+            // BTreeMap, not HashMap: doctor output is snapshot-tested (GH #92)
+            // and these breakdowns are printed by iteration order.
+            let mut by_type: BTreeMap<String, usize> = BTreeMap::new();
+            let mut by_tier: BTreeMap<String, usize> = BTreeMap::new();
             let mut compressed_count = 0;
             let mut helpful_count = 0;
             let mut harmful_count = 0;
@@ -395,7 +397,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // Check 8: Rule status check
     if let Ok(rule_store) = open_rule_store(&cas_root) {
         if let Ok(rules) = rule_store.list() {
-            let mut by_status: HashMap<String, usize> = HashMap::new();
+            let mut by_status: BTreeMap<String, usize> = BTreeMap::new();
             let mut stale_count = 0;
 
             for rule in &rules {
@@ -436,7 +438,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     if let Ok(task_store) = open_task_store(&cas_root) {
         if let Ok(tasks) = task_store.list(None) {
             use crate::types::TaskStatus;
-            let mut by_status: HashMap<String, usize> = HashMap::new();
+            let mut by_status: BTreeMap<String, usize> = BTreeMap::new();
             let open_count = tasks
                 .iter()
                 .filter(|t| matches!(t.status, TaskStatus::Open | TaskStatus::InProgress))

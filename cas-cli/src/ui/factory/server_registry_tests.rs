@@ -355,14 +355,18 @@ fn shared_server_leaves_the_callers_process_group_and_a_private_one_stays() {
     // SAFETY: read-only process-table query.
     let caller_pgid = unsafe { libc::getpgid(std::process::id() as libc::pid_t) } as u32;
 
+    // Server names must be unique across this file's tests: shared scopes are
+    // named cas-server-<session>-<name>, and create_named_scope adopts an
+    // existing directory (restart semantics). Two parallel tests sharing a
+    // name land in one scope, and whichever calls stop() first reaps both.
     let shared = start(
         &cas_root,
-        &spec("shared-srv", "sleep 300", temp.path(), true),
+        &spec("pg-shared-srv", "sleep 300", temp.path(), true),
     )
     .unwrap();
     let private = start(
         &cas_root,
-        &spec("private-srv", "sleep 300", temp.path(), false),
+        &spec("pg-private-srv", "sleep 300", temp.path(), false),
     )
     .unwrap();
 
@@ -442,10 +446,15 @@ fn shared_server_survives_a_worker_cgroup_kill_that_reaps_an_unregistered_proces
 
     // An unregistered straggler: started by the worker, left in the worker's
     // scope. This is the `npm run dev &` the issue says must still die.
-    let mut straggler = Command::new("sh")
-        .args(["-c", "sleep 300"])
-        .spawn()
-        .unwrap();
+    //
+    // Spawned as a bare `sleep`, NOT `sh -c "sleep 300"`: cgroup membership is
+    // inherited at fork, so a shell that forks its payload before add_pid runs
+    // leaves that payload outside the scope — kill_scope then reaps only the
+    // shell, the test still passes, and an orphaned 5-minute sleep holds the
+    // test binary's stdio pipe open, stalling every piped `cargo test` run.
+    // (The production spawn path joins the scope before forking anything; see
+    // cgroup_kills_a_descendant_that_escaped_the_process_group.)
+    let mut straggler = Command::new("sleep").arg("300").spawn().unwrap();
     let straggler_pid = straggler.id();
     super::super::cgroup::add_pid(&worker_scope, straggler_pid).unwrap();
 

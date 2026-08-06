@@ -919,3 +919,104 @@ fn test_doctor_not_initialized() {
         .success()
         .stdout(predicate::str::contains("Not found"));
 }
+
+// ---------------------------------------------------------------------------
+// `cas knowledge` — the distilled project wiki (cas-ee3d)
+// ---------------------------------------------------------------------------
+
+/// Seed one distilled page directly through the store, so the CLI round-trip
+/// can be exercised without an LLM. `cas knowledge build` is the production
+/// producer; this stands in for it.
+fn seed_knowledge_page(cas_dir: &std::path::Path) {
+    use cas_store::{IngestBatch, KnowledgePage, KnowledgeStore, PageWrite, SqliteKnowledgeStore};
+
+    let store = SqliteKnowledgeStore::open(cas_dir).expect("knowledge store should open");
+    let mut page = KnowledgePage::new(
+        store.generate_id().expect("id"),
+        "subsystem",
+        "Worktree Manager",
+    );
+    page.snippet = "Creates and reaps per-worker git worktrees.".to_string();
+    page.sources = vec!["docs/worktrees.md".to_string()];
+
+    store
+        .commit_ingest(&IngestBatch {
+            pages: vec![PageWrite {
+                page,
+                body: "# Worktree Manager\n\nCreates and reaps per-worker git worktrees.\n\
+                       Each factory worker gets an isolated branch.\n"
+                    .to_string(),
+            }],
+            ..IngestBatch::default()
+        })
+        .expect("ingest should commit");
+}
+
+#[test]
+fn test_knowledge_search_and_read_round_trip() {
+    let temp = TempDir::new().unwrap();
+
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["init", "--yes"])
+        .assert()
+        .success();
+
+    seed_knowledge_page(&temp.path().join(".cas"));
+
+    // search surfaces the page by a body word.
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["knowledge", "search", "worktrees"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("subsystem/worktree-manager.md"))
+        .stdout(predicate::str::contains("Worktree Manager"));
+
+    // read by path prints metadata plus the markdown body from disk.
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["knowledge", "read", "subsystem/worktree-manager.md"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("locked:  false"))
+        .stdout(predicate::str::contains("docs/worktrees.md"))
+        .stdout(predicate::str::contains(
+            "Each factory worker gets an isolated branch.",
+        ));
+}
+
+#[test]
+fn test_knowledge_search_with_no_match_is_not_an_error() {
+    let temp = TempDir::new().unwrap();
+
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["init", "--yes"])
+        .assert()
+        .success();
+
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["knowledge", "search", "nonexistent-subject"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No distilled pages match"));
+}
+
+#[test]
+fn test_knowledge_read_of_unknown_page_fails_loudly() {
+    let temp = TempDir::new().unwrap();
+
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["init", "--yes"])
+        .assert()
+        .success();
+
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["knowledge", "read", "subsystem/does-not-exist.md"])
+        .assert()
+        .failure();
+}

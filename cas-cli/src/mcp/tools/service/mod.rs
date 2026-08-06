@@ -27,9 +27,9 @@ mod imports;
 
 // Re-export types from cas-mcp for MCP tool parameters
 pub use cas_mcp::{
-    AgentRequest, CoordinationRequest, ExecuteRequest, FactoryRequest, MemoryRequest,
-    PatternRequest, RuleRequest, SearchContextRequest, SkillRequest, SpecRequest, SystemRequest,
-    TaskRequest, TeamRequest, VerificationRequest,
+    AgentRequest, CoordinationRequest, ExecuteRequest, FactoryRequest, KnowledgeRequest,
+    MemoryRequest, PatternRequest, RuleRequest, SearchContextRequest, SkillRequest, SpecRequest,
+    SystemRequest, TaskRequest, TeamRequest, VerificationRequest,
 };
 
 // ============================================================================
@@ -818,6 +818,47 @@ impl CasService {
 
             // Track MCP tool usage
             crate::telemetry::track_mcp_tool("verification", &action, result.is_ok());
+
+            result
+        })
+        .await
+    }
+
+    // ========================================================================
+    // cas_knowledge - Distilled project wiki (pages, not opinions)
+    // ========================================================================
+
+    #[tool(
+        description = "Distilled project knowledge (the repo wiki built by `cas knowledge build`). Actions: search (full-text over page titles/snippets/bodies), read (one page + its markdown body, by id or rel_path), write (hand-author a page — always stored locked:true so distillation never overwrites it), list (the page index), status (page/source counts). This is repo knowledge, distinct from the `memory` tool's personal entries and opinions."
+    )]
+    pub async fn knowledge(
+        &self,
+        Parameters(req): Parameters<KnowledgeRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let this = self.clone();
+        panic_catch::dispatch_with_catch("knowledge", async move {
+            let action = req.action.clone();
+            let is_mutating = action == "write";
+
+            let result = match action.as_str() {
+                "search" => this.inner.knowledge_search(Parameters(req)).await,
+                "read" => this.inner.knowledge_read(Parameters(req)).await,
+                "write" => this.inner.knowledge_write(Parameters(req)).await,
+                "list" => this.inner.knowledge_list(Parameters(req)).await,
+                "status" => this.inner.knowledge_status(Parameters(req)).await,
+                _ => Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!(
+                        "Unknown knowledge action: {action}. Valid: search, read, write, list, status"
+                    ),
+                )),
+            };
+
+            if is_mutating && result.is_ok() {
+                this.inner.notify_resources_changed().await;
+            }
+
+            crate::telemetry::track_mcp_tool("knowledge", &action, result.is_ok());
 
             result
         })

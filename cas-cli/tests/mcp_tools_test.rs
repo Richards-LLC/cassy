@@ -7,6 +7,8 @@ mod edge_cases;
 mod entity_handler_tests;
 #[path = "mcp_tools_test/field_coverage_tests.rs"]
 mod field_coverage_tests;
+#[path = "mcp_tools_test/knowledge_tools.rs"]
+mod knowledge_tools;
 #[path = "mcp_tools_test/memory_tools.rs"]
 mod memory_tools;
 #[path = "mcp_tools_test/memory_remember_contract.rs"]

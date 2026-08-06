@@ -215,3 +215,50 @@ Note what the fingerprint does and does not buy you: `gc_cleanup` revalidates a
 pid — but that proves identity, not that the process is unwanted. It is a
 protection against killing the wrong process, not against killing the right
 process at the wrong time.
+
+## A test run that looks hung: wedged test binaries (GH #114)
+
+The same fingerprint shows up one level down, in the test binaries `cargo test`
+runs. A parked binary from an earlier run holds the lock the next run wants, so
+the *new* suite prints nothing and looks like a hung test. It is not hung — it
+is blocked behind a corpse. This has been seen twice in one epic; one case
+burned an hour before anyone looked at the process table, and once the stale pid
+was reaped the "hung" suite finished in **0.11s**.
+
+**Look at the test binaries, not at cargo:**
+
+```bash
+ps -eo pid,ppid,etime,time,stat,wchan:20,args | grep -F "/target/debug/deps/"
+```
+
+Read the same two columns as for a wedged build, plus `wchan`:
+
+| `TIME` (CPU used) | `WCHAN` | Meaning |
+|---|---|---|
+| climbing | anything | The suite is running. Slow ≠ stuck. Leave it alone. |
+| ~0:00 with large `ETIME` | `futex_do_wait` | Wedged. Alive for minutes, no CPU burned, parked on a futex. |
+
+**Confirm it has no children before calling it dead:**
+
+```bash
+pgrep -P <pid>      # no output => nothing is running underneath it
+```
+
+A wedged test binary is childless. If it *does* have children, it is a live
+suite forking helpers — leave it alone and re-read `TIME`.
+
+**Then reap by pid, and only by pid.** `gc_report` is read-only and yours to
+run; cleanup is the supervisor's (`gc_cleanup` is host-wide, not scoped to your
+worktree), so name the exact pid you want gone:
+
+```
+mcp__cs__coordination action=gc_report
+```
+
+**Never select test binaries by name.** `pkill -f cas-` or `pkill -f
+"target/debug/deps"` matches another worker's live test run on this shared host
+— every worker runs as the same user, and the deps binaries have identical names
+across worktrees. This is the same rule as for `rustc` above, and it has the
+same consequence: your recovery becomes someone else's mystery failure. The only
+pid you may signal directly is one you captured yourself (`$!`) from a process
+you started, and only after confirming its command line.

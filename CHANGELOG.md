@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.45.0] - 2026-08-06
+
+### Fixed
+- **A parked notification no longer floods the recipient.** A lifecycle transition waiting for its recipient to wake up was re-sent on every queue poll — ten times a second, for as long as it stayed parked — producing byte-identical walls of the same message across turns, outliving both an explicit acknowledgement and the close of the task it referred to. Each transition is now delivered once immediately and then at most once per re-nudge interval, and an acknowledgement stops redelivery permanently instead of merely pausing it.
+- **A worker started from a stale branch says so.** When the branch a worker is cut from has fallen behind the trunk or its own remote, the spawn now reports how far behind it is, which commits it is missing, and how to refresh it — in the spawn record and to the supervisor. Previously the only clue was a number in a status column, and workers could quietly begin dozens of commits in the past. Status views also spell out "STALE BASE: N commit(s) behind" instead of leaving that number to be interpreted.
+- **Reviews can't be run by the wrong party anymore.** Under the default setup, where reviews belong to the supervisor, a worker asking to run one is now declined at the point of asking and told what to do instead. The instructions attached to the completion step had been telling workers the opposite of the rule, so the conflict resolved in favour of whichever instruction was closest to the action. Setups that assign reviews to workers are unaffected.
+- **A busy machine no longer fails a passing test.** A cleanup test that plants a short-lived process could see it exit before the check ran and report a failure that had nothing to do with the code under test. It now retries the setup without weakening a single assertion, and if it genuinely cannot get a foothold it says the machine was loaded rather than blaming the feature.
+
+### Added
+- **A recipe for the "hung" test suite that isn't hung.** The recovery guide now covers left-over test processes that sit idle and block the next run — how to tell them apart from a genuinely running suite, how to clear them safely by process, and why clearing them by name is dangerous. One occurrence of this cost an hour; the suite finished in a fraction of a second once cleared.
+
 ## [2.44.0] - 2026-08-06
 
 ### Fixed

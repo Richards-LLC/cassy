@@ -28,6 +28,7 @@ pub mod bridge;
 pub mod builtins;
 pub mod cli;
 pub mod cloud;
+pub mod code_review_dispatch;
 pub mod config;
 pub mod consolidation;
 pub mod daemon;

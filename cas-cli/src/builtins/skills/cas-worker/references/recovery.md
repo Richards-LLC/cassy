@@ -147,3 +147,74 @@ If the supervisor reassigns your current task to another worker:
 ## Outbox replay
 
 Your outbox may replay stale messages after task state changes (delivery-layer artifact). Before re-sending a blocker or completion notification, re-check task state with `mcp__cas__task action=show` — the issue may already be resolved.
+
+## A build that looks stuck: killed vs wedged
+
+These are different failures with the same symptom (no output, no progress), and
+telling them apart takes about ten seconds. **Do not wait it out** — a wedged
+build never recovers on its own, and one was observed sitting for 57 minutes.
+
+**First, read the build log, not the clock.** Cargo already reports a killed
+child clearly:
+
+```
+error: could not compile `foo` (signal: 9, SIGKILL: kill)
+```
+
+If you see that, the build **failed** — it did not hang. Something killed the
+compiler. Re-run it. If it recurs, find out who is sending the signal before
+blaming the machine.
+
+**If there is no such line and nothing is moving, inspect the process:**
+
+```bash
+ps -eo pid,etime,time,stat,wchan:20,comm | grep -E "rustc|cargo"
+```
+
+Read two columns together:
+
+| `TIME` (CPU used) | Meaning |
+|---|---|
+| climbing | It is compiling. Slow ≠ stuck. Leave it alone. |
+| ~0:00 with large `ETIME` | Wedged. It has been alive for minutes and burned no CPU. |
+
+Confirm before concluding it is a resource problem:
+
+```bash
+grep oom_kill /proc/vmstat        # 0 => the kernel has killed nothing, ever
+cat /proc/pressure/memory         # "full avg10" = % of time all tasks stalled
+```
+
+`oom_kill 0` is decisive: whatever happened, it was not the OOM killer. Do not
+report memory exhaustion without that counter being non-zero.
+
+**Orphans wedge the next build.** Killing a `cargo` leaves its `rustc` children
+adopted by init. They keep running, can hold locks, and have been seen blocking
+a later build in a *different* `CARGO_TARGET_DIR`. If a build wedges right
+after you killed a previous one, that is the first thing to check:
+
+```
+mcp__cas__coordination action=gc_report
+```
+
+Orphaned `rustc` shows up as reapable, annotated "build tool with no parent to
+report to".
+
+**Reporting is yours; cleanup is the supervisor's.** `gc_report` is read-only —
+run it freely. `gc_cleanup force=true dry_run=false` is **not** scoped to your
+worktree: it sweeps every worker's worktree on the host, because all workers run
+as the same user. Ask the supervisor rather than running it yourself, and say
+which pid you want gone. A worker clearing its own wedge with a host-wide kill
+is how one worker's recovery becomes another worker's mystery build failure.
+
+**Never select build processes by name to kill them.** `pkill -9 -f rustc` and
+`pgrep -x rustc` match another worker's live compile on a shared host, and you
+will destroy their build without knowing — this has actually happened here. The
+only pid you may signal directly is one you captured yourself from a process you
+started (`$!`), and only after confirming its command line.
+
+Note what the fingerprint does and does not buy you: `gc_cleanup` revalidates a
+`/proc` start-time fingerprint before signalling, so it cannot hit a *recycled*
+pid — but that proves identity, not that the process is unwanted. It is a
+protection against killing the wrong process, not against killing the right
+process at the wrong time.

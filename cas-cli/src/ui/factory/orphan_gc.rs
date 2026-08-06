@@ -80,6 +80,32 @@ const DEV_SERVER_PATTERNS: &[&str] = &[
     "bun",
 ];
 
+/// `comm` values of build tools whose **only** possible parent is `cargo`, so
+/// that an adopted one provably has no reader left (cas-4614, GH #107).
+///
+/// This list is load-bearing, not advisory like `DEV_SERVER_PATTERNS`: it
+/// overrides the live-process-group spare. The justification is narrow and
+/// must stay narrow. `rustc` and `rustdoc` are spawned by `cargo` and by
+/// nothing else, and they deliver their result to that parent; once it is
+/// reaped they cannot deliver to anyone.
+///
+/// **`cargo` itself is deliberately NOT in this list.** Its parent is a
+/// launcher shell that exits *by design* in every background idiom — `cargo
+/// build &`, `nohup`, `setsid`, a detached harness step — and its result is
+/// artifacts in `CARGO_TARGET_DIR` plus an exit code in a log, neither
+/// delivered to the parent. An adopted `cargo` is routinely a live, working
+/// build. Including it would have made "adopted by systemd inside a worktree"
+/// — the normal shape of a backgrounded build on a factory host — sufficient
+/// to kill someone's in-flight compile. The GH #107 incident this exists for
+/// was an orphaned `rustc`, so nothing is lost by excluding `cargo`.
+///
+/// Matched against `comm` (the kernel's 15-char executable name), not the
+/// command line, so a wrapper merely named after a build tool is not caught.
+/// `comm` is not authenticated — a process can set it via `prctl` or argv[0] —
+/// but the only thing spoofing it buys is being selected for reaping, so
+/// exact-match on `comm` is sufficient here.
+const BUILD_TOOL_COMMS: &[&str] = &["rustc", "rustdoc"];
+
 /// What the parent of a worktree process tells us about ownership.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ParentState {
@@ -156,23 +182,49 @@ pub(crate) fn registry_disposition(
 }
 
 /// Disposition for a process found inside a worktree (GH #88 class 1).
+///
+/// `is_build_tool` (cas-4614, GH #107) narrows one specific over-sparing case.
+/// Sharing a process group with a live worker normally means the worker still
+/// owns the process, so we spare it. That inference does not hold for a
+/// `rustc`/`rustdoc` whose parent has been reaped: `cargo` is the only thing
+/// that ever spawns one or reads its result, so once the parent is gone the
+/// child is waste no matter whose process group it sits in. Observed for real
+/// — a `rustc` orphaned by a killed `cargo` survived 57 minutes inside a live
+/// worker's group and blocked a later build in a different
+/// `CARGO_TARGET_DIR`; the report called it "spared (live owner)", which read
+/// as "something owns this" when nothing did.
+///
+/// See `BUILD_TOOL_COMMS` for why `cargo` itself is excluded: an adopted
+/// `cargo` is routinely a live backgrounded build, and killing those is worse
+/// than the leak this fixes.
+///
+/// This never widens candidacy on its own: `parent.is_adopted()` is still
+/// checked first, so a build tool belonging to a *running* cargo (parent
+/// `Alive`) is not a candidate at all.
 pub(crate) fn worktree_process_disposition(
     parent: ParentState,
     has_fingerprint: bool,
     owned_by_live_factory: bool,
+    is_build_tool: bool,
 ) -> Option<OrphanDisposition> {
     if !parent.is_adopted() {
         // Something still owns it. Not a candidate at all — this is what keeps
         // a developer's shell or editor out of the report.
         return None;
     }
-    if owned_by_live_factory {
+    if owned_by_live_factory && !is_build_tool {
         return Some(OrphanDisposition::SparedLiveOwner);
     }
     if !has_fingerprint {
         return Some(OrphanDisposition::RefusedUnverifiable);
     }
     Some(OrphanDisposition::Reapable)
+}
+
+/// True when `comm` names a build tool that cannot outlive its parent
+/// usefully. See `BUILD_TOOL_COMMS`.
+pub(crate) fn looks_like_build_tool(comm: &str) -> bool {
+    BUILD_TOOL_COMMS.iter().any(|tool| comm == *tool)
 }
 
 /// True when `command` looks like a dev server (advisory annotation only).
@@ -195,6 +247,11 @@ pub(crate) struct OrphanProcess {
     pub starttime: Option<u64>,
     pub ports: Vec<u16>,
     pub dev_server: bool,
+    /// `comm` names a build tool (`rustc`/`rustdoc` — deliberately not
+    /// `cargo`) whose parent has been reaped; see `BUILD_TOOL_COMMS`. Unlike
+    /// `dev_server` this feeds the disposition, so it is recorded rather than
+    /// recomputed at render.
+    pub build_tool: bool,
     pub disposition: OrphanDisposition,
 }
 
@@ -278,10 +335,17 @@ impl OrphanReport {
                     ParentState::Alive => format!("parent {} alive", p.ppid),
                 };
                 out.push_str(&format!(
-                    "  - pid {} ({}{}{}) cwd {} — {}, {}\n",
+                    "  - pid {} ({}{}{}{}) cwd {} — {}, {}\n",
                     p.pid,
                     p.comm,
                     if p.dev_server { ", dev server" } else { "" },
+                    // Say why a build tool is reapable even inside a live
+                    // worker's group, so the verdict does not look arbitrary.
+                    if p.build_tool {
+                        ", build tool with no parent to report to"
+                    } else {
+                        ""
+                    },
                     ports,
                     p.cwd.display(),
                     parent,
@@ -460,9 +524,13 @@ fn scan_worktree_processes(
         let owned_by_live_factory = protected_pgids.contains(&stat.pgid);
         let parent = parent_state(stat.ppid);
         let starttime = crate::mcp::daemon::read_pid_starttime(pid);
-        let Some(disposition) =
-            worktree_process_disposition(parent, starttime.is_some(), owned_by_live_factory)
-        else {
+        let build_tool = looks_like_build_tool(&stat.comm);
+        let Some(disposition) = worktree_process_disposition(
+            parent,
+            starttime.is_some(),
+            owned_by_live_factory,
+            build_tool,
+        ) else {
             continue;
         };
         let command = read_proc_cmdline(pid).unwrap_or_else(|| stat.comm.clone());
@@ -475,6 +543,7 @@ fn scan_worktree_processes(
             starttime,
             ports: super::cgroup::listening_ports_for_pid_public(pid),
             dev_server: looks_like_dev_server(&command),
+            build_tool,
             disposition,
         });
     }
@@ -742,11 +811,46 @@ mod tests {
         pid
     }
 
-    #[cfg(target_os = "linux")] // only the two /proc-based tests use it
+    #[cfg(target_os = "linux")] // only the /proc-based tests use it
     fn kill_if_alive(pid: u32) {
         #[cfg(unix)]
         unsafe {
             libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
+    }
+
+    /// Kills a planted process on drop, so a failed assertion cannot leak it.
+    ///
+    /// Without this the planted process outlives the test for its full sleep.
+    /// That matters most for the `rustc`-named decoy: production now reaps
+    /// processes with exactly that `comm`, and a concurrent run of this same
+    /// suite would find a stranger's leaked decoy sitting in a worktree.
+    /// Cleaning up on the failure path is what keeps the test from seeding the
+    /// condition it exists to detect.
+    #[cfg(target_os = "linux")]
+    struct PlantedProcess(u32);
+
+    #[cfg(target_os = "linux")]
+    impl Drop for PlantedProcess {
+        fn drop(&mut self) {
+            // The decoy is a shell with a `sleep` child; killing only the
+            // parent leaves that child behind as a second orphan in a
+            // worktree the test is about to delete.
+            //
+            // Reap the children by reading `/proc/<pid>/task/<pid>/children`,
+            // NOT with `killpg`. A background job in a non-interactive `sh -c`
+            // does not become a process-group leader — it inherits the
+            // shell's group, which here is the *test runner's* group. A
+            // `killpg` on that pgid would SIGKILL cargo itself.
+            let children = std::fs::read_to_string(format!(
+                "/proc/{pid}/task/{pid}/children",
+                pid = self.0
+            ))
+            .unwrap_or_default();
+            for child in children.split_whitespace().filter_map(|c| c.parse().ok()) {
+                kill_if_alive(child);
+            }
+            kill_if_alive(self.0);
         }
     }
 
@@ -801,7 +905,7 @@ mod tests {
         // The developer's editor / test runner case: cwd is inside a worktree
         // but a real parent owns it.
         assert_eq!(
-            worktree_process_disposition(ParentState::Alive, true, false),
+            worktree_process_disposition(ParentState::Alive, true, false, false),
             None
         );
     }
@@ -810,20 +914,106 @@ mod tests {
     fn adopted_process_matrix() {
         for parent in [ParentState::Reaped, ParentState::Gone] {
             assert_eq!(
-                worktree_process_disposition(parent, true, false),
+                worktree_process_disposition(parent, true, false, false),
                 Some(OrphanDisposition::Reapable)
             );
             assert_eq!(
-                worktree_process_disposition(parent, true, true),
+                worktree_process_disposition(parent, true, true, false),
                 Some(OrphanDisposition::SparedLiveOwner),
                 "a live worker's own process group still owns its descendants"
             );
             assert_eq!(
-                worktree_process_disposition(parent, false, false),
+                worktree_process_disposition(parent, false, false, false),
                 Some(OrphanDisposition::RefusedUnverifiable),
                 "no fingerprint means the pid cannot be proven — never signal"
             );
         }
+    }
+
+    // cas-4614 (GH #107): a build tool whose parent has been reaped is waste
+    // even inside a live worker's process group.
+    #[test]
+    fn orphaned_build_tool_is_not_spared_by_a_live_process_group() {
+        for parent in [ParentState::Reaped, ParentState::Gone] {
+            assert_eq!(
+                worktree_process_disposition(parent, true, true, true),
+                Some(OrphanDisposition::Reapable),
+                "cargo is the only reader of a rustc's result; once the parent \
+                 is reaped the child cannot deliver to anyone, whatever process \
+                 group it sits in"
+            );
+        }
+    }
+
+    #[test]
+    fn a_running_build_is_never_a_candidate_even_though_it_is_a_build_tool() {
+        // The regression that would matter most: killing rustc out from under
+        // a live cargo. `parent.is_adopted()` is checked first, so a build
+        // tool with a live parent is not a candidate at all.
+        assert_eq!(
+            worktree_process_disposition(ParentState::Alive, true, true, true),
+            None
+        );
+        assert_eq!(
+            worktree_process_disposition(ParentState::Alive, true, false, true),
+            None
+        );
+    }
+
+    #[test]
+    fn build_tool_flag_does_not_bypass_the_fingerprint_refusal() {
+        // Identity still outranks everything: an unverifiable pid may already
+        // be a different process, so being a build tool must not license a kill.
+        assert_eq!(
+            worktree_process_disposition(ParentState::Reaped, false, true, true),
+            Some(OrphanDisposition::RefusedUnverifiable)
+        );
+    }
+
+    #[test]
+    fn build_tool_detection_matches_comm_exactly() {
+        for comm in ["rustc", "rustdoc"] {
+            assert!(looks_like_build_tool(comm), "{comm} should be a build tool");
+        }
+        for comm in [
+            "node",
+            "bash",
+            "cas",
+            // Substring matches must NOT count — `comm` is the executable
+            // name, and a wrapper merely named after a build tool is not one.
+            "cargo-nextest",
+            "rustc-wrapper",
+            "sccache",
+            "",
+        ] {
+            assert!(
+                !looks_like_build_tool(comm),
+                "{comm:?} should not be treated as a build tool"
+            );
+        }
+    }
+
+    /// Regression guard for the review finding that killed the first draft:
+    /// `cargo` must NOT get the live-process-group override.
+    ///
+    /// An adopted `cargo` is the normal shape of a backgrounded build —
+    /// `cargo build &`, `nohup`, `setsid`, a detached harness step — whose
+    /// launcher shell exits by design while the build runs on. A live example
+    /// was found on the dev host during review: a working `cargo test`
+    /// adopted by `systemd --user`, cwd inside a worktree, which the first
+    /// draft classified `Reapable`.
+    #[test]
+    fn cargo_is_not_a_build_tool_because_adopted_cargo_is_usually_working() {
+        assert!(
+            !looks_like_build_tool("cargo"),
+            "an adopted cargo is routinely a live backgrounded build; giving it \
+             the live-owner override would kill in-flight compiles"
+        );
+        assert_eq!(
+            worktree_process_disposition(ParentState::Reaped, true, true, false),
+            Some(OrphanDisposition::SparedLiveOwner),
+            "a live worker's process group must still protect an adopted cargo"
+        );
     }
 
     #[test]
@@ -929,6 +1119,108 @@ mod tests {
         assert!(done.killed.is_empty(), "a live-owned process must survive");
         assert!(crate::mcp::daemon::pid_alive(pid));
         kill_if_alive(pid);
+    }
+
+    /// cas-4614 (GH #107) end-to-end, and the counterpart to
+    /// `a_live_workers_own_process_group_is_never_reaped`: the same setup —
+    /// an adopted process claimed by a live worker's process group — flips
+    /// from spared to reapable purely because the process is named `rustc`.
+    ///
+    /// This is the real incident: a `cargo` was killed, its `rustc` children
+    /// were adopted by init but stayed in the live worker's group, the report
+    /// said "spared (live owner)", and one of them went on to block a later
+    /// build in a different `CARGO_TARGET_DIR` for 57 minutes.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn orphaned_rustc_in_a_live_workers_group_is_reaped() {
+        let temp = tempfile::tempdir().unwrap();
+        let cas_root = temp.path().join(".cas");
+        let worktree = cas_root.join("worktrees/worker-a");
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        // `comm` is the basename of the running executable, so a copy of the
+        // shell named `rustc` is indistinguishable from the real thing to the
+        // scanner — which is exactly what we want to exercise.
+        //
+        // It must be the shell and not `sleep`: coreutils ships as a
+        // multi-call binary that dispatches on argv[0] and exits with
+        // "unknown program 'rustc'" when renamed. The shell keeps running
+        // under any name.
+        //
+        // The `; true` is load-bearing. Given a single simple command, bash
+        // execs it in place rather than forking, so the process would replace
+        // itself with `sleep` and `comm` would read "sleep" — the first
+        // version of this test failed exactly that way. A trailing statement
+        // forces bash to stay resident as the parent.
+        //
+        // The pid comes from `$!` — the process this test started. Never
+        // select build tools by name on a shared host: `pgrep -x rustc` will
+        // cheerfully match another worker's live compile.
+        let fake_rustc = temp.path().join("rustc");
+        std::fs::copy("/bin/bash", &fake_rustc).expect("copy bash -> rustc");
+        let pid = {
+            let output = Command::new("sh")
+                .arg("-c")
+                .arg(format!(
+                    "{} -c 'sleep 120; true' >/dev/null 2>&1 </dev/null & echo $!",
+                    fake_rustc.display()
+                ))
+                .current_dir(&worktree)
+                .output()
+                .expect("spawn fake rustc orphan");
+            let pid: u32 = String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .parse()
+                .expect("orphan pid");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                if matches!(
+                    parent_state(read_proc_stat(pid).map(|s| s.ppid).unwrap_or(1)),
+                    ParentState::Reaped | ParentState::Gone
+                ) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            pid
+        };
+
+        // Guard before the first assertion: everything below can panic.
+        let _guard = PlantedProcess(pid);
+
+        let stat = read_proc_stat(pid).expect("stat");
+        assert_eq!(stat.comm, "rustc", "the planted orphan must look like rustc");
+        // Claim its process group as a live worker's — the exact condition
+        // that used to spare it.
+        let protected: HashSet<u32> = [stat.pgid].into_iter().collect();
+
+        let report = scan(&cas_root, &HashSet::new(), &protected);
+        let found = report
+            .processes
+            .iter()
+            .find(|p| p.pid == pid)
+            .expect("planted rustc orphan must be reported");
+        assert!(
+            found.build_tool,
+            "comm rustc must set the build_tool flag (scan saw comm={:?})",
+            found.comm
+        );
+        assert_eq!(
+            found.disposition,
+            OrphanDisposition::Reapable,
+            "an orphaned build tool must not be spared by a live process group"
+        );
+        assert!(
+            report.render().contains("build tool with no parent to report to"),
+            "the report must say why it is reapable despite the live owner"
+        );
+
+        let done = cleanup(&cas_root, &report, true);
+        assert!(
+            done.killed.contains(&pid),
+            "the orphaned rustc should actually be reaped"
+        );
+        // `_guard` reaps it on the failure path too.
     }
 
     #[test]

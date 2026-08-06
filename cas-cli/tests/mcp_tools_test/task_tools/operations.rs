@@ -759,6 +759,238 @@ async fn test_task_ready_is_priority_sorted_and_states_the_true_total() {
     );
 }
 
+/// cas-e163 (GH #109): `tasks_available` — the surface idle workers are
+/// pointed at to self-serve work — caps at 20. Its total was already honest,
+/// but nothing said the list had been cut, so a worker could read 20 rows and
+/// never learn which call shows the rest.
+#[tokio::test]
+async fn test_tasks_available_names_withheld_rows() {
+    use cas::mcp::tools::LimitRequest;
+
+    let (_temp, service) = setup_cas();
+    for i in 0..25 {
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: format!("claimable {i}"),
+                description: None,
+                priority: 2,
+                task_type: "task".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: None,
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("create should succeed");
+    }
+
+    let text = extract_text(
+        service
+            .cas_tasks_available(Parameters(LimitRequest {
+                limit: None, // the default cap is what hides rows
+                scope: "all".to_string(),
+                sort: None,
+                sort_order: None,
+                team_id: None,
+            }))
+            .await
+            .expect("tasks_available should succeed"),
+    );
+
+    assert!(
+        text.contains("Available Tasks (25 total)"),
+        "the honest total stays: {text}"
+    );
+    assert!(
+        text.contains("and 5 more not shown"),
+        "the withheld rows must be named: {text}"
+    );
+    assert!(
+        text.contains("limit=25"),
+        "the footer must say how to see them: {text}"
+    );
+}
+
+/// cas-e163 review follow-up: an explicit `limit` must drive the footer too.
+/// Without this, a regression that hardcoded the cap and ignored `req.limit`
+/// would keep the other tests green while making the footer's own advice
+/// ("pass limit=N") a lie.
+#[tokio::test]
+async fn test_tasks_available_footer_tracks_an_explicit_limit() {
+    use cas::mcp::tools::LimitRequest;
+
+    let (_temp, service) = setup_cas();
+    for i in 0..25 {
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: format!("claimable {i}"),
+                description: None,
+                priority: 2,
+                task_type: "task".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: None,
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("create should succeed");
+    }
+
+    let text = extract_text(
+        service
+            .cas_tasks_available(Parameters(LimitRequest {
+                limit: Some(5),
+                scope: "all".to_string(),
+                sort: None,
+                sort_order: None,
+                team_id: None,
+            }))
+            .await
+            .expect("tasks_available should succeed"),
+    );
+
+    assert_eq!(
+        text.lines().filter(|l| l.starts_with("[P")).count(),
+        5,
+        "explicit limit must bound the rows: {text}"
+    );
+    assert!(
+        text.contains("and 20 more not shown"),
+        "the withheld count must follow the explicit limit: {text}"
+    );
+    assert!(text.contains("limit=25"), "{text}");
+}
+
+/// cas-e163 review follow-up: the total the footer arithmetic depends on is
+/// the post-claim count. A task someone else already holds is not available,
+/// and must not inflate either the total or the withheld count.
+#[tokio::test]
+async fn test_tasks_available_total_excludes_claimed_tasks() {
+    use cas::mcp::tools::LimitRequest;
+
+    let (temp, service) = setup_cas();
+    let cas_dir = temp.path().join(".cas");
+    let mut ids = Vec::new();
+    for i in 0..25 {
+        let created = extract_text(
+            service
+                .cas_task_create(Parameters(TaskCreateRequest {
+                    depth: None,
+                    title: format!("claimable {i}"),
+                    description: None,
+                    priority: 2,
+                    task_type: "task".to_string(),
+                    labels: None,
+                    notes: None,
+                    blocked_by: None,
+                    design: None,
+                    acceptance_criteria: None,
+                    external_ref: None,
+                    assignee: None,
+                    demo_statement: None,
+                    execution_note: None,
+                    epic: None,
+                }))
+                .await
+                .expect("create should succeed"),
+        );
+        ids.push(extract_task_id(&created).expect("task id").to_string());
+    }
+
+    // Five are already held by another agent. The lease row has a foreign key
+    // on the holder, so the holder must be a registered agent.
+    let agent_store = open_agent_store(&cas_dir).expect("agent store");
+    let holder = cas::types::Agent::new("other-agent".to_string(), "other-agent".to_string());
+    agent_store.register(&holder).expect("register holder");
+    for id in ids.iter().take(5) {
+        agent_store
+            .try_claim(id, "other-agent", 600, Some("held elsewhere"))
+            .expect("claim");
+    }
+
+    let text = extract_text(
+        service
+            .cas_tasks_available(Parameters(LimitRequest {
+                limit: None,
+                scope: "all".to_string(),
+                sort: None,
+                sort_order: None,
+                team_id: None,
+            }))
+            .await
+            .expect("tasks_available should succeed"),
+    );
+
+    assert!(
+        text.contains("Available Tasks (20 total)"),
+        "claimed tasks must not inflate the total: {text}"
+    );
+    assert!(
+        !text.contains("more not shown"),
+        "20 available under a cap of 20 withholds nothing: {text}"
+    );
+}
+
+/// cas-e163: a list that fits must not claim anything was withheld.
+#[tokio::test]
+async fn test_tasks_available_has_no_footer_when_nothing_is_withheld() {
+    use cas::mcp::tools::LimitRequest;
+
+    let (_temp, service) = setup_cas();
+    for i in 0..3 {
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: format!("claimable {i}"),
+                description: None,
+                priority: 2,
+                task_type: "task".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: None,
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("create should succeed");
+    }
+
+    let text = extract_text(
+        service
+            .cas_tasks_available(Parameters(LimitRequest {
+                limit: None,
+                scope: "all".to_string(),
+                sort: None,
+                sort_order: None,
+                team_id: None,
+            }))
+            .await
+            .expect("tasks_available should succeed"),
+    );
+
+    assert!(text.contains("Available Tasks (3 total)"), "{text}");
+    assert!(!text.contains("more not shown"), "{text}");
+}
+
 /// cas-06f9: `blocked` carried the identical silent cap and creation-order
 /// default on the same triage surface. Half the shipped change had no
 /// end-to-end coverage, so a revert there would have left the suite green.

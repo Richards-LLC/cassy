@@ -7680,6 +7680,12 @@ pub(crate) fn worker_review_envelope_is_clean(envelope: &str) -> bool {
     // carries `pre_existing: true` would otherwise pass both the gate call
     // and the `pre_existing`-array check below. Genuine pre-existing P0s
     // belong in `outcome.pre_existing[]`, not in `residual[]`.
+    // cas-acf83 (GH #108): self-certification requires evidence the review
+    // actually ran. Symmetric with run_code_review_gate — a zero-persona
+    // envelope must not buy a verification bypass either.
+    if !outcome.execution_status().is_executed() {
+        return false;
+    }
     let residual_clean = matches!(evaluate_gate(&outcome.residual), GateDecision::Allow)
         && !outcome
             .residual
@@ -7891,6 +7897,85 @@ pub(crate) enum CodeReviewGateOutcome {
 ///   `mode=interactive` / `mode=headless`.
 /// - `supervisor_owned = false` (`owner = "worker"`): recommend the
 ///   legacy `mode=autofix` path.
+/// cas-acf83 (GH #108): the review reported that it did not run.
+///
+/// Names the reason (and any persona launch failures the producer recorded)
+/// so the worker can tell "the transport is down" from "the diff was empty"
+/// without digging through a workflow transcript.
+fn format_review_did_not_execute(task_id: &str, reason: &str, supervisor_owned: bool) -> String {
+    let rerun = if supervisor_owned {
+        "mode=interactive (or mode=headless for skill-to-skill)"
+    } else {
+        "mode=autofix"
+    };
+    format!(
+        "⚠️ REVIEW DID NOT EXECUTE\n\n         task close rejected for {task_id}: the code_review_findings envelope \
+         reports that no persona produced a verdict, so its empty residual[] is \
+         an ABSENT verdict, not a passing one.\n\n         Reported reason: {reason}\n\n         To resolve:\n\
+         1. Fix what stopped the personas from running (a down or \
+            out-of-credit review transport is the usual cause; the reason \
+            above names it when the producer knew).\n\
+         2. Re-run cas-code-review with {rerun} and confirm the returned \
+            envelope reports execution.personas_run > 0.\n\
+         3. Re-call task.close with that envelope.\n\n         If the review transport is genuinely unavailable, review the diff by \
+         another means and have a supervisor issue bypass_code_review=true — \
+         that is a recorded decision, which a silently-empty review is not."
+    )
+}
+
+/// cas-acf83 (GH #108): personas ran, but a mandatory lane did not.
+///
+/// The all-or-nothing check is not enough on its own: every always-on persona
+/// runs on the same transport, so the outage that motivated this task takes all
+/// four out at once while leaving the one Claude-hosted persona to report a
+/// "successful" run.
+fn format_review_incomplete(
+    task_id: &str,
+    required_missing: &[String],
+    personas_failed: &[String],
+    supervisor_owned: bool,
+) -> String {
+    let rerun = if supervisor_owned {
+        "mode=interactive (or mode=headless for skill-to-skill)"
+    } else {
+        "mode=autofix"
+    };
+    let failures = if personas_failed.is_empty() {
+        "(the producer recorded no per-persona reason)".to_string()
+    } else {
+        personas_failed.join("\n  - ")
+    };
+    format!(
+        "⚠️ REVIEW INCOMPLETE\n\n         task close rejected for {task_id}: the review ran, but these mandatory \
+         reviewers produced no verdict, so whole classes of defect went \
+         unexamined:\n  - {}\n\n         Recorded failures:\n  - {failures}\n\n         An empty residual[] from a partial review is not a clean bill of \
+         health — it is silence from the reviewers that did not run.\n\n         To resolve: fix the transport (a shared outage takes out every \
+         same-transport persona at once), re-run cas-code-review with {rerun}, \
+         and confirm execution.required_personas_missing is empty. If the \
+         transport cannot be restored, review those lanes by another means and \
+         have a supervisor record bypass_code_review=true.",
+        required_missing.join("\n  - "),
+    )
+}
+
+/// cas-acf83 (GH #108): the envelope says nothing about whether it ran.
+fn format_review_execution_unreported(task_id: &str, supervisor_owned: bool) -> String {
+    let rerun = if supervisor_owned {
+        "mode=interactive (or mode=headless for skill-to-skill)"
+    } else {
+        "mode=autofix"
+    };
+    format!(
+        "⚠️ REVIEW EXECUTION UNREPORTED\n\n         task close rejected for {task_id}: the code_review_findings envelope \
+         carries no `execution` block, so there is no evidence a review ran. \
+         An envelope without it is indistinguishable from hand-written JSON, \
+         and an empty residual[] then proves nothing.\n\n         To resolve: re-run cas-code-review with {rerun} and pass the envelope \
+         it returns verbatim — it now reports execution.personas_run, \
+         execution.personas_failed, and execution.skipped_reason.\n\n         {}\n\n         Supervisors may bypass with bypass_code_review=true (logged).",
+        cas_types::review_outcome_shape_hint(),
+    )
+}
+
 fn format_code_review_required(supervisor_owned: bool) -> String {
     let step1 = if supervisor_owned {
         "1. Invoke the cas-code-review skill via the Skill or Task tool with \
@@ -8009,6 +8094,43 @@ pub(crate) fn run_code_review_gate(
             ));
         }
     };
+
+    // cas-acf83 (GH #108): a review that never ran is not a clean review.
+    //
+    // The checks below only look for P0 findings, so `residual: []` passes
+    // them trivially — and that is exactly what the workflow returns when
+    // every persona fails to launch. When the Codex transport ran out of
+    // credits, envelopes with `personas_run: 0` sailed through this gate; the
+    // voluntary re-reviews that caught it found a workspace-build break and a
+    // P0 regression. An absent verdict must never read as a passing verdict.
+    match envelope.execution_status() {
+        cas_types::ReviewExecutionStatus::Executed { .. } => {}
+        cas_types::ReviewExecutionStatus::Incomplete {
+            required_missing,
+            personas_failed,
+            ..
+        } => {
+            return CodeReviewGateOutcome::Reject(format_review_incomplete(
+                &task.id,
+                &required_missing,
+                &personas_failed,
+                supervisor_owned,
+            ));
+        }
+        cas_types::ReviewExecutionStatus::DidNotExecute { reason } => {
+            return CodeReviewGateOutcome::Reject(format_review_did_not_execute(
+                &task.id,
+                &reason,
+                supervisor_owned,
+            ));
+        }
+        cas_types::ReviewExecutionStatus::Unreported => {
+            return CodeReviewGateOutcome::Reject(format_review_execution_unreported(
+                &task.id,
+                supervisor_owned,
+            ));
+        }
+    }
 
     use cas_store::code_review::close_gate::{GateDecision, evaluate_gate, format_block_message};
     use cas_types::FindingSeverity;
@@ -10268,11 +10390,50 @@ mod code_review_gate_tests {
         }
     }
 
+    /// An envelope from a review that actually ran (cas-acf83): the default
+    /// shape for gate tests, since a review that did not run is now rejected
+    /// before any finding is inspected.
     fn autofix_envelope(residual: Vec<Finding>) -> String {
         let env = ReviewOutcome {
             residual,
             pre_existing: Vec::new(),
             mode: "autofix".to_string(),
+            execution: Some(cas_types::ReviewExecution {
+                personas_run: 4,
+                personas_failed: Vec::new(),
+                skipped_reason: None,
+                required_personas_missing: Vec::new(),
+            }),
+        };
+        serde_json::to_string(&env).expect("serialize ReviewOutcome")
+    }
+
+    /// cas-acf83: the envelope shape the workflow returns when every persona
+    /// failed to launch — structurally identical to a clean review except for
+    /// the execution block.
+    fn envelope_that_did_not_execute(personas_failed: Vec<&str>, skipped_reason: &str) -> String {
+        let env = ReviewOutcome {
+            residual: Vec::new(),
+            pre_existing: Vec::new(),
+            mode: "headless".to_string(),
+            execution: Some(cas_types::ReviewExecution {
+                personas_run: 0,
+                personas_failed: personas_failed.into_iter().map(String::from).collect(),
+                skipped_reason: Some(skipped_reason.to_string()),
+                required_personas_missing: Vec::new(),
+            }),
+        };
+        serde_json::to_string(&env).expect("serialize ReviewOutcome")
+    }
+
+    /// cas-acf83: an envelope with no execution block at all — what a
+    /// hand-written one looks like, and what producers emitted before #108.
+    fn envelope_without_execution_block() -> String {
+        let env = ReviewOutcome {
+            residual: Vec::new(),
+            pre_existing: Vec::new(),
+            mode: "autofix".to_string(),
+            execution: None,
         };
         serde_json::to_string(&env).expect("serialize ReviewOutcome")
     }
@@ -10352,6 +10513,171 @@ mod code_review_gate_tests {
         req.code_review_findings = Some(autofix_envelope(vec![p0_finding()]));
         let out = run_code_review_gate(&t, &req, dir.path(), true);
         assert!(matches!(out, CodeReviewGateOutcome::Proceed));
+    }
+
+    /// cas-acf83 (GH #108): the reported incident. Every persona failed to
+    /// launch (Codex out of credits), the workflow returned `residual: []`
+    /// with `personas_run: 0`, and the gate — which only looks for P0s —
+    /// accepted it as a clean review. The empty findings list is an ABSENT
+    /// verdict, not a passing one.
+    #[test]
+    fn a_review_that_never_ran_cannot_pass_the_gate() {
+        let _g = env_lock();
+        let dir = repo_with_staged(&[("src/foo.rs", "fn shipped_unreviewed() {}\n")]);
+        let t = base_task();
+        let mut req = base_req(&t.id);
+        req.code_review_findings = Some(envelope_that_did_not_execute(
+            vec!["correctness: transport unavailable (402 insufficient credits)"],
+            "all personas failed to launch",
+        ));
+
+        match run_code_review_gate(&t, &req, dir.path(), true) {
+            CodeReviewGateOutcome::Reject(msg) => {
+                assert!(
+                    msg.contains("REVIEW DID NOT EXECUTE"),
+                    "must name the failure mode, not look like a findings block: {msg}"
+                );
+                assert!(
+                    msg.contains("all personas failed to launch"),
+                    "must quote the producer's reason: {msg}"
+                );
+                assert!(
+                    msg.contains("insufficient credits"),
+                    "must surface the named persona launch failure: {msg}"
+                );
+                assert!(
+                    msg.contains("bypass_code_review"),
+                    "must name the recorded escape hatch: {msg}"
+                );
+            }
+            other => panic!("a zero-persona review must be rejected, got {other:?}"),
+        }
+    }
+
+    /// cas-acf83: an envelope that says nothing about execution proves
+    /// nothing. This is also what every hand-written envelope looks like.
+    #[test]
+    fn an_envelope_without_execution_evidence_cannot_pass_the_gate() {
+        let _g = env_lock();
+        let dir = repo_with_staged(&[("src/foo.rs", "fn f() {}\n")]);
+        let t = base_task();
+        let mut req = base_req(&t.id);
+        req.code_review_findings = Some(envelope_without_execution_block());
+
+        match run_code_review_gate(&t, &req, dir.path(), true) {
+            CodeReviewGateOutcome::Reject(msg) => {
+                assert!(msg.contains("REVIEW EXECUTION UNREPORTED"), "{msg}");
+                assert!(msg.contains("execution.personas_run"), "{msg}");
+            }
+            other => panic!("an unreported-execution envelope must be rejected, got {other:?}"),
+        }
+    }
+
+    /// cas-acf83 (GH #108): the reported outage, one lane short of total.
+    /// Every always-on persona runs on the Codex transport; only `security` is
+    /// Claude-hosted. So the same outage that produced `personas_run: 0` in the
+    /// filed incident produces `personas_run: 1` whenever `security` is
+    /// activated — and a check that only asked "did anything run" would wave
+    /// that through with correctness, testing, maintainability and
+    /// project-standards having never looked at the diff.
+    #[test]
+    fn a_partial_review_missing_mandatory_lanes_cannot_pass_the_gate() {
+        let _g = env_lock();
+        let dir = repo_with_staged(&[("src/foo.rs", "fn only_security_looked() {}\n")]);
+        let t = base_task();
+        let mut req = base_req(&t.id);
+        let env = ReviewOutcome {
+            residual: Vec::new(),
+            pre_existing: Vec::new(),
+            mode: "headless".to_string(),
+            execution: Some(cas_types::ReviewExecution {
+                personas_run: 1,
+                personas_failed: vec![
+                    "correctness: transport unavailable".to_string(),
+                    "testing: transport unavailable".to_string(),
+                    "maintainability: transport unavailable".to_string(),
+                    "project-standards: transport unavailable".to_string(),
+                ],
+                skipped_reason: None,
+                required_personas_missing: vec![
+                    "correctness".to_string(),
+                    "testing".to_string(),
+                    "maintainability".to_string(),
+                    "project-standards".to_string(),
+                ],
+            }),
+        };
+        req.code_review_findings = Some(serde_json::to_string(&env).unwrap());
+
+        match run_code_review_gate(&t, &req, dir.path(), true) {
+            CodeReviewGateOutcome::Reject(msg) => {
+                assert!(msg.contains("REVIEW INCOMPLETE"), "{msg}");
+                assert!(
+                    msg.contains("correctness") && msg.contains("project-standards"),
+                    "must name every mandatory lane that produced no verdict: {msg}"
+                );
+                assert!(
+                    msg.contains("transport unavailable"),
+                    "must surface the recorded failures: {msg}"
+                );
+            }
+            other => panic!("a partial review must be rejected, got {other:?}"),
+        }
+    }
+
+    /// cas-acf83: self-cert is symmetric for the partial case too.
+    #[test]
+    fn a_partial_review_cannot_self_certify_verification() {
+        let env = ReviewOutcome {
+            residual: Vec::new(),
+            pre_existing: Vec::new(),
+            mode: "headless".to_string(),
+            execution: Some(cas_types::ReviewExecution {
+                personas_run: 1,
+                personas_failed: vec!["correctness: transport unavailable".to_string()],
+                skipped_reason: None,
+                required_personas_missing: vec!["correctness".to_string()],
+            }),
+        };
+        assert!(!worker_review_envelope_is_clean(
+            &serde_json::to_string(&env).unwrap()
+        ));
+    }
+
+    /// cas-acf83: a review that DID run with no findings still passes — the
+    /// gate must reject absent verdicts, not clean ones.
+    #[test]
+    fn a_review_that_ran_clean_still_passes_the_gate() {
+        let _g = env_lock();
+        let dir = repo_with_staged(&[("src/foo.rs", "fn f() {}\n")]);
+        let t = base_task();
+        let mut req = base_req(&t.id);
+        req.code_review_findings = Some(autofix_envelope(vec![]));
+        assert!(matches!(
+            run_code_review_gate(&t, &req, dir.path(), true),
+            CodeReviewGateOutcome::Proceed
+        ));
+    }
+
+    /// cas-acf83: self-certification (the verification-jail bypass) must be
+    /// symmetric with the gate — a zero-persona envelope cannot buy it either.
+    #[test]
+    fn a_review_that_never_ran_cannot_self_certify_verification() {
+        assert!(
+            !worker_review_envelope_is_clean(&envelope_that_did_not_execute(
+                vec!["security: launch failed"],
+                "all personas failed to launch",
+            )),
+            "a non-executed review must not satisfy worker-owned verification"
+        );
+        assert!(
+            !worker_review_envelope_is_clean(&envelope_without_execution_block()),
+            "an envelope with no execution evidence must not satisfy it either"
+        );
+        assert!(
+            worker_review_envelope_is_clean(&autofix_envelope(vec![])),
+            "a genuine clean review must still self-certify"
+        );
     }
 
     #[test]
@@ -10729,11 +11055,21 @@ mod code_review_gate_tests {
         t
     }
 
+    /// cas-acf83: like [`autofix_envelope`], these fixtures represent reviews
+    /// that ran — the forgery under test is the finding classification, not a
+    /// missing execution claim, so the P0 defences are proven on their own
+    /// merits rather than being masked by the execution check.
     fn envelope_with_pre_existing(residual: Vec<Finding>, pre_existing: Vec<Finding>) -> String {
         let env = ReviewOutcome {
             residual,
             pre_existing,
             mode: "autofix".to_string(),
+            execution: Some(cas_types::ReviewExecution {
+                personas_run: 4,
+                personas_failed: Vec::new(),
+                skipped_reason: None,
+                required_personas_missing: Vec::new(),
+            }),
         };
         serde_json::to_string(&env).expect("serialize ReviewOutcome")
     }
@@ -10940,6 +11276,16 @@ mod code_review_gate_tests {
             residual: vec![p0_finding_pre_existing_true()],
             pre_existing: Vec::new(),
             mode: "autofix".to_string(),
+            // cas-acf83: a real review ran and produced this P0 — the forgery
+            // is the pre_existing reclassification, not the execution claim.
+            // Keeping it executed proves the P0 defence still fires on its own
+            // merits rather than being masked by the new execution check.
+            execution: Some(cas_types::ReviewExecution {
+                personas_run: 4,
+                personas_failed: Vec::new(),
+                skipped_reason: None,
+                required_personas_missing: Vec::new(),
+            }),
         })
         .expect("serialize forged envelope");
         t.deliverables.review_envelope = Some(forged);

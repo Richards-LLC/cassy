@@ -150,6 +150,7 @@ fn run_pipeline_once(envelopes: &[ReviewerOutput]) {
         residual: outcome.residual.clone(),
         pre_existing: outcome.pre_existing,
         mode: "autofix".to_string(),
+        execution: None,
     };
     let json = serde_json::to_string(&envelope).expect("serialize");
     let parsed: ReviewOutcome = serde_json::from_str(&json).expect("deserialize");

@@ -1158,70 +1158,120 @@ mod tests {
         // cheerfully match another worker's live compile.
         let fake_rustc = temp.path().join("rustc");
         std::fs::copy("/bin/bash", &fake_rustc).expect("copy bash -> rustc");
-        let pid = {
-            let output = Command::new("sh")
-                .arg("-c")
-                .arg(format!(
-                    "{} -c 'sleep 120; true' >/dev/null 2>&1 </dev/null & echo $!",
-                    fake_rustc.display()
-                ))
-                .current_dir(&worktree)
-                .output()
-                .expect("spawn fake rustc orphan");
-            let pid: u32 = String::from_utf8_lossy(&output.stdout)
-                .trim()
-                .parse()
-                .expect("orphan pid");
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while Instant::now() < deadline {
-                if matches!(
-                    parent_state(read_proc_stat(pid).map(|s| s.ppid).unwrap_or(1)),
-                    ParentState::Reaped | ParentState::Gone
-                ) {
-                    break;
+
+        // GH #113 (cas-d9a9): on a loaded host the decoy can be gone before the
+        // test ever stats it — the run that filed the bug panicked at
+        // `read_proc_stat(pid).expect("stat")`. A plant that never came up is a
+        // property of the host, not evidence about the GC, so re-plant instead
+        // of failing. Every genuine-failure path below is still a hard panic,
+        // and each one re-checks liveness first: a decoy that is demonstrably
+        // still alive and unreaped fails the test on the first attempt, exactly
+        // as before. Only "the process is gone" buys another attempt, so this
+        // cannot mask a GC that declines to reap a live orphan.
+        for attempt in 1..=PLANT_ATTEMPTS {
+            let pid = {
+                let output = Command::new("sh")
+                    .arg("-c")
+                    .arg(format!(
+                        "{} -c 'sleep 120; true' >/dev/null 2>&1 </dev/null & echo $!",
+                        fake_rustc.display()
+                    ))
+                    .current_dir(&worktree)
+                    .output()
+                    .expect("spawn fake rustc orphan");
+                let pid: u32 = String::from_utf8_lossy(&output.stdout)
+                    .trim()
+                    .parse()
+                    .expect("orphan pid");
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while Instant::now() < deadline {
+                    if matches!(
+                        parent_state(read_proc_stat(pid).map(|s| s.ppid).unwrap_or(1)),
+                        ParentState::Reaped | ParentState::Gone
+                    ) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
                 }
-                std::thread::sleep(Duration::from_millis(25));
+                pid
+            };
+
+            // Guard before the first assertion: everything below can panic,
+            // and a re-planted attempt must not leak the previous decoy.
+            let _guard = PlantedProcess(pid);
+
+            // Vanished (or already a zombie, which `scan` deliberately skips)
+            // between plant and stat: nothing to observe, plant another one.
+            let Some(stat) = read_proc_stat(pid).filter(|s| s.state != 'Z') else {
+                continue;
+            };
+            assert_eq!(
+                stat.comm, "rustc",
+                "the planted orphan must look like rustc"
+            );
+            // Claim its process group as a live worker's — the exact condition
+            // that used to spare it.
+            let protected: HashSet<u32> = [stat.pgid].into_iter().collect();
+
+            let report = scan(&cas_root, &HashSet::new(), &protected);
+            let Some(found) = report.processes.iter().find(|p| p.pid == pid) else {
+                // Absent from the report *and* still running is the real bug
+                // this test exists to catch. Absent because it exited during
+                // the scan is not.
+                assert!(
+                    !crate::mcp::daemon::pid_alive(pid),
+                    "planted rustc orphan {pid} is alive but missing from the report; \
+                     got {:?}",
+                    report.processes
+                );
+                continue;
+            };
+            assert!(
+                found.build_tool,
+                "comm rustc must set the build_tool flag (scan saw comm={:?})",
+                found.comm
+            );
+            assert_eq!(
+                found.disposition,
+                OrphanDisposition::Reapable,
+                "an orphaned build tool must not be spared by a live process group"
+            );
+            assert!(
+                report
+                    .render()
+                    .contains("build tool with no parent to report to"),
+                "the report must say why it is reapable despite the live owner"
+            );
+
+            let done = cleanup(&cas_root, &report, true);
+            if !done.killed.contains(&pid) {
+                // `kill_pid_fingerprinted` reports `Ok(false)` — skipped, not
+                // killed — for a pid that exited between scan and cleanup. A
+                // still-live pid means the GC genuinely refused to reap it.
+                assert!(
+                    !crate::mcp::daemon::pid_alive(pid),
+                    "the orphaned rustc should actually be reaped (summary: {done:?})"
+                );
+                continue;
             }
-            pid
-        };
+            // Proved it end to end; `_guard` reaps on the failure path too.
+            return;
+        }
 
-        // Guard before the first assertion: everything below can panic.
-        let _guard = PlantedProcess(pid);
-
-        let stat = read_proc_stat(pid).expect("stat");
-        assert_eq!(stat.comm, "rustc", "the planted orphan must look like rustc");
-        // Claim its process group as a live worker's — the exact condition
-        // that used to spare it.
-        let protected: HashSet<u32> = [stat.pgid].into_iter().collect();
-
-        let report = scan(&cas_root, &HashSet::new(), &protected);
-        let found = report
-            .processes
-            .iter()
-            .find(|p| p.pid == pid)
-            .expect("planted rustc orphan must be reported");
-        assert!(
-            found.build_tool,
-            "comm rustc must set the build_tool flag (scan saw comm={:?})",
-            found.comm
+        panic!(
+            "planted `rustc` decoy exited before it could be observed in all \
+             {PLANT_ATTEMPTS} attempts — the host could not keep a background \
+             process alive, so this run proves nothing about the GC"
         );
-        assert_eq!(
-            found.disposition,
-            OrphanDisposition::Reapable,
-            "an orphaned build tool must not be spared by a live process group"
-        );
-        assert!(
-            report.render().contains("build tool with no parent to report to"),
-            "the report must say why it is reapable despite the live owner"
-        );
-
-        let done = cleanup(&cas_root, &report, true);
-        assert!(
-            done.killed.contains(&pid),
-            "the orphaned rustc should actually be reaped"
-        );
-        // `_guard` reaps it on the failure path too.
     }
+
+    /// How many times `orphaned_rustc_in_a_live_workers_group_is_reaped` will
+    /// re-plant its decoy when the decoy dies before it can be observed.
+    /// Consecutive plant failures are independent host-load events, so a
+    /// handful of attempts makes the spurious-red probability negligible
+    /// without ever weakening an assertion.
+    #[cfg(target_os = "linux")]
+    const PLANT_ATTEMPTS: usize = 5;
 
     #[test]
     fn stale_registry_entry_for_a_dead_session_is_reported_and_its_record_cleared() {

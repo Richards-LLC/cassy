@@ -892,8 +892,16 @@ impl CasService {
             )
         })?;
 
+        // cas-45c4 (GH #102): say what an ack actually proves. It is the
+        // caller's claim that it received this message — not evidence CAS
+        // observed the content being surfaced, and not a guarantee for anyone
+        // else's copy of a broadcast.
         Ok(Self::success(format!(
-            "Message {notification_id} acknowledged (delivery confirmed)"
+            "Message {notification_id} acknowledged by this session (confirmation_source: \
+             explicit_ack). This records YOUR claim to have received it; CAS does not \
+             independently observe that the content was surfaced. Use message_status to see \
+             transport handoff, wake/reaction observations, and confirmation provenance \
+             separately."
         )))
     }
 
@@ -982,15 +990,34 @@ impl CasService {
                          transport handoff succeeding is not the same as the recipient \
                          reading it; escalate if this is climbing and the target is idle)\n"
                     ),
-                    None => "undelivered_after: n/a (recipient confirmed via message_ack)\n"
-                        .to_string(),
+                    // cas-45c4 (GH #102): an ack inferred from a later reply is
+                    // evidence the recipient took a turn, NOT that this
+                    // message's content was surfaced to it. Reporting both the
+                    // same way is what let status claim a confirmation the
+                    // recipient never made.
+                    None => format!(
+                        "undelivered_after: n/a (confirmation_source: {}{})\n",
+                        r.confirmation_source,
+                        if r.confirmation_source.is_recipient_claim() {
+                            " — the recipient's own claim about this message"
+                        } else {
+                            " — CAS inferred this from later activity; the recipient never \
+                             claimed to have read THIS message"
+                        }
+                    ),
                 };
                 Ok(Self::success(format!(
                     "Message {notification_id} status: {}\n\
-                     stage: {}  pending_reason: {}  wake: {}  reaction: {}\n\
+                     stage: {}  pending_reason: {}  wake: {}  reaction: {}  \
+                     confirmation_source: {}\n\
                      {undelivered_line}\
                      {json}",
-                    r.legacy_status, r.stage, reason, r.wake, r.reaction
+                    r.legacy_status,
+                    r.stage,
+                    reason,
+                    r.wake,
+                    r.reaction,
+                    r.confirmation_source
                 )))
             }
             None => Ok(Self::success(format!(

@@ -39,7 +39,7 @@ export const meta = {
 
 const ALWAYS_ON_PERSONAS = ['correctness', 'testing', 'maintainability', 'project-standards']
 const CODEX_PERSONA_MODEL = 'gpt-5.6-sol'
-const CODEX_PERSONA_EFFORT = 'medium'
+const CODEX_PERSONA_EFFORT = 'high'
 const CODEX_PERSONA_TIMEOUT_SECONDS = 600
 const CODEX_SCHEMA_RETRIES = 2
 const CODEX_TIMEOUT_RETRIES = 1
@@ -533,12 +533,66 @@ function personasRunCount(outputs = []) {
   return outputs.filter(output => !output?.skipped_reason).length
 }
 
+/**
+ * cas-acf83 (GH #108): the execution block the close gate reads.
+ *
+ * `residual: []` is ambiguous on its own — it is what a clean review returns
+ * AND what a review returns when every persona failed to launch. When the
+ * Codex transport ran out of credits, the second kind sailed through the close
+ * gate as if it were the first. This states which one happened, so an absent
+ * verdict can never be mistaken for a passing one.
+ *
+ * `personas_failed` names each persona and why, so a launch failure is
+ * diagnosable from the envelope alone.
+ */
+function buildExecution({
+  personasRun = 0,
+  skippedPersonas = [],
+  skippedReason = null,
+  requiredMissing = [],
+} = {}) {
+  return {
+    personas_run: personasRun,
+    personas_failed: skippedPersonas.map(s => `${s.reviewer}: ${s.reason}`),
+    // cas-acf83: `personas_run > 0` is too weak alone. Every always-on persona
+    // runs on the Codex transport (only `security` is Claude-hosted), so one
+    // outage takes out all four mandatory lanes while a single surviving
+    // persona would otherwise report a "successful" run. Name the missing
+    // mandatory lanes so the close gate can refuse a partial review.
+    required_personas_missing: requiredMissing,
+    ...(skippedReason ? { skipped_reason: skippedReason } : {}),
+  }
+}
+
 function incompleteAlwaysOnPersonas(skippedPersonas = []) {
   return [...new Set(
     skippedPersonas
       .map(skipped => skipped.reviewer)
       .filter(reviewer => ALWAYS_ON_PERSONAS.includes(reviewer))
   )]
+}
+
+/**
+ * cas-acf83 (GH #108): mandatory lanes with no verdict, by SET DIFFERENCE.
+ *
+ * Deliberately not derived from the skip records: those are self-reports from
+ * the very party that failed, keyed on a `reviewer` name it chooses. A persona
+ * whose transport died before it could name itself — or that returned nothing
+ * at all — leaves no skip record, and a skip-record scan would then report a
+ * complete review. Asking instead "which always-on persona produced a usable
+ * verdict?" cannot miss a lane, and a mislabelled verdict counts as missing,
+ * which errs toward rejecting the close.
+ */
+function missingMandatoryPersonas(dispatched = []) {
+  const delivered = new Set(
+    dispatched
+      .filter(entry => entry?.output && !entry.output.skipped_reason)
+      // The name the ORCHESTRATOR dispatched under, never the one the result
+      // claims: a persona that mislabels itself, or a shim that returns a
+      // malformed reviewer field, must not be able to vouch for a lane.
+      .map(entry => entry.persona)
+  )
+  return ALWAYS_ON_PERSONAS.filter(persona => !delivered.has(persona))
 }
 
 async function pipelineWithConcurrency(items, worker, maxConcurrency = CODEX_MAX_CONCURRENCY) {
@@ -801,12 +855,30 @@ const {
 
 if (!diffText || !diffText.trim() || diffText.trim() === 'EMPTY_DIFF') {
   log('Diff is empty — returning clean envelope')
-  return { residual: [], pre_existing: [], dropped: [], mode, skipped_reason: 'empty diff', stats: { personas_run: 0, dropped_findings: 0 } }
+  return {
+    residual: [], pre_existing: [], dropped: [], mode,
+    status: 'did_not_execute',
+    skipped_reason: 'empty diff',
+    execution: buildExecution({
+      skippedReason: 'empty diff',
+      requiredMissing: [...ALWAYS_ON_PERSONAS],
+    }),
+    stats: { personas_run: 0, dropped_findings: 0 },
+  }
 }
 
 if (!baseSha) {
   log('ERROR: base_sha required — pass from skill')
-  return { residual: [], pre_existing: [], dropped: [], mode, error: 'missing base_sha', stats: { personas_run: 0, dropped_findings: 0 } }
+  return {
+    residual: [], pre_existing: [], dropped: [], mode,
+    status: 'did_not_execute',
+    error: 'missing base_sha',
+    execution: buildExecution({
+      skippedReason: 'missing base_sha — cannot resolve a diff to review',
+      requiredMissing: [...ALWAYS_ON_PERSONAS],
+    }),
+    stats: { personas_run: 0, dropped_findings: 0 },
+  }
 }
 
 const changeLines = diffText.split('\n').filter(l => l.startsWith('+') || l.startsWith('-')).length
@@ -883,7 +955,12 @@ if (shardPlan.enabled) {
       pre_existing: [],
       mode,
       error: 'invalid shard coverage',
+      status: 'did_not_execute',
       activation: { activated: toRun, sharding: shardPlanSummary },
+      execution: buildExecution({
+        skippedReason: 'invalid shard coverage — no persona was dispatched',
+        requiredMissing: [...ALWAYS_ON_PERSONAS],
+      }),
       stats: { personas_run: 0, task_id: taskId ?? null },
     }
   }
@@ -896,14 +973,22 @@ if (shardPlan.enabled) {
 phase('Review')
 
 let personaResults = []
+// cas-acf83: keep the orchestrator's own record of who was dispatched and
+// what came back, so mandatory-lane coverage is decided by set difference
+// rather than by trusting each result to name itself.
+const dispatchRecord = []
 if (!shardPlan.enabled) {
   personaResults = await pipelineWithConcurrency(
     personasToDispatch,
-    (name) => dispatchReviewPersona(
-      name,
-      buildPersonaPrompt(name, diffText, fileList ?? '', intentSummary, baseSha),
-      `review:${name}`
-    )
+    async (name) => {
+      const output = await dispatchReviewPersona(
+        name,
+        buildPersonaPrompt(name, diffText, fileList ?? '', intentSummary, baseSha),
+        `review:${name}`
+      )
+      dispatchRecord.push({ persona: name, output })
+      return output
+    }
   )
 } else {
   const shardJobs = shardPlan.shards.flatMap(shard =>
@@ -912,7 +997,7 @@ if (!shardPlan.enabled) {
   log(`Large diff dispatch: ${shardJobs.length} shard/persona runs (${shardPlan.shards.map(s => `${s.id}:${s.personas.join('+')}`).join('; ')})`)
   personaResults = await pipelineWithConcurrency(
     shardJobs,
-    ({ name, shard }) => {
+    async ({ name, shard }) => {
       const shardIntent = `${intentSummary}
 
 Shard: ${shard.id}
@@ -926,11 +1011,13 @@ ${shard.kind === 'interface'
       const shardDiff = shard.diff_text?.trim()
         ? shard.diff_text
         : `# No signature-like interface diff lines detected for ${shard.id}; review the changed file list and cross-shard contract risk only.`
-      return dispatchReviewPersona(
+      const output = await dispatchReviewPersona(
         name,
         buildPersonaPrompt(name, shardDiff, shard.files.join('\n'), shardIntent, baseSha),
         `review:${name}:${shard.id}`
       )
+      dispatchRecord.push({ persona: name, output })
+      return output
     }
   )
 }
@@ -959,7 +1046,13 @@ const allOutputs = [...personaResults, fallowResult, gpt55Result]
 const skippedPersonas = skippedPersonaResults(allOutputs)
 const personasRun = personasRunCount(allOutputs)
 const incompletePersonas = incompleteAlwaysOnPersonas(skippedPersonas)
-const reviewStatus = incompletePersonas.length ? 'incomplete' : 'complete'
+const missingMandatory = missingMandatoryPersonas(dispatchRecord)
+// cas-acf83 (GH #108): zero personas is not a clean review, it is the absence
+// of one. Distinguish it from both 'complete' and the pre-existing
+// 'incomplete' (some always-on persona skipped, but a verdict still exists).
+const reviewStatus = personasRun === 0
+  ? 'did_not_execute'
+  : incompletePersonas.length ? 'incomplete' : 'complete'
 const gpt55Skipped = skippedPersonas.some(
   skipped => skipped.reviewer === 'gpt-5.6-sol:independent'
 )
@@ -969,6 +1062,17 @@ for (const skipped of skippedPersonas) {
 }
 if (incompletePersonas.length) {
   log(`ERROR: review incomplete; always-on personas skipped: ${incompletePersonas.join(', ')}`)
+}
+if (missingMandatory.length) {
+  log(`ERROR: mandatory reviewers produced no verdict: ${missingMandatory.join(', ')} — \
+an empty findings list from this run is silence, not a pass`)
+}
+if (personasRun === 0) {
+  // cas-acf83: loudest possible signal. Everything downstream — the returned
+  // envelope, the close gate — now treats this as a failed review, but the
+  // operator watching the run should not have to infer that from a count.
+  log(`ERROR: REVIEW DID NOT EXECUTE — no persona produced a verdict. \
+Failures: ${skippedPersonas.map(s => `${s.reviewer} (${s.reason})`).join('; ') || 'none reported'}`)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1017,6 +1121,14 @@ return {
     personas_run: personasRun,
     ...(shardPlan.enabled ? { sharding: shardPlanSummary } : {}),
   },
+  execution: buildExecution({
+    personasRun,
+    skippedPersonas,
+    requiredMissing: missingMandatory,
+    skippedReason: personasRun === 0
+      ? 'no persona produced a verdict — see execution.personas_failed'
+      : null,
+  }),
   stats: {
     total_findings: residual.length + pre_existing.length,
     p0, p1, p2, p3,

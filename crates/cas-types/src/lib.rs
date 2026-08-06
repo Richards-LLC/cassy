@@ -64,7 +64,8 @@ pub use agent::{
 };
 pub use code_review::{
     AutofixClass, FINDING_OPTIONAL_FIELDS, FINDING_REQUIRED_FIELDS, Finding,
-    FindingValidationError, MAX_TITLE_LEN, Owner, ReviewOutcome, ReviewOutcomeParseError,
+    FindingValidationError, MAX_TITLE_LEN, Owner, ReviewExecution, ReviewExecutionStatus,
+    ReviewOutcome, ReviewOutcomeParseError,
     ReviewerOutput, Severity as FindingSeverity, parse_review_outcome, parse_reviewer_output,
     review_outcome_shape_hint,
 };

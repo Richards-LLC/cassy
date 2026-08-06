@@ -321,6 +321,11 @@ impl Pane {
         config_dir: Option<&str>,
         config_dir_source: Option<&str>,
         teams: Option<&TeamsSpawnConfig>,
+        // `active_workers`: workers already running plus the one being
+        // spawned, used to derate this worker's `CARGO_BUILD_JOBS`
+        // (cas-4614, GH #107). `None` leaves the constructors' conservative
+        // default in place.
+        active_workers: Option<usize>,
     ) -> PtyConfig {
         let mut config = match cli {
             SupervisorCli::Claude => PtyConfig::claude(
@@ -363,6 +368,7 @@ impl Pane {
         if cli == SupervisorCli::Claude {
             config.apply_claude_config_dir(config_dir, config_dir_source);
         }
+        config.apply_worker_build_concurrency(active_workers);
         config.env.push((
             "CAS_FACTORY_SUPERVISOR_CLI".to_string(),
             supervisor_cli.as_str().to_string(),
@@ -405,6 +411,7 @@ impl Pane {
         cols: u16,
         teams: Option<&TeamsSpawnConfig>,
         factory_session: Option<&str>,
+        active_workers: Option<usize>,
     ) -> Result<Self> {
         Self::pre_trust_codex_workdir(cli, &cwd);
         let mut config = Self::build_worker_config(
@@ -419,6 +426,7 @@ impl Pane {
             config_dir,
             config_dir_source,
             teams,
+            active_workers,
         );
         push_factory_session_env(&mut config, cli, factory_session);
         let session_id = cas_session_id_from_config(&config);

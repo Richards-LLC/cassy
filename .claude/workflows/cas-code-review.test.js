@@ -120,16 +120,40 @@ async function runWorkflowDryRun(args, setupOverride = {}, agentOverrides = {}) 
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('merge implementation parity', () => {
-  test('source Workflow is byte-identical to the shipped builtin copy', () => {
-    const builtin = readFileSync(
-      new URL('../../cas-cli/src/builtins/workflows/cas-code-review.js', import.meta.url),
-      'utf8',
-    )
-    assert.equal(
-      WORKFLOW_SOURCE,
-      builtin,
-      'edit .claude and builtin cas-code-review Workflows together',
-    )
+  // cas-0e5b3 (GH #112): this file under .claude/workflows/ is a RENDERED
+  // ARTIFACT, not a second source. `sync_workflows` (cas-cli/src/builtins.rs)
+  // force-writes it from `BUILTIN_WORKFLOWS` on `cas update --sync`, and the
+  // constant's doc calls workflows "pure CAS-managed artifacts [that] should
+  // never be hand-edited".
+  //
+  // The old failure message here — "edit .claude and builtin Workflows
+  // together" — invited the wrong repair. Editing the rendered copy is exactly
+  // what gets silently reverted by the next sync, so a reader who followed it
+  // would reintroduce the drift they were trying to fix. The real repair is
+  // one-directional: change the builtin, regenerate the copy.
+  test('the rendered .claude copy is in sync with the builtin source', () => {
+    const builtinPath = '../../cas-cli/src/builtins/workflows/cas-code-review.js'
+    const builtin = readFileSync(new URL(builtinPath, import.meta.url), 'utf8')
+
+    if (WORKFLOW_SOURCE !== builtin) {
+      // Name the first divergent line: a whole-file diff of a 40KB script is
+      // unreadable, and the last drift (CODEX_PERSONA_EFFORT, 1 line of 1100)
+      // sat unnoticed for a week behind exactly that wall of output.
+      const mine = WORKFLOW_SOURCE.split('\n')
+      const theirs = builtin.split('\n')
+      let firstDiff = -1
+      for (let i = 0; i < Math.max(mine.length, theirs.length); i += 1) {
+        if (mine[i] !== theirs[i]) { firstDiff = i; break }
+      }
+      assert.fail(
+        `.claude/workflows/cas-code-review.js is STALE relative to its builtin source.\n` +
+        `This file is generated — do NOT edit it to fix this.\n` +
+        `  builtin (source of truth): ${firstDiff + 1}: ${theirs[firstDiff] ?? '<absent>'}\n` +
+        `  rendered copy (stale):     ${firstDiff + 1}: ${mine[firstDiff] ?? '<absent>'}\n` +
+        `Repair: edit cas-cli/src/builtins/workflows/cas-code-review.js, then\n` +
+        `regenerate with \`cas update --sync\` (or copy builtin → .claude/workflows/).`,
+      )
+    }
   })
 
   test('standalone exported validator matches the embedded Workflow validator', () => {
@@ -209,6 +233,149 @@ describe('merge implementation parity', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 // META BLOCK
 // ─────────────────────────────────────────────────────────────────────────────
+
+describe('cas-acf83 (GH #108): execution provenance', () => {
+  // Dispatch labels are `review:<persona>` (and `review:<persona>:<shard>`);
+  // a real persona names itself with the bare persona name in its result.
+  const personaOf = label => String(label).replace(/^review:/, '').split(':')[0]
+
+  const BASE_ARGS = {
+    diff_text: 'diff --git a/lib.rs b/lib.rs\n-old\n+new',
+    file_list: 'lib.rs',
+    base_sha: 'abc123',
+    commit_log: 'synthetic',
+  }
+
+  // A review that did not run returns `residual: []` — structurally identical
+  // to a clean review. The close gate only looks for P0s, so it accepted the
+  // first as if it were the second. Every return path must now say which one
+  // happened.
+
+  test('every early return reports execution, not just findings', () => {
+    // The bail-outs that return an empty envelope without dispatching anyone.
+    // Each is the exact shape that used to reach the close gate looking clean.
+    const bailouts = ['empty diff', 'missing base_sha', 'invalid shard coverage']
+    for (const marker of bailouts) {
+      const at = WORKFLOW_SOURCE.indexOf(`'${marker}'`)
+      assert.notEqual(at, -1, `bail-out for ${marker} must still exist`)
+      const block = WORKFLOW_SOURCE.slice(Math.max(0, at - 400), at + 400)
+      assert.match(
+        block,
+        /execution: buildExecution\(/,
+        `the ${marker} bail-out must state that it did not execute`,
+      )
+      assert.match(
+        block,
+        /status: 'did_not_execute'/,
+        `the ${marker} bail-out must carry the explicit failure status`,
+      )
+    }
+  })
+
+  test('buildExecution names failed personas so a launch failure is diagnosable', () => {
+    const at = WORKFLOW_SOURCE.indexOf('function buildExecution(')
+    assert.notEqual(at, -1, 'buildExecution must exist')
+    const src = WORKFLOW_SOURCE.slice(at, WORKFLOW_SOURCE.indexOf('\n}', WORKFLOW_SOURCE.indexOf('return {', at)))
+    assert.match(src, /personas_run/, 'must report how many personas produced a verdict')
+    assert.match(
+      src,
+      /personas_failed[\s\S]*reviewer[\s\S]*reason/,
+      'must name each failed persona AND why',
+    )
+    assert.match(src, /skipped_reason/, 'must carry the producer-level skip reason')
+    assert.match(
+      src,
+      /required_personas_missing/,
+      'must report mandatory lanes with no verdict — personas_run > 0 alone is too weak',
+    )
+  })
+
+  test('zero personas is its own status, distinct from complete and incomplete', () => {
+    assert.match(
+      WORKFLOW_SOURCE,
+      /personasRun === 0\s*\n?\s*\?\s*'did_not_execute'/,
+      "personas_run === 0 must map to 'did_not_execute', not 'complete'",
+    )
+    assert.match(
+      WORKFLOW_SOURCE,
+      /REVIEW DID NOT EXECUTE/,
+      'the run log must say so loudly, not leave it to be inferred from a count',
+    )
+  })
+
+  // --- behavioural: run the real workflow through the dry-run harness -------
+
+  test('a transport outage that skips every persona reports personas_run 0', async () => {
+    // The filed incident: every persona returns a skipped_reason instead of a
+    // verdict. The merged findings are empty either way — only `execution`
+    // distinguishes this from a clean review.
+    const { result } = await runWorkflowDryRun(BASE_ARGS, {}, {
+      '*': ({ options }) => ({
+        reviewer: personaOf(options.label),
+        findings: [],
+        residual_risks: [],
+        testing_gaps: [],
+        skipped_reason: '402 insufficient credits',
+      }),
+    })
+
+    assert.equal(result.residual.length, 0, 'precondition: findings look clean')
+    assert.equal(result.execution.personas_run, 0)
+    assert.equal(result.status, 'did_not_execute')
+    assert.ok(
+      result.execution.personas_failed.length > 0,
+      'each failed persona must be named with its reason',
+    )
+    assert.ok(
+      result.execution.personas_failed.every(f => f.includes('402 insufficient credits')),
+      `must carry the transport reason: ${JSON.stringify(result.execution.personas_failed)}`,
+    )
+  })
+
+  test('a partial outage names the mandatory lanes that produced no verdict', async () => {
+    // Only the always-on personas fail. `personas_run > 0` alone would call
+    // this a successful review — required_personas_missing is what stops it.
+    const alwaysOn = ['correctness', 'testing', 'maintainability', 'project-standards']
+    const { result } = await runWorkflowDryRun(BASE_ARGS, { activate_security: true }, {
+      '*': ({ options }) => alwaysOn.includes(personaOf(options.label))
+        ? {
+            reviewer: personaOf(options.label),
+            findings: [],
+            residual_risks: [],
+            testing_gaps: [],
+            skipped_reason: 'transport unavailable',
+          }
+        : {
+            reviewer: personaOf(options.label),
+            findings: [],
+            residual_risks: [],
+            testing_gaps: [],
+          },
+    })
+
+    assert.ok(result.execution.personas_run > 0, 'a persona did run')
+    assert.deepEqual(
+      [...result.execution.required_personas_missing].sort(),
+      [...alwaysOn].sort(),
+      'every missing mandatory lane must be named',
+    )
+  })
+
+  test('a clean full run reports execution with no missing lanes', async () => {
+    const { result } = await runWorkflowDryRun(BASE_ARGS, {}, {
+      '*': ({ options }) => ({
+        reviewer: personaOf(options.label),
+        findings: [],
+        residual_risks: [],
+        testing_gaps: [],
+      }),
+    })
+    assert.ok(result.execution.personas_run > 0)
+    assert.deepEqual(result.execution.required_personas_missing, [])
+    assert.deepEqual(result.execution.personas_failed, [])
+    assert.equal(result.status, 'complete')
+  })
+})
 
 describe('WORKFLOW_META', () => {
   test('has required name field', () => {

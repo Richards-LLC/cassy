@@ -479,6 +479,51 @@ impl std::fmt::Display for ObservationStatus {
         }
     }
 }
+/// Provenance of a message's `acked_at` stamp (cas-45c4 / GH #102).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfirmationSource {
+    /// No ack recorded.
+    Unconfirmed,
+    /// The recipient called `message_ack` for this message id — its own claim
+    /// about this specific message.
+    ExplicitAck,
+    /// CAS inferred consumption because the recipient later sent a message to
+    /// the same counterparty (cas-6ad2). Evidence that the recipient took a
+    /// turn, NOT that this message's content was surfaced to it.
+    InferredFromReply,
+    /// Ack recorded before provenance was tracked, or by an unknown path.
+    Unknown,
+}
+
+impl ConfirmationSource {
+    pub fn from_column(raw: Option<&str>, has_ack: bool) -> Self {
+        match (raw, has_ack) {
+            (_, false) => Self::Unconfirmed,
+            (Some("explicit_ack"), true) => Self::ExplicitAck,
+            (Some("inferred_from_reply"), true) => Self::InferredFromReply,
+            (_, true) => Self::Unknown,
+        }
+    }
+
+    /// Whether this confirmation is the recipient's own claim about this
+    /// message, rather than an inference from unrelated activity.
+    pub fn is_recipient_claim(self) -> bool {
+        matches!(self, Self::ExplicitAck)
+    }
+}
+
+impl std::fmt::Display for ConfirmationSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unconfirmed => write!(f, "unconfirmed"),
+            Self::ExplicitAck => write!(f, "explicit_ack"),
+            Self::InferredFromReply => write!(f, "inferred_from_reply"),
+            Self::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
 
 /// Stage-based delivery report for one prompt_queue message (cas-2c5f).
 ///
@@ -510,6 +555,11 @@ pub struct MessageDeliveryReport {
     /// Full transport handoff time only (not legacy processed_at / partial).
     pub delivered_at: Option<DateTime<Utc>>,
     pub confirmed_at: Option<DateTime<Utc>>,
+    /// cas-45c4 (GH #102): how `confirmed_at` was obtained. `Unconfirmed` when
+    /// there is no ack at all. Without this, a reply-inferred ack and an
+    /// explicit recipient acknowledgement are indistinguishable — and only one
+    /// of them is the recipient's own claim about THIS message.
+    pub confirmation_source: ConfirmationSource,
     /// Present when waiting/blocked, partial, or terminal non-delivery.
     pub pending_reason: Option<PendingReason>,
     /// Human-readable detail for the pending reason (error text, …).
@@ -567,6 +617,16 @@ ALTER TABLE prompt_queue ADD COLUMN next_attempt_at TEXT;
 "#;
 const PROMPT_QUEUE_FIRST_ATTEMPT_AT_MIGRATION: &str = r#"
 ALTER TABLE prompt_queue ADD COLUMN first_attempt_at TEXT;
+"#;
+
+/// cas-45c4 (GH #102): how `acked_at` was obtained. `acked_at` alone conflates
+/// two very different claims — the recipient explicitly acknowledged this
+/// message, versus CAS inferred consumption because the recipient later
+/// replied to that counterparty. Reporting both as "confirmed" is what let
+/// `message_status` claim a recipient confirmed content it may never have
+/// surfaced.
+const PROMPT_QUEUE_ACKED_VIA_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN acked_via TEXT;
 "#;
 
 /// Trait for prompt queue operations
@@ -709,6 +769,36 @@ pub trait PromptQueueStore: Send + Sync {
         factory_session: Option<&str>,
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>>;
+
+    /// Count the messages `recipient` has NOT yet seen, without consuming them.
+    ///
+    /// cas-e728 (GH #105): `worker_status` needs to say whether a quiet worker
+    /// has mail waiting, and a supervisor reading status must never mark that
+    /// mail seen — so this shares `poll_unseen_for_recipient`'s predicate
+    /// (recipient-seen state, stale/terminal-stage exclusion, `all_workers`
+    /// fan-out) but takes no write and returns only a count.
+    ///
+    /// Deliberately NOT `processed_at IS NULL`: the daemon stamps
+    /// `processed_at` the instant it hands a row to the transport, so that
+    /// column answers "has the daemon ticked", not "has the worker read it".
+    /// The whole point here is the row that WAS delivered and never consumed.
+    fn count_unseen_for_recipient(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+    ) -> Result<usize>;
+
+    /// Age in seconds of the oldest message `recipient` has not seen.
+    ///
+    /// `None` when the recipient's inbox is empty. cas-e728 uses this to tell
+    /// a worker that is merely between turns (no mail) from one that was handed
+    /// work and never woke (old unseen mail) — the latter is a real stall on a
+    /// harness whose turns CAS cannot observe.
+    fn oldest_unseen_age_secs_for_recipient(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+    ) -> Result<Option<i64>>;
 
     /// Poll all pending prompts (for Factory TUI to process)
     fn poll_all(&self, limit: usize) -> Result<Vec<QueuedPrompt>>;
@@ -1311,6 +1401,65 @@ impl<'a> AtomicStampOpts<'a> {
     }
 }
 
+/// cas-e728 (GH #105): shared read-only evaluation of a recipient's unseen
+/// inbox — count plus the age of its oldest row. Mirrors
+/// `poll_unseen_for_recipient`'s predicate exactly (recipient-seen state,
+/// stale/terminal-stage exclusion, `all_workers` fan-out) so status can never
+/// disagree with what the recipient's own next poll would hand it.
+impl SqlitePromptQueueStore {
+    fn unseen_for_recipient_summary(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+    ) -> Result<(usize, Option<i64>)> {
+        if recipient.trim().is_empty() {
+            return Ok((0, None));
+        }
+        let conn = self.conn.lock().unwrap();
+        let stale_cutoff =
+            (Utc::now() - chrono::Duration::seconds(PROMPT_QUEUE_STALE_TTL_SECS)).to_rfc3339();
+        let deliverable_sql = format!(
+            "AND q.created_at >= ?
+             AND (q.highest_stage IS NULL
+                  OR q.highest_stage NOT IN {TERMINAL_NON_DELIVERY_STAGES})"
+        );
+        let session_sql = if factory_session.is_some() {
+            "AND (q.factory_session = ? OR q.factory_session IS NULL)"
+        } else {
+            "AND q.factory_session IS NULL"
+        };
+        let sql = format!(
+            "SELECT COUNT(*), MIN(q.created_at)
+             FROM prompt_queue q
+             LEFT JOIN prompt_queue_recipient_seen seen
+               ON seen.prompt_id = q.id AND seen.recipient = ?
+             WHERE (q.target = 'all_workers' OR q.acked_at IS NULL)
+               AND seen.prompt_id IS NULL
+               {deliverable_sql}
+               AND (q.target = ? OR q.target = 'all_workers')
+               {session_sql}"
+        );
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
+            Box::new(recipient.to_string()),
+            Box::new(stale_cutoff),
+            Box::new(recipient.to_string()),
+        ];
+        if let Some(session) = factory_session {
+            params.push(Box::new(session.to_string()));
+        }
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let (count, oldest): (i64, Option<String>) = conn.query_row(
+            &sql,
+            rusqlite::params_from_iter(param_refs),
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let oldest_age = oldest
+            .and_then(|created| DateTime::parse_from_rfc3339(&created).ok())
+            .map(|created| (Utc::now() - created.with_timezone(&Utc)).num_seconds().max(0));
+        Ok((usize::try_from(count).unwrap_or(0), oldest_age))
+    }
+}
+
 impl PromptQueueStore for SqlitePromptQueueStore {
     fn init(&self) -> Result<()> {
         // cas-88d8: concurrent openers race on check-then-ALTER. SQLite
@@ -1351,6 +1500,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 ),
                 ("next_attempt_at", PROMPT_QUEUE_NEXT_ATTEMPT_AT_MIGRATION),
                 ("first_attempt_at", PROMPT_QUEUE_FIRST_ATTEMPT_AT_MIGRATION),
+                ("acked_via", PROMPT_QUEUE_ACKED_VIA_MIGRATION),
                 ("dedupe_key", PROMPT_QUEUE_DEDUPE_KEY_MIGRATION),
             ] {
                 crate::shared_db::ensure_column(&conn, "prompt_queue", col, mig)?;
@@ -1729,6 +1879,26 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         })
     }
 
+    fn count_unseen_for_recipient(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+    ) -> Result<usize> {
+        Ok(self
+            .unseen_for_recipient_summary(recipient, factory_session)?
+            .0)
+    }
+
+    fn oldest_unseen_age_secs_for_recipient(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+    ) -> Result<Option<i64>> {
+        Ok(self
+            .unseen_for_recipient_summary(recipient, factory_session)?
+            .1)
+    }
+
     fn poll_all(&self, limit: usize) -> Result<Vec<QueuedPrompt>> {
         crate::shared_db::with_write_retry(|| {
             let conn = self.conn.lock().unwrap();
@@ -2034,7 +2204,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 AtomicStampOpts::clear_reason(),
             );
             conn.execute(
-                "UPDATE prompt_queue SET acked_at = ? WHERE id = ? AND acked_at IS NULL",
+                "UPDATE prompt_queue SET acked_at = ?, acked_via = 'explicit_ack' \
+                 WHERE id = ? AND acked_at IS NULL",
                 params![now, prompt_id],
             )?;
             // rows_affected == 0 means either not found or already acked — both idempotent
@@ -2067,6 +2238,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             let sql = format!(
                 "UPDATE prompt_queue
                  SET acked_at = ?,
+                     acked_via = 'inferred_from_reply',
                      highest_stage = 'confirmed',
                      last_pending_reason = NULL,
                      last_pending_detail = NULL
@@ -2153,7 +2325,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             "SELECT id, prompt, source, target, created_at, processed_at, factory_session,
                     priority, acked_at, urgent, selected_at, last_pending_reason,
                     last_pending_detail, transport_delivered_at, highest_stage,
-                    broadcast_attempted, broadcast_succeeded, broadcast_failed
+                    broadcast_attempted, broadcast_succeeded, broadcast_failed,
+                    acked_via
              FROM prompt_queue WHERE id = ?",
             params![prompt_id],
             |row| {
@@ -2176,6 +2349,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     row.get::<_, Option<i64>>(15).unwrap_or(None),
                     row.get::<_, Option<i64>>(16).unwrap_or(None),
                     row.get::<_, Option<i64>>(17).unwrap_or(None),
+                    row.get::<_, Option<String>>(18).unwrap_or(None),
                 ))
             },
         );
@@ -2199,6 +2373,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             bc_attempted,
             bc_succeeded,
             bc_failed,
+            acked_via_s,
         ) = match row {
             Ok(v) => v,
             Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
@@ -2301,6 +2476,10 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             selected_at,
             delivered_at,
             confirmed_at,
+            confirmation_source: ConfirmationSource::from_column(
+                acked_via_s.as_deref(),
+                confirmed_at.is_some(),
+            ),
             pending_reason,
             pending_detail,
             broadcast_attempted: bc_attempted.map(|n| n as u32),
@@ -2676,6 +2855,80 @@ mod tests {
         (temp, store)
     }
 
+    /// cas-45c4 (GH #102): an ack inferred from a later reply must never be
+    /// reported the same way as the recipient's own acknowledgement. The
+    /// inference proves the recipient took a turn; it does not prove this
+    /// message's content was ever surfaced to it — and reporting both as
+    /// "confirmed" is what let status claim a confirmation nobody made.
+    #[test]
+    fn confirmation_source_separates_an_explicit_ack_from_a_reply_inference() {
+        let (_temp, store) = create_test_store();
+
+        let explicit = store
+            .enqueue_with_session("supervisor", "swift-fox", "read this", "sess-1")
+            .unwrap();
+        let inferred = store
+            .enqueue_with_session("supervisor", "swift-fox", "and this", "sess-1")
+            .unwrap();
+
+        // Both reach the recipient's transport.
+        store.poll_all(10).unwrap();
+        store.mark_transport_delivered(explicit).unwrap();
+        store.mark_transport_delivered(inferred).unwrap();
+
+        let before = store.message_delivery_report(explicit).unwrap().unwrap();
+        assert_eq!(
+            before.confirmation_source,
+            ConfirmationSource::Unconfirmed,
+            "transport handoff is not a confirmation"
+        );
+
+        // The recipient explicitly acknowledges one of them...
+        store.ack(explicit).unwrap();
+        // ...and separately sends a reply, which sweeps the rest to acked.
+        store
+            .ack_delivered_for_recipient(&["swift-fox"], &["supervisor"], Some("sess-1"))
+            .unwrap();
+
+        let a = store.message_delivery_report(explicit).unwrap().unwrap();
+        let b = store.message_delivery_report(inferred).unwrap().unwrap();
+
+        assert_eq!(a.confirmation_source, ConfirmationSource::ExplicitAck);
+        assert!(
+            a.confirmation_source.is_recipient_claim(),
+            "the recipient acknowledged this message itself"
+        );
+
+        assert_eq!(b.confirmation_source, ConfirmationSource::InferredFromReply);
+        assert!(
+            !b.confirmation_source.is_recipient_claim(),
+            "a reply-inferred ack must not be presented as the recipient's claim about \
+             THIS message — it may never have been surfaced"
+        );
+        // Both still read as legacy-confirmed, so older clients are unaffected.
+        assert!(a.confirmed_at.is_some() && b.confirmed_at.is_some());
+    }
+
+    /// cas-45c4: rows acked before provenance tracking existed must report
+    /// `Unknown` rather than being upgraded to a claim nobody made.
+    #[test]
+    fn a_legacy_ack_without_provenance_is_reported_as_unknown_not_explicit() {
+        assert_eq!(
+            ConfirmationSource::from_column(None, true),
+            ConfirmationSource::Unknown
+        );
+        assert_eq!(
+            ConfirmationSource::from_column(None, false),
+            ConfirmationSource::Unconfirmed
+        );
+        // An ack stamp is required before any provenance is meaningful.
+        assert_eq!(
+            ConfirmationSource::from_column(Some("explicit_ack"), false),
+            ConfirmationSource::Unconfirmed
+        );
+        assert!(!ConfirmationSource::Unknown.is_recipient_claim());
+    }
+
     #[test]
     fn test_enqueue_and_poll() {
         let (_temp, store) = create_test_store();
@@ -2967,6 +3220,121 @@ mod tests {
         assert_eq!(prompts_b.len(), 1);
         assert_eq!(prompts_b[0].target, "worker-b1");
         assert_eq!(prompts_b[0].factory_session.as_deref(), Some("session-b"));
+    }
+
+    /// cas-e728 (GH #105): the count must mean "the recipient has not read
+    /// this", not "the daemon has not touched it". worker_status uses it to
+    /// tell a worker that is merely between turns from one that was handed
+    /// work and never woke, so a row the transport already delivered must
+    /// still count until the recipient actually consumes it.
+    #[test]
+    fn count_unseen_survives_transport_delivery_and_stops_at_recipient_read() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue("supervisor", "worker-a", "start this")
+            .unwrap();
+
+        assert_eq!(
+            store.count_unseen_for_recipient("worker-a", None).unwrap(),
+            1
+        );
+
+        // The daemon hands it to the transport: `processed_at` is stamped, but
+        // the worker has still not read it.
+        store.mark_transport_delivered(id).unwrap();
+        assert_eq!(
+            store.count_unseen_for_recipient("worker-a", None).unwrap(),
+            1,
+            "transport delivery is not the worker reading it"
+        );
+
+        // The worker polls its inbox — now it is seen.
+        store
+            .poll_unseen_for_recipient("worker-a", None, 10)
+            .unwrap();
+        assert_eq!(
+            store.count_unseen_for_recipient("worker-a", None).unwrap(),
+            0
+        );
+    }
+
+    /// Broadcasts are real inbox items with per-recipient read state; missing
+    /// them made worker_status report "inbox empty" for every worker that had
+    /// just been asked to report.
+    #[test]
+    fn count_unseen_includes_all_workers_broadcasts_per_recipient() {
+        let (_temp, store) = create_test_store();
+        store
+            .enqueue("supervisor", "all_workers", "everyone report")
+            .unwrap();
+
+        assert_eq!(
+            store.count_unseen_for_recipient("worker-a", None).unwrap(),
+            1
+        );
+        assert_eq!(
+            store.count_unseen_for_recipient("worker-b", None).unwrap(),
+            1
+        );
+
+        store
+            .poll_unseen_for_recipient("worker-a", None, 10)
+            .unwrap();
+        assert_eq!(
+            store.count_unseen_for_recipient("worker-a", None).unwrap(),
+            0,
+            "one worker draining a broadcast must not hide it from peers"
+        );
+        assert_eq!(
+            store.count_unseen_for_recipient("worker-b", None).unwrap(),
+            1
+        );
+    }
+
+    /// The age of the oldest unread row is what separates "just delivered" from
+    /// "delivered and ignored"; an empty inbox has no age.
+    #[test]
+    fn oldest_unseen_age_is_none_for_an_empty_inbox_and_set_otherwise() {
+        let (_temp, store) = create_test_store();
+        assert_eq!(
+            store
+                .oldest_unseen_age_secs_for_recipient("worker-a", None)
+                .unwrap(),
+            None
+        );
+
+        store.enqueue("supervisor", "worker-a", "hello").unwrap();
+        let age = store
+            .oldest_unseen_age_secs_for_recipient("worker-a", None)
+            .unwrap()
+            .expect("a pending row must have an age");
+        assert!(
+            (0..5).contains(&age),
+            "fresh row age should be ~0s, got {age}"
+        );
+    }
+
+    /// Counting must never mark anything seen — a supervisor reading status
+    /// must not consume a worker's mail.
+    #[test]
+    fn counting_does_not_consume_the_inbox() {
+        let (_temp, store) = create_test_store();
+        store.enqueue("supervisor", "worker-a", "keep me").unwrap();
+
+        for _ in 0..3 {
+            assert_eq!(
+                store.count_unseen_for_recipient("worker-a", None).unwrap(),
+                1
+            );
+        }
+        assert_eq!(
+            store
+                .poll_unseen_for_recipient("worker-a", None, 10)
+                .unwrap()
+                .len(),
+            1,
+            "the message must still be deliverable after being counted"
+        );
     }
 
     #[test]

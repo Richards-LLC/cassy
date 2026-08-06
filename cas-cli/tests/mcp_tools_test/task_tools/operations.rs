@@ -644,6 +644,872 @@ async fn test_task_ready() {
     assert!(text.contains("Ready task") || text.contains("ready") || text.contains("Tasks"));
 }
 
+/// cas-06f9 (GH #104): `ready` capped at 10 with a header that printed only
+/// the shown count, so a capped list was indistinguishable from a drained
+/// queue — and the default ordering was creation order, so low-priority
+/// follow-ups created later could fill the window while P0s sat unseen. The
+/// reported incident: 30 ready tasks rendered as 10, thirteen ready P0s hidden
+/// behind P2/P3 work for hours.
+#[tokio::test]
+async fn test_task_ready_is_priority_sorted_and_states_the_true_total() {
+    let (_temp, service) = setup_cas();
+
+    // Ordering of creation is load-bearing: the OLD default was created/DESC
+    // (newest first), so the P0s must be the OLDEST tasks for creation order to
+    // push them out of the window. Creating them last would have let the old
+    // code surface them and the test would pass against the bug.
+    for i in 0..4 {
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: format!("critical {i}"),
+                description: None,
+                priority: 0,
+                task_type: "bug".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: None,
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("create should succeed");
+    }
+    // Enough newer, lower-priority work to fill the 10-row window on its own.
+    for (priority, label) in [(2u8, "medium"), (3, "late follow-up")] {
+        for i in 0..9 {
+            service
+                .cas_task_create(Parameters(TaskCreateRequest {
+                    depth: None,
+                    title: format!("{label} {i}"),
+                    description: None,
+                    priority,
+                    task_type: "task".to_string(),
+                    labels: None,
+                    notes: None,
+                    blocked_by: None,
+                    design: None,
+                    acceptance_criteria: None,
+                    external_ref: None,
+                    assignee: None,
+                    demo_statement: None,
+                    execution_note: None,
+                    epic: None,
+                }))
+                .await
+                .expect("create should succeed");
+        }
+    }
+
+    let text = extract_text(
+        service
+            .cas_task_ready(Parameters(TaskReadyBlockedRequest {
+                scope: "all".to_string(),
+                limit: None, // the reported call: no limit passed
+                sort: None,
+                sort_order: None,
+                epic: None,
+            }))
+            .await
+            .expect("task_ready should succeed"),
+    );
+
+    // The header must state what was withheld, not just what was shown.
+    assert!(
+        text.contains("showing 10 of 22"),
+        "header must carry the true total: {text}"
+    );
+    assert!(
+        text.contains("P0 first"),
+        "header must name the ordering applied: {text}"
+    );
+    assert!(
+        text.contains("and 12 more not shown"),
+        "footer must say how much is hidden: {text}"
+    );
+    assert!(
+        text.contains("limit=22"),
+        "footer must say how to see the rest: {text}"
+    );
+
+    // Every P0 must be inside the window — the priority inversion is the
+    // damage the truncation actually caused.
+    for i in 0..4 {
+        assert!(
+            text.contains(&format!("critical {i}")),
+            "P0 task 'critical {i}' must be visible in the capped window: {text}"
+        );
+    }
+    let first_line = text
+        .lines()
+        .find(|line| line.starts_with("- ["))
+        .expect("at least one task row");
+    assert!(
+        first_line.contains("P0"),
+        "the first row must be a P0: {first_line}"
+    );
+    assert!(
+        !text.contains("late follow-up 8"),
+        "P3 work must not displace P0s in the window: {text}"
+    );
+}
+
+/// cas-e163 (GH #109): `tasks_available` — the surface idle workers are
+/// pointed at to self-serve work — caps at 20. Its total was already honest,
+/// but nothing said the list had been cut, so a worker could read 20 rows and
+/// never learn which call shows the rest.
+#[tokio::test]
+async fn test_tasks_available_names_withheld_rows() {
+    use cas::mcp::tools::LimitRequest;
+
+    let (_temp, service) = setup_cas();
+    for i in 0..25 {
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: format!("claimable {i}"),
+                description: None,
+                priority: 2,
+                task_type: "task".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: None,
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("create should succeed");
+    }
+
+    let text = extract_text(
+        service
+            .cas_tasks_available(Parameters(LimitRequest {
+                limit: None, // the default cap is what hides rows
+                scope: "all".to_string(),
+                sort: None,
+                sort_order: None,
+                team_id: None,
+            }))
+            .await
+            .expect("tasks_available should succeed"),
+    );
+
+    assert!(
+        text.contains("Available Tasks (25 total, P0 first)"),
+        "the honest total stays: {text}"
+    );
+    assert!(
+        text.contains("and 5 more not shown"),
+        "the withheld rows must be named: {text}"
+    );
+    assert!(
+        text.contains("limit=25"),
+        "the footer must say how to see them: {text}"
+    );
+}
+
+/// cas-61d3 (GH #111): `sort`/`sort_order` are in this action's schema and
+/// were routed all the way into the handler, which ignored them — an agent
+/// asking for a different order got the default back with no error and no way
+/// to tell. The last of the advertised-but-inert family.
+#[tokio::test]
+async fn test_tasks_available_honours_an_explicit_sort() {
+    use cas::mcp::tools::LimitRequest;
+
+    let (_temp, service) = setup_cas();
+    // Priority order and title order disagree, so the assertion can only pass
+    // if the requested field is the one actually applied.
+    for (priority, title) in [(0u8, "zulu critical"), (3, "alpha low")] {
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: title.to_string(),
+                description: None,
+                priority,
+                task_type: "task".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: None,
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("create should succeed");
+    }
+
+    let by_title = extract_text(
+        service
+            .cas_tasks_available(Parameters(LimitRequest {
+                limit: None,
+                scope: "all".to_string(),
+                sort: Some("title".to_string()),
+                sort_order: Some("asc".to_string()),
+                team_id: None,
+            }))
+            .await
+            .expect("tasks_available should succeed"),
+    );
+    assert!(
+        by_title.contains("title A-Z"),
+        "the header must name the ordering applied: {by_title}"
+    );
+    let first = by_title
+        .lines()
+        .find(|l| l.starts_with("[P"))
+        .expect("a task row");
+    assert!(
+        first.contains("alpha low"),
+        "sort=title must actually reorder the rows: {first}"
+    );
+
+    // Default is unchanged: priority first.
+    let by_default = extract_text(
+        service
+            .cas_tasks_available(Parameters(LimitRequest {
+                limit: None,
+                scope: "all".to_string(),
+                sort: None,
+                sort_order: None,
+                team_id: None,
+            }))
+            .await
+            .expect("tasks_available should succeed"),
+    );
+    assert!(by_default.contains("P0 first"), "{by_default}");
+    let first_default = by_default
+        .lines()
+        .find(|l| l.starts_with("[P"))
+        .expect("a task row");
+    assert!(
+        first_default.contains("zulu critical"),
+        "the default must stay priority-first: {first_default}"
+    );
+}
+
+/// cas-61d3 review follow-up: the sort must be applied BEFORE truncation. A
+/// regression that sorted only the already-capped window would leave every
+/// other test green while making the capped case — the one GH #109 exists for
+/// — silently wrong.
+#[tokio::test]
+async fn test_tasks_available_sorts_before_truncating() {
+    use cas::mcp::tools::LimitRequest;
+
+    let (_temp, service) = setup_cas();
+    // Creation order is load-bearing and easy to get backwards: `list_ready`
+    // returns priority ASC, created_at DESC, so the NEWEST task is already
+    // first. Creating "alpha" last would put it at the top before any sorting
+    // and the assertion below would pass even if the sort ran after the cap.
+    // Create it FIRST so the natural order leads with "zulu".
+    for (priority, title) in [
+        (0u8, "alpha critical"),
+        (0, "mike critical"),
+        (0, "zulu critical"),
+    ] {
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: title.to_string(),
+                description: None,
+                priority,
+                task_type: "task".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: None,
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("create should succeed");
+    }
+
+    let text = extract_text(
+        service
+            .cas_tasks_available(Parameters(LimitRequest {
+                limit: Some(1),
+                scope: "all".to_string(),
+                sort: Some("title".to_string()),
+                sort_order: Some("asc".to_string()),
+                team_id: None,
+            }))
+            .await
+            .expect("tasks_available should succeed"),
+    );
+
+    let rows: Vec<_> = text.lines().filter(|l| l.starts_with("[P")).collect();
+    assert_eq!(rows.len(), 1, "limit must still bound the rows: {text}");
+    assert!(
+        rows[0].contains("alpha critical"),
+        "the single surviving row must be the global first, not the first of an \
+         unsorted window: {text}"
+    );
+    assert!(text.contains("and 2 more not shown"), "{text}");
+}
+
+/// cas-61d3 review follow-up: `sort_order` alone must behave here exactly as
+/// it does on ready/blocked — keep the priority field, flip the direction.
+#[tokio::test]
+async fn test_tasks_available_sort_order_alone_flips_priority_direction() {
+    use cas::mcp::tools::LimitRequest;
+
+    let (_temp, service) = setup_cas();
+    for (priority, title) in [(0u8, "critical one"), (3, "low one")] {
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: title.to_string(),
+                description: None,
+                priority,
+                task_type: "task".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: None,
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("create should succeed");
+    }
+
+    let text = extract_text(
+        service
+            .cas_tasks_available(Parameters(LimitRequest {
+                limit: None,
+                scope: "all".to_string(),
+                sort: None,
+                sort_order: Some("desc".to_string()),
+                team_id: None,
+            }))
+            .await
+            .expect("tasks_available should succeed"),
+    );
+
+    assert!(text.contains("lowest priority first"), "{text}");
+    let first = text
+        .lines()
+        .find(|l| l.starts_with("[P"))
+        .expect("a task row");
+    assert!(first.contains("low one"), "{first}");
+}
+
+/// cas-61d3: an unrecognised sort field means "unspecified" here, exactly as
+/// on ready/blocked — it must not silently resurrect creation order.
+#[tokio::test]
+async fn test_tasks_available_unparseable_sort_falls_back_to_priority() {
+    use cas::mcp::tools::LimitRequest;
+
+    let (_temp, service) = setup_cas();
+    // Order matters: the P0 is created FIRST, so a fallback to created/desc
+    // (the trap #104 fixed) would put "low one" at the top and the row
+    // assertion below would catch it — not just the header label.
+    for (priority, title) in [(0u8, "critical one"), (3, "low one")] {
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: title.to_string(),
+                description: None,
+                priority,
+                task_type: "task".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: None,
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("create should succeed");
+    }
+
+    let text = extract_text(
+        service
+            .cas_tasks_available(Parameters(LimitRequest {
+                limit: None,
+                scope: "all".to_string(),
+                sort: Some("highest".to_string()), // not a valid field
+                sort_order: None,
+                team_id: None,
+            }))
+            .await
+            .expect("tasks_available should succeed"),
+    );
+
+    assert!(text.contains("P0 first"), "{text}");
+    let first = text
+        .lines()
+        .find(|l| l.starts_with("[P"))
+        .expect("a task row");
+    assert!(first.contains("critical one"), "{first}");
+}
+
+/// cas-e163 review follow-up: an explicit `limit` must drive the footer too.
+/// Without this, a regression that hardcoded the cap and ignored `req.limit`
+/// would keep the other tests green while making the footer's own advice
+/// ("pass limit=N") a lie.
+#[tokio::test]
+async fn test_tasks_available_footer_tracks_an_explicit_limit() {
+    use cas::mcp::tools::LimitRequest;
+
+    let (_temp, service) = setup_cas();
+    for i in 0..25 {
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: format!("claimable {i}"),
+                description: None,
+                priority: 2,
+                task_type: "task".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: None,
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("create should succeed");
+    }
+
+    let text = extract_text(
+        service
+            .cas_tasks_available(Parameters(LimitRequest {
+                limit: Some(5),
+                scope: "all".to_string(),
+                sort: None,
+                sort_order: None,
+                team_id: None,
+            }))
+            .await
+            .expect("tasks_available should succeed"),
+    );
+
+    assert_eq!(
+        text.lines().filter(|l| l.starts_with("[P")).count(),
+        5,
+        "explicit limit must bound the rows: {text}"
+    );
+    assert!(
+        text.contains("and 20 more not shown"),
+        "the withheld count must follow the explicit limit: {text}"
+    );
+    assert!(text.contains("limit=25"), "{text}");
+}
+
+/// cas-e163 review follow-up: the total the footer arithmetic depends on is
+/// the post-claim count. A task someone else already holds is not available,
+/// and must not inflate either the total or the withheld count.
+#[tokio::test]
+async fn test_tasks_available_total_excludes_claimed_tasks() {
+    use cas::mcp::tools::LimitRequest;
+
+    let (temp, service) = setup_cas();
+    let cas_dir = temp.path().join(".cas");
+    let mut ids = Vec::new();
+    for i in 0..25 {
+        let created = extract_text(
+            service
+                .cas_task_create(Parameters(TaskCreateRequest {
+                    depth: None,
+                    title: format!("claimable {i}"),
+                    description: None,
+                    priority: 2,
+                    task_type: "task".to_string(),
+                    labels: None,
+                    notes: None,
+                    blocked_by: None,
+                    design: None,
+                    acceptance_criteria: None,
+                    external_ref: None,
+                    assignee: None,
+                    demo_statement: None,
+                    execution_note: None,
+                    epic: None,
+                }))
+                .await
+                .expect("create should succeed"),
+        );
+        ids.push(extract_task_id(&created).expect("task id").to_string());
+    }
+
+    // Five are already held by another agent. The lease row has a foreign key
+    // on the holder, so the holder must be a registered agent.
+    let agent_store = open_agent_store(&cas_dir).expect("agent store");
+    let holder = cas::types::Agent::new("other-agent".to_string(), "other-agent".to_string());
+    agent_store.register(&holder).expect("register holder");
+    for id in ids.iter().take(5) {
+        agent_store
+            .try_claim(id, "other-agent", 600, Some("held elsewhere"))
+            .expect("claim");
+    }
+
+    let text = extract_text(
+        service
+            .cas_tasks_available(Parameters(LimitRequest {
+                limit: None,
+                scope: "all".to_string(),
+                sort: None,
+                sort_order: None,
+                team_id: None,
+            }))
+            .await
+            .expect("tasks_available should succeed"),
+    );
+
+    assert!(
+        text.contains("Available Tasks (20 total, P0 first)"),
+        "claimed tasks must not inflate the total: {text}"
+    );
+    assert!(
+        !text.contains("more not shown"),
+        "20 available under a cap of 20 withholds nothing: {text}"
+    );
+}
+
+/// cas-e163: a list that fits must not claim anything was withheld.
+#[tokio::test]
+async fn test_tasks_available_has_no_footer_when_nothing_is_withheld() {
+    use cas::mcp::tools::LimitRequest;
+
+    let (_temp, service) = setup_cas();
+    for i in 0..3 {
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: format!("claimable {i}"),
+                description: None,
+                priority: 2,
+                task_type: "task".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: None,
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("create should succeed");
+    }
+
+    let text = extract_text(
+        service
+            .cas_tasks_available(Parameters(LimitRequest {
+                limit: None,
+                scope: "all".to_string(),
+                sort: None,
+                sort_order: None,
+                team_id: None,
+            }))
+            .await
+            .expect("tasks_available should succeed"),
+    );
+
+    assert!(
+        text.contains("Available Tasks (3 total, P0 first)"),
+        "{text}"
+    );
+    assert!(!text.contains("more not shown"), "{text}");
+}
+
+/// cas-06f9: `blocked` carried the identical silent cap and creation-order
+/// default on the same triage surface. Half the shipped change had no
+/// end-to-end coverage, so a revert there would have left the suite green.
+#[tokio::test]
+async fn test_task_blocked_is_priority_sorted_and_states_the_true_total() {
+    let (_temp, service) = setup_cas();
+
+    // One blocker everything depends on, so every other task is Blocked.
+    let blocker_id = extract_task_id(&extract_text(
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: "the blocker".to_string(),
+                description: None,
+                priority: 2,
+                task_type: "task".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: None,
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("blocker create"),
+    ))
+    .expect("blocker id")
+    .to_string();
+
+    // P0s oldest, so creation order (newest first) would push them out.
+    for i in 0..3 {
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: format!("critical blocked {i}"),
+                description: None,
+                priority: 0,
+                task_type: "bug".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: Some(blocker_id.clone()),
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("create should succeed");
+    }
+    for i in 0..12 {
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: format!("low blocked {i}"),
+                description: None,
+                priority: 3,
+                task_type: "task".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: Some(blocker_id.clone()),
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("create should succeed");
+    }
+
+    let text = extract_text(
+        service
+            .cas_task_blocked(Parameters(TaskReadyBlockedRequest {
+                scope: "all".to_string(),
+                limit: None,
+                sort: None,
+                sort_order: None,
+                epic: None,
+            }))
+            .await
+            .expect("task_blocked should succeed"),
+    );
+
+    assert!(
+        text.contains("showing 10 of 15"),
+        "blocked header must carry the true total: {text}"
+    );
+    assert!(text.contains("P0 first"), "{text}");
+    assert!(
+        text.contains("and 5 more not shown"),
+        "blocked footer must name the withheld rows: {text}"
+    );
+    for i in 0..3 {
+        assert!(
+            text.contains(&format!("critical blocked {i}")),
+            "P0 blocked task {i} must be inside the window: {text}"
+        );
+    }
+}
+
+/// cas-06f9 review follow-up: an unrecognised `sort=` must not silently hand
+/// back creation order — that is the incident behaviour. Unrecognised means
+/// unspecified, and unspecified means priority here.
+#[tokio::test]
+async fn test_task_ready_unparseable_sort_falls_back_to_priority_not_creation_order() {
+    let (_temp, service) = setup_cas();
+    for (priority, title) in [(3u8, "low one"), (0, "critical one")] {
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: title.to_string(),
+                description: None,
+                priority,
+                task_type: "task".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: None,
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("create should succeed");
+    }
+
+    let text = extract_text(
+        service
+            .cas_task_ready(Parameters(TaskReadyBlockedRequest {
+                scope: "all".to_string(),
+                limit: None,
+                sort: Some("highest".to_string()), // not a valid sort field
+                sort_order: None,
+                epic: None,
+            }))
+            .await
+            .expect("task_ready should succeed"),
+    );
+
+    assert!(text.contains("P0 first"), "{text}");
+    let first_line = text
+        .lines()
+        .find(|line| line.starts_with("- ["))
+        .expect("a task row");
+    assert!(
+        first_line.contains("critical one"),
+        "an unparseable sort must not resurrect creation order: {first_line}"
+    );
+}
+
+/// cas-06f9: an uncapped list must not claim to be truncated, and must still
+/// name its ordering.
+#[tokio::test]
+async fn test_task_ready_header_is_plain_when_nothing_is_withheld() {
+    let (_temp, service) = setup_cas();
+    for i in 0..3 {
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: format!("task {i}"),
+                description: None,
+                priority: 2,
+                task_type: "task".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: None,
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("create should succeed");
+    }
+
+    let text = extract_text(
+        service
+            .cas_task_ready(Parameters(TaskReadyBlockedRequest {
+                scope: "all".to_string(),
+                limit: None,
+                sort: None,
+                sort_order: None,
+                epic: None,
+            }))
+            .await
+            .expect("task_ready should succeed"),
+    );
+
+    assert!(text.contains("Ready tasks (3, P0 first):"), "{text}");
+    assert!(!text.contains("showing"), "{text}");
+    assert!(!text.contains("more not shown"), "{text}");
+}
+
+/// cas-06f9: an explicit `sort=` still wins, and the header names the ordering
+/// actually applied rather than always claiming priority order.
+#[tokio::test]
+async fn test_task_ready_explicit_sort_overrides_the_priority_default() {
+    let (_temp, service) = setup_cas();
+    for (priority, title) in [(0u8, "critical one"), (3, "low one")] {
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: title.to_string(),
+                description: None,
+                priority,
+                task_type: "task".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: None,
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("create should succeed");
+    }
+
+    let text = extract_text(
+        service
+            .cas_task_ready(Parameters(TaskReadyBlockedRequest {
+                scope: "all".to_string(),
+                limit: None,
+                sort: Some("created".to_string()),
+                sort_order: Some("desc".to_string()),
+                epic: None,
+            }))
+            .await
+            .expect("task_ready should succeed"),
+    );
+
+    assert!(
+        text.contains("newest first"),
+        "header must describe the requested ordering, not the default: {text}"
+    );
+    assert!(!text.contains("P0 first"), "{text}");
+    let first_line = text
+        .lines()
+        .find(|line| line.starts_with("- ["))
+        .expect("a task row");
+    assert!(
+        first_line.contains("low one"),
+        "explicit sort must win: {first_line}"
+    );
+}
+
 /// Regression test for cas-978e: `task action=ready epic=<id>` must return only ready tasks
 /// that are children of the specified EPIC; without `epic`, behavior is unchanged.
 #[tokio::test]

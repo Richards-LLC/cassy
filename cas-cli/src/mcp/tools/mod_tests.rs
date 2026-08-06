@@ -1,10 +1,92 @@
 #[cfg(test)]
 mod tests {
     use super::super::{
-        check_worktree_staleness, resolve_staleness_sync_ref, slugify_for_branch, truncate_str,
+        check_worktree_staleness, ready_blocked_sort_options, resolve_staleness_sync_ref,
+        slugify_for_branch, sort_order_label, truncate_str, truncated_list_footer,
+        truncated_list_header,
     };
     use std::process::Command;
     use tempfile::TempDir;
+
+    // ========================================================================
+    // cas-06f9 (GH #104): honest truncation + priority-first default
+    // ========================================================================
+
+    /// Unspecified sort means priority order on the ready/blocked surface.
+    /// `TaskSortOptions`' own default is Created, which is incidental ordering
+    /// for "what should I pick up next".
+    #[test]
+    fn unspecified_sort_defaults_to_priority_p0_first() {
+        let opts = ready_blocked_sort_options(None, None);
+        assert_eq!(opts.field, cas_types::TaskSortField::Priority);
+        assert_eq!(opts.effective_order(), cas_types::SortOrder::Asc);
+        assert_eq!(sort_order_label(&opts), "P0 first");
+    }
+
+    /// An explicit sort from the caller still wins — this only redefines
+    /// "unspecified".
+    #[test]
+    fn explicit_sort_is_not_overridden_by_the_default() {
+        let opts = ready_blocked_sort_options(Some("created"), Some("desc"));
+        assert_eq!(opts.field, cas_types::TaskSortField::Created);
+        assert_eq!(sort_order_label(&opts), "newest first");
+
+        // An order without a field keeps priority but honours the direction.
+        let reversed = ready_blocked_sort_options(None, Some("desc"));
+        assert_eq!(reversed.field, cas_types::TaskSortField::Priority);
+        assert_eq!(sort_order_label(&reversed), "lowest priority first");
+    }
+
+    /// The header must never imply an order the rows are not in.
+    #[test]
+    fn every_sort_field_has_a_distinct_honest_label() {
+        let cases = [
+            (Some("priority"), Some("asc"), "P0 first"),
+            (Some("priority"), Some("desc"), "lowest priority first"),
+            (Some("created"), Some("asc"), "oldest first"),
+            (Some("created"), Some("desc"), "newest first"),
+            (Some("updated"), Some("asc"), "least recently updated first"),
+            (Some("updated"), Some("desc"), "most recently updated first"),
+            (Some("title"), Some("asc"), "title A-Z"),
+            (Some("title"), Some("desc"), "title Z-A"),
+        ];
+        for (sort, order, expected) in cases {
+            let opts = ready_blocked_sort_options(sort, order);
+            assert_eq!(sort_order_label(&opts), expected, "{sort:?}/{order:?}");
+        }
+    }
+
+    /// A capped list states the true total; an uncapped one does not pretend
+    /// to be capped.
+    #[test]
+    fn header_states_the_true_total_only_when_something_is_withheld() {
+        let opts = ready_blocked_sort_options(None, None);
+
+        let truncated = truncated_list_header("Ready tasks", 30, 10, &opts);
+        assert!(
+            truncated.starts_with("Ready tasks (showing 10 of 30, P0 first):"),
+            "{truncated}"
+        );
+
+        let complete = truncated_list_header("Ready tasks", 3, 3, &opts);
+        assert!(
+            complete.starts_with("Ready tasks (3, P0 first):"),
+            "{complete}"
+        );
+        assert!(!complete.contains("showing"), "{complete}");
+    }
+
+    /// The footer names the withheld count and the exact way to see it; an
+    /// uncapped list gets no footer at all.
+    #[test]
+    fn footer_names_what_was_withheld_and_how_to_see_it() {
+        let footer = truncated_list_footer(30, 10);
+        assert!(footer.contains("and 20 more not shown"), "{footer}");
+        assert!(footer.contains("limit=30"), "{footer}");
+
+        assert!(truncated_list_footer(3, 3).is_empty());
+        assert!(truncated_list_footer(0, 0).is_empty());
+    }
 
     // ========================================================================
     // Epic Branch Slugification Tests
@@ -184,5 +266,195 @@ mod tests {
     #[test]
     fn check_worktree_staleness_missing_path_returns_none() {
         assert!(check_worktree_staleness("/nonexistent/worktree/path", Some("epic/a")).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // cas-f8bc (GH #106): behindness must count only commits whose CONTENT the
+    // worktree lacks. Counting the merge of the worker's own landed lane made
+    // assignment refuse a worker for being "behind" its own work, and that
+    // refused assignment was the prerequisite for the merge that would clear
+    // it — a closed loop.
+    // -----------------------------------------------------------------------
+
+    fn commit_file(p: &std::path::Path, name: &str, body: &str) {
+        std::fs::write(p.join(name), body).unwrap();
+        git(p, &["add", "."]);
+        git(p, &["commit", "-q", "-m", body]);
+    }
+
+    fn seeded_epic_repo() -> (TempDir, std::path::PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().to_path_buf();
+        git(&p, &["init", "-q", "-b", "main"]);
+        commit_file(&p, "seed.txt", "seed");
+        git(&p, &["checkout", "-q", "-b", "epic/a"]);
+        (dir, p)
+    }
+
+    /// The live repro: the supervisor merges the worker's own completed lane
+    /// into the epic, and the worker is then told it is 1 commit behind.
+    #[test]
+    fn own_merged_lane_does_not_count_as_behind_cas_f8bc() {
+        let (_dir, p) = seeded_epic_repo();
+        git(&p, &["checkout", "-q", "-b", "factory/worker"]);
+        commit_file(&p, "w1.txt", "worker work 1");
+        commit_file(&p, "w2.txt", "worker work 2");
+        git(&p, &["checkout", "-q", "epic/a"]);
+        git(
+            &p,
+            &["merge", "-q", "--no-ff", "factory/worker", "-m", "Merge factory/worker"],
+        );
+        git(&p, &["checkout", "-q", "factory/worker"]);
+
+        // Precondition: the naive measure is what produced the deadlock.
+        let naive = String::from_utf8_lossy(
+            &Command::new("git")
+                .args(["rev-list", "--count", "HEAD..epic/a"])
+                .current_dir(&p)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .trim()
+        .parse::<u32>()
+        .unwrap();
+        assert_eq!(naive, 1, "precondition: the merge node reads as behindness");
+
+        let (behind, branch) =
+            check_worktree_staleness(p.to_str().unwrap(), Some("epic/a")).expect("staleness");
+        assert_eq!(branch, "epic/a");
+        assert_eq!(
+            behind, 0,
+            "a worker whose own lane was just merged has nothing to sync"
+        );
+    }
+
+    /// The exemption must not blind the gate to real staleness.
+    #[test]
+    fn another_workers_merged_commits_still_count_as_behind_cas_f8bc() {
+        let (_dir, p) = seeded_epic_repo();
+        git(&p, &["checkout", "-q", "-b", "factory/me"]);
+        git(&p, &["checkout", "-q", "epic/a"]);
+        git(&p, &["checkout", "-q", "-b", "factory/other"]);
+        commit_file(&p, "o1.txt", "other work 1");
+        commit_file(&p, "o2.txt", "other work 2");
+        git(&p, &["checkout", "-q", "epic/a"]);
+        git(
+            &p,
+            &["merge", "-q", "--no-ff", "factory/other", "-m", "Merge factory/other"],
+        );
+        git(&p, &["checkout", "-q", "factory/me"]);
+
+        let (behind, _) =
+            check_worktree_staleness(p.to_str().unwrap(), Some("epic/a")).expect("staleness");
+        assert_eq!(
+            behind, 2,
+            "the other worker's two commits are genuinely missing here"
+        );
+    }
+
+    /// When the supervisor replays a lane onto the epic (rebase/cherry-pick)
+    /// the worker's commits reappear under new SHAs. Reachability alone still
+    /// calls those "behind"; patch-id equality is what clears them.
+    #[test]
+    fn own_lane_replayed_under_new_shas_is_exempt_but_real_work_is_not_cas_f8bc() {
+        let (_dir, p) = seeded_epic_repo();
+        git(&p, &["checkout", "-q", "-b", "factory/me"]);
+        commit_file(&p, "m1.txt", "my work 1");
+        // Epic advances on its own first, so the replay lands on a different
+        // parent and therefore a different SHA.
+        git(&p, &["checkout", "-q", "epic/a"]);
+        commit_file(&p, "e1.txt", "epic side work");
+        let mine = String::from_utf8_lossy(
+            &Command::new("git")
+                .args(["rev-parse", "factory/me"])
+                .current_dir(&p)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .trim()
+        .to_string();
+        git(&p, &["cherry-pick", &mine]);
+        git(&p, &["checkout", "-q", "factory/me"]);
+
+        let (behind, _) =
+            check_worktree_staleness(p.to_str().unwrap(), Some("epic/a")).expect("staleness");
+        assert_eq!(
+            behind, 1,
+            "only the epic-side commit is genuinely missing; the replayed lane is not"
+        );
+    }
+
+    /// A squash-merge collapses the worker's commits into one new commit whose
+    /// patch-id matches none of the originals, so commit-level rules alone
+    /// still count it. Tree equality is what closes this.
+    #[test]
+    fn own_squash_merged_lane_does_not_count_as_behind_cas_f8bc() {
+        let (_dir, p) = seeded_epic_repo();
+        git(&p, &["checkout", "-q", "-b", "factory/worker"]);
+        commit_file(&p, "w1.txt", "worker work 1");
+        commit_file(&p, "w2.txt", "worker work 2");
+        git(&p, &["checkout", "-q", "epic/a"]);
+        git(&p, &["merge", "-q", "--squash", "factory/worker"]);
+        git(&p, &["commit", "-q", "-m", "Squashed worker lane"]);
+        git(&p, &["checkout", "-q", "factory/worker"]);
+
+        // Precondition: the commit-level measure alone would still deadlock.
+        let by_commits = String::from_utf8_lossy(
+            &Command::new("git")
+                .args([
+                    "rev-list",
+                    "--count",
+                    "--no-merges",
+                    "--cherry-pick",
+                    "--right-only",
+                    "HEAD...epic/a",
+                ])
+                .current_dir(&p)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .trim()
+        .parse::<u32>()
+        .unwrap();
+        assert_eq!(
+            by_commits, 1,
+            "precondition: a squashed lane is invisible to patch-id matching"
+        );
+
+        let (behind, _) =
+            check_worktree_staleness(p.to_str().unwrap(), Some("epic/a")).expect("staleness");
+        assert_eq!(
+            behind, 0,
+            "the worker's own squash-merged lane must not read as staleness"
+        );
+    }
+
+    /// A worker holding unmerged work of its own, with nothing new on the epic,
+    /// is not behind — being ahead is not being stale.
+    #[test]
+    fn worker_ahead_of_epic_is_not_behind_cas_f8bc() {
+        let (_dir, p) = seeded_epic_repo();
+        git(&p, &["checkout", "-q", "-b", "factory/worker"]);
+        commit_file(&p, "wip.txt", "unmerged work");
+
+        let (behind, _) =
+            check_worktree_staleness(p.to_str().unwrap(), Some("epic/a")).expect("staleness");
+        assert_eq!(behind, 0, "ahead is not behind");
+    }
+
+    /// A worker that has simply not synced is still reported as stale.
+    #[test]
+    fn plain_unsynced_worker_is_still_behind_cas_f8bc() {
+        let (_dir, p) = seeded_epic_repo();
+        commit_file(&p, "e1.txt", "epic work 1");
+        commit_file(&p, "e2.txt", "epic work 2");
+        git(&p, &["checkout", "-q", "-b", "factory/worker", "HEAD~2"]);
+
+        let (behind, _) =
+            check_worktree_staleness(p.to_str().unwrap(), Some("epic/a")).expect("staleness");
+        assert_eq!(behind, 2, "genuine staleness must still block assignment");
     }
 }

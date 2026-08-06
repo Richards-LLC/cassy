@@ -36,6 +36,22 @@ pub enum TaskStatus {
     AwaitingMerge,
 }
 
+impl TaskStatus {
+    /// States in which the task is parked behind a SUPERVISOR action: the
+    /// worker is done or stopped and cannot proceed on its own (cas-f02b).
+    ///
+    /// Unlike a transient transition, a task can sit in one of these for a long
+    /// time and keep accruing writes while it waits, so "is the task still
+    /// here?" — not "is this the same write?" — is the right currency test for
+    /// a notification about it.
+    pub fn is_parked_awaiting_supervisor(self) -> bool {
+        matches!(
+            self,
+            TaskStatus::AwaitingMerge | TaskStatus::PendingSupervisorReview | TaskStatus::Blocked
+        )
+    }
+}
+
 impl fmt::Display for TaskStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

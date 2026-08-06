@@ -50,6 +50,60 @@ impl LifecycleTransition {
             Self::Started | Self::ReadyReopened | Self::Closed => NotificationPriority::Normal,
         }
     }
+
+    /// Whether this transition may wake an IDLE supervisor pane (cas-f02b /
+    /// GH #101).
+    ///
+    /// True exactly for the transitions that park a worker behind supervisor
+    /// action: the work is finished or stopped, and nothing in the factory can
+    /// proceed until the supervisor merges, re-reviews, or unblocks. Delivered
+    /// to a Claude supervisor in teams mode, these are inbox FILE writes —
+    /// Claude Code polls its inbox only at turn boundaries, and an idle
+    /// supervisor has no upcoming boundary, so the signal sits unread until
+    /// something external creates a turn. That is the reported failure: fleets
+    /// parked in `awaiting_merge` idling silently until a cron sweep, with
+    /// every drain discovered by poll and never by push.
+    ///
+    /// `Started` / `ReadyReopened` / `Closed` stay false — they are progress
+    /// FYI, and waking a supervisor for them would re-create the noise the
+    /// idle-nudge exclusion (cas-dab2) was added to stop.
+    pub fn wakes_idle_supervisor(self) -> bool {
+        match self {
+            Self::CloseRejected | Self::AwaitingMerge | Self::Blocked => true,
+            Self::Started | Self::ReadyReopened | Self::Closed => false,
+        }
+    }
+}
+
+/// Marker prefix on a `prompt_queue.source` whose row may wake an idle
+/// supervisor pane (cas-f02b).
+///
+/// The delivery lane needs to tell "a worker sent the supervisor a message"
+/// (inbox-only — see cas-dab2) from "the factory is stalled behind the
+/// supervisor" (wake-eligible). Rather than have the daemon sniff prompt text,
+/// the emitting side states the intent in the one field it already synthesizes.
+pub const LIFECYCLE_WAKE_SOURCE_PREFIX: &str = "lifecycle-wake:";
+
+/// Non-waking counterpart of [`LIFECYCLE_WAKE_SOURCE_PREFIX`].
+pub const LIFECYCLE_SOURCE_PREFIX: &str = "lifecycle:";
+
+/// `prompt_queue.source` for one lifecycle notification, encoding whether the
+/// transition may wake an idle supervisor (cas-f02b).
+///
+/// Both the live emit path and the outbox drain build the source here, so a
+/// replayed row carries the same wake eligibility as the original.
+pub fn lifecycle_prompt_source(kind: LifecycleTransition, notification_id: i64) -> String {
+    let prefix = if kind.wakes_idle_supervisor() {
+        LIFECYCLE_WAKE_SOURCE_PREFIX
+    } else {
+        LIFECYCLE_SOURCE_PREFIX
+    };
+    format!("{prefix}{notification_id}")
+}
+
+/// Whether a queued prompt's `source` marks it as a supervisor wake signal.
+pub fn is_lifecycle_wake_source(source: &str) -> bool {
+    source.starts_with(LIFECYCLE_WAKE_SOURCE_PREFIX)
 }
 
 /// Result of a lifecycle push attempt.
@@ -444,7 +498,7 @@ fn deliver_prompt_for_notification(
         occurrence_id,
     );
     let summary = format!("{}: {} ({})", kind.as_event_type(), task_id, occurrence_id);
-    let source = format!("lifecycle:{notification_id}");
+    let source = lifecycle_prompt_source(kind, notification_id);
     let dedupe = lifecycle_prompt_dedupe_key(notification_id);
 
     prompt_queue
@@ -837,6 +891,94 @@ mod tests {
             "task_awaiting_merge"
         );
         assert_eq!(LifecycleTransition::Closed.as_event_type(), "task_closed");
+    }
+
+    /// cas-f02b (GH #101): the transitions that park a worker behind supervisor
+    /// action are exactly the ones allowed to wake an idle supervisor. Progress
+    /// FYI must not — that noise is what cas-dab2's exclusion stopped.
+    #[test]
+    fn only_parked_transitions_wake_an_idle_supervisor() {
+        assert!(LifecycleTransition::AwaitingMerge.wakes_idle_supervisor());
+        assert!(LifecycleTransition::CloseRejected.wakes_idle_supervisor());
+        assert!(LifecycleTransition::Blocked.wakes_idle_supervisor());
+        assert!(!LifecycleTransition::Started.wakes_idle_supervisor());
+        assert!(!LifecycleTransition::ReadyReopened.wakes_idle_supervisor());
+        assert!(!LifecycleTransition::Closed.wakes_idle_supervisor());
+    }
+
+    /// cas-f02b: wake eligibility travels on the row's `source`, so the daemon
+    /// never has to sniff prompt text — and a row replayed by the outbox drain
+    /// carries the same eligibility as the original.
+    #[test]
+    fn lifecycle_prompt_source_encodes_wake_eligibility() {
+        let wake = lifecycle_prompt_source(LifecycleTransition::AwaitingMerge, 7);
+        assert_eq!(wake, "lifecycle-wake:7");
+        assert!(is_lifecycle_wake_source(&wake));
+
+        let fyi = lifecycle_prompt_source(LifecycleTransition::Closed, 7);
+        assert_eq!(fyi, "lifecycle:7");
+        assert!(!is_lifecycle_wake_source(&fyi));
+        // The non-waking form must not be a prefix-match false positive.
+        assert!(!is_lifecycle_wake_source("lifecycle:70"));
+    }
+
+    /// cas-f02b end to end: parking a task as AwaitingMerge enqueues a
+    /// supervisor-targeted prompt row that the dispatch layer will recognise
+    /// as a wake — the push the factory prompt promises, instead of a file
+    /// write nobody is polling.
+    #[test]
+    fn awaiting_merge_push_enqueues_a_wake_eligible_supervisor_row() {
+        let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "sess-wake")]);
+
+        let temp = TempDir::new().unwrap();
+        let agents = SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        agents
+            .register(&agent_in_session(
+                "sup-wake",
+                "cosmic-bear-43",
+                AgentRole::Supervisor,
+                "sess-wake",
+            ))
+            .unwrap();
+        let sq = SqliteSupervisorQueueStore::open(temp.path()).unwrap();
+        sq.init().unwrap();
+        let pq = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        pq.init().unwrap();
+
+        let result = emit_task_lifecycle_transition(
+            &sq,
+            Some(&pq as &dyn PromptQueueStore),
+            &agents,
+            "cas-f02b",
+            "MERGE REQUIRED close rejections never reach the supervisor",
+            TaskStatus::InProgress,
+            TaskStatus::AwaitingMerge,
+            "swift-fox",
+            Some("MERGE REQUIRED"),
+            LifecycleTransition::AwaitingMerge,
+            "occ-wake",
+        )
+        .expect("awaiting_merge push succeeds");
+        assert!(matches!(result, LifecyclePushResult::Enqueued { .. }));
+
+        let rows = pq.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1, "exactly one supervisor push");
+        assert_eq!(rows[0].target, "supervisor");
+        assert!(
+            is_lifecycle_wake_source(&rows[0].source),
+            "the dispatch layer must be able to tell this apart from ordinary \
+             supervisor-addressed traffic: source={}",
+            rows[0].source
+        );
+        assert_eq!(rows[0].priority, NotificationPriority::High);
+        assert!(
+            rows[0].prompt.contains("task_awaiting_merge")
+                && rows[0].prompt.contains("cas-f02b"),
+            "body must self-identify as a lifecycle signal (it is injected into \
+             the supervisor pane, so it can never read as operator input): {}",
+            rows[0].prompt
+        );
     }
 
     #[test]

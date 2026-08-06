@@ -1795,6 +1795,461 @@ async fn test_worker_status_shows_agents() {
     assert!(text.contains("effort: high"), "Should show effort: {text}");
 }
 
+/// cas-e728 (GH #105) defect 1 — stale task attribution.
+///
+/// A lease is a fixed-duration row that nothing renews and that not every
+/// close path releases (a direct status update, a supervisor-side close, a
+/// crashed worker all leave it). While it lingered, `worker_status` counted
+/// the worker as holding an in-progress task for the rest of the lease
+/// (default 30 minutes) — reporting work that was already finished, and
+/// rendering `⚠ STALLED ... while task in progress` at a worker with nothing
+/// assigned. Every task list must be read at render time and the lease must
+/// only corroborate a task that is STILL in progress.
+#[tokio::test]
+async fn test_worker_status_task_state_is_fresh_for_a_just_closed_task() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    env.register_supervisor("sup-1");
+    let worker_id = env.register_worker("wolf");
+
+    let task_store = env.task_store();
+    let id = task_store.generate_id().expect("id");
+    let mut task = Task::new(id.clone(), "Do the thing".to_string());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("wolf".to_string());
+    task_store.add(&task).expect("add");
+    // A live lease, exactly as `try_claim` leaves one during real work.
+    env.agent_store()
+        .try_claim(&id, &worker_id, 1800, Some("working"))
+        .expect("claim");
+
+    let before = get_text(
+        &env.service
+            .factory(Parameters(factory_req("worker_status")))
+            .await
+            .expect("status"),
+    );
+    assert!(
+        before.contains(&format!("task: {id} (in progress)")),
+        "while genuinely in progress the task must be named: {before}"
+    );
+
+    // The task closes. The lease is deliberately NOT released — that is the
+    // reported production state.
+    let mut closed = task_store.get(&id).expect("get");
+    closed.status = TaskStatus::Closed;
+    task_store.update(&closed).expect("close");
+    assert!(
+        env.agent_store()
+            .get_lease(&id)
+            .expect("get_lease")
+            .is_some(),
+        "fixture precondition: the stale lease must still exist"
+    );
+
+    let after = get_text(
+        &env.service
+            .factory(Parameters(factory_req("worker_status")))
+            .await
+            .expect("status"),
+    );
+    assert!(
+        after.contains("task: none assigned"),
+        "a closed task must not read as assigned at render time: {after}"
+    );
+    assert!(
+        !after.contains("in progress"),
+        "a closed task must never render as in progress: {after}"
+    );
+    assert!(
+        !after.contains("STALLED"),
+        "a stale lease alone must not produce a stall accusation: {after}"
+    );
+}
+
+/// cas-e728 (GH #105) defect 1, the load-bearing regression barrier.
+///
+/// Uses a CODEX worker deliberately: on a turn-observable harness the ⚠ STALLED
+/// verdict is unchanged, so this test isolates the lease cross-check itself.
+/// With the cross-check reverted this renders
+/// `⚠ STALLED (no activity ≥0s while task in progress)` beside
+/// `task: none assigned` — the reported defect, verbatim.
+#[tokio::test]
+async fn test_worker_status_stale_lease_alone_does_not_assert_work_in_progress() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    std::fs::write(
+        env.cas_root.join("config.toml"),
+        "[factory]\nstall_threshold_secs = 0\n",
+    )
+    .expect("write config.toml");
+    env.register_supervisor("sup-1");
+    let mut codex_meta = HashMap::new();
+    codex_meta.insert("worker_cli".to_string(), "codex".to_string());
+    let worker_id = env.register_worker_with_metadata("badger", codex_meta);
+
+    let task_store = env.task_store();
+    let id = task_store.generate_id().expect("id");
+    let mut task = Task::new(id.clone(), "Finished work".to_string());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("badger".to_string());
+    task_store.add(&task).expect("add");
+    env.agent_store()
+        .try_claim(&id, &worker_id, 1800, Some("working"))
+        .expect("claim");
+
+    let mut closed = task_store.get(&id).expect("get");
+    closed.status = TaskStatus::Closed;
+    closed.assignee = None;
+    task_store.update(&closed).expect("close");
+    assert!(
+        env.agent_store()
+            .get_lease(&id)
+            .expect("get_lease")
+            .is_some(),
+        "fixture precondition: the lease must outlive the close"
+    );
+
+    let text = get_text(
+        &env.service
+            .factory(Parameters(factory_req("worker_status")))
+            .await
+            .expect("status"),
+    );
+    let row = text
+        .split("• ")
+        .find(|block| block.starts_with("badger"))
+        .expect("badger row");
+    assert!(
+        !row.contains("STALLED"),
+        "a lease outliving its closed task must not assert work in progress: {row}"
+    );
+    assert!(
+        row.contains("task: none assigned"),
+        "the closed task must not be attributed: {row}"
+    );
+}
+
+/// cas-e728 (GH #105) defect 1, second half — finished-awaiting-merge was
+/// invisible. It rendered as "task: none assigned", identical to a worker
+/// with nothing to do, so the one state that genuinely needs supervisor
+/// action looked like the one that needs none.
+#[tokio::test]
+async fn test_worker_status_names_finished_awaiting_merge_as_waiting_on_supervisor() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    env.register_supervisor("sup-1");
+    env.register_worker("wolf");
+
+    let task_store = env.task_store();
+    for (status, expected) in [
+        (TaskStatus::AwaitingMerge, "awaiting merge"),
+        (
+            TaskStatus::PendingSupervisorReview,
+            "awaiting supervisor review",
+        ),
+    ] {
+        let id = task_store.generate_id().expect("id");
+        let mut task = Task::new(id.clone(), "Finished work".to_string());
+        task.status = status;
+        task.assignee = Some("wolf".to_string());
+        task_store.add(&task).expect("add");
+
+        let text = get_text(
+            &env.service
+                .factory(Parameters(factory_req("worker_status")))
+                .await
+                .expect("status"),
+        );
+        assert!(
+            text.contains(&id) && text.contains(expected),
+            "{status:?} must be named on the row: {text}"
+        );
+        assert!(
+            text.contains("WAITING ON YOU"),
+            "{status:?} must say the supervisor is the blocker: {text}"
+        );
+        assert!(
+            !text.contains("task: none assigned"),
+            "{status:?} must not read as an idle worker: {text}"
+        );
+
+        let mut done = task_store.get(&id).expect("get");
+        done.status = TaskStatus::Closed;
+        done.assignee = None;
+        task_store.update(&done).expect("clear");
+    }
+}
+
+/// cas-e728 review follow-up: `all_workers` broadcasts are real inbox items
+/// with per-recipient read state. Counting only name-targeted rows made a
+/// broadcast that nobody acted on render as "inbox empty" on every row — the
+/// status line affirming that nothing was waiting on workers that had all been
+/// asked to report.
+#[tokio::test]
+async fn test_worker_status_counts_broadcast_messages_in_worker_inboxes() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    env.register_supervisor("sup-1");
+    env.register_worker("wolf");
+
+    env.prompt_queue()
+        .enqueue("sup-1", "all_workers", "everyone report status")
+        .expect("broadcast");
+
+    let text = get_text(
+        &env.service
+            .factory(Parameters(factory_req("worker_status")))
+            .await
+            .expect("status"),
+    );
+    assert!(
+        text.contains("inbox: 1 unread message"),
+        "a pending broadcast must count toward every worker's inbox: {text}"
+    );
+}
+
+/// cas-e728 review follow-up: the inbox line must render for workers that are
+/// not "stalled" at all. The commonest handed-work-and-asleep shape is a worker
+/// with a parked or freshly assigned task, which never trips the stall path —
+/// gating the count on the alert hid it exactly where it mattered.
+#[tokio::test]
+async fn test_worker_status_shows_inbox_depth_even_when_not_stalled() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    env.register_supervisor("sup-1");
+    env.register_worker("wolf");
+    env.register_worker("fox");
+
+    let task_store = env.task_store();
+    let id = task_store.generate_id().expect("id");
+    let mut task = Task::new(id.clone(), "Finished work".to_string());
+    task.status = TaskStatus::AwaitingMerge;
+    task.assignee = Some("wolf".to_string());
+    task_store.add(&task).expect("add");
+
+    env.prompt_queue()
+        .enqueue("sup-1", "wolf", "next task for you")
+        .expect("enqueue");
+
+    let text = get_text(
+        &env.service
+            .factory(Parameters(factory_req("worker_status")))
+            .await
+            .expect("status"),
+    );
+    let wolf = text
+        .split("• ")
+        .find(|b| b.starts_with("wolf"))
+        .expect("wolf row");
+    let fox = text
+        .split("• ")
+        .find(|b| b.starts_with("fox"))
+        .expect("fox row");
+    assert!(
+        wolf.contains("inbox: 1 unread message"),
+        "a parked worker with mail must still show its inbox: {wolf}"
+    );
+    assert!(
+        !fox.contains("inbox:"),
+        "a worker with no mail must not get an inbox line: {fox}"
+    );
+}
+
+/// cas-e728 review follow-up: a task assigned by agent ID (not name) must be
+/// named too — narrowing that lookup would silently restore the original
+/// "none assigned" defect for uuid-assigned work.
+#[tokio::test]
+async fn test_worker_status_names_parked_task_assigned_by_agent_id() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    env.register_supervisor("sup-1");
+    let worker_id = env.register_worker("wolf");
+
+    let task_store = env.task_store();
+    let id = task_store.generate_id().expect("id");
+    let mut task = Task::new(id.clone(), "Finished work".to_string());
+    task.status = TaskStatus::AwaitingMerge;
+    task.assignee = Some(worker_id);
+    task_store.add(&task).expect("add");
+
+    let text = get_text(
+        &env.service
+            .factory(Parameters(factory_req("worker_status")))
+            .await
+            .expect("status"),
+    );
+    assert!(
+        text.contains(&id) && text.contains("awaiting merge"),
+        "an id-assigned parked task must be named: {text}"
+    );
+}
+
+/// cas-e728 review follow-up: a Blocked task is not in progress and not parked
+/// for the supervisor, but it must still be named — it is the one status that
+/// literally means "waiting on something".
+#[tokio::test]
+async fn test_worker_status_names_a_blocked_task() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    env.register_supervisor("sup-1");
+    env.register_worker("wolf");
+
+    let task_store = env.task_store();
+    let id = task_store.generate_id().expect("id");
+    let mut task = Task::new(id.clone(), "Stuck work".to_string());
+    task.status = TaskStatus::Blocked;
+    task.assignee = Some("wolf".to_string());
+    task_store.add(&task).expect("add");
+
+    let text = get_text(
+        &env.service
+            .factory(Parameters(factory_req("worker_status")))
+            .await
+            .expect("status"),
+    );
+    assert!(text.contains(&id), "blocked task must be named: {text}");
+    assert!(text.contains("blocked"), "{text}");
+    assert!(
+        !text.contains("task: none assigned"),
+        "a blocked worker must not read as idle: {text}"
+    );
+}
+
+/// cas-e728 review follow-up: a live in-progress task outranks an older parked
+/// one on the same worker — the normal end-of-task shape (previous task
+/// awaiting merge, new task started).
+#[tokio::test]
+async fn test_worker_status_prefers_live_task_over_parked_one() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    env.register_supervisor("sup-1");
+    env.register_worker("wolf");
+
+    let task_store = env.task_store();
+    let parked_id = task_store.generate_id().expect("id");
+    let mut parked = Task::new(parked_id.clone(), "Old work".to_string());
+    parked.status = TaskStatus::AwaitingMerge;
+    parked.assignee = Some("wolf".to_string());
+    task_store.add(&parked).expect("add parked");
+
+    let live_id = task_store.generate_id().expect("id");
+    let mut live = Task::new(live_id.clone(), "Current work".to_string());
+    live.status = TaskStatus::InProgress;
+    live.assignee = Some("wolf".to_string());
+    task_store.add(&live).expect("add live");
+
+    let text = get_text(
+        &env.service
+            .factory(Parameters(factory_req("worker_status")))
+            .await
+            .expect("status"),
+    );
+    assert!(
+        text.contains(&format!("task: {live_id} (in progress)")),
+        "the live task must win: {text}"
+    );
+    assert!(
+        !text.contains(&format!("task: {parked_id}")),
+        "the parked task must not also claim the row: {text}"
+    );
+}
+
+/// cas-e728 (GH #105) defect 2 — the stall heuristic assumed continuous
+/// execution. A Claude worker only runs when a message grants it a turn; a
+/// healthy turn ends with commit/push/note and then legitimate silence. The
+/// old flag fired dozens of times in one session with zero true positives.
+/// A heartbeating worker on a harness with no turn-start artifact must get
+/// the honest between-turns line plus the one actionable fact — unread mail.
+#[tokio::test]
+async fn test_worker_status_reports_between_turns_not_stalled_for_claude_worker() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    // Threshold 0: any quiet moment counts as "past the stall threshold", so
+    // the old code would unconditionally render ⚠ STALLED here.
+    std::fs::write(
+        env.cas_root.join("config.toml"),
+        "[factory]\nstall_threshold_secs = 0\n",
+    )
+    .expect("write config.toml");
+    env.register_supervisor("sup-1");
+    env.register_worker("wolf");
+
+    let task_store = env.task_store();
+    let id = task_store.generate_id().expect("id");
+    let mut task = Task::new(id.clone(), "Long running work".to_string());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("wolf".to_string());
+    task_store.add(&task).expect("add");
+
+    let text = get_text(
+        &env.service
+            .factory(Parameters(factory_req("worker_status")))
+            .await
+            .expect("status"),
+    );
+    assert!(
+        !text.contains("STALLED"),
+        "a heartbeating turn-based worker must not be accused of stalling: {text}"
+    );
+    assert!(
+        text.contains("between turns"),
+        "the row must state the between-turns reality: {text}"
+    );
+    assert!(
+        text.contains("inbox empty"),
+        "with no queued work the row must say so: {text}"
+    );
+}
+
+/// cas-e728: the actionable half — quiet WITH undelivered mail means the
+/// worker was handed work and has not woken. The count must be surfaced, and
+/// reading status must never consume the worker's inbox.
+#[tokio::test]
+async fn test_worker_status_surfaces_unread_inbox_without_consuming_it() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    std::fs::write(
+        env.cas_root.join("config.toml"),
+        "[factory]\nstall_threshold_secs = 0\n",
+    )
+    .expect("write config.toml");
+    env.register_supervisor("sup-1");
+    env.register_worker("wolf");
+
+    let task_store = env.task_store();
+    let id = task_store.generate_id().expect("id");
+    let mut task = Task::new(id.clone(), "Queued work".to_string());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("wolf".to_string());
+    task_store.add(&task).expect("add");
+
+    let queue = env.prompt_queue();
+    queue.enqueue("sup-1", "wolf", "please start").expect("q1");
+    queue.enqueue("sup-1", "wolf", "and this too").expect("q2");
+
+    let text = get_text(
+        &env.service
+            .factory(Parameters(factory_req("worker_status")))
+            .await
+            .expect("status"),
+    );
+    assert!(
+        text.contains("inbox: 2 unread messages"),
+        "the unread count must be on the row: {text}"
+    );
+
+    // Reading status must not mark the worker's mail as seen.
+    let still_unread = queue
+        .poll_unseen_for_recipient("wolf", None, 10)
+        .expect("poll");
+    assert_eq!(
+        still_unread.len(),
+        2,
+        "worker_status must PEEK the inbox, never consume it"
+    );
+}
+
 #[tokio::test]
 async fn test_worker_status_scopes_agents_to_factory_session() {
     let _guard = EnvGuard::set_optional(&[("CAS_FACTORY_SESSION", None)]);
@@ -2096,7 +2551,13 @@ async fn test_9829_worker_status_marks_stalled_worker_with_in_progress_task() {
     )
     .expect("write config.toml");
 
-    let busy_id = env.register_worker("busy-badger");
+    // cas-e728 (GH #105): the ⚠ STALLED verdict now belongs to harnesses that
+    // publish an authoritative turn-start artifact. Codex does, so this row
+    // keeps the original contract verbatim; the Claude case is covered by
+    // test_worker_status_reports_between_turns_not_stalled_for_claude_worker.
+    let mut codex_meta = HashMap::new();
+    codex_meta.insert("worker_cli".to_string(), "codex".to_string());
+    let busy_id = env.register_worker_with_metadata("busy-badger", codex_meta);
     let task_store = env.task_store();
     let task = Task::new("cas-0b7d".to_string(), "Stalled task".to_string());
     task_store.add(&task).expect("add task");
@@ -4632,5 +5093,474 @@ async fn test_a844_show_and_list_distinguish_merge_conflict() {
     assert!(
         !clean_line.contains("MERGE CONFLICT"),
         "clean awaiting_merge line must not carry the conflict marker: {clean_line}"
+    );
+}
+
+// ===========================================================================
+// cas-0a6f (GH #103): sync_all_workers must not rebase a worktree that is
+// dirty or whose assignee is mid-task, and a stranded stash must reach both
+// the worker and the supervisor. These drive the real MCP handler against
+// real linked worktrees — the pure-unit tests in factory_ops.rs cover the
+// decision table, these cover the wiring.
+// ===========================================================================
+
+fn sync_env_with_worker(session: &str, worker: &str) -> (FactoryTestEnv, PathBuf, EnvGuard) {
+    let home = TempDir::new().expect("home tempdir");
+    let guard = EnvGuard::set(&[
+        ("CAS_FACTORY_SESSION", session),
+        ("HOME", home.path().to_str().unwrap()),
+        // A real factory session exports this; blank it so supervisor
+        // resolution is decided by the fixture's agent store rather than by
+        // whatever session happens to be running the suite.
+        ("CAS_SUPERVISOR_NAME", ""),
+    ]);
+    std::mem::forget(home);
+    let env = FactoryTestEnv::new();
+    let worker_path = init_sync_repo(&env, worker);
+    env.register_worker_in_session(worker, session);
+    add_epic_with_id(&env, "cas-3b7c", TaskStatus::Open, "epic/requested");
+    write_session_metadata_for_project(
+        session,
+        Some("cas-3b7c"),
+        env.cas_root.parent().unwrap().to_str().unwrap(),
+    );
+    (env, worker_path, guard)
+}
+
+#[tokio::test]
+async fn test_sync_all_workers_skips_dirty_worktree_without_force_cas_0a6f() {
+    let (env, worker_path, _guard) =
+        sync_env_with_worker("session-sync-dirty", "sync-dirty-worker");
+
+    // Live WIP the worker has not committed.
+    std::fs::write(worker_path.join("wip.txt"), "precious uncommitted work").unwrap();
+
+    let mut req = factory_req("sync_all_workers");
+    req.id = Some("cas-3b7c".to_string());
+    let text = get_text(&env.service.factory(Parameters(req)).await.expect("sync"));
+
+    assert!(
+        text.contains("Skipped:") && text.contains("uncommitted change(s)"),
+        "a dirty worktree must be reported as skipped: {text}"
+    );
+    assert!(
+        !text.contains("Synced:"),
+        "nothing should have been rebased: {text}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(worker_path.join("wip.txt")).unwrap(),
+        "precious uncommitted work",
+        "WIP must be untouched"
+    );
+    assert!(
+        !worker_path.join("requested.txt").exists(),
+        "the worktree must not have been rebased onto the epic"
+    );
+    assert!(
+        git_stdout(&worker_path, &["stash", "list"]).trim().is_empty(),
+        "sync must not have stashed anything"
+    );
+}
+
+#[tokio::test]
+async fn test_sync_all_workers_force_syncs_dirty_worktree_and_restores_wip_cas_0a6f() {
+    let (env, worker_path, _guard) =
+        sync_env_with_worker("session-sync-force", "sync-force-worker");
+
+    std::fs::write(worker_path.join("wip.txt"), "precious uncommitted work").unwrap();
+
+    let mut req = factory_req("sync_all_workers");
+    req.id = Some("cas-3b7c".to_string());
+    req.force = Some(true);
+    let text = get_text(&env.service.factory(Parameters(req)).await.expect("sync"));
+
+    assert!(
+        text.contains("Synced:") && text.contains("stashed + rebased + restored"),
+        "force must carry the dirty worktree through: {text}"
+    );
+    assert!(
+        worker_path.join("requested.txt").exists(),
+        "the epic commit must have landed: {text}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(worker_path.join("wip.txt")).unwrap(),
+        "precious uncommitted work",
+        "the worker's WIP must be restored after the rebase"
+    );
+    assert!(
+        git_stdout(&worker_path, &["stash", "list"]).trim().is_empty(),
+        "a restored stash must not be left behind"
+    );
+}
+
+#[tokio::test]
+async fn test_sync_all_workers_skips_worker_holding_an_in_progress_task_cas_0a6f() {
+    let (env, worker_path, _guard) = sync_env_with_worker("session-sync-busy", "sync-busy-worker");
+
+    // Clean worktree, but the worker is actively working a task.
+    let store = env.task_store();
+    let task_id = store.generate_id().expect("generate_id");
+    let mut task = Task::new(task_id.clone(), "Live work".to_string());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("sync-busy-worker".to_string());
+    store.add(&task).expect("add in-progress task");
+
+    let mut req = factory_req("sync_all_workers");
+    req.id = Some("cas-3b7c".to_string());
+    let text = get_text(&env.service.factory(Parameters(req)).await.expect("sync"));
+
+    assert!(
+        text.contains("Skipped:") && text.contains(&task_id),
+        "the skip must name the task holding the worktree: {text}"
+    );
+    assert!(
+        !worker_path.join("requested.txt").exists(),
+        "a mid-task worktree must not be rebased under the worker: {text}"
+    );
+}
+
+#[tokio::test]
+async fn test_sync_all_workers_notifies_worker_and_supervisor_on_stranded_stash_cas_0a6f() {
+    let (env, worker_path, _guard) =
+        sync_env_with_worker("session-sync-strand", "sync-strand-worker");
+    env.register_supervisor("sync-strand-supervisor");
+
+    // Untracked WIP that collides with the file the epic commit introduces:
+    // the rebase succeeds, then the stash pop cannot restore it.
+    std::fs::write(worker_path.join("requested.txt"), "local uncommitted version").unwrap();
+
+    let mut req = factory_req("sync_all_workers");
+    req.id = Some("cas-3b7c".to_string());
+    req.force = Some(true);
+    let text = get_text(&env.service.factory(Parameters(req)).await.expect("sync"));
+
+    assert!(
+        text.contains("Failed:") && text.contains("WIP IS NOT LOST"),
+        "a stranded stash must be reported loudly: {text}"
+    );
+    assert!(
+        text.contains("Incident notifications:"),
+        "the report must record that the incident was pushed: {text}"
+    );
+
+    let queue = env.prompt_queue();
+    for target in ["sync-strand-worker", "sync-strand-supervisor"] {
+        let queued = queue.poll_for_target(target, 10).expect("poll queue");
+        let incident = queued
+            .iter()
+            .find(|q| q.prompt.contains("SYNC INCIDENT"))
+            .unwrap_or_else(|| panic!("{target} must receive the incident: {queued:?}"));
+        // The prose may quote the git command that FAILED ("stash pop
+        // failed: ..."); what matters is the command block the operator is
+        // told to run. `git stash pop <sha>` would be rejected by git as
+        // "not a stash reference", so the instruction must be `apply`.
+        let instruction = incident
+            .prompt
+            .split("run:")
+            .nth(1)
+            .unwrap_or_else(|| panic!("incident must contain an instruction block: {}", incident.prompt));
+        assert!(
+            instruction.contains("git stash apply"),
+            "the recovery command must be one git accepts for a SHA: {instruction}"
+        );
+        assert!(
+            !instruction.contains("git stash pop"),
+            "`stash pop` rejects the SHA we hand out: {instruction}"
+        );
+        assert!(
+            instruction.contains("--include-untracked"),
+            "inspection must reveal untracked WIP: {instruction}"
+        );
+    }
+
+    // The WIP really is recoverable via the instruction that was sent.
+    assert!(
+        !git_stdout(&worker_path, &["stash", "list"]).trim().is_empty(),
+        "the stash entry must survive for recovery"
+    );
+}
+
+// ===========================================================================
+// cas-f8bc (GH #106): the circular authorization deadlock.
+//
+//   worker closes A → produces a standalone fix for new task B on its branch
+//   → worktree_merge refuses (task B has no assignee/lease)
+//   → assignment refuses ("N commits behind epic")
+//   → but it is behind ONLY because the worker's own lane was merged, and the
+//     assignment it is refusing is the prerequisite the merge path asked for.
+//
+// These drive the real assignment gate through the MCP surface.
+// ===========================================================================
+
+/// Build the exact post-merge state from the live repro: the worker's own lane
+/// is merged into the epic, so the epic is one merge commit "ahead".
+fn repo_with_worker_lane_merged(env: &FactoryTestEnv, worker: &str) -> PathBuf {
+    let worker_path = init_sync_repo(env, worker);
+    let project = env.cas_root.parent().expect("project root");
+
+    let run = |dir: &std::path::Path, args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "CAS Test")
+            .env("GIT_AUTHOR_EMAIL", "test@cas")
+            .env("GIT_COMMITTER_NAME", "CAS Test")
+            .env("GIT_COMMITTER_EMAIL", "test@cas")
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    // The worker starts current with the epic — the deadlock is about a worker
+    // whose ONLY gap is its own landed work, so any pre-existing staleness must
+    // be out of the picture first.
+    run(&worker_path, &["rebase", "epic/requested"]);
+
+    // Worker does its work on its own branch.
+    std::fs::write(worker_path.join("fix.txt"), "worker fix").unwrap();
+    run(&worker_path, &["add", "."]);
+    run(&worker_path, &["commit", "-m", "worker fix"]);
+
+    // Supervisor merges that lane into the epic branch.
+    run(project, &["checkout", "epic/requested"]);
+    run(
+        project,
+        &[
+            "merge",
+            "--no-ff",
+            &format!("factory/{worker}"),
+            "-m",
+            "Merge worker lane",
+        ],
+    );
+    run(project, &["checkout", "main"]);
+    worker_path
+}
+
+fn child_task_of_epic(env: &FactoryTestEnv, epic_id: &str, title: &str) -> String {
+    let store = env.task_store();
+    let id = store.generate_id().expect("generate_id");
+    let task = Task::new(id.clone(), title.to_string());
+    store.add(&task).expect("add child task");
+    store
+        .add_dependency(&cas::types::Dependency {
+            from_id: id.clone(),
+            to_id: epic_id.to_string(),
+            dep_type: cas::types::DependencyType::ParentChild,
+            created_at: chrono::Utc::now(),
+            created_by: Some("test".to_string()),
+        })
+        .expect("link child to epic");
+    id
+}
+
+async fn assign(env: &FactoryTestEnv, task_id: &str, assignee: &str) -> Result<String, String> {
+    let req: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "update",
+        "id": task_id,
+        "assignee": assignee,
+    }))
+    .expect("task request");
+    match env.service.task(Parameters(req)).await {
+        Ok(result) => Ok(get_text(&result)),
+        Err(error) => Err(error.message.to_string()),
+    }
+}
+
+#[tokio::test]
+async fn test_assignment_is_not_blocked_by_the_workers_own_merged_lane_cas_f8bc() {
+    let home = TempDir::new().expect("home tempdir");
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_FACTORY_MODE", Some("1")),
+        ("CAS_FACTORY_SESSION", Some("session-f8bc-own")),
+        ("HOME", Some(home.path().to_str().unwrap())),
+    ]);
+    let env = FactoryTestEnv::new();
+    let worker = "f8bc-own-worker";
+    let worker_path = repo_with_worker_lane_merged(&env, worker);
+    add_epic_with_id(&env, "cas-3b7c", TaskStatus::Open, "epic/requested");
+
+    {
+        let store = env.agent_store();
+        let mut agent = Agent::new(Agent::generate_fallback_id(), worker.to_string());
+        agent.role = AgentRole::Worker;
+        agent.factory_session = Some("session-f8bc-own".to_string());
+        agent.metadata.insert(
+            "clone_path".to_string(),
+            worker_path.to_str().unwrap().to_string(),
+        );
+        store.register(&agent).expect("register worker");
+    }
+
+    let task_b = child_task_of_epic(&env, "cas-3b7c", "standalone fix follow-up");
+    let outcome = assign(&env, &task_b, worker).await;
+
+    let text = outcome.unwrap_or_else(|error| {
+        panic!(
+            "assignment must not be refused for the worker's own merged lane \
+             — that refusal is the deadlock (GH #106): {error}"
+        )
+    });
+    assert!(
+        text.contains("assignee"),
+        "the assignment must actually be applied: {text}"
+    );
+    assert!(
+        !text.contains("commit(s) behind"),
+        "no staleness warning is warranted for a worker's own landed work: {text}"
+    );
+
+    // And the sanctioned merge path is now open: worktree_merge's conservative
+    // rule authorizes on assignee match, no lease required.
+    let task = env.task_store().get(&task_b).expect("task");
+    assert_eq!(task.assignee.as_deref(), Some(worker));
+}
+
+#[tokio::test]
+async fn test_assignment_still_refuses_a_genuinely_stale_worker_cas_f8bc() {
+    let home = TempDir::new().expect("home tempdir");
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_FACTORY_MODE", Some("1")),
+        ("CAS_FACTORY_SESSION", Some("session-f8bc-stale")),
+        ("HOME", Some(home.path().to_str().unwrap())),
+    ]);
+    let env = FactoryTestEnv::new();
+    let worker = "f8bc-stale-worker";
+    // init_sync_repo leaves epic/requested one real commit ahead of the
+    // worker's branch, and nothing of the worker's has been merged.
+    let worker_path = init_sync_repo(&env, worker);
+    add_epic_with_id(&env, "cas-3b7c", TaskStatus::Open, "epic/requested");
+
+    {
+        let store = env.agent_store();
+        let mut agent = Agent::new(Agent::generate_fallback_id(), worker.to_string());
+        agent.role = AgentRole::Worker;
+        agent.factory_session = Some("session-f8bc-stale".to_string());
+        agent.metadata.insert(
+            "clone_path".to_string(),
+            worker_path.to_str().unwrap().to_string(),
+        );
+        store.register(&agent).expect("register worker");
+    }
+
+    let task_b = child_task_of_epic(&env, "cas-3b7c", "work needing fresh base");
+    let error = assign(&env, &task_b, worker)
+        .await
+        .expect_err("a worker missing real epic commits must still be refused");
+    assert!(
+        error.contains("commits behind") && error.contains("epic/requested"),
+        "the genuine staleness guard must survive the exemption: {error}"
+    );
+}
+
+// ===========================================================================
+// cas-aae6 (GH #110): epic_status must show the chain for a stacked epic.
+// The renderer is unit-tested with a hand-built chain; this drives the real
+// handler against a real three-deep stack, which is the only thing that can
+// catch a mis-wiring (wrong branch, wrong trunk, swapped arguments).
+// ===========================================================================
+
+#[tokio::test]
+async fn test_epic_status_reports_a_three_deep_stack_end_to_end_cas_aae6() {
+    let home = TempDir::new().expect("home tempdir");
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_FACTORY_MODE", Some("1")),
+        ("HOME", Some(home.path().to_str().unwrap())),
+    ]);
+    let env = FactoryTestEnv::new();
+    let project = env.cas_root.parent().expect("project root").to_path_buf();
+
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&project)
+            .env("GIT_AUTHOR_NAME", "CAS Test")
+            .env("GIT_AUTHOR_EMAIL", "test@cas")
+            .env("GIT_COMMITTER_NAME", "CAS Test")
+            .env("GIT_COMMITTER_EMAIL", "test@cas")
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    let commit = |name: &str| {
+        std::fs::write(project.join(name), name).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", name]);
+    };
+
+    git(&["init", "-b", "main"]);
+    git(&["config", "user.email", "test@cas"]);
+    git(&["config", "user.name", "CAS Test"]);
+    commit("seed.txt");
+    git(&["checkout", "-b", "epic/a"]);
+    commit("a.txt");
+    git(&["checkout", "-b", "epic/b"]);
+    commit("b.txt");
+    git(&["checkout", "-b", "epic/c"]);
+    commit("c.txt");
+    git(&["checkout", "main"]);
+
+    add_epic_with_id(&env, "cas-top", TaskStatus::Open, "epic/c");
+
+    let mut req = factory_req("epic_status");
+    req.id = Some("cas-top".to_string());
+    let text = get_text(&env.service.factory(Parameters(req)).await.expect("status"));
+
+    assert!(
+        text.contains("Stacked on: 2 unlanded epic branch(es) — 'epic/a' → 'epic/b'"),
+        "the full chain must reach the supervisor-facing report: {text}"
+    );
+    assert!(
+        text.contains("Landing order: 'epic/a' → 'epic/b' → 'epic/c'"),
+        "bottom-up order must be shown: {text}"
+    );
+}
+
+#[tokio::test]
+async fn test_epic_status_omits_stack_lines_for_an_unstacked_epic_cas_aae6() {
+    let home = TempDir::new().expect("home tempdir");
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_FACTORY_MODE", Some("1")),
+        ("HOME", Some(home.path().to_str().unwrap())),
+    ]);
+    let env = FactoryTestEnv::new();
+    let project = env.cas_root.parent().expect("project root").to_path_buf();
+
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(&project)
+            .env("GIT_AUTHOR_NAME", "CAS Test")
+            .env("GIT_AUTHOR_EMAIL", "test@cas")
+            .env("GIT_COMMITTER_NAME", "CAS Test")
+            .env("GIT_COMMITTER_EMAIL", "test@cas")
+            .output()
+            .expect("git");
+    };
+    git(&["init", "-b", "main"]);
+    git(&["config", "user.email", "test@cas"]);
+    git(&["config", "user.name", "CAS Test"]);
+    std::fs::write(project.join("seed.txt"), "seed").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-m", "seed"]);
+    git(&["branch", "epic/solo"]);
+
+    add_epic_with_id(&env, "cas-solo", TaskStatus::Open, "epic/solo");
+
+    let mut req = factory_req("epic_status");
+    req.id = Some("cas-solo".to_string());
+    let text = get_text(&env.service.factory(Parameters(req)).await.expect("status"));
+
+    assert!(
+        !text.contains("Stacked on"),
+        "an epic cut straight from trunk must not claim a stack: {text}"
     );
 }

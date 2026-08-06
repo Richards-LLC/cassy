@@ -404,6 +404,30 @@ impl PtyConfig {
         }
     }
 
+    /// Re-derate this worker's `CARGO_BUILD_JOBS` against the number of
+    /// workers actually competing for the host (cas-4614, GH #107).
+    ///
+    /// The constructors set a conservative default that assumes
+    /// `DEFAULT_WORKER_CONCURRENCY_ASSUMPTION` workers, because they have no
+    /// view of the fleet. The mux does, so it calls this immediately after
+    /// building the config. Replaces rather than appends: two
+    /// `CARGO_BUILD_JOBS` entries would leave the effective value depending on
+    /// `CommandBuilder`'s iteration order, which is not a contract worth
+    /// relying on.
+    ///
+    /// No-op for non-worker roles (nothing to replace — supervisors never get
+    /// the variable) and when the fleet is at or below the assumed floor.
+    pub fn apply_worker_build_concurrency(&mut self, active_workers: Option<usize>) {
+        if !self.env.iter().any(|(k, _)| k == "CARGO_BUILD_JOBS") {
+            return;
+        }
+        let Some(jobs) = cargo_build_jobs_for_worker(active_workers) else {
+            return;
+        };
+        self.env.retain(|(k, _)| k != "CARGO_BUILD_JOBS");
+        self.env.push(("CARGO_BUILD_JOBS".to_string(), jobs));
+    }
+
     /// Create config for a Claude CLI instance
     ///
     /// # Arguments
@@ -902,7 +926,7 @@ const DEFAULT_WORKER_CONCURRENCY_ASSUMPTION: usize = 4;
 /// which should be vanishingly rare. In that case we do NOT set
 /// `CARGO_BUILD_JOBS` — cargo's own default (= num_cpus) then applies
 /// and the cap is a no-op rather than misleading.
-fn cargo_build_jobs_for_worker() -> Option<String> {
+fn cargo_build_jobs_for_worker(active_workers: Option<usize>) -> Option<String> {
     if let Ok(explicit) = std::env::var("CAS_FACTORY_CARGO_BUILD_JOBS") {
         let trimmed = explicit.trim();
         // Case-insensitive `"auto"` falls through to the computed cap so
@@ -914,8 +938,28 @@ fn cargo_build_jobs_for_worker() -> Option<String> {
         }
     }
     let cores = std::thread::available_parallelism().ok()?.get();
-    let capped = std::cmp::max(2, cores / DEFAULT_WORKER_CONCURRENCY_ASSUMPTION);
+    let capped = std::cmp::max(2, cores / worker_concurrency_divisor(active_workers));
     Some(capped.to_string())
+}
+
+/// How many workers to assume are competing for the host when derating
+/// `CARGO_BUILD_JOBS` (cas-4614, GH #107).
+///
+/// `DEFAULT_WORKER_CONCURRENCY_ASSUMPTION` is a **floor**, not a default that
+/// a live count replaces. Taking the max in both directions would let a
+/// single-worker fleet claim `cores / 1` — every thread on the box — which is
+/// the storm the derate exists to prevent, and the count is only a snapshot
+/// anyway: more workers usually follow. So a fleet at or below the assumption
+/// keeps exactly today's behaviour, and a larger fleet derates further.
+///
+/// The count is read at spawn time and baked into the child's environment, so
+/// a worker spawned early keeps its allocation as the fleet grows. That is a
+/// known limitation, not an oversight: `CARGO_BUILD_JOBS` is an env var, and
+/// re-deriving it would mean re-spawning the pane. Erring conservative at the
+/// floor is what keeps the early-spawn case from being harmful.
+fn worker_concurrency_divisor(active_workers: Option<usize>) -> usize {
+    let observed = active_workers.unwrap_or(0);
+    std::cmp::max(DEFAULT_WORKER_CONCURRENCY_ASSUMPTION, observed)
 }
 
 /// Spawn-inject the CAS MCP server into a Codex command via `-c` overrides
@@ -1090,7 +1134,7 @@ fn push_worker_cargo_env(env: &mut Vec<(String, String)>, role: &str) {
     if role != "worker" {
         return;
     }
-    if let Some(cargo_jobs) = cargo_build_jobs_for_worker() {
+    if let Some(cargo_jobs) = cargo_build_jobs_for_worker(None) {
         env.push(("CARGO_BUILD_JOBS".to_string(), cargo_jobs));
     }
 }
@@ -2939,6 +2983,14 @@ mod tests {
         use crate::pty::tests::ScopedEnv;
         use crate::pty::*;
 
+        /// Local twin of the helper in `claude_config_dir_contract_tests`,
+        /// which is private to that module.
+        fn env_value(env: &[(String, String)], key: &str) -> Option<String> {
+            env.iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.to_string())
+        }
+
         #[test]
         fn cargo_build_jobs_honours_explicit_env_override() {
             let _e = ScopedEnv::new();
@@ -2946,7 +2998,7 @@ mod tests {
             unsafe {
                 std::env::set_var("CAS_FACTORY_CARGO_BUILD_JOBS", "3");
             }
-            assert_eq!(cargo_build_jobs_for_worker().as_deref(), Some("3"));
+            assert_eq!(cargo_build_jobs_for_worker(None).as_deref(), Some("3"));
         }
 
         #[test]
@@ -2955,7 +3007,7 @@ mod tests {
             unsafe {
                 std::env::set_var("CAS_FACTORY_CARGO_BUILD_JOBS", "  6  ");
             }
-            assert_eq!(cargo_build_jobs_for_worker().as_deref(), Some("6"));
+            assert_eq!(cargo_build_jobs_for_worker(None).as_deref(), Some("6"));
         }
 
         #[test]
@@ -2965,7 +3017,7 @@ mod tests {
             unsafe {
                 std::env::set_var("CAS_FACTORY_CARGO_BUILD_JOBS", "auto");
             }
-            let got = cargo_build_jobs_for_worker()
+            let got = cargo_build_jobs_for_worker(None)
                 .expect("available_parallelism should succeed on test host");
             let n: usize = got.parse().expect("computed CARGO_BUILD_JOBS must parse");
             assert!(
@@ -2978,10 +3030,131 @@ mod tests {
         fn cargo_build_jobs_empty_env_falls_through_to_computed() {
             let _e = ScopedEnv::new();
             // No env set at all → compute. Same assertion as "auto".
-            let got = cargo_build_jobs_for_worker()
+            let got = cargo_build_jobs_for_worker(None)
                 .expect("available_parallelism should succeed on test host");
             let n: usize = got.parse().expect("computed CARGO_BUILD_JOBS must parse");
             assert!(n >= 2);
+        }
+
+        // cas-4614 (GH #107): the divisor is count-aware, with the old
+        // hardcoded assumption kept as a floor.
+        #[test]
+        fn worker_concurrency_divisor_treats_assumption_as_a_floor() {
+            // A fleet smaller than the assumption must not raise the jobs
+            // allocation — a lone worker claiming cores/1 is the storm the
+            // derate exists to prevent.
+            assert_eq!(
+                worker_concurrency_divisor(Some(1)),
+                DEFAULT_WORKER_CONCURRENCY_ASSUMPTION
+            );
+            assert_eq!(
+                worker_concurrency_divisor(Some(DEFAULT_WORKER_CONCURRENCY_ASSUMPTION)),
+                DEFAULT_WORKER_CONCURRENCY_ASSUMPTION
+            );
+            // Unknown count behaves exactly like today.
+            assert_eq!(
+                worker_concurrency_divisor(None),
+                DEFAULT_WORKER_CONCURRENCY_ASSUMPTION
+            );
+            // A larger fleet derates further — this is the new behaviour.
+            assert_eq!(worker_concurrency_divisor(Some(12)), 12);
+        }
+
+        #[test]
+        fn cargo_build_jobs_derates_further_for_a_large_fleet() {
+            let _e = ScopedEnv::new();
+            let cores = std::thread::available_parallelism()
+                .expect("available_parallelism should succeed on test host")
+                .get();
+            let floor = cargo_build_jobs_for_worker(Some(1))
+                .and_then(|v| v.parse::<usize>().ok())
+                .expect("computed value must parse");
+            // Pick a fleet well above both the assumption and the core count
+            // so the derate is forced onto the 2-job floor regardless of the
+            // test host's topology.
+            let huge = cargo_build_jobs_for_worker(Some(cores * 4))
+                .and_then(|v| v.parse::<usize>().ok())
+                .expect("computed value must parse");
+            assert_eq!(huge, 2, "a fleet larger than the core count floors at 2");
+            assert!(
+                huge <= floor,
+                "a larger fleet must never be granted more jobs than a small one: \
+                 {huge} > {floor}"
+            );
+        }
+
+        #[test]
+        fn explicit_env_override_still_wins_over_the_fleet_count() {
+            let _e = ScopedEnv::new();
+            unsafe {
+                std::env::set_var("CAS_FACTORY_CARGO_BUILD_JOBS", "7");
+            }
+            // Operator intent outranks the computed derate at every fleet size.
+            assert_eq!(cargo_build_jobs_for_worker(Some(64)).as_deref(), Some("7"));
+            assert_eq!(cargo_build_jobs_for_worker(None).as_deref(), Some("7"));
+        }
+
+        #[test]
+        fn apply_worker_build_concurrency_replaces_rather_than_appends() {
+            let _e = ScopedEnv::new();
+            let mut config = PtyConfig::claude(
+                "w1",
+                "worker",
+                PathBuf::from("/tmp"),
+                None,
+                Some("sup"),
+                None,
+                None,
+                None,
+                None,
+            );
+            let before = env_value(&config.env, "CARGO_BUILD_JOBS")
+                .expect("worker config must carry CARGO_BUILD_JOBS")
+                .to_string();
+
+            config.apply_worker_build_concurrency(Some(64));
+
+            let entries: Vec<_> = config
+                .env
+                .iter()
+                .filter(|(k, _)| k == "CARGO_BUILD_JOBS")
+                .collect();
+            assert_eq!(
+                entries.len(),
+                1,
+                "a duplicate entry would make the effective value depend on \
+                 CommandBuilder iteration order"
+            );
+            let after = entries[0].1.clone();
+            assert_eq!(after, "2", "a 64-worker fleet floors at 2 jobs");
+            assert_ne!(
+                after, before,
+                "the fleet-aware value must actually replace the default"
+            );
+        }
+
+        #[test]
+        fn apply_worker_build_concurrency_is_noop_for_supervisor_config() {
+            let _e = ScopedEnv::new();
+            let mut config = PtyConfig::claude(
+                "sup",
+                "supervisor",
+                PathBuf::from("/tmp"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            assert!(env_value(&config.env, "CARGO_BUILD_JOBS").is_none());
+            // Must not invent the variable for a role that never had it —
+            // supervisors are deliberately left uncapped.
+            config.apply_worker_build_concurrency(Some(8));
+            assert!(
+                env_value(&config.env, "CARGO_BUILD_JOBS").is_none(),
+                "supervisors must never gain CARGO_BUILD_JOBS"
+            );
         }
 
         #[test]
@@ -3141,7 +3314,7 @@ mod tests {
                 unsafe {
                     std::env::set_var("CAS_FACTORY_CARGO_BUILD_JOBS", variant);
                 }
-                let got = cargo_build_jobs_for_worker()
+                let got = cargo_build_jobs_for_worker(None)
                     .expect("available_parallelism should succeed on test host");
                 let n: usize = got.parse().expect("computed value must parse as integer");
                 assert!(

@@ -3226,6 +3226,64 @@ This is the body content."#;
         }
     }
 
+    /// cas-0e5b3 (GH #112): the checked-in rendered copy must equal the builtin
+    /// it is generated from.
+    ///
+    /// `.claude/workflows/cas-code-review.js` is not a second source — it is
+    /// output that [`sync_workflows`] force-writes from [`BUILTIN_WORKFLOWS`].
+    /// A one-line divergence (`CODEX_PERSONA_EFFORT`) sat in the tree for a
+    /// week because the only guard for it lived in the Node test suite, which
+    /// `cargo test` never runs: every worker and every CI pass was green while
+    /// this repo reviewed its own code at a different reasoning effort than the
+    /// one it ships. This test is deliberately standalone and named for what it
+    /// checks, rather than riding along inside a sync test, because the whole
+    /// failure mode was drift going unnoticed.
+    #[test]
+    fn test_rendered_workflow_matches_builtin() {
+        // Coupled to the single BUILTIN_WORKFLOWS entry: `include_str!` needs a
+        // literal path, so this cannot iterate the slice. The length assert
+        // below turns "someone added a second workflow" into a loud failure
+        // here instead of a silently unguarded file.
+        assert_eq!(
+            BUILTIN_WORKFLOWS.len(),
+            1,
+            "a new builtin workflow was added but this parity guard still checks only \
+             cas-code-review.js — extend it with an include_str! for the new file, or \
+             the new rendered copy can drift undetected (cas-0e5b3)"
+        );
+
+        let rendered_copy = include_str!("../../.claude/workflows/cas-code-review.js");
+        let builtin_source = BUILTIN_WORKFLOWS
+            .iter()
+            .find(|f| f.path == "workflows/cas-code-review.js")
+            .expect("cas-code-review workflow must be a builtin")
+            .content;
+        if rendered_copy != builtin_source {
+            // Name the first divergent line: the previous guard dumped both
+            // whole files, which is how a 1-in-1100-line difference stayed
+            // invisible even after the test went red.
+            let first_diff = rendered_copy
+                .lines()
+                .zip(builtin_source.lines())
+                .position(|(a, b)| a != b);
+            let detail = match first_diff {
+                Some(i) => format!(
+                    "line {}:\n  builtin (source of truth): {}\n  rendered copy (stale):     {}",
+                    i + 1,
+                    builtin_source.lines().nth(i).unwrap_or("<absent>"),
+                    rendered_copy.lines().nth(i).unwrap_or("<absent>"),
+                ),
+                None => "one file is a prefix of the other (trailing content differs)".to_string(),
+            };
+            panic!(
+                ".claude/workflows/cas-code-review.js is STALE relative to its builtin \
+                 source.\nThat file is generated — do NOT edit it to fix this.\n{detail}\n\
+                 Repair: edit cas-cli/src/builtins/workflows/cas-code-review.js, then \
+                 regenerate with `cas update --sync` (or copy builtin -> .claude/workflows/)."
+            );
+        }
+    }
+
     #[test]
     fn test_sync_installs_cas_code_review_and_overwrites_code_reviewer() {
         use tempfile::tempdir;

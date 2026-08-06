@@ -339,6 +339,7 @@ const SPAWN_HISTORY_WINDOW_SECS: i64 = 1800;
 fn format_assigned_task_info(
     in_progress: Option<(&str, &str)>,
     assigned_open: Option<(&str, &str)>,
+    parked: Option<(&str, &str, cas_types::TaskStatus)>,
 ) -> String {
     const TITLE_CAP: usize = 60;
     let truncate = |title: &str| -> String {
@@ -350,20 +351,50 @@ fn format_assigned_task_info(
         format!("{}…", short.trim_end())
     };
 
-    match (in_progress, assigned_open) {
-        (Some((id, title)), _) => {
+    match (in_progress, assigned_open, parked) {
+        (Some((id, title)), _, _) => {
             format!("\n    task: {id} (in progress) — {}", truncate(title))
         }
         // Assigned but not started: the dispatch grace window, or a worker that
         // never picked the task up. Naming it lets the supervisor tell those
         // apart without opening anything.
-        (None, Some((id, title))) => {
+        (None, Some((id, title)), _) => {
             format!(
                 "\n    task: {id} (assigned, not started) — {}",
                 truncate(title)
             )
         }
-        (None, None) => "\n    task: none assigned".to_string(),
+        // cas-e728 (GH #105): finished and waiting on the SUPERVISOR. This
+        // rendered as "none assigned" — identical to a worker with nothing to
+        // do — so the one state that genuinely needs supervisor action looked
+        // like the one that needs none. It is also why the stall flag "missed
+        // the real anomaly": there was nothing in the row to miss.
+        (None, None, Some((id, title, status))) => {
+            // Matched exhaustively on purpose: a catch-all would silently
+            // relabel any status added to the parked set later.
+            let (label, action) = match status {
+                cas_types::TaskStatus::AwaitingMerge => (
+                    "finished, awaiting merge",
+                    "merge its branch, then it can close",
+                ),
+                cas_types::TaskStatus::PendingSupervisorReview => (
+                    "finished, awaiting supervisor review",
+                    "review it, then it can close",
+                ),
+                cas_types::TaskStatus::Blocked => (
+                    "blocked",
+                    "clear the blocker or reassign — the worker cannot proceed",
+                ),
+                cas_types::TaskStatus::Open
+                | cas_types::TaskStatus::InProgress
+                | cas_types::TaskStatus::Closed => ("parked", "check the task"),
+            };
+            format!(
+                "\n    task: {id} ({label}) — {} → WAITING ON YOU: {action}",
+                truncate(title)
+            )
+        }
+        (None, None, None) => "\n    task: none assigned".to_string(),
     }
 }
 
@@ -1378,34 +1409,113 @@ impl CasService {
         // GH #67: keep the whole task, not just the assignee name. The
         // supervisor had to open the task store (or the worktree) to learn
         // WHICH task a worker was holding; the roster knew all along.
-        let in_progress_tasks: Vec<cas_types::Task> = {
+        //
+        // cas-e728 (GH #105): every task list here is read at RENDER time, and
+        // the lease check below is cross-referenced against them, so a task
+        // that closed a second ago can never keep reading as in-progress.
+        // cas-e728: a failed read must not masquerade as "nobody has a task".
+        // Every worker's task line and stall verdict derives from these lists,
+        // so silently defaulting to empty would turn one SQLITE_BUSY into a
+        // whole status page of false reassurance.
+        let mut task_read_failed = false;
+        let all_in_progress_tasks: Vec<cas_types::Task> = {
             use crate::store::open_task_store;
-            open_task_store(&self.inner.cas_root)
-                .ok()
-                .and_then(|ts| ts.list(Some(cas_types::TaskStatus::InProgress)).ok())
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|t| t.assignee.is_some())
-                .collect()
+            match open_task_store(&self.inner.cas_root)
+                .map_err(|e| e.to_string())
+                .and_then(|ts| {
+                    ts.list(Some(cas_types::TaskStatus::InProgress))
+                        .map_err(|e| e.to_string())
+                }) {
+                Ok(tasks) => tasks,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "cas-e728: worker_status could not read in-progress tasks"
+                    );
+                    task_read_failed = true;
+                    Vec::new()
+                }
+            }
         };
+        // cas-e728: the set of tasks that are in progress *right now*. A lease
+        // is a fixed-duration row that outlives the work — closing a task
+        // through any path that does not explicitly release it (a direct status
+        // update, a supervisor-side close, a crashed worker) leaves the lease
+        // on the books for the rest of its duration (default 30 minutes). Before
+        // this set existed, that stale lease alone made `has_in_progress_task`
+        // true, so `worker_status` told supervisors a finished worker had a task
+        // "in progress" and rendered `⚠ STALLED ... while task in progress` at
+        // it — the stale attribution behind the wrongful stall accusations in
+        // the report.
+        let mut unfinished_task_ids: std::collections::HashSet<String> =
+            all_in_progress_tasks.iter().map(|t| t.id.clone()).collect();
+        let in_progress_tasks: Vec<cas_types::Task> = all_in_progress_tasks
+            .into_iter()
+            .filter(|t| t.assignee.is_some())
+            .collect();
         let in_progress_assignees: std::collections::HashSet<String> = in_progress_tasks
             .iter()
             .filter_map(|t| t.assignee.clone())
             .collect();
+        // cas-e728 (GH #105): the finished-awaiting-merge state is the anomaly
+        // the stall flag structurally cannot see — the worker is healthy, its
+        // work is done, and it is waiting on the SUPERVISOR. It rendered as
+        // "task: none assigned", indistinguishable from an idle worker with
+        // nothing to do, so it read as "free" when it was actually blocking.
+        let parked_tasks: Vec<cas_types::Task> = {
+            use crate::store::open_task_store;
+            open_task_store(&self.inner.cas_root)
+                .ok()
+                .map(|ts| {
+                    [
+                        cas_types::TaskStatus::AwaitingMerge,
+                        cas_types::TaskStatus::PendingSupervisorReview,
+                        // cas-e728: Blocked literally means "waiting on
+                        // something". It is not in progress, so it must not
+                        // count toward the stall verdict — but it must still be
+                        // NAMED, or a blocked worker renders as idle-with-
+                        // nothing-to-do, the same hole this fix closes for
+                        // awaiting-merge.
+                        cas_types::TaskStatus::Blocked,
+                    ]
+                    .into_iter()
+                    .flat_map(|status| ts.list(Some(status)).unwrap_or_default())
+                    .filter(|task| task.assignee.is_some())
+                    .collect()
+                })
+                .unwrap_or_default()
+        };
         // cas-78bf: retain assigned Open tasks (including their assignment
         // timestamp) so worker_status can distinguish the normal dispatch
         // grace window from a worker that has held work without ever
         // starting it past the configured stall threshold.
-        let assigned_open_tasks: Vec<cas_types::Task> = {
+        let all_open_tasks: Vec<cas_types::Task> = {
             use crate::store::open_task_store;
-            open_task_store(&self.inner.cas_root)
-                .ok()
-                .and_then(|ts| ts.list(Some(cas_types::TaskStatus::Open)).ok())
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|task| task.assignee.is_some())
-                .collect()
+            match open_task_store(&self.inner.cas_root)
+                .map_err(|e| e.to_string())
+                .and_then(|ts| {
+                    ts.list(Some(cas_types::TaskStatus::Open))
+                        .map_err(|e| e.to_string())
+                }) {
+                Ok(tasks) => tasks,
+                Err(error) => {
+                    tracing::warn!(%error, "cas-e728: worker_status could not read open tasks");
+                    task_read_failed = true;
+                    Vec::new()
+                }
+            }
         };
+        // cas-e728: a lease taken between `claim` and `start` points at a task
+        // that is still Open — that IS work in flight, so Open counts as
+        // unfinished here. What must NOT count is a task that has reached a
+        // terminal-for-the-worker state (Closed, AwaitingMerge,
+        // PendingSupervisorReview): the work is over, and only the lease row
+        // outlived it.
+        unfinished_task_ids.extend(all_open_tasks.iter().map(|t| t.id.clone()));
+        let assigned_open_tasks: Vec<cas_types::Task> = all_open_tasks
+            .into_iter()
+            .filter(|task| task.assignee.is_some())
+            .collect();
 
         let workers: Vec<_> = agents
             .iter()
@@ -1414,6 +1524,43 @@ impl CasService {
                     && owned.as_ref().is_none_or(|set| set.contains(&a.name))
             })
             .collect();
+        // cas-e728 (GH #105): per-worker inbox state — how many messages the
+        // worker has NOT consumed, and how old the oldest one is.
+        //
+        // Keyed on recipient-seen state, NOT `processed_at`: the daemon stamps
+        // `processed_at` the instant it hands a row to the transport, so that
+        // column answers "has the daemon ticked", not "has the worker read
+        // it" — counting it would report an empty inbox for precisely the case
+        // this signal exists to catch (message delivered, worker never woke).
+        // The shared store query also fans `all_workers` broadcasts out to
+        // every recipient, so a broadcast nobody acted on can no longer render
+        // as "inbox empty".
+        //
+        // Read-only by construction: a supervisor polling status must never
+        // mark a worker's mail seen.
+        let inbox_state: std::collections::HashMap<String, (usize, Option<i64>)> = {
+            use crate::store::open_prompt_queue_store;
+            open_prompt_queue_store(&self.inner.cas_root)
+                .ok()
+                .map(|queue| {
+                    workers
+                        .iter()
+                        .map(|agent| {
+                            let count = queue
+                                .count_unseen_for_recipient(&agent.name, factory_session.as_deref())
+                                .unwrap_or(0);
+                            let oldest = queue
+                                .oldest_unseen_age_secs_for_recipient(
+                                    &agent.name,
+                                    factory_session.as_deref(),
+                                )
+                                .unwrap_or(None);
+                            (agent.name.clone(), (count, oldest))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
         let self_name = std::env::var("CAS_AGENT_NAME").ok();
         let supervisors: Vec<_> = agents
             .iter()
@@ -1608,9 +1755,21 @@ impl CasService {
                 // InProgress task assigned to its name/id, matching the
                 // supervisor's "assignment-or-lease, not lease alone"
                 // guidance.
+                //
+                // cas-e728 (GH #105): a lease only corroborates in-progress
+                // work while the task it points at is STILL in progress.
+                // Leases are never renewed and are not always released on
+                // close, so an unqualified `!leases.is_empty()` kept a
+                // finished worker looking busy for the rest of the lease
+                // duration (default 30m) and drove `⚠ STALLED ... while task
+                // in progress` at workers with nothing assigned.
                 let has_in_progress_task = store
                     .list_agent_leases(&agent.id)
-                    .map(|leases| !leases.is_empty())
+                    .map(|leases| {
+                        leases
+                            .iter()
+                            .any(|lease| unfinished_task_ids.contains(&lease.task_id))
+                    })
                     .unwrap_or(false)
                     || in_progress_assignees.contains(agent.name.as_str())
                     || in_progress_assignees.contains(agent.id.as_str());
@@ -1673,6 +1832,28 @@ impl CasService {
                     stall_threshold_secs,
                     in_flight_tool_call,
                 );
+                // cas-e728 (GH #105): inbox depth is rendered on EVERY row, not
+                // only on a row that already tripped the stall path. The most
+                // common "handed work and did not wake" shape is a worker with
+                // a parked or freshly assigned task — which is never "stalled"
+                // — so gating this on the alert hid it exactly where it was
+                // needed.
+                let worker_inbox = inbox_state
+                    .get(agent.name.as_str())
+                    .copied()
+                    .unwrap_or((0, None));
+                let inbox_info = match worker_inbox {
+                    (0, _) => String::new(),
+                    (count, oldest) => {
+                        let plural = if count == 1 { "" } else { "s" };
+                        match oldest {
+                            Some(age) => format!(
+                                "\n    inbox: {count} unread message{plural} (oldest {age}s)"
+                            ),
+                            None => format!("\n    inbox: {count} unread message{plural}"),
+                        }
+                    }
+                };
                 let priority_alert = format_priority_worker_status_alert(
                     stalled,
                     last_activity,
@@ -1682,6 +1863,9 @@ impl CasService {
                         .map(|(task, elapsed)| {
                             (task.id.as_str(), elapsed, effective_stall_threshold)
                         }),
+                    harness_publishes_turn_start(worker_cli),
+                    elapsed,
+                    worker_inbox,
                 );
                 let activity_info = if let Some(alert) = priority_alert {
                     alert
@@ -1736,9 +1920,13 @@ impl CasService {
                         .find(|t| matches_agent(t.assignee.as_deref()))
                         .map(|t| (t.id.as_str(), t.title.as_str())),
                     assigned_open_task.map(|t| (t.id.as_str(), t.title.as_str())),
+                    parked_tasks
+                        .iter()
+                        .find(|t| matches_agent(t.assignee.as_deref()))
+                        .map(|t| (t.id.as_str(), t.title.as_str(), t.status)),
                 );
                 output.push_str(&format!(
-                    "  • {} (heartbeat: {}){}{}{}{}{}{}{}{}{}{}\n    session: {}\n",
+                    "  • {} (heartbeat: {}){}{}{}{}{}{}{}{}{}{}{}\n    session: {}\n",
                     &agent.name,
                     since,
                     liveness_label,
@@ -1751,6 +1939,7 @@ impl CasService {
                     activity_info,
                     harness_turn_info,
                     task_info,
+                    inbox_info,
                     session_uuid
                 ));
             }
@@ -1763,6 +1952,15 @@ impl CasService {
         // cas-2e81: died-while-leased section (empty-fleet vs crash distinction).
         output.push_str(&died_section);
 
+        // cas-e728: say it out loud rather than rendering a confidently empty
+        // roster of task state.
+        if task_read_failed {
+            output.push_str(
+                "\n⚠ TASK STATE UNAVAILABLE: the task store could not be read for this poll, so \
+                 every 'task:' line and stall verdict above is incomplete. Re-run worker_status \
+                 before acting on it.\n",
+            );
+        }
         if stale_pruned > 0 {
             output.push_str(&format!(
                 "\nFiltered stale agent record(s): {stale_pruned} (>{worker_stale_threshold_secs}s heartbeat age)\n"
@@ -2086,6 +2284,127 @@ impl CasService {
         Ok(Self::success(output))
     }
 
+    /// Push a sync incident to the worker whose directory it is AND to the
+    /// supervisor (cas-0a6f / GH #103).
+    ///
+    /// A stranded stash or an unfinished rebase is invisible from inside the
+    /// worker's next turn — it just sees a working tree that lost its changes.
+    /// Best-effort by design: a queue failure must not mask the sync report,
+    /// so it is reported back as a line instead of an error. Returns the
+    /// delivery outcomes for the report.
+    fn notify_sync_incident(
+        &self,
+        worker_name: &str,
+        path: &std::path::Path,
+        sync_ref: &str,
+        failure: &SyncFailure,
+    ) -> Vec<String> {
+        use crate::store::{NotificationPriority, open_prompt_queue_store};
+
+        let mut body = format!(
+            "SYNC INCIDENT in your worktree ({}) while syncing to '{sync_ref}': {}",
+            path.display(),
+            failure.message
+        );
+        if let Some(stash) = failure.stranded_stash.as_deref() {
+            body.push_str(&format!(
+                "\n\nYour uncommitted work was stashed and could NOT be restored automatically. \
+                 It is not lost. In that worktree run:\n\n    {}\n\nDo this before making \
+                 further edits, or the apply will conflict. Once it is applied cleanly, find the \
+                 entry in `git stash list` and drop it by its stash@{{N}} index (`drop` and `pop` \
+                 do not accept the SHA above).",
+                stash_recovery_command(stash)
+            ));
+        }
+        if failure.mid_rebase {
+            body.push_str(
+                "\n\nThe worktree was left MID-REBASE. Resolve the conflict and \
+                 `git rebase --continue`, or `git rebase --abort` to return to the prior state, \
+                 before doing anything else in it.",
+            );
+        }
+
+        let summary = if failure.stranded_stash.is_some() {
+            format!("sync stranded {worker_name} WIP in a stash")
+        } else {
+            format!("sync left {worker_name} mid-rebase")
+        };
+
+        let queue = match open_prompt_queue_store(&self.inner.cas_root) {
+            Ok(queue) => queue,
+            Err(error) => {
+                tracing::error!(
+                    target: "cas::coordination",
+                    stage = "sync_incident_queue_open_failed",
+                    worker = %worker_name,
+                    "{error}"
+                );
+                return vec![format!(
+                    "{worker_name}: COULD NOT NOTIFY (queue unavailable: {error}) — relay the \
+                     recovery instruction above by hand"
+                )];
+            }
+        };
+
+        let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
+        let supervisor = std::env::var("CAS_SUPERVISOR_NAME")
+            .ok()
+            .filter(|name| !name.trim().is_empty())
+            .or_else(|| {
+                use cas_types::{AgentRole, AgentStatus};
+                crate::store::open_agent_store(&self.inner.cas_root)
+                    .ok()
+                    .and_then(|store| store.list(None).ok())
+                    .and_then(|agents| {
+                        agents
+                            .into_iter()
+                            .find(|a| {
+                                a.role == AgentRole::Supervisor
+                                    && matches!(a.status, AgentStatus::Active | AgentStatus::Idle)
+                            })
+                            .map(|a| a.name)
+                    })
+            });
+
+        let mut outcomes = Vec::new();
+        let mut targets = vec![worker_name.to_string()];
+        match supervisor {
+            Some(name) if name != worker_name => targets.push(name),
+            Some(_) => {}
+            None => outcomes.push(format!(
+                "{worker_name}: supervisor identity unresolved — incident delivered to the worker \
+                 only"
+            )),
+        }
+
+        for target in targets {
+            match queue.enqueue_full(
+                "cas-sync",
+                &target,
+                &body,
+                factory_session.as_deref(),
+                Some(summary.as_str()),
+                Some(NotificationPriority::High),
+            ) {
+                Ok(id) => outcomes.push(format!("{target}: notified (message {id})")),
+                Err(error) => {
+                    tracing::error!(
+                        target: "cas::coordination",
+                        stage = "sync_incident_enqueue_failed",
+                        worker = %worker_name,
+                        notify_target = %target,
+                        "{error}"
+                    );
+                    outcomes.push(format!(
+                        "{target}: COULD NOT NOTIFY ({error}) — relay the recovery instruction by \
+                         hand"
+                    ));
+                }
+            }
+        }
+        outcomes
+    }
+
     pub(super) async fn factory_sync_all_workers(
         &self,
         req: FactoryRequest,
@@ -2147,6 +2466,13 @@ impl CasService {
         let mut synced = Vec::new();
         let mut skipped = Vec::new();
         let mut failed = Vec::new();
+        let mut notified = Vec::new();
+
+        // cas-0a6f (GH #103): sync is a bulk, supervisor-initiated rewrite of
+        // other agents' working directories. Live WIP and in-flight tasks are
+        // never collateral without explicit consent.
+        let force = req.force.unwrap_or(false);
+        let in_progress_by_assignee = in_progress_tasks_by_assignee(&self.inner.cas_root);
 
         for worker in workers {
             // cas-f53c: same path resolution as worker_status — do not require
@@ -2162,14 +2488,58 @@ impl CasService {
                 continue;
             };
 
+            let dirty_files = match dirty_file_count(&path) {
+                Ok(count) => count,
+                Err(err) => {
+                    // Cannot establish cleanliness ⇒ cannot claim consent.
+                    skipped.push(format!(
+                        "{} (refusing sync — could not read worktree status: {err})",
+                        worker.name
+                    ));
+                    continue;
+                }
+            };
+            let in_progress = in_progress_by_assignee
+                .get(&worker.name)
+                .map(String::as_str);
+            if let SyncGate::Refuse(reason) = sync_gate_for_worker(
+                &worker.name,
+                dirty_files,
+                rebase_in_progress(&path),
+                in_progress,
+                force,
+            ) {
+                skipped.push(reason);
+                continue;
+            }
+
             match sync_worker_clone(&path, &sync_ref) {
                 Ok(details) => synced.push(format!("{} ({})", worker.name, details)),
-                Err(err) => failed.push(format!("{} ({})", worker.name, err)),
+                Err(failure) => {
+                    // A stranded stash or an unfinished rebase is invisible to
+                    // the worker whose directory it is — push it to them and to
+                    // the supervisor rather than only into this report.
+                    if failure.stranded_stash.is_some() || failure.mid_rebase {
+                        notified.extend(self.notify_sync_incident(
+                            &worker.name,
+                            &path,
+                            &sync_ref,
+                            &failure,
+                        ));
+                    }
+                    failed.push(format!("{} ({})", worker.name, failure.report_line()));
+                }
             }
         }
 
-        let mut out =
-            format!("Worker Sync Report\n==================\n\nSync target: {sync_ref}\n");
+        let mut out = format!(
+            "Worker Sync Report\n==================\n\nSync target: {sync_ref}\nMode: {}\n",
+            if force {
+                "force=true (dirty worktrees stashed; mid-task workers rebased)"
+            } else {
+                "safe (dirty or mid-task worktrees are skipped — pass force=true to include them)"
+            }
+        );
         if !synced.is_empty() {
             out.push_str("\nSynced:\n");
             for item in synced {
@@ -2185,6 +2555,12 @@ impl CasService {
         if !failed.is_empty() {
             out.push_str("\nFailed:\n");
             for item in failed {
+                out.push_str(&format!("  - {item}\n"));
+            }
+        }
+        if !notified.is_empty() {
+            out.push_str("\nIncident notifications:\n");
+            for item in notified {
                 out.push_str(&format!("  - {item}\n"));
             }
         }
@@ -2417,7 +2793,7 @@ impl CasService {
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::core::task::lifecycle::close_ops::{
-            collect_epic_branch_statuses, render_epic_status_report,
+            collect_epic_branch_statuses, render_epic_status_report_with_stack,
         };
         use crate::store::open_task_store;
         use cas_types::TaskType;
@@ -2468,7 +2844,47 @@ impl CasService {
 
         let close_project_root = self.inner.cas_root.parent().unwrap_or(&self.inner.cas_root);
         let statuses = collect_epic_branch_statuses(&subtasks, parent_branch, close_project_root);
-        let report = render_epic_status_report(epic_id, parent_branch, &statuses);
+
+        // cas-aae6 (GH #110): an epic stacked on other unlanded epic branches
+        // cannot land alone. Show that here, where the supervisor decides
+        // merge order, rather than only in the creation message that scrolled
+        // away hours ago.
+        let stacked_on = {
+            use crate::worktree::GitOperations;
+            // "Landed" is only meaningful against the trunk this epic is
+            // actually destined for. Prefer the target branch the epic itself
+            // declared (which is what epic creation branched from and what the
+            // close gate merges into); only fall back to config/repo defaults
+            // when the epic declared nothing. Re-deriving trunk from current
+            // config would misclassify an ancestor as landed on a repo
+            // configured with a different base (e.g. staging vs main).
+            let trunk = epic
+                .deliverables
+                .work_target
+                .as_ref()
+                .and_then(|target| {
+                    crate::mcp::tools::core::task::repo_context::resolve_repo_context(
+                        &self.inner.cas_root,
+                        target,
+                    )
+                    .ok()
+                })
+                .map(|context| context.target_branch)
+                .or_else(|| {
+                    crate::config::Config::configured_epic_base_branch(close_project_root)
+                })
+                .unwrap_or_else(|| {
+                    GitOperations::new(close_project_root.to_path_buf()).detect_default_branch()
+                });
+            GitOperations::new(close_project_root.to_path_buf())
+                .unlanded_epic_ancestry(parent_branch, &trunk)
+        };
+        let report = render_epic_status_report_with_stack(
+            epic_id,
+            parent_branch,
+            &statuses,
+            &stacked_on,
+        );
 
         Ok(Self::success(report))
     }
@@ -3247,12 +3663,204 @@ fn run_git(path: &std::path::Path, args: &[&str]) -> std::result::Result<String,
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Map worker display name -> the id of a task that makes its worktree unsafe
+/// to rebase (cas-0a6f / GH #103).
+///
+/// `InProgress` is the obvious one. `PendingSupervisorReview` and
+/// `AwaitingMerge` are included because their commits are already named by a
+/// delivery receipt: rebasing rewrites exactly the SHAs the supervisor is
+/// about to verify and merge.
+fn in_progress_tasks_by_assignee(
+    cas_root: &std::path::Path,
+) -> std::collections::HashMap<String, String> {
+    use cas_types::TaskStatus;
+
+    let mut map = std::collections::HashMap::new();
+    let Ok(store) = crate::store::open_task_store_local(cas_root) else {
+        return map;
+    };
+    for status in [
+        TaskStatus::InProgress,
+        TaskStatus::PendingSupervisorReview,
+        TaskStatus::AwaitingMerge,
+    ] {
+        let Ok(tasks) = store.list(Some(status)) else {
+            continue;
+        };
+        for task in tasks {
+            let Some(assignee) = task.assignee.as_ref() else {
+                continue;
+            };
+            let label = if status == TaskStatus::InProgress {
+                task.id.clone()
+            } else {
+                format!("{} [{}]", task.id, status)
+            };
+            map.entry(assignee.clone()).or_insert(label);
+        }
+    }
+    map
+}
+
+/// Why `sync_all_workers` must not touch a given worktree (cas-0a6f / GH #103).
+///
+/// Sync used to rebase every worker worktree unconditionally: uncommitted WIP
+/// was stashed without consent, a failed stash pop stranded it silently, and a
+/// conflicting rebase left the worktree mid-rebase in a state the worker never
+/// initiated. The decision is a pure function so every branch is testable
+/// without a git fixture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SyncGate {
+    Proceed,
+    /// Skip this worktree; the string is the operator-facing reason.
+    Refuse(String),
+}
+
+/// Decide whether a worker worktree may be rebased.
+///
+/// `force` covers exactly the two consent-shaped cases — dirty tree and a
+/// worker mid-task. It deliberately does NOT cover an in-flight rebase: that
+/// state was not created by sync, a second rebase on top of it destroys the
+/// resolution in progress, and no automated recovery is safe.
+pub(crate) fn sync_gate_for_worker(
+    worker_name: &str,
+    dirty_files: usize,
+    mid_rebase: bool,
+    in_progress_task: Option<&str>,
+    force: bool,
+) -> SyncGate {
+    if mid_rebase {
+        return SyncGate::Refuse(format!(
+            "{worker_name} (ALREADY MID-REBASE — sync did not start this and will not rebase on \
+             top of it; finish or `git rebase --abort` in the worktree, then re-run sync. \
+             force= does not override this)"
+        ));
+    }
+    if let Some(task_id) = in_progress_task
+        && !force
+    {
+        return SyncGate::Refuse(format!(
+            "{worker_name} (mid-task on {task_id} — rebasing under a working agent rewrites the \
+             commits it is building on; wait for the task to land, or pass force=true)"
+        ));
+    }
+    if dirty_files > 0 && !force {
+        return SyncGate::Refuse(format!(
+            "{worker_name} ({dirty_files} uncommitted change(s) — refusing to stash and rebase \
+             live WIP; commit it, or pass force=true to stash/rebase/restore)"
+        ));
+    }
+    SyncGate::Proceed
+}
+
+/// True when the worktree is sitting in an unfinished rebase.
+fn rebase_in_progress(path: &std::path::Path) -> bool {
+    for probe in ["rebase-merge", "rebase-apply"] {
+        if let Ok(dir) = run_git(path, &["rev-parse", "--git-path", probe]) {
+            let dir = dir.trim();
+            if dir.is_empty() {
+                continue;
+            }
+            let candidate = std::path::Path::new(dir);
+            let resolved = if candidate.is_absolute() {
+                candidate.to_path_buf()
+            } else {
+                path.join(candidate)
+            };
+            if resolved.exists() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Count of entries reported by `git status --porcelain`.
+fn dirty_file_count(path: &std::path::Path) -> std::result::Result<usize, String> {
+    let status = run_git(path, &["status", "--porcelain"])?;
+    Ok(status.lines().filter(|l| !l.trim().is_empty()).count())
+}
+
+/// A sync attempt that failed in a way the operator must act on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SyncFailure {
+    pub message: String,
+    /// Set when stashed WIP was NOT restored — the exact ref to recover from.
+    pub stranded_stash: Option<String>,
+    /// Set when the worktree was left in an unfinished rebase.
+    pub mid_rebase: bool,
+}
+
+impl SyncFailure {
+    fn plain(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            stranded_stash: None,
+            mid_rebase: false,
+        }
+    }
+
+    /// One-line render for the sync report.
+    pub(crate) fn report_line(&self) -> String {
+        let mut line = self.message.clone();
+        if let Some(stash) = self.stranded_stash.as_deref() {
+            line.push_str(&format!(
+                " — WIP IS NOT LOST: recover with `{}` in the worktree",
+                stash_recovery_command(stash)
+            ));
+        }
+        if self.mid_rebase {
+            line.push_str(
+                " — WORKTREE LEFT MID-REBASE: resolve or `git rebase --abort` before using it",
+            );
+        }
+        line
+    }
+}
+
+/// The recovery command an operator can actually run for a stranded stash.
+///
+/// Two git details this must respect, both verified against real git rather
+/// than assumed:
+/// - `git stash pop`/`drop` reject a bare commit SHA ("is not a stash
+///   reference"); only `apply`/`show` accept one. The ref recorded here is a
+///   SHA on purpose (a later stash push shifts `stash@{0}` off this entry), so
+///   the instruction must be `apply`.
+/// - `git stash show -p` prints nothing for untracked-only WIP unless
+///   `--include-untracked` is passed — and untracked WIP is exactly what the
+///   auto-stash sweeps up. Without the flag the inspection reads as "empty",
+///   i.e. "my work is gone".
+/// - `apply` itself refuses while a file of the same name exists in the
+///   worktree ("already exists, no checkout") — which is usually the very
+///   reason the pop failed. Saying only "run apply" would send the operator
+///   into the same wall, so the caveat and its way out are part of the text.
+pub(crate) fn stash_recovery_command(stash_ref: &str) -> String {
+    format!(
+        "git stash show -p --include-untracked {stash_ref}   # what is in it\n    \
+         git stash apply {stash_ref}                          # restore it\n    \
+         # if apply says \"already exists, no checkout\", move that file aside \
+         (that collision is why the restore failed) and re-run apply; the stash \
+         entry stays until you drop it by its `git stash list` index"
+    )
+}
+
+/// Resolve the stash just pushed to a durable ref (`refs/stash`'s SHA) so the
+/// recovery instruction survives later pushes shifting `stash@{0}`.
+///
+/// Returns a bare ref token — never annotated prose — because callers splice
+/// it straight into a shell command.
+fn resolve_stash_ref(path: &std::path::Path) -> String {
+    run_git(path, &["rev-parse", "refs/stash"])
+        .map(|sha| sha[..sha.len().min(12)].to_string())
+        .unwrap_or_else(|_| "stash@{0}".to_string())
+}
+
 fn sync_worker_clone(
     path: &std::path::Path,
     sync_ref: &str,
-) -> std::result::Result<String, String> {
-    let status = run_git(path, &["status", "--porcelain"])?;
-    let mut stashed = false;
+) -> std::result::Result<String, SyncFailure> {
+    let status = run_git(path, &["status", "--porcelain"]).map_err(SyncFailure::plain)?;
+    let mut stash_ref: Option<String> = None;
 
     if !status.trim().is_empty() {
         let stash_msg = format!(
@@ -3262,28 +3870,40 @@ fn sync_worker_clone(
         let stash_out = run_git(
             path,
             &["stash", "push", "--include-untracked", "-m", &stash_msg],
-        )?;
+        )
+        .map_err(SyncFailure::plain)?;
         if !stash_out.contains("No local changes") {
-            stashed = true;
+            stash_ref = Some(resolve_stash_ref(path));
         }
     }
 
     let _ = run_git(path, &["fetch", "origin"]);
 
     if let Err(rebase_err) = run_git(path, &["rebase", sync_ref]) {
-        let _ = run_git(path, &["rebase", "--abort"]);
-        if stashed {
-            let _ = run_git(path, &["stash", "pop"]);
-        }
-        return Err(format!("rebase failed: {rebase_err}"));
+        let abort = run_git(path, &["rebase", "--abort"]);
+        let still_mid_rebase = abort.is_err() && rebase_in_progress(path);
+        let pop_failed = match stash_ref.as_ref() {
+            Some(_) => run_git(path, &["stash", "pop"]).is_err(),
+            None => false,
+        };
+        return Err(SyncFailure {
+            message: format!("rebase failed: {rebase_err}"),
+            stranded_stash: if pop_failed { stash_ref } else { None },
+            mid_rebase: still_mid_rebase,
+        });
     }
 
-    if stashed {
-        run_git(path, &["stash", "pop"])
-            .map_err(|e| format!("sync applied but stash pop failed: {e}"))?;
+    if stash_ref.is_some()
+        && let Err(pop_err) = run_git(path, &["stash", "pop"])
+    {
+        return Err(SyncFailure {
+            message: format!("sync applied but stash pop failed: {pop_err}"),
+            stranded_stash: stash_ref,
+            mid_rebase: false,
+        });
     }
 
-    Ok(if stashed {
+    Ok(if stash_ref.is_some() {
         "stashed + rebased + restored".to_string()
     } else {
         "rebased cleanly".to_string()
@@ -3534,17 +4154,124 @@ fn format_assigned_unstarted_status(
     )
 }
 
+/// cas-e728 (GH #105): does this harness publish an authoritative turn-start
+/// artifact CAS can read?
+///
+/// Codex and Grok write a rollout/signals record when a turn begins, so
+/// silence from them can be interpreted. Claude does not — Agent Teams inbox
+/// persistence is *delivery* evidence, not wake evidence (see
+/// `format_harness_turn_observation_at`, which says exactly this on every
+/// Claude row). For an unobservable harness, quiet is the NORMAL state
+/// between turns: a healthy Claude worker commits, pushes, notes, and then
+/// legitimately goes silent until its next message grants a turn. Calling
+/// that "stalled" produced dozens of false alarms in one session and zero
+/// true ones, which trains supervisors to ignore the flag.
+fn harness_publishes_turn_start(cli: cas_mux::SupervisorCli) -> bool {
+    cli != cas_mux::SupervisorCli::Claude
+}
+
+/// cas-e728 (GH #105): the honest replacement for `⚠ STALLED` on a
+/// turn-unobservable worker that is still heartbeating.
+///
+/// States only what is known. CAS cannot see Claude turn boundaries at all
+/// (the same row says `harness turn: unobserved` two lines down), so this must
+/// not assert that no turn is running — a worker twenty minutes into a
+/// `cargo build` would read as free, and the supervisor's natural response is
+/// to reset a live worker and discard its in-flight work.
+fn format_between_turns_status(
+    last_activity: Option<(i64, &'static str)>,
+    unread_inbox: usize,
+) -> String {
+    let mail = match unread_inbox {
+        0 => "inbox empty — nothing is waiting on it".to_string(),
+        1 => "1 unread message waiting".to_string(),
+        n => format!("{n} unread messages waiting"),
+    };
+    match last_activity {
+        Some((secs, phase)) => format!(
+            "\n    between turns since {secs}s ago (last: {phase}); {mail}. Turn-based worker: CAS cannot see Claude turn boundaries, so quiet is not evidence either way"
+        ),
+        None => format!(
+            "\n    between turns: no activity in last 10m; {mail}. Turn-based worker: CAS cannot see Claude turn boundaries, so quiet is not evidence either way"
+        ),
+    }
+}
+
+/// cas-e728 (GH #105): the real stall signal for a harness whose turns CAS
+/// cannot observe.
+///
+/// Silence alone proves nothing about a Claude worker — but silence *after it
+/// was handed work* does. A message left unconsumed past the stall threshold
+/// while the worker produced no activity means the wake-up did not take: the
+/// harness is wedged (this repo's own CLAUDE.md documents a Claude UI crash
+/// that leaves the process alive and heartbeating with a dead pane), the
+/// delivery was lost, or the worker is stuck mid-turn. All three need a human,
+/// and none are visible from the heartbeat — which the daemon stamps purely
+/// from process liveness, independent of turn execution.
+///
+/// This is what keeps the alarm honest after `⚠ STALLED` was narrowed: the
+/// flag moves from "it is quiet" (always true between turns) to "it was given
+/// work and did not react" (only true when something is actually wrong).
+fn format_not_waking_status(
+    last_activity: Option<(i64, &'static str)>,
+    unread_inbox: usize,
+    oldest_unread_secs: i64,
+) -> String {
+    let quiet = match last_activity {
+        Some((secs, phase)) => format!("last activity {secs}s ago ({phase})"),
+        None => "no activity in the last 10m".to_string(),
+    };
+    let plural = if unread_inbox == 1 { "" } else { "s" };
+    format!(
+        "\n    ⚠ NOT WAKING: {unread_inbox} message{plural} unread for {oldest_unread_secs}s and {quiet}. The worker was handed work and has not reacted — check its pane for a wedged harness, then re-send or respawn"
+    )
+}
+
 /// Render the highest-priority worker-status alert.
 ///
 /// A confirmed InProgress stall is more urgent than a second assigned Open
 /// task that has not started, so it must win when both states coexist.
+///
+/// cas-e728 (GH #105): `⚠ STALLED` is only honest when silence is evidence.
+/// It is kept for a worker whose HEARTBEAT has lapsed (the genuine
+/// no-heartbeat stall — that worker really has stopped, whatever its harness)
+/// and for harnesses that publish a turn-start artifact. A heartbeating
+/// worker on a turn-unobservable harness gets the between-turns line instead.
 fn format_priority_worker_status_alert(
     stalled: bool,
     last_activity: Option<(i64, &'static str)>,
     stall_threshold_secs: i64,
     assigned_unstarted: Option<(&str, i64, i64)>,
+    turn_start_observable: bool,
+    heartbeat_elapsed_secs: i64,
+    inbox: (usize, Option<i64>),
 ) -> Option<String> {
+    let (unread_inbox, oldest_unread_secs) = inbox;
     if stalled {
+        let heartbeat_lapsed = heartbeat_elapsed_secs >= WORKER_STALE_SECS;
+        if !turn_start_observable && !heartbeat_lapsed {
+            // Handed work and did not react: a real, actionable stall the
+            // heartbeat cannot see.
+            if let Some(oldest) = oldest_unread_secs
+                && unread_inbox > 0
+                && oldest >= stall_threshold_secs
+            {
+                return Some(format_not_waking_status(
+                    last_activity,
+                    unread_inbox,
+                    oldest,
+                ));
+            }
+            // A second assigned-but-unstarted task is a separate, still-valid
+            // alarm — it is about an untouched assignment, not about silence —
+            // so narrowing the stall flag must not swallow it.
+            if let Some((task_id, elapsed, threshold)) = assigned_unstarted {
+                return Some(format_assigned_unstarted_status(
+                    task_id, elapsed, threshold,
+                ));
+            }
+            return Some(format_between_turns_status(last_activity, unread_inbox));
+        }
         return Some(match last_activity {
             Some((secs, phase)) => format!(
                 "\n    last activity: {secs}s ago ({phase}) ⚠ STALLED (no activity ≥{stall_threshold_secs}s while task in progress)"
@@ -4927,7 +5654,7 @@ mod spawn_lifecycle_tests {
     #[test]
     fn in_progress_task_is_named_on_the_row() {
         let out =
-            format_assigned_task_info(Some(("cas-8b84", "Worker lifecycle observability")), None);
+            format_assigned_task_info(Some(("cas-8b84", "Worker lifecycle observability")), None, None);
         assert!(out.contains("cas-8b84"), "{out}");
         assert!(out.contains("in progress"), "{out}");
         assert!(out.contains("Worker lifecycle observability"), "{out}");
@@ -4938,7 +5665,7 @@ mod spawn_lifecycle_tests {
     /// up, and the supervisor must be able to tell those from an idle row.
     #[test]
     fn assigned_but_unstarted_is_distinguished_from_in_progress() {
-        let out = format_assigned_task_info(None, Some(("cas-4242", "Fix the thing")));
+        let out = format_assigned_task_info(None, Some(("cas-4242", "Fix the thing")), None);
         assert!(out.contains("cas-4242"), "{out}");
         assert!(out.contains("assigned, not started"), "{out}");
         assert!(!out.contains("in progress"), "{out}");
@@ -4951,6 +5678,7 @@ mod spawn_lifecycle_tests {
         let out = format_assigned_task_info(
             Some(("cas-1111", "Started work")),
             Some(("cas-2222", "Also assigned")),
+            None,
         );
         assert!(out.contains("cas-1111"), "{out}");
         assert!(!out.contains("cas-2222"), "{out}");
@@ -4960,7 +5688,7 @@ mod spawn_lifecycle_tests {
     /// as missing data; "none assigned" is an answer.
     #[test]
     fn unassigned_worker_says_none_assigned() {
-        let out = format_assigned_task_info(None, None);
+        let out = format_assigned_task_info(None, None, None);
         assert!(out.contains("none assigned"), "{out}");
     }
 
@@ -4968,7 +5696,7 @@ mod spawn_lifecycle_tests {
     #[test]
     fn long_titles_are_truncated() {
         let long = "x".repeat(200);
-        let out = format_assigned_task_info(Some(("cas-9999", &long)), None);
+        let out = format_assigned_task_info(Some(("cas-9999", &long)), None, None);
         assert!(out.contains('…'), "{out}");
         assert!(
             out.len() < 140,
@@ -5778,11 +6506,244 @@ effort = "high"
             Some((310, "activity")),
             300,
             Some(("cas-unstarted", 600, 300)),
+            // Turn-observable harness: the STALLED verdict is unchanged there
+            // (cas-e728 only replaces it for turn-unobservable workers).
+            true,
+            0,
+            (0, None),
         )
         .expect("coexisting stalled and assigned-unstarted states must render an alert");
 
         assert!(rendered.contains("⚠ STALLED"), "{rendered}");
         assert!(!rendered.contains("ASSIGNED BUT UNSTARTED"), "{rendered}");
+    }
+
+    // --- cas-e728 (GH #105): STALLED is only honest when silence is evidence.
+
+    /// A Claude worker publishes no turn-start artifact, so quiet is the
+    /// NORMAL state between turns. While it is still heartbeating, the row
+    /// must state that instead of accusing it of stalling.
+    #[test]
+    fn turn_unobservable_heartbeating_worker_reports_between_turns_not_stalled() {
+        let rendered = format_priority_worker_status_alert(
+            true,
+            Some((900, "checkpoint")),
+            300,
+            None,
+            harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
+            0,
+            (0, None),
+        )
+        .expect("a stalled-by-threshold worker must still render a line");
+
+        assert!(!rendered.contains("STALLED"), "{rendered}");
+        assert!(
+            rendered.contains("between turns since 900s ago"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("inbox empty"), "{rendered}");
+    }
+
+    /// cas-e728 review follow-up: the heartbeat is stamped by the DAEMON from
+    /// process liveness (`mcp/daemon.rs` heartbeats while the harness PID is
+    /// alive), not by turn execution — so a Claude worker that wedges with its
+    /// process alive keeps heartbeating forever. Narrowing STALLED on the
+    /// heartbeat alone would have silenced the only manual-poll alarm for
+    /// exactly that case and replaced it with reassurance. Mail that was handed
+    /// over and never consumed is the evidence that survives.
+    #[test]
+    fn unconsumed_mail_past_the_threshold_escalates_on_a_turn_unobservable_worker() {
+        let rendered = format_priority_worker_status_alert(
+            true,
+            Some((900, "checkpoint")),
+            300,
+            None,
+            harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
+            0, // heartbeat fresh — the wedged-but-alive shape
+            (2, Some(900)),
+        )
+        .expect("alert");
+
+        assert!(rendered.contains("⚠ NOT WAKING"), "{rendered}");
+        assert!(
+            rendered.contains("2 messages unread for 900s"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("wedged harness"),
+            "must say what to check: {rendered}"
+        );
+        assert!(!rendered.contains("between turns"), "{rendered}");
+    }
+
+    /// Mail that arrived a moment ago is not evidence of anything — the worker
+    /// may simply not have been given its turn yet.
+    #[test]
+    fn fresh_mail_does_not_escalate() {
+        let rendered = format_priority_worker_status_alert(
+            true,
+            Some((900, "checkpoint")),
+            300,
+            None,
+            harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
+            0,
+            (1, Some(5)),
+        )
+        .expect("alert");
+
+        assert!(!rendered.contains("NOT WAKING"), "{rendered}");
+        assert!(rendered.contains("between turns"), "{rendered}");
+        assert!(rendered.contains("1 unread message waiting"), "{rendered}");
+    }
+
+    /// cas-e728 review follow-up: the between-turns branch must not swallow the
+    /// assigned-but-unstarted alarm. That alarm is about an untouched
+    /// assignment, not about silence, so narrowing the stall flag has no
+    /// bearing on it.
+    #[test]
+    fn between_turns_does_not_swallow_the_assigned_unstarted_alarm() {
+        let rendered = format_priority_worker_status_alert(
+            true,
+            Some((900, "checkpoint")),
+            300,
+            Some(("cas-unstarted", 600, 300)),
+            harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
+            0,
+            (0, None),
+        )
+        .expect("alert");
+
+        assert!(rendered.contains("ASSIGNED BUT UNSTARTED"), "{rendered}");
+        assert!(rendered.contains("cas-unstarted"), "{rendered}");
+    }
+
+    /// cas-e728 review follow-up: the row must not assert something CAS cannot
+    /// know. The same row says `harness turn: unobserved`; claiming "no turn is
+    /// in flight" beside it would send a supervisor to reset a worker that is
+    /// twenty minutes into a build.
+    #[test]
+    fn between_turns_line_does_not_claim_to_know_no_turn_is_running() {
+        let rendered = format_between_turns_status(Some((600, "activity")), 0);
+        assert!(
+            !rendered.contains("no turn is in flight"),
+            "must not assert unobservable state: {rendered}"
+        );
+        assert!(
+            rendered.contains("cannot see Claude turn boundaries"),
+            "must say what is actually known: {rendered}"
+        );
+    }
+
+    /// cas-e728 review follow-up: Blocked is neither in progress nor
+    /// parked-for-the-supervisor, but it must still be named — otherwise a
+    /// blocked worker renders as idle-with-nothing-to-do, the same hole this
+    /// change closes for awaiting-merge.
+    #[test]
+    fn blocked_task_is_named_not_rendered_as_idle() {
+        let out = format_assigned_task_info(
+            None,
+            None,
+            Some(("cas-block", "Stuck work", cas_types::TaskStatus::Blocked)),
+        );
+        assert!(out.contains("cas-block"), "{out}");
+        assert!(out.contains("blocked"), "{out}");
+        assert!(out.contains("clear the blocker"), "{out}");
+        assert!(!out.contains("none assigned"), "{out}");
+    }
+
+    /// The actionable half: quiet WITH undelivered mail means the worker was
+    /// handed work and has not woken.
+    #[test]
+    fn between_turns_line_carries_the_unread_inbox_count() {
+        let none = format_between_turns_status(Some((600, "activity")), 0);
+        assert!(none.contains("inbox empty"), "{none}");
+        let one = format_between_turns_status(Some((600, "activity")), 1);
+        assert!(one.contains("1 unread message waiting"), "{one}");
+        let many = format_between_turns_status(Some((600, "activity")), 3);
+        assert!(many.contains("3 unread messages waiting"), "{many}");
+    }
+
+    /// The genuine stall survives: a worker whose HEARTBEAT lapsed really has
+    /// stopped, whatever its harness, so it keeps the alarm.
+    #[test]
+    fn lapsed_heartbeat_still_flags_stalled_on_a_turn_unobservable_harness() {
+        let rendered = format_priority_worker_status_alert(
+            true,
+            Some((900, "checkpoint")),
+            300,
+            None,
+            harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
+            WORKER_STALE_SECS,
+            (0, None),
+        )
+        .expect("a lapsed-heartbeat worker must render an alert");
+
+        assert!(rendered.contains("⚠ STALLED"), "{rendered}");
+        assert!(!rendered.contains("between turns"), "{rendered}");
+    }
+
+    /// Harnesses that DO publish a turn-start artifact keep the old verdict
+    /// verbatim — this change narrows the flag, it does not remove it.
+    #[test]
+    fn turn_observable_harnesses_keep_the_stalled_verdict() {
+        for cli in [cas_mux::SupervisorCli::Codex, cas_mux::SupervisorCli::Grok] {
+            assert!(
+                harness_publishes_turn_start(cli),
+                "{cli:?} publishes a turn-start artifact"
+            );
+            let rendered = format_priority_worker_status_alert(
+                true,
+                Some((900, "checkpoint")),
+                300,
+                None,
+                harness_publishes_turn_start(cli),
+                0,
+                (5, Some(9_000)),
+            )
+            .expect("alert");
+            assert!(rendered.contains("⚠ STALLED"), "{cli:?}: {rendered}");
+        }
+    }
+
+    /// cas-e728: finished-awaiting-merge is named, and says who is blocking.
+    #[test]
+    fn parked_task_names_the_supervisor_as_the_blocker() {
+        let merge = format_assigned_task_info(
+            None,
+            None,
+            Some(("cas-1234", "Done work", cas_types::TaskStatus::AwaitingMerge)),
+        );
+        assert!(merge.contains("cas-1234"), "{merge}");
+        assert!(merge.contains("awaiting merge"), "{merge}");
+        assert!(merge.contains("WAITING ON YOU"), "{merge}");
+        assert!(!merge.contains("none assigned"), "{merge}");
+
+        let review = format_assigned_task_info(
+            None,
+            None,
+            Some((
+                "cas-5678",
+                "Reviewed work",
+                cas_types::TaskStatus::PendingSupervisorReview,
+            )),
+        );
+        assert!(review.contains("awaiting supervisor review"), "{review}");
+    }
+
+    /// A live in-progress task still outranks a parked one.
+    #[test]
+    fn in_progress_takes_precedence_over_a_parked_task() {
+        let out = format_assigned_task_info(
+            Some(("cas-live", "Current work")),
+            None,
+            Some((
+                "cas-parked",
+                "Old work",
+                cas_types::TaskStatus::AwaitingMerge,
+            )),
+        );
+        assert!(out.contains("cas-live"), "{out}");
+        assert!(!out.contains("cas-parked"), "{out}");
     }
 
     #[test]
@@ -8062,5 +9023,294 @@ effort = "high"
             status
         );
         assert_eq!(status.git_info, "\n    git: missing-worktree");
+    }
+}
+
+#[cfg(test)]
+mod sync_safety_tests {
+    //! cas-0a6f (GH #103): sync_all_workers used to rebase every worker
+    //! worktree unconditionally — stashing live WIP without consent, stranding
+    //! it silently when the pop failed, and leaving worktrees mid-rebase.
+
+    use super::*;
+    use std::process::Command;
+
+    fn git(repo: &std::path::Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@test.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@test.com")
+            .env("GIT_MERGE_AUTOEDIT", "no")
+            .env("GIT_EDITOR", "true")
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?} failed to run: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn commit(repo: &std::path::Path, file: &str, contents: &str) {
+        std::fs::write(repo.join(file), contents).unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-q", "-m", &format!("add {file}")]);
+    }
+
+    /// Repo with `main` carrying one commit ahead of the worker branch, so a
+    /// rebase onto `main` actually does work.
+    fn repo_with_upstream_commit() -> (tempfile::TempDir, std::path::PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().to_path_buf();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.email", "test@test.com"]);
+        git(&repo, &["config", "user.name", "Test"]);
+        commit(&repo, "base.txt", "base");
+        git(&repo, &["checkout", "-q", "-b", "factory/worker"]);
+        git(&repo, &["checkout", "-q", "main"]);
+        commit(&repo, "upstream.txt", "upstream work");
+        git(&repo, &["checkout", "-q", "factory/worker"]);
+        (temp, repo)
+    }
+
+    // ---- gate decisions (pure) --------------------------------------------
+
+    #[test]
+    fn dirty_worktree_is_skipped_without_force() {
+        let gate = sync_gate_for_worker("w1", 3, false, None, false);
+        let SyncGate::Refuse(reason) = gate else {
+            panic!("a dirty worktree must not be rebased without consent");
+        };
+        assert!(
+            reason.contains("3 uncommitted change(s)") && reason.contains("force=true"),
+            "reason must state the count and the way forward: {reason}"
+        );
+    }
+
+    #[test]
+    fn dirty_worktree_proceeds_with_force() {
+        assert_eq!(
+            sync_gate_for_worker("w1", 3, false, None, true),
+            SyncGate::Proceed
+        );
+    }
+
+    #[test]
+    fn worker_mid_task_is_skipped_without_force_and_named() {
+        let SyncGate::Refuse(reason) = sync_gate_for_worker("w1", 0, false, Some("cas-1234"), false)
+        else {
+            panic!("rebasing under a working agent needs consent");
+        };
+        assert!(
+            reason.contains("cas-1234"),
+            "reason must name the task holding the worktree: {reason}"
+        );
+        assert_eq!(
+            sync_gate_for_worker("w1", 0, false, Some("cas-1234"), true),
+            SyncGate::Proceed,
+            "force is the documented override"
+        );
+    }
+
+    #[test]
+    fn mid_rebase_worktree_is_refused_even_with_force() {
+        for force in [false, true] {
+            let SyncGate::Refuse(reason) =
+                sync_gate_for_worker("w1", 0, true, Some("cas-1234"), force)
+            else {
+                panic!("sync must never rebase on top of an unfinished rebase (force={force})");
+            };
+            assert!(
+                reason.contains("MID-REBASE") && reason.contains("rebase --abort"),
+                "reason must flag the state and how to clear it: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn clean_idle_worktree_proceeds() {
+        assert_eq!(
+            sync_gate_for_worker("w1", 0, false, None, false),
+            SyncGate::Proceed
+        );
+    }
+
+    // ---- git-level behaviour ----------------------------------------------
+
+    #[test]
+    fn dirty_count_and_rebase_probe_read_real_worktree_state() {
+        let (_temp, repo) = repo_with_upstream_commit();
+        assert_eq!(dirty_file_count(&repo).unwrap(), 0);
+        assert!(!rebase_in_progress(&repo));
+
+        std::fs::write(repo.join("wip.txt"), "uncommitted").unwrap();
+        assert_eq!(
+            dirty_file_count(&repo).unwrap(),
+            1,
+            "untracked WIP counts as dirty — it is exactly what auto-stash would sweep up"
+        );
+    }
+
+    #[test]
+    fn clean_sync_rebases_without_touching_a_stash() {
+        let (_temp, repo) = repo_with_upstream_commit();
+        let details = sync_worker_clone(&repo, "main").expect("clean rebase should succeed");
+        assert_eq!(details, "rebased cleanly");
+        assert!(
+            git(&repo, &["stash", "list"]).is_empty(),
+            "nothing should have been stashed"
+        );
+        assert!(repo.join("upstream.txt").exists(), "sync should have landed");
+    }
+
+    #[test]
+    fn stash_pop_failure_reports_the_stash_ref_and_does_not_lose_wip() {
+        let (_temp, repo) = repo_with_upstream_commit();
+
+        // WIP that collides with the incoming upstream commit: the rebase
+        // succeeds (the file is untracked locally) and the pop then fails.
+        std::fs::write(repo.join("upstream.txt"), "local uncommitted version").unwrap();
+
+        let failure =
+            sync_worker_clone(&repo, "main").expect_err("stash pop must fail on this collision");
+        assert!(
+            failure.message.contains("stash pop failed"),
+            "failure must say what happened: {}",
+            failure.message
+        );
+        let stash_ref = failure
+            .stranded_stash
+            .as_deref()
+            .expect("a stranded stash must be reported with its ref");
+        assert!(
+            !stash_ref.contains(' '),
+            "the ref is spliced into a shell command — it must be a single token, got {stash_ref:?}"
+        );
+
+        let line = failure.report_line();
+        assert!(
+            line.contains("WIP IS NOT LOST") && line.contains(stash_ref),
+            "report line must carry recovery instructions with the ref: {line}"
+        );
+
+        // Walk the documented recovery for real, in order.
+        //
+        // 1. `apply` refuses while the colliding file is present — that
+        //    collision is exactly why the pop failed, and the guidance says so
+        //    rather than sending the operator into the same wall.
+        let blocked = Command::new("git")
+            .args(["stash", "apply", stash_ref])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            !blocked.status.success(),
+            "precondition: the collision that stranded the stash still blocks apply"
+        );
+        // 2. Move the collision aside as instructed, then apply succeeds and
+        //    the WIP comes back. (`pop` is never instructed: git rejects a bare
+        //    SHA there with "is not a stash reference".)
+        std::fs::rename(repo.join("upstream.txt"), repo.join("upstream.rebased")).unwrap();
+        let applied = Command::new("git")
+            .args(["stash", "apply", stash_ref])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            applied.status.success(),
+            "after the documented step the recovery must succeed: {}",
+            String::from_utf8_lossy(&applied.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("upstream.txt")).unwrap(),
+            "local uncommitted version",
+            "the worker's WIP must be back on disk"
+        );
+
+        // The stash really is still there, and really does hold the WIP.
+        assert!(
+            !git(&repo, &["stash", "list"]).is_empty(),
+            "the stash entry must survive for recovery"
+        );
+        // `--include-untracked` is required in the inspect command: the WIP was
+        // untracked, and plain `git stash show -p` prints nothing for it —
+        // which reads as "my work is gone".
+        assert!(
+            git(
+                &repo,
+                &["stash", "show", "-p", "--include-untracked", stash_ref]
+            )
+            .contains("local uncommitted version"),
+            "the stranded stash must contain the worker's WIP"
+        );
+        // Scope the `pop` check to the recovery instruction: the diagnostic
+        // half of the line legitimately quotes the git command that failed.
+        let guidance = line
+            .split("recover with")
+            .nth(1)
+            .expect("report must contain recovery guidance");
+        assert!(
+            guidance.contains("--include-untracked") && !guidance.contains("stash pop"),
+            "guidance must inspect untracked WIP and must not use `pop`, which rejects a SHA: {guidance}"
+        );
+    }
+
+    #[test]
+    fn failed_rebase_restores_wip_and_reports_no_stranded_stash() {
+        let (_temp, repo) = repo_with_upstream_commit();
+
+        // Make the rebase itself conflict: commit a change to a file the
+        // upstream commit also introduces.
+        std::fs::write(repo.join("upstream.txt"), "worker version").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "worker version"]);
+        // Plus recoverable WIP on top.
+        std::fs::write(repo.join("wip.txt"), "worker wip").unwrap();
+
+        let failure = sync_worker_clone(&repo, "main").expect_err("conflicting rebase must fail");
+        assert!(
+            failure.message.contains("rebase failed"),
+            "failure must name the phase: {}",
+            failure.message
+        );
+        assert!(
+            !failure.mid_rebase,
+            "the abort succeeded, so the worktree must not be flagged mid-rebase"
+        );
+        assert!(
+            failure.stranded_stash.is_none(),
+            "the stash was popped back, so nothing is stranded"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("wip.txt")).unwrap(),
+            "worker wip",
+            "the worker's uncommitted WIP must be back in the worktree"
+        );
+        assert!(
+            !rebase_in_progress(&repo),
+            "the worktree must be left usable"
+        );
+    }
+
+    #[test]
+    fn report_line_flags_a_worktree_left_mid_rebase() {
+        let failure = SyncFailure {
+            message: "rebase failed: conflict".to_string(),
+            stranded_stash: Some("abc123def456 (stash@{0} at sync time)".to_string()),
+            mid_rebase: true,
+        };
+        let line = failure.report_line();
+        assert!(
+            line.contains("WORKTREE LEFT MID-REBASE") && line.contains("rebase --abort"),
+            "an unfinished rebase must be explicit in the report: {line}"
+        );
+        assert!(
+            line.contains("abc123def456"),
+            "the stash ref must ride along: {line}"
+        );
     }
 }

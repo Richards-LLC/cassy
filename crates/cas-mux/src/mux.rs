@@ -323,6 +323,10 @@ impl Mux {
                 None,
                 None,
                 teams,
+                // The whole initial fleet is known here, so every worker in it
+                // is derated against the real total rather than the assumed
+                // floor (cas-4614, GH #107).
+                Some(worker_names.len()),
             );
             let mut pty_config = pty_config;
             push_factory_session_env(&mut pty_config, cli, config.factory_session.as_deref());
@@ -418,6 +422,9 @@ impl Mux {
                 pane_cols,
                 teams,
                 config.factory_session.as_deref(),
+                // Same as `factory_pane_configs`: the initial fleet size is
+                // known before the first pane exists (cas-4614, GH #107).
+                Some(worker_names.len()),
             )?;
             mux.add_pane(pane);
         }
@@ -680,6 +687,19 @@ impl Mux {
             config_dir,
             config_dir_source,
             teams,
+            // Mirrors `add_worker`: this helper previews the config that
+            // spawn would produce, so it must derate identically or the
+            // preview would lie about the env (cas-4614, GH #107).
+            //
+            // Unlike `add_worker` this can be called for a worker that
+            // already has a pane, so only count the +1 when the spawn would
+            // actually add one — otherwise the preview over-counts the fleet
+            // and under-reports jobs against what that worker really got.
+            Some(if self.panes.contains_key(name) {
+                self.worker_count()
+            } else {
+                self.worker_count() + 1
+            }),
         );
         push_factory_session_env(&mut config, effective.cli, self.factory_session.as_deref());
         config
@@ -726,6 +746,14 @@ impl Mux {
             (None, Some(dir)) => (Some(dir), Some("supervisor")),
             (None, None) => (None, None),
         };
+        // cas-4614 (GH #107): derate this worker's CARGO_BUILD_JOBS against
+        // the fleet it is joining. `worker_count()` is the live pane count
+        // *before* this insertion, so +1 counts the worker being spawned —
+        // otherwise the first worker of a fleet would size itself as if it
+        // were alone. The Mux is the right source: it owns the panes, so the
+        // number is exact at the moment the env is built, with nothing to
+        // thread through the caller.
+        let fleet_size = self.worker_count() + 1;
         let pane = Pane::worker(
             name,
             cwd,
@@ -741,6 +769,7 @@ impl Mux {
             self.cols,
             teams,
             self.factory_session.as_deref(),
+            Some(fleet_size),
         )?;
         let id = pane.id().to_string();
         // Persist the resolved spec so `effective_worker_spec(name, None)` is
@@ -918,6 +947,21 @@ impl Mux {
     /// turn-break before injecting the correction.
     pub fn pane_bytes_received(&self, pane_id: &str) -> Option<u64> {
         self.panes.get(pane_id).map(|p| p.bytes_received())
+    }
+
+    /// Whether an attached operator currently has an unsubmitted draft in this
+    /// pane's composer (cas-f02b).
+    ///
+    /// `Mux::inject` already defers on a dirty composer, but only for a bounded
+    /// window — after `COMPOSER_DEFER_TIMEOUT` it writes anyway. Callers that
+    /// would rather skip entirely than ever type over a human (the supervisor
+    /// wake path) check this first. An unknown pane reports `false`: absence of
+    /// a pane is not evidence of a draft, and the caller's own liveness checks
+    /// decide whether to proceed.
+    pub fn pane_composer_dirty(&self, pane_id: &str) -> bool {
+        self.panes
+            .get(pane_id)
+            .is_some_and(|p| p.is_composer_dirty())
     }
 
     /// Break a specific worker's current turn by name by sending a single

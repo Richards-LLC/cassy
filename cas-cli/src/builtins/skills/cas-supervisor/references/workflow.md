@@ -121,12 +121,69 @@ base branch ────────────────────► (sta
                └─ factory/owl ┘
 ```
 
+### Merging with CAS, not raw git
+
+`mcp__cas__coordination action=worktree_merge` is the **primary** merge path. It resolves
+the merge target from task state, enforces the trunk guard, and keeps factory tracking,
+leases, and cleanup consistent. Raw `git merge` / `git worktree remove` bypasses all of
+that — see the fallback note at the end of this section.
+
+```
+mcp__cas__coordination action=worktree_merge id=<worker> task_id=<task-id>
+```
+
+`id` accepts the worker name or `factory/<worker>`. Target resolution: an explicit
+`task_id` first, then the assignee's current task binding. A `focus_epic` pin is a
+**display filter and never merge authority**, and CAS never silently defaults to
+`main`/`master`/`staging`.
+
+Three flags that are routinely confused — they are independent (cas-0b32 / cas-369f):
+
+| Flag | What it authorizes | What it does NOT do |
+|---|---|---|
+| `force=true` | Merging a **dirty** worktree | Does not authorize trunk as a target |
+| `allow_trunk=true` | Trunk as the merge target when no epic branch is resolvable (standalone task) | Does not bypass dirty-tree protection |
+| `cleanup=true/false` | Removing the worktree + deleting the branch after the merge | Not implied by `force` |
+
+`cleanup` defaults to **preserve** for factory (`isolate=true`) worktrees, so a mid-epic
+merge does not delete a live worker's cwd out from under it. Pass `cleanup=true` only at
+end-of-lane, once the worker is done with that worktree.
+
 **Worker hits MERGE REQUIRED / `awaiting_merge` (cas-c145):**
 1. This is a **push signal**, not optional chat. Drain the merge queue before free-form user replies.
 2. Confirm: `mcp__cas__coordination action=epic_status id=<focused-epic>` and/or `mcp__cas__task action=list status=awaiting_merge`.
-3. Merge `factory/<worker>` into the epic branch (FF preferred; else `git merge --no-ff factory/<worker>` on the epic checkout). Push if remote tracking applies.
+3. Merge into the epic branch:
+   ```
+   mcp__cas__coordination action=worktree_merge id=<worker> task_id=<task-id>
+   ```
+   The resolved task and target branch are echoed back — read them before moving on. Push if remote tracking applies.
 4. Message the worker to re-close (`mcp__cas__task action=close id=<task-id>`). After merge, normal close/review flow resumes.
 5. Then clear context / hand the worker their next task. Do **not** poll for merge state.
+
+If the merge is rejected on review rather than landed, the sanctioned exit from
+`awaiting_merge` is `mcp__cas__task action=request_changes id=<task-id>` — it reopens the
+task with the assignee preserved, so the same worker resumes the rework.
+
+### Keeping other workers current
+
+After the epic branch advances, rebase the other worktrees with one call rather than
+messaging each worker a `git rebase` recipe:
+
+```
+mcp__cas__coordination action=sync_all_workers branch=epic/<slug>
+```
+
+It deliberately **skips** worktrees that are dirty or whose assignee is mid-task, and
+reports why. `force=true` is consent for exactly those two cases (WIP is stashed, rebased,
+and restored). A worktree already **mid-rebase is always refused**, `force` or not — sync
+did not create that state and rebasing on top of it destroys the resolution in progress;
+finish it or `git rebase --abort` in that worktree first.
+
+**Fallback only (labelled, not the default).** Raw `git merge --no-ff` / `git worktree
+remove` / hand-written per-worker rebase messages bypass factory tracking, leases, and
+cleanup entirely. Reach for them only when `worktree_merge` / `sync_all_workers` cannot
+act (e.g. a conflict you must resolve by hand in the worktree), and say so explicitly in
+the task notes so the audit trail shows the bypass was deliberate.
 
 **Worker completes a task:**
 1. Worker closes their own task
@@ -146,12 +203,11 @@ base branch ────────────────────► (sta
    - If the single diff is exceptionally risky, you may run
      `/cas-code-review mode=interactive base_sha=<pre-cp-sha> task_id=<task-id>`
      by explicit judgment; this is an exception, not the default cadence.
-6. Message other active workers to sync onto the **local** branch (not `origin/`):
+6. Bring the other worktrees onto the updated **local** branch (not `origin/`):
    ```
-   mcp__cas__coordination action=message target=<other-worker> \
-     summary="Epic branch updated" \
-     message="Branch updated after cherry-pick. Sync: git stash && git rebase <base-branch> && git stash pop"
+   mcp__cas__coordination action=sync_all_workers branch=<base-branch>
    ```
+   Read the skip list it returns — dirty and mid-task worktrees are intentionally left alone until you consent with `force=true`, and a mid-rebase worktree is never touched.
 7. Clear completed worker's context: `mcp__cas__coordination action=clear_context target=<worker>`
 8. Assign next task
 
@@ -198,12 +254,14 @@ When workers share the main directory, there's no branch merging — workers com
    cargo test --no-fail-fast > /tmp/<epic-id>-cargo-test.log 2>&1; echo $?
    ```
    Never pipe the test run to `tail`; that captures the pipe status, not the cargo status.
-6. **Isolated mode only**: Merge epic to base branch and cleanup worktrees (can be 10GB+ each) only after the review loop is clean and the full gate exits 0:
-   ```bash
-   git checkout <base-branch> && git merge epic/<slug>
-   mcp__cas__coordination action=shutdown_workers count=0
-   git worktree remove <path>  # for each worker worktree
-   git branch -d epic/<slug>
+6. **Isolated mode only**: land the lanes and reclaim the worktrees (can be 10GB+ each) only after the review loop is clean and the full gate exits 0. This is the end-of-lane consume, so `cleanup=true` is correct here:
    ```
+   # One per worker lane — removes the worktree and deletes factory/<worker>
+   mcp__cas__coordination action=worktree_merge id=<worker> task_id=<task-id> cleanup=true
+   mcp__cas__coordination action=shutdown_workers count=0
+   ```
+   Then merge the epic branch to base. A standalone task with no parent epic needs
+   `allow_trunk=true` to target trunk at all — `force=true` will not authorize it.
+   Fallback only, when a merge must be resolved by hand: `git checkout <base-branch> && git merge epic/<slug>`, `git worktree remove <path>`, `git branch -d epic/<slug>` — this bypasses factory tracking/lease/cleanup, so note it on the task.
 7. Close the epic and post release notes.
 8. Shutdown workers: `mcp__cas__coordination action=shutdown_workers count=0`

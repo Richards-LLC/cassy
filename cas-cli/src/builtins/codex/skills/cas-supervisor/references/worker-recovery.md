@@ -37,7 +37,7 @@ The Bun/React-Ink crash signature is the visual fingerprint captured in the cas-
 
 **Why `dead` now requires two signals (cas-f781).** A live worker's tracked pid can end up pointing at the wrong process — e.g. an MCP-server child self-registering over the real `claude --agent-name <worker>` pid. When that happens, the pid probe alone reads "gone" while the real worker is still alive and writing. `is-wedged` now corroborates a pid-gone reading against transcript mtime and worktree edit recency before calling it `dead`; a single contradicted signal reports `unverified` instead. Never auto-reset a lease off `unverified` — investigate first.
 
-**Step 2: read the transcript tail.** `cas factory debug <worker> --tail 20` prints the last N JSONL entries from `~/.claude/projects/*/<session>.jsonl` without touching the TUI. This is the canonical "what did the worker just do" signal — use it to decide whether the wedged state has salvageable in-flight work before killing.
+**Step 2: read the transcript tail.** `cas factory debug <worker> --tail 20` prints the last N JSONL entries from `~/.claude/projects/*/<session>.jsonl` without touching the TUI. That path follows the **worker's** config dir, not yours: a worker spawned with `config_dir=~/.claude-alt` writes its transcript under `~/.claude-alt/projects/*/` instead. If the transcript looks missing, check which config dir the worker was spawned into before concluding it never started. This is the canonical "what did the worker just do" signal — use it to decide whether the wedged state has salvageable in-flight work before killing.
 
 **Step 3: recovery.** Only after `is-wedged` reports `wedged` or `dead` — never off `unverified`:
 

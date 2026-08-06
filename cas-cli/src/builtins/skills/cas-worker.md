@@ -65,6 +65,9 @@ Your scope is locked at assignment. The supervisor will reject work that violate
 - **Stow/install steps target the main checkout, never a worktree path.** Dotfile managers (`stow`, `chezmoi`, etc.) and install scripts create symlinks that outlive your worktree's lifetime. Point them at the real checkout — never `$REPO/.cas/worktrees/<you>/...` — or a later worktree cleanup silently orphans every symlink it created, with the breakage only surfacing much later (cas-df97).
 - **No config surprises.** Don't hardcode values that should be configurable. Don't add config that wasn't requested.
 - **Document important choices.** Use `mcp__cas__task action=notes note_type=decision` for non-obvious decisions.
+- **Never block the pane.** Anything that can exceed ~2 minutes (builds, suites, deploys, servers, **every** CI wait) runs backgrounded, or becomes `action=remind remind_delay_secs=<n>` + end turn. Foreground `gh run watch` and poll loops are banned. Servers: `action=server_start`, never a raw `&`.
+- **Report context headroom** ("context: ~60% used") in every milestone progress note.
+- **Checkpoint, never compact.** Low on context → commit + push + handoff note + ask for respawn. Small pushed commits over large WIP. Details: [discipline.md](cas-worker/references/discipline.md).
 
 ## Communication
 
@@ -94,18 +97,9 @@ Before setting `status=blocked`, re-read with `action=show`. If the task already
 
 For Vercel-deployed projects, `vercel env pull .env.<env> --environment=<env>` (run from the linked project dir) pulls real credentials for prod services (Neon, QStash, etc.) into a local file. Add that file to `.gitignore` — never commit credentials.
 
-## Running the Full Test Suite in a Worker
+## Running Tests in a Worker
 
-Factory identity variables inherited by worker processes can change test behavior. Use this canonical sanitized command for full-suite gates; do not shorten the list:
-
-```bash
-env -u CAS_AGENT_ROLE -u CAS_AGENT_NAME -u CAS_AGENT_ID -u CAS_FACTORY_MODE \
-    -u CAS_FACTORY_SESSION -u CAS_FACTORY_SUPERVISOR_CLI -u CAS_FACTORY_WORKER_CLI \
-    -u CAS_SESSION_ID -u CAS_SUPERVISOR_NAME -u CAS_CLONE_PATH -u CAS_ROOT \
-    cargo test --no-fail-fast
-```
-
-That is what the factory actually injects. `CAS_ROOT`/`CAS_CLONE_PATH` matter most — left set, a test can reach the *main* checkout's `.cas`. There is no `CAS_TASK_ID`; don't add it back.
+**Scope first:** `cargo test --lib` / `cargo test --test <name>` for targeted changes. A full suite is a close gate for shared/public surfaces only — background it, and run it through the canonical sanitized `env -u ...` command in [discipline.md](cas-worker/references/discipline.md), which strips the factory identity variables that change test behavior.
 
 ## References
 
@@ -113,6 +107,7 @@ Open these on demand — they are not pre-loaded.
 
 - **[close-gate.md](cas-worker/references/close-gate.md)** — Pre-close self-verification (6 checks), code-review gate, P0 handling, simplify-as-you-go trigger.
 - **[recovery.md](cas-worker/references/recovery.md)** — Verification jail, all-tools-blocked, context exhaustion, worktree issues, MCP connectivity, missing CAS tools, supervisor silent, task reassigned, outbox replay.
+- **[discipline.md](cas-worker/references/discipline.md)** — Backgrounding recipes (builds/tests, servers, CI waits, sanitized full suite) and context budget: headroom reporting, checkpoint protocol, commit sizing.
 - **[details.md](cas-worker/references/details.md)** — Tool selection, sync (rebase) mechanics, full schema cheat sheet (exact field names, valid actions).
 
 ## When to open which reference
@@ -121,6 +116,7 @@ Open these on demand — they are not pre-loaded.
 |---|---|
 | About to close (step 6) | close-gate |
 | Anything went wrong (jail, MCP, worktree, reassignment) | recovery |
+| About to run anything >2 min, or context filling | discipline |
 | Need an exact field name or action name | details |
 
 ## Context budgeting

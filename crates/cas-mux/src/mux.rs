@@ -690,7 +690,16 @@ impl Mux {
             // Mirrors `add_worker`: this helper previews the config that
             // spawn would produce, so it must derate identically or the
             // preview would lie about the env (cas-4614, GH #107).
-            Some(self.worker_count() + 1),
+            //
+            // Unlike `add_worker` this can be called for a worker that
+            // already has a pane, so only count the +1 when the spawn would
+            // actually add one — otherwise the preview over-counts the fleet
+            // and under-reports jobs against what that worker really got.
+            Some(if self.panes.contains_key(name) {
+                self.worker_count()
+            } else {
+                self.worker_count() + 1
+            }),
         );
         push_factory_session_env(&mut config, effective.cli, self.factory_session.as_deref());
         config

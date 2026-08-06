@@ -132,6 +132,9 @@ async fn codex_worker_pane_pre_trusts_workdir_before_launch() {
         80,
         None,
         None,
+        // active_workers: this test drives the real spawn path only to assert
+        // the pre-trust side effect, so the fleet size is irrelevant here.
+        None,
     );
 
     assert!(
@@ -189,6 +192,9 @@ async fn claude_worker_pane_does_not_touch_codex_config() {
         24,
         80,
         None,
+        None,
+        // active_workers: this test drives the real spawn path only to assert
+        // the pre-trust side effect, so the fleet size is irrelevant here.
         None,
     );
 

@@ -247,9 +247,10 @@ pub(crate) struct OrphanProcess {
     pub starttime: Option<u64>,
     pub ports: Vec<u16>,
     pub dev_server: bool,
-    /// `comm` names a build tool (`rustc`/`cargo`/`rustdoc`) whose parent has
-    /// been reaped — see `BUILD_TOOL_COMMS`. Unlike `dev_server` this feeds
-    /// the disposition, so it is recorded rather than recomputed at render.
+    /// `comm` names a build tool (`rustc`/`rustdoc` — deliberately not
+    /// `cargo`) whose parent has been reaped; see `BUILD_TOOL_COMMS`. Unlike
+    /// `dev_server` this feeds the disposition, so it is recorded rather than
+    /// recomputed at render.
     pub build_tool: bool,
     pub disposition: OrphanDisposition,
 }
@@ -832,6 +833,23 @@ mod tests {
     #[cfg(target_os = "linux")]
     impl Drop for PlantedProcess {
         fn drop(&mut self) {
+            // The decoy is a shell with a `sleep` child; killing only the
+            // parent leaves that child behind as a second orphan in a
+            // worktree the test is about to delete.
+            //
+            // Reap the children by reading `/proc/<pid>/task/<pid>/children`,
+            // NOT with `killpg`. A background job in a non-interactive `sh -c`
+            // does not become a process-group leader — it inherits the
+            // shell's group, which here is the *test runner's* group. A
+            // `killpg` on that pgid would SIGKILL cargo itself.
+            let children = std::fs::read_to_string(format!(
+                "/proc/{pid}/task/{pid}/children",
+                pid = self.0
+            ))
+            .unwrap_or_default();
+            for child in children.split_whitespace().filter_map(|c| c.parse().ok()) {
+                kill_if_alive(child);
+            }
             kill_if_alive(self.0);
         }
     }

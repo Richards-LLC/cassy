@@ -120,16 +120,40 @@ async function runWorkflowDryRun(args, setupOverride = {}, agentOverrides = {}) 
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('merge implementation parity', () => {
-  test('source Workflow is byte-identical to the shipped builtin copy', () => {
-    const builtin = readFileSync(
-      new URL('../../cas-cli/src/builtins/workflows/cas-code-review.js', import.meta.url),
-      'utf8',
-    )
-    assert.equal(
-      WORKFLOW_SOURCE,
-      builtin,
-      'edit .claude and builtin cas-code-review Workflows together',
-    )
+  // cas-0e5b3 (GH #112): this file under .claude/workflows/ is a RENDERED
+  // ARTIFACT, not a second source. `sync_workflows` (cas-cli/src/builtins.rs)
+  // force-writes it from `BUILTIN_WORKFLOWS` on `cas update --sync`, and the
+  // constant's doc calls workflows "pure CAS-managed artifacts [that] should
+  // never be hand-edited".
+  //
+  // The old failure message here — "edit .claude and builtin Workflows
+  // together" — invited the wrong repair. Editing the rendered copy is exactly
+  // what gets silently reverted by the next sync, so a reader who followed it
+  // would reintroduce the drift they were trying to fix. The real repair is
+  // one-directional: change the builtin, regenerate the copy.
+  test('the rendered .claude copy is in sync with the builtin source', () => {
+    const builtinPath = '../../cas-cli/src/builtins/workflows/cas-code-review.js'
+    const builtin = readFileSync(new URL(builtinPath, import.meta.url), 'utf8')
+
+    if (WORKFLOW_SOURCE !== builtin) {
+      // Name the first divergent line: a whole-file diff of a 40KB script is
+      // unreadable, and the last drift (CODEX_PERSONA_EFFORT, 1 line of 1100)
+      // sat unnoticed for a week behind exactly that wall of output.
+      const mine = WORKFLOW_SOURCE.split('\n')
+      const theirs = builtin.split('\n')
+      let firstDiff = -1
+      for (let i = 0; i < Math.max(mine.length, theirs.length); i += 1) {
+        if (mine[i] !== theirs[i]) { firstDiff = i; break }
+      }
+      assert.fail(
+        `.claude/workflows/cas-code-review.js is STALE relative to its builtin source.\n` +
+        `This file is generated — do NOT edit it to fix this.\n` +
+        `  builtin (source of truth): ${firstDiff + 1}: ${theirs[firstDiff] ?? '<absent>'}\n` +
+        `  rendered copy (stale):     ${firstDiff + 1}: ${mine[firstDiff] ?? '<absent>'}\n` +
+        `Repair: edit cas-cli/src/builtins/workflows/cas-code-review.js, then\n` +
+        `regenerate with \`cas update --sync\` (or copy builtin → .claude/workflows/).`,
+      )
+    }
   })
 
   test('standalone exported validator matches the embedded Workflow validator', () => {

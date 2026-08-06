@@ -827,6 +827,40 @@ impl TeamsManager {
         operation()
     }
 
+    /// Does this inbox row carry exactly the `(from, text)` pair we wrote?
+    /// Single definition shared by the write-time dedup guard and
+    /// [`Self::inbox_has_unread_copy`] (cas-ceae).
+    fn row_matches(row: &InboxMessage, from: &str, message: &str) -> bool {
+        row.from == from && row.text == message
+    }
+
+    /// cas-ceae (GH #124/#123): is an UNREAD copy of `(from, message)` still
+    /// sitting in `target`'s inbox file?
+    ///
+    /// The delivery path uses this to tell "the recipient hasn't picked the
+    /// message up yet" from "the harness drained the row into the recipient's
+    /// context". Only the second case is delivery, and it is invisible to the
+    /// write-time dedup guard — which is exactly how one queue row turned into
+    /// one fresh injected copy per harness drain (the reported 385x flood).
+    ///
+    /// A missing, unreadable, or unparseable inbox answers `false`. That is the
+    /// safe direction: the caller then treats the message as delivered, and the
+    /// worst case is a row consumed while its copy still sits in the inbox — the
+    /// recipient still receives it exactly once. The opposite default would
+    /// resume the storm whenever this file could not be read.
+    pub fn inbox_has_unread_copy(&self, target: &str, from: &str, message: &str) -> bool {
+        let inbox_path = self.inboxes_dir.join(format!("{}.json", target));
+        let Ok(content) = std::fs::read_to_string(&inbox_path) else {
+            return false;
+        };
+        let Ok(messages) = serde_json::from_str::<Vec<InboxMessage>>(&content) else {
+            return false;
+        };
+        messages
+            .iter()
+            .any(|row| !row.read && Self::row_matches(row, from, message))
+    }
+
     fn write_to_inbox_impl(
         &self,
         target: &str,
@@ -891,10 +925,17 @@ impl TeamsManager {
             // message is still present in the inbox, skip the append — no
             // time window. Prevents director/prompt_queue/outbox replay and
             // post-handle redelivery without an intentional redelivery marker.
+            //
+            // cas-ceae (GH #124): this guard can only see copies the harness
+            // has NOT yet taken — it drains rows out of this file when it
+            // injects them. `Self::inbox_has_unread_copy` is the deliberate
+            // complement used by the delivery path to notice that drain and
+            // consume the queue row instead of re-appending forever; the two
+            // predicates must stay in sync, so both go through `row_matches`.
             let is_content_duplicate = messages
                 .iter()
                 .rev()
-                .any(|m| m.from == from && m.text == message);
+                .any(|m| Self::row_matches(m, from, message));
 
             if is_content_duplicate {
                 tracing::debug!(
@@ -1676,6 +1717,101 @@ mod tests {
             .expect("an error exit must release LOCK_EX even while a forked child retains the fd");
         fs2::FileExt::unlock(&contender).unwrap();
         drop(child.take());
+    }
+
+    /// cas-ceae (GH #124): the write-time dedup guard sees only copies the
+    /// harness has NOT taken yet, so it cannot be the storm guard on its own.
+    /// This pins the complementary signal the delivery path needs: the exact
+    /// observed sequence — write, harness drains the file, daemon polls again —
+    /// must report "no unread copy" so the queue row is consumed instead of
+    /// re-appended, and `write_to_inbox` must indeed re-append once drained
+    /// (which is the bug, and why the queue row has to be consumed first).
+    #[test]
+    fn drained_inbox_copy_is_reported_gone_so_the_row_can_be_consumed_cas_ceae() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inboxes_dir = tmp.path().join("inboxes");
+        std::fs::create_dir_all(&inboxes_dir).unwrap();
+        let teams = TeamsManager {
+            team_name: "cas-src-test".to_string(),
+            teams_dir: tmp.path().to_path_buf(),
+            inboxes_dir: inboxes_dir.clone(),
+        };
+        let worker = "loyal-heron-7";
+        let text = "Start task cas-ceae — worker inbox storm.";
+
+        assert!(
+            !teams.inbox_has_unread_copy(worker, "supervisor", text),
+            "nothing written yet: an absent inbox must never look like a pending copy"
+        );
+
+        teams
+            .write_to_inbox(worker, "supervisor", text, None, None)
+            .unwrap();
+        assert!(
+            teams.inbox_has_unread_copy(worker, "supervisor", text),
+            "the copy we just wrote is unread — the row must stay pending"
+        );
+        assert!(
+            !teams.inbox_has_unread_copy(worker, "supervisor", "a different message"),
+            "presence is keyed on (from, text), like the write-time dedup guard"
+        );
+        assert!(
+            !teams.inbox_has_unread_copy("proud-tiger-29", "supervisor", text),
+            "another worker's inbox is not evidence about this recipient"
+        );
+
+        // Claude Code takes the row into its context and removes it — observed
+        // every ~2s in the live reproduction.
+        std::fs::write(inboxes_dir.join(format!("{worker}.json")), "[]").unwrap();
+        assert!(
+            !teams.inbox_has_unread_copy(worker, "supervisor", text),
+            "after the drain the recipient HAS the message: this is what makes the \
+             inbox write a completed delivery"
+        );
+
+        // And this is the 385x mechanism: with the row still pending, the very
+        // next write appends a brand-new copy, because the dedup guard has
+        // nothing left to match on.
+        teams
+            .write_to_inbox(worker, "supervisor", text, None, None)
+            .unwrap();
+        let rows: Vec<InboxMessage> = serde_json::from_str(
+            &std::fs::read_to_string(inboxes_dir.join(format!("{worker}.json"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "a drained inbox accepts the identical message again — hence the queue row \
+             must be consumed at the drain, not re-delivered"
+        );
+    }
+
+    /// A row the harness marked read (rather than removing) is equally received:
+    /// treating it as "still pending" would keep the row alive forever.
+    #[test]
+    fn a_read_inbox_copy_is_not_pending_cas_ceae() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inboxes_dir = tmp.path().join("inboxes");
+        std::fs::create_dir_all(&inboxes_dir).unwrap();
+        let teams = TeamsManager {
+            team_name: "cas-src-test".to_string(),
+            teams_dir: tmp.path().to_path_buf(),
+            inboxes_dir: inboxes_dir.clone(),
+        };
+        teams
+            .write_to_inbox("supervisor", "wise-phoenix-2", "merge request", None, None)
+            .unwrap();
+        let path = inboxes_dir.join("supervisor.json");
+        let mut rows: Vec<InboxMessage> =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        rows[0].read = true;
+        std::fs::write(&path, serde_json::to_string_pretty(&rows).unwrap()).unwrap();
+
+        assert!(
+            !teams.inbox_has_unread_copy("supervisor", "wise-phoenix-2", "merge request"),
+            "a read row has been seen by the recipient — the queue row is done"
+        );
     }
 
     /// `supervisor_settings_contents()` must cover every tool family whose

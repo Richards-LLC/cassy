@@ -212,7 +212,12 @@ pub struct TaskRequest {
                        Required for tasks with reviewable code changes \
                        unless bypass_code_review is set or the task is \
                        additive-only. Shape: \
-                       {residual: Finding[], pre_existing: Finding[], mode: string}. \
+                       {residual: Finding[], pre_existing: Finding[], mode: string, \
+                       execution: {personas_run: int, personas_failed: string[], \
+                       required_personas_missing: string[], skipped_reason: string|null}}. \
+                       `execution` is required and must be copied from the review \
+                       result, not hand-written: without it an empty residual[] is \
+                       indistinguishable from a review that never ran (cas-acf83). \
                        Each Finding requires: title, severity, file, line, \
                        why_it_matters, autofix_class, owner, confidence, \
                        evidence, pre_existing (optional: suggested_fix, \

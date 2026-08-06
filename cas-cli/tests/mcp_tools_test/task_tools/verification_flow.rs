@@ -6194,6 +6194,13 @@ async fn test_close_forwards_persisted_review_envelope_after_jail() {
         "residual": [],
         "pre_existing": [],
         "mode": "autofix",
+        // cas-acf83: a clean review must show it ran; without this the gate
+        // (correctly) cannot tell it from a review that never happened.
+        "execution": {
+            "personas_run": 4,
+            "personas_failed": [],
+            "required_personas_missing": [],
+        },
     })
     .to_string();
 
@@ -6461,7 +6468,12 @@ async fn test_registered_supervisor_can_verify_live_worker_task() {
 
 /// A valid ReviewOutcome JSON with empty residual — what a clean cas-code-review
 /// run returns after the autofix loop resolves every finding.
-const CLEAN_ENVELOPE: &str = r#"{"residual":[],"pre_existing":[],"mode":"autofix"}"#;
+///
+/// cas-acf83 (GH #108): carries the `execution` block the gate now requires.
+/// Without it an empty residual[] is indistinguishable from a review that never
+/// ran, which is the whole point of that change — so a fixture that omits it is
+/// no longer modelling a clean review, it is modelling the bug.
+const CLEAN_ENVELOPE: &str = r#"{"residual":[],"pre_existing":[],"mode":"autofix","execution":{"personas_run":4,"personas_failed":[],"required_personas_missing":[]}}"#;
 
 /// A ReviewOutcome JSON with a P0 finding in residual — the autofix loop could
 /// not resolve a blocker. The verification gate must still arm the jail.

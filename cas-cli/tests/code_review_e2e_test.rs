@@ -169,6 +169,7 @@ fn run_pipeline(envelopes: Vec<ReviewerOutput>) -> PipelineResult {
         residual: autofix.residual.clone(),
         pre_existing: autofix.pre_existing.clone(),
         mode: "autofix".to_string(),
+        execution: None,
     };
     let envelope_json = serde_json::to_string(&envelope).expect("envelope serializes");
     let parsed: ReviewOutcome = serde_json::from_str(&envelope_json).expect("envelope round-trips");
@@ -419,6 +420,12 @@ fn scenario_pre_existing_p0_in_residual_does_not_block() {
         }],
         pre_existing: vec![],
         mode: "autofix".to_string(),
+        execution: Some(cas_types::ReviewExecution {
+            personas_run: 4,
+            personas_failed: Vec::new(),
+            skipped_reason: None,
+            required_personas_missing: Vec::new(),
+        }),
     };
 
     let json = serde_json::to_string(&envelope).unwrap();
@@ -458,6 +465,7 @@ fn envelope_validation_rejects_empty_mode() {
         residual: vec![],
         pre_existing: vec![],
         mode: "   ".to_string(),
+        execution: None,
     };
     assert!(bad.validate().is_err());
 }

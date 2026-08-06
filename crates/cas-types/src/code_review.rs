@@ -372,9 +372,125 @@ pub struct ReviewOutcome {
     /// and downstream consumers can tell whether the envelope came
     /// from the primary close-gate path or an out-of-band invocation.
     pub mode: String,
+    /// cas-acf83 (GH #108): what the review actually DID.
+    ///
+    /// Without this, "every persona ran and found nothing" and "no persona
+    /// ever launched" are the same envelope — `residual: []` — and the close
+    /// gate, which only looks for P0s, accepts both. That is not a
+    /// hypothetical: when the Codex transport ran out of credits, every
+    /// persona skipped, the workflow returned `residual: []` with
+    /// `personas_run: 0`, and the gate waved it through. Two workers caught it
+    /// by hand; their voluntary re-reviews found a workspace-build break and a
+    /// P0 regression that had already passed the gate.
+    ///
+    /// `None` means the producer reported nothing about execution. That is
+    /// NOT the same as "it ran" — see [`ReviewOutcome::execution_status`].
+    #[serde(default)]
+    pub execution: Option<ReviewExecution>,
+}
+
+/// What a review run actually executed (cas-acf83 / GH #108).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ReviewExecution {
+    /// Personas that produced a verdict. Zero means no review happened,
+    /// whatever the findings arrays say.
+    pub personas_run: u32,
+    /// Personas that were dispatched but never produced a verdict, with the
+    /// reason. Named so a launch failure is diagnosable from the envelope
+    /// alone instead of requiring the workflow transcript.
+    #[serde(default)]
+    pub personas_failed: Vec<String>,
+    /// Why the review declined to run at all (empty diff, missing base SHA,
+    /// invalid shard coverage, …). Present only when nothing ran.
+    #[serde(default)]
+    pub skipped_reason: Option<String>,
+    /// Mandatory personas that produced no verdict (cas-acf83).
+    ///
+    /// `personas_run > 0` alone is too weak a bar. In the reported outage every
+    /// Codex-transport persona failed — which is all four always-on reviewers,
+    /// because only `security` runs on the Claude transport. If that one
+    /// persona happened to be activated, the run would report `personas_run: 1`
+    /// and pass a check that only asked "did anything run", with correctness,
+    /// testing, maintainability and project-standards having never looked at
+    /// the diff. A review missing a mandatory lane is not a review.
+    #[serde(default)]
+    pub required_personas_missing: Vec<String>,
+}
+
+/// Whether a [`ReviewOutcome`] represents a review that actually happened
+/// (cas-acf83).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewExecutionStatus {
+    /// Every mandatory persona produced a verdict.
+    Executed {
+        personas_run: u32,
+        /// Optional personas that failed — the review stands, but degraded.
+        personas_failed: Vec<String>,
+    },
+    /// Personas ran, but at least one MANDATORY lane produced no verdict, so
+    /// whole classes of defect went unexamined (cas-acf83).
+    Incomplete {
+        personas_run: u32,
+        /// The mandatory lanes that are missing.
+        required_missing: Vec<String>,
+        /// Every failure the producer recorded, for diagnosis.
+        personas_failed: Vec<String>,
+    },
+    /// The producer explicitly reported that nothing ran.
+    DidNotExecute {
+        /// Why, if the producer said. Includes named persona failures.
+        reason: String,
+    },
+    /// The envelope carries no execution information at all. Indistinguishable
+    /// from a hand-written envelope, so it can never be treated as evidence a
+    /// review occurred.
+    Unreported,
+}
+
+impl ReviewExecutionStatus {
+    /// Whether this outcome may be trusted as evidence a review ran.
+    pub fn is_executed(&self) -> bool {
+        matches!(self, Self::Executed { .. })
+    }
 }
 
 impl ReviewOutcome {
+    /// Whether this envelope is evidence that a review actually ran
+    /// (cas-acf83 / GH #108).
+    ///
+    /// Reads the explicit `execution` block. An envelope without one is
+    /// `Unreported` — indistinguishable from hand-written JSON, so it can
+    /// never be treated as evidence a review occurred.
+    pub fn execution_status(&self) -> ReviewExecutionStatus {
+        let Some(execution) = self.execution.as_ref() else {
+            return ReviewExecutionStatus::Unreported;
+        };
+        if execution.personas_run == 0 {
+            let mut reason = execution
+                .skipped_reason
+                .clone()
+                .unwrap_or_else(|| "no personas produced a verdict".to_string());
+            if !execution.personas_failed.is_empty() {
+                reason.push_str(&format!(
+                    " (failed: {})",
+                    execution.personas_failed.join(", ")
+                ));
+            }
+            return ReviewExecutionStatus::DidNotExecute { reason };
+        }
+        if !execution.required_personas_missing.is_empty() {
+            return ReviewExecutionStatus::Incomplete {
+                personas_run: execution.personas_run,
+                required_missing: execution.required_personas_missing.clone(),
+                personas_failed: execution.personas_failed.clone(),
+            };
+        }
+        ReviewExecutionStatus::Executed {
+            personas_run: execution.personas_run,
+            personas_failed: execution.personas_failed.clone(),
+        }
+    }
+
     /// Validate every contained finding + the mode string. Called by
     /// the close gate before it trusts the envelope — a malformed
     /// envelope from the worker is treated like a reviewer error, not
@@ -418,7 +534,12 @@ pub const FINDING_OPTIONAL_FIELDS: &[&str] = &["suggested_fix", "requires_verifi
 /// across serial close attempts (cas-297e).
 pub fn review_outcome_shape_hint() -> String {
     format!(
-        "Expected shape: {{residual: Finding[], pre_existing: Finding[], mode: string}}.\n\
+        "Expected shape: {{residual: Finding[], pre_existing: Finding[], mode: string, \
+         execution: {{personas_run: int, personas_failed: string[], \
+         required_personas_missing: string[], skipped_reason: string|null}}}}.\n\
+         `execution` is required (cas-acf83): without it an empty residual[] \
+         cannot be told apart from a review that never ran. Copy it from the \
+         cas-code-review result; do not hand-write it.\n\
          Each Finding requires: {}.\n\
          Optional Finding fields: {}.",
         FINDING_REQUIRED_FIELDS.join(", "),
@@ -494,7 +615,10 @@ pub fn parse_review_outcome(json: &str) -> Result<ReviewOutcome, ReviewOutcomePa
     }
 
     for k in obj.keys() {
-        if !matches!(k.as_str(), "residual" | "pre_existing" | "mode") {
+        if !matches!(
+            k.as_str(),
+            "residual" | "pre_existing" | "mode" | "execution"
+        ) {
             errors.push(format!("unknown field `{k}`"));
         }
     }
@@ -546,6 +670,129 @@ fn collect_finding_field_errors(value: &serde_json::Value, path: &str) -> Vec<St
 
 #[cfg(test)]
 mod tests {
+    // --- cas-acf83 (GH #108): execution provenance ---------------------------
+
+    fn execution(personas_run: u32, failed: &[&str], required_missing: &[&str]) -> ReviewExecution {
+        ReviewExecution {
+            personas_run,
+            personas_failed: failed.iter().map(|s| s.to_string()).collect(),
+            skipped_reason: None,
+            required_personas_missing: required_missing.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn outcome_with(execution: Option<ReviewExecution>) -> ReviewOutcome {
+        ReviewOutcome {
+            residual: Vec::new(),
+            pre_existing: Vec::new(),
+            mode: "headless".to_string(),
+            execution,
+        }
+    }
+
+    /// The reported incident: every persona failed to launch, so the empty
+    /// residual[] is an absent verdict rather than a passing one.
+    #[test]
+    fn zero_personas_is_not_an_executed_review() {
+        let mut exec = execution(0, &["correctness: 402 insufficient credits"], &[]);
+        exec.skipped_reason = Some("all personas failed to launch".to_string());
+        match outcome_with(Some(exec)).execution_status() {
+            ReviewExecutionStatus::DidNotExecute { reason } => {
+                assert!(
+                    reason.contains("all personas failed to launch"),
+                    "must carry the producer's reason: {reason}"
+                );
+                assert!(
+                    reason.contains("402 insufficient credits"),
+                    "must name the persona failure so it is diagnosable: {reason}"
+                );
+            }
+            other => panic!("expected DidNotExecute, got {other:?}"),
+        }
+    }
+
+    /// With no reason recorded, the status still reports that nothing ran
+    /// rather than falling back to "executed".
+    #[test]
+    fn zero_personas_without_a_reason_still_reports_did_not_execute() {
+        match outcome_with(Some(execution(0, &[], &[]))).execution_status() {
+            ReviewExecutionStatus::DidNotExecute { reason } => {
+                assert!(!reason.trim().is_empty(), "must say something");
+            }
+            other => panic!("expected DidNotExecute, got {other:?}"),
+        }
+    }
+
+    /// The narrower failure the all-or-nothing check misses: every always-on
+    /// persona shares the Codex transport, so one outage silences all four
+    /// while a single Claude-hosted persona still reports a run.
+    #[test]
+    fn a_surviving_persona_does_not_excuse_missing_mandatory_lanes() {
+        let status = outcome_with(Some(execution(
+            1,
+            &["correctness: transport down", "testing: transport down"],
+            &["correctness", "testing", "maintainability", "project-standards"],
+        )))
+        .execution_status();
+        match &status {
+            ReviewExecutionStatus::Incomplete {
+                personas_run,
+                required_missing,
+                personas_failed,
+            } => {
+                assert_eq!(*personas_run, 1);
+                assert_eq!(required_missing.len(), 4);
+                assert!(required_missing.iter().any(|p| p == "correctness"));
+                assert!(!personas_failed.is_empty(), "failures must survive for diagnosis");
+            }
+            other => panic!("a partial review must not read as Executed, got {other:?}"),
+        }
+        assert!(
+            !status.is_executed(),
+            "Incomplete must never be treated as a completed review"
+        );
+    }
+
+    /// An envelope with no execution block proves nothing — it is exactly what
+    /// hand-written JSON looks like.
+    #[test]
+    fn a_missing_execution_block_is_unreported_not_executed() {
+        let status = outcome_with(None).execution_status();
+        assert_eq!(status, ReviewExecutionStatus::Unreported);
+        assert!(!status.is_executed());
+    }
+
+    /// A genuine full run is Executed, and an optional persona failing does not
+    /// downgrade it.
+    #[test]
+    fn a_full_run_is_executed_even_with_an_optional_persona_failure() {
+        let status = outcome_with(Some(execution(7, &["performance: timed out"], &[])))
+            .execution_status();
+        match &status {
+            ReviewExecutionStatus::Executed {
+                personas_run,
+                personas_failed,
+            } => {
+                assert_eq!(*personas_run, 7);
+                assert_eq!(personas_failed, &vec!["performance: timed out".to_string()]);
+            }
+            other => panic!("expected Executed, got {other:?}"),
+        }
+        assert!(status.is_executed());
+    }
+
+    /// The execution block must survive a JSON round-trip through the strict
+    /// parser the close gate uses — an unknown-field rejection here would make
+    /// every compliant envelope unparseable.
+    #[test]
+    fn the_strict_parser_accepts_and_preserves_the_execution_block() {
+        let json = r#"{"residual":[],"pre_existing":[],"mode":"autofix",
+            "execution":{"personas_run":4,"personas_failed":[],
+            "required_personas_missing":[],"skipped_reason":null}}"#;
+        let parsed = parse_review_outcome(json).expect("must parse");
+        assert!(parsed.execution_status().is_executed());
+    }
+
     use super::*;
 
     fn valid_finding() -> Finding {
@@ -916,6 +1163,7 @@ mod tests {
             residual: vec![valid_finding()],
             pre_existing: vec![],
             mode: "autofix".to_string(),
+            execution: None,
         };
         let json = serde_json::to_string(&env).unwrap();
         let parsed = parse_review_outcome(&json).unwrap();

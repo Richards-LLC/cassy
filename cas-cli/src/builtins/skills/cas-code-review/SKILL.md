@@ -85,11 +85,23 @@ In every mode, the output envelope contract is:
 
 `dropped` retains every finding the deterministic merge cannot surface. Schema-invalid entries contain `{ reviewer, reason: "schema_validation_failed", validation_errors, finding }`; confidence-gated entries contain `{ reviewer, reason: "confidence_below_threshold", threshold, finding }`. `stats.dropped_findings` is exactly `dropped.length`. Consumers must render or persist these diagnostics rather than silently discarding them. `activation` records which personas ran and why, and `intent_summary` comes from the Workflow return value.
 
-When the caller must pass the result into `task.close` via `code_review_findings`, its narrower wire envelope remains:
+When the caller must pass the result into `task.close` via `code_review_findings`, its narrower wire envelope is:
 
 ```
-{ "residual": Finding[], "pre_existing": Finding[], "mode": string }
+{
+  "residual": Finding[],
+  "pre_existing": Finding[],
+  "mode": string,
+  "execution": {
+    "personas_run": number,
+    "personas_failed": string[],
+    "required_personas_missing": string[],
+    "skipped_reason": string | null
+  }
+}
 ```
+
+`execution` is **required** (cas-acf83 / GH #108) and must be copied verbatim from the workflow result — never hand-written. Without it, an empty `residual[]` cannot be told apart from a review that never ran, which is exactly what happened when a transport outage skipped every persona and the close gate accepted the result as clean. The gate rejects an envelope with no `execution`, with `personas_run: 0`, or with a non-empty `required_personas_missing` (a mandatory reviewer produced no verdict, so an empty `residual[]` is silence, not a pass). Note this is an accident detector, not a forgery defence: it catches an honest producer relaying a degraded run.
 
 Each **Finding** requires: `title`, `severity`, `file`, `line`, `why_it_matters`, `autofix_class`, `owner`, `confidence`, `evidence`, `pre_existing`. Optional: `suggested_fix`, `requires_verification`. Full field rules live in [references/findings-schema.md](references/findings-schema.md). A malformed envelope is rejected with **all** missing Finding fields listed in one response — do not invent a partial shape by hand.
 

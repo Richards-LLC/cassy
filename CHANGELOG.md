@@ -7,7 +7,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
-## [2.42.0] - 2026-08-06
+## [2.43.0] - 2026-08-06
+
+### Fixed
+- **The supervisor now hears about parked closes.** A worker's close rejected with MERGE REQUIRED previously vanished — fleets idled silently until a human checked in; the event now reaches the supervisor as a push signal.
+- **Messages stop lying about being seen.** Wake-up nudges no longer trust the registry's "busy" claim (an automated git checkpoint counted as activity); pane and transcript evidence decide, vetoed nudges retry instead of stranding, and acks record whether they were explicit or merely inferred from a reply.
+- **Fleet sync can no longer destroy work in progress.** `sync_all_workers` refuses dirty or mid-task worktrees without force, and a failed stash pop notifies both the worker and the supervisor with the stash ref instead of silently stranding the changes.
+- **Status surfaces tell the truth.** `worker_status` no longer shows closed tasks as in-progress for the lease duration, the constantly-crying STALLED flag is replaced for turn-based workers by a NOT-WAKING check built on unread-mail evidence, parked-awaiting-merge workers are labeled "WAITING ON YOU" instead of looking idle, and every row shows real unread-inbox depth.
+- **Triage lists stopped hiding work.** `ready`/`blocked`/`available` sort by priority by default, print the true total, and name the withheld count — previously a silent cap of 10 plus a newest-first default buried ready P0s behind fresh P2s for hours. Sort parameters that used to be silent no-ops are honoured everywhere.
+- **A worker is no longer "behind" its own merged work.** Behindness is measured by content (tree equality, then cherry-pick) instead of commit topology, dissolving the circular-authorization deadlock where the follow-up assignment was blocked by the very merge it needed — including squash-merged lanes.
+- **Orphaned build tools get reaped, honestly.** `rustc`/`rustdoc` orphans that wedge subsequent builds are detected and cleaned by gc (with `cargo` deliberately excluded — an adopted cargo is routinely a live build), the build-jobs derate tracks the real fleet size, and the hang-vs-kill diagnosis recipe is documented. The issue's original OOM premise was measured and corrected on the record.
+- **An empty review can no longer pass as a clean one.** A review outcome missing any mandatory persona lane — not just personas_run=0 — is rejected at the close gate, with lane presence computed from what the orchestrator dispatched rather than self-reported skips.
+- **The review-workflow parity guard now guards.** The rendered workflow copy had silently drifted from the shipped builtin for two days while the only parity test lived in a suite nothing ran; the guard now runs under `cargo test`, names the divergent line, and states the repair direction.
+
+### Added
+- **Stacked epics are visible.** Creating an epic on top of an unlanded epic branch surfaces the full ancestry chain (depth, not one level) at creation and in `epic_status`, derived live from git topology so it cannot drift.
 
 ### Added
 - **The GitHub-issues sweep is now a skill instead of folklore.** `cas-github-issues` ships as a builtin for every harness: dedupe double-filed copies, verify-and-close fixed claims, task new issues into the active github-issues epic (creating a successor epic when none is open — never tasking into a closed one), comment each issue with its task ID, unblock chained tasks when lanes merge, and file defects observed since the last sweep.

@@ -385,11 +385,45 @@ const WIP_BANNER_MAX_ENTRIES: usize = 20;
 /// Triage BEFORE spawning workers: decide salvage / commit / discard.
 /// Full history: .cas/logs/factory-session-{date}.log
 /// ```
+#[cfg(test)]
 pub fn build_session_start_wip_banner(cas_root: &Path) -> Option<String> {
+    build_session_start_wip_banner_sized(cas_root).map(|b| b.full)
+}
+
+/// A SessionStart banner in both its full and compact renderings (cas-b114).
+///
+/// The assembled SessionStart payload has an aggregate byte budget (see
+/// [`crate::hooks::handlers::session_budget`]). Variable-length banners hand
+/// the assembler both forms so an over-budget payload degrades to counts plus
+/// the remediation command instead of being truncated mid-line by the harness.
+#[derive(Debug, Clone)]
+pub struct SessionStartBanner {
+    pub full: String,
+    pub compact: String,
+}
+
+/// Full + compact renderings of the prior-factory WIP triage banner.
+pub fn build_session_start_wip_banner_sized(cas_root: &Path) -> Option<SessionStartBanner> {
     let summary = wip_candidates(cas_root)?;
     if summary.is_clean() {
         return None;
     }
+    Some(render_wip_banner(&summary))
+}
+
+/// Pure renderer for the WIP banner — separated from the git scan so the
+/// SessionStart budget test (cas-b114) can drive a worst-case summary.
+pub(crate) fn render_wip_banner(summary: &WipSummary) -> SessionStartBanner {
+    let prefix_for_compact = crate::harness_policy::own_tool_prefix();
+    let compact = format!(
+        "⚠ Prior-factory WIP in main worktree: {} file(s) ({} modified, {} untracked). \
+         Triage BEFORE spawning workers — run `{prefix_for_compact}coordination action=gc_report` \
+         for the per-file list and task attribution; full history in \
+         .cas/logs/factory-session-{{date}}.log.\n",
+        summary.entries.len(),
+        summary.modified_count(),
+        summary.untracked_count(),
+    );
     let mut out = String::new();
     out.push_str(&format!(
         "⚠ Prior-factory WIP detected in main worktree ({} files, {} modified, {} untracked):\n",
@@ -428,7 +462,7 @@ pub fn build_session_start_wip_banner(cas_root: &Path) -> Option<String> {
         "\nTriage BEFORE spawning workers: decide salvage / commit / discard.\n\
          Full history: .cas/logs/factory-session-{date}.log (see cas-supervisor-checklist)\n",
     );
-    Some(out)
+    SessionStartBanner { full: out, compact }
 }
 
 /// Maximum orphan rows the SessionStart banner renders inline (cas-b7dd).
@@ -447,7 +481,13 @@ const ORPHAN_BANNER_MAX_ENTRIES: usize = 10;
 /// consent to signal processes.
 ///
 /// Returns `None` when there is nothing to report, which is the common case.
+#[cfg(test)]
 pub fn build_session_start_orphan_banner(cas_root: &Path) -> Option<String> {
+    build_session_start_orphan_banner_sized(cas_root).map(|b| b.full)
+}
+
+/// Full + compact renderings of the orphan/stale-server banner (cas-b114).
+pub fn build_session_start_orphan_banner_sized(cas_root: &Path) -> Option<SessionStartBanner> {
     let report = crate::ui::factory::orphan_gc::scan(
         cas_root,
         &live_factory_session_names(),
@@ -456,6 +496,14 @@ pub fn build_session_start_orphan_banner(cas_root: &Path) -> Option<String> {
     if report.is_empty() {
         return None;
     }
+    Some(render_orphan_banner(&report))
+}
+
+/// Pure renderer for the orphan banner — separated from the process scan so the
+/// SessionStart budget test (cas-b114) can drive a worst-case report.
+pub(crate) fn render_orphan_banner(
+    report: &crate::ui::factory::orphan_gc::OrphanReport,
+) -> SessionStartBanner {
     let prefix = crate::harness_policy::own_tool_prefix();
     let ports = report.squatted_ports();
     let mut out = format!(
@@ -475,6 +523,14 @@ pub fn build_session_start_orphan_banner(cas_root: &Path) -> Option<String> {
                     .join(", ")
             )
         }
+    );
+
+    // Compact form: the header (counts + squatted ports) plus the remediation
+    // commands, with the per-orphan rows dropped. `gc_report` reproduces them.
+    let compact = format!(
+        "{out}Adopt or kill BEFORE binding these ports: `{prefix}coordination action=gc_report` \
+         lists them; reclaim with `{prefix}coordination action=gc_cleanup force=true \
+         dry_run=false`.\n"
     );
 
     let shown: Vec<String> = report
@@ -514,7 +570,7 @@ pub fn build_session_start_orphan_banner(cas_root: &Path) -> Option<String> {
          `{prefix}coordination action=gc_cleanup force=true dry_run=false`. \
          Servers registered `shared` are left alone by design.\n"
     ));
-    Some(out)
+    SessionStartBanner { full: out, compact }
 }
 
 fn live_factory_session_names() -> std::collections::HashSet<String> {

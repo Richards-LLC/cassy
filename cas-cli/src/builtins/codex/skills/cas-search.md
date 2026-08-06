@@ -57,3 +57,7 @@ Prefer the built-in Grep tool for simple patterns where you already know file pa
 - **`entity_list`** / **`entity_show`** — Browse extracted entities (person, project, technology, etc.)
 - **`code_show`** — Full details for a specific code symbol by ID
 - **`blame`** — Git blame with optional AI-line filtering (`file_path`, `line_start`, `line_end`)
+
+## Valid Actions
+
+**Valid `mcp__cs__search` actions** (exact list — do not invent others): `search`, `context`, `context_for_subagent`, `observe`, `entity_list`, `entity_show`, `entity_extract`, `code_search`, `code_show`, `grep`, `blame`.

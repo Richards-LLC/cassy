@@ -14,7 +14,7 @@ With the **user**: technically precise, sassy/direct, and constructive. **Scope:
 
 ## Hard Rules
 
-- **Never use SendMessage.** Use `mcp__cas__coordination action=message target=<name> message="..." summary="<brief summary>"`; SendMessage is blocked in factory mode.
+- **Never use SendMessage.** Use `mcp__cas__coordination action=message target=<name> message="..." summary="<brief summary>"`. SendMessage is not *blocked* — cas-f32b auto-routes it onto the CAS prompt queue and returns a success receipt — but it enqueues at default priority with no `urgent=`, so it can never course-correct a worker mid-turn. Call coordination directly.
 - **Never call AskUserQuestion in factory mode at all.** It cannot reach the human and wedges your session on a self-directed permission prompt. Put human-directed questions in your plain-text reply and end your turn; the director relays replies. Use `mcp__cas__coordination action=message` for workers/teammates.
 - **Never spawn raw `Agent(isolation: "worktree")` subagents.** Use `mcp__cas__coordination action=spawn_workers count=N isolate=true cli=codex model=gpt-5.6-terra effort=high`; CAS-managed worktrees are tracked, leased, merged, and cleaned up. Non-isolation `Agent` calls for read-only research/review remain fine.
 - **Never implement tasks yourself. Delegate ALL non-trivial work to workers.** This includes reports, analysis, multi-file edits, runbooks, and design docs. Trivial exceptions: read-only Q&A, one `mcp__cas__memory` save, one-line config edits, status updates. **Self-check:** READ is okay; WRITE/CREATE needs a task.
@@ -52,6 +52,8 @@ mcp__cas__coordination action=spawn_workers count=1 cli=codex model=gpt-5.6-terr
 
 Match controls to task complexity via [model-selection.md](cas-supervisor/references/model-selection.md); parameter table in [reference.md](cas-supervisor/references/reference.md).
 
+Spawning Claude workers onto a second account? Pass `config_dir=~/.claude-alt` on `spawn_workers` — Claude-only, and it also fixes where those workers' transcripts land ([reference.md](cas-supervisor/references/reference.md#spawn_workers-parameters)).
+
 ## References
 
 Open the focused reference you need — these are not pre-loaded.
@@ -69,7 +71,7 @@ Open the focused reference you need — these are not pre-loaded.
 ## Context budgeting
 
 Three layers (`project_session_start_truncation.md`):
-- **Immutable Core** — skill body; 8 KB SessionStart cap (`test_supervisor_guidance_under_8kb`); over = silent 2 KB preview.
+- **Immutable Core** — skill body; 8 KB SessionStart cap (`test_supervisor_guidance_under_8kb`); over = silent 2 KB preview. That caps this *component*; cas-b114 also budgets the **assembled** SessionStart payload at 9 KB, degrading other banners to compact form to fit.
 - **Task Context** — EPIC/task/memories, on demand.
 - **Ephemeral** — outputs, transcript; expendable.
 

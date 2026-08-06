@@ -242,6 +242,33 @@ impl CodemapStaleness {
         }
     }
 
+    /// Compact rendering for the SessionStart aggregate size budget (cas-b114).
+    ///
+    /// Same signal — severity, change count, remediation command — with the
+    /// enumerated file list dropped. A 198-change staleness renders the same
+    /// ~150 bytes as a 12-change one, so the codemap banner can never be the
+    /// section that pushes the payload past the harness' inline cap. The full
+    /// file list stays one `/codemap` (or `cas codemap status`) away.
+    pub fn format_injection_compact(&self, is_supervisor: bool) -> String {
+        match self {
+            CodemapStaleness::Missing => self.format_injection(is_supervisor),
+            CodemapStaleness::Stale { total_changes, .. } if !is_supervisor => format!(
+                "<codemap-freshness severity=\"info\">\n\
+                 CODEMAP.md has {total_changes} pending structural change(s). \
+                 Run `cas codemap status` for the file list.\n\
+                 </codemap-freshness>"
+            ),
+            CodemapStaleness::Stale { total_changes, .. }
+            | CodemapStaleness::SignificantlyStale { total_changes, .. } => format!(
+                "<codemap-freshness severity=\"high\">\n\
+                 CODEMAP.md is out of date ({total_changes} structural change(s)). \
+                 Run `/codemap` to update before assigning work \
+                 (`cas codemap status` lists the files).\n\
+                 </codemap-freshness>"
+            ),
+        }
+    }
+
     /// Format as a context injection string for SessionStart.
     ///
     /// If `is_supervisor` is true, always uses strong language regardless of severity.
@@ -892,6 +919,44 @@ mod tests {
         assert!(msg.contains("15 structural changes"));
         assert!(msg.contains("(+5 more)"));
         assert!(msg.contains("Run `/codemap`"));
+    }
+
+    /// cas-b114: the compact rendering must be size-stable (no file list) and
+    /// still carry the count and the remediation command, so the SessionStart
+    /// budget can degrade it instead of the harness truncating the payload.
+    #[test]
+    fn compact_injection_drops_the_file_list_and_keeps_the_remediation() {
+        let staleness = CodemapStaleness::SignificantlyStale {
+            total_changes: 198,
+            file_list: (0..10)
+                .map(|i| format!("+crates/cas-cli/src/very/long/path/module_{i}.rs"))
+                .collect(),
+            commit_info: " since abc1234".to_string(),
+        };
+        let compact = staleness.format_injection_compact(true);
+        assert!(compact.contains("198 structural change"));
+        assert!(compact.contains("Run `/codemap`"));
+        assert!(!compact.contains("module_0.rs"), "no file list: {compact}");
+        assert!(
+            compact.len() < staleness.format_injection(true).len(),
+            "compact must be smaller than the full injection"
+        );
+
+        // Same staleness with 10x the files renders the same number of bytes.
+        let bigger = CodemapStaleness::SignificantlyStale {
+            total_changes: 198,
+            file_list: (0..100)
+                .map(|i| format!("+crates/cas-cli/src/very/long/path/module_{i}.rs"))
+                .collect(),
+            commit_info: " since abc1234".to_string(),
+        };
+        assert_eq!(compact.len(), bigger.format_injection_compact(true).len());
+
+        // Missing CODEMAP has no variable part — compact == full.
+        assert_eq!(
+            CodemapStaleness::Missing.format_injection_compact(false),
+            CodemapStaleness::Missing.format_injection(false)
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@
 The most common close rejection: your `factory/<name>` branch has commits not yet on the task's parent branch. This is a **data-state guard** — nobody can bypass it; `bypass_code_review=true` does not apply.
 
 1. **Read the guard text** — it names the parent branch and the unmerged commit count, and includes the correct remediation for your case.
-2. **Before any escalation, run `mcp__cas__coordination action=inbox_poll`.** This pulls unread supervisor messages and marks them seen for inbox polling without consuming daemon transport delivery. If a message says the branch was merged or requests more changes, follow it and do not send a stale merge request.
+2. **Before any escalation, drain the inbox: run `mcp__cas__coordination action=inbox_poll` repeatedly until it returns `No unread messages`.** A poll returns at most 10 rows by default, so one call is not guaranteed to pull all unread supervisor messages. Polling marks messages seen for inbox polling without consuming daemon transport delivery, and the claim is at-most-once — if a poll response is lost those rows are not replayed, so also re-read any supervisor messages just delivered in your conversation. If a message says the branch was merged or requests more changes, follow it and do not send a stale merge request.
 3. **Parent is `epic/<slug>`**: run `git rev-parse factory/<name>` to capture the current tip, `git push origin factory/<name>`, then message the supervisor to merge your branch into the epic:
    ```
    mcp__cas__coordination action=message target=supervisor \
@@ -14,7 +14,8 @@ The most common close rejection: your `factory/<name>` branch has commits not ye
    ```
    Do **NOT** `gh pr create --base epic/...` — epic branches are supervisor-local; the ref doesn't exist on origin and the call always fails.
 4. **Parent is `main`/`master`/`staging`**: push and complete the project's PR/merge flow, then retry close.
-5. **Guard still counts unmerged commits after a confirmed merge** → squash-merge SHA drift makes already-merged commits look missing. Send the supervisor the exact guard text (they reset the stale branch ref). Do not retry-loop against the guard.
+5. **Guard still counts unmerged commits after a confirmed merge** → squash-merge SHA drift makes already-merged commits look missing. **Clear it yourself first**: re-close with `commit_receipt=<sha>` naming the commit that carries this task's work (cas-e74c). CAS resolves the SHA, checks it has a non-empty diff and is reachable from the parent branch (or `origin/<parent>`), and treats that as the delivery evidence — close proceeds with a note even if the lane branch still holds other tasks' commits. Only if the receipt is rejected, send the supervisor the exact guard text *and* the rejection reason (they reset the stale branch ref). Do not retry-loop against the guard.
+   - For a fully transactional handoff, `close` also accepts `completion_receipt=<json>` (`WorkerCompletionReceiptInput`: `task_id`, `worker_agent_id`, `repo_selector`, `source_branch`, `commit_sha`, `merge_base_sha`, `target_branch`, `target_sha`, `proof_reference`, `scope_summary`). CAS revalidates every field against registered agent state and live Git, persists an immutable delivery transaction, releases your lease, and parks the task in `pending_supervisor_review`. It is opt-in — omitting it leaves close unchanged. See [close-gate.md](close-gate.md).
 6. **Never route around it** with `action=update status=closed` plus a hand-written `verification action=add` — that forges the verification record and the audit trail. Rejection loops are a supervisor conversation, not a workaround opportunity.
 
 ## Close requires task-scoped verification
@@ -52,17 +53,17 @@ ln -s /path/to/main/repo/vendor/<submodule> vendor/<submodule>
 
 **Build errors in code you didn't touch**: Triage before reporting to supervisor.
 
-1. **Merge conflict from another worker?** Pull latest from main and rebase:
+1. **Merge conflict from another worker?** Rebase onto the **local** branch the supervisor named at assignment (`main`, `master`, or `epic/<slug>`):
    ```bash
-   git fetch origin main && git rebase origin/main
+   git stash && git rebase <branch> && git stash pop
    ```
-   If conflicts appear in files you own, resolve them. If in files you don't own, report to supervisor.
+   Do **not** rebase onto `origin/<branch>`. In factory mode the supervisor merges worker branches into the local branch directly, and epic branches are local-only (cas-c631) — `origin/main` is stale and `origin/epic/...` does not exist. Same rule as [details.md](details.md) "Syncing". If conflicts appear in files you own, resolve them; if in files you don't own, report to supervisor.
 
-2. **Missing dependency or new module?** Check if another worker added dependencies:
+2. **Missing dependency or new module?** Check if another worker added dependencies, diffing against that same local branch:
    ```bash
-   git diff origin/main -- Cargo.toml Cargo.lock package.json pnpm-lock.yaml
+   git diff <branch> -- Cargo.toml Cargo.lock package.json pnpm-lock.yaml
    ```
-   If new crates/packages were added, pull main and rebuild.
+   If new crates/packages were added, rebase onto it and rebuild.
 
 3. **Environment issue?** Verify tool versions and env vars match what the project expects:
    ```bash
@@ -70,12 +71,12 @@ ln -s /path/to/main/repo/vendor/<submodule> vendor/<submodule>
    node --version                       # Check Node if applicable
    ```
 
-4. **Reproducible on main?** Test whether the failure is pre-existing:
+4. **Reproducible on the base branch?** Test whether the failure is pre-existing:
    ```bash
-   git stash && git checkout origin/main && cargo build  # or npm run build
+   git stash && git checkout <branch> && cargo build  # or npm run build
    ```
-   - If it fails on main too → report to supervisor as **pre-existing** (not your blocker).
-   - If it passes on main → the conflict is between your changes and another worker's recent commit. Report as **cross-worker conflict** with both commit hashes.
+   - If it fails there too → report to supervisor as **pre-existing** (not your blocker).
+   - If it passes there → the conflict is between your changes and another worker's recent commit. Report as **cross-worker conflict** with both commit hashes.
 
 Only report to supervisor after completing at least steps 1–2. Include the error output and which step identified the cause.
 
@@ -218,3 +219,50 @@ Note what the fingerprint does and does not buy you: `gc_cleanup` revalidates a
 pid — but that proves identity, not that the process is unwanted. It is a
 protection against killing the wrong process, not against killing the right
 process at the wrong time.
+
+## A test run that looks hung: wedged test binaries (GH #114)
+
+The same fingerprint shows up one level down, in the test binaries `cargo test`
+runs. A parked binary from an earlier run holds the lock the next run wants, so
+the *new* suite prints nothing and looks like a hung test. It is not hung — it
+is blocked behind a corpse. This has been seen twice in one epic; one case
+burned an hour before anyone looked at the process table, and once the stale pid
+was reaped the "hung" suite finished in **0.11s**.
+
+**Look at the test binaries, not at cargo:**
+
+```bash
+ps -eo pid,ppid,etime,time,stat,wchan:20,args | grep -F "/target/debug/deps/"
+```
+
+Read the same two columns as for a wedged build, plus `wchan`:
+
+| `TIME` (CPU used) | `WCHAN` | Meaning |
+|---|---|---|
+| climbing | anything | The suite is running. Slow ≠ stuck. Leave it alone. |
+| ~0:00 with large `ETIME` | `futex_do_wait` | Wedged. Alive for minutes, no CPU burned, parked on a futex. |
+
+**Confirm it has no children before calling it dead:**
+
+```bash
+pgrep -P <pid>      # no output => nothing is running underneath it
+```
+
+A wedged test binary is childless. If it *does* have children, it is a live
+suite forking helpers — leave it alone and re-read `TIME`.
+
+**Then reap by pid, and only by pid.** `gc_report` is read-only and yours to
+run; cleanup is the supervisor's (`gc_cleanup` is host-wide, not scoped to your
+worktree), so name the exact pid you want gone:
+
+```
+mcp__cas__coordination action=gc_report
+```
+
+**Never select test binaries by name.** `pkill -f cas-` or `pkill -f
+"target/debug/deps"` matches another worker's live test run on this shared host
+— every worker runs as the same user, and the deps binaries have identical names
+across worktrees. This is the same rule as for `rustc` above, and it has the
+same consequence: your recovery becomes someone else's mystery failure. The only
+pid you may signal directly is one you captured yourself (`$!`) from a process
+you started, and only after confirming its command line.

@@ -469,8 +469,13 @@ impl TeamsManager {
 
     /// Tools that must reach the `PreToolUse` hook for factory-specific
     /// routing or denial, but must not be listed in `permissions.allow`.
+    /// `Skill` and `Workflow` are here for cas-bcfb (GH #125): the
+    /// `cas-code-review` ownership gate can only refuse a worker if the hook
+    /// actually fires for the tools that reach the pipeline, and both of them
+    /// bypass CAS MCP entirely. They must NOT be auto-approved — they are
+    /// intercept-only, exactly like `SendMessage`.
     fn factory_pre_tool_intercept_list() -> &'static [&'static str] {
-        &["SendMessage", "AskUserQuestion"]
+        &["SendMessage", "AskUserQuestion", "Skill", "Workflow"]
     }
 
     /// `hooks` block for per-role settings files. Wires `PreToolUse` (belt
@@ -1854,7 +1859,10 @@ mod tests {
                 "worker allowlist must include {tool}, got {names:?}"
             );
         }
-        for tool in ["SendMessage", "AskUserQuestion"] {
+        // cas-bcfb: `Skill`/`Workflow` must reach the hook (review dispatch
+        // gate) but must never be pre-approved, or the gate's deny would race
+        // an allow already granted by the permissions list.
+        for tool in ["SendMessage", "AskUserQuestion", "Skill", "Workflow"] {
             assert!(
                 !names.contains(&tool),
                 "worker allowlist must not auto-allow intercept-only tool {tool}: {names:?}"
@@ -1914,6 +1922,9 @@ mod tests {
                 "NotebookEdit",
                 "SendMessage",
                 "AskUserQuestion",
+                // cas-bcfb: without these the review dispatch gate never runs.
+                "Skill",
+                "Workflow",
             ] {
                 assert!(
                     matcher.contains(tool),

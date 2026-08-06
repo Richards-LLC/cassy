@@ -23,13 +23,34 @@ impl FactoryApp {
             .unwrap_or_else(|| git_ops.detect_default_branch());
         let resolved = git_ops.resolve_fresh_base(&trunk)?;
 
-        if git_ops.create_branch_from(&branch_name, &resolved.branch_ref)? {
+        // cas-a85e (GH #99): a checkout on the previous epic branch must not
+        // silently strand it; base from it, or state what was left out.
+        let base_choice = git_ops.resolve_epic_base(&resolved.branch_ref);
+        if let Some(notice) = base_choice.notice.as_deref() {
+            if base_choice.used_head {
+                tracing::info!("{}", notice);
+            } else {
+                tracing::warn!("{}", notice);
+            }
+        }
+        // `resolved.behind_count` is local trunk vs origin/trunk; once the base
+        // is HEAD's epic branch it no longer describes the printed base.
+        let (base_sha, base_behind) = if base_choice.used_head {
+            (
+                git_ops.ref_sha(&base_choice.base_ref).unwrap_or_default(),
+                base_choice.head_behind,
+            )
+        } else {
+            (resolved.sha.clone(), resolved.behind_count)
+        };
+
+        if git_ops.create_branch_from(&branch_name, &base_choice.base_ref)? {
             tracing::info!(
                 "Created epic branch {} from base '{}' (sha={}, behind={})",
                 branch_name,
-                resolved.branch_ref,
-                &resolved.sha[..resolved.sha.len().min(7)],
-                resolved.behind_count,
+                base_choice.base_ref,
+                &base_sha[..base_sha.len().min(7)],
+                base_behind,
             );
         } else {
             tracing::info!("Epic branch already exists: {}", branch_name);

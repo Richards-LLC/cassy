@@ -264,6 +264,100 @@ impl GitOperations {
         })
     }
 
+    /// Choose the start point for a NEW epic branch, given the trunk base
+    /// already resolved by the caller (cas-a85e / GH #99).
+    ///
+    /// Epic branches are anchored to trunk on purpose (cas-dc28) so an
+    /// incidental HEAD — a worker branch, a feature branch, a detached
+    /// checkout — can never seed one. That rule silently strands work in
+    /// exactly one shape: the checkout is on the PREVIOUS epic branch, which
+    /// carries commits trunk has never seen, and the follow-on epic is meant
+    /// to continue them. Reported as GH #99 with a 36-commit gap.
+    ///
+    /// Decision table (HEAD vs `base_ref`):
+    /// - HEAD is detached, is the base itself, or is not ahead → trunk, silent.
+    /// - HEAD is an `epic/*` branch strictly ahead (contains the base) →
+    ///   base from HEAD, and say so with the commit count.
+    /// - HEAD is an `epic/*` branch that has DIVERGED (ahead and behind) →
+    ///   trunk, with a warning naming both counts: auto-stacking would drop
+    ///   the base-only commits, so a human has to choose.
+    /// - HEAD is any other branch that is ahead → trunk (cas-dc28 holds),
+    ///   with a note stating the divergence so it is never silent.
+    ///
+    /// Never fails: any git error degrades to the plain trunk choice, because
+    /// failing epic creation over an advisory comparison would be worse than
+    /// the staleness it reports.
+    pub fn resolve_epic_base(&self, base_ref: &str) -> crate::worktree::git::EpicBaseChoice {
+        use crate::worktree::git::EpicBaseChoice;
+
+        let plain = EpicBaseChoice::plain(base_ref);
+
+        let Ok(head) = self.current_branch() else {
+            return plain;
+        };
+        let head = head.trim().to_string();
+        // Detached HEAD ("HEAD"), or the checkout is already on the base.
+        if head.is_empty()
+            || head == "HEAD"
+            || head == base_ref
+            || base_ref == format!("origin/{head}")
+        {
+            return plain;
+        }
+
+        let Ok(head_ahead) = self.commits_behind(base_ref, &head) else {
+            return plain;
+        };
+        if head_ahead == 0 {
+            return plain;
+        }
+        let head_behind = self.commits_behind(&head, base_ref).unwrap_or(0);
+        let is_epic_head = head.starts_with("epic/");
+
+        if is_epic_head && head_behind == 0 {
+            return EpicBaseChoice {
+                base_ref: head.clone(),
+                notice: Some(format!(
+                    "Based on the active epic branch '{head}' ({head_ahead} commit(s) ahead of \
+                     '{base_ref}') so work already on it is not stranded. This branch therefore \
+                     CONTAINS those commits: merging it to '{base_ref}' also merges '{head}', so \
+                     land '{head}' first or accept that. Pass an explicit \
+                     target_repo/target_branch, or check out '{base_ref}', to start from trunk \
+                     instead."
+                )),
+                head_branch: Some(head),
+                head_ahead,
+                head_behind,
+                used_head: true,
+            };
+        }
+
+        let notice = if is_epic_head {
+            format!(
+                "WARNING: the checkout is on epic branch '{head}', which has DIVERGED from \
+                 '{base_ref}' ({head_ahead} commit(s) only on '{head}', {head_behind} only on \
+                 '{base_ref}'). The new epic branch was based on '{base_ref}', so the \
+                 {head_ahead} commit(s) on '{head}' are NOT included — merge or rebase the two \
+                 before workers rely on this branch."
+            )
+        } else {
+            format!(
+                "Note: the checkout is on '{head}', {head_ahead} commit(s) ahead of \
+                 '{base_ref}'. The new epic branch was based on '{base_ref}' — those commits \
+                 are NOT included."
+            )
+        };
+
+        EpicBaseChoice {
+            base_ref: base_ref.to_string(),
+            head_branch: Some(head),
+            head_ahead,
+            head_behind,
+            used_head: false,
+            notice: Some(notice),
+        }
+    }
+
     /// Resolve the full SHA of a ref (branch name, "HEAD", etc.).
     ///
     /// Returns a 40-character hex SHA, or a GitError if the ref doesn't exist.

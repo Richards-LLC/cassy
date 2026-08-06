@@ -341,7 +341,6 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<TaskReadyBlockedRequest>,
     ) -> Result<CallToolResult, McpError> {
-
         let task_store = self.open_task_store()?;
 
         // If epic filter specified, get subtasks and filter to ready ones

@@ -45,10 +45,18 @@ fn sort_by_task_opts<T>(items: &mut [T], opts: &cas_types::TaskSortOptions, key:
             TaskSortField::Priority => a.priority.0.cmp(&b.priority.0),
             TaskSortField::Title => a.title.cmp(&b.title),
         };
-        match opts.effective_order() {
+        let cmp = match opts.effective_order() {
             SortOrder::Asc => cmp,
             SortOrder::Desc => cmp.reverse(),
-        }
+        };
+        // cas-06f9 (GH #104): break ties deterministically. `list_ready` /
+        // `list_blocked` carry an ORDER BY, but `get_subtasks` (the epic-
+        // filtered path) does not, so equal-priority rows arrived in
+        // SQLite-plan order — two identical calls could show different tasks
+        // inside a capped window, which is precisely the kind of "it moved and
+        // I don't know why" that truncation honesty is meant to remove.
+        cmp.then_with(|| b.created_at.cmp(&a.created_at))
+            .then_with(|| a.id.cmp(&b.id))
     });
 }
 
@@ -70,13 +78,16 @@ pub(super) fn ready_blocked_sort_options(
     order: Option<&str>,
 ) -> cas_types::TaskSortOptions {
     use cas_types::TaskSortField;
-    match sort {
-        Some(_) => cas_types::TaskSortOptions::from_params(sort, order),
-        None => cas_types::TaskSortOptions::new(
-            TaskSortField::Priority,
-            order.and_then(|o| o.parse().ok()),
-        ),
-    }
+    // An unparseable `sort=` must NOT silently fall back to created/desc —
+    // that is the exact pre-fix ordering, so `sort=p0` or `sort=highest`
+    // (neither is a valid field) would hand the caller the incident behaviour
+    // back with no error. Unrecognised means unspecified, and unspecified means
+    // priority here.
+    cas_types::TaskSortOptions::new(
+        sort.and_then(|s| s.parse().ok())
+            .unwrap_or(TaskSortField::Priority),
+        order.and_then(|o| o.parse().ok()),
+    )
 }
 
 /// Human-readable name for the ordering actually applied, so the header can

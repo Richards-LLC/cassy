@@ -654,9 +654,34 @@ async fn test_task_ready() {
 async fn test_task_ready_is_priority_sorted_and_states_the_true_total() {
     let (_temp, service) = setup_cas();
 
-    // Create the low-priority tasks FIRST so creation order (the old default)
-    // would put them at the front of the window and bury the P0s.
-    for (priority, label) in [(3u8, "late follow-up"), (2, "medium")] {
+    // Ordering of creation is load-bearing: the OLD default was created/DESC
+    // (newest first), so the P0s must be the OLDEST tasks for creation order to
+    // push them out of the window. Creating them last would have let the old
+    // code surface them and the test would pass against the bug.
+    for i in 0..4 {
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: format!("critical {i}"),
+                description: None,
+                priority: 0,
+                task_type: "bug".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: None,
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("create should succeed");
+    }
+    // Enough newer, lower-priority work to fill the 10-row window on its own.
+    for (priority, label) in [(2u8, "medium"), (3, "late follow-up")] {
         for i in 0..9 {
             service
                 .cas_task_create(Parameters(TaskCreateRequest {
@@ -679,28 +704,6 @@ async fn test_task_ready_is_priority_sorted_and_states_the_true_total() {
                 .await
                 .expect("create should succeed");
         }
-    }
-    for i in 0..4 {
-        service
-            .cas_task_create(Parameters(TaskCreateRequest {
-                depth: None,
-                title: format!("critical {i}"),
-                description: None,
-                priority: 0,
-                task_type: "bug".to_string(),
-                labels: None,
-                notes: None,
-                blocked_by: None,
-                design: None,
-                acceptance_criteria: None,
-                external_ref: None,
-                assignee: None,
-                demo_statement: None,
-                execution_note: None,
-                epic: None,
-            }))
-            .await
-            .expect("create should succeed");
     }
 
     let text = extract_text(
@@ -753,6 +756,168 @@ async fn test_task_ready_is_priority_sorted_and_states_the_true_total() {
     assert!(
         !text.contains("late follow-up 8"),
         "P3 work must not displace P0s in the window: {text}"
+    );
+}
+
+/// cas-06f9: `blocked` carried the identical silent cap and creation-order
+/// default on the same triage surface. Half the shipped change had no
+/// end-to-end coverage, so a revert there would have left the suite green.
+#[tokio::test]
+async fn test_task_blocked_is_priority_sorted_and_states_the_true_total() {
+    let (_temp, service) = setup_cas();
+
+    // One blocker everything depends on, so every other task is Blocked.
+    let blocker_id = extract_task_id(&extract_text(
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: "the blocker".to_string(),
+                description: None,
+                priority: 2,
+                task_type: "task".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: None,
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("blocker create"),
+    ))
+    .expect("blocker id")
+    .to_string();
+
+    // P0s oldest, so creation order (newest first) would push them out.
+    for i in 0..3 {
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: format!("critical blocked {i}"),
+                description: None,
+                priority: 0,
+                task_type: "bug".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: Some(blocker_id.clone()),
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("create should succeed");
+    }
+    for i in 0..12 {
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: format!("low blocked {i}"),
+                description: None,
+                priority: 3,
+                task_type: "task".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: Some(blocker_id.clone()),
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("create should succeed");
+    }
+
+    let text = extract_text(
+        service
+            .cas_task_blocked(Parameters(TaskReadyBlockedRequest {
+                scope: "all".to_string(),
+                limit: None,
+                sort: None,
+                sort_order: None,
+                epic: None,
+            }))
+            .await
+            .expect("task_blocked should succeed"),
+    );
+
+    assert!(
+        text.contains("showing 10 of 15"),
+        "blocked header must carry the true total: {text}"
+    );
+    assert!(text.contains("P0 first"), "{text}");
+    assert!(
+        text.contains("and 5 more not shown"),
+        "blocked footer must name the withheld rows: {text}"
+    );
+    for i in 0..3 {
+        assert!(
+            text.contains(&format!("critical blocked {i}")),
+            "P0 blocked task {i} must be inside the window: {text}"
+        );
+    }
+}
+
+/// cas-06f9 review follow-up: an unrecognised `sort=` must not silently hand
+/// back creation order — that is the incident behaviour. Unrecognised means
+/// unspecified, and unspecified means priority here.
+#[tokio::test]
+async fn test_task_ready_unparseable_sort_falls_back_to_priority_not_creation_order() {
+    let (_temp, service) = setup_cas();
+    for (priority, title) in [(3u8, "low one"), (0, "critical one")] {
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: title.to_string(),
+                description: None,
+                priority,
+                task_type: "task".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: None,
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("create should succeed");
+    }
+
+    let text = extract_text(
+        service
+            .cas_task_ready(Parameters(TaskReadyBlockedRequest {
+                scope: "all".to_string(),
+                limit: None,
+                sort: Some("highest".to_string()), // not a valid sort field
+                sort_order: None,
+                epic: None,
+            }))
+            .await
+            .expect("task_ready should succeed"),
+    );
+
+    assert!(text.contains("P0 first"), "{text}");
+    let first_line = text
+        .lines()
+        .find(|line| line.starts_with("- ["))
+        .expect("a task row");
+    assert!(
+        first_line.contains("critical one"),
+        "an unparseable sort must not resurrect creation order: {first_line}"
     );
 }
 

@@ -1867,6 +1867,69 @@ async fn test_worker_status_task_state_is_fresh_for_a_just_closed_task() {
     );
 }
 
+/// cas-e728 (GH #105) defect 1, the load-bearing regression barrier.
+///
+/// Uses a CODEX worker deliberately: on a turn-observable harness the ⚠ STALLED
+/// verdict is unchanged, so this test isolates the lease cross-check itself.
+/// With the cross-check reverted this renders
+/// `⚠ STALLED (no activity ≥0s while task in progress)` beside
+/// `task: none assigned` — the reported defect, verbatim.
+#[tokio::test]
+async fn test_worker_status_stale_lease_alone_does_not_assert_work_in_progress() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    std::fs::write(
+        env.cas_root.join("config.toml"),
+        "[factory]\nstall_threshold_secs = 0\n",
+    )
+    .expect("write config.toml");
+    env.register_supervisor("sup-1");
+    let mut codex_meta = HashMap::new();
+    codex_meta.insert("worker_cli".to_string(), "codex".to_string());
+    let worker_id = env.register_worker_with_metadata("badger", codex_meta);
+
+    let task_store = env.task_store();
+    let id = task_store.generate_id().expect("id");
+    let mut task = Task::new(id.clone(), "Finished work".to_string());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("badger".to_string());
+    task_store.add(&task).expect("add");
+    env.agent_store()
+        .try_claim(&id, &worker_id, 1800, Some("working"))
+        .expect("claim");
+
+    let mut closed = task_store.get(&id).expect("get");
+    closed.status = TaskStatus::Closed;
+    closed.assignee = None;
+    task_store.update(&closed).expect("close");
+    assert!(
+        env.agent_store()
+            .get_lease(&id)
+            .expect("get_lease")
+            .is_some(),
+        "fixture precondition: the lease must outlive the close"
+    );
+
+    let text = get_text(
+        &env.service
+            .factory(Parameters(factory_req("worker_status")))
+            .await
+            .expect("status"),
+    );
+    let row = text
+        .split("• ")
+        .find(|block| block.starts_with("badger"))
+        .expect("badger row");
+    assert!(
+        !row.contains("STALLED"),
+        "a lease outliving its closed task must not assert work in progress: {row}"
+    );
+    assert!(
+        row.contains("task: none assigned"),
+        "the closed task must not be attributed: {row}"
+    );
+}
+
 /// cas-e728 (GH #105) defect 1, second half — finished-awaiting-merge was
 /// invisible. It rendered as "task: none assigned", identical to a worker
 /// with nothing to do, so the one state that genuinely needs supervisor
@@ -1916,6 +1979,180 @@ async fn test_worker_status_names_finished_awaiting_merge_as_waiting_on_supervis
         done.assignee = None;
         task_store.update(&done).expect("clear");
     }
+}
+
+/// cas-e728 review follow-up: `all_workers` broadcasts are real inbox items
+/// with per-recipient read state. Counting only name-targeted rows made a
+/// broadcast that nobody acted on render as "inbox empty" on every row — the
+/// status line affirming that nothing was waiting on workers that had all been
+/// asked to report.
+#[tokio::test]
+async fn test_worker_status_counts_broadcast_messages_in_worker_inboxes() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    env.register_supervisor("sup-1");
+    env.register_worker("wolf");
+
+    env.prompt_queue()
+        .enqueue("sup-1", "all_workers", "everyone report status")
+        .expect("broadcast");
+
+    let text = get_text(
+        &env.service
+            .factory(Parameters(factory_req("worker_status")))
+            .await
+            .expect("status"),
+    );
+    assert!(
+        text.contains("inbox: 1 unread message"),
+        "a pending broadcast must count toward every worker's inbox: {text}"
+    );
+}
+
+/// cas-e728 review follow-up: the inbox line must render for workers that are
+/// not "stalled" at all. The commonest handed-work-and-asleep shape is a worker
+/// with a parked or freshly assigned task, which never trips the stall path —
+/// gating the count on the alert hid it exactly where it mattered.
+#[tokio::test]
+async fn test_worker_status_shows_inbox_depth_even_when_not_stalled() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    env.register_supervisor("sup-1");
+    env.register_worker("wolf");
+    env.register_worker("fox");
+
+    let task_store = env.task_store();
+    let id = task_store.generate_id().expect("id");
+    let mut task = Task::new(id.clone(), "Finished work".to_string());
+    task.status = TaskStatus::AwaitingMerge;
+    task.assignee = Some("wolf".to_string());
+    task_store.add(&task).expect("add");
+
+    env.prompt_queue()
+        .enqueue("sup-1", "wolf", "next task for you")
+        .expect("enqueue");
+
+    let text = get_text(
+        &env.service
+            .factory(Parameters(factory_req("worker_status")))
+            .await
+            .expect("status"),
+    );
+    let wolf = text
+        .split("• ")
+        .find(|b| b.starts_with("wolf"))
+        .expect("wolf row");
+    let fox = text
+        .split("• ")
+        .find(|b| b.starts_with("fox"))
+        .expect("fox row");
+    assert!(
+        wolf.contains("inbox: 1 unread message"),
+        "a parked worker with mail must still show its inbox: {wolf}"
+    );
+    assert!(
+        !fox.contains("inbox:"),
+        "a worker with no mail must not get an inbox line: {fox}"
+    );
+}
+
+/// cas-e728 review follow-up: a task assigned by agent ID (not name) must be
+/// named too — narrowing that lookup would silently restore the original
+/// "none assigned" defect for uuid-assigned work.
+#[tokio::test]
+async fn test_worker_status_names_parked_task_assigned_by_agent_id() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    env.register_supervisor("sup-1");
+    let worker_id = env.register_worker("wolf");
+
+    let task_store = env.task_store();
+    let id = task_store.generate_id().expect("id");
+    let mut task = Task::new(id.clone(), "Finished work".to_string());
+    task.status = TaskStatus::AwaitingMerge;
+    task.assignee = Some(worker_id);
+    task_store.add(&task).expect("add");
+
+    let text = get_text(
+        &env.service
+            .factory(Parameters(factory_req("worker_status")))
+            .await
+            .expect("status"),
+    );
+    assert!(
+        text.contains(&id) && text.contains("awaiting merge"),
+        "an id-assigned parked task must be named: {text}"
+    );
+}
+
+/// cas-e728 review follow-up: a Blocked task is not in progress and not parked
+/// for the supervisor, but it must still be named — it is the one status that
+/// literally means "waiting on something".
+#[tokio::test]
+async fn test_worker_status_names_a_blocked_task() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    env.register_supervisor("sup-1");
+    env.register_worker("wolf");
+
+    let task_store = env.task_store();
+    let id = task_store.generate_id().expect("id");
+    let mut task = Task::new(id.clone(), "Stuck work".to_string());
+    task.status = TaskStatus::Blocked;
+    task.assignee = Some("wolf".to_string());
+    task_store.add(&task).expect("add");
+
+    let text = get_text(
+        &env.service
+            .factory(Parameters(factory_req("worker_status")))
+            .await
+            .expect("status"),
+    );
+    assert!(text.contains(&id), "blocked task must be named: {text}");
+    assert!(text.contains("blocked"), "{text}");
+    assert!(
+        !text.contains("task: none assigned"),
+        "a blocked worker must not read as idle: {text}"
+    );
+}
+
+/// cas-e728 review follow-up: a live in-progress task outranks an older parked
+/// one on the same worker — the normal end-of-task shape (previous task
+/// awaiting merge, new task started).
+#[tokio::test]
+async fn test_worker_status_prefers_live_task_over_parked_one() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    env.register_supervisor("sup-1");
+    env.register_worker("wolf");
+
+    let task_store = env.task_store();
+    let parked_id = task_store.generate_id().expect("id");
+    let mut parked = Task::new(parked_id.clone(), "Old work".to_string());
+    parked.status = TaskStatus::AwaitingMerge;
+    parked.assignee = Some("wolf".to_string());
+    task_store.add(&parked).expect("add parked");
+
+    let live_id = task_store.generate_id().expect("id");
+    let mut live = Task::new(live_id.clone(), "Current work".to_string());
+    live.status = TaskStatus::InProgress;
+    live.assignee = Some("wolf".to_string());
+    task_store.add(&live).expect("add live");
+
+    let text = get_text(
+        &env.service
+            .factory(Parameters(factory_req("worker_status")))
+            .await
+            .expect("status"),
+    );
+    assert!(
+        text.contains(&format!("task: {live_id} (in progress)")),
+        "the live task must win: {text}"
+    );
+    assert!(
+        !text.contains(&format!("task: {parked_id}")),
+        "the parked task must not also claim the row: {text}"
+    );
 }
 
 /// cas-e728 (GH #105) defect 2 — the stall heuristic assumed continuous
@@ -1998,12 +2235,8 @@ async fn test_worker_status_surfaces_unread_inbox_without_consuming_it() {
             .expect("status"),
     );
     assert!(
-        text.contains("2 unread inbox messages"),
-        "the actionable signal is the unread count: {text}"
-    );
-    assert!(
-        text.contains("has not woken"),
-        "the row must say what the unread count means: {text}"
+        text.contains("inbox: 2 unread messages"),
+        "the unread count must be on the row: {text}"
     );
 
     // Reading status must not mark the worker's mail as seen.

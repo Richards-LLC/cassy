@@ -370,15 +370,24 @@ fn format_assigned_task_info(
         // like the one that needs none. It is also why the stall flag "missed
         // the real anomaly": there was nothing in the row to miss.
         (None, None, Some((id, title, status))) => {
+            // Matched exhaustively on purpose: a catch-all would silently
+            // relabel any status added to the parked set later.
             let (label, action) = match status {
                 cas_types::TaskStatus::AwaitingMerge => (
                     "finished, awaiting merge",
                     "merge its branch, then it can close",
                 ),
-                _ => (
+                cas_types::TaskStatus::PendingSupervisorReview => (
                     "finished, awaiting supervisor review",
                     "review it, then it can close",
                 ),
+                cas_types::TaskStatus::Blocked => (
+                    "blocked",
+                    "clear the blocker or reassign — the worker cannot proceed",
+                ),
+                cas_types::TaskStatus::Open
+                | cas_types::TaskStatus::InProgress
+                | cas_types::TaskStatus::Closed => ("parked", "check the task"),
             };
             format!(
                 "\n    task: {id} ({label}) — {} → WAITING ON YOU: {action}",
@@ -1404,12 +1413,29 @@ impl CasService {
         // cas-e728 (GH #105): every task list here is read at RENDER time, and
         // the lease check below is cross-referenced against them, so a task
         // that closed a second ago can never keep reading as in-progress.
+        // cas-e728: a failed read must not masquerade as "nobody has a task".
+        // Every worker's task line and stall verdict derives from these lists,
+        // so silently defaulting to empty would turn one SQLITE_BUSY into a
+        // whole status page of false reassurance.
+        let mut task_read_failed = false;
         let all_in_progress_tasks: Vec<cas_types::Task> = {
             use crate::store::open_task_store;
-            open_task_store(&self.inner.cas_root)
-                .ok()
-                .and_then(|ts| ts.list(Some(cas_types::TaskStatus::InProgress)).ok())
-                .unwrap_or_default()
+            match open_task_store(&self.inner.cas_root)
+                .map_err(|e| e.to_string())
+                .and_then(|ts| {
+                    ts.list(Some(cas_types::TaskStatus::InProgress))
+                        .map_err(|e| e.to_string())
+                }) {
+                Ok(tasks) => tasks,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "cas-e728: worker_status could not read in-progress tasks"
+                    );
+                    task_read_failed = true;
+                    Vec::new()
+                }
+            }
         };
         // cas-e728: the set of tasks that are in progress *right now*. A lease
         // is a fixed-duration row that outlives the work — closing a task
@@ -1444,6 +1470,13 @@ impl CasService {
                     [
                         cas_types::TaskStatus::AwaitingMerge,
                         cas_types::TaskStatus::PendingSupervisorReview,
+                        // cas-e728: Blocked literally means "waiting on
+                        // something". It is not in progress, so it must not
+                        // count toward the stall verdict — but it must still be
+                        // NAMED, or a blocked worker renders as idle-with-
+                        // nothing-to-do, the same hole this fix closes for
+                        // awaiting-merge.
+                        cas_types::TaskStatus::Blocked,
                     ]
                     .into_iter()
                     .flat_map(|status| ts.list(Some(status)).unwrap_or_default())
@@ -1458,10 +1491,19 @@ impl CasService {
         // starting it past the configured stall threshold.
         let all_open_tasks: Vec<cas_types::Task> = {
             use crate::store::open_task_store;
-            open_task_store(&self.inner.cas_root)
-                .ok()
-                .and_then(|ts| ts.list(Some(cas_types::TaskStatus::Open)).ok())
-                .unwrap_or_default()
+            match open_task_store(&self.inner.cas_root)
+                .map_err(|e| e.to_string())
+                .and_then(|ts| {
+                    ts.list(Some(cas_types::TaskStatus::Open))
+                        .map_err(|e| e.to_string())
+                }) {
+                Ok(tasks) => tasks,
+                Err(error) => {
+                    tracing::warn!(%error, "cas-e728: worker_status could not read open tasks");
+                    task_read_failed = true;
+                    Vec::new()
+                }
+            }
         };
         // cas-e728: a lease taken between `claim` and `start` points at a task
         // that is still Open — that IS work in flight, so Open counts as
@@ -1482,32 +1524,42 @@ impl CasService {
                     && owned.as_ref().is_none_or(|set| set.contains(&a.name))
             })
             .collect();
-        // cas-e728 (GH #105): undelivered inbox depth per worker. This is the
-        // signal that actually separates "quiet because it is between turns"
-        // from "quiet although it was handed work" — the only actionable half
-        // of what `⚠ STALLED` was trying to say for a turn-based worker.
-        // PEEK, never poll: `poll_unseen_for_recipient` marks rows seen, and a
-        // supervisor reading status must not consume a worker's mail.
-        let unread_inbox_counts: std::collections::HashMap<String, usize> = {
+        // cas-e728 (GH #105): per-worker inbox state — how many messages the
+        // worker has NOT consumed, and how old the oldest one is.
+        //
+        // Keyed on recipient-seen state, NOT `processed_at`: the daemon stamps
+        // `processed_at` the instant it hands a row to the transport, so that
+        // column answers "has the daemon ticked", not "has the worker read
+        // it" — counting it would report an empty inbox for precisely the case
+        // this signal exists to catch (message delivered, worker never woke).
+        // The shared store query also fans `all_workers` broadcasts out to
+        // every recipient, so a broadcast nobody acted on can no longer render
+        // as "inbox empty".
+        //
+        // Read-only by construction: a supervisor polling status must never
+        // mark a worker's mail seen.
+        let inbox_state: std::collections::HashMap<String, (usize, Option<i64>)> = {
             use crate::store::open_prompt_queue_store;
-            let names: Vec<&str> = workers.iter().map(|a| a.name.as_str()).collect();
-            if names.is_empty() {
-                std::collections::HashMap::new()
-            } else {
-                open_prompt_queue_store(&self.inner.cas_root)
-                    .ok()
-                    .and_then(|queue| {
-                        queue
-                            .peek_for_targets(&names, factory_session.as_deref(), 200)
-                            .ok()
-                    })
-                    .unwrap_or_default()
-                    .into_iter()
-                    .fold(std::collections::HashMap::new(), |mut counts, prompt| {
-                        *counts.entry(prompt.target).or_insert(0) += 1;
-                        counts
-                    })
-            }
+            open_prompt_queue_store(&self.inner.cas_root)
+                .ok()
+                .map(|queue| {
+                    workers
+                        .iter()
+                        .map(|agent| {
+                            let count = queue
+                                .count_unseen_for_recipient(&agent.name, factory_session.as_deref())
+                                .unwrap_or(0);
+                            let oldest = queue
+                                .oldest_unseen_age_secs_for_recipient(
+                                    &agent.name,
+                                    factory_session.as_deref(),
+                                )
+                                .unwrap_or(None);
+                            (agent.name.clone(), (count, oldest))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
         };
         let self_name = std::env::var("CAS_AGENT_NAME").ok();
         let supervisors: Vec<_> = agents
@@ -1780,6 +1832,28 @@ impl CasService {
                     stall_threshold_secs,
                     in_flight_tool_call,
                 );
+                // cas-e728 (GH #105): inbox depth is rendered on EVERY row, not
+                // only on a row that already tripped the stall path. The most
+                // common "handed work and did not wake" shape is a worker with
+                // a parked or freshly assigned task — which is never "stalled"
+                // — so gating this on the alert hid it exactly where it was
+                // needed.
+                let worker_inbox = inbox_state
+                    .get(agent.name.as_str())
+                    .copied()
+                    .unwrap_or((0, None));
+                let inbox_info = match worker_inbox {
+                    (0, _) => String::new(),
+                    (count, oldest) => {
+                        let plural = if count == 1 { "" } else { "s" };
+                        match oldest {
+                            Some(age) => format!(
+                                "\n    inbox: {count} unread message{plural} (oldest {age}s)"
+                            ),
+                            None => format!("\n    inbox: {count} unread message{plural}"),
+                        }
+                    }
+                };
                 let priority_alert = format_priority_worker_status_alert(
                     stalled,
                     last_activity,
@@ -1791,10 +1865,7 @@ impl CasService {
                         }),
                     harness_publishes_turn_start(worker_cli),
                     elapsed,
-                    unread_inbox_counts
-                        .get(agent.name.as_str())
-                        .copied()
-                        .unwrap_or(0),
+                    worker_inbox,
                 );
                 let activity_info = if let Some(alert) = priority_alert {
                     alert
@@ -1855,7 +1926,7 @@ impl CasService {
                         .map(|t| (t.id.as_str(), t.title.as_str(), t.status)),
                 );
                 output.push_str(&format!(
-                    "  • {} (heartbeat: {}){}{}{}{}{}{}{}{}{}{}\n    session: {}\n",
+                    "  • {} (heartbeat: {}){}{}{}{}{}{}{}{}{}{}{}\n    session: {}\n",
                     &agent.name,
                     since,
                     liveness_label,
@@ -1868,6 +1939,7 @@ impl CasService {
                     activity_info,
                     harness_turn_info,
                     task_info,
+                    inbox_info,
                     session_uuid
                 ));
             }
@@ -1880,6 +1952,15 @@ impl CasService {
         // cas-2e81: died-while-leased section (empty-fleet vs crash distinction).
         output.push_str(&died_section);
 
+        // cas-e728: say it out loud rather than rendering a confidently empty
+        // roster of task state.
+        if task_read_failed {
+            output.push_str(
+                "\n⚠ TASK STATE UNAVAILABLE: the task store could not be read for this poll, so \
+                 every 'task:' line and stall verdict above is incomplete. Re-run worker_status \
+                 before acting on it.\n",
+            );
+        }
         if stale_pruned > 0 {
             output.push_str(&format!(
                 "\nFiltered stale agent record(s): {stale_pruned} (>{worker_stale_threshold_secs}s heartbeat age)\n"
@@ -3670,28 +3751,58 @@ fn harness_publishes_turn_start(cli: cas_mux::SupervisorCli) -> bool {
 /// cas-e728 (GH #105): the honest replacement for `⚠ STALLED` on a
 /// turn-unobservable worker that is still heartbeating.
 ///
-/// States what is actually known (how long it has been quiet) and the one
-/// signal that is genuinely actionable: whether the worker has undelivered
-/// inbox messages. Quiet with nothing unread = between turns, nothing to do.
-/// Quiet WITH unread mail = it was given work and has not woken, which is
-/// worth a look.
+/// States only what is known. CAS cannot see Claude turn boundaries at all
+/// (the same row says `harness turn: unobserved` two lines down), so this must
+/// not assert that no turn is running — a worker twenty minutes into a
+/// `cargo build` would read as free, and the supervisor's natural response is
+/// to reset a live worker and discard its in-flight work.
 fn format_between_turns_status(
     last_activity: Option<(i64, &'static str)>,
     unread_inbox: usize,
 ) -> String {
     let mail = match unread_inbox {
         0 => "inbox empty — nothing is waiting on it".to_string(),
-        1 => "1 unread inbox message — it has work queued and has not woken".to_string(),
-        n => format!("{n} unread inbox messages — it has work queued and has not woken"),
+        1 => "1 unread message waiting".to_string(),
+        n => format!("{n} unread messages waiting"),
     };
     match last_activity {
         Some((secs, phase)) => format!(
-            "\n    between turns since {secs}s ago (last: {phase}); {mail}. Turn-based worker: quiet is normal — no turn is in flight"
+            "\n    between turns since {secs}s ago (last: {phase}); {mail}. Turn-based worker: CAS cannot see Claude turn boundaries, so quiet is not evidence either way"
         ),
         None => format!(
-            "\n    between turns: no activity in last 10m; {mail}. Turn-based worker: quiet is normal — no turn is in flight"
+            "\n    between turns: no activity in last 10m; {mail}. Turn-based worker: CAS cannot see Claude turn boundaries, so quiet is not evidence either way"
         ),
     }
+}
+
+/// cas-e728 (GH #105): the real stall signal for a harness whose turns CAS
+/// cannot observe.
+///
+/// Silence alone proves nothing about a Claude worker — but silence *after it
+/// was handed work* does. A message left unconsumed past the stall threshold
+/// while the worker produced no activity means the wake-up did not take: the
+/// harness is wedged (this repo's own CLAUDE.md documents a Claude UI crash
+/// that leaves the process alive and heartbeating with a dead pane), the
+/// delivery was lost, or the worker is stuck mid-turn. All three need a human,
+/// and none are visible from the heartbeat — which the daemon stamps purely
+/// from process liveness, independent of turn execution.
+///
+/// This is what keeps the alarm honest after `⚠ STALLED` was narrowed: the
+/// flag moves from "it is quiet" (always true between turns) to "it was given
+/// work and did not react" (only true when something is actually wrong).
+fn format_not_waking_status(
+    last_activity: Option<(i64, &'static str)>,
+    unread_inbox: usize,
+    oldest_unread_secs: i64,
+) -> String {
+    let quiet = match last_activity {
+        Some((secs, phase)) => format!("last activity {secs}s ago ({phase})"),
+        None => "no activity in the last 10m".to_string(),
+    };
+    let plural = if unread_inbox == 1 { "" } else { "s" };
+    format!(
+        "\n    ⚠ NOT WAKING: {unread_inbox} message{plural} unread for {oldest_unread_secs}s and {quiet}. The worker was handed work and has not reacted — check its pane for a wedged harness, then re-send or respawn"
+    )
 }
 
 /// Render the highest-priority worker-status alert.
@@ -3711,11 +3822,32 @@ fn format_priority_worker_status_alert(
     assigned_unstarted: Option<(&str, i64, i64)>,
     turn_start_observable: bool,
     heartbeat_elapsed_secs: i64,
-    unread_inbox: usize,
+    inbox: (usize, Option<i64>),
 ) -> Option<String> {
+    let (unread_inbox, oldest_unread_secs) = inbox;
     if stalled {
         let heartbeat_lapsed = heartbeat_elapsed_secs >= WORKER_STALE_SECS;
         if !turn_start_observable && !heartbeat_lapsed {
+            // Handed work and did not react: a real, actionable stall the
+            // heartbeat cannot see.
+            if let Some(oldest) = oldest_unread_secs
+                && unread_inbox > 0
+                && oldest >= stall_threshold_secs
+            {
+                return Some(format_not_waking_status(
+                    last_activity,
+                    unread_inbox,
+                    oldest,
+                ));
+            }
+            // A second assigned-but-unstarted task is a separate, still-valid
+            // alarm — it is about an untouched assignment, not about silence —
+            // so narrowing the stall flag must not swallow it.
+            if let Some((task_id, elapsed, threshold)) = assigned_unstarted {
+                return Some(format_assigned_unstarted_status(
+                    task_id, elapsed, threshold,
+                ));
+            }
             return Some(format_between_turns_status(last_activity, unread_inbox));
         }
         return Some(match last_activity {
@@ -5956,7 +6088,7 @@ effort = "high"
             // (cas-e728 only replaces it for turn-unobservable workers).
             true,
             0,
-            0,
+            (0, None),
         )
         .expect("coexisting stalled and assigned-unstarted states must render an alert");
 
@@ -5978,7 +6110,7 @@ effort = "high"
             None,
             harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
             0,
-            0,
+            (0, None),
         )
         .expect("a stalled-by-threshold worker must still render a line");
 
@@ -5990,15 +6122,123 @@ effort = "high"
         assert!(rendered.contains("inbox empty"), "{rendered}");
     }
 
+    /// cas-e728 review follow-up: the heartbeat is stamped by the DAEMON from
+    /// process liveness (`mcp/daemon.rs` heartbeats while the harness PID is
+    /// alive), not by turn execution — so a Claude worker that wedges with its
+    /// process alive keeps heartbeating forever. Narrowing STALLED on the
+    /// heartbeat alone would have silenced the only manual-poll alarm for
+    /// exactly that case and replaced it with reassurance. Mail that was handed
+    /// over and never consumed is the evidence that survives.
+    #[test]
+    fn unconsumed_mail_past_the_threshold_escalates_on_a_turn_unobservable_worker() {
+        let rendered = format_priority_worker_status_alert(
+            true,
+            Some((900, "checkpoint")),
+            300,
+            None,
+            harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
+            0, // heartbeat fresh — the wedged-but-alive shape
+            (2, Some(900)),
+        )
+        .expect("alert");
+
+        assert!(rendered.contains("⚠ NOT WAKING"), "{rendered}");
+        assert!(
+            rendered.contains("2 messages unread for 900s"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("wedged harness"),
+            "must say what to check: {rendered}"
+        );
+        assert!(!rendered.contains("between turns"), "{rendered}");
+    }
+
+    /// Mail that arrived a moment ago is not evidence of anything — the worker
+    /// may simply not have been given its turn yet.
+    #[test]
+    fn fresh_mail_does_not_escalate() {
+        let rendered = format_priority_worker_status_alert(
+            true,
+            Some((900, "checkpoint")),
+            300,
+            None,
+            harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
+            0,
+            (1, Some(5)),
+        )
+        .expect("alert");
+
+        assert!(!rendered.contains("NOT WAKING"), "{rendered}");
+        assert!(rendered.contains("between turns"), "{rendered}");
+        assert!(rendered.contains("1 unread message waiting"), "{rendered}");
+    }
+
+    /// cas-e728 review follow-up: the between-turns branch must not swallow the
+    /// assigned-but-unstarted alarm. That alarm is about an untouched
+    /// assignment, not about silence, so narrowing the stall flag has no
+    /// bearing on it.
+    #[test]
+    fn between_turns_does_not_swallow_the_assigned_unstarted_alarm() {
+        let rendered = format_priority_worker_status_alert(
+            true,
+            Some((900, "checkpoint")),
+            300,
+            Some(("cas-unstarted", 600, 300)),
+            harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
+            0,
+            (0, None),
+        )
+        .expect("alert");
+
+        assert!(rendered.contains("ASSIGNED BUT UNSTARTED"), "{rendered}");
+        assert!(rendered.contains("cas-unstarted"), "{rendered}");
+    }
+
+    /// cas-e728 review follow-up: the row must not assert something CAS cannot
+    /// know. The same row says `harness turn: unobserved`; claiming "no turn is
+    /// in flight" beside it would send a supervisor to reset a worker that is
+    /// twenty minutes into a build.
+    #[test]
+    fn between_turns_line_does_not_claim_to_know_no_turn_is_running() {
+        let rendered = format_between_turns_status(Some((600, "activity")), 0);
+        assert!(
+            !rendered.contains("no turn is in flight"),
+            "must not assert unobservable state: {rendered}"
+        );
+        assert!(
+            rendered.contains("cannot see Claude turn boundaries"),
+            "must say what is actually known: {rendered}"
+        );
+    }
+
+    /// cas-e728 review follow-up: Blocked is neither in progress nor
+    /// parked-for-the-supervisor, but it must still be named — otherwise a
+    /// blocked worker renders as idle-with-nothing-to-do, the same hole this
+    /// change closes for awaiting-merge.
+    #[test]
+    fn blocked_task_is_named_not_rendered_as_idle() {
+        let out = format_assigned_task_info(
+            None,
+            None,
+            Some(("cas-block", "Stuck work", cas_types::TaskStatus::Blocked)),
+        );
+        assert!(out.contains("cas-block"), "{out}");
+        assert!(out.contains("blocked"), "{out}");
+        assert!(out.contains("clear the blocker"), "{out}");
+        assert!(!out.contains("none assigned"), "{out}");
+    }
+
     /// The actionable half: quiet WITH undelivered mail means the worker was
     /// handed work and has not woken.
     #[test]
     fn between_turns_line_carries_the_unread_inbox_count() {
+        let none = format_between_turns_status(Some((600, "activity")), 0);
+        assert!(none.contains("inbox empty"), "{none}");
         let one = format_between_turns_status(Some((600, "activity")), 1);
-        assert!(one.contains("1 unread inbox message —"), "{one}");
+        assert!(one.contains("1 unread message waiting"), "{one}");
         let many = format_between_turns_status(Some((600, "activity")), 3);
-        assert!(many.contains("3 unread inbox messages"), "{many}");
-        assert!(many.contains("has not woken"), "{many}");
+        assert!(many.contains("3 unread messages waiting"), "{many}");
     }
 
     /// The genuine stall survives: a worker whose HEARTBEAT lapsed really has
@@ -6012,7 +6252,7 @@ effort = "high"
             None,
             harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
             WORKER_STALE_SECS,
-            0,
+            (0, None),
         )
         .expect("a lapsed-heartbeat worker must render an alert");
 
@@ -6036,7 +6276,7 @@ effort = "high"
                 None,
                 harness_publishes_turn_start(cli),
                 0,
-                5,
+                (5, Some(9_000)),
             )
             .expect("alert");
             assert!(rendered.contains("⚠ STALLED"), "{cli:?}: {rendered}");

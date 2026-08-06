@@ -924,3 +924,179 @@ fn unrelated_hooks_still_track_their_own_flags() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// cas-5b96: multi-config-dir awareness
+//
+// Claude Code reads `$CLAUDE_CONFIG_DIR/settings.json` when the variable is set
+// and `~/.claude/settings.json` otherwise. Treating hooks in `~/.claude` as
+// covering *every* session silently stripped project hooks and left alt-dir
+// sessions with zero CAS hooks.
+// ---------------------------------------------------------------------------
+
+use crate::cli::hook::config_gen::{
+    all_config_dirs_have_cas_hooks, config_dir_has_cas_hooks, config_dirs_missing_cas_hooks,
+    known_claude_config_dirs_from,
+};
+use crate::cli::hook::configure_claude_hooks_with_config_dirs;
+use std::path::PathBuf;
+
+/// Write a settings.json containing CAS hooks into `config_dir`.
+fn write_global_hooks(config_dir: &std::path::Path) {
+    std::fs::create_dir_all(config_dir).unwrap();
+    let settings = serde_json::json!({
+        "hooks": {
+            "SessionStart": [{
+                "hooks": [{"type": "command", "command": "cas hook SessionStart"}]
+            }]
+        }
+    });
+    std::fs::write(
+        config_dir.join("settings.json"),
+        serde_json::to_string_pretty(&settings).unwrap(),
+    )
+    .unwrap();
+}
+
+fn project_has_cas_hooks(project_root: &std::path::Path) -> bool {
+    let content =
+        std::fs::read_to_string(project_root.join(".claude/settings.json")).unwrap();
+    let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+    has_cas_hook_entries(&settings)
+}
+
+#[test]
+fn known_config_dirs_defaults_to_home_claude() {
+    let home = PathBuf::from("/fake/home");
+    let dirs = known_claude_config_dirs_from(Some(&home), None);
+    assert_eq!(dirs, vec![home.join(".claude")]);
+}
+
+#[test]
+fn known_config_dirs_adds_env_dir_and_expands_tilde() {
+    let home = PathBuf::from("/fake/home");
+
+    let dirs = known_claude_config_dirs_from(Some(&home), Some("~/.claude-alt"));
+    assert_eq!(
+        dirs,
+        vec![home.join(".claude"), home.join(".claude-alt")],
+        "CLAUDE_CONFIG_DIR must be expanded against home and added"
+    );
+
+    let absolute = known_claude_config_dirs_from(Some(&home), Some("/elsewhere/claude"));
+    assert_eq!(
+        absolute,
+        vec![home.join(".claude"), PathBuf::from("/elsewhere/claude")]
+    );
+}
+
+#[test]
+fn known_config_dirs_dedupes_and_ignores_blank_env() {
+    let home = PathBuf::from("/fake/home");
+
+    // Env pointing at the default dir must not duplicate it.
+    let dirs = known_claude_config_dirs_from(Some(&home), Some("~/.claude"));
+    assert_eq!(dirs, vec![home.join(".claude")]);
+
+    // Empty / whitespace env is treated as unset.
+    assert_eq!(
+        known_claude_config_dirs_from(Some(&home), Some("   ")),
+        vec![home.join(".claude")]
+    );
+}
+
+#[test]
+fn coverage_requires_every_config_dir() {
+    let home = isolated_home();
+    let default_dir = home.path().join(".claude");
+    let alt_dir = home.path().join(".claude-alt");
+    let dirs = vec![default_dir.clone(), alt_dir.clone()];
+
+    // Neither populated → not covered.
+    assert!(!all_config_dirs_have_cas_hooks(&dirs));
+
+    // Default dir only → the alt-dir sessions are still uncovered.
+    write_global_hooks(&default_dir);
+    assert!(config_dir_has_cas_hooks(&default_dir));
+    assert!(!all_config_dirs_have_cas_hooks(&dirs));
+    assert_eq!(config_dirs_missing_cas_hooks(&dirs), vec![alt_dir.clone()]);
+
+    // Both populated → covered, and nothing is missing.
+    write_global_hooks(&alt_dir);
+    assert!(all_config_dirs_have_cas_hooks(&dirs));
+    assert!(config_dirs_missing_cas_hooks(&dirs).is_empty());
+
+    // An empty dir list can never prove coverage.
+    assert!(!all_config_dirs_have_cas_hooks(&[]));
+}
+
+/// AC1: hooks only in ~/.claude while sessions run under CLAUDE_CONFIG_DIR=alt
+/// must NOT leave the project hookless.
+#[test]
+fn configure_keeps_project_hooks_when_alt_config_dir_lacks_them() {
+    let home = isolated_home();
+    let default_dir = home.path().join(".claude");
+    let alt_dir = home.path().join(".claude-alt");
+    write_global_hooks(&default_dir);
+    std::fs::create_dir_all(&alt_dir).unwrap();
+
+    let project = TempDir::new().unwrap();
+    configure_claude_hooks_with_config_dirs(project.path(), false, &[default_dir, alt_dir])
+        .unwrap();
+
+    assert!(
+        project_has_cas_hooks(project.path()),
+        "project hooks must be kept while a known config dir has no global hooks"
+    );
+}
+
+/// Regression for the reported failure: an existing project settings file with
+/// CAS hooks must not be stripped by a re-run (`cas update`) when the alt config
+/// dir is hookless.
+#[test]
+fn configure_does_not_strip_existing_project_hooks_for_alt_config_dir() {
+    let home = isolated_home();
+    let default_dir = home.path().join(".claude");
+    let alt_dir = home.path().join(".claude-alt");
+    write_global_hooks(&default_dir);
+
+    let project = TempDir::new().unwrap();
+    // First run with no global hooks anywhere writes project hooks.
+    configure_claude_hooks_with_config_dirs(project.path(), false, &[alt_dir.clone()]).unwrap();
+    assert!(project_has_cas_hooks(project.path()));
+
+    // Second run (cas update) with hooks in ~/.claude only must keep them.
+    configure_claude_hooks_with_config_dirs(project.path(), false, &[default_dir, alt_dir])
+        .unwrap();
+    assert!(
+        project_has_cas_hooks(project.path()),
+        "cas update must not strip project hooks that alt-dir sessions depend on"
+    );
+}
+
+/// AC3/AC4: when every known config dir has global hooks, dedup still strips the
+/// project-level copies (single-config-dir behavior unchanged).
+#[test]
+fn configure_strips_project_hooks_when_all_config_dirs_covered() {
+    let home = isolated_home();
+    let default_dir = home.path().join(".claude");
+    let alt_dir = home.path().join(".claude-alt");
+
+    let project = TempDir::new().unwrap();
+    configure_claude_hooks_with_config_dirs(project.path(), false, &[default_dir.clone()]).unwrap();
+    assert!(project_has_cas_hooks(project.path()));
+
+    write_global_hooks(&default_dir);
+    write_global_hooks(&alt_dir);
+    configure_claude_hooks_with_config_dirs(project.path(), false, &[default_dir.clone(), alt_dir])
+        .unwrap();
+    assert!(
+        !project_has_cas_hooks(project.path()),
+        "with every config dir covered, project hooks are duplicates and must be stripped"
+    );
+
+    // Single config dir populated → same strip behavior as before cas-5b96.
+    let project2 = TempDir::new().unwrap();
+    configure_claude_hooks_with_config_dirs(project2.path(), false, &[default_dir]).unwrap();
+    assert!(!project_has_cas_hooks(project2.path()));
+}

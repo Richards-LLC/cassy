@@ -638,9 +638,9 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub urgent: Option<bool>,
 
-    /// Force operation (shutdown, worktree cleanup/merge, gc_cleanup)
+    /// Force operation (shutdown, worktree cleanup/merge, gc_cleanup, sync_all_workers)
     #[schemars(
-        description = "Force operation even with uncommitted changes (dirty worktree cleanup/merge). Does NOT authorize trunk as a merge target — use allow_trunk for that (cas-0b32)."
+        description = "Force operation even with uncommitted changes (dirty worktree cleanup/merge). For sync_all_workers: consent to rebase worktrees that are dirty (WIP is stashed and restored) or whose assignee is mid-task — without it those are skipped; a worktree already mid-rebase is refused either way. Does NOT authorize trunk as a merge target — use allow_trunk for that (cas-0b32)."
     )]
     #[serde(default)]
     pub force: Option<bool>,

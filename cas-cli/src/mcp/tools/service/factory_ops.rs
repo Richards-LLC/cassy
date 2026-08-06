@@ -2111,10 +2111,11 @@ impl CasService {
         if let Some(stash) = failure.stranded_stash.as_deref() {
             body.push_str(&format!(
                 "\n\nYour uncommitted work was stashed and could NOT be restored automatically. \
-                 It is not lost: recover it with `git stash pop {stash}` (inspect first with \
-                 `git stash show -p --include-untracked {stash}` — plain `stash show` renders \
-                 nothing when the WIP was untracked) in that worktree. Do this before making \
-                 further edits, or the pop will conflict."
+                 It is not lost. In that worktree run:\n\n    {}\n\nDo this before making \
+                 further edits, or the apply will conflict. Once it is applied cleanly, find the \
+                 entry in `git stash list` and drop it by its stash@{{N}} index (`drop` and `pop` \
+                 do not accept the SHA above).",
+                stash_recovery_command(stash)
             ));
         }
         if failure.mid_rebase {
@@ -3565,12 +3566,9 @@ impl SyncFailure {
     pub(crate) fn report_line(&self) -> String {
         let mut line = self.message.clone();
         if let Some(stash) = self.stranded_stash.as_deref() {
-            // `--include-untracked` matters: the stash was taken with it, and
-            // plain `git stash show -p` renders nothing for untracked-only
-            // WIP — which reads as "my work is gone".
             line.push_str(&format!(
-                " — WIP IS NOT LOST: recover with `git stash pop {stash}` (inspect with \
-                 `git stash show -p --include-untracked {stash}`) in the worktree"
+                " — WIP IS NOT LOST: recover with `{}` in the worktree",
+                stash_recovery_command(stash)
             ));
         }
         if self.mid_rebase {
@@ -3582,14 +3580,40 @@ impl SyncFailure {
     }
 }
 
+/// The recovery command an operator can actually run for a stranded stash.
+///
+/// Two git details this must respect, both verified against real git rather
+/// than assumed:
+/// - `git stash pop`/`drop` reject a bare commit SHA ("is not a stash
+///   reference"); only `apply`/`show` accept one. The ref recorded here is a
+///   SHA on purpose (a later stash push shifts `stash@{0}` off this entry), so
+///   the instruction must be `apply`.
+/// - `git stash show -p` prints nothing for untracked-only WIP unless
+///   `--include-untracked` is passed — and untracked WIP is exactly what the
+///   auto-stash sweeps up. Without the flag the inspection reads as "empty",
+///   i.e. "my work is gone".
+/// - `apply` itself refuses while a file of the same name exists in the
+///   worktree ("already exists, no checkout") — which is usually the very
+///   reason the pop failed. Saying only "run apply" would send the operator
+///   into the same wall, so the caveat and its way out are part of the text.
+pub(crate) fn stash_recovery_command(stash_ref: &str) -> String {
+    format!(
+        "git stash show -p --include-untracked {stash_ref}   # what is in it\n    \
+         git stash apply {stash_ref}                          # restore it\n    \
+         # if apply says \"already exists, no checkout\", move that file aside \
+         (that collision is why the restore failed) and re-run apply; the stash \
+         entry stays until you drop it by its `git stash list` index"
+    )
+}
+
 /// Resolve the stash just pushed to a durable ref (`refs/stash`'s SHA) so the
 /// recovery instruction survives later pushes shifting `stash@{0}`.
+///
+/// Returns a bare ref token — never annotated prose — because callers splice
+/// it straight into a shell command.
 fn resolve_stash_ref(path: &std::path::Path) -> String {
     run_git(path, &["rev-parse", "refs/stash"])
-        .map(|sha| {
-            let short = &sha[..sha.len().min(12)];
-            format!("{short} (stash@{{0}} at sync time)")
-        })
+        .map(|sha| sha[..sha.len().min(12)].to_string())
         .unwrap_or_else(|_| "stash@{0}".to_string())
 }
 
@@ -8583,6 +8607,10 @@ mod sync_safety_tests {
             .stranded_stash
             .as_deref()
             .expect("a stranded stash must be reported with its ref");
+        assert!(
+            !stash_ref.contains(' '),
+            "the ref is spliced into a shell command — it must be a single token, got {stash_ref:?}"
+        );
 
         let line = failure.report_line();
         assert!(
@@ -8590,25 +8618,65 @@ mod sync_safety_tests {
             "report line must carry recovery instructions with the ref: {line}"
         );
 
+        // Walk the documented recovery for real, in order.
+        //
+        // 1. `apply` refuses while the colliding file is present — that
+        //    collision is exactly why the pop failed, and the guidance says so
+        //    rather than sending the operator into the same wall.
+        let blocked = Command::new("git")
+            .args(["stash", "apply", stash_ref])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            !blocked.status.success(),
+            "precondition: the collision that stranded the stash still blocks apply"
+        );
+        // 2. Move the collision aside as instructed, then apply succeeds and
+        //    the WIP comes back. (`pop` is never instructed: git rejects a bare
+        //    SHA there with "is not a stash reference".)
+        std::fs::rename(repo.join("upstream.txt"), repo.join("upstream.rebased")).unwrap();
+        let applied = Command::new("git")
+            .args(["stash", "apply", stash_ref])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            applied.status.success(),
+            "after the documented step the recovery must succeed: {}",
+            String::from_utf8_lossy(&applied.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("upstream.txt")).unwrap(),
+            "local uncommitted version",
+            "the worker's WIP must be back on disk"
+        );
+
         // The stash really is still there, and really does hold the WIP.
         assert!(
             !git(&repo, &["stash", "list"]).is_empty(),
             "the stash entry must survive for recovery"
         );
-        // `--include-untracked` is required here: the WIP was untracked, and
-        // plain `git stash show -p` prints nothing for it. That is precisely
-        // why the recovery guidance spells the flag out.
+        // `--include-untracked` is required in the inspect command: the WIP was
+        // untracked, and plain `git stash show -p` prints nothing for it —
+        // which reads as "my work is gone".
         assert!(
             git(
                 &repo,
-                &["stash", "show", "-p", "--include-untracked", "stash@{0}"]
+                &["stash", "show", "-p", "--include-untracked", stash_ref]
             )
             .contains("local uncommitted version"),
             "the stranded stash must contain the worker's WIP"
         );
+        // Scope the `pop` check to the recovery instruction: the diagnostic
+        // half of the line legitimately quotes the git command that failed.
+        let guidance = line
+            .split("recover with")
+            .nth(1)
+            .expect("report must contain recovery guidance");
         assert!(
-            line.contains("--include-untracked"),
-            "recovery guidance must use a command that actually shows untracked WIP: {line}"
+            guidance.contains("--include-untracked") && !guidance.contains("stash pop"),
+            "guidance must inspect untracked WIP and must not use `pop`, which rejects a SHA: {guidance}"
         );
     }
 

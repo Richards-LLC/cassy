@@ -4634,3 +4634,187 @@ async fn test_a844_show_and_list_distinguish_merge_conflict() {
         "clean awaiting_merge line must not carry the conflict marker: {clean_line}"
     );
 }
+
+// ===========================================================================
+// cas-0a6f (GH #103): sync_all_workers must not rebase a worktree that is
+// dirty or whose assignee is mid-task, and a stranded stash must reach both
+// the worker and the supervisor. These drive the real MCP handler against
+// real linked worktrees — the pure-unit tests in factory_ops.rs cover the
+// decision table, these cover the wiring.
+// ===========================================================================
+
+fn sync_env_with_worker(session: &str, worker: &str) -> (FactoryTestEnv, PathBuf, EnvGuard) {
+    let home = TempDir::new().expect("home tempdir");
+    let guard = EnvGuard::set(&[
+        ("CAS_FACTORY_SESSION", session),
+        ("HOME", home.path().to_str().unwrap()),
+        // A real factory session exports this; blank it so supervisor
+        // resolution is decided by the fixture's agent store rather than by
+        // whatever session happens to be running the suite.
+        ("CAS_SUPERVISOR_NAME", ""),
+    ]);
+    std::mem::forget(home);
+    let env = FactoryTestEnv::new();
+    let worker_path = init_sync_repo(&env, worker);
+    env.register_worker_in_session(worker, session);
+    add_epic_with_id(&env, "cas-3b7c", TaskStatus::Open, "epic/requested");
+    write_session_metadata_for_project(
+        session,
+        Some("cas-3b7c"),
+        env.cas_root.parent().unwrap().to_str().unwrap(),
+    );
+    (env, worker_path, guard)
+}
+
+#[tokio::test]
+async fn test_sync_all_workers_skips_dirty_worktree_without_force_cas_0a6f() {
+    let (env, worker_path, _guard) =
+        sync_env_with_worker("session-sync-dirty", "sync-dirty-worker");
+
+    // Live WIP the worker has not committed.
+    std::fs::write(worker_path.join("wip.txt"), "precious uncommitted work").unwrap();
+
+    let mut req = factory_req("sync_all_workers");
+    req.id = Some("cas-3b7c".to_string());
+    let text = get_text(&env.service.factory(Parameters(req)).await.expect("sync"));
+
+    assert!(
+        text.contains("Skipped:") && text.contains("uncommitted change(s)"),
+        "a dirty worktree must be reported as skipped: {text}"
+    );
+    assert!(
+        !text.contains("Synced:"),
+        "nothing should have been rebased: {text}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(worker_path.join("wip.txt")).unwrap(),
+        "precious uncommitted work",
+        "WIP must be untouched"
+    );
+    assert!(
+        !worker_path.join("requested.txt").exists(),
+        "the worktree must not have been rebased onto the epic"
+    );
+    assert!(
+        git_stdout(&worker_path, &["stash", "list"]).trim().is_empty(),
+        "sync must not have stashed anything"
+    );
+}
+
+#[tokio::test]
+async fn test_sync_all_workers_force_syncs_dirty_worktree_and_restores_wip_cas_0a6f() {
+    let (env, worker_path, _guard) =
+        sync_env_with_worker("session-sync-force", "sync-force-worker");
+
+    std::fs::write(worker_path.join("wip.txt"), "precious uncommitted work").unwrap();
+
+    let mut req = factory_req("sync_all_workers");
+    req.id = Some("cas-3b7c".to_string());
+    req.force = Some(true);
+    let text = get_text(&env.service.factory(Parameters(req)).await.expect("sync"));
+
+    assert!(
+        text.contains("Synced:") && text.contains("stashed + rebased + restored"),
+        "force must carry the dirty worktree through: {text}"
+    );
+    assert!(
+        worker_path.join("requested.txt").exists(),
+        "the epic commit must have landed: {text}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(worker_path.join("wip.txt")).unwrap(),
+        "precious uncommitted work",
+        "the worker's WIP must be restored after the rebase"
+    );
+    assert!(
+        git_stdout(&worker_path, &["stash", "list"]).trim().is_empty(),
+        "a restored stash must not be left behind"
+    );
+}
+
+#[tokio::test]
+async fn test_sync_all_workers_skips_worker_holding_an_in_progress_task_cas_0a6f() {
+    let (env, worker_path, _guard) = sync_env_with_worker("session-sync-busy", "sync-busy-worker");
+
+    // Clean worktree, but the worker is actively working a task.
+    let store = env.task_store();
+    let task_id = store.generate_id().expect("generate_id");
+    let mut task = Task::new(task_id.clone(), "Live work".to_string());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("sync-busy-worker".to_string());
+    store.add(&task).expect("add in-progress task");
+
+    let mut req = factory_req("sync_all_workers");
+    req.id = Some("cas-3b7c".to_string());
+    let text = get_text(&env.service.factory(Parameters(req)).await.expect("sync"));
+
+    assert!(
+        text.contains("Skipped:") && text.contains(&task_id),
+        "the skip must name the task holding the worktree: {text}"
+    );
+    assert!(
+        !worker_path.join("requested.txt").exists(),
+        "a mid-task worktree must not be rebased under the worker: {text}"
+    );
+}
+
+#[tokio::test]
+async fn test_sync_all_workers_notifies_worker_and_supervisor_on_stranded_stash_cas_0a6f() {
+    let (env, worker_path, _guard) =
+        sync_env_with_worker("session-sync-strand", "sync-strand-worker");
+    env.register_supervisor("sync-strand-supervisor");
+
+    // Untracked WIP that collides with the file the epic commit introduces:
+    // the rebase succeeds, then the stash pop cannot restore it.
+    std::fs::write(worker_path.join("requested.txt"), "local uncommitted version").unwrap();
+
+    let mut req = factory_req("sync_all_workers");
+    req.id = Some("cas-3b7c".to_string());
+    req.force = Some(true);
+    let text = get_text(&env.service.factory(Parameters(req)).await.expect("sync"));
+
+    assert!(
+        text.contains("Failed:") && text.contains("WIP IS NOT LOST"),
+        "a stranded stash must be reported loudly: {text}"
+    );
+    assert!(
+        text.contains("Incident notifications:"),
+        "the report must record that the incident was pushed: {text}"
+    );
+
+    let queue = env.prompt_queue();
+    for target in ["sync-strand-worker", "sync-strand-supervisor"] {
+        let queued = queue.poll_for_target(target, 10).expect("poll queue");
+        let incident = queued
+            .iter()
+            .find(|q| q.prompt.contains("SYNC INCIDENT"))
+            .unwrap_or_else(|| panic!("{target} must receive the incident: {queued:?}"));
+        // The prose may quote the git command that FAILED ("stash pop
+        // failed: ..."); what matters is the command block the operator is
+        // told to run. `git stash pop <sha>` would be rejected by git as
+        // "not a stash reference", so the instruction must be `apply`.
+        let instruction = incident
+            .prompt
+            .split("run:")
+            .nth(1)
+            .unwrap_or_else(|| panic!("incident must contain an instruction block: {}", incident.prompt));
+        assert!(
+            instruction.contains("git stash apply"),
+            "the recovery command must be one git accepts for a SHA: {instruction}"
+        );
+        assert!(
+            !instruction.contains("git stash pop"),
+            "`stash pop` rejects the SHA we hand out: {instruction}"
+        );
+        assert!(
+            instruction.contains("--include-untracked"),
+            "inspection must reveal untracked WIP: {instruction}"
+        );
+    }
+
+    // The WIP really is recoverable via the instruction that was sent.
+    assert!(
+        !git_stdout(&worker_path, &["stash", "list"]).trim().is_empty(),
+        "the stash entry must survive for recovery"
+    );
+}

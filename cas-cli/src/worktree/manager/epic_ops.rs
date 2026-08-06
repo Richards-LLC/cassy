@@ -28,17 +28,40 @@ impl WorktreeManager {
             .resolve_fresh_base(&trunk)
             .map_err(WorktreeError::Git)?;
 
+        // cas-a85e (GH #99): prefer the active epic branch when the checkout
+        // is on one that trunk does not contain, so a follow-on epic does not
+        // start empty; otherwise keep trunk and say what was excluded.
+        let base_choice = self.git.resolve_epic_base(&resolved.branch_ref);
+        if let Some(notice) = base_choice.notice.as_deref() {
+            if base_choice.used_head {
+                tracing::info!("{}", notice);
+            } else {
+                tracing::warn!("{}", notice);
+            }
+        }
+        // `resolved.behind_count` describes local trunk vs origin/trunk. Once
+        // the base is HEAD's epic branch instead, that number describes a
+        // different pair of refs — report the base's own gap to trunk.
+        let (base_sha, base_behind) = if base_choice.used_head {
+            (
+                self.git.ref_sha(&base_choice.base_ref).unwrap_or_default(),
+                base_choice.head_behind,
+            )
+        } else {
+            (resolved.sha.clone(), resolved.behind_count)
+        };
+
         let newly_created = match self
             .git
-            .create_branch_from(&branch_name, &resolved.branch_ref)
+            .create_branch_from(&branch_name, &base_choice.base_ref)
         {
             Ok(true) => {
                 tracing::info!(
                     "Created epic branch {} from base '{}' (sha={}, behind={})",
                     branch_name,
-                    resolved.branch_ref,
-                    short_sha(&resolved.sha),
-                    resolved.behind_count,
+                    base_choice.base_ref,
+                    short_sha(&base_sha),
+                    base_behind,
                 );
                 true
             }

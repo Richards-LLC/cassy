@@ -39,6 +39,22 @@ In shared mode, file-overlap analysis is even more critical — two workers edit
 3. Gather spec with `/epic-spec`, break down with `/epic-breakdown`
 4. Review task scope and dependencies
 
+**Standalone follow-up work (no EPIC needed).** An EPIC is for a body of work broken into
+tasks. When an epic has closed and one loose task turns up — a follow-up, a late bug, a
+one-off — do NOT create a single-child epic to satisfy the spawn gate. Create the task and
+spawn straight onto it:
+
+```
+mcp__cas__task action=create title="..." description="..."
+mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-5.6-terra effort=high task_id=<task-id>
+```
+
+A concrete open, unassigned `task_id` authorizes the spawn on its own. It authorizes exactly
+one worker: a second spawn for the same still-queued task is refused, as is a task that is
+blocked, awaiting merge, awaiting review, or already assigned to another worker — those state
+that no new worker can pick the task up. Ceremonial single-child epics distort epic reporting
+and the "all subtasks closed -> verify and close the epic" flow, so this is the preferred path.
+
 ## Phase 2: Coordinate
 
 1. Spawn workers:

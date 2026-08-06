@@ -406,6 +406,7 @@ impl Pane {
         teams: Option<&TeamsSpawnConfig>,
         factory_session: Option<&str>,
     ) -> Result<Self> {
+        Self::pre_trust_codex_workdir(cli, &cwd);
         let mut config = Self::build_worker_config(
             name,
             cwd,
@@ -509,6 +510,7 @@ impl Pane {
         teams: Option<&TeamsSpawnConfig>,
         factory_session: Option<&str>,
     ) -> Result<Self> {
+        Self::pre_trust_codex_workdir(cli, &cwd);
         let mut config = Self::build_supervisor_config(
             name,
             cwd,
@@ -528,6 +530,27 @@ impl Pane {
             pane.set_harness_session_id(sid);
         }
         Ok(pane)
+    }
+
+    /// cas-28a49 (GH #97): make the pane's cwd trusted for Codex **before** the
+    /// process starts.
+    ///
+    /// Codex CLI parks on its interactive "do you trust this folder?" prompt
+    /// when the directory is absent from `[projects]` in
+    /// `$CODEX_HOME/config.toml`. It parks before rendering, before writing a
+    /// session file, and before starting `cas serve` — so the worker never
+    /// registers and the spawn dies at `stage=register` with a generic 60s
+    /// timeout. Verified against codex-cli 0.146.0; see
+    /// `cas_pty::codex_trust` for the measurements and for why the `-c`
+    /// config-override flag cannot be used instead.
+    ///
+    /// Best effort by design: a failure here is logged with the manual fix and
+    /// the spawn proceeds, which is exactly the pre-fix behaviour.
+    fn pre_trust_codex_workdir(cli: SupervisorCli, cwd: &std::path::Path) {
+        if cli != SupervisorCli::Codex {
+            return;
+        }
+        let _ = cas_pty::ensure_project_trusted(cwd);
     }
 
     fn push_supervisor_env(
@@ -1299,11 +1322,31 @@ impl Pane {
                 // so we don't block the daemon event loop for 150-500ms.
                 let writer = pty.writer_handle();
                 let settle_ms = if pty.is_codex() { 500 } else { 150 };
+                // cas-ae6d (GH #100): the submit CR is what turns injected text
+                // into an actual turn. It is written from a detached task, so
+                // its failure cannot be returned to the caller — which already
+                // recorded the inject as Delivered and marked the pane
+                // turn-in-flight. Swallowing the error silently leaves the
+                // payload sitting in the harness composer as an unsubmitted
+                // draft while every observer believes the agent was woken (the
+                // "assignment delivered, worker still idle" shape). It stays
+                // detached (blocking the daemon loop 500ms per inject is worse),
+                // but the failure is now visible on the same
+                // `cas::coordination` lane the delivery telemetry uses.
+                let pane_id = self.id.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(settle_ms)).await;
                     let mut guard = writer.lock().await;
-                    let _ = guard.write_all(b"\r");
-                    let _ = guard.flush();
+                    if let Err(e) = guard.write_all(b"\r").and_then(|()| guard.flush()) {
+                        tracing::warn!(
+                            target: "cas::coordination",
+                            stage = "inject_submit_failed",
+                            target_agent = %pane_id,
+                            error = %e,
+                            "injected payload was written but its submit CR failed — the text is \
+                             sitting unsubmitted in the pane composer and no turn started"
+                        );
+                    }
                 });
                 self.clear_composer_dirty();
                 // Inject submits a prompt → turn is in flight (cas-7f6f).

@@ -806,6 +806,7 @@ async fn test_anonymous_or_orphan_verification_add_fails_closed() {
 
 fn task_status_update(id: &str, status: Option<&str>, notes: Option<&str>) -> TaskUpdateRequest {
     TaskUpdateRequest {
+        blocked_by: None,
         depth: None,
         id: id.to_string(),
         title: None,

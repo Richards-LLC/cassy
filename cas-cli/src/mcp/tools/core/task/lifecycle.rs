@@ -268,9 +268,15 @@ impl CasCore {
                         .as_ref()
                         .map(|context| context.target_branch.clone())
                         .unwrap_or_else(|| git_ops.detect_default_branch());
-                    let trunk_sha = git_ops.ref_sha(&trunk).unwrap_or_default();
-                    let sha_preview = &trunk_sha[..trunk_sha.len().min(8)];
-                    match git_ops.create_branch_from(&branch_name, &trunk) {
+                    // cas-a85e (GH #99): trunk stays the default anchor, but a
+                    // checkout sitting on the PREVIOUS epic branch must not
+                    // silently strand that epic's commits — base from it, or
+                    // say plainly what was left out.
+                    let base_choice = git_ops.resolve_epic_base(&trunk);
+                    let base_ref = base_choice.base_ref.clone();
+                    let base_sha = git_ops.ref_sha(&base_ref).unwrap_or_default();
+                    let sha_preview = &base_sha[..base_sha.len().min(8)];
+                    match git_ops.create_branch_from(&branch_name, &base_ref) {
                         Ok(created) => {
                             // Update epic with branch info (no worktree)
                             let task_store = self.open_task_store()?;
@@ -296,8 +302,13 @@ impl CasCore {
                                 }
                             }
 
+                            let divergence = base_choice
+                                .notice
+                                .as_deref()
+                                .map(|notice| format!("\n   {notice}"))
+                                .unwrap_or_default();
                             Some(format!(
-                                "\n\n🌿 Epic branch created: {branch_name}\n   Base: '{trunk}' @ {sha_preview}. Workers will branch from this when spawned."
+                                "\n\n🌿 Epic branch created: {branch_name}\n   Base: '{base_ref}' @ {sha_preview}. Workers will branch from this when spawned.{divergence}"
                             ))
                         }
                         Err(e) => {

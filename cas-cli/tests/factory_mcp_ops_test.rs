@@ -984,6 +984,13 @@ async fn test_spawn_workers_requires_epic() {
         "Error should mention missing EPIC: {}",
         err.message
     );
+    // cas-549c (GH #96): the error must point at the no-epic escape hatch
+    // instead of only demanding an epic.
+    assert!(
+        err.message.contains("task_id=<task-id>"),
+        "Error should offer the task_id path for standalone work: {}",
+        err.message
+    );
 }
 
 #[tokio::test]
@@ -1044,6 +1051,264 @@ async fn test_spawn_workers_isolate_flag_in_isolated_child() {
     let entries = env.spawn_queue().peek(10).expect("peek");
     assert_eq!(entries.len(), 1);
     assert!(entries[0].isolate, "Should have isolate=true");
+}
+
+/// cas-549c (GH #96): after an epic is verified and closed, a standalone
+/// follow-on task must be spawnable without inventing a ceremonial
+/// single-child epic. The epic gate exists to stop *unscoped* spawning; a
+/// concrete open task_id already states the work.
+#[tokio::test]
+async fn test_spawn_workers_with_task_id_succeeds_after_epic_closed() {
+    let env = FactoryTestEnv::new();
+    let task_store = env.task_store();
+
+    // The exact reported sequence: an epic existed, was completed, and closed.
+    let epic_id = env.create_epic("Finished Epic");
+    let mut epic = task_store.get(&epic_id).expect("get epic");
+    epic.status = TaskStatus::Closed;
+    task_store.update(&epic).expect("close epic");
+
+    // New evidence arrives; a standalone follow-on task is created.
+    let task_id = task_store.generate_id().expect("generate_id");
+    task_store
+        .add(&Task::new(
+            task_id.clone(),
+            "Post-epic follow-up".to_string(),
+        ))
+        .expect("add follow-up task");
+
+    let mut req = factory_req("spawn_workers");
+    req.count = Some(1);
+    req.task_id = Some(task_id.clone());
+
+    let result = env.service.factory(Parameters(req)).await;
+    assert!(
+        result.is_ok(),
+        "spawn_workers with a concrete open task_id must not require an epic: {result:?}"
+    );
+
+    let entries = env.spawn_queue().peek(10).expect("peek");
+    assert_eq!(entries.len(), 1, "the spawn must actually be queued");
+    assert_eq!(entries[0].task_id.as_deref(), Some(task_id.as_str()));
+}
+
+/// cas-549c: the same relaxation must hold when no epic has ever existed —
+/// a fresh project with one task, not just a post-close one.
+#[tokio::test]
+async fn test_spawn_workers_with_task_id_succeeds_with_no_epic_at_all() {
+    let env = FactoryTestEnv::new();
+    let task_store = env.task_store();
+    let task_id = task_store.generate_id().expect("generate_id");
+    task_store
+        .add(&Task::new(task_id.clone(), "Standalone".to_string()))
+        .expect("add task");
+
+    let mut req = factory_req("spawn_workers");
+    req.worker_names = Some("swift-fox".to_string());
+    req.task_id = Some(task_id.clone());
+
+    let result = env.service.factory(Parameters(req)).await;
+    assert!(
+        result.is_ok(),
+        "a single named worker for an open task needs no epic: {result:?}"
+    );
+    assert_eq!(env.spawn_queue().peek(10).expect("peek").len(), 1);
+}
+
+/// cas-549c review follow-up: standing in for an EPIC is a stronger claim
+/// than being a legal pre-assignment target. A task that a newly spawned
+/// worker cannot actually pick up — already owned by another worker, or
+/// parked awaiting the supervisor — must NOT authorize an epic-free spawn,
+/// or the factory boots a pane and worktree for a worker that then sits
+/// permanently idle (assign_task_to_new_worker refuses to steal an assignee).
+#[tokio::test]
+async fn test_spawn_workers_undispatchable_task_id_is_rejected_without_epic() {
+    let undispatchable = [
+        (
+            TaskStatus::AwaitingMerge,
+            None,
+            "not work a newly spawned worker",
+        ),
+        (
+            TaskStatus::PendingSupervisorReview,
+            None,
+            "not work a newly spawned worker",
+        ),
+        (TaskStatus::Blocked, None, "not work a newly spawned worker"),
+        (TaskStatus::Open, Some("alpha"), "already assigned to 'alpha'"),
+        (TaskStatus::InProgress, Some("alpha"), "already assigned to 'alpha'"),
+    ];
+
+    for (status, assignee, expected) in undispatchable {
+        let env = FactoryTestEnv::new();
+        let task_store = env.task_store();
+        let id = task_store.generate_id().expect("generate_id");
+        let mut task = Task::new(id.clone(), format!("{status:?} task"));
+        task.status = status;
+        task.assignee = assignee.map(str::to_string);
+        task_store.add(&task).expect("add task");
+
+        let mut req = factory_req("spawn_workers");
+        req.count = Some(1);
+        req.task_id = Some(id.clone());
+        let err = env
+            .service
+            .factory(Parameters(req))
+            .await
+            .expect_err(&format!(
+                "{status:?} (assignee={assignee:?}) must not authorize an epic-free spawn"
+            ));
+        assert!(
+            err.message.contains(expected),
+            "{status:?} (assignee={assignee:?}) error should say why: {}",
+            err.message
+        );
+        assert!(
+            env.spawn_queue().peek(10).expect("peek").is_empty(),
+            "{status:?} must not enqueue a spawn"
+        );
+    }
+}
+
+/// cas-549c review follow-up: the SAME statuses must still be accepted when
+/// an epic is open — the tightening only ever withholds the epic bypass, it
+/// must not change pre-assignment rules for an epic-backed factory.
+#[tokio::test]
+async fn test_undispatchable_task_id_still_allowed_when_an_epic_is_open() {
+    for (status, assignee) in [
+        (TaskStatus::AwaitingMerge, None),
+        (TaskStatus::Open, Some("alpha")),
+        (TaskStatus::InProgress, Some("alpha")),
+    ] {
+        let env = FactoryTestEnv::new();
+        env.create_epic("Live Epic");
+        let task_store = env.task_store();
+        let id = task_store.generate_id().expect("generate_id");
+        let mut task = Task::new(id.clone(), format!("{status:?} task"));
+        task.status = status;
+        task.assignee = assignee.map(str::to_string);
+        task_store.add(&task).expect("add task");
+
+        let mut req = factory_req("spawn_workers");
+        req.count = Some(1);
+        req.task_id = Some(id.clone());
+        assert!(
+            env.service.factory(Parameters(req)).await.is_ok(),
+            "with an open epic, {status:?} (assignee={assignee:?}) must behave exactly as before"
+        );
+        assert_eq!(env.spawn_queue().peek(10).expect("peek").len(), 1);
+    }
+}
+
+/// cas-549c review follow-up: one task authorizes ONE spawn. Nothing in the
+/// MCP call mutates the task (binding happens at worker registration), so
+/// without a duplicate guard a single open task_id could authorize an
+/// unbounded burst of epic-free spawns where only the first worker binds.
+#[tokio::test]
+async fn test_task_id_authorizes_only_one_epic_free_spawn() {
+    let env = FactoryTestEnv::new();
+    let task_store = env.task_store();
+    let task_id = task_store.generate_id().expect("generate_id");
+    task_store
+        .add(&Task::new(task_id.clone(), "Only once".to_string()))
+        .expect("add task");
+
+    let mut first = factory_req("spawn_workers");
+    first.count = Some(1);
+    first.task_id = Some(task_id.clone());
+    env.service
+        .factory(Parameters(first))
+        .await
+        .expect("first epic-free spawn should be authorized");
+
+    let mut second = factory_req("spawn_workers");
+    second.count = Some(1);
+    second.task_id = Some(task_id.clone());
+    let err = env
+        .service
+        .factory(Parameters(second))
+        .await
+        .expect_err("a second spawn for the same queued task must be refused");
+    assert!(
+        err.message.contains("already queued"),
+        "error should name the pending spawn: {}",
+        err.message
+    );
+    assert_eq!(
+        env.spawn_queue().peek(10).expect("peek").len(),
+        1,
+        "the duplicate must not enqueue a second row"
+    );
+}
+
+/// cas-549c: the relaxation is scoped to a *valid* task_id. A closed task,
+/// a nonexistent one, or an ambiguous multi-worker request must still be
+/// rejected with no epic present — otherwise task_id becomes a blanket
+/// bypass of the unscoped-spawn guard.
+#[tokio::test]
+async fn test_spawn_workers_task_id_bypass_requires_a_valid_open_task() {
+    let env = FactoryTestEnv::new();
+    let task_store = env.task_store();
+
+    let closed_id = task_store.generate_id().expect("generate_id");
+    let mut closed = Task::new(closed_id.clone(), "Already done".to_string());
+    closed.status = TaskStatus::Closed;
+    task_store.add(&closed).expect("add closed task");
+
+    let open_id = task_store.generate_id().expect("generate_id");
+    task_store
+        .add(&Task::new(open_id.clone(), "Open".to_string()))
+        .expect("add open task");
+
+    // Closed task: rejected on the task, not waved through as "authorized".
+    let mut req = factory_req("spawn_workers");
+    req.count = Some(1);
+    req.task_id = Some(closed_id.clone());
+    let err = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect_err("a closed task must not authorize a spawn");
+    assert!(
+        err.message.contains("already closed"),
+        "error should name the closed task: {}",
+        err.message
+    );
+
+    // Unknown task id.
+    let mut req = factory_req("spawn_workers");
+    req.count = Some(1);
+    req.task_id = Some("cas-doesnotexist".to_string());
+    let err = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect_err("an unknown task must not authorize a spawn");
+    assert!(
+        err.message.contains("no such task"),
+        "error should say the task is unknown: {}",
+        err.message
+    );
+
+    // Ambiguous multi-worker request keeps its own error even with no epic.
+    let mut req = factory_req("spawn_workers");
+    req.count = Some(3);
+    req.task_id = Some(open_id);
+    let err = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect_err("multi-worker + task_id stays ambiguous");
+    assert!(
+        err.message.contains("single-worker"),
+        "error should explain the single-worker requirement: {}",
+        err.message
+    );
+
+    assert!(
+        env.spawn_queue().peek(10).expect("peek").is_empty(),
+        "no rejected request may enqueue anything"
+    );
 }
 
 /// cas-6913 AC3: `task_id` on a single-worker spawn request must carry
@@ -3947,6 +4212,7 @@ async fn test_062d_lifecycle_start_and_blocked_push_session_isolated() {
         .service
         .inner
         .cas_task_update(Parameters(cas::mcp::tools::TaskUpdateRequest {
+            blocked_by: None,
             id: "cas-062d-start".to_string(),
             title: None,
             notes: None,

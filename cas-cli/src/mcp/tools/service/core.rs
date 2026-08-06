@@ -281,6 +281,8 @@ impl CasService {
             notes: req.notes,
             priority: req.priority,
             labels: req.labels,
+            // cas-d45f (GH #98): blocked_by used to be dropped on the floor here.
+            blocked_by: req.blocked_by,
             description: req.description,
             design: req.design,
             acceptance_criteria: req.acceptance_criteria,

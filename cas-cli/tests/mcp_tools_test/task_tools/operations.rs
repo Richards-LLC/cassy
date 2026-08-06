@@ -179,6 +179,7 @@ async fn test_execution_note_update_sets_value() {
 
     let updated = service
         .cas_task_update(Parameters(TaskUpdateRequest {
+            blocked_by: None,
             depth: None,
             id: id.clone(),
             title: None,
@@ -231,6 +232,7 @@ async fn test_execution_note_update_empty_string_clears() {
 
     service
         .cas_task_update(Parameters(TaskUpdateRequest {
+            blocked_by: None,
             depth: None,
             id: id.clone(),
             title: None,
@@ -297,6 +299,7 @@ async fn test_task_update() {
 
     // Update task
     let update_req = TaskUpdateRequest {
+        blocked_by: None,
         depth: None,
         id: id.to_string(),
         title: Some("Updated title".to_string()),
@@ -357,6 +360,7 @@ async fn test_task_update_design_and_acceptance_criteria() {
 
     // Update design and acceptance_criteria
     let update_req = TaskUpdateRequest {
+        blocked_by: None,
         depth: None,
         id: id.to_string(),
         title: None,
@@ -1022,6 +1026,7 @@ async fn test_close_auto_unblocks_blocked_dependents() {
 
     let _ = service
         .cas_task_update(Parameters(TaskUpdateRequest {
+            blocked_by: None,
             depth: None,
             id: blocked_id.clone(),
             title: None,
@@ -1151,6 +1156,7 @@ async fn test_task_update_invalid_epic_keeps_original_parent_dependency() {
 
     let update_result = service
         .cas_task_update(Parameters(TaskUpdateRequest {
+            blocked_by: None,
             depth: None,
             id: subtask_id.clone(),
             title: None,
@@ -1261,6 +1267,7 @@ async fn test_task_update_surfaces_epic_dependency_delete_failure() {
 
     let update_result = service
         .cas_task_update(Parameters(TaskUpdateRequest {
+            blocked_by: None,
             depth: None,
             id: subtask_id,
             title: None,
@@ -1694,6 +1701,7 @@ async fn test_task_mine_matches_env_worker_name_during_spawn_race() {
         .to_string();
 
     let update_req = TaskUpdateRequest {
+        blocked_by: None,
         depth: None,
         id: id.clone(),
         title: None,
@@ -1874,6 +1882,7 @@ async fn test_release_autorecovers_lease_less_in_progress_task() {
 
     service
         .cas_task_update(Parameters(TaskUpdateRequest {
+            blocked_by: None,
             depth: None,
             id: id.clone(),
             title: None,
@@ -2001,6 +2010,7 @@ async fn test_reset_clears_lease_assignee_and_forces_open() {
 
     service
         .cas_task_update(Parameters(TaskUpdateRequest {
+            blocked_by: None,
             depth: None,
             id: id.clone(),
             title: None,
@@ -2083,6 +2093,7 @@ async fn test_reset_refuses_closed_task() {
 
     service
         .cas_task_update(Parameters(TaskUpdateRequest {
+            blocked_by: None,
             depth: None,
             id: id.clone(),
             title: None,
@@ -2149,6 +2160,7 @@ async fn test_show_after_update_reflects_new_status_without_lag() {
     // Move to InProgress.
     service
         .cas_task_update(Parameters(TaskUpdateRequest {
+            blocked_by: None,
             depth: None,
             id: id.clone(),
             title: None,
@@ -2185,6 +2197,7 @@ async fn test_show_after_update_reflects_new_status_without_lag() {
     // Now flip back to Open. Show must reflect Open, not a cached InProgress.
     service
         .cas_task_update(Parameters(TaskUpdateRequest {
+            blocked_by: None,
             depth: None,
             id: id.clone(),
             title: None,
@@ -2255,6 +2268,7 @@ async fn test_task_mine_matches_case_insensitive_and_trimmed() {
         .to_string();
 
     let update_req = TaskUpdateRequest {
+        blocked_by: None,
         depth: None,
         id: id.clone(),
         title: None,
@@ -3124,6 +3138,7 @@ async fn test_factory_mode_normalizes_session_uuid_assignee_to_display_name() {
     // Assign by session UUID — mimics a director prompt that used the wrong identifier.
     let update_result = service
         .cas_task_update(Parameters(TaskUpdateRequest {
+            blocked_by: None,
             depth: None,
             id: task_id.clone(),
             title: None,
@@ -3216,6 +3231,7 @@ async fn test_factory_mode_empty_assignee_clears_without_remapping_to_live_worke
     // Seed a real assignee, then clear with empty string (supervisor intent).
     service
         .cas_task_update(Parameters(TaskUpdateRequest {
+            blocked_by: None,
             depth: None,
             id: task_id.clone(),
             title: None,
@@ -3245,6 +3261,7 @@ async fn test_factory_mode_empty_assignee_clears_without_remapping_to_live_worke
 
     let clear_result = service
         .cas_task_update(Parameters(TaskUpdateRequest {
+            blocked_by: None,
             depth: None,
             id: task_id.clone(),
             title: None,
@@ -3297,6 +3314,7 @@ async fn test_factory_mode_empty_assignee_clears_without_remapping_to_live_worke
     // Whitespace-only is also an explicit clear.
     service
         .cas_task_update(Parameters(TaskUpdateRequest {
+            blocked_by: None,
             depth: None,
             id: task_id.clone(),
             title: None,
@@ -3320,6 +3338,7 @@ async fn test_factory_mode_empty_assignee_clears_without_remapping_to_live_worke
     unsafe { std::env::set_var("CAS_FACTORY_MODE", "1") }
     service
         .cas_task_update(Parameters(TaskUpdateRequest {
+            blocked_by: None,
             depth: None,
             id: task_id.clone(),
             title: None,

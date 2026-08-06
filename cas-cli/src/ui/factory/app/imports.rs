@@ -14,7 +14,7 @@ pub(super) use crate::store::{find_cas_root, open_agent_store, open_prompt_queue
 pub(super) use crate::types::Worktree;
 pub(super) use crate::ui::factory::director::{
     DiffLine, DiffLineType, DirectorData, DirectorEvent, DirectorEventDetector, PanelAreas, Prompt,
-    SidecarFocus, SidecarState, ViewMode, generate_prompt, render_with_state,
+    SidecarFocus, SidecarState, ViewMode, generate_prompt_at, render_with_state,
 };
 pub(super) use crate::ui::factory::input::{InputMode, LayoutSizes};
 pub(super) use crate::ui::factory::layout::{Direction, FactoryLayout, PANE_SIDECAR, PaneGrid};

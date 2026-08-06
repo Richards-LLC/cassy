@@ -537,26 +537,51 @@ mod supervisor_claude_delivery {
     /// created (a successful `write_to_inbox` needs it to exist); leaving it false
     /// drives the inbox-write-failure path deterministically (missing parent dir).
     /// `f` receives the manager, the resolved inboxes dir, and the session name.
+    ///
+    /// Runs under the DEFAULT config dir (`<temp home>/.claude`); see
+    /// [`with_team_session_in`] for the non-default-config-dir variant.
     fn with_team_session(
         label: &str,
         create_inboxes: bool,
         f: impl FnOnce(&TeamsManager, &Path, &str),
     ) {
-        crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
-            let session = format!("cas6257-{label}");
-            // Constructed AFTER HOME is set so its inbox dir resolves under the
-            // temp home (TeamsManager::new reads dirs::home_dir()).
-            let teams = TeamsManager::new(&session);
-            let inboxes = home
-                .join(".claude")
-                .join("teams")
-                .join(&session)
-                .join("inboxes");
-            if create_inboxes {
-                std::fs::create_dir_all(&inboxes).expect("mk inboxes dir");
-            }
-            f(&teams, &inboxes, &session);
-        });
+        with_team_session_in(label, ".claude", create_inboxes, f);
+    }
+
+    /// Like [`with_team_session`], but pins which Claude config dir (relative to
+    /// the temp `HOME`) owns the teams tree for the duration of the closure.
+    ///
+    /// HERMETICITY (cas-9534 / GH #129): the inbox turn surface is resolved from
+    /// the process environment — `teams_root_dir()` (teams.rs) joins `teams` onto
+    /// `claude_config_dir_from(dirs::home_dir(), $CLAUDE_CONFIG_DIR)`, and an
+    /// ABSOLUTE `CLAUDE_CONFIG_DIR` wins over `HOME` entirely (correct production
+    /// behavior, cas-3585). Isolating only `HOME` therefore left these tests
+    /// reading `<temp home>/.claude/...` while the real `TeamsManager` wrote to
+    /// the invoking user's live config dir (e.g. `~/.claude-alt`) — a missing
+    /// parent dir there made every `write_to_inbox` fail, so the whole module
+    /// failed whenever the ambient `CLAUDE_CONFIG_DIR` was set, and would have
+    /// polluted the user's real config dir had that tree existed. Setting the
+    /// variable explicitly makes the run independent of the invoking env in BOTH
+    /// directions: never inherited, never leaked.
+    fn with_team_session_in(
+        label: &str,
+        config_dir_name: &str,
+        create_inboxes: bool,
+        f: impl FnOnce(&TeamsManager, &Path, &str),
+    ) {
+        let mut guard = crate::test_support::TestEnvGuard::temp_home();
+        let config_dir = guard.home().join(config_dir_name);
+        guard.set("CLAUDE_CONFIG_DIR", &config_dir);
+
+        let session = format!("cas6257-{label}");
+        // Constructed AFTER HOME and CLAUDE_CONFIG_DIR are set so its inbox dir
+        // resolves under the pinned config dir (TeamsManager::new reads both).
+        let teams = TeamsManager::new(&session);
+        let inboxes = config_dir.join("teams").join(&session).join("inboxes");
+        if create_inboxes {
+            std::fs::create_dir_all(&inboxes).expect("mk inboxes dir");
+        }
+        f(&teams, &inboxes, &session);
     }
 
     fn open_queue(dir: &Path) -> SqlitePromptQueueStore {
@@ -888,6 +913,68 @@ mod supervisor_claude_delivery {
             assert_eq!(inbox.len(), 1);
             assert_eq!(inbox[0].from, DIRECTOR_AGENT_NAME);
             assert_eq!(inbox[0].text, "director: epic advanced");
+        });
+    }
+
+    /// cas-9534 / GH #129 regression: the supervisor→Claude delivery path must
+    /// work — and be pinned by this module — under a **non-default** Claude
+    /// config dir, the shape every `cas claude alt` factory runs in.
+    ///
+    /// Two failures are guarded at once:
+    /// 1. RUNTIME — the inbox turn surface must follow `$CLAUDE_CONFIG_DIR`
+    ///    (cas-3585), so the message lands under `<home>/.claude-alt/teams/...`
+    ///    and NOT under the default `<home>/.claude/teams/...`.
+    /// 2. HERMETICITY — the fixture pins the variable rather than inheriting it,
+    ///    so this suite's result no longer depends on the invoking environment.
+    ///    Before the fix, running the module with `CLAUDE_CONFIG_DIR` set (this
+    ///    host's standing `~/.claude-alt`) failed 6/14 with an empty inbox.
+    #[test]
+    fn supervisor_message_reaches_claude_inbox_under_non_default_config_dir() {
+        let qdir = TempDir::new().unwrap();
+        let queue = open_queue(qdir.path());
+
+        with_team_session_in("altcfg", ".claude-alt", true, |teams, inboxes, session| {
+            // The surface really is the alt config dir, not the default one.
+            assert!(
+                inboxes.ends_with(
+                    Path::new(".claude-alt")
+                        .join("teams")
+                        .join(session)
+                        .join("inboxes")
+                ),
+                "inbox surface must resolve under the non-default config dir; got {inboxes:?}"
+            );
+
+            queue
+                .enqueue_with_session("supervisor", "swift-fox", "start cas-9534", session)
+                .unwrap();
+
+            let marked = drain_claude(&queue, teams, &targets(), session);
+            assert_eq!(
+                marked, 1,
+                "delivery under a non-default CLAUDE_CONFIG_DIR must succeed and \
+                 mark the row processed"
+            );
+
+            let inbox = read_inbox(inboxes, "swift-fox");
+            assert_eq!(inbox.len(), 1, "message must land in the alt-config inbox");
+            assert_eq!(inbox[0].from, "supervisor");
+            assert_eq!(inbox[0].text, "start cas-9534");
+
+            // Nothing was written to the default config dir's teams tree.
+            let default_teams = inboxes
+                .ancestors()
+                .nth(3)
+                .expect("config dir")
+                .parent()
+                .expect("home")
+                .join(".claude")
+                .join("teams");
+            assert!(
+                !default_teams.exists(),
+                "delivery must not fall back to the default config dir; \
+                 {default_teams:?} should not exist"
+            );
         });
     }
 }

@@ -2241,11 +2241,20 @@ This is the body content."#;
         // the 9KB aggregate SessionStart budget introduced by cas-b114, so the
         // section can't drift back to describing a silent-truncation model
         // that no longer exists.
+        // cas-703a: grok was previously absent from this list, so the grok
+        // bodies could lose a context-budgeting marker with this test green.
+        // Grok is now checked here directly, and additionally guarded by
+        // cas-cli/tests/builtin_flavor_drift_test.rs, which holds all three
+        // flavors of these two files content-identical after normalization.
         let supervisor_files = [
             ("claude cas-supervisor.md", SUPERVISOR_GUIDE),
             (
                 "codex cas-supervisor.md",
                 include_str!("builtins/codex/skills/cas-supervisor.md"),
+            ),
+            (
+                "grok cas-supervisor.md",
+                include_str!("builtins/grok/skills/cas-supervisor.md"),
             ),
         ];
         let worker_files = [
@@ -2253,6 +2262,10 @@ This is the body content."#;
             (
                 "codex cas-worker.md",
                 include_str!("builtins/codex/skills/cas-worker.md"),
+            ),
+            (
+                "grok cas-worker.md",
+                include_str!("builtins/grok/skills/cas-worker.md"),
             ),
         ];
         for (label, content) in supervisor_files {

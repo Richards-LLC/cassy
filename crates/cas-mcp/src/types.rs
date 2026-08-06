@@ -921,8 +921,8 @@ pub(crate) mod deser;
 mod ops_secondary;
 
 pub use crate::types::ops_secondary::{
-    CoordinationRequest, ExecuteRequest, FactoryRequest, SearchContextRequest, SystemRequest,
-    TeamRequest, VerificationRequest,
+    CoordinationRequest, ExecuteRequest, FactoryRequest, KnowledgeRequest, SearchContextRequest,
+    SystemRequest, TeamRequest, VerificationRequest,
 };
 
 #[cfg(test)]

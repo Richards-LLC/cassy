@@ -375,6 +375,77 @@ pub struct VerificationRequest {
     pub dispatch_id: Option<String>,
 }
 
+/// Unified distilled-knowledge (project wiki) operations request.
+///
+/// This is the page surface of the knowledge store (EPIC cas-7d31). It is
+/// distinct from `MemoryRequest`'s `opinion_*` actions, which operate on
+/// belief-typed memory entries and happen to live in a source file also named
+/// `knowledge.rs`.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct KnowledgeRequest {
+    /// Action to perform
+    #[schemars(description = "Action: 'search', 'read', 'write', 'list', 'status'")]
+    pub action: String,
+
+    /// Full-text query (for search)
+    #[schemars(description = "Full-text query across page titles, snippets and bodies")]
+    #[serde(default)]
+    pub query: Option<String>,
+
+    /// Page ID (for read)
+    #[schemars(description = "Page ID, e.g. 'cas-kn007' (read)")]
+    #[serde(default)]
+    pub id: Option<String>,
+
+    /// Page path relative to the knowledge dir (for read/write)
+    #[schemars(
+        description = "Page path relative to the knowledge directory, e.g. 'subsystem/hooks.md' (read, or write to an existing page)"
+    )]
+    #[serde(default)]
+    pub rel_path: Option<String>,
+
+    /// Page title (for write)
+    #[schemars(description = "Page title — with page_type it determines the canonical path (write)")]
+    #[serde(default)]
+    pub title: Option<String>,
+
+    /// Page type (for write)
+    #[schemars(
+        description = "Page category: 'architecture', 'subsystem', 'workflow', 'guide', 'configuration', … (write; default 'guide')"
+    )]
+    #[serde(default)]
+    pub page_type: Option<String>,
+
+    /// Markdown body (for write)
+    #[schemars(description = "Markdown body of the page (write)")]
+    #[serde(default)]
+    pub body: Option<String>,
+
+    /// One-or-two sentence index-injectable summary (for write)
+    #[schemars(
+        description = "Short summary used for index injection (write; derived from the body when omitted)"
+    )]
+    #[serde(default)]
+    pub snippet: Option<String>,
+
+    /// Comma-separated provenance paths (for write)
+    #[schemars(
+        description = "Comma-separated source paths this page was written from (write; defaults to 'manual://mcp')"
+    )]
+    #[serde(default)]
+    pub sources: Option<String>,
+
+    /// Include the full markdown body in list/search output
+    #[schemars(description = "Include full page bodies in the response (default: false)")]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub include_body: Option<bool>,
+
+    /// Limit for list/search operations
+    #[schemars(description = "Maximum items to return")]
+    #[serde(default, deserialize_with = "deser::option_usize")]
+    pub limit: Option<usize>,
+}
+
 /// Unified team operations request
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct TeamRequest {

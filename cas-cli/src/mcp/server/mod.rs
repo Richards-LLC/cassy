@@ -67,6 +67,10 @@ pub struct CasCore {
     pub(crate) cached_agent_store: OnceLock<Arc<dyn AgentStore>>,
     pub(crate) cached_verification_store: OnceLock<Arc<dyn VerificationStore>>,
     pub(crate) cached_worktree_store: OnceLock<Arc<dyn WorktreeStore>>,
+    /// Distilled project-knowledge pages (EPIC cas-7d31). Separate from the
+    /// entry store: bodies live on disk under `.cas/knowledge/`, only the index
+    /// is in SQLite.
+    pub(crate) cached_knowledge_store: OnceLock<Arc<dyn cas_store::KnowledgeStore>>,
     /// Cached search index (lazily initialized, opened once per server lifetime)
     pub(crate) cached_search_index: OnceLock<SearchIndex>,
     /// Cached config (lazily initialized, loaded once per server lifetime)
@@ -221,6 +225,25 @@ impl CasCore {
                 message: Cow::from(format!("Failed to open worktree store: {e}")),
                 data: None,
             })
+        })
+    }
+
+    /// Get the distilled-knowledge store (cached).
+    ///
+    /// `SqliteKnowledgeStore::open` also runs `init()`, so a project that has
+    /// never run `cas knowledge build` still answers `search`/`list` with an
+    /// empty result instead of an error.
+    pub(crate) fn open_knowledge_store(
+        &self,
+    ) -> Result<Arc<dyn cas_store::KnowledgeStore>, McpError> {
+        Self::cached_or_init(&self.cached_knowledge_store, || {
+            cas_store::SqliteKnowledgeStore::open(&self.cas_root)
+                .map(|store| Arc::new(store) as Arc<dyn cas_store::KnowledgeStore>)
+                .map_err(|e| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("Failed to open knowledge store: {e}")),
+                    data: None,
+                })
         })
     }
 

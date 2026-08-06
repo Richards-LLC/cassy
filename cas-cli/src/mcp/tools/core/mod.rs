@@ -3,6 +3,7 @@ mod imports;
 mod knowledge;
 mod maintenance;
 mod memory;
+mod opinion;
 mod rules;
 mod search;
 mod skills;

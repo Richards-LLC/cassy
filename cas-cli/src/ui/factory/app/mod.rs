@@ -112,6 +112,11 @@ pub struct WorktreePrep {
 pub struct WorkerSpawnPrep {
     pub worker_name: String,
     pub worktree_info: Option<WorktreePrep>,
+    /// cas-ecf7 (GH #118): spawn-time warnings about the resolved base ref
+    /// (stale relative to trunk/remote, or not containing the focused epic).
+    /// The daemon drains these into the spawn audit trail and the supervisor's
+    /// inbox so a worker cut from old history is never a silent event.
+    pub warnings: Vec<String>,
 }
 
 /// Result of background worktree preparation (phase 2 output)
@@ -4896,6 +4901,7 @@ mod spawn_isolation_tests {
                     repo_root: repo.clone(),
                     cas_dir: cas_dir.clone(),
                 }),
+                warnings: Vec::new(),
             };
 
             let result = prep
@@ -4951,6 +4957,7 @@ mod spawn_isolation_tests {
                 repo_root: repo.clone(),
                 cas_dir,
             }),
+            warnings: Vec::new(),
         };
 
         match prep.run() {

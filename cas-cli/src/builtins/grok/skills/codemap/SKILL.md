@@ -17,6 +17,19 @@ Produce a **short, structural map** of the repo at `.claude/CODEMAP.md`. The goa
 
 If the project also has `docs/PRODUCT_OVERVIEW.md`, assume the reader has it. Don't restage product/domain content here.
 
+## Check the knowledge store first
+
+`.claude/CODEMAP.md` is a **view** over the project knowledge store, not an independent artifact. Before reading any source, ask the store what it already knows:
+
+```bash
+cas knowledge search "codemap module layout workspace"
+```
+
+- **A page comes back and its sources are current** (the paths it cites have not moved since it was written) — read it with `cas knowledge read <id-or-path>` and use it as your draft. You are reconciling a document, not writing one from scratch.
+- **Nothing comes back, or the page cites paths that no longer exist** — the store has nothing usable. Do the full read order below.
+
+Never skip writing `.claude/CODEMAP.md` just because a page exists. The page is the distilled form; the file is the artifact the freshness gate and other agents read.
+
 ## Read order (highest signal first)
 
 Read only what's needed to map the structure. Stop once every top-level directory has a one-liner — do not exhaustively skim files.
@@ -123,7 +136,23 @@ See [.claude/CODEMAP.md](.claude/CODEMAP.md) — Rust workspace + TS frontend; C
 
 If a pointer already exists with the same name, update it. Do not create duplicates.
 
-### 2. Commit CODEMAP.md to reset the staleness signal
+### 2. Seed the knowledge store
+
+`.claude/CODEMAP.md` is a distillable source, so one build turns the doc you just wrote into a knowledge page plus a source-ledger entry:
+
+```bash
+cas knowledge build --max-sources 5
+```
+
+Nothing else in the repo changed, so the ledger short-circuits every other source and this costs at most one model call. Confirm it landed:
+
+```bash
+cas knowledge search "codemap"
+```
+
+If the store is not initialized in this project, the command says so and there is nothing to fix — the doc on disk is still the artifact of record.
+
+### 3. Commit CODEMAP.md to reset the staleness signal
 
 The freshness gate (SessionStart hook + `cas codemap status`) uses **git history** as the sole authority. Once you commit `.claude/CODEMAP.md`, its git timestamp advances past all prior structural changes and both signals automatically report "up to date" in the next session.
 
@@ -140,7 +169,7 @@ cas codemap status
 
 Should report `Status: up to date`. No manual `cas codemap clear` is required.
 
-### 3. Report back
+### 4. Report back
 
 Print two things to the user:
 
@@ -162,4 +191,6 @@ Print two things to the user:
 - Skipping the keep-block check on regeneration. Destroying hand-edits is a trust breaker.
 - Forgetting to commit `.claude/CODEMAP.md`. Freshness is computed from git history — committing resets the staleness signal for the next session.
 - Forgetting to write the memory pointer.
+- Regenerating from scratch without checking `cas knowledge search` first. A current page is a draft you should be reconciling, not discarding.
+- Forgetting `cas knowledge build` after writing the doc. The store then keeps serving a stale page to every agent that queries it.
 - Including `target/`, `node_modules/`, `dist/`, `vendor/` as if they were source. They aren't — skip them.

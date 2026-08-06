@@ -17,6 +17,19 @@ Produce a **short, project-specific** domain snapshot at `docs/PRODUCT_OVERVIEW.
 
 If the project has a CODEMAP, assume the reader has it. Don't restage file-structure facts here.
 
+## Check the knowledge store first
+
+`docs/PRODUCT_OVERVIEW.md` is a **view** over the project knowledge store, not an independent artifact. Before reading any source, ask the store what it already knows:
+
+```bash
+cas knowledge search "product overview domain personas"
+```
+
+- **A page comes back and its sources are current** (the docs and schemas it cites still exist and still say what it claims) — read it with `cas knowledge read <id-or-path>` and use it as your draft. You are reconciling a document, not writing one from scratch.
+- **Nothing comes back, or the page cites paths that no longer exist** — the store has nothing usable. Do the full read order below.
+
+Never skip writing `docs/PRODUCT_OVERVIEW.md` just because a page exists. The page is the distilled form; the file is the artifact humans and other agents open.
+
 ## Read order (highest signal first)
 
 Read only what's needed to extract domain meaning. Stop once the picture is clear — do not exhaustively skim the repo.
@@ -124,7 +137,23 @@ See [docs/PRODUCT_OVERVIEW.md](docs/PRODUCT_OVERVIEW.md) — creator-brand campa
 
 If a pointer already exists with the same name, update it. Do not create duplicates.
 
-### 2. Clear the freshness counter
+### 2. Seed the knowledge store
+
+`docs/PRODUCT_OVERVIEW.md` is a distillable source, so one build turns the doc you just wrote into a knowledge page plus a source-ledger entry:
+
+```bash
+cas knowledge build --max-sources 5
+```
+
+Nothing else in the repo changed, so the ledger short-circuits every other source and this costs at most one model call. Confirm it landed:
+
+```bash
+cas knowledge search "product overview"
+```
+
+If the store is not initialized in this project, the command says so and there is nothing to fix — the doc on disk is still the artifact of record.
+
+### 3. Clear the freshness counter
 
 Run:
 
@@ -134,7 +163,7 @@ cas project-overview clear
 
 This resets the pending-change counter that `SessionStart` uses to warn about drift. Skipping this step means the next session will keep nagging about staleness even though the doc was just refreshed.
 
-### 3. Report back
+### 4. Report back
 
 Print two things to the user:
 
@@ -156,3 +185,5 @@ Print two things to the user:
 - Writing "the user" when you mean "the brand manager" or "the creator" or "the on-call engineer". Name the persona.
 - Skipping the keep-block check on regeneration. Destroying hand-edits is a trust breaker.
 - Forgetting to write the memory pointer or forgetting to run `cas project-overview clear`.
+- Regenerating from scratch without checking `cas knowledge search` first. A current page is a draft you should be reconciling, not discarding.
+- Forgetting `cas knowledge build` after writing the doc. The store then keeps serving a stale page to every agent that queries it.

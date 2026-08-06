@@ -49,7 +49,7 @@ Binary lives in `cas-cli`; everything else is a library consumed by it. Release 
 - `cli/init/`, `cli/config/`, `cli/config_tui/` — project init, config read/write, config TUI. `config/settings.rs` holds `STOCK_WORKER_{HARNESS,MODEL,REASONING_EFFORT}` and `FactoryConfig.strict_cli`
 - `cli/update/`, `cli/hook/`, `cli/hook_tests/` — `cas update` atomic rewrite of `managed_by:cas` files; hook install/inspect + golden-JSON tests
 - `cli/codemap_cmd.rs`, `cli/project_overview_cmd.rs` — freshness-gate subcommands
-- `cli/knowledge_cmd.rs` — `cas knowledge build|status|list`; `--dry-run` classifies against the ledger without prompting, committing, or writing a ledger row
+- `cli/knowledge_cmd.rs` — `cas knowledge build|status|list|search|read`; `--dry-run` classifies against the ledger without prompting, committing, or writing a ledger row; `read` accepts a page id or a rel_path
 - `cli/{doctor,status,list,queue,open,known_repos,memory,mcp_cmd,bridge,changelog,claude_md,auth,device}.rs`
 
 ## cas-cli/src/mcp — MCP server
@@ -59,7 +59,9 @@ Tool dispatch for `mcp__cas__*`; each call is panic-isolated via `tokio::spawn` 
 - `tools/core/task/lifecycle/{stale_close_guard,supervisor_push}.rs` — post-close guards, transition→supervisor push seam
 - `tools/core/agent_coordination/` — register/whoami/messaging, `agent_management.rs` (lease-history renderer), task claiming + supervisor force-transfer
 - `tools/core/workflow/worktree_ops.rs` — `worktree_merge` target resolution: explicit task → assignee tasks → `allow_trunk` → refuse. Session `focus_epic` is deliberately **not** merge authority (cas-b86e)
-- `tools/core/{memory,search,rules,skills,system,knowledge,maintenance}.rs`
+- `tools/core/{memory,search,rules,skills,system,maintenance}.rs`
+- `tools/core/knowledge.rs` — the `knowledge` meta-tool's page handlers (search/read/write/list/status over `KnowledgeStore`); `write` is unlock→`commit_ingest`→`set_locked(true)`, so hand-authored pages are always `locked=1`
+- `tools/core/opinion.rs` — belief-typed `opinion_reinforce|weaken|contradict` handlers, dispatched from the `memory` tool (this file was named `knowledge.rs` until cas-ee3d)
 - `tools/service/factory_ops.rs` — `worker_status`, `worker_activity`, `spawn_workers`, `epic_status`, `focus_epic`; Codex rollout resolution + activity/in-flight/context signals
 - `tools/service/harness_observation.rs` — artifact-backed turn observations; asymmetric evidence model (Codex turn_id correlation vs Claude inbox-only)
 - `tools/service/agent_search_system/message.rs` — `message` / `message_status` and delivery-report formatting

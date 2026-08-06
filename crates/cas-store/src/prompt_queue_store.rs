@@ -67,6 +67,49 @@ const NOT_ALREADY_CONSUMED_SQL: &str =
                        WHERE seen.prompt_id = prompt_queue.id
                          AND seen.recipient = prompt_queue.target)))";
 
+/// cas-99d2 (GH #126): may a reply be taken as confirmation that a delivered
+/// message was consumed?
+///
+/// Reply-inference (cas-6ad2) is the only confirmation path factory prompts
+/// actually exercise, and it was unconditional: ANY later message from the
+/// recipient to the same counterparty confirmed EVERY transport-delivered row
+/// between them. That silently marked messages `confirmed` while the recipient
+/// had never been shown them — zeroing `undelivered_after` and disarming the
+/// supervisor's escalation gate on a worker idling against a stale premise.
+///
+/// Two independent gates, both required:
+///
+/// 1. **Ordering.** The reply must have been enqueued after the message's
+///    transport handoff. A reply composed before the message existed (or while
+///    it was still crossing in flight) cannot be a response to it.
+/// 2. **Surfacing receipt.** CAS must hold a record that the message's content
+///    was actually put in front of the recipient at or before the reply — a
+///    `prompt_queue_recipient_seen` row for (message, addressed target),
+///    written by the recipient's own inbox drain. Transport handoff is a write
+///    to a file or a pane; it is not evidence anyone read it.
+///
+/// Weak evidence is not "probably fine": without both gates the row must stay
+/// `delivered` / `awaiting_ack` so its undelivered clock keeps counting. An
+/// explicit `message_ack` remains the strong path and does not come through
+/// here at all.
+pub fn reply_confirms_delivered_message(
+    transport_delivered_at: Option<DateTime<Utc>>,
+    recipient_seen_at: Option<DateTime<Utc>>,
+    reply_enqueued_at: DateTime<Utc>,
+) -> bool {
+    let Some(delivered_at) = transport_delivered_at else {
+        // Never handed to a transport — nothing could have been consumed.
+        return false;
+    };
+    if delivered_at > reply_enqueued_at {
+        return false;
+    }
+    let Some(seen_at) = recipient_seen_at else {
+        return false;
+    };
+    seen_at <= reply_enqueued_at
+}
+
 /// Result of recording a failed daemon delivery attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptRetryDisposition {
@@ -868,11 +911,17 @@ pub trait PromptQueueStore: Send + Sync {
     /// `"supervisor"` alias, so both sides are expressed as alias slices.
     /// Only transport-delivered, still-unacked rows in the observing factory
     /// session are advanced.
+    ///
+    /// cas-99d2 (GH #126): a reply confirms a message only when it could
+    /// actually have been a response to it — see
+    /// [`reply_confirms_delivered_message`] for the two required gates.
+    /// `reply_enqueued_at` is when the confirming reply was enqueued.
     fn ack_delivered_for_recipient(
         &self,
         recipient_aliases: &[&str],
         sender_aliases: &[&str],
         factory_session: Option<&str>,
+        reply_enqueued_at: DateTime<Utc>,
     ) -> Result<usize>;
 
     /// Get messages that were processed but not acked within the timeout
@@ -2218,6 +2267,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         recipient_aliases: &[&str],
         sender_aliases: &[&str],
         factory_session: Option<&str>,
+        reply_enqueued_at: DateTime<Utc>,
     ) -> Result<usize> {
         if recipient_aliases.is_empty() || sender_aliases.is_empty() {
             return Ok(0);
@@ -2235,13 +2285,22 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             } else {
                 "AND factory_session IS NULL"
             };
-            let sql = format!(
-                "UPDATE prompt_queue
-                 SET acked_at = ?,
-                     acked_via = 'inferred_from_reply',
-                     highest_stage = 'confirmed',
-                     last_pending_reason = NULL,
-                     last_pending_detail = NULL
+            // cas-99d2 (GH #126): candidate selection first, then the two
+            // evidence gates evaluated in Rust.
+            //
+            // Timestamps are compared after `parse_datetime`, never as SQL
+            // string inequalities: the column holds a mix of `to_rfc3339()`
+            // output ("…+00:00") and literal "Z" spellings, and "Z" sorts
+            // after "+", so for the same instant the two spellings compare
+            // in opposite directions.
+            let select_sql = format!(
+                "SELECT prompt_queue.id,
+                        prompt_queue.transport_delivered_at,
+                        (SELECT MIN(seen.seen_at)
+                           FROM prompt_queue_recipient_seen seen
+                          WHERE seen.prompt_id = prompt_queue.id
+                            AND seen.recipient = prompt_queue.target)
+                 FROM prompt_queue
                  WHERE acked_at IS NULL
                    AND transport_delivered_at IS NOT NULL
                    AND target IN ({})
@@ -2252,8 +2311,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             );
 
             let mut query_params: Vec<Box<dyn rusqlite::ToSql>> =
-                Vec::with_capacity(1 + recipient_aliases.len() + sender_aliases.len() + 1);
-            query_params.push(Box::new(now));
+                Vec::with_capacity(recipient_aliases.len() + sender_aliases.len() + 1);
             query_params.extend(
                 recipient_aliases
                     .iter()
@@ -2268,10 +2326,51 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 query_params.push(Box::new(session.to_string()));
             }
 
-            Ok(conn.execute(
-                &sql,
-                rusqlite::params_from_iter(query_params.iter().map(|value| value.as_ref())),
-            )?)
+            let candidates: Vec<(i64, Option<String>, Option<String>)> = {
+                let mut stmt = conn.prepare(&select_sql)?;
+                stmt.query_map(
+                    rusqlite::params_from_iter(query_params.iter().map(|value| value.as_ref())),
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    },
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+            };
+
+            let confirmable: Vec<i64> = candidates
+                .into_iter()
+                .filter(|(_, delivered_at, seen_at)| {
+                    reply_confirms_delivered_message(
+                        delivered_at.as_deref().and_then(Self::parse_datetime),
+                        seen_at.as_deref().and_then(Self::parse_datetime),
+                        reply_enqueued_at,
+                    )
+                })
+                .map(|(id, _, _)| id)
+                .collect();
+
+            if confirmable.is_empty() {
+                return Ok(0);
+            }
+
+            let mut stmt = conn.prepare_cached(
+                "UPDATE prompt_queue
+                 SET acked_at = ?,
+                     acked_via = 'inferred_from_reply',
+                     highest_stage = 'confirmed',
+                     last_pending_reason = NULL,
+                     last_pending_detail = NULL
+                 WHERE id = ? AND acked_at IS NULL",
+            )?;
+            let mut updated = 0usize;
+            for id in confirmable {
+                updated += stmt.execute(params![now, id])?;
+            }
+            Ok(updated)
         })
     }
 
@@ -2855,6 +2954,260 @@ mod tests {
         (temp, store)
     }
 
+    /// Write the surfacing receipt an inbox drain would leave, at a chosen
+    /// instant. Done in SQL rather than via `poll_unseen_for_recipient` so a
+    /// test can place the receipt at a specific time and without the drain's
+    /// side effect of advancing every polled row's stage (cas-99d2).
+    fn record_seen(
+        store: &SqlitePromptQueueStore,
+        prompt_id: i64,
+        recipient: &str,
+        seen_at: DateTime<Utc>,
+    ) {
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO prompt_queue_recipient_seen (prompt_id, recipient, seen_at)
+             VALUES (?, ?, ?)",
+            params![prompt_id, recipient, seen_at.to_rfc3339()],
+        )
+        .unwrap();
+    }
+
+    /// Stamp transport delivery at a chosen instant (the real API stamps
+    /// `now`, which cannot express "delivered after the reply was composed").
+    fn set_transport_delivered_at(
+        store: &SqlitePromptQueueStore,
+        prompt_id: i64,
+        at: DateTime<Utc>,
+    ) {
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE prompt_queue
+             SET transport_delivered_at = ?, processed_at = ?, highest_stage = 'delivered',
+                 last_pending_reason = 'awaiting_ack'
+             WHERE id = ?",
+            params![at.to_rfc3339(), at.to_rfc3339(), prompt_id],
+        )
+        .unwrap();
+    }
+
+    /// cas-99d2 (GH #126): the REAL shape of notifications 7124 / 7129 in
+    /// factory session cas-src-noble-salmon-99.
+    ///
+    /// Both were transport-delivered to a worker, both had NO
+    /// `prompt_queue_recipient_seen` row, and both were nevertheless marked
+    /// `confirmed` / `inferred_from_reply` by the worker's next message to the
+    /// supervisor ~12s and ~21s later. That zeroed `undelivered_after` and
+    /// disarmed the supervisor's escalation gate while the worker was still
+    /// operating on a stale premise. The reply ordering was fine here — the
+    /// missing surfacing receipt is what made the confirmation a fabrication.
+    #[test]
+    fn cas99d2_reply_without_a_surfacing_receipt_does_not_confirm_gh126() {
+        let (_temp, store) = create_test_store();
+        let delivered_at = Utc::now() - chrono::Duration::seconds(21);
+        let message = store
+            .enqueue_with_session(
+                "supervisor",
+                "fierce-crow-25",
+                "factory/fierce-crow-25 is merged into the epic branch at 8823fcc3. \
+                 Re-run close with commit_receipt=83179ea9 and FRESH scoped test evidence.",
+                "cas-src-noble-salmon-99",
+            )
+            .unwrap();
+        set_transport_delivered_at(&store, message, delivered_at);
+        // No record_seen(...) — the worker never drained its inbox for this row.
+
+        let confirmed = store
+            .ack_delivered_for_recipient(
+                &["fierce-crow-25"],
+                &["supervisor"],
+                Some("cas-src-noble-salmon-99"),
+                Utc::now(),
+            )
+            .unwrap();
+        assert_eq!(
+            confirmed, 0,
+            "a reply must not confirm a message CAS never observed being surfaced"
+        );
+
+        let report = store.message_delivery_report(message).unwrap().unwrap();
+        assert_eq!(report.stage, DeliveryStage::Delivered);
+        assert_eq!(report.pending_reason, Some(PendingReason::AwaitingAck));
+        assert_eq!(report.confirmation_source, ConfirmationSource::Unconfirmed);
+        assert!(
+            report.confirmed_at.is_none(),
+            "confirmed_at must stay unset so the undelivered clock keeps counting"
+        );
+    }
+
+    /// cas-99d2: the positive control — notification 7112's shape, which DID
+    /// have a drain receipt (19:10:42) before its ack (19:11:01). Adding
+    /// evidence gates must not break the case reply-inference exists for.
+    #[test]
+    fn cas99d2_reply_after_a_surfacing_receipt_still_confirms() {
+        let (_temp, store) = create_test_store();
+        let delivered_at = Utc::now() - chrono::Duration::seconds(900);
+        let seen_at = Utc::now() - chrono::Duration::seconds(19);
+        let message = store
+            .enqueue_with_session(
+                "supervisor",
+                "watchful-koala-20",
+                "You are assigned task cas-7587 (P2 bug, epic cas-b0c7).",
+                "cas-src-noble-salmon-99",
+            )
+            .unwrap();
+        set_transport_delivered_at(&store, message, delivered_at);
+        record_seen(&store, message, "watchful-koala-20", seen_at);
+
+        let confirmed = store
+            .ack_delivered_for_recipient(
+                &["watchful-koala-20"],
+                &["supervisor"],
+                Some("cas-src-noble-salmon-99"),
+                Utc::now(),
+            )
+            .unwrap();
+        assert_eq!(confirmed, 1);
+        let report = store.message_delivery_report(message).unwrap().unwrap();
+        assert_eq!(report.stage, DeliveryStage::Confirmed);
+        assert_eq!(
+            report.confirmation_source,
+            ConfirmationSource::InferredFromReply
+        );
+    }
+
+    /// cas-99d2 (GH #126, AC2): a reply enqueued BEFORE the message was
+    /// delivered — the two crossing in flight — can never be a response to it.
+    /// No production path produces this today; the ordering guard is retained
+    /// so that it cannot start producing it silently.
+    #[test]
+    fn cas99d2_reply_composed_before_delivery_never_confirms() {
+        let (_temp, store) = create_test_store();
+        let reply_enqueued_at = Utc::now() - chrono::Duration::seconds(30);
+        let delivered_at = reply_enqueued_at + chrono::Duration::seconds(5);
+        let message = store
+            .enqueue_with_session("supervisor", "worker-1", "new premise", "sess-1")
+            .unwrap();
+        set_transport_delivered_at(&store, message, delivered_at);
+        // Receipt exists, and even predates the delivery stamp — the ordering
+        // gate must still refuse, independently of the receipt gate.
+        record_seen(&store, message, "worker-1", reply_enqueued_at);
+
+        let confirmed = store
+            .ack_delivered_for_recipient(
+                &["worker-1"],
+                &["supervisor"],
+                Some("sess-1"),
+                reply_enqueued_at,
+            )
+            .unwrap();
+        assert_eq!(
+            confirmed, 0,
+            "a reply that predates transport delivery cannot confirm the message"
+        );
+        assert_eq!(
+            store
+                .message_delivery_report(message)
+                .unwrap()
+                .unwrap()
+                .confirmation_source,
+            ConfirmationSource::Unconfirmed
+        );
+    }
+
+    /// cas-99d2: a receipt written AFTER the reply is not evidence the reply
+    /// was a response — the recipient saw the content only later.
+    #[test]
+    fn cas99d2_surfacing_receipt_after_the_reply_does_not_confirm() {
+        let (_temp, store) = create_test_store();
+        let reply_enqueued_at = Utc::now() - chrono::Duration::seconds(60);
+        let message = store
+            .enqueue_with_session("supervisor", "worker-1", "new premise", "sess-1")
+            .unwrap();
+        set_transport_delivered_at(
+            &store,
+            message,
+            reply_enqueued_at - chrono::Duration::seconds(10),
+        );
+        record_seen(
+            &store,
+            message,
+            "worker-1",
+            reply_enqueued_at + chrono::Duration::seconds(10),
+        );
+
+        assert_eq!(
+            store
+                .ack_delivered_for_recipient(
+                    &["worker-1"],
+                    &["supervisor"],
+                    Some("sess-1"),
+                    reply_enqueued_at,
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    /// cas-99d2: the gates as a pure truth table, including the sub-second
+    /// precision hazard that motivated comparing parsed instants instead of
+    /// SQL string inequalities.
+    #[test]
+    fn cas99d2_reply_confirmation_predicate_truth_table() {
+        let reply = Utc::now();
+        let before = reply - chrono::Duration::seconds(1);
+        let after = reply + chrono::Duration::seconds(1);
+
+        assert!(reply_confirms_delivered_message(
+            Some(before),
+            Some(before),
+            reply
+        ));
+        assert!(
+            reply_confirms_delivered_message(Some(reply), Some(reply), reply),
+            "simultaneity is permitted; only strict inversion is refused"
+        );
+        assert!(
+            !reply_confirms_delivered_message(Some(after), Some(before), reply),
+            "delivery after the reply"
+        );
+        assert!(
+            !reply_confirms_delivered_message(Some(before), None, reply),
+            "no surfacing receipt"
+        );
+        assert!(
+            !reply_confirms_delivered_message(Some(before), Some(after), reply),
+            "receipt after the reply"
+        );
+        assert!(
+            !reply_confirms_delivered_message(None, Some(before), reply),
+            "never transport-delivered"
+        );
+
+        // Offset spelling: the store holds a mix of `to_rfc3339()` output
+        // ("+00:00") and literal "Z" timestamps, and "Z" (0x5A) sorts after
+        // "+" (0x2B) — so for the SAME instant a Z-spelled stamp compares
+        // greater as a string. That is why the query hands parsed instants to
+        // this predicate instead of using a SQL string inequality.
+        let earlier = Utc.timestamp_opt(1_800_000_000, 0).unwrap();
+        let later = Utc.timestamp_opt(1_800_000_000, 500_000_000).unwrap();
+        let z_spelled = earlier.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        assert!(z_spelled.ends_with('Z'));
+        assert!(
+            z_spelled > later.to_rfc3339(),
+            "the earlier instant sorts LATER as a string once offsets differ"
+        );
+        assert!(
+            reply_confirms_delivered_message(
+                SqlitePromptQueueStore::parse_datetime(&z_spelled),
+                Some(earlier),
+                later
+            ),
+            "a delivery that really is earlier must confirm regardless of how its \
+             timestamp happens to be spelled"
+        );
+    }
+
     /// cas-45c4 (GH #102): an ack inferred from a later reply must never be
     /// reported the same way as the recipient's own acknowledgement. The
     /// inference proves the recipient took a turn; it does not prove this
@@ -2885,9 +3238,18 @@ mod tests {
 
         // The recipient explicitly acknowledges one of them...
         store.ack(explicit).unwrap();
-        // ...and separately sends a reply, which sweeps the rest to acked.
+        // ...and separately drains its inbox (cas-99d2: the surfacing receipt
+        // reply-inference now requires) and replies, which sweeps the rest.
         store
-            .ack_delivered_for_recipient(&["swift-fox"], &["supervisor"], Some("sess-1"))
+            .poll_unseen_for_recipient("swift-fox", Some("sess-1"), 10)
+            .unwrap();
+        store
+            .ack_delivered_for_recipient(
+                &["swift-fox"],
+                &["supervisor"],
+                Some("sess-1"),
+                Utc::now(),
+            )
             .unwrap();
 
         let a = store.message_delivery_report(explicit).unwrap().unwrap();
@@ -3138,12 +3500,15 @@ mod tests {
             )
             .unwrap();
         store.mark_transport_delivered(consumed).unwrap();
+        // cas-99d2: reply-inference also needs a surfacing receipt for the row.
+        record_seen(&store, consumed, "worker-1", Utc::now());
 
         let confirmed = store
             .ack_delivered_for_recipient(
                 &["worker-1"],
                 &["supervisor", "display-supervisor"],
                 Some("factory-session"),
+                Utc::now(),
             )
             .unwrap();
         assert_eq!(confirmed, 1);

@@ -49,6 +49,7 @@ Binary lives in `cas-cli`; everything else is a library consumed by it. Release 
 - `cli/init/`, `cli/config/`, `cli/config_tui/` — project init, config read/write, config TUI. `config/settings.rs` holds `STOCK_WORKER_{HARNESS,MODEL,REASONING_EFFORT}` and `FactoryConfig.strict_cli`
 - `cli/update/`, `cli/hook/`, `cli/hook_tests/` — `cas update` atomic rewrite of `managed_by:cas` files; hook install/inspect + golden-JSON tests
 - `cli/codemap_cmd.rs`, `cli/project_overview_cmd.rs` — freshness-gate subcommands
+- `cli/knowledge_cmd.rs` — `cas knowledge build|status|list`; `--dry-run` classifies against the ledger without prompting, committing, or writing a ledger row
 - `cli/{doctor,status,list,queue,open,known_repos,memory,mcp_cmd,bridge,changelog,claude_md,auth,device}.rs`
 
 ## cas-cli/src/mcp — MCP server
@@ -82,6 +83,7 @@ Rust TUI over an in-process PTY mux (not tmux); `cas` with no subcommand launche
 - `cloud/syncer/` — `pull.rs` (`sync_with_sessions` drains personal push, team queue, then pull), project-scoping guards, push envelope carrying `project_canonical_id`
 - `sync/`, `bridge/`, `daemon/` — builtin→`.claude/` sync, HTTP bridge, background maintenance
 - `extraction/`, `consolidation/`, `hybrid_search/`, `rules/` — memory pipeline
+- `knowledge/` — distillation pass over `cas-store/knowledge_store.rs` (EPIC cas-7d31). `sources.rs` picks docs/key configs and synthesizes `code://<module>` summaries from indexed symbols; `chunk.rs` splits headings→paragraphs→hard slice with tail overlap; `prompt.rs` holds the two-stage prompts plus the role-isolation armor (untrusted content is neutralized and marker-quoted; `DistilledPage` has no path field, so a model-proposed path cannot be honored); `merge.rs` defines the provenance-tagged body fragments (`<!-- cas:sources [...] -->`) and the cost tiers (containment→union only / small page→rewrite / large page→append delta); `llm.rs` is the `LlmRunner` trait + `claude -p` runner + `ScriptedLlm` mock (its call count is the token meter); `pipeline.rs` runs the pass and repairs provenance and dangling wikilinks after a cascade delete. An unchanged repo short-circuits before any prompt is built
 - `telemetry/`, `tracing/`, `otel.rs`, `sentry.rs`, `logging.rs` — observability
 - `worktree/` — worktree creation, salvage, sweep, cleanup
 - `harness_policy.rs`, `agent_id.rs`, `duplicate_check.rs`, `error.rs`, `async_runtime.rs`

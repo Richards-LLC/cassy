@@ -654,9 +654,68 @@ impl EmbeddedDaemon {
                 "[CAS] Code indexing: {} indexed, {} deleted, {} symbols",
                 result.files_indexed, result.files_deleted, result.symbols_indexed,
             );
+
+            // EPIC cas-7d31 (cas-c9be): the code index just told us something
+            // moved, which is exactly when distilled knowledge goes stale.
+            // Opt-in only — a distillation pass spends tokens, so it never
+            // starts from a background cycle unless the operator asked for it.
+            if crate::knowledge::auto_distill_enabled() {
+                self.run_knowledge_distillation().await;
+            }
         }
 
         Ok(())
+    }
+
+    /// Distill changed sources into the knowledge wiki (opt-in, see
+    /// [`crate::knowledge::AUTO_DISTILL_ENV`]).
+    ///
+    /// Failures are logged, never propagated: knowledge is an enrichment, and a
+    /// missing provider binary must not take down the daemon's index cycle.
+    async fn run_knowledge_distillation(&self) {
+        let cas_root = self.config.cas_root.clone();
+        let model = self.config.to_daemon_config().model;
+
+        let outcome = tokio::task::spawn_blocking(move || {
+            let store = cas_store::SqliteKnowledgeStore::open(&cas_root)?;
+            let project_root = cas_root
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .ok_or_else(|| anyhow::anyhow!("cannot resolve project root"))?;
+            // The source set MUST be the complete one: `run_distillation`
+            // tombstones every ledger path missing from it, so handing it a
+            // set with no `code://` module sources would cascade-delete every
+            // module page the CLI had built (and re-bill them next pass).
+            let symbols = crate::cli::knowledge_symbols_with_limit(&cas_root, crate::cli::KNOWLEDGE_MAX_SYMBOLS);
+            let sources = crate::knowledge::collect_sources(&project_root, &symbols.symbols);
+            let runner = crate::knowledge::ClaudeCliRunner::new(Some(model));
+            let config = crate::knowledge::DistillConfig {
+                protected_prefixes: if symbols.truncated {
+                    vec![crate::knowledge::sources::CODE_MODULE_SCHEME.to_string()]
+                } else {
+                    Vec::new()
+                },
+                ..crate::knowledge::DistillConfig::default()
+            };
+            crate::knowledge::run_distillation(&store, &runner, &sources, &config)
+        })
+        .await;
+
+        match outcome {
+            Ok(Ok(report)) if !report.is_noop() => {
+                eprintln!(
+                    "[CAS] Knowledge distillation: {} pages written, {} llm calls",
+                    report.pages_written, report.llm_calls
+                );
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(error = %error, "Knowledge distillation failed");
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "Knowledge distillation task join error");
+            }
+        }
     }
 
     /// Run full maintenance cycle

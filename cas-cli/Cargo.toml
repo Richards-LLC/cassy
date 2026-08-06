@@ -98,6 +98,10 @@ chrono = { version = "0.4", features = ["serde"] }
 # File System
 dirs = "6.0"
 walkdir = "2.5"
+# Distillation captures provider stdout/stderr to files rather than pipes so a
+# deadline can be enforced without a full pipe wedging the child; those captures
+# must be O_EXCL + 0600, not predictable names in a shared /tmp (cas-c9be).
+tempfile = "3.14"
 ignore = "0.4"
 notify = { version = "8.0", default-features = false, features = ["macos_fsevent"] }
 notify-debouncer-mini = "0.7"

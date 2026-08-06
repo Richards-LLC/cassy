@@ -950,3 +950,145 @@ fn epic_base_degrades_to_trunk_when_git_cannot_answer() {
     assert!(choice.notice.is_none());
     assert_eq!(choice.head_ahead, 0);
 }
+
+// ---------------------------------------------------------------------------
+// cas-aae6 (GH #110): a stack deeper than one level. C on B on A used to
+// present as "C is based on B" — the A → B → C landing order was invisible.
+// ---------------------------------------------------------------------------
+
+/// main → epic/a → epic/b → epic/c, each carrying one commit, none landed.
+fn three_deep_stack() -> (TempDir, PathBuf, String) {
+    let (temp, repo_path) = create_test_repo();
+    let trunk = trunk_of(&repo_path);
+    checkout_new(&repo_path, "epic/a");
+    commit_on(&repo_path, "a.txt", "epic a work");
+    checkout_new(&repo_path, "epic/b");
+    commit_on(&repo_path, "b.txt", "epic b work");
+    checkout_new(&repo_path, "epic/c");
+    commit_on(&repo_path, "c.txt", "epic c work");
+    (temp, repo_path, trunk)
+}
+
+#[test]
+fn unlanded_epic_ancestry_reports_the_whole_chain_trunk_first() {
+    let (_temp, repo_path, trunk) = three_deep_stack();
+    let git = GitOperations::new(repo_path);
+
+    assert_eq!(
+        git.unlanded_epic_ancestry("epic/c", &trunk),
+        vec!["epic/a".to_string(), "epic/b".to_string()],
+        "the chain must be complete and ordered by the sequence they must land in"
+    );
+    assert_eq!(
+        git.unlanded_epic_ancestry("epic/b", &trunk),
+        vec!["epic/a".to_string()],
+        "the middle of the stack sees only what is below it"
+    );
+    assert!(
+        git.unlanded_epic_ancestry("epic/a", &trunk).is_empty(),
+        "the bottom of the stack is stacked on nothing"
+    );
+}
+
+#[test]
+fn landed_epics_drop_out_of_the_chain() {
+    let (_temp, repo_path, trunk) = three_deep_stack();
+    // epic/a lands on trunk; it now constrains nothing.
+    Command::new("git")
+        .args(["checkout", "-q", &trunk])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["merge", "-q", "--no-ff", "epic/a", "-m", "land epic/a"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+
+    let git = GitOperations::new(repo_path);
+    assert_eq!(
+        git.unlanded_epic_ancestry("epic/c", &trunk),
+        vec!["epic/b".to_string()],
+        "a landed epic must not keep appearing as a blocker"
+    );
+}
+
+#[test]
+fn sibling_epics_are_not_part_of_the_chain() {
+    let (_temp, repo_path, trunk) = three_deep_stack();
+    // An unrelated epic off trunk: unlanded, but not contained in epic/c.
+    Command::new("git")
+        .args(["checkout", "-q", &trunk])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    checkout_new(&repo_path, "epic/unrelated");
+    commit_on(&repo_path, "u.txt", "unrelated epic work");
+
+    let git = GitOperations::new(repo_path);
+    let chain = git.unlanded_epic_ancestry("epic/c", &trunk);
+    assert_eq!(chain, vec!["epic/a".to_string(), "epic/b".to_string()]);
+    assert!(
+        !chain.contains(&"epic/unrelated".to_string()),
+        "only branches actually contained in the base constrain it: {chain:?}"
+    );
+}
+
+#[test]
+fn epic_base_notice_names_the_full_stack_not_just_the_parent() {
+    let (_temp, repo_path, trunk) = three_deep_stack();
+    // Sitting on epic/c, create a fourth epic.
+    let git = GitOperations::new(repo_path);
+    let choice = git.resolve_epic_base(&trunk);
+
+    assert!(choice.used_head);
+    assert_eq!(choice.base_ref, "epic/c");
+    assert_eq!(
+        choice.stacked_on,
+        vec!["epic/a".to_string(), "epic/b".to_string()],
+        "the choice must carry the whole chain, not one level"
+    );
+    let notice = choice.notice.expect("stacking must be explained");
+    assert!(
+        notice.contains("STACK DEPTH 3"),
+        "depth must be stated so a deep stack is obvious at a glance: {notice}"
+    );
+    assert!(
+        notice.contains("'epic/a' → 'epic/b'")
+            && notice.contains("'epic/a' → 'epic/b' → 'epic/c'"),
+        "the notice must name the ancestry AND the landing order: {notice}"
+    );
+}
+
+#[test]
+fn single_level_stack_does_not_claim_a_chain() {
+    let (_temp, repo_path) = create_test_repo();
+    let trunk = trunk_of(&repo_path);
+    checkout_new(&repo_path, "epic/only");
+    commit_on(&repo_path, "o.txt", "epic work");
+
+    let git = GitOperations::new(repo_path);
+    let choice = git.resolve_epic_base(&trunk);
+
+    assert!(choice.used_head);
+    assert!(
+        choice.stacked_on.is_empty(),
+        "one level is not a stack: {:?}",
+        choice.stacked_on
+    );
+    let notice = choice.notice.expect("notice");
+    assert!(
+        !notice.contains("STACK DEPTH"),
+        "no chain language when there is no chain: {notice}"
+    );
+}
+
+#[test]
+fn ancestry_is_empty_when_git_cannot_answer() {
+    let temp = TempDir::new().unwrap();
+    let git = GitOperations::new(temp.path().to_path_buf());
+    assert!(
+        git.unlanded_epic_ancestry("epic/c", "main").is_empty(),
+        "an advisory display must never fail epic creation"
+    );
+}

@@ -241,6 +241,11 @@ pub struct EpicBaseChoice {
     pub head_behind: u32,
     /// Whether `base_ref` is HEAD's branch rather than the trunk base.
     pub used_head: bool,
+    /// Unlanded `epic/*` branches already contained in the chosen base,
+    /// trunk-first (cas-aae6 / GH #110). Empty unless the base is an epic
+    /// branch that is itself stacked. The new epic sits on top of all of them,
+    /// so this is the order they must land in.
+    pub stacked_on: Vec<String>,
     /// Operator-facing sentence describing the decision, when there is
     /// anything to say. Always populated when HEAD is ahead of the base.
     pub notice: Option<String>,
@@ -255,6 +260,7 @@ impl EpicBaseChoice {
             head_ahead: 0,
             head_behind: 0,
             used_head: false,
+            stacked_on: Vec::new(),
             notice: None,
         }
     }

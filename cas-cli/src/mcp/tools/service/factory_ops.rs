@@ -2793,7 +2793,7 @@ impl CasService {
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::core::task::lifecycle::close_ops::{
-            collect_epic_branch_statuses, render_epic_status_report,
+            collect_epic_branch_statuses, render_epic_status_report_with_stack,
         };
         use crate::store::open_task_store;
         use cas_types::TaskType;
@@ -2844,7 +2844,26 @@ impl CasService {
 
         let close_project_root = self.inner.cas_root.parent().unwrap_or(&self.inner.cas_root);
         let statuses = collect_epic_branch_statuses(&subtasks, parent_branch, close_project_root);
-        let report = render_epic_status_report(epic_id, parent_branch, &statuses);
+
+        // cas-aae6 (GH #110): an epic stacked on other unlanded epic branches
+        // cannot land alone. Show that here, where the supervisor decides
+        // merge order, rather than only in the creation message that scrolled
+        // away hours ago.
+        let stacked_on = {
+            use crate::worktree::GitOperations;
+            let trunk = crate::config::Config::configured_epic_base_branch(close_project_root)
+                .unwrap_or_else(|| {
+                    GitOperations::new(close_project_root.to_path_buf()).detect_default_branch()
+                });
+            GitOperations::new(close_project_root.to_path_buf())
+                .unlanded_epic_ancestry(parent_branch, &trunk)
+        };
+        let report = render_epic_status_report_with_stack(
+            epic_id,
+            parent_branch,
+            &statuses,
+            &stacked_on,
+        );
 
         Ok(Self::success(report))
     }

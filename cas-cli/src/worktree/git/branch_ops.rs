@@ -315,16 +315,43 @@ impl GitOperations {
         let is_epic_head = head.starts_with("epic/");
 
         if is_epic_head && head_behind == 0 {
+            // cas-aae6 (GH #110): name the WHOLE stack, not just the branch
+            // being based on. C on B on A used to read as "based on B", and
+            // the A→B→C landing order stayed invisible until something failed
+            // to merge.
+            let ancestry = self.unlanded_epic_ancestry(&head, base_ref);
+            let chain_note = if ancestry.is_empty() {
+                String::new()
+            } else {
+                let mut order = ancestry.clone();
+                order.push(head.clone());
+                format!(
+                    " STACK DEPTH {}: '{head}' is itself based on unlanded epic branch(es) {}. \
+                     Everything above lands with it — merge order is {} → '{base_ref}'.",
+                    order.len(),
+                    ancestry
+                        .iter()
+                        .map(|b| format!("'{b}'"))
+                        .collect::<Vec<_>>()
+                        .join(" → "),
+                    order
+                        .iter()
+                        .map(|b| format!("'{b}'"))
+                        .collect::<Vec<_>>()
+                        .join(" → "),
+                )
+            };
             return EpicBaseChoice {
                 base_ref: head.clone(),
                 notice: Some(format!(
                     "Based on the active epic branch '{head}' ({head_ahead} commit(s) ahead of \
                      '{base_ref}') so work already on it is not stranded. This branch therefore \
                      CONTAINS those commits: merging it to '{base_ref}' also merges '{head}', so \
-                     land '{head}' first or accept that. Pass an explicit \
+                     land '{head}' first or accept that.{chain_note} Pass an explicit \
                      target_repo/target_branch, or check out '{base_ref}', to start from trunk \
                      instead."
                 )),
+                stacked_on: ancestry,
                 head_branch: Some(head),
                 head_ahead,
                 head_behind,
@@ -354,8 +381,88 @@ impl GitOperations {
             head_ahead,
             head_behind,
             used_head: false,
+            // Trunk was chosen, so the new epic inherits no stack.
+            stacked_on: Vec::new(),
             notice: Some(notice),
         }
+    }
+
+    /// Every unlanded `epic/*` branch contained in `branch`, trunk-first
+    /// (cas-aae6 / GH #110).
+    ///
+    /// Epic stacking is legal and sometimes intended (cas-a85e bases a
+    /// follow-on epic on the epic it continues), but it is only safe if the
+    /// operator can see it. The cas-a85e notice described one level, so a
+    /// three-deep stack — C on B on A — presented as "C is based on B" and the
+    /// A→B→C merge order stayed invisible until something failed to land.
+    ///
+    /// "Contained" is asked of git directly (`merge-base --is-ancestor`), so
+    /// the chain is derived from the repository rather than from bookkeeping
+    /// that can drift. "Unlanded" means not yet reachable from `trunk`: once an
+    /// epic lands, it stops constraining anything and drops out of the chain.
+    ///
+    /// Ordering is by distance from trunk ascending, so the returned list reads
+    /// in the order the branches must land. Ties (independent branches at the
+    /// same distance) keep a stable name order.
+    ///
+    /// Never fails: any git error yields an empty chain, because an advisory
+    /// display must not be able to break epic creation.
+    pub fn unlanded_epic_ancestry(&self, branch: &str, trunk: &str) -> Vec<String> {
+        let listed = Command::new("git")
+            .args([
+                "for-each-ref",
+                "--format=%(refname:short)",
+                "refs/heads/epic/",
+            ])
+            .current_dir(&self.repo_root)
+            .output();
+        let Ok(listed) = listed else {
+            return Vec::new();
+        };
+        if !listed.status.success() {
+            return Vec::new();
+        }
+
+        let branch_tip = self.ref_sha(branch).unwrap_or_default();
+        let mut chain: Vec<(u32, String)> = Vec::new();
+
+        for candidate in String::from_utf8_lossy(&listed.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+        {
+            if candidate == branch {
+                continue;
+            }
+            // Same commit under two names is not a stack, just an alias.
+            if !branch_tip.is_empty() && self.ref_sha(candidate).unwrap_or_default() == branch_tip {
+                continue;
+            }
+            if !self.is_ancestor(candidate, branch) {
+                continue;
+            }
+            if self.is_ancestor(candidate, trunk) {
+                continue; // already landed — constrains nothing
+            }
+            let distance = self.commits_behind(trunk, candidate).unwrap_or(0);
+            chain.push((distance, candidate.to_string()));
+        }
+
+        chain.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        chain.into_iter().map(|(_, name)| name).collect()
+    }
+
+    /// True when `ancestor` is reachable from `descendant`.
+    ///
+    /// A git failure answers `false`: callers use this to decide whether to
+    /// *add* a warning, so an unknown must not manufacture one.
+    pub fn is_ancestor(&self, ancestor: &str, descendant: &str) -> bool {
+        Command::new("git")
+            .args(["merge-base", "--is-ancestor", ancestor, descendant])
+            .current_dir(&self.repo_root)
+            .status()
+            .map(|status| status.code() == Some(0))
+            .unwrap_or(false)
     }
 
     /// Resolve the full SHA of a ref (branch name, "HEAD", etc.).

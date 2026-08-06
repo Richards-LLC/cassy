@@ -7,6 +7,22 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.46.0] - 2026-08-06
+
+### Fixed
+- **Finished work can close after the supervisor merges it.** A worker whose branch showed only a sync-merge after the supervisor had already merged its work was refused closure and steered toward resetting the branch — the exact state that success looks like. A close carrying a valid receipt for merged work now passes, and the refusal text for genuinely empty closes names the receipt path instead of implying branch surgery.
+- **A reply no longer counts as having read a message.** Any message back from a recipient used to mark every outstanding message to them "confirmed", silencing the sender's escalation clock while the recipient worked on from a stale premise. Confirmation now requires that the reply came after delivery and that the message was actually shown; without that, the clock keeps counting. Assignments the recipient already acted on are no longer re-served verbatim, and any true redelivery is labeled as one.
+- **"Delivered" now means the recipient can actually find it.** Delivery used to be stamped the moment the daemon wrote a message down, with nothing on the recipient's side to corroborate it — messages could sit invisible for an entire task while their status read delivered, and one acknowledgment shape could erase a never-shown message from the recipient's inbox entirely. Every delivery now leaves a per-recipient record in the same transaction, only an explicit acknowledgment or a real surfacing hides an inbox row, and an urgent interrupt is not considered done until there is evidence it actually woke its target — retried on a throttle, never a storm.
+- **Workers spawn from the branch their task belongs to.** New worker checkouts were cut from whichever epic the dashboard happened to be focused on, not the epic of the task being assigned — every spawn started on the wrong code and needed a manual reset. Base resolution now follows the task, and the spawn report names which branch it chose and why.
+- **The worker-side message storm is over.** A handful of real messages could be re-injected as hundreds of duplicates, flooding a worker's context until it was forcibly compacted — two workers died to it in one afternoon. Identical parked notifications now collapse to one entry with a count, and redelivery follows the once-per-interval contract on the worker path too.
+- **A shared checkout can't be silently commandeered.** A worker running without isolation could park the shared repository on its own branch, sending every subsequent supervisor merge and tag quietly to the wrong place. That state is now loudly flagged in status output, and the commit guard steers away from committing onto it.
+- **The review gate holds at every door.** The rule that reviews belong to the supervisor was enforced at one entry path and bypassable through another; every dispatch route now applies the same refusal.
+- **Test results stopped depending on which account ran them.** Six delivery tests failed on any machine whose environment pointed at an alternate configuration directory — noise that cost real investigation time on unrelated work and could have masked a genuine regression. The fixtures now pin their own configuration root, and a regression test runs the same path under a non-default directory on purpose.
+- **Epic status tells the truth about branches.** A merged-and-closed lane could show phantom unmerged commits after its local branch was cleaned up — inviting surgery on work that was already safe — while a branch with no readable state at all reported a reassuring zero. Rows now name which branch they read, fall back to the remote when the local copy is gone, say so explicitly when neither exists, and a leftover base commit inherited from a stale spawn can no longer block an epic from closing.
+
+### Added
+- **Workers are told to never sit foreground-blocked.** The worker guides now mandate backgrounding anything long-running, with concrete recipes for builds, test suites, and CI waits — a foreground-blocked worker is unreachable except by turn-breaking interrupt, which was the leading cause of lost in-flight work.
+
 ## [2.45.0] - 2026-08-06
 
 ### Fixed

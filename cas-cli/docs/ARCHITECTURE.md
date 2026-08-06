@@ -12,12 +12,13 @@ The root `Cargo.toml` defines a workspace. `cas-cli/` is the main binary crate; 
 |--------|---------|
 | `main.rs` / `lib.rs` | Entry point, module declarations |
 | `cli/` | Clap command definitions and handlers. `mod.rs` has the `Commands` enum — add new subcommands here. |
-| `mcp/` | MCP server: `server/` (CasCore with cached OnceLock stores), `tools/` (55 tool handlers split into `core/` and `service/`), `daemon.rs` (embedded background maintenance), `socket.rs` (notification socket) |
+| `mcp/` | MCP server: `server/` (CasCore with cached OnceLock stores), `tools/` — 12 action-dispatched meta-tools (`memory`, `task`, `rule`, `skill`, `coordination`, `search`, `system`, `verification`, `knowledge`, `team`, `pattern`, `spec`; plus `mcp_search`/`mcp_execute` when a proxy is configured), each fanning out to handlers in `core/` and `service/` — `daemon.rs` (embedded background maintenance), `socket.rs` (notification socket) |
 | `store/` | Re-exports from `cas-store` + wrappers: `notifying_*.rs` (emit change notifications), `syncing_*.rs` (sync to `.claude/` filesystem), `layered.rs` (project + global store composition), `detect.rs` (find `.cas/` root) |
 | `hooks/` | Claude Code hook event handlers (SessionStart, Stop, PostToolUse, etc.). `handlers/` has session, state, event, and middleware handlers. `scorer.rs` ranks context items for injection. |
-| `migration/` | Forward-only schema migrations. `migrations/` has individual migration files (m001-m182+). `detector.rs` introspects existing schema. |
+| `migration/` | Forward-only schema migrations. `migrations/` has individual migration files (m001–m218). `detector.rs` introspects existing schema. |
+| `knowledge/` | LLM distillation pipeline for the project wiki: `sources.rs` (what is distillable), `chunk.rs`, `prompt.rs` (role-isolation armor), `llm.rs` (provider-CLI runner + `ScriptedLlm` mock), `merge.rs` (cost-tiered merge), `pipeline.rs` (`run_distillation`) |
 | `ui/` | Ratatui TUI components for factory view: `factory/`, `components/`, `widgets/`, `theme/`, `markdown/` |
-| `config/` | Configuration loading from `.cas/config.yaml` |
+| `config/` | Configuration loading from `.cas/config.toml` (TOML is the only format written; a legacy `.cas/config.yaml` is migrated once and renamed to `config.yaml.bak`) |
 | `orchestration/` | Agent name generation and orchestration logic |
 | `worktree/` | Git worktree management for factory workers |
 | `consolidation/` | Memory consolidation and decay |
@@ -31,8 +32,8 @@ The root `Cargo.toml` defines a workspace. `cas-cli/` is the main binary crate; 
 | Crate | Purpose |
 |-------|---------|
 | `cas-types` | Shared data types (Entry, Task, Rule, Skill, Agent, etc.) |
-| `cas-store` | SQLite storage layer — trait definitions (`Store`, `TaskStore`, `RuleStore`, etc.) and `SqliteStore` implementation |
-| `cas-search` | Full-text search via Tantivy (BM25 scoring) |
+| `cas-store` | SQLite storage layer — trait definitions (`Store`, `TaskStore`, `RuleStore`, `KnowledgeStore`, etc.) and their SQLite implementations. `knowledge_store.rs` is the odd one out: it keeps page *index rows* in SQLite and page *bodies* as markdown on disk. |
+| `cas-search` | Search infrastructure: `Bm25Index` (Tantivy), `LmdbVectorStore` (heed) and score-combination helpers. Local search is **BM25-only** — the vector store and `HybridSearch` are wired but have no local embedder, so semantic ranking is cloud-gated. |
 | `cas-core` | Core business logic, hooks framework, search index abstraction, skill/rule syncing |
 | `cas-mcp` | MCP protocol types and request/response models |
 | `cas-factory` | Factory session lifecycle: `FactoryCore`, config, director, recording, notifications |
@@ -45,11 +46,34 @@ The root `Cargo.toml` defines a workspace. `cas-cli/` is the main binary crate; 
 | `cas-tui-test` | TUI testing framework |
 | `ghostty_vt` / `ghostty_vt_sys` | Virtual terminal parser (based on Ghostty) |
 
+### The memory surfaces — one map
+
+CAS stores agent-facing knowledge in seven distinct surfaces. They are not tiers of one thing; each has its own store, its own write path, and its own retrieval channel. The recurring confusion this table exists to end is "which one do I write to, and who will ever read it back?"
+
+| Surface | What it holds | Stored where | Written by | Read back by |
+|---------|---------------|--------------|------------|--------------|
+| **Entries** (memories) | Free-form learnings, preferences, observations, opinions. Belief-typed (`Fact` / `Opinion` / `Hypothesis`) with a confidence score. | `entries` table in `.cas/cas.db` | `memory` MCP tool, `cas add`, extraction from sessions | `search` MCP tool, SessionStart injection via `hooks/scorer.rs` |
+| **Rules** | Normative constraints ("always…", "never…") with optional path globs and auto-approve grants. | `rules` table; proven rules also synced to `.claude/rules/cas/` | `rule` MCP tool, `cas rule` | Claude Code reads the synced markdown directly; also BM25-searchable |
+| **Skills** | Procedural playbooks — a `SKILL.md` body plus references. | `skills` table; synced to `.claude/skills/`. Builtins ship from `cas-cli/src/builtins/skills/` in three harness flavors (claude / codex / grok). | `skill` MCP tool, `cas skill`, builtin sync on `cas init` | The harness loads them as Agent Skills; also BM25-searchable |
+| **Entities** | Extracted proper nouns (person, project, technology, file, concept, …) and their mentions — the join layer between prose and code. | `entities`, `entity_mentions`, `relationships` | `search action=entity_extract`, background extraction | `search action=entity_list` / `entity_show` |
+| **Code index** | Symbols and files parsed by tree-sitter, plus code↔memory links. | `code_symbols`, `code_files`, `code_relationships`, `code_memory_links` | Daemon code-index cycle (60s), `cas index` | `search action=code_search` / `code_show` / `grep` |
+| **Knowledge pages** | The distilled project wiki: LLM-written prose about *this repo*, with source provenance and a user-sovereignty lock. | Index rows in `knowledge_pages` + `knowledge_sources`; **bodies are markdown files on disk** under `.cas/knowledge/<type>/<title>.md` | `cas knowledge build` (distillation), `knowledge action=write` (hand-authored, always `locked=1`) | `knowledge` MCP tool (`search`/`read`/`list`), `cas knowledge search|read` |
+| **Patterns** | Cross-project personal/team conventions. | **Not local** — CAS Cloud, reached over the `/api/patterns` HTTP surface | `pattern` MCP tool | `pattern` MCP tool (requires login) |
+
+Two properties of the knowledge surface are load-bearing and easy to get wrong:
+
+- **Bodies never enter SQLite.** `knowledge_pages_fts` is a *contentless* FTS5 table (`content=''`, `contentless_delete=1`) over title + snippet + body: the inverted index lives in the DB, the prose only ever lives on disk. That is what makes the pages greppable with ordinary tools and keeps the database small.
+- **`locked` is a one-way promise to the user.** `commit_ingest` never sets or clears `locked` and its upsert is guarded by `WHERE knowledge_pages.locked = 0`, so distillation can neither overwrite a locked page nor lock one the user didn't. `set_locked` is the only way the bit moves; the `knowledge action=write` MCP handler goes unlock → write → lock precisely because that guard is real.
+
+`.claude/CODEMAP.md` and `docs/PRODUCT_OVERVIEW.md` are **views over this surface, not a parallel one**: both are ordinary distillable sources, so the `codemap` and `project-overview` skills query `cas knowledge search` before regenerating and run `cas knowledge build` after writing, which turns each doc into a page plus a source-ledger entry.
+
+**Search reality check:** every "search" above except the knowledge surface goes through the Tantivy BM25 index (`cas-core/src/search/`, doc types `entry`/`task`/`rule`/`skill`/`spec`/`code_symbol`/`code_file`). The knowledge surface has its own SQLite FTS5 index instead. **Neither is semantic.** There is no local embedder — `pending_embedding` columns exist and are populated, but nothing local consumes them.
+
 ### Key Patterns
 
 **Store trait hierarchy**: `cas-store` defines traits (`Store`, `TaskStore`, `RuleStore`, `SkillStore`, `EntityStore`, `AgentStore`, `VerificationStore`, `WorktreeStore`). `SqliteStore` implements all of them. `cas-cli/src/store/` wraps these with notification and sync decorators.
 
-**CasCore (MCP server)**: Lives in `cas-cli/src/mcp/server/mod.rs`. Caches all store instances in `OnceLock` fields — each store type opened exactly once per server lifetime. Has an embedded daemon for background maintenance (embedding generation every 2min, full maintenance every 30min).
+**CasCore (MCP server)**: Lives in `cas-cli/src/mcp/server/mod.rs`. Caches all store instances in `OnceLock` fields — each store type opened exactly once per server lifetime. Has an embedded daemon for background maintenance: code re-index every 60s, agent heartbeat every 30s, full maintenance every 30min, cloud sync on its own interval. It does **not** generate embeddings — `daemon::indexing::run_embedding_cycle` is a no-op stub kept for signature compatibility.
 
 **`cas serve` project-root resolution** (`cas-cli/src/mcp/server/runtime.rs::resolve_mcp_serve_root`): Priority order: (1) `CLAUDE_PROJECT_DIR` env var — Claude Code 2.1.139+ sets this when spawning a stdio MCP server, eliminating cwd-mismatch failures; (2) `CAS_ROOT` env var (explicit override); (3) git-worktree detection; (4) directory walk from cwd. Falls back silently to (2)–(4) when `CLAUDE_PROJECT_DIR` is unset or points at a non-existent path.
 

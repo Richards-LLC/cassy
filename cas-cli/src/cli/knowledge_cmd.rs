@@ -19,6 +19,10 @@ pub enum KnowledgeCommands {
     Status,
     /// List distilled pages
     List(ListArgs),
+    /// Full-text search across distilled pages
+    Search(SearchArgs),
+    /// Print one distilled page (metadata + markdown body)
+    Read(ReadArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -47,6 +51,23 @@ pub struct ListArgs {
     pub limit: usize,
 }
 
+#[derive(Debug, Clone, Args)]
+pub struct SearchArgs {
+    /// Free-text query (all terms must match)
+    pub query: Vec<String>,
+
+    /// Maximum hits to show
+    #[arg(long, default_value_t = 10)]
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ReadArgs {
+    /// Page ID (`cas-kn007`) or path relative to the knowledge dir
+    /// (`subsystem/hooks.md`)
+    pub target: String,
+}
+
 pub fn execute(
     command: &KnowledgeCommands,
     _cli: &crate::cli::Cli,
@@ -56,6 +77,8 @@ pub fn execute(
         KnowledgeCommands::Build(args) => execute_build(args, cas_root),
         KnowledgeCommands::Status => execute_status(cas_root),
         KnowledgeCommands::List(args) => execute_list(args, cas_root),
+        KnowledgeCommands::Search(args) => execute_search(args, cas_root),
+        KnowledgeCommands::Read(args) => execute_read(args, cas_root),
     }
 }
 
@@ -258,6 +281,67 @@ fn execute_list(args: &ListArgs, cas_root: &Path) -> anyhow::Result<()> {
     if pages.len() > args.limit {
         println!("... and {} more", pages.len() - args.limit);
     }
+    Ok(())
+}
+
+fn execute_search(args: &SearchArgs, cas_root: &Path) -> anyhow::Result<()> {
+    let query = args.query.join(" ");
+    if query.trim().is_empty() {
+        anyhow::bail!("nothing to search for — pass a query, e.g. `cas knowledge search hooks`");
+    }
+
+    let store = SqliteKnowledgeStore::open(cas_root)?;
+    let hits = store.search(&query, args.limit.max(1))?;
+    if hits.is_empty() {
+        println!("No distilled pages match '{query}'.");
+        return Ok(());
+    }
+
+    println!("{} page(s) matching '{query}':", hits.len());
+    for hit in &hits {
+        println!(
+            "{} {} [{}] {}",
+            if hit.page.locked { "🔒" } else { "  " },
+            hit.page.rel_path,
+            hit.page.id,
+            hit.page.title
+        );
+        if !hit.page.snippet.is_empty() {
+            println!("    {}", hit.page.snippet);
+        }
+    }
+    println!("\nRead one with: cas knowledge read <id-or-path>");
+    Ok(())
+}
+
+fn execute_read(args: &ReadArgs, cas_root: &Path) -> anyhow::Result<()> {
+    let store = SqliteKnowledgeStore::open(cas_root)?;
+
+    // `target` accepts either identity, so a path copied straight out of
+    // `search` output works without a flag.
+    let page = match store.get_page_by_rel_path(&args.target)? {
+        Some(page) => page,
+        None => store
+            .get_page(&args.target)
+            .map_err(|_| anyhow::anyhow!("no knowledge page '{}'", args.target))?,
+    };
+
+    let body = store.read_body(&page.rel_path)?;
+    println!("# {} [{}]", page.title, page.id);
+    println!("type:    {}", page.page_type);
+    println!("path:    {}", page.rel_path);
+    println!("locked:  {}", page.locked);
+    println!(
+        "sources: {}",
+        if page.sources.is_empty() {
+            "(none)".to_string()
+        } else {
+            page.sources.join(", ")
+        }
+    );
+    println!("updated: {}", page.updated_at.to_rfc3339());
+    println!();
+    println!("{body}");
     Ok(())
 }
 

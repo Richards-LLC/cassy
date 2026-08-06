@@ -469,7 +469,7 @@ fn take_unverified_spawn_on_exit(
 /// normal completion until an explicit cancel — so it would report a supervisor
 /// permanently busy and silently re-disable the wake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct SupervisorPaneState {
+pub(crate) struct PaneWakeState {
     /// An attached operator has an unsubmitted draft. cas-dab2's reported
     /// symptom; the wake yields entirely rather than relying on
     /// `Mux::inject`'s bounded defer window.
@@ -478,17 +478,68 @@ pub(crate) struct SupervisorPaneState {
     /// This path performs a PTY write on a channel (`TeamsInbox`) whose normal
     /// delivery skips the readiness gate, so it is checked here explicitly.
     pub ready_for_injection: bool,
-    /// No PTY output since the previous tick — the pane is not mid-render.
-    /// Best-effort: a silent long tool call also looks quiescent, which is why
-    /// a skipped wake is retried rather than dropped.
-    pub output_quiescent: bool,
+    /// How long the pane has produced no PTY output at all. `None` when there
+    /// is no baseline yet (first observation of this pane).
+    pub silent_for: Option<std::time::Duration>,
+    /// The recipient's transcript shows an outstanding tool call — it is
+    /// mid-turn, or blocked on an approval dialog, whatever the pane's silence
+    /// suggests. Read with the same helper `cas factory is-wedged` uses.
+    pub tool_call_in_flight: bool,
 }
 
-impl SupervisorPaneState {
+impl PaneWakeState {
+    /// Safe to type into for a recipient the registry already judged idle.
+    ///
+    /// The registry has already supplied the "not working" half, so the pane
+    /// only has to corroborate it: a brief settle, no operator draft, and no
+    /// outstanding tool call. That last check is new for this path (cas-45c4)
+    /// and is a deliberate tightening of cas-893c: an idle-looking worker
+    /// blocked on an approval dialog is silent too, and the injected payload
+    /// ends in a submit CR that would answer it.
     fn is_safe_to_type_into(self) -> bool {
-        !self.composer_dirty && self.ready_for_injection && self.output_quiescent
+        !self.composer_dirty
+            && self.ready_for_injection
+            && !self.tool_call_in_flight
+            && self
+                .silent_for
+                .is_some_and(|silence| silence >= SILENCE_FOR_IDLE_RECIPIENT_WAKE)
+    }
+
+    /// cas-45c4 (GH #102): safe to type into the pane of a recipient the
+    /// REGISTRY calls active, where that judgement is not trustworthy.
+    ///
+    /// Requires two independent things, because pane silence alone is not
+    /// evidence of being parked:
+    /// - sustained wall-clock silence (a harness rendering a turn emits
+    ///   token/tool frames continuously);
+    /// - no outstanding tool call in the transcript. This is the load-bearing
+    ///   half: a worker blocked on an approval dialog, or sleeping on a long
+    ///   backgrounded command, is silent indefinitely and would otherwise look
+    ///   maximally wakeable — and the injected payload ends in a submit CR,
+    ///   which would answer whatever that dialog has highlighted.
+    fn is_safe_to_wake_an_active_looking_recipient(self) -> bool {
+        !self.composer_dirty
+            && self.ready_for_injection
+            && !self.tool_call_in_flight
+            && self
+                .silent_for
+                .is_some_and(|silence| silence >= SILENCE_FOR_ACTIVE_RECIPIENT_WAKE)
     }
 }
+
+/// Wall-clock PTY silence required before waking a recipient the agent
+/// registry currently calls active (cas-45c4).
+///
+/// Measured in SECONDS, not poll ticks: `process_prompt_queue` runs on a 100ms
+/// poll, so a tick count here would have made "sustained silence" mean a third
+/// of a second — no evidence at all about turn boundaries.
+const SILENCE_FOR_ACTIVE_RECIPIENT_WAKE: std::time::Duration =
+    std::time::Duration::from_secs(45);
+
+/// Wall-clock PTY silence required before waking a recipient the registry
+/// already judged idle (cas-45c4). Short: this is corroboration that the pane
+/// has settled, not the primary evidence.
+const SILENCE_FOR_IDLE_RECIPIENT_WAKE: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl FactoryDaemon {
     pub(super) async fn handle_mux_event(&mut self, event: cas_mux::MuxEvent) {
@@ -990,7 +1041,7 @@ impl FactoryDaemon {
         supervisor_name: &str,
         source: &str,
         prompt: &str,
-        pane: SupervisorPaneState,
+        pane: PaneWakeState,
         now: chrono::DateTime<chrono::Utc>,
     ) -> bool {
         use crate::mcp::tools::core::task::lifecycle::supervisor_push::is_lifecycle_wake_source;
@@ -1021,7 +1072,7 @@ impl FactoryDaemon {
         supervisor_name: &str,
         source: &str,
         prompt: &str,
-        pane: SupervisorPaneState,
+        pane: PaneWakeState,
         now: chrono::DateTime<chrono::Utc>,
     ) -> bool {
         if pane_target == supervisor_name {
@@ -1035,7 +1086,51 @@ impl FactoryDaemon {
                 now,
             );
         }
-        Self::target_looks_like_idle_worker(data, pane_target, supervisor_name, now)
+        // cas-45c4 (GH #102): the registry's idle judgement is not a turn
+        // signal, so failing it must not end the enquiry.
+        //
+        // Traced from the live incident (prompt_queue row 6744): the recipient
+        // had NO in-progress task — its own task had been parked
+        // `awaiting_merge` almost three minutes earlier — and it was doing
+        // nothing at all. What vetoed the nudge was `agent_signals_look_quiet`:
+        // an AUTOMATED `worker_git_commit` checkpoint 112 seconds before
+        // delivery still counted as "recent activity" (window: 120s), and the
+        // heartbeat is stamped by the daemon from process liveness. Two signals
+        // that track neither turns nor work therefore agreed the worker was
+        // busy, and the message sat in a file until the worker next spoke for
+        // its own reasons.
+        //
+        // So when the registry says "active", ask the pane and the transcript
+        // instead — evidence that does track turns.
+        if Self::target_looks_like_idle_worker(data, pane_target, supervisor_name, now) {
+            return pane.is_safe_to_type_into();
+        }
+        Self::active_looking_recipient_is_parked(data, pane_target, supervisor_name, pane)
+    }
+
+    /// cas-45c4: a recipient the agent registry currently calls active, but
+    /// which the pane and its transcript agree is parked at its prompt.
+    ///
+    /// Applies to any known worker — NOT only to one holding a task. The
+    /// registry's "active" verdict comes from heartbeat freshness (daemon
+    /// process liveness) and a global recent-activity window that automated
+    /// events like checkpoint commits land in, so it fires for workers doing
+    /// nothing whatsoever.
+    fn active_looking_recipient_is_parked(
+        data: &crate::ui::factory::director::DirectorData,
+        pane_target: &str,
+        supervisor_name: &str,
+        pane: PaneWakeState,
+    ) -> bool {
+        if pane_target == supervisor_name {
+            return false;
+        }
+        // Unknown agents (mid-spawn) are not wake candidates: absence of a
+        // registry row is not evidence the pane is parked.
+        if !data.agents.iter().any(|a| a.name == pane_target) {
+            return false;
+        }
+        pane.is_safe_to_wake_an_active_looking_recipient()
     }
 
     /// Minimum settle floor between an urgent turn-break (Esc) and the
@@ -1088,18 +1183,80 @@ impl FactoryDaemon {
     /// treated as NOT quiescent — the row stays pending and the next tick,
     /// which does have a baseline, decides. Skipping is cheap now that a
     /// skipped wake is retried instead of dropped.
-    fn sample_supervisor_pane(&mut self, pane_target: &str) -> SupervisorPaneState {
-        let bytes = self.app.mux.pane_bytes_received(pane_target);
-        let previous = self.last_pane_output_bytes.get(pane_target).copied();
-        if let Some(current) = bytes {
-            self.last_pane_output_bytes
-                .insert(pane_target.to_string(), current);
+    /// Advance every pane's quiet-tick streak exactly once per queue poll
+    /// (cas-45c4 / GH #102).
+    ///
+    /// Sampling must be driven by the CLOCK, not by traffic. Sampling inside
+    /// the delivery decision would make `quiet_ticks` count "consecutive
+    /// messages to this pane", so a pane parked silently for an hour would
+    /// still read as `0` when its first message arrived and could never be
+    /// woken by it — the counter would not mean what its name says, and the
+    /// fix would only work for the second and later messages.
+    ///
+    /// Cheap: two atomic-ish reads per pane per poll, no I/O.
+    fn refresh_pane_quiet_samples(&mut self) {
+        let now = std::time::Instant::now();
+        let panes: Vec<String> = self
+            .app
+            .mux
+            .pane_ids()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        for pane in panes {
+            let Some(bytes) = self.app.mux.pane_bytes_received(&pane) else {
+                continue;
+            };
+            match self.last_pane_output_bytes.get(&pane).copied() {
+                // Output since the previous poll — the silence clock restarts.
+                Some(previous) if previous != bytes => {
+                    self.pane_silent_since.insert(pane.clone(), now);
+                }
+                // First observation: start the clock now rather than claiming
+                // silence we did not witness.
+                None => {
+                    self.pane_silent_since.insert(pane.clone(), now);
+                }
+                _ => {}
+            }
+            self.last_pane_output_bytes.insert(pane, bytes);
         }
-        SupervisorPaneState {
+    }
+
+    /// Read the current wake state for a pane. Pure read — the streak is
+    /// advanced only by [`Self::refresh_pane_quiet_samples`], so two decisions
+    /// in the same poll see the same evidence.
+    fn pane_wake_state(&self, pane_target: &str) -> PaneWakeState {
+        PaneWakeState {
             composer_dirty: self.app.mux.pane_composer_dirty(pane_target),
             ready_for_injection: self.app.mux.pane_ready_for_injection(pane_target),
-            output_quiescent: matches!((previous, bytes), (Some(p), Some(c)) if p == c),
+            silent_for: self
+                .pane_silent_since
+                .get(pane_target)
+                .map(|since| since.elapsed()),
+            tool_call_in_flight: self.recipient_has_tool_call_in_flight(pane_target),
         }
+    }
+
+    /// Whether `pane_target`'s harness transcript shows an outstanding tool
+    /// call (cas-45c4). Uses `resolve_worker` +
+    /// `transcript_has_in_flight_tool_call` — the same pair `cas factory
+    /// is-wedged` and the director's stall detector use, so the three cannot
+    /// disagree about what "still working" means.
+    ///
+    /// Unresolvable transcript → `true` (assume in flight). Absence of
+    /// telemetry is not permission to type into someone's pane; the message
+    /// still reaches the inbox and the recipient reads it at its own next turn.
+    fn recipient_has_tool_call_in_flight(&self, pane_target: &str) -> bool {
+        let cas_root = self.app.cas_dir();
+        let Ok(resolved) = crate::cli::factory::wedged::resolve_worker(cas_root, pane_target)
+        else {
+            return true;
+        };
+        let Some(path) = resolved.transcript_path.as_deref() else {
+            return true;
+        };
+        crate::cli::factory::wedged::transcript_has_in_flight_tool_call(path, resolved.cli)
     }
 
     /// Process prompt queue
@@ -1108,6 +1265,10 @@ impl FactoryDaemon {
         use cas_types::{Event, EventEntityType, EventType};
 
         let queue = open_prompt_queue_store(self.app.cas_dir())?;
+
+        // cas-45c4 (GH #102): advance every pane's quiet streak once per poll,
+        // before any delivery decision reads it.
+        self.refresh_pane_quiet_samples();
 
         // Native-extension agents consume their own queue rows. Excluding them
         // from the daemon's target universe prevents this PTY/inbox processor
@@ -1791,15 +1952,10 @@ impl FactoryDaemon {
                     // behind supervisor action. Everything else addressed to
                     // the supervisor stays inbox-only (cas-dab2).
                     let is_supervisor_target = pane_target == self.app.supervisor_name();
-                    let pane_state = if is_supervisor_target {
-                        self.sample_supervisor_pane(&pane_target)
-                    } else {
-                        SupervisorPaneState {
-                            composer_dirty: false,
-                            ready_for_injection: true,
-                            output_quiescent: true,
-                        }
-                    };
+                    // cas-45c4: every recipient's pane is sampled now — the
+                    // worker path needs the same turn evidence the supervisor
+                    // wake introduced (cas-f02b).
+                    let pane_state = self.pane_wake_state(&pane_target);
                     // cas-f02b: at most one supervisor wake per drain pass. The
                     // supervisor is the single convergence point for every
                     // worker's lifecycle traffic, so an epic drain can park
@@ -1823,8 +1979,24 @@ impl FactoryDaemon {
                     // content-deduped (`TeamsManager::write_to_inbox`), so
                     // leaving the row pending costs nothing and the next tick
                     // retries. `GatedNotReady` keeps it out of the retry budget.
-                    let wake_was_required = is_supervisor_target
-                        && Self::row_is_supervisor_wake(&queued.source, &queued.prompt);
+                    // cas-f02b: a supervisor wake row is not consumed until it
+                    // wakes the pane. cas-45c4 (GH #102) extends the same rule
+                    // to worker rows: the nudge decision is one instant's view
+                    // of a pane, and if it vetoes, the message is exactly as
+                    // stranded as the bug this task fixes. Retrying is safe
+                    // because the inbox write is content-deduped and the row is
+                    // consumed the moment the recipient is actually woken —
+                    // or immediately, if no wake was warranted.
+                    let wake_was_required = if is_supervisor_target {
+                        Self::row_is_supervisor_wake(&queued.source, &queued.prompt)
+                    } else {
+                        // Only rows whose recipient reads an inbox can be left
+                        // unwoken; a PTY recipient's delivery IS a turn.
+                        super::delivery::choose_channel(
+                            self.app.harness_for(&pane_target),
+                            self.teams.is_some(),
+                        ) == super::delivery::DeliveryChannel::TeamsInbox
+                    };
                     wake_deferred = wake_was_required && !worker_is_idle;
                     if worker_is_idle && is_supervisor_target {
                         supervisor_wake_sent = true;
@@ -2035,15 +2207,18 @@ impl FactoryDaemon {
                 let _ = queue.record_pending_reason(
                     queued.id,
                     cas_store::PendingReason::GatedNotReady,
-                    Some("supervisor wake deferred — pane busy, operator composing, or wake slot taken"),
+                    Some(
+                        "wake deferred — pane busy, tool call in flight, operator composing, \
+                         or wake slot taken",
+                    ),
                 );
                 tracing::info!(
                     target: "cas::coordination",
-                    stage = "supervisor_wake_deferred",
+                    stage = "wake_deferred",
                     channel = "prompt_queue",
                     message_id = queued.id,
                     target_agent = %queued.target,
-                    "supervisor wake deferred; row stays pending for retry"
+                    "wake deferred; row stays pending so a later poll can grant the turn"
                 );
             } else if success {
                 // cas-2c5f: authoritative transport handoff only.
@@ -3877,13 +4052,16 @@ mod tests {
         )
     }
 
-    use super::SupervisorPaneState;
+    use super::{PaneWakeState, SILENCE_FOR_ACTIVE_RECIPIENT_WAKE, SILENCE_FOR_IDLE_RECIPIENT_WAKE};
 
-    fn quiet_pane() -> SupervisorPaneState {
-        SupervisorPaneState {
+    /// A pane that has been silent long enough to wake even a recipient the
+    /// registry calls active, with no outstanding tool call.
+    fn quiet_pane() -> PaneWakeState {
+        PaneWakeState {
             composer_dirty: false,
             ready_for_injection: true,
-            output_quiescent: true,
+            silent_for: Some(SILENCE_FOR_ACTIVE_RECIPIENT_WAKE),
+            tool_call_in_flight: false,
         }
     }
 
@@ -3946,14 +4124,17 @@ mod tests {
             "epic ownership must not permanently suppress the merge wake"
         );
 
-        // The worker rule is untouched: a worker holding an InProgress task is
-        // genuinely mid-work and must not be nudged.
+        // cas-45c4 (GH #102) CHANGED THIS: a worker holding an InProgress task
+        // used to be unreachable by the nudge, which is why a normal-priority
+        // message sat unread for 28 minutes in a live session. Holding a task
+        // is not taking a turn. It is now nudged — but only on sustained pane
+        // silence, never on the single quiet tick the taskless path accepts.
         let worker_busy = director_data_with(vec![
             agent_summary("cosmic-bear-43", None, None, None),
             agent_summary("swift-fox", Some("cas-f02b"), None, None),
         ]);
         assert!(
-            !FactoryDaemon::delivery_should_nudge_pane(
+            FactoryDaemon::delivery_should_nudge_pane(
                 &worker_busy,
                 "swift-fox",
                 "cosmic-bear-43",
@@ -3962,7 +4143,22 @@ mod tests {
                 quiet_pane(),
                 now,
             ),
-            "cas-893c: a worker with an active task is not idle"
+            "a task-holding worker parked at its prompt must still receive a turn"
+        );
+        assert!(
+            !FactoryDaemon::delivery_should_nudge_pane(
+                &worker_busy,
+                "swift-fox",
+                "cosmic-bear-43",
+                "supervisor",
+                "plain message",
+                PaneWakeState {
+                    silent_for: Some(SILENCE_FOR_ACTIVE_RECIPIENT_WAKE / 2),
+                    ..quiet_pane()
+                },
+                now,
+            ),
+            "a brief lull is not evidence a busy-looking worker is between turns"
         );
     }
 
@@ -4041,25 +4237,25 @@ mod tests {
 
         for (state, why) in [
             (
-                SupervisorPaneState {
+                PaneWakeState {
                     composer_dirty: true,
                     ..quiet_pane()
                 },
                 "never type over an operator draft (cas-dab2's reported symptom)",
             ),
             (
-                SupervisorPaneState {
+                PaneWakeState {
                     ready_for_injection: false,
                     ..quiet_pane()
                 },
                 "a pane still flushing its startup buffer would swallow the wake",
             ),
             (
-                SupervisorPaneState {
-                    output_quiescent: false,
+                PaneWakeState {
+                    silent_for: Some(std::time::Duration::from_secs(1)),
                     ..quiet_pane()
                 },
-                "a pane mid-render is mid-turn; a stray CR could answer a prompt",
+                "a pane that spoke a second ago is mid-turn",
             ),
         ] {
             assert!(
@@ -4120,6 +4316,168 @@ mod tests {
         assert!(!FactoryDaemon::row_is_supervisor_wake(
             "lifecycle-wake:1",
             "no envelope here"
+        ));
+    }
+
+    /// cas-45c4 (GH #102), the reproduced failure — stated as the DB actually
+    /// shows it, not as the issue guessed.
+    ///
+    /// prompt_queue row 6744 was transport-delivered 4ms after enqueue and sat
+    /// in the recipient's inbox with no wake. The recipient held no in-progress
+    /// task (its own had been parked `awaiting_merge` ~3 minutes earlier) and
+    /// was doing nothing. What vetoed the nudge was `agent_signals_look_quiet`:
+    /// an AUTOMATED `worker_git_commit` checkpoint 112s before delivery still
+    /// counted as "recent activity" (window 120s), and `last_heartbeat` is
+    /// stamped by the daemon from process liveness. Two signals that track
+    /// neither turns nor work agreed the worker was busy.
+    #[test]
+    fn a_worker_the_registry_wrongly_calls_busy_is_still_reachable() {
+        let now = chrono::Utc::now();
+        let data = director_data_with(vec![
+            agent_summary("cosmic-bear-43", None, None, None),
+            // Fresh heartbeat AND recent activity — a daemon-stamped heartbeat
+            // plus an automated checkpoint commit reproduce this exactly. By
+            // the registry's reckoning this worker is maximally "busy".
+            agent_summary("jolly-wolf-30", None, Some(now), Some(now)),
+        ]);
+
+        assert!(
+            !FactoryDaemon::worker_looks_idle(&data, "jolly-wolf-30", now),
+            "precondition: the registry calls this worker busy on signals that track \
+             neither turns nor work — which is why no nudge was ever attempted"
+        );
+        assert!(
+            FactoryDaemon::delivery_should_nudge_pane(
+                &data,
+                "jolly-wolf-30",
+                "cosmic-bear-43",
+                "supervisor",
+                "context for your next step",
+                quiet_pane(),
+                now,
+            ),
+            "a worker parked at its prompt must get the turn, whatever the registry thinks"
+        );
+    }
+
+    /// cas-45c4: every veto on the new path is load-bearing and independent.
+    /// The tool-call check is the most important of them: a worker blocked on
+    /// an approval dialog is silent indefinitely and would otherwise look
+    /// maximally wakeable, and the injected payload ends in a submit CR that
+    /// would answer whatever the dialog has highlighted.
+    #[test]
+    fn a_worker_mid_turn_or_awaiting_approval_is_never_typed_into() {
+        let now = chrono::Utc::now();
+        let data = director_data_with(vec![
+            agent_summary("cosmic-bear-43", None, None, None),
+            agent_summary("jolly-wolf-30", Some("cas-a85e"), Some(now), Some(now)),
+        ]);
+
+        for (state, why) in [
+            (
+                PaneWakeState {
+                    silent_for: Some(std::time::Duration::from_secs(1)),
+                    ..quiet_pane()
+                },
+                "output a second ago means the worker is mid-turn",
+            ),
+            (
+                PaneWakeState {
+                    composer_dirty: true,
+                    ..quiet_pane()
+                },
+                "an unsubmitted draft must never be typed over",
+            ),
+            (
+                PaneWakeState {
+                    ready_for_injection: false,
+                    ..quiet_pane()
+                },
+                "a pane still flushing startup output would swallow the message",
+            ),
+            (
+                PaneWakeState {
+                    tool_call_in_flight: true,
+                    ..quiet_pane()
+                },
+                "an outstanding tool call means mid-turn or awaiting approval — the \
+                 submit CR could answer a dialog",
+            ),
+            (
+                PaneWakeState {
+                    silent_for: None,
+                    ..quiet_pane()
+                },
+                "no baseline yet is not evidence of silence",
+            ),
+        ] {
+            assert!(
+                !FactoryDaemon::delivery_should_nudge_pane(
+                    &data,
+                    "jolly-wolf-30",
+                    "cosmic-bear-43",
+                    "supervisor",
+                    "context for your next step",
+                    state,
+                    now,
+                ),
+                "{why}"
+            );
+        }
+    }
+
+    /// cas-45c4: an agent CAS has no registry row for (mid-spawn) is not a wake
+    /// candidate — absence of a row is not evidence the pane is parked.
+    #[test]
+    fn an_unknown_agent_is_not_woken_on_pane_evidence_alone() {
+        let now = chrono::Utc::now();
+        let data = director_data_with(vec![agent_summary("cosmic-bear-43", None, None, None)]);
+        assert!(!FactoryDaemon::delivery_should_nudge_pane(
+            &data,
+            "not-registered-yet",
+            "cosmic-bear-43",
+            "supervisor",
+            "hello",
+            quiet_pane(),
+            now,
+        ));
+    }
+
+    /// cas-45c4: the taskless path keeps its original, lower bar (cas-893c) —
+    /// one quiet tick — so existing idle-worker delivery is not slowed down.
+    #[test]
+    fn the_taskless_worker_path_keeps_its_original_bar() {
+        let now = chrono::Utc::now();
+        let data = director_data_with(vec![
+            agent_summary("cosmic-bear-43", None, None, None),
+            agent_summary("swift-fox", None, None, None),
+        ]);
+        assert!(FactoryDaemon::delivery_should_nudge_pane(
+            &data,
+            "swift-fox",
+            "cosmic-bear-43",
+            "supervisor",
+            "your next task",
+            PaneWakeState {
+                silent_for: Some(SILENCE_FOR_IDLE_RECIPIENT_WAKE),
+                ..quiet_pane()
+            },
+            now,
+        ));
+        // ...but an outstanding tool call vetoes even the registry-idle path:
+        // a worker blocked on an approval dialog is silent too, and the submit
+        // CR would answer it (cas-45c4 tightening of cas-893c).
+        assert!(!FactoryDaemon::delivery_should_nudge_pane(
+            &data,
+            "swift-fox",
+            "cosmic-bear-43",
+            "supervisor",
+            "your next task",
+            PaneWakeState {
+                tool_call_in_flight: true,
+                ..quiet_pane()
+            },
+            now,
         ));
     }
 

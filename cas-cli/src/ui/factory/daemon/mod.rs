@@ -240,6 +240,10 @@ pub struct FactoryDaemon {
     /// when a supervisor wake is evaluated. Equality across two evaluations is
     /// the evidence that the pane is not mid-render and is safe to type into.
     last_pane_output_bytes: HashMap<String, u64>,
+    /// cas-45c4 (GH #102): when each pane's current run of PTY silence began.
+    /// Wall-clock, because the queue poll is 100ms — counting polls would make
+    /// "sustained silence" mean a third of a second.
+    pane_silent_since: HashMap<String, std::time::Instant>,
     /// Last bounded sweep that terminalized aged prompts for targets no
     /// longer belonging to this factory session.
     last_prompt_poison_sweep: Option<std::time::Instant>,

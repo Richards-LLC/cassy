@@ -5302,6 +5302,15 @@ pub(crate) struct WorkerGitStatus {
     pub pushed_ref: String,
     /// Open pull-request URL, or `"none"` when not found / gh unavailable
     pub pr_url: String,
+    /// `true` when this path is the SHARED primary checkout (the main
+    /// working tree) rather than a linked `git worktree`.
+    ///
+    /// cas-5bef (GH #120): a non-isolated worker branching in place re-points
+    /// the HEAD that the supervisor's landing sequence runs against, so the
+    /// distinction has to survive into the rendered status. Defaults to
+    /// `false` (treated as a linked worktree) whenever git can't answer —
+    /// a false alarm on every non-git dir would train the reader to ignore it.
+    pub is_shared_checkout: bool,
 }
 
 /// Collect git introspection data for a worker's worktree path.
@@ -5414,6 +5423,20 @@ pub(crate) fn collect_worker_git_status(worktree_path: &std::path::Path) -> Work
             .unwrap_or_else(|| "none".to_string())
     };
 
+    // --- shared checkout or linked worktree? ----------------------------------
+    // cas-5bef (GH #120). In a linked worktree `--git-dir` resolves to
+    // `<repo>/.git/worktrees/<name>` while `--git-common-dir` stays at
+    // `<repo>/.git`; in the primary checkout the two are the same path. Both
+    // must answer for the claim to be made — an unreadable/non-git path stays
+    // `false` so the loud warning below can only fire on a positive ID.
+    let is_shared_checkout = match (
+        run_git(worktree_path, &["rev-parse", "--git-dir"]),
+        run_git(worktree_path, &["rev-parse", "--git-common-dir"]),
+    ) {
+        (Ok(git_dir), Ok(common_dir)) => git_dir == common_dir,
+        _ => false,
+    };
+
     WorkerGitStatus {
         branch,
         head_sha,
@@ -5423,7 +5446,48 @@ pub(crate) fn collect_worker_git_status(worktree_path: &std::path::Path) -> Work
         dirty,
         pushed_ref,
         pr_url,
+        is_shared_checkout,
     }
+}
+
+/// Warning text for a SHARED primary checkout whose HEAD is parked on a
+/// `factory/*` branch, or `None` when that is not the situation.
+///
+/// cas-5bef (GH #120): a non-isolated worker refused by the WORKER COMMIT
+/// GUARD created `factory/bright-eagle-91` in the shared checkout and left it
+/// checked out. The supervisor's landing sequence in that directory then
+/// misfired silently — `git merge --ff-only <sha>` said "Already up to date"
+/// (it merged into the factory branch), `git push origin main` pushed the
+/// stale local trunk, and the release tag pointed at a commit unreachable from
+/// `origin/main`. Every step "succeeded"; only the parked HEAD was wrong.
+///
+/// Pure so the wording is testable without a git fixture.
+pub(crate) fn shared_checkout_parked_warning(
+    is_shared_checkout: bool,
+    branch: &str,
+    base_branch: &str,
+) -> Option<String> {
+    let branch = branch.trim();
+    if !is_shared_checkout || !branch.starts_with("factory/") {
+        return None;
+    }
+    // "origin/main" → "main": the remedy is a local switch, not a remote ref.
+    let trunk = base_branch
+        .trim()
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("main");
+
+    Some(format!(
+        "\n    ⚠️ SHARED CHECKOUT PARKED ON '{branch}': this is the shared primary checkout, \
+         not an isolated worktree, and its HEAD is '{branch}' instead of '{trunk}'. \
+         Any `git merge --ff-only`, `git push origin {trunk}` or release tag run in this \
+         directory targets '{branch}' and reports success while landing nothing on \
+         '{trunk}' (GH #120). Remedy: once that work is pushed, restore trunk here with \
+         `git switch {trunk}`, and give the worker `git worktree add` instead of a branch \
+         created in place."
+    ))
 }
 
 /// Render a `WorkerGitStatus` as a multi-line block for injection into the
@@ -5458,9 +5522,16 @@ pub(crate) fn format_worker_git_status(gs: &WorkerGitStatus) -> String {
         String::new()
     };
 
+    // cas-5bef (GH #120): a shared checkout parked on factory/* is rendered
+    // with the same loudness as STALE BASE — it is the same class of failure
+    // (the supervisor's next git command silently operates on the wrong thing).
+    let parked_label =
+        shared_checkout_parked_warning(gs.is_shared_checkout, &gs.branch, &gs.base_branch)
+            .unwrap_or_default();
+
     format!(
         "\n    git: {} @ {} {} {}\
-         \n    ahead: {} behind: {} (vs {}){}\
+         \n    ahead: {} behind: {} (vs {}){}{}\
          \n    PR: {}",
         gs.branch,
         gs.head_sha,
@@ -5470,6 +5541,7 @@ pub(crate) fn format_worker_git_status(gs: &WorkerGitStatus) -> String {
         gs.behind,
         gs.base_branch,
         stale_label,
+        parked_label,
         pr_label,
     )
 }
@@ -8800,6 +8872,7 @@ effort = "high"
             dirty: false,
             pushed_ref: "origin/factory/myworker".to_string(),
             pr_url: "https://github.com/org/repo/pull/42".to_string(),
+            is_shared_checkout: false,
         };
         let out = format_worker_git_status(&gs);
         assert!(
@@ -8839,6 +8912,7 @@ effort = "high"
             dirty: false,
             pushed_ref: "none".to_string(),
             pr_url: "none".to_string(),
+            is_shared_checkout: false,
         };
         let out = format_worker_git_status(&stale);
         assert!(
@@ -8858,6 +8932,164 @@ effort = "high"
             !format_worker_git_status(&current).contains("STALE BASE"),
             "an up-to-date worktree must not be flagged"
         );
+    }
+
+    // ── cas-5bef (GH #120): shared checkout parked on factory/* ──────────
+
+    /// AC1 (cas-5bef): the shared primary checkout sitting on a `factory/*`
+    /// branch must be called out by name, with the trunk it is NOT on and the
+    /// remedy — the incident's `git merge --ff-only` / `git push origin main`
+    /// both reported success while landing nothing on main.
+    #[test]
+    fn format_git_status_calls_out_a_parked_shared_checkout_loudly() {
+        let parked = WorkerGitStatus {
+            branch: "factory/bright-eagle-91".to_string(),
+            head_sha: "0bd4a26".to_string(),
+            ahead: 1,
+            behind: 0,
+            base_branch: "origin/main".to_string(),
+            dirty: false,
+            pushed_ref: "none".to_string(),
+            pr_url: "none".to_string(),
+            is_shared_checkout: true,
+        };
+        let out = format_worker_git_status(&parked);
+        assert!(
+            out.contains("SHARED CHECKOUT PARKED"),
+            "a parked shared checkout needs an explicit callout: {out}"
+        );
+        assert!(
+            out.contains("factory/bright-eagle-91"),
+            "the callout must name the parked branch: {out}"
+        );
+        assert!(
+            out.contains("'main'"),
+            "the callout must name the trunk it is not on: {out}"
+        );
+        assert!(
+            out.contains("git switch main"),
+            "the callout must state the remedy: {out}"
+        );
+        assert!(
+            out.contains("git worktree add"),
+            "the callout must steer to a worktree instead of a branch in place: {out}"
+        );
+    }
+
+    /// The warning is specific to the two conditions that produced GH #120 —
+    /// an isolated worktree on factory/* is the normal case and a shared
+    /// checkout on trunk is the healthy one; neither may be flagged, or the
+    /// callout becomes noise the supervisor scrolls past.
+    #[test]
+    fn parked_warning_only_fires_for_a_shared_checkout_on_a_factory_branch() {
+        assert!(
+            shared_checkout_parked_warning(true, "factory/bright-eagle-91", "origin/main")
+                .is_some(),
+            "shared checkout on factory/* is the GH #120 shape"
+        );
+        assert!(
+            shared_checkout_parked_warning(false, "factory/bright-eagle-91", "origin/main")
+                .is_none(),
+            "an isolated worktree on its own factory branch is normal"
+        );
+        assert!(
+            shared_checkout_parked_warning(true, "main", "origin/main").is_none(),
+            "a shared checkout on trunk is the healthy state"
+        );
+        // Non-origin bases and bare trunk names both resolve to a usable
+        // `git switch <trunk>` remedy.
+        let staging =
+            shared_checkout_parked_warning(true, "factory/w", "upstream/staging").expect("warn");
+        assert!(
+            staging.contains("git switch staging"),
+            "remedy must name the actual trunk: {staging}"
+        );
+        let bare = shared_checkout_parked_warning(true, "factory/w", "main").expect("warn");
+        assert!(
+            bare.contains("git switch main"),
+            "a bare base branch needs no stripping: {bare}"
+        );
+    }
+
+    /// AC3 (cas-5bef): reproduce the GH #120 sequence against real git — a
+    /// worker creates `factory/*` IN the shared checkout and leaves it checked
+    /// out — and assert the supervisor-visible status carries the warning
+    /// BEFORE the merge/tag step could misfire. The linked worktree in the same
+    /// repo must stay quiet.
+    #[test]
+    fn collect_git_status_flags_the_gh120_shared_checkout_repro() {
+        let tmp = make_git_repo_for_status();
+        let shared = tmp.path().join("repo");
+        let shared = shared.as_path();
+
+        // The GH #120 escape: refused on main, the worker branches in place.
+        run_git_ok(shared, &["checkout", "-b", "factory/bright-eagle-91"]);
+
+        let shared_status = collect_worker_git_status(shared);
+        assert!(
+            shared_status.is_shared_checkout,
+            "the primary checkout must be identified as shared, got branch {}",
+            shared_status.branch
+        );
+        let rendered = format_worker_git_status(&shared_status);
+        assert!(
+            rendered.contains("SHARED CHECKOUT PARKED"),
+            "worker_status must warn before the supervisor's merge/tag step: {rendered}"
+        );
+        assert!(
+            rendered.contains("factory/bright-eagle-91"),
+            "the warning must name the parked branch: {rendered}"
+        );
+
+        // A linked worktree on the very same factory branch shape is normal.
+        let linked = tmp.path().join("linked-worktree");
+        run_git_ok(
+            shared,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "factory/isolated-worker",
+                &linked.to_string_lossy(),
+            ],
+        );
+        let linked_status = collect_worker_git_status(&linked);
+        assert!(
+            !linked_status.is_shared_checkout,
+            "a linked worktree must not be reported as the shared checkout"
+        );
+        assert!(
+            !format_worker_git_status(&linked_status).contains("SHARED CHECKOUT PARKED"),
+            "isolated workers must not be flagged"
+        );
+    }
+
+    fn run_git_ok(dir: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A committed git repo at `<tempdir>/repo`, so a linked worktree can be
+    /// added as a sibling inside the same temp dir.
+    fn make_git_repo_for_status() -> tempfile::TempDir {
+        let outer = tempfile::TempDir::new().expect("tempdir");
+        let repo = outer.path().join("repo");
+        std::fs::create_dir(&repo).expect("mkdir repo");
+        run_git_ok(&repo, &["init", "-b", "main"]);
+        run_git_ok(&repo, &["config", "user.email", "t@example.com"]);
+        run_git_ok(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("f.txt"), "x").expect("write");
+        run_git_ok(&repo, &["add", "."]);
+        run_git_ok(&repo, &["commit", "-m", "init"]);
+        outer
     }
 
     /// AC2 (cas-844bf): when gh is unavailable / not pushed, pr_url and
@@ -8888,6 +9120,7 @@ effort = "high"
             dirty: true,
             pushed_ref: "none".to_string(),
             pr_url: "none".to_string(),
+            is_shared_checkout: false,
         };
         let out = format_worker_git_status(&gs);
         assert!(

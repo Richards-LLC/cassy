@@ -607,6 +607,12 @@ fn parse_worker_name_filter(filter: Option<&String>) -> std::collections::HashSe
         .collect()
 }
 
+/// How many undrained spawn-queue rows `spawn_workers` scans when checking
+/// whether a task_id already authorized a spawn (cas-549c, GH #96). The queue
+/// is drained every daemon tick, so the pending set is small; this is a bound
+/// against a pathologically backed-up queue, not a correctness knob.
+const SPAWN_QUEUE_DUPLICATE_SCAN: usize = 100;
+
 impl CasService {
     pub(super) async fn factory_spawn_workers(
         &self,
@@ -644,8 +650,11 @@ impl CasService {
         // spawning first.
         //
         // cas-549c (GH #96): this runs BEFORE the epic gate, because a
-        // validated open task_id is itself sufficient authorization to spawn.
-        let mut task_id_authorizes_spawn = false;
+        // dispatchable task_id is itself sufficient authorization to spawn.
+        // `None` = a task_id was supplied but may not stand in for an epic; the
+        // string says why, and is only surfaced when there is also no epic, so
+        // epic-present behaviour is unchanged.
+        let mut task_id_authorization: Option<Result<(), String>> = None;
         if let Some(ref task_id) = req.task_id {
             let requested_worker_count = if worker_names.is_empty() {
                 count
@@ -667,7 +676,13 @@ impl CasService {
             let task = task_store.get(task_id).map_err(|e| {
                 Self::error(
                     ErrorCode::INVALID_PARAMS,
-                    format!("task_id {task_id} not found: {e}"),
+                    // cas-549c: `get` cannot distinguish "no such row" from a
+                    // store fault, and this is now the first fallible read on
+                    // the task_id path — so do not assert "not found".
+                    format!(
+                        "task_id {task_id} could not be read (no such task, or the task store is \
+                         unavailable): {e}"
+                    ),
                 )
             })?;
             if task.status == TaskStatus::Closed {
@@ -678,7 +693,31 @@ impl CasService {
                     ),
                 ));
             }
-            task_id_authorizes_spawn = true;
+
+            // Standing in for an epic is a stronger claim than being a legal
+            // pre-assignment target, so it is held to a stricter bar: the task
+            // must be work a NEW worker can actually pick up. A task parked in
+            // AwaitingMerge / PendingSupervisorReview is finished and waiting on
+            // the supervisor; a Blocked task cannot be started; a task that
+            // already has an assignee belongs to another worker, and
+            // `assign_task_to_new_worker` will refuse to steal it — the spawned
+            // worker would boot a pane and worktree only to sit permanently
+            // idle. Everything below only ever *withholds* the epic bypass; the
+            // pre-assignment rules above are unchanged, so a request made with
+            // an open epic behaves exactly as before.
+            task_id_authorization = Some(match (&task.status, &task.assignee) {
+                (TaskStatus::Open | TaskStatus::InProgress, None) => Ok(()),
+                (TaskStatus::Open | TaskStatus::InProgress, Some(assignee)) => Err(format!(
+                    "task {task_id} is already assigned to '{assignee}', so it cannot stand in \
+                     for an EPIC — that worker owns it and the pre-assignment would be refused. \
+                     Clear it first (mcp__cas__task action=update id={task_id} assignee=) or \
+                     reset it (action=reset) if that worker is gone."
+                )),
+                (status, _) => Err(format!(
+                    "task {task_id} is {status:?}, which is not work a newly spawned worker can \
+                     pick up, so it cannot stand in for an EPIC."
+                )),
+            });
         }
 
         // The epic gate exists to stop *unscoped* spawning — workers summoned
@@ -688,7 +727,42 @@ impl CasService {
         // epic anyway forced a ceremonial single-child epic for every
         // post-epic follow-up, which distorts epic reporting and the
         // "all subtasks closed → verify and close the epic" flow.
-        if !task_id_authorizes_spawn {
+        let queue = open_spawn_queue_store(&self.inner.cas_root).map_err(|e| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to open spawn queue: {e}"),
+            )
+        })?;
+
+        // A task authorizes ONE spawn. Nothing here mutates the task — binding
+        // happens later, at worker registration — so without this check the same
+        // open task_id could authorize an unbounded burst of epic-free spawns,
+        // where only the first worker ever binds and the rest boot into
+        // permanent idleness. Scoped to the bypass path so an epic-backed
+        // factory keeps its existing (re-issuable) behaviour.
+        if matches!(task_id_authorization, Some(Ok(())))
+            && let Some(ref task_id) = req.task_id
+        {
+            let already_queued = queue
+                .peek(SPAWN_QUEUE_DUPLICATE_SCAN)
+                .map_err(|e| {
+                    Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!("Failed to inspect spawn queue: {e}"),
+                    )
+                })?
+                .into_iter()
+                .any(|entry| entry.task_id.as_deref() == Some(task_id.as_str()));
+            if already_queued {
+                task_id_authorization = Some(Err(format!(
+                    "a spawn for task {task_id} is already queued and has not been consumed yet, \
+                     so it cannot authorize a second worker. Wait for that worker to register, or \
+                     open an EPIC if you really want more workers."
+                )));
+            }
+        }
+
+        if !matches!(task_id_authorization, Some(Ok(()))) {
             let has_open_epic = task_store
                 .list(None)
                 .map_err(|e| {
@@ -701,27 +775,26 @@ impl CasService {
                 .any(|t| t.task_type == TaskType::Epic && t.status != TaskStatus::Closed);
 
             if !has_open_epic {
+                let why = match task_id_authorization {
+                    Some(Err(reason)) => reason,
+                    _ => "no task_id was supplied.".to_string(),
+                };
                 return Err(Self::error(
                     ErrorCode::INVALID_REQUEST,
-                    "No active EPIC found, and no task_id was supplied. Either name the work \
-                     directly or open an EPIC:\n\
-                     0. Spawn for one existing open task (no EPIC needed): \
-                     mcp__cas__coordination action=spawn_workers count=1 task_id=<task-id>\n\
-                     1. Create EPIC: mcp__cas__task action=create task_type=epic title=\"...\" description=\"...\"\n\
-                     2. Or assign existing EPIC: mcp__cas__task action=start id=<epic-id>\n\
-                     3. Optionally gather requirements using the epic-spec skill\n\
-                     4. Break into tasks using the epic-breakdown skill\n\
-                     5. Then spawn workers to work on the tasks",
+                    format!(
+                        "No active EPIC found, and {why} Either name the work directly or open an \
+                         EPIC:\n\
+                         0. Spawn for one existing open task (no EPIC needed): \
+                         mcp__cas__coordination action=spawn_workers count=1 task_id=<task-id>\n\
+                         1. Create EPIC: mcp__cas__task action=create task_type=epic title=\"...\" description=\"...\"\n\
+                         2. Or assign existing EPIC: mcp__cas__task action=start id=<epic-id>\n\
+                         3. Optionally gather requirements using the epic-spec skill\n\
+                         4. Break into tasks using the epic-breakdown skill\n\
+                         5. Then spawn workers to work on the tasks"
+                    ),
                 ));
             }
         }
-
-        let queue = open_spawn_queue_store(&self.inner.cas_root).map_err(|e| {
-            Self::error(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Failed to open spawn queue: {e}"),
-            )
-        })?;
 
         // Resolve a concrete WorkerSpec for every queued spawn. Omitting model
         // or effort must never inherit the supervisor session's frontier-tier

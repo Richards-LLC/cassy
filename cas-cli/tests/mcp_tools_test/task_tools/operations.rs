@@ -805,7 +805,7 @@ async fn test_tasks_available_names_withheld_rows() {
     );
 
     assert!(
-        text.contains("Available Tasks (25 total)"),
+        text.contains("Available Tasks (25 total, P0 first)"),
         "the honest total stays: {text}"
     );
     assert!(
@@ -816,6 +816,258 @@ async fn test_tasks_available_names_withheld_rows() {
         text.contains("limit=25"),
         "the footer must say how to see them: {text}"
     );
+}
+
+/// cas-61d3 (GH #111): `sort`/`sort_order` are in this action's schema and
+/// were routed all the way into the handler, which ignored them — an agent
+/// asking for a different order got the default back with no error and no way
+/// to tell. The last of the advertised-but-inert family.
+#[tokio::test]
+async fn test_tasks_available_honours_an_explicit_sort() {
+    use cas::mcp::tools::LimitRequest;
+
+    let (_temp, service) = setup_cas();
+    // Priority order and title order disagree, so the assertion can only pass
+    // if the requested field is the one actually applied.
+    for (priority, title) in [(0u8, "zulu critical"), (3, "alpha low")] {
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: title.to_string(),
+                description: None,
+                priority,
+                task_type: "task".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: None,
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("create should succeed");
+    }
+
+    let by_title = extract_text(
+        service
+            .cas_tasks_available(Parameters(LimitRequest {
+                limit: None,
+                scope: "all".to_string(),
+                sort: Some("title".to_string()),
+                sort_order: Some("asc".to_string()),
+                team_id: None,
+            }))
+            .await
+            .expect("tasks_available should succeed"),
+    );
+    assert!(
+        by_title.contains("title A-Z"),
+        "the header must name the ordering applied: {by_title}"
+    );
+    let first = by_title
+        .lines()
+        .find(|l| l.starts_with("[P"))
+        .expect("a task row");
+    assert!(
+        first.contains("alpha low"),
+        "sort=title must actually reorder the rows: {first}"
+    );
+
+    // Default is unchanged: priority first.
+    let by_default = extract_text(
+        service
+            .cas_tasks_available(Parameters(LimitRequest {
+                limit: None,
+                scope: "all".to_string(),
+                sort: None,
+                sort_order: None,
+                team_id: None,
+            }))
+            .await
+            .expect("tasks_available should succeed"),
+    );
+    assert!(by_default.contains("P0 first"), "{by_default}");
+    let first_default = by_default
+        .lines()
+        .find(|l| l.starts_with("[P"))
+        .expect("a task row");
+    assert!(
+        first_default.contains("zulu critical"),
+        "the default must stay priority-first: {first_default}"
+    );
+}
+
+/// cas-61d3 review follow-up: the sort must be applied BEFORE truncation. A
+/// regression that sorted only the already-capped window would leave every
+/// other test green while making the capped case — the one GH #109 exists for
+/// — silently wrong.
+#[tokio::test]
+async fn test_tasks_available_sorts_before_truncating() {
+    use cas::mcp::tools::LimitRequest;
+
+    let (_temp, service) = setup_cas();
+    // Creation order is load-bearing and easy to get backwards: `list_ready`
+    // returns priority ASC, created_at DESC, so the NEWEST task is already
+    // first. Creating "alpha" last would put it at the top before any sorting
+    // and the assertion below would pass even if the sort ran after the cap.
+    // Create it FIRST so the natural order leads with "zulu".
+    for (priority, title) in [
+        (0u8, "alpha critical"),
+        (0, "mike critical"),
+        (0, "zulu critical"),
+    ] {
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: title.to_string(),
+                description: None,
+                priority,
+                task_type: "task".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: None,
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("create should succeed");
+    }
+
+    let text = extract_text(
+        service
+            .cas_tasks_available(Parameters(LimitRequest {
+                limit: Some(1),
+                scope: "all".to_string(),
+                sort: Some("title".to_string()),
+                sort_order: Some("asc".to_string()),
+                team_id: None,
+            }))
+            .await
+            .expect("tasks_available should succeed"),
+    );
+
+    let rows: Vec<_> = text.lines().filter(|l| l.starts_with("[P")).collect();
+    assert_eq!(rows.len(), 1, "limit must still bound the rows: {text}");
+    assert!(
+        rows[0].contains("alpha critical"),
+        "the single surviving row must be the global first, not the first of an \
+         unsorted window: {text}"
+    );
+    assert!(text.contains("and 2 more not shown"), "{text}");
+}
+
+/// cas-61d3 review follow-up: `sort_order` alone must behave here exactly as
+/// it does on ready/blocked — keep the priority field, flip the direction.
+#[tokio::test]
+async fn test_tasks_available_sort_order_alone_flips_priority_direction() {
+    use cas::mcp::tools::LimitRequest;
+
+    let (_temp, service) = setup_cas();
+    for (priority, title) in [(0u8, "critical one"), (3, "low one")] {
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: title.to_string(),
+                description: None,
+                priority,
+                task_type: "task".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: None,
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("create should succeed");
+    }
+
+    let text = extract_text(
+        service
+            .cas_tasks_available(Parameters(LimitRequest {
+                limit: None,
+                scope: "all".to_string(),
+                sort: None,
+                sort_order: Some("desc".to_string()),
+                team_id: None,
+            }))
+            .await
+            .expect("tasks_available should succeed"),
+    );
+
+    assert!(text.contains("lowest priority first"), "{text}");
+    let first = text
+        .lines()
+        .find(|l| l.starts_with("[P"))
+        .expect("a task row");
+    assert!(first.contains("low one"), "{first}");
+}
+
+/// cas-61d3: an unrecognised sort field means "unspecified" here, exactly as
+/// on ready/blocked — it must not silently resurrect creation order.
+#[tokio::test]
+async fn test_tasks_available_unparseable_sort_falls_back_to_priority() {
+    use cas::mcp::tools::LimitRequest;
+
+    let (_temp, service) = setup_cas();
+    // Order matters: the P0 is created FIRST, so a fallback to created/desc
+    // (the trap #104 fixed) would put "low one" at the top and the row
+    // assertion below would catch it — not just the header label.
+    for (priority, title) in [(0u8, "critical one"), (3, "low one")] {
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: title.to_string(),
+                description: None,
+                priority,
+                task_type: "task".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: None,
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("create should succeed");
+    }
+
+    let text = extract_text(
+        service
+            .cas_tasks_available(Parameters(LimitRequest {
+                limit: None,
+                scope: "all".to_string(),
+                sort: Some("highest".to_string()), // not a valid field
+                sort_order: None,
+                team_id: None,
+            }))
+            .await
+            .expect("tasks_available should succeed"),
+    );
+
+    assert!(text.contains("P0 first"), "{text}");
+    let first = text
+        .lines()
+        .find(|l| l.starts_with("[P"))
+        .expect("a task row");
+    assert!(first.contains("critical one"), "{first}");
 }
 
 /// cas-e163 review follow-up: an explicit `limit` must drive the footer too.
@@ -936,7 +1188,7 @@ async fn test_tasks_available_total_excludes_claimed_tasks() {
     );
 
     assert!(
-        text.contains("Available Tasks (20 total)"),
+        text.contains("Available Tasks (20 total, P0 first)"),
         "claimed tasks must not inflate the total: {text}"
     );
     assert!(
@@ -987,7 +1239,10 @@ async fn test_tasks_available_has_no_footer_when_nothing_is_withheld() {
             .expect("tasks_available should succeed"),
     );
 
-    assert!(text.contains("Available Tasks (3 total)"), "{text}");
+    assert!(
+        text.contains("Available Tasks (3 total, P0 first)"),
+        "{text}"
+    );
     assert!(!text.contains("more not shown"), "{text}");
 }
 

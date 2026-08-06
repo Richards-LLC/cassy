@@ -593,10 +593,23 @@ impl CasCore {
             active_leases.iter().map(|l| l.task_id.as_str()).collect();
 
         // Filter to unclaimed tasks
-        let available: Vec<_> = ready_tasks
+        let mut available: Vec<_> = ready_tasks
             .iter()
             .filter(|t| !claimed_ids.contains(t.id.as_str()))
             .collect();
+
+        // cas-61d3 (GH #111): `sort`/`sort_order` are accepted by this action's
+        // schema and were routed all the way into the handler, which then
+        // ignored them — an agent asking for a different order got the default
+        // one back with no error and no way to tell. Honour them with the same
+        // semantics `ready`/`blocked` use (cas-06f9 / GH #104): unspecified
+        // means priority, and an unrecognised field means unspecified rather
+        // than silently falling back to creation order.
+        let sort_opts = crate::mcp::tools::ready_blocked_sort_options(
+            req.sort.as_deref(),
+            req.sort_order.as_deref(),
+        );
+        crate::mcp::tools::sort_task_refs(&mut available, &sort_opts);
 
         if available.is_empty() {
             return Ok(Self::success(
@@ -609,12 +622,17 @@ impl CasCore {
         // could read 20 rows, see a larger total it had no reason to connect to
         // its own view, and never learn which call shows the rest. Same footer
         // as `ready`/`blocked` (cas-06f9 / GH #104), same surface behaviour.
-        // Rows arrive priority-first from `list_ready`'s ORDER BY, so the
-        // withheld tail is genuinely lower-priority work.
+        // The tail withheld here is the tail of whatever ordering was applied
+        // just above — lower-priority work by default, but the alphabetical
+        // tail under sort=title. The footer makes no ordering claim; the
+        // header names the order so the two cannot disagree.
         let limit = req.limit.unwrap_or(20);
         let total = available.len();
         let shown = total.min(limit);
-        let mut output = format!("Available Tasks ({total} total):\n\n");
+        // State the ordering, so honouring `sort` is observable to the caller
+        // rather than something they have to infer from the rows.
+        let order = crate::mcp::tools::sort_order_label(&sort_opts);
+        let mut output = format!("Available Tasks ({total} total, {order}):\n\n");
 
         for task in available.iter().take(limit) {
             output.push_str(&format!(

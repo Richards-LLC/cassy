@@ -373,14 +373,10 @@ impl CloudSyncer {
                                 EntityType::CommitLink => result.upsert_commit_links.push(value),
                                 EntityType::Agent => result.upsert_agents.push(value),
                                 EntityType::Worktree => result.upsert_worktrees.push(value),
-                                // Knowledge pages do not ride the generic
-                                // queue: they are pushed page-at-a-time from
-                                // the store by `push_knowledge_pages`, which
-                                // needs the body from disk. Nothing enqueues
-                                // them, so this arm is unreachable in
-                                // practice — it exists so adding a queue
-                                // producer later is a compile error here
-                                // rather than a silent drop.
+                                // Pages ship via `push_knowledge_pages` (it
+                                // needs the body from disk), so nothing
+                                // enqueues them today. Arm kept explicit so a
+                                // future queue producer is a compile error.
                                 EntityType::KnowledgePage => {}
                             }
                         }

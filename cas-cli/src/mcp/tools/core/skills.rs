@@ -290,11 +290,11 @@ impl CasCore {
         // description's tail and was violated twice in one session, so it is
         // enforced here — before the usage is recorded — rather than asked for.
         if crate::code_review_dispatch::is_cas_code_review_skill(&req.id) {
-            let supervisor_owned = crate::config::Config::load(&self.cas_root)
-                .ok()
-                .and_then(|config| config.code_review)
-                .map(|cr| cr.supervisor_owned())
-                .unwrap_or_else(|| crate::config::CodeReviewConfig::default().supervisor_owned());
+            // cas-bcfb: shared resolver — the PreToolUse gate on the
+            // harness-native `Skill`/`Workflow` paths answers "who owns review
+            // here?" with this same function, so the two cannot drift.
+            let supervisor_owned =
+                crate::code_review_dispatch::supervisor_owned_at(Some(self.cas_root.as_path()));
             if let crate::code_review_dispatch::ReviewDispatchDecision::Refused { message } =
                 crate::code_review_dispatch::review_dispatch_decision(
                     crate::code_review_dispatch::is_factory_worker_from_env(),

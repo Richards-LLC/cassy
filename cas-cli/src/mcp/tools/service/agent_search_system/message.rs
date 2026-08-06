@@ -9,6 +9,143 @@ fn resolve_inbox_recipient(
         .filter(|name| !name.trim().is_empty())
 }
 
+/// Marker prefixed to any inbox row this poll is handing over for a second
+/// time (cas-99d2, GH #127).
+///
+/// Recipients — human or agent — must be able to tell a repeat from a new
+/// instruction mechanically, without reasoning about timestamps. The daemon's
+/// teams-inbox writer already treats this exact token as the signal for an
+/// *intentional* redelivery (see `daemon::runtime::teams`), so the same marker
+/// means the same thing on both delivery channels.
+pub(crate) const INBOX_REDELIVERY_MARKER: &str = "[redelivery]";
+
+/// cas-99d2 (GH #127): what to do with one row an inbox poll selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InboxRedelivery {
+    /// Never handed to a transport before — render it plainly.
+    FirstDelivery,
+    /// Already transport-delivered once; render it, marked as a repeat.
+    MarkRedelivery,
+    /// Already transport-delivered AND the action it solicited demonstrably
+    /// happened — re-rendering it verbatim would read as a fresh instruction.
+    WithholdConsumed,
+}
+
+/// cas-99d2 (GH #127): decide how an inbox poll should render a selected row.
+///
+/// Pure so the reported shape is testable without a store, a daemon or a clock.
+///
+/// `already_transport_delivered` is the daemon's own handoff stamp. Note that
+/// this is deliberately NOT a reason to drop the row outright: the whole point
+/// of the polling API is to surface rows the transport wrote to a file nobody
+/// read. What it does establish is that this is not the recipient's first look
+/// at the content, which is exactly what the recipient needs told.
+///
+/// `solicited_action_observed` is real consumption evidence: the state
+/// transition the message asked for is already in the store, attributed to this
+/// recipient. For an assignment that means the named task has been started by
+/// the addressed worker. When a message has both — it was delivered, and what
+/// it asked for happened — handing it back verbatim 15 minutes later is a
+/// fabricated instruction, which is the reported bug (notification 7112).
+pub(crate) fn inbox_redelivery_decision(
+    already_transport_delivered: bool,
+    solicited_action_observed: bool,
+) -> InboxRedelivery {
+    if !already_transport_delivered {
+        return InboxRedelivery::FirstDelivery;
+    }
+    if solicited_action_observed {
+        return InboxRedelivery::WithholdConsumed;
+    }
+    InboxRedelivery::MarkRedelivery
+}
+
+/// cas-99d2 (GH #127): the task id an assignment message solicits a `start`
+/// for, if this message is an assignment at all.
+///
+/// Two shapes exist in the wild and both must parse:
+/// - the director's generated prompt — `"You have been assigned a new task:\n
+///   Task ID: cas-7587\n…"`;
+/// - a supervisor's hand-written dispatch — `"You are assigned task cas-7587
+///   (P2 bug, …). Run `… action=show id=cas-7587` then `… action=start
+///   id=cas-7587`."` (this is the literal shape of notification 7112).
+///
+/// Requires BOTH an assignment phrase and an explicit task id: a status
+/// question or review note that merely mentions a task id must not be treated
+/// as an assignment, because that would let unrelated task progress silence a
+/// message that was never about assigning work.
+pub(crate) fn assignment_solicited_task_id(prompt: &str) -> Option<String> {
+    let lowered = prompt.to_lowercase();
+    const ASSIGNMENT_PHRASES: [&str; 4] = [
+        "you have been assigned",
+        "you are assigned",
+        "you're assigned",
+        "assigned task",
+    ];
+    if !ASSIGNMENT_PHRASES
+        .iter()
+        .any(|phrase| lowered.contains(phrase))
+    {
+        return None;
+    }
+    // `action=start id=<task>` is the most explicit statement of the solicited
+    // transition; fall back to the declared `Task ID:` field, then to the first
+    // task-shaped token anywhere in the assignment text.
+    for marker in ["action=start id=", "task id:", "assigned task "] {
+        if let Some(index) = lowered.find(marker)
+            && let Some(id) = first_task_id_token(&prompt[index + marker.len()..])
+        {
+            return Some(id);
+        }
+    }
+    first_task_id_token(prompt)
+}
+
+/// First `cas-<hex>` token in `text`, stripped of surrounding punctuation.
+fn first_task_id_token(text: &str) -> Option<String> {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+        .find(|token| {
+            let Some(suffix) = token
+                .strip_prefix("cas-")
+                .or_else(|| token.strip_prefix("CAS-"))
+            else {
+                return false;
+            };
+            suffix.len() >= 4 && suffix.chars().all(|c| c.is_ascii_alphanumeric())
+        })
+        .map(|token| format!("cas-{}", &token[4..]))
+}
+
+/// cas-ac7e (GH #130): the operator-facing warning for a row that claims
+/// `stage=delivered` with no recipient-side transport stamp.
+///
+/// A free function, not an inline condition, because this warning IS the fix's
+/// visible surface: it is how an operator tells notification 7183's shape
+/// (delivered per the writer, unrecorded per the recipient) from a genuinely
+/// corroborated delivery. Three independent clauses have to be right and an
+/// inline expression let all three be wrong silently.
+///
+/// `all_workers` is exempt: a broadcast's per-recipient transport is its
+/// broadcast counts, so it legitimately has no single-recipient stamp.
+pub(crate) fn recipient_transport_warning(
+    stage: cas_store::DeliveryStage,
+    target: &str,
+    has_recipient_transport: bool,
+) -> Option<&'static str> {
+    if stage != cas_store::DeliveryStage::Delivered
+        || target == "all_workers"
+        || has_recipient_transport
+    {
+        return None;
+    }
+    Some(
+        "recipient_transport: MISSING — this row reports stage=delivered with no \
+         per-recipient transport stamp. Either it was delivered before CAS \
+         recorded them, or the stamp and the stage have diverged; treat the \
+         delivery as unproven and re-send.\n",
+    )
+}
+
 impl CasService {
     pub(in crate::mcp::tools::service) async fn message_send(
         &self,
@@ -575,10 +712,19 @@ impl CasService {
             cas_store::EnqueueOutcome::SuppressedDuplicate(_)
         );
 
-        // cas-6ad2: sending a response is an authoritative recipient-side
-        // consumption signal for prior messages from that counterparty. The
-        // old explicit message_ack API was never invoked by factory prompts,
-        // leaving every acted-on message stuck at Delivered/AwaitingAck.
+        // cas-6ad2: sending a response is a recipient-side consumption signal
+        // for prior messages from that counterparty. The old explicit
+        // message_ack API was never invoked by factory prompts, leaving every
+        // acted-on message stuck at Delivered/AwaitingAck.
+        //
+        // cas-99d2 (GH #126): "a reply happened" is NOT on its own evidence
+        // that any particular earlier message was consumed. The store now
+        // requires the reply to post-date the message's transport handoff AND a
+        // surfacing receipt to exist for it — so this call needs the reply's
+        // own enqueue instant, read back from the row just written rather than
+        // sampled as "now" (which would drift past the true enqueue time by
+        // however long the surrounding bookkeeping takes and could sweep in a
+        // message delivered in that window).
         //
         // Supervisors have two queue identities: outbound source
         // `"supervisor"` and their generated pane/display name as an inbound
@@ -615,10 +761,17 @@ impl CasService {
         {
             counterparty_aliases.push("supervisor");
         }
+        let reply_enqueued_at = queue
+            .message_delivery_report(message_id)
+            .ok()
+            .flatten()
+            .map(|report| report.enqueued_at)
+            .unwrap_or_else(chrono::Utc::now);
         if let Err(error) = queue.ack_delivered_for_recipient(
             &recipient_aliases,
             &counterparty_aliases,
             factory_session.as_deref(),
+            reply_enqueued_at,
         ) {
             tracing::warn!(
                 message_id,
@@ -845,22 +998,122 @@ impl CasService {
             )));
         }
 
-        let mut output = format!(
-            "Pulled {} unread message(s) for {recipient} (at-most-once inbox claim: \
-             marked seen before this response is delivered; daemon transport delivery is \
-             unchanged):\n\n",
-            messages.len()
-        );
+        // cas-99d2 (GH #127): a row the daemon already handed to this
+        // recipient's transport is not new mail, and the poll used to render it
+        // byte-identically with no way to tell. Classify each row before
+        // rendering: withhold one whose solicited transition already happened,
+        // and mark the rest as repeats.
+        let task_store = crate::store::open_task_store_local(&self.inner.cas_root).ok();
+        let mut rendered = 0usize;
+        let mut withheld: Vec<(i64, String)> = Vec::new();
+        let mut redelivered = 0usize;
+        let mut body = String::new();
         for message in &messages {
+            let solicited_task = assignment_solicited_task_id(&message.prompt);
+            // The transition an assignment solicits: the ADDRESSED recipient
+            // started that task. `assignee` must match — another worker
+            // starting the task says nothing about whether this recipient ever
+            // saw the message.
+            let solicited_action_observed = match (&solicited_task, task_store.as_ref()) {
+                (Some(task_id), Some(store)) => store
+                    .get(task_id)
+                    .ok()
+                    .map(|task| {
+                        task.status != cas_types::TaskStatus::Open
+                            && task
+                                .assignee
+                                .as_deref()
+                                .is_some_and(|assignee| assignee.eq_ignore_ascii_case(&recipient))
+                    })
+                    .unwrap_or(false),
+                _ => false,
+            };
+            match inbox_redelivery_decision(
+                message.processed_at.is_some(),
+                solicited_action_observed,
+            ) {
+                InboxRedelivery::WithholdConsumed => {
+                    let task_id = solicited_task.unwrap_or_default();
+                    tracing::info!(
+                        target: "cas::coordination",
+                        stage = "inbox_withheld_consumed",
+                        prompt_id = message.id,
+                        recipient = %recipient,
+                        task_id = %task_id,
+                        "cas-99d2: withheld an already-delivered assignment whose solicited \
+                         task start is already recorded for this recipient"
+                    );
+                    withheld.push((message.id, task_id));
+                    continue;
+                }
+                InboxRedelivery::MarkRedelivery => {
+                    redelivered += 1;
+                    body.push_str(&format!(
+                        "**[{}] From: {} — {INBOX_REDELIVERY_MARKER} (already delivered {})**\n\
+                         Summary: {}\nCreated: {}\nMessage: {}\n\n",
+                        message.id,
+                        message.source,
+                        message
+                            .processed_at
+                            .map(|at| at.to_rfc3339())
+                            .unwrap_or_else(|| "earlier".to_string()),
+                        message.summary.as_deref().unwrap_or("(no summary)"),
+                        message.created_at.to_rfc3339(),
+                        message.prompt,
+                    ));
+                }
+                InboxRedelivery::FirstDelivery => {
+                    body.push_str(&format!(
+                        "**[{}] From: {}**\nSummary: {}\nCreated: {}\nMessage: {}\n\n",
+                        message.id,
+                        message.source,
+                        message.summary.as_deref().unwrap_or("(no summary)"),
+                        message.created_at.to_rfc3339(),
+                        message.prompt,
+                    ));
+                }
+            }
+            rendered += 1;
+        }
+
+        if rendered == 0 {
+            let ids = withheld
+                .iter()
+                .map(|(id, task)| format!("{id} (assignment for {task})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Ok(Self::success(format!(
+                "No unread messages for {recipient} — withheld {} already-delivered \
+                 message(s) whose requested action is already done: {ids}",
+                withheld.len()
+            )));
+        }
+
+        let mut output = format!(
+            "Pulled {rendered} unread message(s) for {recipient} (at-most-once inbox claim: \
+             marked seen before this response is delivered; daemon transport delivery is \
+             unchanged)"
+        );
+        if redelivered > 0 {
             output.push_str(&format!(
-                "**[{}] From: {}**\nSummary: {}\nCreated: {}\nMessage: {}\n\n",
-                message.id,
-                message.source,
-                message.summary.as_deref().unwrap_or("(no summary)"),
-                message.created_at.to_rfc3339(),
-                message.prompt,
+                ". {redelivered} marked {INBOX_REDELIVERY_MARKER}: already handed to your \
+                 transport once — treat as a duplicate unless you never acted on it"
             ));
         }
+        if !withheld.is_empty() {
+            output.push_str(&format!(
+                ". Withheld {} already-delivered message(s) whose requested action is already \
+                 recorded: {}",
+                withheld.len(),
+                withheld
+                    .iter()
+                    .map(|(id, task)| format!("{id} (assignment for {task})"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        output.push_str(":\n\n");
+        output.push_str(&body);
 
         Ok(Self::success(output))
     }
@@ -1006,18 +1259,25 @@ impl CasService {
                         }
                     ),
                 };
+                // cas-ac7e (GH #130): stage=delivered used to be the writer's
+                // unchecked claim about itself. Say out loud when the
+                // recipient side cannot corroborate it, instead of reporting
+                // "delivered" and leaving the operator to discover from the
+                // recipient that nothing arrived.
+                let transport_line = recipient_transport_warning(
+                    r.stage,
+                    &r.target,
+                    r.recipient_transport_at.is_some(),
+                )
+                .unwrap_or("");
                 Ok(Self::success(format!(
                     "Message {notification_id} status: {}\n\
                      stage: {}  pending_reason: {}  wake: {}  reaction: {}  \
                      confirmation_source: {}\n\
+                     {transport_line}\
                      {undelivered_line}\
                      {json}",
-                    r.legacy_status,
-                    r.stage,
-                    reason,
-                    r.wake,
-                    r.reaction,
-                    r.confirmation_source
+                    r.legacy_status, r.stage, reason, r.wake, r.reaction, r.confirmation_source
                 )))
             }
             None => Ok(Self::success(format!(
@@ -1085,7 +1345,54 @@ fn enrich_report_from_harness_artifact(
 
 #[cfg(test)]
 mod inbox_poll_identity_tests {
-    use super::{enrich_report_from_harness_artifact, resolve_inbox_recipient};
+    use super::{
+        enrich_report_from_harness_artifact, recipient_transport_warning, resolve_inbox_recipient,
+    };
+    use cas_store::DeliveryStage;
+
+    /// cas-ac7e (GH #130): the 7183 shape — delivered per the writer, with
+    /// nothing on the recipient's side to corroborate it — must be called out.
+    #[test]
+    fn a_delivered_row_without_a_recipient_stamp_warns() {
+        let warning = recipient_transport_warning(DeliveryStage::Delivered, "fast-cobra-90", false);
+        assert!(
+            warning.is_some_and(|w| w.contains("MISSING")),
+            "silently reporting stage=delivered here is exactly the blind spot #130 reported"
+        );
+    }
+
+    #[test]
+    fn a_corroborated_delivery_does_not_warn() {
+        assert_eq!(
+            recipient_transport_warning(DeliveryStage::Delivered, "fast-cobra-90", true),
+            None
+        );
+    }
+
+    #[test]
+    fn a_broadcast_is_exempt_from_the_recipient_stamp_warning() {
+        assert_eq!(
+            recipient_transport_warning(DeliveryStage::Delivered, "all_workers", false),
+            None,
+            "a broadcast's per-recipient transport is its broadcast counts; warning here              would fire on every healthy broadcast and train operators to ignore it"
+        );
+    }
+
+    #[test]
+    fn a_row_that_never_reached_delivered_does_not_warn() {
+        for stage in [
+            DeliveryStage::Enqueued,
+            DeliveryStage::Selected,
+            DeliveryStage::Gated,
+            DeliveryStage::Confirmed,
+        ] {
+            assert_eq!(
+                recipient_transport_warning(stage, "worker-1", false),
+                None,
+                "{stage} has made no delivery claim to contradict"
+            );
+        }
+    }
 
     #[test]
     fn registered_identity_precedes_environment_fallback() {
@@ -1174,5 +1481,97 @@ mod inbox_poll_identity_tests {
         assert!(report.wake_evidence.as_deref().is_some_and(|evidence| {
             evidence.contains("task_started") && evidence.contains("rollout-live-worker")
         }));
+    }
+}
+
+#[cfg(test)]
+mod cas99d2_redelivery_tests {
+    use super::{
+        INBOX_REDELIVERY_MARKER, InboxRedelivery, assignment_solicited_task_id,
+        inbox_redelivery_decision,
+    };
+
+    /// The literal text of notification 7112 (supervisor hand-written dispatch).
+    #[test]
+    fn the_real_7112_assignment_names_its_solicited_task() {
+        let prompt = "You are assigned task cas-7587 (P2 bug, epic cas-b0c7). Run \
+                      `mcp__cas__task action=show id=cas-7587` then \
+                      `mcp__cas__task action=start id=cas-7587`.\n\nScope: GH #122 …";
+        assert_eq!(
+            assignment_solicited_task_id(prompt).as_deref(),
+            Some("cas-7587")
+        );
+    }
+
+    /// The director's generated assignment prompt shape.
+    #[test]
+    fn the_generated_assignment_prompt_names_its_solicited_task() {
+        let prompt = "You have been assigned a new task:\n\
+                      Task ID: cas-99d2\n\
+                      Title: Message confirmation truth\n\n\
+                      Start working: mcp__cas__task action=start id=cas-99d2";
+        assert_eq!(
+            assignment_solicited_task_id(prompt).as_deref(),
+            Some("cas-99d2")
+        );
+    }
+
+    /// A message that merely mentions a task id is not an assignment. Treating
+    /// it as one would let unrelated task progress silence real instructions.
+    #[test]
+    fn non_assignment_messages_solicit_nothing() {
+        for prompt in [
+            "factory/fierce-crow-25 is merged into the epic branch. Re-run close for cas-bcfb.",
+            "status on cas-7587? your last note was 20 minutes ago",
+            "Reviewed the diff for cas-7587 myself — nice work.",
+            "stand down and shut down cleanly",
+        ] {
+            assert_eq!(
+                assignment_solicited_task_id(prompt),
+                None,
+                "must not be read as an assignment: {prompt}"
+            );
+        }
+    }
+
+    /// An assignment phrase with no task-shaped id yields nothing rather than
+    /// a bogus id that would be looked up and (not) found.
+    #[test]
+    fn an_assignment_without_a_task_id_solicits_nothing() {
+        assert_eq!(
+            assignment_solicited_task_id("You have been assigned a new task, details to follow"),
+            None
+        );
+    }
+
+    #[test]
+    fn redelivery_decision_covers_the_three_cases() {
+        assert_eq!(
+            inbox_redelivery_decision(false, false),
+            InboxRedelivery::FirstDelivery
+        );
+        assert_eq!(
+            inbox_redelivery_decision(true, false),
+            InboxRedelivery::MarkRedelivery,
+            "a repeat with no consumption evidence is still delivered, but marked"
+        );
+        assert_eq!(
+            inbox_redelivery_decision(true, true),
+            InboxRedelivery::WithholdConsumed,
+            "GH #127: delivered once AND the solicited action happened"
+        );
+        assert_eq!(
+            inbox_redelivery_decision(false, true),
+            InboxRedelivery::FirstDelivery,
+            "a row never handed to a transport must be delivered even if the task \
+             happens to have moved — the recipient has provably not seen this text"
+        );
+    }
+
+    /// The marker must match the token the daemon's teams-inbox writer already
+    /// recognises as an intentional redelivery, so the two channels agree.
+    #[test]
+    fn the_marker_matches_the_teams_inbox_redelivery_token() {
+        assert_eq!(INBOX_REDELIVERY_MARKER, "[redelivery]");
     }
 }

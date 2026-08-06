@@ -6,6 +6,7 @@ mod message_display;
 mod permission_request_factory;
 mod preferences_context;
 mod reload_skills;
+mod review_dispatch_gate;
 mod reviews;
 mod session_title;
 mod ripple_path_scope;

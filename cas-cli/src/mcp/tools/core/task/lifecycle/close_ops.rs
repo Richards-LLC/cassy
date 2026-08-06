@@ -5613,6 +5613,131 @@ fn commit_tip_tree_reachable_from(
     }
 }
 
+/// Is `commit` reachable from any of `trunk_refs`?
+///
+/// Used to classify a commit in an anchor's range as inherited spawn base
+/// rather than task work (cas-2a99 / GH #131).
+fn commit_reachable_from_any(
+    repo_path: &std::path::Path,
+    commit: &str,
+    trunk_refs: &[String],
+) -> bool {
+    use std::process::Command;
+
+    if !is_safe_git_refname(commit) {
+        return false;
+    }
+    trunk_refs.iter().any(|trunk| {
+        matches!(
+            Command::new("git")
+                .args(["merge-base", "--is-ancestor", commit, trunk])
+                .current_dir(repo_path)
+                .status(),
+            Ok(status) if status.success()
+        )
+    })
+}
+
+/// The repository's trunk refs — `origin/<default>` and local `<default>` —
+/// for spawn-base classification (cas-2a99 / GH #131).
+///
+/// Returns only refs that actually resolve. An empty result means trunk is
+/// unknowable here, and every caller must then fall back to its stricter
+/// pre-existing behaviour rather than treating "no trunk" as "nothing is
+/// inherited" — otherwise an unresolvable trunk would silently widen the
+/// exclusion set to everything.
+fn resolve_trunk_refs(repo_path: &std::path::Path) -> Vec<String> {
+    let Ok(default_branch) = resolve_close_gate_default_branch(repo_path) else {
+        return Vec::new();
+    };
+    [format!("origin/{default_branch}"), default_branch]
+        .into_iter()
+        .filter(|r| git_ref_exists(repo_path, r))
+        .collect()
+}
+
+/// cas-2a99 (GH #131): does the anchor's own TASK WORK have a patch-equivalent
+/// on `parent_ref`, ignoring commits it merely inherited from its spawn base?
+///
+/// [`commit_patches_cherry_equivalent_on_parent`] requires EVERY commit unique
+/// to the anchor to be cherry-equivalent on the parent. A factory worktree is
+/// cut from whatever trunk pointed at when the worker spawned, so an anchor's
+/// range routinely contains commits that were never this task's work — in the
+/// #131 incident, a docs commit inherited from the spawn base, dropped by the
+/// worker's rebase and never landed on the epic. One such commit made the
+/// whole proof fail and reported a fully merged child as carrying stranded
+/// commits, hard-blocking the epic's close.
+///
+/// The discriminator is reachability from trunk: a commit already reachable
+/// from `origin/<default>` or local `<default>` is inherited spawn base BY
+/// DEFINITION and cannot be work this task produced on its factory branch.
+/// Those are excluded from the required-equivalence set. EVERY remaining
+/// commit must still be cherry-equivalent on the parent, so a genuinely
+/// dropped work commit — never trunk-reachable — still poisons the proof and
+/// still blocks. That property is the fence around this deliberate loosening.
+///
+/// Fail-closed in every ambiguous direction: unsafe/missing refs, a failed
+/// `git cherry`, unrecognized cherry output, an unresolvable trunk, or an
+/// absence of any positively-equivalent commit all return `false`.
+fn anchor_work_patches_equivalent_on_parent(
+    repo_path: &std::path::Path,
+    commit_ish: &str,
+    parent_ref: &str,
+) -> bool {
+    use std::process::Command;
+
+    if !is_safe_git_refname(commit_ish) || !is_safe_git_refname(parent_ref) {
+        return false;
+    }
+    if !git_ref_exists(repo_path, commit_ish) || !git_ref_exists(repo_path, parent_ref) {
+        return false;
+    }
+
+    // No resolvable trunk → nothing can be classified as inherited, so this
+    // degrades to the strict whole-range check rather than excluding blindly.
+    let trunk_refs = resolve_trunk_refs(repo_path);
+
+    let cherry_out = Command::new("git")
+        .args(["cherry", parent_ref, commit_ish])
+        .current_dir(repo_path)
+        .output();
+    let Ok(o) = cherry_out else {
+        return false;
+    };
+    if !o.status.success() {
+        return false;
+    }
+
+    let stdout = String::from_utf8_lossy(&o.stdout);
+    let mut saw_equivalent = false;
+    for line in stdout.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if let Some(sha) = t.strip_prefix('+') {
+            let sha = sha.trim();
+            // Inherited spawn-base commit: not this task's work, so its
+            // absence from the parent is not evidence of stranded work.
+            if !trunk_refs.is_empty() && commit_reachable_from_any(repo_path, sha, &trunk_refs) {
+                continue;
+            }
+            // A non-trunk-reachable commit with no equivalent on the parent
+            // is real work that did not land. Refuse.
+            return false;
+        }
+        if t.starts_with('-') {
+            saw_equivalent = true;
+            continue;
+        }
+        // Unrecognized cherry output is not evidence of equivalence.
+        return false;
+    }
+    // Empty output, or a range consisting only of inherited base commits, is
+    // not positive proof that this task's work landed.
+    saw_equivalent
+}
+
 /// cas-38e2 / cas-cf64 (P3, bounded + validated): best-effort
 /// `git fetch origin <parent_branch>` inside `repo_path`, refreshing the
 /// `origin/<parent_branch>` remote-tracking ref before
@@ -6992,6 +7117,54 @@ fn commit_receipt_rejection(receipt: &str, parent_branch: &str, reason: &str) ->
     )
 }
 
+/// Resolve a close against the merge evidence the caller supplied, if any.
+///
+/// Returns `Some(outcome)` when evidence was offered — the anchor proves
+/// integration (cas-127f), or the receipt is adjudicated by
+/// [`validate_task_commit_receipt`] and either carries the close or is
+/// rejected on its own terms. Returns `None` only when NO evidence was
+/// offered, leaving the caller's heuristic to decide.
+///
+/// cas-cab3 (GH #128): this used to be inlined on the zero-commit path only,
+/// so the no-diff path rejected merged work that came with a valid receipt —
+/// the state a branch is in after the supervisor merges it and the worker
+/// syncs with the epic tip. Evidence outranks the heuristic on BOTH paths;
+/// one function so they cannot drift apart again.
+fn resolve_merge_evidence(
+    worker_worktree_path: &std::path::Path,
+    parent_branch: &str,
+    factory_branch_anchor: Option<&str>,
+    commit_receipt: Option<&str>,
+    commit_receipt_window: Option<&TaskCommitReceiptWindow>,
+) -> Option<ZeroCommitCloseOutcome> {
+    // cas-127f: merge-satisfied — parked tip is now on the parent.
+    if let Some(anchor) = factory_branch_anchor {
+        if commit_is_merged_into_parent(worker_worktree_path, anchor, parent_branch) {
+            return Some(ZeroCommitCloseOutcome::Proceed);
+        }
+    }
+    let receipt = commit_receipt?;
+    let Some(window) = commit_receipt_window else {
+        return Some(ZeroCommitCloseOutcome::AmbiguousCodeTask(
+            commit_receipt_rejection(
+                receipt,
+                parent_branch,
+                "task attribution window is unavailable; ask the supervisor for an audited bypass",
+            ),
+        ));
+    };
+    Some(
+        match validate_task_commit_receipt(worker_worktree_path, receipt, parent_branch, window) {
+            Ok(note) => ZeroCommitCloseOutcome::ProceedWithReceipt(note),
+            Err(reason) => ZeroCommitCloseOutcome::AmbiguousCodeTask(commit_receipt_rejection(
+                receipt,
+                parent_branch,
+                &reason,
+            )),
+        },
+    )
+}
+
 /// cas-ee2b: check whether a zero-commit close is ambiguous and should be
 /// rejected.
 ///
@@ -7011,13 +7184,19 @@ fn commit_receipt_rejection(receipt: &str, parent_branch: &str, reason: &str) ->
 ///    gate handles that case):
 ///    → `Proceed`. No ambiguity.
 ///
-/// 3. **Merge-satisfied** (cas-127f/cas-3d37): `count == 0` but
-///    `factory_branch_anchor` is set and that SHA is an ancestor of
-///    `parent_branch` (work was committed, the PostToolUse hook captured the
-///    tip, and the supervisor merged into the epic either before or after
-///    the first close). → `Proceed`. Without this path, post-merge close
-///    false-rejects ZERO-COMMIT because the worker tip is no longer *ahead
-///    of* parent even though the work landed.
+/// 3. **Merge-satisfied** (cas-127f/cas-3d37): `factory_branch_anchor` is set
+///    and that SHA is an ancestor of `parent_branch` (work was committed, the
+///    PostToolUse hook captured the tip, and the supervisor merged into the
+///    epic either before or after the first close), or a `commit_receipt`
+///    passes [`validate_task_commit_receipt`]. → `Proceed` /
+///    `ProceedWithReceipt`. Without this path, post-merge close
+///    false-rejects because the worker tip is no longer *ahead of* parent
+///    even though the work landed.
+///
+///    cas-cab3 (GH #128): this applies whether the branch has 0 commits or
+///    only zero-diff sync merges. A supervisor merge followed by a sync with
+///    the epic tip produces the latter, and it is what SUCCESS looks like —
+///    evidence is consulted before the no-diff heuristic on both shapes.
 ///
 /// 4. **Ambiguous zero-commit** (`count == 0`, no anchor / anchor not
 ///    integrated, no `execution_note`, task type is Bug/Feature/Task, no
@@ -7082,58 +7261,65 @@ pub(crate) fn check_zero_commit_close(
             return ZeroCommitCloseOutcome::Proceed;
         }
         // Case 3b: commit(s) exist but the diff vs parent is empty — a
-        // sync/merge-only close, not task work.
+        // sync/merge-only close.
+        //
+        // cas-cab3 (GH #128): "sync-only" is ALSO the shape of a successful
+        // post-merge close. Once the supervisor merges the factory branch and
+        // the worker syncs with the epic tip, the branch legitimately holds
+        // nothing but a zero-diff merge commit — the work is in the parent,
+        // which is where it belongs. Consult the merge evidence (anchor /
+        // receipt) FIRST, exactly as the zero-commit path below does; the
+        // heuristic only decides the cases evidence cannot.
+        if let Some(outcome) = resolve_merge_evidence(
+            worker_worktree_path,
+            parent_branch,
+            factory_branch_anchor,
+            commit_receipt,
+            commit_receipt_window,
+        ) {
+            return outcome;
+        }
         let task_type_str = format!("{task_type:?}").to_lowercase();
         let wt_display = worker_worktree_path.display();
         return ZeroCommitCloseOutcome::AmbiguousCodeTask(format!(
             "⚠️ NO-DIFF CLOSE ON CODE TASK\n\n\
             task close rejected: this is a {task_type_str} task with no \
-            code_review_findings, no execution_note, and {commit_count} \
-            commit(s) on the worker branch that produce an EMPTY diff vs \
-            {parent_branch} (a sync/merge-only commit, e.g. `git merge \
-            --no-ff` with no unique work, not task work). That combination \
-            is ambiguous — either the work wasn't committed yet, or this \
-            task was resolved without code.\n\n\
+            code_review_findings, no execution_note, no merge evidence, and \
+            {commit_count} commit(s) on the worker branch that produce an \
+            EMPTY diff vs {parent_branch} (a sync/merge-only commit, e.g. \
+            `git merge --no-ff` with no unique work, not task work). That \
+            combination is ambiguous — either the work wasn't committed yet, \
+            or this task was resolved without code.\n\n\
             📂 Worker worktree: {wt_display}\n\
             📊 Commits on branch: {commit_count} (zero-diff vs {parent_branch})\n\n\
             To resolve:\n\
             1. If you wrote code but forgot to commit: stage and commit your \
                changes, then retry close.\n\
-            2. If this task was resolved without code (fixed by a sibling task, \
+            2. If the supervisor already merged this task's work and you then \
+               synced this branch with {parent_branch}, that is exactly what \
+               a finished task looks like — do NOT reset or force-push the \
+               branch. Find the SHA of the worker task commit OR the merge \
+               commit that carried this task's work (never an unrelated \
+               historical commit), verify it with `git show --stat <sha>` and \
+               `git merge-base --is-ancestor <sha> {parent_branch}`, then \
+               retry close with `commit_receipt=<sha>` (full or an \
+               unambiguous abbreviation).\n\
+            3. If this task was resolved without code (fixed by a sibling task, \
                docs-only, characterization-only): update the task with an \
                execution_note to signal intentional no-code work:\n\
                `mcp__cas__task action=update id={task_id} execution_note=additive-only`\n\
-            3. Supervisors may bypass this gate with bypass_code_review=true \
+            4. Supervisors may bypass this gate with bypass_code_review=true \
                (logged as a decision note)."
         ));
     }
-    // cas-127f: merge-satisfied — parked tip is now on the parent.
-    if let Some(anchor) = factory_branch_anchor {
-        if commit_is_merged_into_parent(worker_worktree_path, anchor, parent_branch) {
-            return ZeroCommitCloseOutcome::Proceed;
-        }
-    }
-    if let Some(receipt) = commit_receipt {
-        let Some(window) = commit_receipt_window else {
-            return ZeroCommitCloseOutcome::AmbiguousCodeTask(commit_receipt_rejection(
-                receipt,
-                parent_branch,
-                "task attribution window is unavailable; ask the supervisor for an audited bypass",
-            ));
-        };
-        return match validate_task_commit_receipt(
-            worker_worktree_path,
-            receipt,
-            parent_branch,
-            window,
-        ) {
-            Ok(note) => ZeroCommitCloseOutcome::ProceedWithReceipt(note),
-            Err(reason) => ZeroCommitCloseOutcome::AmbiguousCodeTask(commit_receipt_rejection(
-                receipt,
-                parent_branch,
-                &reason,
-            )),
-        };
+    if let Some(outcome) = resolve_merge_evidence(
+        worker_worktree_path,
+        parent_branch,
+        factory_branch_anchor,
+        commit_receipt,
+        commit_receipt_window,
+    ) {
+        return outcome;
     }
     // Case 3: ambiguous zero-commit close.
     let task_type_str = format!("{task_type:?}").to_lowercase();
@@ -7192,6 +7378,79 @@ pub(crate) struct EpicChildBranchStatus {
     /// Audit note emitted when a stranded recorded anchor is superseded by
     /// live branch tips that are all known merged into the parent.
     pub merge_evidence_note: Option<String>,
+    /// cas-2a99 (GH #131): which ref each checked commit-ish was actually
+    /// read from — the local ref, the `origin/` fallback, or neither.
+    pub checked_ref_reads: Vec<CheckedRefRead>,
+    /// True when this row checked at least one commit-ish and NONE of them
+    /// resolved locally or on `origin/`. [`Self::unmerged_count`] is then
+    /// not a measurement and must never be rendered as a count.
+    pub refs_unresolved: bool,
+}
+
+/// Which ref an epic-status row's unmerged count was actually read from
+/// (cas-2a99 / GH #131).
+///
+/// A worker's worktree cleanup deletes the local `factory/<worker>` ref, so a
+/// fully merged child can present with no local ref at all while
+/// `origin/factory/<worker>` still names the exact merged tip. Reading only
+/// the local ref makes that row's number arithmetic about a ref that no longer
+/// exists; reading neither and reporting `0` makes a vanished branch look
+/// merged. Both are recorded explicitly so the table can name its source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CheckedRefRead {
+    /// The requested commit-ish resolved directly (local branch ref, or a raw
+    /// commit id such as a recorded `factory_branch_anchor`).
+    Local { requested: String },
+    /// The local ref was gone; `origin/<requested>` was read instead.
+    Origin { requested: String, read: String },
+    /// Neither the local ref nor `origin/<requested>` resolves. No unmerged
+    /// count is derivable from this ref.
+    Missing { requested: String },
+}
+
+impl CheckedRefRead {
+    /// The ref every merge-base/rev-list for this entry should be run
+    /// against, or `None` when nothing resolved.
+    pub(crate) fn read_ref(&self) -> Option<&str> {
+        match self {
+            Self::Local { requested } => Some(requested),
+            Self::Origin { read, .. } => Some(read),
+            Self::Missing { .. } => None,
+        }
+    }
+
+    /// Supervisor-facing label naming the ref actually read.
+    fn label(&self) -> String {
+        match self {
+            Self::Local { requested } => requested.clone(),
+            Self::Origin { requested, read } => format!("{read} (local {requested} missing)"),
+            Self::Missing { requested } => format!("{requested} missing (local + origin)"),
+        }
+    }
+}
+
+/// Resolve `requested` preferring the local ref and falling back to
+/// `origin/<requested>` (cas-2a99 / GH #131).
+///
+/// Mirrors the dual-ref read the director's merge-alert path already performs
+/// before it reports a count: read both, and never let "the ref I happened to
+/// look at is gone" masquerade as a measurement.
+fn read_ref_preferring_local(repo_path: &std::path::Path, requested: &str) -> CheckedRefRead {
+    if git_ref_exists(repo_path, requested) {
+        return CheckedRefRead::Local {
+            requested: requested.to_string(),
+        };
+    }
+    let origin = format!("origin/{requested}");
+    if git_ref_exists(repo_path, &origin) {
+        return CheckedRefRead::Origin {
+            requested: requested.to_string(),
+            read: origin,
+        };
+    }
+    CheckedRefRead::Missing {
+        requested: requested.to_string(),
+    }
 }
 
 impl EpicChildBranchStatus {
@@ -7208,6 +7467,20 @@ impl EpicChildBranchStatus {
         } else {
             branches
         }
+    }
+
+    /// Names the ref(s) this row's unmerged count was actually read from
+    /// (cas-2a99 / GH #131), so a supervisor can tell a local read from an
+    /// `origin/` fallback from a ref that resolves nowhere.
+    fn checked_refs_label(&self) -> String {
+        if self.checked_ref_reads.is_empty() {
+            return "—".to_string();
+        }
+        self.checked_ref_reads
+            .iter()
+            .map(CheckedRefRead::label)
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
@@ -7277,6 +7550,16 @@ fn live_branch_merge_evidence(
 /// A zero-ahead branch alone is never proof: the branch name may have been
 /// recycled or reset after discarding the recorded task's work.
 ///
+/// cas-2a99 (GH #131) narrows what "cherry-equivalent patches" must cover:
+/// commits the anchor inherited from its spawn base (reachable from trunk) are
+/// excluded from the required-equivalence set, because they are not this
+/// task's work. Commits the task actually produced are never trunk-reachable,
+/// so a dropped work commit still fails the proof and still blocks.
+///
+/// Every commit-ish is read local-first with an `origin/<branch>` fallback, and
+/// a commit-ish that resolves neither way is recorded as unresolved rather than
+/// counted as `0` — see [`CheckedRefRead`].
+///
 /// Used by both:
 /// - `factory_epic_status` (read-only diagnostic — renders all rows)
 /// - `run_epic_close_merge_gate` (close gate — filters to rows with
@@ -7326,16 +7609,31 @@ pub(crate) fn collect_epic_branch_statuses(
             } else {
                 fallback_branches.iter().map(String::as_str).collect()
             };
+            // cas-2a99 (GH #131): resolve each commit-ish through the dual-ref
+            // read before measuring anything. A merged child whose worker
+            // shutdown deleted the local `factory/<worker>` ref must be counted
+            // against `origin/factory/<worker>`, and a commit-ish that resolves
+            // NOWHERE must not fail open to `0` — that reported a vanished
+            // branch as merged.
             let mut unmerged_count = 0;
             let mut latest_commit_unix = None;
+            let mut checked_ref_reads = Vec::new();
+            let mut any_ref_resolved = false;
             for commit in checked_refs {
-                unmerged_count = unmerged_count.max(count_unmerged_factory_commits(
-                    repo_path,
-                    commit,
-                    parent_branch,
-                ));
-                latest_commit_unix = latest_commit_unix.max(last_commit_unix(repo_path, commit));
+                let read = read_ref_preferring_local(repo_path, commit);
+                if let Some(refname) = read.read_ref() {
+                    any_ref_resolved = true;
+                    unmerged_count = unmerged_count.max(count_unmerged_factory_commits(
+                        repo_path,
+                        refname,
+                        parent_branch,
+                    ));
+                    latest_commit_unix =
+                        latest_commit_unix.max(last_commit_unix(repo_path, refname));
+                }
+                checked_ref_reads.push(read);
             }
+            let refs_unresolved = !checked_ref_reads.is_empty() && !any_ref_resolved;
             let mut merge_evidence_note = None;
             if let Some(anchor) = resolved_anchor
                 && unmerged_count > 0
@@ -7364,9 +7662,13 @@ pub(crate) fn collect_epic_branch_statuses(
                         None => live_state_is_known = false,
                     }
                 }
+                // cas-2a99 (GH #131): the cherry arm ignores commits the anchor
+                // merely inherited from its spawn base (trunk-reachable, so not
+                // this task's work). A dropped WORK commit is never
+                // trunk-reachable and still poisons the proof.
                 let anchor_has_task_specific_proof =
                     commit_tip_tree_reachable_from(repo_path, anchor, parent_branch)
-                        || commit_patches_cherry_equivalent_on_parent(
+                        || anchor_work_patches_equivalent_on_parent(
                             repo_path,
                             anchor,
                             parent_branch,
@@ -7398,6 +7700,8 @@ pub(crate) fn collect_epic_branch_statuses(
                 unmerged_count,
                 last_commit_unix: latest_commit_unix,
                 merge_evidence_note,
+                checked_ref_reads,
+                refs_unresolved,
             }
         })
         .collect()
@@ -7453,8 +7757,12 @@ pub(crate) fn render_epic_status_report_with_stack(
         out.push_str("(no child tasks)\n");
         return out;
     }
-    out.push_str("| Task | Status | Assignee | Factory branch | Unmerged | Last commit |\n");
-    out.push_str("|------|--------|----------|----------------|----------|-------------|\n");
+    out.push_str(
+        "| Task | Status | Assignee | Factory branch | Checked ref | Unmerged | Last commit |\n",
+    );
+    out.push_str(
+        "|------|--------|----------|----------------|-------------|----------|-------------|\n",
+    );
     for s in statuses {
         // Use Display (snake_case: in_progress, closed) rather than
         // Debug (PascalCase: InProgress, Closed) so the supervisor-
@@ -7463,7 +7771,12 @@ pub(crate) fn render_epic_status_report_with_stack(
         let status_str = s.task_status.to_string();
         let assignee = s.assignee.as_deref().unwrap_or("—");
         let branch = s.factory_branches_label();
-        let unmerged = if s.factory_branch.is_some() {
+        // cas-2a99 (GH #131): a row whose refs resolve nowhere has no
+        // measurement to report. Saying so beats printing `0`, which reads as
+        // "merged" and previously produced a false all-clear.
+        let unmerged = if s.refs_unresolved {
+            "? (no ref)".to_string()
+        } else if s.factory_branch.is_some() {
             s.unmerged_count.to_string()
         } else {
             "—".to_string()
@@ -7473,11 +7786,12 @@ pub(crate) fn render_epic_status_report_with_stack(
             None => "—".to_string(),
         };
         out.push_str(&format!(
-            "| {task} | {status} | {assignee} | {branch} | {unmerged} | {last} |\n",
+            "| {task} | {status} | {assignee} | {branch} | {checked} | {unmerged} | {last} |\n",
             task = s.task_id,
             status = status_str,
             assignee = assignee,
             branch = branch,
+            checked = s.checked_refs_label(),
             unmerged = unmerged,
             last = last_commit,
         ));
@@ -7492,14 +7806,39 @@ pub(crate) fn render_epic_status_report_with_stack(
             out.push_str(&format!("- {note}\n"));
         }
     }
+    // cas-2a99 (GH #131): unresolved-ref rows are reported separately. They
+    // are not stranded (no measurement says so) and they are not proven merged
+    // either, so they must not be folded into the all-clear.
+    let unresolved: Vec<&EpicChildBranchStatus> =
+        statuses.iter().filter(|s| s.refs_unresolved).collect();
+    if !unresolved.is_empty() {
+        out.push_str(&format!(
+            "\nℹ️  {} child task(s) have no readable branch ref (neither the local ref \
+             nor `origin/<branch>` resolves), so their merge state is unknown rather \
+             than zero:\n",
+            unresolved.len(),
+        ));
+        for s in &unresolved {
+            out.push_str(&format!(
+                "- {task}: {refs}\n",
+                task = s.task_id,
+                refs = s.checked_refs_label(),
+            ));
+        }
+    }
     let stranded = statuses.iter().filter(|s| s.unmerged_count > 0).count();
     if stranded > 0 {
         out.push_str(&format!(
             "\n⚠️  {stranded} child task(s) carry stranded factory commits. \
              Epic close will be hard-blocked until they are merged.\n",
         ));
-    } else {
+    } else if unresolved.is_empty() {
         out.push_str("\n✓ All child factory branches are merged into the parent epic branch.\n");
+    } else {
+        out.push_str(
+            "\n✓ Every child factory branch that could be read is merged into the parent \
+             epic branch (see unreadable refs above).\n",
+        );
     }
     out
 }
@@ -14214,6 +14553,313 @@ mod epic_status_gate_tests {
         );
     }
 
+    // --- cas-2a99 (GH #131): dual-ref reads + spawn-base-aware anchor proof --
+    //
+    // Incident shape: a child's work merged into the epic, then the worker shut
+    // down and its worktree cleanup deleted the local `factory/<worker>` ref.
+    // `origin/factory/<worker>` still named the exact merged tip, yet the row
+    // reported stranded commits and the report threatened a close hard-block.
+
+    /// Give `p` a real `origin` remote (a bare repo in `bare`) so
+    /// `origin/<branch>` remote-tracking refs exist for the dual-ref read and
+    /// for trunk classification.
+    fn add_origin(p: &std::path::Path, bare: &std::path::Path) {
+        git(bare, &["init", "-q", "--bare"]);
+        git(p, &["remote", "add", "origin", bare.to_str().unwrap()]);
+    }
+
+    /// Commit `name` on the current branch of `p` and return its SHA.
+    fn commit_returning_sha(p: &std::path::Path, name: &str, body: &str) -> String {
+        std::fs::write(p.join(name), body).unwrap();
+        git(p, &["add", name]);
+        git(p, &["commit", "-q", "-m", &format!("commit {name}")]);
+        epic_git_stdout(p, &["rev-parse", "HEAD"])
+    }
+
+    #[test]
+    fn merged_child_with_deleted_local_ref_reads_origin_and_reports_zero() {
+        // AC1: local factory ref gone, origin ref present and merged → the row
+        // must report 0 unmerged, must NAME the ref it read, and must not
+        // produce a hard-block footer.
+        let dir = tempfile::tempdir().unwrap();
+        let bare = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "main"]);
+        commit_returning_sha(p, "seed.txt", "seed\n");
+        add_origin(p, bare.path());
+        git(p, &["push", "-q", "origin", "main"]);
+
+        git(p, &["checkout", "-q", "-b", "epic/x"]);
+        git(p, &["checkout", "-q", "-b", "factory/alpha"]);
+        commit_returning_sha(p, "work.rs", "// work\n");
+        // The worker pushed, the supervisor merged, then the worker shut down.
+        git(p, &["push", "-q", "origin", "factory/alpha"]);
+        git(p, &["checkout", "-q", "epic/x"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "-m",
+                "merge alpha",
+                "factory/alpha",
+            ],
+        );
+        git(p, &["branch", "-q", "-D", "factory/alpha"]);
+
+        // Precondition: exactly the incident shape.
+        assert!(
+            !git_ref_exists(p, "factory/alpha"),
+            "local factory ref must be gone for this test to mean anything"
+        );
+        assert!(git_ref_exists(p, "origin/factory/alpha"));
+
+        let subtasks = vec![child("cas-c1", TaskStatus::Closed, Some("alpha"))];
+        let statuses = collect_epic_branch_statuses(&subtasks, "epic/x", p);
+        let row = &statuses[0];
+
+        assert_eq!(
+            row.unmerged_count, 0,
+            "merged child must report 0 unmerged, not a phantom count: {row:?}"
+        );
+        assert!(!row.refs_unresolved, "the origin ref resolved: {row:?}");
+        assert_eq!(
+            row.checked_ref_reads,
+            vec![CheckedRefRead::Origin {
+                requested: "factory/alpha".to_string(),
+                read: "origin/factory/alpha".to_string(),
+            }],
+            "the row must record that it fell back to the origin ref"
+        );
+        assert!(
+            row.last_commit_unix.is_some(),
+            "the origin ref resolves, so a last-commit timestamp is readable"
+        );
+
+        let report = render_epic_status_report("cas-epic", "epic/x", &statuses);
+        assert!(
+            report.contains("origin/factory/alpha (local factory/alpha missing)"),
+            "report must name the ref it actually read: {report}"
+        );
+        assert!(
+            !report.contains("hard-blocked"),
+            "a fully merged child must not threaten a close hard-block: {report}"
+        );
+        assert!(report.contains("All child factory branches are merged"));
+    }
+
+    #[test]
+    fn child_with_no_readable_ref_says_so_instead_of_reporting_zero() {
+        // AC2: neither the local ref nor origin/<branch> resolves. Reporting
+        // "0" there is a false all-clear — the inverse phantom.
+        let dir = init_epic_repo(&[]);
+        let p = dir.path();
+        let subtasks = vec![child("cas-c1", TaskStatus::Closed, Some("ghost"))];
+        let statuses = collect_epic_branch_statuses(&subtasks, "main", p);
+        let row = &statuses[0];
+
+        assert!(
+            row.refs_unresolved,
+            "neither factory/ghost nor origin/factory/ghost exists: {row:?}"
+        );
+        assert_eq!(
+            row.checked_ref_reads,
+            vec![CheckedRefRead::Missing {
+                requested: "factory/ghost".to_string(),
+            }]
+        );
+
+        let report = render_epic_status_report("cas-epic", "main", &statuses);
+        assert!(
+            report.contains("? (no ref)"),
+            "unreadable row must show an explicit unknown, not a count: {report}"
+        );
+        assert!(
+            report.contains("no readable branch ref"),
+            "report must call out the unreadable ref: {report}"
+        );
+        assert!(
+            !report.contains("✓ All child factory branches are merged into the parent"),
+            "an unreadable ref must not be folded into the all-clear: {report}"
+        );
+    }
+
+    /// Build the exact GH #131 anchor shape and return (tempdir, bare, anchor).
+    ///
+    /// `main` carries an inherited spawn-base commit that never lands on the
+    /// epic. The anchor is the worker's pre-rebase work commit on top of it.
+    /// `land_work` picks whether the rebase preserved the work (the incident)
+    /// or dropped it (the integrity case).
+    fn init_anchor_repo(land_work: bool) -> (TempDir, TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let bare = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "main"]);
+        commit_returning_sha(p, "seed.txt", "seed\n");
+        git(p, &["checkout", "-q", "-b", "epic/x"]);
+        git(p, &["checkout", "-q", "main"]);
+        // Inherited spawn-base commit: on trunk, never on the epic.
+        commit_returning_sha(p, "docs.md", "unrelated docs\n");
+        add_origin(p, bare.path());
+        git(p, &["push", "-q", "origin", "main"]);
+
+        // Worker spawned from trunk, so it inherits docs.md, then does work.
+        git(p, &["checkout", "-q", "-b", "factory/alpha"]);
+        let anchor = commit_returning_sha(p, "work.rs", "// work\n");
+
+        git(p, &["checkout", "-q", "epic/x"]);
+        if land_work {
+            // Rebase preserved the work: it is cherry-picked onto the epic and
+            // the factory branch is reset to that landed tip.
+            git(p, &["cherry-pick", &anchor]);
+        }
+        git(p, &["branch", "-q", "-f", "factory/alpha", "epic/x"]);
+        git(p, &["push", "-q", "origin", "factory/alpha"]);
+        // Worker shutdown removed the local ref.
+        git(p, &["checkout", "-q", "epic/x"]);
+        git(p, &["branch", "-q", "-D", "factory/alpha"]);
+        (dir, bare, anchor)
+    }
+
+    #[test]
+    fn anchor_proof_ignores_inherited_spawn_base_commit_and_clears_merged_child() {
+        // Supervisor test (1): anchor = work commit + trunk-reachable base
+        // commit; the work was rebased and merged. The trunk-reachable commit
+        // must not poison the proof, so the row clears and the epic's close is
+        // not hard-blocked.
+        let (dir, _bare, anchor) = init_anchor_repo(true);
+        let p = dir.path();
+
+        let mut t = child("cas-c1", TaskStatus::Closed, Some("alpha"));
+        t.deliverables.factory_branch_anchor = Some(anchor.clone());
+
+        // Precondition: without the exclusion this anchor genuinely looks
+        // stranded — that is the bug being fixed, not a no-op test.
+        assert!(
+            count_unmerged_factory_commits(p, &anchor, "epic/x") > 0,
+            "anchor must be non-ancestor of the epic for this test to bite"
+        );
+        assert!(
+            !commit_patches_cherry_equivalent_on_parent(p, &anchor, "epic/x"),
+            "the strict whole-range proof must still fail here (inherited \
+             docs.md has no equivalent on the epic) — otherwise this test \
+             would pass without the cas-2a99 change"
+        );
+        assert!(
+            anchor_work_patches_equivalent_on_parent(p, &anchor, "epic/x"),
+            "excluding the trunk-reachable spawn-base commit must leave only \
+             the work commit, which IS cherry-equivalent on the epic"
+        );
+
+        let subtasks = vec![t];
+        let statuses = collect_epic_branch_statuses(&subtasks, "epic/x", p);
+        let row = &statuses[0];
+        assert_eq!(
+            row.unmerged_count, 0,
+            "merged work must reconcile to 0 unmerged: {row:?}"
+        );
+        assert!(
+            row.merge_evidence_note.is_some(),
+            "the reconciliation must be recorded as an auditable note: {row:?}"
+        );
+
+        let report = render_epic_status_report("cas-epic", "epic/x", &statuses);
+        assert!(
+            !report.contains("hard-blocked"),
+            "epic close must not be hard-blocked by fully merged work: {report}"
+        );
+
+        // The gate shares this collector — the epic's close must actually pass.
+        let out = run_epic_close_merge_gate(
+            &epic("cas-epic"),
+            &base_req("cas-epic"),
+            "epic/x",
+            p,
+            &subtasks,
+        );
+        assert!(
+            matches!(out, EpicCloseGateOutcome::ProceedWithNote(_)),
+            "epic close must proceed (with the reconciliation note), got {out:?}"
+        );
+    }
+
+    #[test]
+    fn anchor_proof_still_blocks_when_a_real_work_commit_was_dropped() {
+        // Supervisor test (2): THE FENCE around the deliberate loosening. The
+        // rebase dropped a genuine work commit that never landed anywhere. It
+        // is not trunk-reachable, so it is not excluded, and the proof must
+        // still fail even though the live branch is fully merged.
+        let (dir, _bare, anchor) = init_anchor_repo(false);
+        let p = dir.path();
+
+        let mut t = child("cas-c1", TaskStatus::Closed, Some("alpha"));
+        t.deliverables.factory_branch_anchor = Some(anchor.clone());
+
+        // The live branch really is fully merged — the ONLY thing standing
+        // between this and a false clear is the work-commit check.
+        assert!(
+            matches!(
+                live_branch_merge_evidence(p, "factory/alpha", "epic/x"),
+                Some((KnownUnmergedCount::KnownZero, _))
+            ),
+            "precondition: the live (origin) branch is known fully merged"
+        );
+        assert!(
+            !anchor_work_patches_equivalent_on_parent(p, &anchor, "epic/x"),
+            "a dropped work commit is never trunk-reachable, so it must not be \
+             excluded and the proof must fail"
+        );
+
+        let subtasks = vec![t];
+        let statuses = collect_epic_branch_statuses(&subtasks, "epic/x", p);
+        let row = &statuses[0];
+        assert!(
+            row.unmerged_count > 0,
+            "stranded work must still be reported: {row:?}"
+        );
+        assert!(
+            row.merge_evidence_note.is_none(),
+            "nothing was reconciled, so no supersession note: {row:?}"
+        );
+
+        let out = run_epic_close_merge_gate(
+            &epic("cas-epic"),
+            &base_req("cas-epic"),
+            "epic/x",
+            p,
+            &subtasks,
+        );
+        assert!(
+            matches!(out, EpicCloseGateOutcome::Reject(_)),
+            "epic close must stay hard-blocked on genuinely dropped work, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn unresolvable_trunk_falls_back_to_strict_whole_range_proof() {
+        // Fail-closed: with no origin/HEAD and no local main/master, nothing
+        // can be classified as inherited. The exclusion must NOT widen to
+        // everything — the proof degrades to the strict check.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        git(p, &["init", "-q", "-b", "trunkless"]);
+        commit_returning_sha(p, "seed.txt", "seed\n");
+        git(p, &["checkout", "-q", "-b", "epic/x"]);
+        git(p, &["checkout", "-q", "-b", "factory/alpha"]);
+        let anchor = commit_returning_sha(p, "work.rs", "// work\n");
+
+        assert!(
+            resolve_trunk_refs(p).is_empty(),
+            "fixture must have no resolvable trunk"
+        );
+        assert!(
+            !anchor_work_patches_equivalent_on_parent(p, &anchor, "epic/x"),
+            "with no trunk to classify against, unlanded work must still fail \
+             the proof rather than being excluded as 'inherited'"
+        );
+    }
+
     // cas-aae6 (GH #110): a stacked epic cannot land alone, and epic_status is
     // where the supervisor decides merge order — so the chain belongs here, not
     // only in a creation message that scrolled away hours ago.
@@ -14860,6 +15506,13 @@ mod epic_status_gate_tests {
                 unmerged_count: 0,
                 last_commit_unix: Some(1735689600), // 2025-01-01 00:00 UTC
                 merge_evidence_note: None,
+                // cas-2a99: the incident shape — local ref gone after worker
+                // shutdown, count read from the origin fallback.
+                checked_ref_reads: vec![CheckedRefRead::Origin {
+                    requested: "factory/alpha".to_string(),
+                    read: "origin/factory/alpha".to_string(),
+                }],
+                refs_unresolved: false,
             },
             EpicChildBranchStatus {
                 task_id: "cas-bbbb".to_string(),
@@ -14871,6 +15524,10 @@ mod epic_status_gate_tests {
                 unmerged_count: 2,
                 last_commit_unix: Some(1735776000), // 2025-01-02 00:00 UTC
                 merge_evidence_note: None,
+                checked_ref_reads: vec![CheckedRefRead::Local {
+                    requested: "factory/bravo".to_string(),
+                }],
+                refs_unresolved: false,
             },
             EpicChildBranchStatus {
                 task_id: "cas-cccc".to_string(),
@@ -14882,6 +15539,8 @@ mod epic_status_gate_tests {
                 unmerged_count: 0,
                 last_commit_unix: None,
                 merge_evidence_note: None,
+                checked_ref_reads: Vec::new(),
+                refs_unresolved: false,
             },
         ];
         let report = render_epic_status_report("cas-754b", "epic/foo", &statuses);
@@ -14893,11 +15552,11 @@ mod epic_status_gate_tests {
 Epic cas-754b — factory branch status\n\
 Parent branch: epic/foo\n\
 \n\
-| Task | Status | Assignee | Factory branch | Unmerged | Last commit |\n\
-|------|--------|----------|----------------|----------|-------------|\n\
-| cas-aaaa | closed | alpha | factory/alpha | 0 | 2025-01-01 00:00 UTC |\n\
-| cas-bbbb | in_progress | bravo | factory/bravo | 2 | 2025-01-02 00:00 UTC |\n\
-| cas-cccc | in_progress | — | — | — | — |\n\
+| Task | Status | Assignee | Factory branch | Checked ref | Unmerged | Last commit |\n\
+|------|--------|----------|----------------|-------------|----------|-------------|\n\
+| cas-aaaa | closed | alpha | factory/alpha | origin/factory/alpha (local factory/alpha missing) | 0 | 2025-01-01 00:00 UTC |\n\
+| cas-bbbb | in_progress | bravo | factory/bravo | factory/bravo | 2 | 2025-01-02 00:00 UTC |\n\
+| cas-cccc | in_progress | — | — | — | — | — |\n\
 \n\
 ⚠️  1 child task(s) carry stranded factory commits. \
 Epic close will be hard-blocked until they are merged.\n";
@@ -15869,6 +16528,285 @@ mod zero_change_close_tests {
         assert!(
             matches!(outcome, ZeroCommitCloseOutcome::AmbiguousCodeTask(_)),
             "unmerged anchor must not unlock zero-commit; got {outcome:?}"
+        );
+    }
+
+    // ── cas-cab3 (GH #128): merge evidence outranks the no-diff heuristic ──
+
+    /// Build the exact GH #128 shape and hand back the receipt SHA:
+    /// worker commits real work → supervisor merges it into the parent →
+    /// worker syncs the branch with the parent tip via `git merge --no-ff`.
+    /// The branch now holds ONE commit (the sync merge) whose diff vs parent
+    /// is empty, while the receipt commit is a merged ancestor carrying real
+    /// files. That is what a finished task looks like, not a no-code close.
+    fn build_gh128_post_merge_sync(dir: &Path) -> String {
+        std::fs::write(dir.join("guard_fix.rs"), "pub fn guard() {}\n").unwrap();
+        git(dir, &["add", "guard_fix.rs"]);
+        git(dir, &["commit", "-q", "-m", "fix: real task work"]);
+        let receipt = head_sha(dir);
+
+        // Supervisor merges the factory branch into the parent.
+        git(dir, &["checkout", "-q", "main"]);
+        git(
+            dir,
+            &[
+                "merge",
+                "--no-ff",
+                "-m",
+                "Merge branch 'factory/test-worker'",
+                "factory/test-worker",
+            ],
+        );
+        // Parent moves on (a sibling lane lands), so the worker's later sync
+        // is a genuine non-fast-forward merge, exactly as in the incident.
+        std::fs::write(dir.join("sibling_lane.rs"), "pub fn sibling() {}\n").unwrap();
+        git(dir, &["add", "sibling_lane.rs"]);
+        git(dir, &["commit", "-q", "-m", "sibling lane work"]);
+
+        // Worker syncs with the epic tip — the ONLY commit unique to the
+        // branch is now a zero-diff merge.
+        git(dir, &["checkout", "-q", "factory/test-worker"]);
+        git(dir, &["merge", "--no-ff", "-m", "sync to epic tip", "main"]);
+        receipt
+    }
+
+    /// THE GH #128 REGRESSION: receipt commit merged to the parent, branch is
+    /// parent tip + sync-merge only → close must pass on the receipt.
+    ///
+    /// Before this fix the no-diff heuristic rejected first and never looked
+    /// at the receipt, which pushed workers into `git reset --hard <epic tip>`
+    /// + force-push as routine post-merge hygiene.
+    #[test]
+    fn cascab3_merged_receipt_beats_no_diff_after_post_merge_sync_gh128() {
+        let dir = init_worker_repo();
+        let receipt = build_gh128_post_merge_sync(dir.path());
+
+        // Sanity: this really is the no-diff branch of the guard, not the
+        // zero-commit one — the sync merge counts, its diff is empty.
+        assert!(
+            count_worker_branch_commits(dir.path(), "main") > 0,
+            "sanity: the sync merge must count as a commit beyond the merge base"
+        );
+        assert!(
+            get_worker_diff_stat(dir.path(), "main").trim().is_empty(),
+            "sanity: a synced post-merge branch must have an empty diff vs parent"
+        );
+
+        let outcome = check_zero_commit_close(
+            dir.path(),
+            "main",
+            "cas-cab3",
+            &TaskType::Bug,
+            None,  // no execution_note
+            false, // no review findings
+            None,  // no anchor — receipt is the only evidence
+            Some(&receipt),
+            Some(&test_receipt_window()),
+        );
+        assert!(
+            matches!(outcome, ZeroCommitCloseOutcome::ProceedWithReceipt(_)),
+            "a merged receipt with a real diff must carry the close after a \
+             post-merge sync; got {outcome:?}"
+        );
+    }
+
+    /// Same shape, evidence supplied as the anchor instead of the receipt.
+    #[test]
+    fn cascab3_merged_anchor_beats_no_diff_after_post_merge_sync_gh128() {
+        let dir = init_worker_repo();
+        let anchor = build_gh128_post_merge_sync(dir.path());
+
+        let outcome = check_zero_commit_close(
+            dir.path(),
+            "main",
+            "cas-cab3",
+            &TaskType::Bug,
+            None,
+            false,
+            Some(&anchor),
+            None,
+            None,
+        );
+        assert!(
+            matches!(outcome, ZeroCommitCloseOutcome::Proceed),
+            "a merged factory anchor must satisfy the no-diff path too; got {outcome:?}"
+        );
+    }
+
+    /// STILL REJECTED #1: no receipt and no unique diff (the cas-9eae case
+    /// the guard exists for). Its wording must point at the receipt remedy
+    /// and must not read as an invitation to rewrite the branch.
+    #[test]
+    fn cascab3_no_diff_without_evidence_still_rejects_and_names_the_receipt_remedy() {
+        let dir = init_worker_repo();
+        // Parent moves; worker only syncs. No task work was ever committed.
+        git(dir.path(), &["checkout", "-q", "main"]);
+        std::fs::write(dir.path().join("epic_progress.txt"), "epic moved on\n").unwrap();
+        git(dir.path(), &["add", "epic_progress.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "unrelated epic progress"]);
+        git(dir.path(), &["checkout", "-q", "factory/test-worker"]);
+        git(dir.path(), &["merge", "--no-ff", "-m", "sync only", "main"]);
+
+        let outcome = check_zero_commit_close(
+            dir.path(),
+            "main",
+            "cas-cab3",
+            &TaskType::Bug,
+            None,
+            false,
+            None, // no anchor
+            None, // no receipt
+            None,
+        );
+        let ZeroCommitCloseOutcome::AmbiguousCodeTask(msg) = outcome else {
+            panic!("a sync-only branch with no evidence at all must still be rejected");
+        };
+        assert!(
+            msg.contains("NO-DIFF CLOSE ON CODE TASK"),
+            "the guard must still name itself: {msg}"
+        );
+        assert!(
+            msg.contains("commit_receipt=<sha>"),
+            "the refusal must name the receipt remedy: {msg}"
+        );
+        assert!(
+            msg.contains("do NOT reset or force-push"),
+            "the refusal must steer away from branch surgery (GH #128): {msg}"
+        );
+    }
+
+    /// STILL REJECTED #2: a receipt whose commit carries an empty diff is not
+    /// evidence of work, no matter that it is an ancestor of the parent.
+    #[test]
+    fn cascab3_no_diff_with_empty_diff_receipt_still_rejects() {
+        let dir = init_worker_repo();
+        // An empty commit on the parent — merged, but contributes nothing.
+        git(dir.path(), &["checkout", "-q", "main"]);
+        git(
+            dir.path(),
+            &["commit", "-q", "--allow-empty", "-m", "empty parent commit"],
+        );
+        let empty_receipt = head_sha(dir.path());
+        git(dir.path(), &["checkout", "-q", "factory/test-worker"]);
+        git(dir.path(), &["merge", "--no-ff", "-m", "sync only", "main"]);
+
+        let outcome = check_zero_commit_close(
+            dir.path(),
+            "main",
+            "cas-cab3",
+            &TaskType::Bug,
+            None,
+            false,
+            None,
+            Some(&empty_receipt),
+            Some(&test_receipt_window()),
+        );
+        let ZeroCommitCloseOutcome::AmbiguousCodeTask(msg) = outcome else {
+            panic!("an empty-diff receipt must not carry a close");
+        };
+        assert!(
+            msg.contains("INVALID TASK COMMIT RECEIPT"),
+            "an offered-but-invalid receipt must be rejected on its own terms: {msg}"
+        );
+    }
+
+    /// STILL REJECTED #3: a receipt that is NOT an ancestor of the parent —
+    /// real work, but not integrated, so the close is premature.
+    #[test]
+    fn cascab3_no_diff_with_unmerged_receipt_still_rejects() {
+        let dir = init_worker_repo();
+        // Real work on a side branch that is never merged into main.
+        git(dir.path(), &["checkout", "-q", "-b", "factory/side-lane"]);
+        std::fs::write(dir.path().join("unmerged.rs"), "pub fn unmerged() {}\n").unwrap();
+        git(dir.path(), &["add", "unmerged.rs"]);
+        git(dir.path(), &["commit", "-q", "-m", "fix: never merged"]);
+        let unmerged_receipt = head_sha(dir.path());
+
+        git(dir.path(), &["checkout", "-q", "main"]);
+        std::fs::write(dir.path().join("epic_progress.txt"), "epic moved on\n").unwrap();
+        git(dir.path(), &["add", "epic_progress.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "unrelated epic progress"]);
+        git(dir.path(), &["checkout", "-q", "factory/test-worker"]);
+        git(dir.path(), &["merge", "--no-ff", "-m", "sync only", "main"]);
+
+        let outcome = check_zero_commit_close(
+            dir.path(),
+            "main",
+            "cas-cab3",
+            &TaskType::Bug,
+            None,
+            false,
+            None,
+            Some(&unmerged_receipt),
+            Some(&test_receipt_window()),
+        );
+        let ZeroCommitCloseOutcome::AmbiguousCodeTask(msg) = outcome else {
+            panic!("an unmerged receipt must not carry a close");
+        };
+        assert!(
+            msg.contains("INVALID TASK COMMIT RECEIPT"),
+            "an unmerged receipt must be rejected on its own terms: {msg}"
+        );
+    }
+
+    /// An unmerged ANCHOR must not silently unlock the no-diff path either —
+    /// it falls through to the ordinary refusal (no receipt was offered).
+    #[test]
+    fn cascab3_no_diff_with_unmerged_anchor_still_rejects() {
+        let dir = init_worker_repo();
+        git(dir.path(), &["checkout", "-q", "-b", "factory/side-lane"]);
+        std::fs::write(dir.path().join("unmerged.rs"), "pub fn unmerged() {}\n").unwrap();
+        git(dir.path(), &["add", "unmerged.rs"]);
+        git(dir.path(), &["commit", "-q", "-m", "fix: never merged"]);
+        let unmerged_anchor = head_sha(dir.path());
+
+        git(dir.path(), &["checkout", "-q", "main"]);
+        std::fs::write(dir.path().join("epic_progress.txt"), "epic moved on\n").unwrap();
+        git(dir.path(), &["add", "epic_progress.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "unrelated epic progress"]);
+        git(dir.path(), &["checkout", "-q", "factory/test-worker"]);
+        git(dir.path(), &["merge", "--no-ff", "-m", "sync only", "main"]);
+
+        let outcome = check_zero_commit_close(
+            dir.path(),
+            "main",
+            "cas-cab3",
+            &TaskType::Bug,
+            None,
+            false,
+            Some(&unmerged_anchor),
+            None,
+            None,
+        );
+        assert!(
+            matches!(outcome, ZeroCommitCloseOutcome::AmbiguousCodeTask(_)),
+            "an unmerged anchor must not unlock the no-diff path; got {outcome:?}"
+        );
+    }
+
+    /// The commit-count>0 WITH a real diff case is untouched: normal
+    /// unmerged work still proceeds without needing any evidence.
+    #[test]
+    fn cascab3_branch_with_real_diff_is_unaffected() {
+        let dir = init_worker_repo();
+        std::fs::write(dir.path().join("work.rs"), "pub fn work() {}\n").unwrap();
+        git(dir.path(), &["add", "work.rs"]);
+        git(dir.path(), &["commit", "-q", "-m", "fix: unmerged work"]);
+
+        let outcome = check_zero_commit_close(
+            dir.path(),
+            "main",
+            "cas-cab3",
+            &TaskType::Bug,
+            None,
+            false,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            matches!(outcome, ZeroCommitCloseOutcome::Proceed),
+            "a branch with a real diff must proceed without evidence; got {outcome:?}"
         );
     }
 

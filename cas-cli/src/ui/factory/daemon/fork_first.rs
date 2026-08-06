@@ -555,6 +555,8 @@ impl DaemonInitPhase {
             cancelled_spawns: std::collections::HashSet::new(),
             last_idle_message_times: HashMap::new(),
             lifecycle_redelivery_attempts: HashMap::new(),
+            inbox_deferred_writes: std::collections::HashSet::new(),
+            urgent_wake_probes: HashMap::new(),
             last_pane_output_bytes: HashMap::new(),
             pane_silent_since: HashMap::new(),
             last_prompt_poison_sweep: Some(Instant::now()),

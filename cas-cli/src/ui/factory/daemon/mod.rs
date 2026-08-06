@@ -246,6 +246,30 @@ pub struct FactoryDaemon {
     /// reported storm: one transition, ~50 byte-identical injections per turn.
     /// Entries are dropped when the row is finally consumed or suppressed.
     lifecycle_redelivery_attempts: HashMap<i64, std::time::Instant>,
+    /// cas-ceae (GH #124/#123): queue rows whose payload this daemon has
+    /// already written into the recipient's Agent-Teams inbox and then left
+    /// pending because the wake was deferred. Keyed by `prompt_queue.id`.
+    ///
+    /// The harness OWNS that inbox file and removes rows when it takes them
+    /// into the recipient's context, so `TeamsManager`'s content dedup (the
+    /// only previous guard against duplicate copies) goes blind the moment a
+    /// row is drained and the next ~100ms poll appends a brand-new copy — one
+    /// per drain, forever. Knowing we already wrote a row lets the delivery
+    /// path check the inbox for the drain and consume the queue row instead.
+    /// Entries are dropped when the row is consumed, suppressed or abandoned.
+    inbox_deferred_writes: std::collections::HashSet<i64>,
+    /// cas-ac7e (GH #130): urgent rows whose interrupt-and-inject has been
+    /// written to the PTY but whose wake has not yet been corroborated by pane
+    /// output. Keyed by `prompt_queue.id`.
+    ///
+    /// `Mux::interrupt_and_inject` returns `Result<()>`: it proves bytes were
+    /// typed, never that the target's turn broke or that a new turn was
+    /// granted. Consuming the row on that alone is how notification 7206 came
+    /// to read `stage=delivered` with `wake: unobserved` while its recipient
+    /// idled straight through it and acted only on a manual re-send. The probe
+    /// records the pane's output byte count at inject time; a later poll
+    /// resolves it against the pane's current count.
+    urgent_wake_probes: HashMap<i64, crate::ui::factory::daemon::runtime::UrgentWakeProbe>,
     /// cas-f02b (GH #101): last observed PTY output byte count per pane, sampled
     /// when a supervisor wake is evaluated. Equality across two evaluations is
     /// the evidence that the pane is not mid-render and is safe to type into.

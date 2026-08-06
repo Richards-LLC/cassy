@@ -91,6 +91,47 @@ pub fn handle_pre_tool_use(
     }
 
     // ========================================================================
+    // REVIEW DISPATCH GATE — every harness entry path (cas-bcfb, GH #125)
+    //
+    // cas-4fef put the ownership gate on `cas_skill_use`, i.e. only on
+    // `mcp__cas__skill action=use id=cas-code-review`. No agent takes that
+    // path: the skill is installed on disk as a Claude Code skill and is
+    // invoked with the native `Skill` tool, and the Phase C workflow
+    // (`.claude/workflows/cas-code-review.js`) is callable straight from the
+    // `Workflow` tool. Both bypass the MCP server entirely, which is how a
+    // worker ran the full persona fan-out under `owner = "supervisor"` on a
+    // binary that provably contained the gate (GH #125: same refusal string
+    // compiled into both binary generations alive that day).
+    //
+    // PreToolUse is the only seam CAS owns for harness-native tool calls, so
+    // the gate is re-stated here — same pure `review_dispatch_decision`, same
+    // refusal text, so the MCP site and this one cannot drift. The matcher
+    // lists that make this hook fire for `Skill`/`Workflow` live in
+    // `ui/factory/daemon/runtime/teams.rs` (factory settings) and
+    // `config/hooks.rs` (generated settings); both must keep these tools.
+    //
+    // Hoisted above the cas_root check for the same reason the
+    // AskUserQuestion gate is: role comes from the hook's own snapshot, and a
+    // hook dispatch that cannot resolve a CAS root must still refuse (with
+    // cas_root=None `supervisor_owned_at` returns the cas-865b default).
+    // ========================================================================
+    if crate::harness_policy::is_worker(input)
+        && crate::code_review_dispatch::tool_call_enters_review(
+            tool_name,
+            input.tool_input.as_ref(),
+        )
+    {
+        if let crate::code_review_dispatch::ReviewDispatchDecision::Refused { message } =
+            crate::code_review_dispatch::review_dispatch_decision(
+                true,
+                crate::code_review_dispatch::supervisor_owned_at(cas_root),
+            )
+        {
+            return Ok(HookOutput::with_pre_tool_permission("deny", &message));
+        }
+    }
+
+    // ========================================================================
     // WORKER COMMIT GUARD — HOISTED ABOVE cas_root check (cas-bea2, LAYER 1)
     //
     // Must run before the hoisted FACTORY_AUTO_APPROVE block below. That
@@ -876,22 +917,42 @@ pub(crate) fn check_worker_git_commit_scope(cwd: &str) -> Option<String> {
             ));
         }
         Some(branch) if !is_worker_commit_allowed_branch(&branch) => {
-            let non_isolated_hint = if !is_isolated {
+            // cas-5bef (GH #120): the refusal below used to end at "create a
+            // branch here", and a non-isolated worker took exactly that escape
+            // — it left the SHARED checkout parked on factory/*, after which
+            // the supervisor's `git merge --ff-only` / `git push origin main`
+            // both reported success while landing nothing on main. For the
+            // non-isolated case the remedy must preserve shared HEAD (own
+            // worktree), and the in-place fallback must say: restore trunk
+            // after pushing.
+            let remedy = if is_isolated {
                 format!(
-                    "\n\nYou are running without an isolated worktree (CAS_CLONE_PATH not set).\n\
-                    Create a feature branch before committing:\n  \
-                    git switch -c factory/{worker_name}"
+                    "Switch to your work branch and commit there:\n  \
+                    git switch factory/{worker_name}   # or: git switch <your-feature-branch>\n  \
+                    git commit ...\n"
                 )
             } else {
-                String::new()
+                format!(
+                    "\nYou are running without an isolated worktree (CAS_CLONE_PATH not set), so \
+                    this is the SHARED checkout.\n\
+                    Its HEAD is read by every other agent here and by the supervisor's \
+                    merge/tag sequence — do NOT leave it pointing at a factory branch.\n\n\
+                    PREFERRED — keep shared HEAD on '{branch}' and work in your own worktree:\n  \
+                    git worktree add ../factory-{worker_name} -b factory/{worker_name}\n  \
+                    cd ../factory-{worker_name}   # commit and push from there\n\n\
+                    FALLBACK — if you must branch in place, RESTORE TRUNK AFTER PUSH:\n  \
+                    git switch -c factory/{worker_name}\n  \
+                    git commit ... && git push -u origin factory/{worker_name}\n  \
+                    git switch {branch}   # MANDATORY: a shared checkout left on factory/* \
+                    makes `git merge --ff-only` and `git push origin {branch}` silently \
+                    misfire (GH #120)\n"
+                )
             };
             return Some(format!(
                 "🚫 WORKER COMMIT GUARD: Direct commits to '{branch}' are blocked.\n\n\
                 Workers must NOT commit directly to protected branches \
-                (main, master, staging).{non_isolated_hint}\n\
-                Switch to your work branch and commit there:\n  \
-                git switch factory/{worker_name}   # or: git switch <your-feature-branch>\n  \
-                git commit ...\n\n\
+                (main, master, staging).\n\
+                {remedy}\n\
                 Your staged changes are preserved — only the branch matters.\n\n\
                 Note: --no-verify does NOT bypass this guard (it only skips git hooks,\n\
                 not the Claude Code PreToolUse harness). Switching branches is the only option."
@@ -1309,6 +1370,75 @@ mod worker_commit_guard_tests {
         assert!(
             msg.contains("CAS_CLONE_PATH not set"),
             "message should mention lack of isolation for actionable guidance: {msg}"
+        );
+    }
+
+    /// cas-5bef (GH #120): the refusal a NON-ISOLATED worker sees must not
+    /// leave "branch in place and stay there" as the implied escape — that is
+    /// what parked the shared checkout on factory/bright-eagle-91 and made the
+    /// supervisor's `git merge --ff-only` / `git push origin main` silently
+    /// no-op during the v2.45.0 cut.
+    #[test]
+    fn non_isolated_refusal_steers_away_from_parking_shared_head() {
+        let tmp = make_git_repo(); // on main
+        let p = tmp.path().to_string_lossy().to_string();
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_CLONE_PATH", None),
+            ("CAS_AGENT_NAME", Some("bright-eagle-91")),
+        ]);
+
+        let msg = check_worker_git_commit_scope(&p).expect("non-isolated worker on main is denied");
+
+        // Preferred path: a worktree, which never re-points shared HEAD.
+        assert!(
+            msg.contains("git worktree add"),
+            "refusal must offer a shared-HEAD-preserving path: {msg}"
+        );
+        assert!(
+            msg.contains("SHARED checkout"),
+            "refusal must say why this directory is special: {msg}"
+        );
+        // Fallback path: branching in place is allowed only with a restore.
+        assert!(
+            msg.contains("RESTORE TRUNK AFTER PUSH"),
+            "the in-place fallback must mandate restoring trunk: {msg}"
+        );
+        assert!(
+            msg.contains("git switch main"),
+            "the restore step must name the trunk to return to: {msg}"
+        );
+        assert!(
+            msg.contains("GH #120"),
+            "the consequence must be attributable to the incident: {msg}"
+        );
+        // The old advice ended here; it must no longer be the last word.
+        let switch_c = msg.find("git switch -c factory/bright-eagle-91").expect("fallback");
+        let restore = msg.find("git switch main").expect("restore");
+        assert!(
+            restore > switch_c,
+            "the restore step must follow the in-place branch creation: {msg}"
+        );
+    }
+
+    /// The isolated case is unchanged: those workers own their worktree, so
+    /// switching branches there re-points nothing shared.
+    #[test]
+    fn isolated_refusal_keeps_the_plain_branch_switch_remedy() {
+        let tmp = make_git_repo(); // on main
+        let p = tmp.path().to_string_lossy().to_string();
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_CLONE_PATH", Some(&p)),
+            ("CAS_AGENT_NAME", Some("iso-worker")),
+        ]);
+
+        let msg = check_worker_git_commit_scope(&p).expect("isolated worker on main is denied");
+        assert!(
+            msg.contains("git switch factory/iso-worker"),
+            "isolated workers keep the direct switch remedy: {msg}"
+        );
+        assert!(
+            !msg.contains("git worktree add"),
+            "isolated workers must not be told to create another worktree: {msg}"
         );
     }
 

@@ -67,6 +67,77 @@ const NOT_ALREADY_CONSUMED_SQL: &str =
                        WHERE seen.prompt_id = prompt_queue.id
                          AND seen.recipient = prompt_queue.target)))";
 
+/// cas-ac7e (GH #130): when may an ack remove a message from the recipient's
+/// unread inbox?
+///
+/// Only on evidence about THIS message from THIS recipient: a surfacing
+/// receipt (`prompt_queue_recipient_seen`, written by the recipient's own
+/// drain) or the recipient's own `message_ack`
+/// (`acked_via = 'explicit_ack'`).
+///
+/// The `poll_unseen_for_recipient` predicate used to read plain
+/// `q.acked_at IS NULL`, which treats EVERY ack path as read state. That is
+/// how notification 7212 vanished: it was stamped `inferred_from_reply` 55s
+/// after enqueue — an inference about the recipient having taken *a* turn,
+/// not about this message being surfaced — and was therefore filtered out of
+/// the supervisor's own full `inbox_poll` drain ten minutes later, despite
+/// having no `seen` row and never having been rendered to anyone. An ack that
+/// is not the recipient's claim about this message must not be able to erase
+/// the message from the only view that would reveal it; a message that
+/// re-appears is recoverable, a message that vanishes is not.
+///
+/// `all_workers` stays exempt for the same reason as
+/// [`NOT_ALREADY_CONSUMED_SQL`]: broadcast read state is per-recipient.
+///
+/// Requires the `prompt_queue` table to be aliased `q`.
+const UNSURFACED_UNLESS_EXPLICIT_ACK_SQL: &str = "AND (q.target = 'all_workers'
+                      OR q.acked_at IS NULL
+                      OR q.acked_via IS NULL
+                      OR q.acked_via <> 'explicit_ack')";
+
+/// cas-99d2 (GH #126): may a reply be taken as confirmation that a delivered
+/// message was consumed?
+///
+/// Reply-inference (cas-6ad2) is the only confirmation path factory prompts
+/// actually exercise, and it was unconditional: ANY later message from the
+/// recipient to the same counterparty confirmed EVERY transport-delivered row
+/// between them. That silently marked messages `confirmed` while the recipient
+/// had never been shown them — zeroing `undelivered_after` and disarming the
+/// supervisor's escalation gate on a worker idling against a stale premise.
+///
+/// Two independent gates, both required:
+///
+/// 1. **Ordering.** The reply must have been enqueued after the message's
+///    transport handoff. A reply composed before the message existed (or while
+///    it was still crossing in flight) cannot be a response to it.
+/// 2. **Surfacing receipt.** CAS must hold a record that the message's content
+///    was actually put in front of the recipient at or before the reply — a
+///    `prompt_queue_recipient_seen` row for (message, addressed target),
+///    written by the recipient's own inbox drain. Transport handoff is a write
+///    to a file or a pane; it is not evidence anyone read it.
+///
+/// Weak evidence is not "probably fine": without both gates the row must stay
+/// `delivered` / `awaiting_ack` so its undelivered clock keeps counting. An
+/// explicit `message_ack` remains the strong path and does not come through
+/// here at all.
+pub fn reply_confirms_delivered_message(
+    transport_delivered_at: Option<DateTime<Utc>>,
+    recipient_seen_at: Option<DateTime<Utc>>,
+    reply_enqueued_at: DateTime<Utc>,
+) -> bool {
+    let Some(delivered_at) = transport_delivered_at else {
+        // Never handed to a transport — nothing could have been consumed.
+        return false;
+    };
+    if delivered_at > reply_enqueued_at {
+        return false;
+    }
+    let Some(seen_at) = recipient_seen_at else {
+        return false;
+    };
+    seen_at <= reply_enqueued_at
+}
+
 /// Result of recording a failed daemon delivery attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptRetryDisposition {
@@ -136,6 +207,25 @@ CREATE TABLE IF NOT EXISTS prompt_queue_recipient_seen (
 
 CREATE INDEX IF NOT EXISTS idx_prompt_queue_recipient_seen_recipient
     ON prompt_queue_recipient_seen(recipient, prompt_id);
+
+-- cas-ac7e (GH #130): the recipient-side counterpart of the row-level
+-- `transport_delivered_at` stamp. `stage=delivered` used to be a claim the
+-- WRITER made about itself with nothing on the recipient's side to
+-- corroborate it, which is how notifications 7179/7181/7183 could read
+-- `stage=delivered` in `message_status` while the recipient's own drain
+-- showed no delivery record for them at all. Written in the same
+-- transaction as the Delivered stage stamp, so a delivered direct row
+-- always has one. `all_workers` is excluded: a broadcast's per-recipient
+-- transport is stamped by `mark_broadcast_outcome`'s counts, not here.
+CREATE TABLE IF NOT EXISTS prompt_queue_recipient_transport (
+    prompt_id INTEGER NOT NULL,
+    recipient TEXT NOT NULL,
+    delivered_at TEXT NOT NULL,
+    PRIMARY KEY (prompt_id, recipient)
+);
+
+CREATE INDEX IF NOT EXISTS idx_prompt_queue_recipient_transport_recipient
+    ON prompt_queue_recipient_transport(recipient, prompt_id);
 "#;
 
 /// Add factory_session column for multi-session isolation.
@@ -554,6 +644,16 @@ pub struct MessageDeliveryReport {
     pub selected_at: Option<DateTime<Utc>>,
     /// Full transport handoff time only (not legacy processed_at / partial).
     pub delivered_at: Option<DateTime<Utc>>,
+    /// cas-ac7e (GH #130): recipient-side corroboration of `delivered_at` —
+    /// the `prompt_queue_recipient_transport` stamp for (this row, its
+    /// addressed target), written in the same transaction as the Delivered
+    /// stage stamp. `delivered_at` alone is the writer's claim about itself;
+    /// #130 reported `stage=delivered` on rows whose recipient side showed no
+    /// delivery record at all. `None` on `all_workers` (per-recipient
+    /// transport is the broadcast counts) and on rows delivered before this
+    /// table existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recipient_transport_at: Option<DateTime<Utc>>,
     pub confirmed_at: Option<DateTime<Utc>>,
     /// cas-45c4 (GH #102): how `confirmed_at` was obtained. `Unconfirmed` when
     /// there is no ack at all. Without this, a reply-inferred ack and an
@@ -868,11 +968,17 @@ pub trait PromptQueueStore: Send + Sync {
     /// `"supervisor"` alias, so both sides are expressed as alias slices.
     /// Only transport-delivered, still-unacked rows in the observing factory
     /// session are advanced.
+    ///
+    /// cas-99d2 (GH #126): a reply confirms a message only when it could
+    /// actually have been a response to it — see
+    /// [`reply_confirms_delivered_message`] for the two required gates.
+    /// `reply_enqueued_at` is when the confirming reply was enqueued.
     fn ack_delivered_for_recipient(
         &self,
         recipient_aliases: &[&str],
         sender_aliases: &[&str],
         factory_session: Option<&str>,
+        reply_enqueued_at: DateTime<Utc>,
     ) -> Result<usize>;
 
     /// Get messages that were processed but not acked within the timeout
@@ -1363,6 +1469,24 @@ impl SqlitePromptQueueStore {
                 prompt_id,
             ],
         )?;
+
+        // cas-ac7e (GH #130): a Delivered stamp must leave a recipient-side
+        // record, not just a writer-side column. Same transaction, so the two
+        // truths cannot diverge: if `message_status` reports stage=delivered
+        // for a direct row, `prompt_queue_recipient_transport` holds the
+        // matching (row, addressed recipient) stamp. INSERT OR IGNORE keeps
+        // re-stamping idempotent and preserves the FIRST handoff instant,
+        // mirroring the COALESCE on `transport_delivered_at` above.
+        if stamp_transport {
+            tx.execute(
+                "INSERT OR IGNORE INTO prompt_queue_recipient_transport
+                     (prompt_id, recipient, delivered_at)
+                 SELECT id, target, ?
+                   FROM prompt_queue
+                  WHERE id = ? AND target <> 'all_workers'",
+                params![now, prompt_id],
+            )?;
+        }
         Ok(())
     }
 }
@@ -1433,8 +1557,8 @@ impl SqlitePromptQueueStore {
              FROM prompt_queue q
              LEFT JOIN prompt_queue_recipient_seen seen
                ON seen.prompt_id = q.id AND seen.recipient = ?
-             WHERE (q.target = 'all_workers' OR q.acked_at IS NULL)
-               AND seen.prompt_id IS NULL
+             WHERE seen.prompt_id IS NULL
+               {UNSURFACED_UNLESS_EXPLICIT_ACK_SQL}
                {deliverable_sql}
                AND (q.target = ? OR q.target = 'all_workers')
                {session_sql}"
@@ -1777,8 +1901,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                          FROM prompt_queue q
                          LEFT JOIN prompt_queue_recipient_seen seen
                            ON seen.prompt_id = q.id AND seen.recipient = ?
-                         WHERE (q.target = 'all_workers' OR q.acked_at IS NULL)
-                           AND seen.prompt_id IS NULL
+                         WHERE seen.prompt_id IS NULL
+                           {UNSURFACED_UNLESS_EXPLICIT_ACK_SQL}
                            {deliverable_sql}
                            AND (q.target = ? OR q.target = 'all_workers')
                            AND (q.factory_session = ? OR q.factory_session IS NULL)
@@ -1802,8 +1926,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                          FROM prompt_queue q
                          LEFT JOIN prompt_queue_recipient_seen seen
                            ON seen.prompt_id = q.id AND seen.recipient = ?
-                         WHERE (q.target = 'all_workers' OR q.acked_at IS NULL)
-                           AND seen.prompt_id IS NULL
+                         WHERE seen.prompt_id IS NULL
+                           {UNSURFACED_UNLESS_EXPLICIT_ACK_SQL}
                            {deliverable_sql}
                            AND (q.target = ? OR q.target = 'all_workers')
                            AND q.factory_session IS NULL
@@ -2218,6 +2342,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         recipient_aliases: &[&str],
         sender_aliases: &[&str],
         factory_session: Option<&str>,
+        reply_enqueued_at: DateTime<Utc>,
     ) -> Result<usize> {
         if recipient_aliases.is_empty() || sender_aliases.is_empty() {
             return Ok(0);
@@ -2235,13 +2360,22 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             } else {
                 "AND factory_session IS NULL"
             };
-            let sql = format!(
-                "UPDATE prompt_queue
-                 SET acked_at = ?,
-                     acked_via = 'inferred_from_reply',
-                     highest_stage = 'confirmed',
-                     last_pending_reason = NULL,
-                     last_pending_detail = NULL
+            // cas-99d2 (GH #126): candidate selection first, then the two
+            // evidence gates evaluated in Rust.
+            //
+            // Timestamps are compared after `parse_datetime`, never as SQL
+            // string inequalities: the column holds a mix of `to_rfc3339()`
+            // output ("…+00:00") and literal "Z" spellings, and "Z" sorts
+            // after "+", so for the same instant the two spellings compare
+            // in opposite directions.
+            let select_sql = format!(
+                "SELECT prompt_queue.id,
+                        prompt_queue.transport_delivered_at,
+                        (SELECT MIN(seen.seen_at)
+                           FROM prompt_queue_recipient_seen seen
+                          WHERE seen.prompt_id = prompt_queue.id
+                            AND seen.recipient = prompt_queue.target)
+                 FROM prompt_queue
                  WHERE acked_at IS NULL
                    AND transport_delivered_at IS NOT NULL
                    AND target IN ({})
@@ -2252,8 +2386,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             );
 
             let mut query_params: Vec<Box<dyn rusqlite::ToSql>> =
-                Vec::with_capacity(1 + recipient_aliases.len() + sender_aliases.len() + 1);
-            query_params.push(Box::new(now));
+                Vec::with_capacity(recipient_aliases.len() + sender_aliases.len() + 1);
             query_params.extend(
                 recipient_aliases
                     .iter()
@@ -2268,10 +2401,51 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 query_params.push(Box::new(session.to_string()));
             }
 
-            Ok(conn.execute(
-                &sql,
-                rusqlite::params_from_iter(query_params.iter().map(|value| value.as_ref())),
-            )?)
+            let candidates: Vec<(i64, Option<String>, Option<String>)> = {
+                let mut stmt = conn.prepare(&select_sql)?;
+                stmt.query_map(
+                    rusqlite::params_from_iter(query_params.iter().map(|value| value.as_ref())),
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    },
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+            };
+
+            let confirmable: Vec<i64> = candidates
+                .into_iter()
+                .filter(|(_, delivered_at, seen_at)| {
+                    reply_confirms_delivered_message(
+                        delivered_at.as_deref().and_then(Self::parse_datetime),
+                        seen_at.as_deref().and_then(Self::parse_datetime),
+                        reply_enqueued_at,
+                    )
+                })
+                .map(|(id, _, _)| id)
+                .collect();
+
+            if confirmable.is_empty() {
+                return Ok(0);
+            }
+
+            let mut stmt = conn.prepare_cached(
+                "UPDATE prompt_queue
+                 SET acked_at = ?,
+                     acked_via = 'inferred_from_reply',
+                     highest_stage = 'confirmed',
+                     last_pending_reason = NULL,
+                     last_pending_detail = NULL
+                 WHERE id = ? AND acked_at IS NULL",
+            )?;
+            let mut updated = 0usize;
+            for id in confirmable {
+                updated += stmt.execute(params![now, id])?;
+            }
+            Ok(updated)
         })
     }
 
@@ -2380,6 +2554,23 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             Err(e) => return Err(e.into()),
         };
 
+        // cas-ac7e (GH #130): the recipient-side corroboration of
+        // `delivered_at`. Absent only on rows delivered before this table
+        // existed, or on `all_workers` (whose per-recipient transport is the
+        // broadcast counts). A direct row reporting stage=delivered with this
+        // field empty is the exact contradiction #130 reported.
+        let recipient_transport_at = conn
+            .query_row(
+                "SELECT delivered_at FROM prompt_queue_recipient_transport
+                  WHERE prompt_id = ? AND recipient = ?",
+                params![id, &target],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+            .as_deref()
+            .and_then(Self::parse_datetime);
+
         let enqueued_at = Self::require_datetime(&created_at_s, "created_at", id)?;
         let selected_at = Self::optional_datetime(selected_at_s.as_deref(), "selected_at", id)?;
         let delivered_at = Self::optional_datetime(
@@ -2475,6 +2666,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             enqueued_at,
             selected_at,
             delivered_at,
+            recipient_transport_at,
             confirmed_at,
             confirmation_source: ConfirmationSource::from_column(
                 acked_via_s.as_deref(),
@@ -2855,6 +3047,498 @@ mod tests {
         (temp, store)
     }
 
+    /// cas-ac7e (GH #130): stamp the legacy/inferred ack shape directly.
+    ///
+    /// Notification 7212 was acked `inferred_from_reply` by a daemon that
+    /// predates the cas-99d2 surfacing-receipt gate, so that shape cannot be
+    /// produced through `ack_delivered_for_recipient` on this branch any more —
+    /// but it is durably present in every store written before the upgrade,
+    /// which is exactly why the drain predicate has to handle it.
+    fn stamp_ack_via(store: &SqlitePromptQueueStore, prompt_id: i64, via: Option<&str>) {
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE prompt_queue
+                SET acked_at = ?, acked_via = ?, highest_stage = 'confirmed'
+              WHERE id = ?",
+            params![Utc::now().to_rfc3339(), via, prompt_id],
+        )
+        .unwrap();
+    }
+
+    fn recipient_transport_stamp(
+        store: &SqlitePromptQueueStore,
+        prompt_id: i64,
+        recipient: &str,
+    ) -> Option<String> {
+        let conn = store.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT delivered_at FROM prompt_queue_recipient_transport
+              WHERE prompt_id = ? AND recipient = ?",
+            params![prompt_id, recipient],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .unwrap()
+    }
+
+    /// cas-ac7e (GH #130) AC1 — the 7183 shape.
+    ///
+    /// Notification 7183 read `stage=delivered` in `message_status` while the
+    /// recipient's own side of the store held no delivery record for it at
+    /// all: the stamp lived only on the writer's column. A Delivered stamp now
+    /// leaves a per-recipient transport row in the same transaction, so the
+    /// two truths cannot disagree.
+    #[test]
+    fn delivered_direct_row_always_carries_a_recipient_transport_stamp() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_with_session(
+                "supervisor",
+                "fast-cobra-90",
+                "Assignment context for cas-99d2 (pre-assigned to you)",
+                "cas-src-fair-sparrow-50",
+            )
+            .unwrap();
+
+        assert!(
+            recipient_transport_stamp(&store, id, "fast-cobra-90").is_none(),
+            "an enqueued row has not been handed to any transport yet"
+        );
+
+        store.mark_transport_delivered(id).unwrap();
+
+        let report = store.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(report.stage, DeliveryStage::Delivered);
+        assert!(report.delivered_at.is_some());
+        assert!(
+            report.recipient_transport_at.is_some(),
+            "stage=delivered must imply a per-recipient transport stamp; without it \
+             message_status asserts a delivery the recipient side cannot corroborate \
+             — the exact 7183 contradiction"
+        );
+        assert_eq!(
+            recipient_transport_stamp(&store, id, "fast-cobra-90"),
+            report
+                .recipient_transport_at
+                .map(|at| at.to_rfc3339()),
+            "the reported stamp must be the stored one"
+        );
+
+        // And the row the recipient actually drains is the same row, still
+        // carrying that stamp — "delivered" and "drainable" are not in tension.
+        let drained = store
+            .poll_unseen_for_recipient("fast-cobra-90", Some("cas-src-fair-sparrow-50"), 10)
+            .unwrap();
+        assert_eq!(drained.iter().map(|p| p.id).collect::<Vec<_>>(), vec![id]);
+        assert!(recipient_transport_stamp(&store, id, "fast-cobra-90").is_some());
+    }
+
+    /// cas-ac7e (GH #130) AC1 — re-stamping preserves the first handoff.
+    #[test]
+    fn recipient_transport_stamp_is_idempotent_and_keeps_the_first_instant() {
+        let (_temp, store) = create_test_store();
+        let id = store.enqueue("supervisor", "worker-1", "hello").unwrap();
+        store.mark_transport_delivered(id).unwrap();
+        let first = recipient_transport_stamp(&store, id, "worker-1").unwrap();
+        store.mark_transport_delivered(id).unwrap();
+        assert_eq!(
+            recipient_transport_stamp(&store, id, "worker-1").unwrap(),
+            first,
+            "re-stamping must not rewrite the original handoff instant, matching \
+             the COALESCE on transport_delivered_at"
+        );
+    }
+
+    /// cas-ac7e (GH #130) AC1 — a broadcast has no single addressed recipient.
+    #[test]
+    fn broadcast_rows_do_not_get_a_recipient_transport_stamp() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue("supervisor", "all_workers", "stand down")
+            .unwrap();
+        store.mark_transport_delivered(id).unwrap();
+        assert!(
+            recipient_transport_stamp(&store, id, "all_workers").is_none(),
+            "broadcast transport is the per-recipient broadcast counts, not a stamp \
+             against the literal target 'all_workers'"
+        );
+    }
+
+    /// cas-ac7e (GH #130) AC1 — the third path that reaches Delivered.
+    ///
+    /// `mark_broadcast_outcome` with all recipients succeeding advances the row
+    /// to Delivered through the same shared stamp, so it must observe the same
+    /// `all_workers` exemption. Asserted separately because the existing
+    /// broadcast test only checks stage and counts and would not notice this
+    /// path growing per-recipient rows keyed on the literal string.
+    #[test]
+    fn an_all_succeeded_broadcast_still_records_no_recipient_transport_stamp() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue("supervisor", "all_workers", "stand down")
+            .unwrap();
+        store.mark_broadcast_outcome(id, 3, 3, 0, None).unwrap();
+
+        let report = store.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(report.stage, DeliveryStage::Delivered);
+        assert!(
+            report.recipient_transport_at.is_none(),
+            "a broadcast has no single addressed recipient to stamp"
+        );
+        assert!(recipient_transport_stamp(&store, id, "all_workers").is_none());
+    }
+
+    /// cas-ac7e (GH #130) AC2 — the 7212 vanish shape.
+    ///
+    /// 7212 was transport-delivered, never surfaced to anyone, then stamped
+    /// `acked_via = inferred_from_reply`. The drain predicate read plain
+    /// `acked_at IS NULL`, so the supervisor's own full `inbox_poll` ten
+    /// minutes later did not return it: an ack that was never the recipient's
+    /// claim about this message had erased it from the only view that would
+    /// have revealed it.
+    #[test]
+    fn inferred_ack_cannot_hide_a_message_the_recipient_never_saw() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_with_session(
+                "rapid-cardinal-70",
+                "lively-jaguar-3",
+                "Fresh after draining unread inbox until \"No unread\"",
+                "cas-src-fair-sparrow-50",
+            )
+            .unwrap();
+        store.mark_transport_delivered(id).unwrap();
+        stamp_ack_via(&store, id, Some("inferred_from_reply"));
+
+        let drained = store
+            .poll_unseen_for_recipient("lively-jaguar-3", Some("cas-src-fair-sparrow-50"), 20)
+            .unwrap();
+        assert_eq!(
+            drained.iter().map(|p| p.id).collect::<Vec<_>>(),
+            vec![id],
+            "a reply-inferred ack is evidence the recipient took a turn, not that \
+             THIS message was put in front of it; the row must stay in the inbox"
+        );
+        assert_eq!(
+            store
+                .count_unseen_for_recipient("lively-jaguar-3", Some("cas-src-fair-sparrow-50"))
+                .unwrap(),
+            0,
+            "the drain above wrote the surfacing receipt, so the unread count is \
+             now genuinely zero"
+        );
+
+        // Second drain returns nothing: the row left the inbox by being SEEN,
+        // which is the only exit that means the recipient actually got it.
+        assert!(
+            store
+                .poll_unseen_for_recipient("lively-jaguar-3", Some("cas-src-fair-sparrow-50"), 20)
+                .unwrap()
+                .is_empty(),
+            "a surfaced row must not re-appear forever"
+        );
+    }
+
+    /// cas-ac7e (GH #130) AC2 — legacy rows with no ack provenance are treated
+    /// the same as inferred ones: unknown provenance is not the recipient's
+    /// claim.
+    #[test]
+    fn ack_without_provenance_cannot_hide_an_unsurfaced_message() {
+        let (_temp, store) = create_test_store();
+        let id = store.enqueue("worker-1", "supervisor", "report").unwrap();
+        store.mark_transport_delivered(id).unwrap();
+        stamp_ack_via(&store, id, None);
+
+        assert_eq!(
+            store
+                .poll_unseen_for_recipient("supervisor", None, 20)
+                .unwrap()
+                .iter()
+                .map(|p| p.id)
+                .collect::<Vec<_>>(),
+            vec![id]
+        );
+    }
+
+    /// cas-ac7e (GH #130) AC2 — the recipient's OWN `message_ack` is still a
+    /// terminal exit. Without this the fix would resurrect every acked message.
+    #[test]
+    fn explicit_recipient_ack_still_clears_the_inbox() {
+        let (_temp, store) = create_test_store();
+        let id = store.enqueue("worker-1", "supervisor", "report").unwrap();
+        store.mark_transport_delivered(id).unwrap();
+        store.ack(id).unwrap();
+
+        assert!(
+            store
+                .poll_unseen_for_recipient("supervisor", None, 20)
+                .unwrap()
+                .is_empty(),
+            "explicit_ack is the recipient's claim about this message and must \
+             remove it from the inbox"
+        );
+        assert_eq!(
+            store
+                .count_unseen_for_recipient("supervisor", None)
+                .unwrap(),
+            0
+        );
+    }
+
+    /// Write the surfacing receipt an inbox drain would leave, at a chosen
+    /// instant. Done in SQL rather than via `poll_unseen_for_recipient` so a
+    /// test can place the receipt at a specific time and without the drain's
+    /// side effect of advancing every polled row's stage (cas-99d2).
+    fn record_seen(
+        store: &SqlitePromptQueueStore,
+        prompt_id: i64,
+        recipient: &str,
+        seen_at: DateTime<Utc>,
+    ) {
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO prompt_queue_recipient_seen (prompt_id, recipient, seen_at)
+             VALUES (?, ?, ?)",
+            params![prompt_id, recipient, seen_at.to_rfc3339()],
+        )
+        .unwrap();
+    }
+
+    /// Stamp transport delivery at a chosen instant (the real API stamps
+    /// `now`, which cannot express "delivered after the reply was composed").
+    fn set_transport_delivered_at(
+        store: &SqlitePromptQueueStore,
+        prompt_id: i64,
+        at: DateTime<Utc>,
+    ) {
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE prompt_queue
+             SET transport_delivered_at = ?, processed_at = ?, highest_stage = 'delivered',
+                 last_pending_reason = 'awaiting_ack'
+             WHERE id = ?",
+            params![at.to_rfc3339(), at.to_rfc3339(), prompt_id],
+        )
+        .unwrap();
+    }
+
+    /// cas-99d2 (GH #126): the REAL shape of notifications 7124 / 7129 in
+    /// factory session cas-src-noble-salmon-99.
+    ///
+    /// Both were transport-delivered to a worker, both had NO
+    /// `prompt_queue_recipient_seen` row, and both were nevertheless marked
+    /// `confirmed` / `inferred_from_reply` by the worker's next message to the
+    /// supervisor ~12s and ~21s later. That zeroed `undelivered_after` and
+    /// disarmed the supervisor's escalation gate while the worker was still
+    /// operating on a stale premise. The reply ordering was fine here — the
+    /// missing surfacing receipt is what made the confirmation a fabrication.
+    #[test]
+    fn cas99d2_reply_without_a_surfacing_receipt_does_not_confirm_gh126() {
+        let (_temp, store) = create_test_store();
+        let delivered_at = Utc::now() - chrono::Duration::seconds(21);
+        let message = store
+            .enqueue_with_session(
+                "supervisor",
+                "fierce-crow-25",
+                "factory/fierce-crow-25 is merged into the epic branch at 8823fcc3. \
+                 Re-run close with commit_receipt=83179ea9 and FRESH scoped test evidence.",
+                "cas-src-noble-salmon-99",
+            )
+            .unwrap();
+        set_transport_delivered_at(&store, message, delivered_at);
+        // No record_seen(...) — the worker never drained its inbox for this row.
+
+        let confirmed = store
+            .ack_delivered_for_recipient(
+                &["fierce-crow-25"],
+                &["supervisor"],
+                Some("cas-src-noble-salmon-99"),
+                Utc::now(),
+            )
+            .unwrap();
+        assert_eq!(
+            confirmed, 0,
+            "a reply must not confirm a message CAS never observed being surfaced"
+        );
+
+        let report = store.message_delivery_report(message).unwrap().unwrap();
+        assert_eq!(report.stage, DeliveryStage::Delivered);
+        assert_eq!(report.pending_reason, Some(PendingReason::AwaitingAck));
+        assert_eq!(report.confirmation_source, ConfirmationSource::Unconfirmed);
+        assert!(
+            report.confirmed_at.is_none(),
+            "confirmed_at must stay unset so the undelivered clock keeps counting"
+        );
+    }
+
+    /// cas-99d2: the positive control — notification 7112's shape, which DID
+    /// have a drain receipt (19:10:42) before its ack (19:11:01). Adding
+    /// evidence gates must not break the case reply-inference exists for.
+    #[test]
+    fn cas99d2_reply_after_a_surfacing_receipt_still_confirms() {
+        let (_temp, store) = create_test_store();
+        let delivered_at = Utc::now() - chrono::Duration::seconds(900);
+        let seen_at = Utc::now() - chrono::Duration::seconds(19);
+        let message = store
+            .enqueue_with_session(
+                "supervisor",
+                "watchful-koala-20",
+                "You are assigned task cas-7587 (P2 bug, epic cas-b0c7).",
+                "cas-src-noble-salmon-99",
+            )
+            .unwrap();
+        set_transport_delivered_at(&store, message, delivered_at);
+        record_seen(&store, message, "watchful-koala-20", seen_at);
+
+        let confirmed = store
+            .ack_delivered_for_recipient(
+                &["watchful-koala-20"],
+                &["supervisor"],
+                Some("cas-src-noble-salmon-99"),
+                Utc::now(),
+            )
+            .unwrap();
+        assert_eq!(confirmed, 1);
+        let report = store.message_delivery_report(message).unwrap().unwrap();
+        assert_eq!(report.stage, DeliveryStage::Confirmed);
+        assert_eq!(
+            report.confirmation_source,
+            ConfirmationSource::InferredFromReply
+        );
+    }
+
+    /// cas-99d2 (GH #126, AC2): a reply enqueued BEFORE the message was
+    /// delivered — the two crossing in flight — can never be a response to it.
+    /// No production path produces this today; the ordering guard is retained
+    /// so that it cannot start producing it silently.
+    #[test]
+    fn cas99d2_reply_composed_before_delivery_never_confirms() {
+        let (_temp, store) = create_test_store();
+        let reply_enqueued_at = Utc::now() - chrono::Duration::seconds(30);
+        let delivered_at = reply_enqueued_at + chrono::Duration::seconds(5);
+        let message = store
+            .enqueue_with_session("supervisor", "worker-1", "new premise", "sess-1")
+            .unwrap();
+        set_transport_delivered_at(&store, message, delivered_at);
+        // Receipt exists, and even predates the delivery stamp — the ordering
+        // gate must still refuse, independently of the receipt gate.
+        record_seen(&store, message, "worker-1", reply_enqueued_at);
+
+        let confirmed = store
+            .ack_delivered_for_recipient(
+                &["worker-1"],
+                &["supervisor"],
+                Some("sess-1"),
+                reply_enqueued_at,
+            )
+            .unwrap();
+        assert_eq!(
+            confirmed, 0,
+            "a reply that predates transport delivery cannot confirm the message"
+        );
+        assert_eq!(
+            store
+                .message_delivery_report(message)
+                .unwrap()
+                .unwrap()
+                .confirmation_source,
+            ConfirmationSource::Unconfirmed
+        );
+    }
+
+    /// cas-99d2: a receipt written AFTER the reply is not evidence the reply
+    /// was a response — the recipient saw the content only later.
+    #[test]
+    fn cas99d2_surfacing_receipt_after_the_reply_does_not_confirm() {
+        let (_temp, store) = create_test_store();
+        let reply_enqueued_at = Utc::now() - chrono::Duration::seconds(60);
+        let message = store
+            .enqueue_with_session("supervisor", "worker-1", "new premise", "sess-1")
+            .unwrap();
+        set_transport_delivered_at(
+            &store,
+            message,
+            reply_enqueued_at - chrono::Duration::seconds(10),
+        );
+        record_seen(
+            &store,
+            message,
+            "worker-1",
+            reply_enqueued_at + chrono::Duration::seconds(10),
+        );
+
+        assert_eq!(
+            store
+                .ack_delivered_for_recipient(
+                    &["worker-1"],
+                    &["supervisor"],
+                    Some("sess-1"),
+                    reply_enqueued_at,
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    /// cas-99d2: the gates as a pure truth table, including the sub-second
+    /// precision hazard that motivated comparing parsed instants instead of
+    /// SQL string inequalities.
+    #[test]
+    fn cas99d2_reply_confirmation_predicate_truth_table() {
+        let reply = Utc::now();
+        let before = reply - chrono::Duration::seconds(1);
+        let after = reply + chrono::Duration::seconds(1);
+
+        assert!(reply_confirms_delivered_message(
+            Some(before),
+            Some(before),
+            reply
+        ));
+        assert!(
+            reply_confirms_delivered_message(Some(reply), Some(reply), reply),
+            "simultaneity is permitted; only strict inversion is refused"
+        );
+        assert!(
+            !reply_confirms_delivered_message(Some(after), Some(before), reply),
+            "delivery after the reply"
+        );
+        assert!(
+            !reply_confirms_delivered_message(Some(before), None, reply),
+            "no surfacing receipt"
+        );
+        assert!(
+            !reply_confirms_delivered_message(Some(before), Some(after), reply),
+            "receipt after the reply"
+        );
+        assert!(
+            !reply_confirms_delivered_message(None, Some(before), reply),
+            "never transport-delivered"
+        );
+
+        // Offset spelling: the store holds a mix of `to_rfc3339()` output
+        // ("+00:00") and literal "Z" timestamps, and "Z" (0x5A) sorts after
+        // "+" (0x2B) — so for the SAME instant a Z-spelled stamp compares
+        // greater as a string. That is why the query hands parsed instants to
+        // this predicate instead of using a SQL string inequality.
+        let earlier = Utc.timestamp_opt(1_800_000_000, 0).unwrap();
+        let later = Utc.timestamp_opt(1_800_000_000, 500_000_000).unwrap();
+        let z_spelled = earlier.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        assert!(z_spelled.ends_with('Z'));
+        assert!(
+            z_spelled > later.to_rfc3339(),
+            "the earlier instant sorts LATER as a string once offsets differ"
+        );
+        assert!(
+            reply_confirms_delivered_message(
+                SqlitePromptQueueStore::parse_datetime(&z_spelled),
+                Some(earlier),
+                later
+            ),
+            "a delivery that really is earlier must confirm regardless of how its \
+             timestamp happens to be spelled"
+        );
+    }
+
     /// cas-45c4 (GH #102): an ack inferred from a later reply must never be
     /// reported the same way as the recipient's own acknowledgement. The
     /// inference proves the recipient took a turn; it does not prove this
@@ -2885,9 +3569,18 @@ mod tests {
 
         // The recipient explicitly acknowledges one of them...
         store.ack(explicit).unwrap();
-        // ...and separately sends a reply, which sweeps the rest to acked.
+        // ...and separately drains its inbox (cas-99d2: the surfacing receipt
+        // reply-inference now requires) and replies, which sweeps the rest.
         store
-            .ack_delivered_for_recipient(&["swift-fox"], &["supervisor"], Some("sess-1"))
+            .poll_unseen_for_recipient("swift-fox", Some("sess-1"), 10)
+            .unwrap();
+        store
+            .ack_delivered_for_recipient(
+                &["swift-fox"],
+                &["supervisor"],
+                Some("sess-1"),
+                Utc::now(),
+            )
             .unwrap();
 
         let a = store.message_delivery_report(explicit).unwrap().unwrap();
@@ -3138,12 +3831,15 @@ mod tests {
             )
             .unwrap();
         store.mark_transport_delivered(consumed).unwrap();
+        // cas-99d2: reply-inference also needs a surfacing receipt for the row.
+        record_seen(&store, consumed, "worker-1", Utc::now());
 
         let confirmed = store
             .ack_delivered_for_recipient(
                 &["worker-1"],
                 &["supervisor", "display-supervisor"],
                 Some("factory-session"),
+                Utc::now(),
             )
             .unwrap();
         assert_eq!(confirmed, 1);
@@ -4128,6 +4824,110 @@ mod tests {
             .unwrap();
         let prompts = store.poll_for_target("w", 10).unwrap();
         assert!(prompts.iter().any(|p| p.prompt == "new urgent" && p.urgent));
+    }
+
+    /// cas-ac7e (GH #130): the recipient-transport table has to appear on
+    /// stores that predate it, or every existing factory keeps reporting
+    /// `stage=delivered` with no recipient-side stamp — the bug, preserved.
+    #[test]
+    fn recipient_transport_table_is_created_on_a_preexisting_store() {
+        let temp = TempDir::new().unwrap();
+        let db_path = temp.path().join("cas.db");
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE prompt_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source TEXT NOT NULL,
+                    target TEXT NOT NULL,
+                    prompt TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    processed_at TEXT,
+                    factory_session TEXT,
+                    summary TEXT,
+                    priority INTEGER NOT NULL DEFAULT 2,
+                    acked_at TEXT
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO prompt_queue (source, target, prompt, created_at) \
+                 VALUES ('supervisor','worker-1','legacy', datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+
+        // A row delivered AFTER the upgrade gets the stamp...
+        let fresh = store.enqueue("supervisor", "worker-1", "post-upgrade").unwrap();
+        store.mark_transport_delivered(fresh).unwrap();
+        assert!(
+            recipient_transport_stamp(&store, fresh, "worker-1").is_some(),
+            "the table must exist and be written on an upgraded store"
+        );
+
+        // ...and the pre-existing row is untouched, not dropped.
+        assert!(
+            store
+                .peek_all(10)
+                .unwrap()
+                .iter()
+                .any(|p| p.prompt == "legacy"),
+            "adding the table must not disturb existing rows"
+        );
+    }
+
+    /// cas-ac7e (GH #130): the recipient's own drain is a delivery path too, so
+    /// it must leave the same corroboration as the daemon's handoff. Without
+    /// this a row could be reported `stage=delivered` with no stamp purely
+    /// because it reached the recipient by polling rather than by the daemon.
+    #[test]
+    fn a_drained_row_also_records_its_recipient_transport_stamp() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_with_session("supervisor", "worker-1", "assignment", "sess")
+            .unwrap();
+        assert!(recipient_transport_stamp(&store, id, "worker-1").is_none());
+
+        let drained = store
+            .poll_unseen_for_recipient("worker-1", Some("sess"), 10)
+            .unwrap();
+        assert_eq!(drained.len(), 1);
+
+        let report = store.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(report.stage, DeliveryStage::Delivered);
+        assert!(
+            report.recipient_transport_at.is_some(),
+            "a drain that advances the row to Delivered must leave the stamp too"
+        );
+    }
+
+    /// cas-ac7e (GH #130) AC2 — `unseen_for_recipient_summary` backs the unread
+    /// count and oldest-age the supervisor escalates on. If it kept the old
+    /// `acked_at IS NULL` predicate, a vanished message would read as zero
+    /// unread while `poll_unseen_for_recipient` still returned it.
+    #[test]
+    fn unread_count_agrees_with_the_drain_about_an_inferred_acked_row() {
+        let (_temp, store) = create_test_store();
+        let id = store.enqueue("worker-1", "supervisor", "report").unwrap();
+        store.mark_transport_delivered(id).unwrap();
+        stamp_ack_via(&store, id, Some("inferred_from_reply"));
+
+        assert_eq!(
+            store.count_unseen_for_recipient("supervisor", None).unwrap(),
+            1,
+            "the unread count must see exactly what the drain would return"
+        );
+        assert!(
+            store
+                .oldest_unseen_age_secs_for_recipient("supervisor", None)
+                .unwrap()
+                .is_some(),
+            "the undelivered clock must keep running on a row nobody has seen"
+        );
     }
 
     /// cas-2bcb / cas-04a6 R1: lower-ID NULL-session legacy rows must not

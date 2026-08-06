@@ -27,10 +27,13 @@ impl FactoryApp {
         // silently strand it; base from it, or state what was left out.
         let base_choice = git_ops.resolve_epic_base(&resolved.branch_ref);
         if let Some(notice) = base_choice.notice.as_deref() {
+            // stack_depth is emitted as a structured field (cas-aae6) so ops
+            // tooling can alert on deep stacks without parsing prose.
+            let stack_depth = base_choice.stacked_on.len();
             if base_choice.used_head {
-                tracing::info!("{}", notice);
+                tracing::info!(stack_depth, stacked_on = ?base_choice.stacked_on, "{}", notice);
             } else {
-                tracing::warn!("{}", notice);
+                tracing::warn!(stack_depth, stacked_on = ?base_choice.stacked_on, "{}", notice);
             }
         }
         // `resolved.behind_count` is local trunk vs origin/trunk; once the base

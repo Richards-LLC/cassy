@@ -7411,11 +7411,44 @@ pub(crate) fn render_epic_status_report(
     parent_branch: &str,
     statuses: &[EpicChildBranchStatus],
 ) -> String {
+    render_epic_status_report_with_stack(epic_id, parent_branch, statuses, &[])
+}
+
+/// Render an epic-status report, naming the unlanded epic branches this epic
+/// is stacked on (cas-aae6 / GH #110).
+///
+/// `stacked_on` is trunk-first, so the landing order is that list followed by
+/// this epic's own branch. An empty slice renders exactly the pre-existing
+/// report, which is why the plain [`render_epic_status_report`] delegates here.
+pub(crate) fn render_epic_status_report_with_stack(
+    epic_id: &str,
+    parent_branch: &str,
+    statuses: &[EpicChildBranchStatus],
+    stacked_on: &[String],
+) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "Epic {epic_id} — factory branch status\n\
-         Parent branch: {parent_branch}\n\n",
+         Parent branch: {parent_branch}\n",
     ));
+    if !stacked_on.is_empty() {
+        let quoted: Vec<String> = stacked_on.iter().map(|b| format!("'{b}'")).collect();
+        let mut order = quoted.clone();
+        order.push(format!("'{parent_branch}'"));
+        // Deliberately does NOT claim each entry contains the previous one:
+        // when an epic branch merges two independent unlanded epics, both are
+        // ancestors of it while neither contains the other. What is always
+        // true — and what the supervisor needs — is that this epic contains
+        // all of them, so none can be left behind.
+        out.push_str(&format!(
+            "Stacked on: {} unlanded epic branch(es) — {}\n\
+             Landing order: {} (this epic contains all of them; merging it merges them)\n",
+            stacked_on.len(),
+            quoted.join(" → "),
+            order.join(" → "),
+        ));
+    }
+    out.push('\n');
     if statuses.is_empty() {
         out.push_str("(no child tasks)\n");
         return out;
@@ -14178,6 +14211,76 @@ mod epic_status_gate_tests {
         assert!(
             report.contains("2 child task(s) carry stranded factory commits"),
             "report must summarize stranded count = 2 (bravo + charlie): {report}"
+        );
+    }
+
+    // cas-aae6 (GH #110): a stacked epic cannot land alone, and epic_status is
+    // where the supervisor decides merge order — so the chain belongs here, not
+    // only in a creation message that scrolled away hours ago.
+
+    #[test]
+    fn epic_status_names_the_full_stack_and_landing_order() {
+        let dir = init_epic_repo(&[("alpha", 1)]);
+        let subtasks = vec![child("cas-c1", TaskStatus::Closed, Some("alpha"))];
+        let statuses = collect_epic_branch_statuses(&subtasks, "epic/c", dir.path());
+
+        let report = render_epic_status_report_with_stack(
+            "cas-epic",
+            "epic/c",
+            &statuses,
+            &["epic/a".to_string(), "epic/b".to_string()],
+        );
+
+        assert!(
+            report.contains("Stacked on: 2 unlanded epic branch(es) — 'epic/a' → 'epic/b'"),
+            "the ancestry must be named in full: {report}"
+        );
+        assert!(
+            report.contains("Landing order: 'epic/a' → 'epic/b' → 'epic/c'")
+                && report.contains("merging it merges them"),
+            "the order the branches must land in is the actionable part: {report}"
+        );
+    }
+
+    #[test]
+    fn epic_status_without_a_stack_is_byte_identical_to_before() {
+        let dir = init_epic_repo(&[("alpha", 1)]);
+        let subtasks = vec![child("cas-c1", TaskStatus::Closed, Some("alpha"))];
+        let statuses = collect_epic_branch_statuses(&subtasks, "main", dir.path());
+
+        let plain = render_epic_status_report("cas-epic", "main", &statuses);
+        let empty_stack =
+            render_epic_status_report_with_stack("cas-epic", "main", &statuses, &[]);
+
+        assert_eq!(
+            plain, empty_stack,
+            "an unstacked epic must render exactly as it did before this feature"
+        );
+        assert!(
+            !plain.contains("Stacked on"),
+            "no stack language when there is no stack: {plain}"
+        );
+    }
+
+    #[test]
+    fn epic_status_shows_the_stack_even_with_no_child_tasks() {
+        let dir = init_epic_repo(&[]);
+        let statuses = collect_epic_branch_statuses(&[], "epic/b", dir.path());
+
+        let report = render_epic_status_report_with_stack(
+            "cas-epic",
+            "epic/b",
+            &statuses,
+            &["epic/a".to_string()],
+        );
+
+        assert!(
+            report.contains("Stacked on: 1 unlanded epic branch(es) — 'epic/a'"),
+            "an empty epic still has a landing constraint: {report}"
+        );
+        assert!(
+            report.contains("(no child tasks)"),
+            "the existing empty-epic body must survive: {report}"
         );
     }
 

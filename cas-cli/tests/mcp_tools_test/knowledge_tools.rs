@@ -181,6 +181,70 @@ async fn rewriting_a_locked_page_keeps_it_locked_and_keeps_its_id() {
     assert_eq!(pages.len(), 1, "rewrite must not duplicate the page");
 }
 
+/// The write path unlocks before it ingests, so a failed ingest must put the
+/// lock back. Otherwise one failed write silently strips a user's sovereignty
+/// bit and the next distillation pass is free to overwrite the page.
+///
+/// The failure is injected by replacing the page's parent directory with a
+/// symlink pointing outside the knowledge dir. `commit_ingest` resolves the
+/// body's parent and refuses to write through anything that escapes
+/// `.cas/knowledge/` (`ensure_within_knowledge_dir`), so the write fails
+/// *after* the unlock — exactly the window the restore logic exists to cover.
+///
+/// Chosen over the obvious "make the body path unwritable" injection because
+/// this one does not depend on file permissions, which a root test runner
+/// ignores.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_write_restores_the_lock_it_took() {
+    let (temp, core) = setup_cas();
+    let cas_dir = temp.path().join(".cas");
+
+    core.knowledge_write(Parameters(write_req(
+        "Lease Renewal",
+        "workflow",
+        "Heartbeat renews the lease every thirty seconds.\n",
+    )))
+    .await
+    .expect("first write should succeed");
+
+    let store = SqliteKnowledgeStore::open(&cas_dir).expect("store opens");
+    let page = store
+        .get_page_by_rel_path("workflow/lease-renewal.md")
+        .expect("lookup succeeds")
+        .expect("page exists");
+    assert!(page.locked, "precondition: the page starts locked");
+
+    // Point the page's directory outside the knowledge dir; the store's
+    // containment check then refuses the write.
+    let body_path = store.body_path(&page.rel_path).expect("body path");
+    let page_dir = body_path.parent().expect("page dir").to_path_buf();
+    let escape = temp.path().join("outside-the-knowledge-dir");
+    std::fs::create_dir_all(&escape).expect("create escape dir");
+    std::fs::remove_dir_all(&page_dir).expect("remove page dir");
+    std::os::unix::fs::symlink(&escape, &page_dir).expect("symlink page dir out of the store");
+
+    let failed = core
+        .knowledge_write(Parameters(write_req(
+            "Lease Renewal",
+            "workflow",
+            "Heartbeat renews the lease every ten seconds.\n",
+        )))
+        .await;
+    assert!(failed.is_err(), "the write must fail, not silently no-op");
+
+    // The whole point: the lock survived a failed write.
+    let after = SqliteKnowledgeStore::open(&cas_dir)
+        .expect("store reopens")
+        .get_page_by_rel_path("workflow/lease-renewal.md")
+        .expect("lookup succeeds")
+        .expect("page still exists");
+    assert!(
+        after.locked,
+        "a failed write must leave the page exactly as locked as it found it"
+    );
+}
+
 #[tokio::test]
 async fn list_and_status_report_an_empty_store_without_erroring() {
     let (_temp, core) = setup_cas();

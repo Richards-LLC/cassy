@@ -2220,7 +2220,9 @@ This is the body content."#;
     /// model so future maintainers see the framework before adding to the
     /// Immutable Core (this skill body). The section names the three
     /// layers explicitly (Immutable Core / Task Context / Ephemeral),
-    /// cites the 12 KB ceiling, and points at the rationale memory file
+    /// cites its component ceiling (8 KB supervisor / 12 KB worker) plus,
+    /// for the worker, the 9 KB aggregate SessionStart budget, and points
+    /// at the rationale memory file
     /// `project_session_start_truncation.md`. Both Claude and Codex
     /// mirrors are checked so neither surface silently drifts.
     #[test]
@@ -2234,7 +2236,11 @@ This is the body content."#;
             "project_session_start_truncation.md",
             "references/",
         ];
-        // Supervisor cap was lowered to 8KB (cas-5e4b); worker cap remains 12KB.
+        // Supervisor cap was lowered to 8KB (cas-5e4b); the worker *component*
+        // cap remains 12KB. cas-4c25: the worker body must additionally name
+        // the 9KB aggregate SessionStart budget introduced by cas-b114, so the
+        // section can't drift back to describing a silent-truncation model
+        // that no longer exists.
         let supervisor_files = [
             ("claude cas-supervisor.md", SUPERVISOR_GUIDE),
             (
@@ -2258,7 +2264,7 @@ This is the body content."#;
             }
         }
         for (label, content) in worker_files {
-            for required in common.iter().chain(["12 KB"].iter()) {
+            for required in common.iter().chain(["12 KB", "9 KB"].iter()) {
                 assert!(
                     content.contains(required),
                     "{label} missing required Context-budgeting marker: {required:?}"

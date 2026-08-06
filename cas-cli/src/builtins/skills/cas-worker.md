@@ -73,10 +73,10 @@ mcp__cas__coordination action=message target=supervisor \
   summary="<brief preview>" message="<full body>"
 ```
 
-- **`target` is the literal string `supervisor`.** Using the supervisor's display name (e.g. `target="sturdy-finch-2"`) is rejected, even though kickoff messages show you that name.
+- **Use the literal string `supervisor` as `target`.** CAS resolves it from `CAS_SUPERVISOR_NAME` or the active supervisor agent, so it can't go stale. The display name (e.g. `sturdy-finch-2`) is accepted only when it exactly matches that resolved supervisor; anything else is rejected with `Workers can only message their supervisor`.
 - **Both `summary` and `message` are required** on every send — `message` alone is rejected with `summary required`.
 - **You may ONLY message the supervisor.** Peer worker messaging is rejected with `"Workers can only message their supervisor"`. If you need something from another worker, ask the supervisor to relay.
-- Do not use the built-in `SendMessage` tool — it's disabled in factory mode. This includes your first ready-ping at spawn: use `mcp__cas__coordination action=message` from the very first message.
+- Use `mcp__cas__coordination action=message`, not the built-in `SendMessage`, from your first ready-ping at spawn onward. `SendMessage` isn't blocked — in factory mode a PreToolUse hook auto-routes it onto the same CAS queue and returns success (cas-f32b) — but it only carries what that layer can parse. Call the coordination tool directly.
 - Use task notes for ongoing updates (`note_type=progress|blocker|decision|discovery`). The supervisor sees these in the TUI.
 - Message the supervisor when you complete a task or need help.
 
@@ -99,8 +99,13 @@ For Vercel-deployed projects, `vercel env pull .env.<env> --environment=<env>` (
 Factory identity variables inherited by worker processes can change test behavior. Use this canonical sanitized command for full-suite gates; do not shorten the list:
 
 ```bash
-env -u CAS_AGENT_ROLE -u CAS_FACTORY_MODE -u CAS_FACTORY_SUPERVISOR_CLI -u CAS_FACTORY_WORKER_CLI -u CAS_SESSION_ID -u CAS_FACTORY_SESSION -u CAS_AGENT_ID -u CAS_TASK_ID cargo test --no-fail-fast
+env -u CAS_AGENT_ROLE -u CAS_AGENT_NAME -u CAS_AGENT_ID -u CAS_FACTORY_MODE \
+    -u CAS_FACTORY_SESSION -u CAS_FACTORY_SUPERVISOR_CLI -u CAS_FACTORY_WORKER_CLI \
+    -u CAS_SESSION_ID -u CAS_SUPERVISOR_NAME -u CAS_CLONE_PATH -u CAS_ROOT \
+    cargo test --no-fail-fast
 ```
+
+That is what the factory actually injects. `CAS_ROOT`/`CAS_CLONE_PATH` matter most — left set, a test can reach the *main* checkout's `.cas`. There is no `CAS_TASK_ID`; don't add it back.
 
 ## References
 
@@ -121,7 +126,7 @@ Open these on demand — they are not pre-loaded.
 ## Context budgeting
 
 Three layers (`project_session_start_truncation.md`):
-- **Immutable Core** — skill body; 12 KB SessionStart cap (`test_*_guidance_under_12kb`); over = silent 2 KB preview.
+- **Immutable Core** — skill body; 12 KB component ceiling (`test_worker_guidance_under_12kb`). The *assembled* payload has a tighter 9 KB aggregate budget (`SESSION_START_BUDGET_BYTES`, cas-b114): over it, degradable listings (ready tasks, memories, skills) collapse deterministically to a heading plus the command that reprints them, while role guidance is protected and emitted verbatim. Nothing is cut mid-sentence.
 - **Task Context** — EPIC/task/memories, on demand.
 - **Ephemeral** — outputs, transcript; expendable.
 

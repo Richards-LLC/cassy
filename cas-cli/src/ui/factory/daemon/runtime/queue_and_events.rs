@@ -669,11 +669,81 @@ pub(super) fn lifecycle_redelivery_decision(
 /// on every ~100ms poll (385 injected copies, GH #124). Any row this daemon has
 /// already written into a recipient's inbox and left pending carries the same
 /// contract now, whoever the recipient is.
+///
+/// cas-ac7e (GH #130): an urgent row left pending by an unresolved/unobserved
+/// wake probe joins the same contract. It is the storm shape the two previous
+/// tasks fixed, aimed at the loudest transport there is — a re-interrupt
+/// discards whatever the recipient is doing — so it must never be eligible on
+/// every 100ms poll.
 pub(super) fn row_needs_renudge_cadence(
     is_supervisor_wake: bool,
     already_written_to_inbox: bool,
+    urgent_wake_unresolved: bool,
 ) -> bool {
-    is_supervisor_wake || already_written_to_inbox
+    is_supervisor_wake || already_written_to_inbox || urgent_wake_unresolved
+}
+
+/// cas-ac7e (GH #130): how long the daemon waits for a pane to show ANY output
+/// after an urgent interrupt-and-inject before declaring the wake unobserved.
+///
+/// A harness that actually took the turn starts rendering within a few hundred
+/// milliseconds (banner, spinner, echoed prompt). Notification 7206's target
+/// emitted its next output — an unrelated idle notification — 15s after the
+/// interrupt and had plainly never seen the message, so the window has to be
+/// short enough to conclude "unobserved" long before the operator does.
+const URGENT_WAKE_OBSERVE_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// cas-ac7e (GH #130): an urgent row whose payload has been typed into a pane
+/// and whose wake is still unproven.
+#[derive(Debug, Clone)]
+pub(crate) struct UrgentWakeProbe {
+    /// Pane the interrupt was aimed at (already name-normalised).
+    pub(crate) pane: String,
+    /// The pane's cumulative PTY output byte count at inject time.
+    pub(crate) bytes_at_inject: u64,
+    /// When the inject completed.
+    pub(crate) injected_at: std::time::Instant,
+}
+
+/// cas-ac7e (GH #130): verdict on an urgent wake probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum UrgentWakeOutcome {
+    /// The pane produced output after the inject — the harness took the turn.
+    /// Only now is the row's delivery a fact rather than a keystroke.
+    Observed,
+    /// The observation window elapsed with the pane's byte count unchanged.
+    /// Bytes were typed at something that never reacted; the row must stay
+    /// pending rather than be stamped delivered.
+    Unobserved,
+    /// Still inside the window with no output yet — no verdict, check again.
+    Pending,
+}
+
+/// cas-ac7e (GH #130): resolve an urgent wake probe.
+///
+/// Pure so the 7206 shape is testable without a PTY or a clock: an interrupt
+/// whose pane never emits a byte must resolve to `Unobserved`, and `Unobserved`
+/// is what keeps the row out of `mark_transport_delivered`.
+///
+/// Byte-count growth is deliberately the weakest possible evidence of a wake —
+/// it says the harness reacted to the keystrokes at all. That is still strictly
+/// more than the previous rule, which was "we called write() and it returned
+/// Ok". A pane whose count is frozen for the whole window did not react by any
+/// definition.
+pub(super) fn classify_urgent_wake(
+    bytes_at_inject: u64,
+    bytes_now: Option<u64>,
+    elapsed: std::time::Duration,
+    window: std::time::Duration,
+) -> UrgentWakeOutcome {
+    match bytes_now {
+        // Pane vanished mid-probe (worker died/was shut down). There is no
+        // evidence a turn was granted and none is coming.
+        None => UrgentWakeOutcome::Unobserved,
+        Some(now) if now > bytes_at_inject => UrgentWakeOutcome::Observed,
+        Some(_) if elapsed >= window => UrgentWakeOutcome::Unobserved,
+        Some(_) => UrgentWakeOutcome::Pending,
+    }
 }
 
 /// cas-ceae (GH #124/#123): what to do with a queue row whose payload this
@@ -735,6 +805,86 @@ impl FactoryDaemon {
     fn forget_row_delivery_state(&mut self, row_id: i64) {
         self.lifecycle_redelivery_attempts.remove(&row_id);
         self.inbox_deferred_writes.remove(&row_id);
+        self.urgent_wake_probes.remove(&row_id);
+    }
+
+    /// cas-ac7e (GH #130): settle every outstanding urgent wake probe against
+    /// the pane's current output counter.
+    ///
+    /// Runs at the top of each queue poll, before any delivery decision, so a
+    /// row whose wake has now been corroborated is consumed rather than
+    /// re-interrupted, and a row whose pane never reacted stays pending with a
+    /// truthful reason instead of being stamped Delivered on the strength of a
+    /// `write()` that returned Ok (notification 7206).
+    fn resolve_urgent_wake_probes(&mut self, queue: &dyn cas_store::PromptQueueStore) {
+        if self.urgent_wake_probes.is_empty() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let verdicts: Vec<(i64, UrgentWakeOutcome, String)> = self
+            .urgent_wake_probes
+            .iter()
+            .map(|(row_id, probe)| {
+                (
+                    *row_id,
+                    classify_urgent_wake(
+                        probe.bytes_at_inject,
+                        self.app.mux.pane_bytes_received(&probe.pane),
+                        now.saturating_duration_since(probe.injected_at),
+                        URGENT_WAKE_OBSERVE_WINDOW,
+                    ),
+                    probe.pane.clone(),
+                )
+            })
+            .collect();
+
+        for (row_id, outcome, pane) in verdicts {
+            match outcome {
+                UrgentWakeOutcome::Pending => {}
+                UrgentWakeOutcome::Observed => {
+                    self.forget_row_delivery_state(row_id);
+                    if let Err(error) = queue.mark_transport_delivered(row_id) {
+                        tracing::error!(
+                            prompt_id = row_id,
+                            %error,
+                            "cas-ac7e: failed to stamp an urgent row whose wake was observed"
+                        );
+                    } else {
+                        tracing::info!(
+                            target: "cas::coordination",
+                            stage = "urgent_wake_observed",
+                            channel = "prompt_queue",
+                            message_id = row_id,
+                            target_agent = %pane,
+                            "cas-ac7e: pane reacted to the interrupt — urgent row consumed"
+                        );
+                    }
+                }
+                UrgentWakeOutcome::Unobserved => {
+                    // Keep the row pending. The cadence gate in the delivery
+                    // loop makes the next re-interrupt at most one per
+                    // LIFECYCLE_RENUDGE_INTERVAL, and the row's undelivered
+                    // clock keeps counting for the supervisor's escalation.
+                    self.urgent_wake_probes.remove(&row_id);
+                    let _ = queue.record_pending_reason(
+                        row_id,
+                        cas_store::PendingReason::GatedNotReady,
+                        Some(
+                            "urgent interrupt did not grant a turn — pane produced no output \
+                             within the wake observation window",
+                        ),
+                    );
+                    tracing::warn!(
+                        target: "cas::coordination",
+                        stage = "urgent_wake_unobserved",
+                        channel = "prompt_queue",
+                        message_id = row_id,
+                        target_agent = %pane,
+                        "cas-ac7e: urgent redirect produced no pane reaction — row stays pending"
+                    );
+                }
+            }
+        }
     }
 
     /// cas-ceae: resolve the queue `source` to the team member name the inbox
@@ -1526,6 +1676,11 @@ impl FactoryDaemon {
         // before any delivery decision reads it.
         self.refresh_pane_quiet_samples();
 
+        // cas-ac7e (GH #130): settle urgent wake probes before anything else
+        // selects a row, so an urgent row is consumed the moment its pane
+        // proves it took the turn — and never before.
+        self.resolve_urgent_wake_probes(queue.as_ref());
+
         // Native-extension agents consume their own queue rows. Excluding them
         // from the daemon's target universe prevents this PTY/inbox processor
         // from repeatedly selecting rows it deliberately cannot consume.
@@ -1905,6 +2060,7 @@ impl FactoryDaemon {
             if row_needs_renudge_cadence(
                 Self::row_is_supervisor_wake(&queued.source, &queued.prompt),
                 self.inbox_deferred_writes.contains(&queued.id),
+                queued.urgent && self.lifecycle_redelivery_attempts.contains_key(&queued.id),
             ) {
                 match lifecycle_redelivery_decision(
                     queued.acked_at.is_some(),
@@ -2095,6 +2251,11 @@ impl FactoryDaemon {
             // cas-f02b: set when this row is a supervisor wake that did not
             // actually wake the pane this pass — see the stamp guard below.
             let mut wake_deferred = false;
+            // cas-ac7e (GH #130): set when this pass typed an urgent redirect
+            // into a pane and opened a wake probe for it. The row is not
+            // consumed on the strength of the keystrokes alone — see the stamp
+            // guard below and `resolve_urgent_wake_probes`.
+            let mut urgent_wake_probe_opened = false;
             if target == "all_workers" {
                 // cas-2c5f: truthful broadcast outcomes — never stamp full
                 // Delivered on any_success. Count intended/succeeded/failed.
@@ -2291,12 +2452,31 @@ impl FactoryDaemon {
                         settle_ms = settle.as_millis() as u64,
                         "urgent message: breaking turn then injecting"
                     );
-                    self.app
+                    // cas-ac7e (GH #130): sample the pane's output counter
+                    // BEFORE the interrupt so the probe below has a floor to
+                    // compare against. `interrupt_and_inject` itself proves
+                    // only that bytes were typed.
+                    let bytes_at_inject =
+                        self.app.mux.pane_bytes_received(&pane_target).unwrap_or(0);
+                    let outcome = self
+                        .app
                         .mux
                         .interrupt_and_inject(&pane_target, &payload, settle)
                         .await
                         .map(|()| cas_mux::InjectOutcome::Delivered)
-                        .map_err(Into::into)
+                        .map_err(Into::into);
+                    if matches!(outcome, Ok(cas_mux::InjectOutcome::Delivered)) {
+                        self.urgent_wake_probes.insert(
+                            queued.id,
+                            UrgentWakeProbe {
+                                pane: pane_target.clone(),
+                                bytes_at_inject,
+                                injected_at: std::time::Instant::now(),
+                            },
+                        );
+                        urgent_wake_probe_opened = true;
+                    }
+                    outcome
                 } else {
                     // Recipient-aware routing (cas-b68a): delivery channel +
                     // name normalisation handled inside the helper.
@@ -2559,7 +2739,34 @@ impl FactoryDaemon {
                 }
             }
 
-            if success && wake_deferred {
+            if success && urgent_wake_probe_opened {
+                // cas-ac7e (GH #130): the redirect is in the pane's input, but
+                // nothing yet shows the pane reacted. Stamping Delivered here
+                // is what made notification 7206 terminal — no redelivery, no
+                // undelivered clock — while its recipient idled straight
+                // through the interrupt. Hold the row pending; the probe
+                // resolves it on a later poll, and the re-nudge cadence gate
+                // bounds any re-interrupt to one per interval.
+                let _ = queue.record_pending_reason(
+                    queued.id,
+                    cas_store::PendingReason::GatedNotReady,
+                    Some(
+                        "urgent redirect typed into the pane; awaiting evidence the \
+                         interrupt granted a turn",
+                    ),
+                );
+                self.lifecycle_redelivery_attempts
+                    .entry(queued.id)
+                    .or_insert_with(std::time::Instant::now);
+                tracing::info!(
+                    target: "cas::coordination",
+                    stage = "urgent_wake_probe_opened",
+                    channel = "prompt_queue",
+                    message_id = queued.id,
+                    target_agent = %queued.target,
+                    "cas-ac7e: urgent row stays pending until the pane shows it took the turn"
+                );
+            } else if success && wake_deferred {
                 // cas-f02b (GH #101): the inbox write landed, but this row's
                 // whole purpose is to WAKE the supervisor — consuming it now
                 // reproduces the reported silent stall (fleet parked, signal
@@ -4911,7 +5118,7 @@ mod tests {
 
             // Guard 2: the cas-d732 cadence, generalized past supervisor rows.
             let cadence_applies = if cas_ceae_guards {
-                row_needs_renudge_cadence(is_supervisor_wake, written_earlier)
+                row_needs_renudge_cadence(is_supervisor_wake, written_earlier, false)
             } else {
                 is_supervisor_wake
             };
@@ -5025,7 +5232,7 @@ mod tests {
             "inbox contents cannot gate a row we never wrote"
         );
         assert!(
-            !row_needs_renudge_cadence(false, false),
+            !row_needs_renudge_cadence(false, false, false),
             "an ordinary worker message must reach its first delivery unthrottled"
         );
     }
@@ -5046,7 +5253,7 @@ mod tests {
             "our copy is gone — the harness took it, which is delivery on this transport"
         );
         assert!(
-            row_needs_renudge_cadence(false, true),
+            row_needs_renudge_cadence(false, true, false),
             "a worker row already written to an inbox is under the cadence contract"
         );
     }
@@ -6037,6 +6244,131 @@ mod tests {
             "long messages must never be treated as idle heartbeats even when they \
              start with a stock phrase — idle filter silently drops matches, so a \
              false positive here would lose the entire report"
+        );
+    }
+}
+
+/// cas-ac7e (GH #130): urgent interrupts must record their wake outcome
+/// truthfully, and a wake that did not grant a turn must not consume the row.
+#[cfg(test)]
+mod urgent_wake_probe_tests {
+    use super::{
+        LIFECYCLE_RENUDGE_INTERVAL, LifecycleRedelivery, URGENT_WAKE_OBSERVE_WINDOW,
+        UrgentWakeOutcome, classify_urgent_wake, lifecycle_redelivery_decision,
+        row_needs_renudge_cadence,
+    };
+    use std::time::Duration;
+
+    /// The 7206 shape: the daemon broke the turn and typed the redirect at
+    /// 20:23:57, the pane produced nothing, and the recipient acted only on a
+    /// manual re-send. Before this task the row was stamped Delivered on the
+    /// strength of the write alone; now the verdict is `Unobserved`, which is
+    /// what keeps it pending.
+    #[test]
+    fn a_pane_that_never_reacts_resolves_unobserved() {
+        assert_eq!(
+            classify_urgent_wake(
+                4_096,
+                Some(4_096),
+                URGENT_WAKE_OBSERVE_WINDOW,
+                URGENT_WAKE_OBSERVE_WINDOW,
+            ),
+            UrgentWakeOutcome::Unobserved,
+            "a frozen output counter across the whole window is not a granted turn"
+        );
+    }
+
+    #[test]
+    fn a_pane_that_renders_after_the_interrupt_resolves_observed() {
+        assert_eq!(
+            classify_urgent_wake(
+                4_096,
+                Some(4_097),
+                Duration::from_millis(120),
+                URGENT_WAKE_OBSERVE_WINDOW
+            ),
+            UrgentWakeOutcome::Observed,
+            "one byte of reaction is weak evidence, but it is evidence; the previous \
+             rule was none at all"
+        );
+    }
+
+    #[test]
+    fn silence_inside_the_window_is_not_yet_a_verdict() {
+        assert_eq!(
+            classify_urgent_wake(
+                4_096,
+                Some(4_096),
+                URGENT_WAKE_OBSERVE_WINDOW / 2,
+                URGENT_WAKE_OBSERVE_WINDOW,
+            ),
+            UrgentWakeOutcome::Pending,
+            "declaring a wake missed before the harness has had time to render \
+             would re-interrupt a worker that is about to answer"
+        );
+    }
+
+    #[test]
+    fn a_pane_that_disappeared_mid_probe_resolves_unobserved() {
+        assert_eq!(
+            classify_urgent_wake(
+                4_096,
+                None,
+                Duration::from_millis(10),
+                URGENT_WAKE_OBSERVE_WINDOW
+            ),
+            UrgentWakeOutcome::Unobserved,
+            "a dead pane will never produce the evidence, so the row must not be \
+             left waiting on it"
+        );
+    }
+
+    /// An unobserved urgent wake leaves the row pending, and `process_prompt_queue`
+    /// re-selects pending rows every ~100ms. Without the cadence gate that is a
+    /// re-interrupt at 10Hz — the GH #119/#124 storm aimed at the one transport
+    /// that destroys the recipient's in-flight work. Simulate 10 minutes of
+    /// polling and assert the re-interrupt rate.
+    #[test]
+    fn an_unobserved_urgent_wake_cannot_storm_the_pane() {
+        let start = std::time::Instant::now();
+        let poll = Duration::from_millis(100);
+        let total = Duration::from_secs(600);
+
+        let mut last_attempt: Option<std::time::Instant> = None;
+        let mut interrupts = 0usize;
+        let mut elapsed = Duration::ZERO;
+        while elapsed <= total {
+            let now = start + elapsed;
+            // The row is urgent and has a recorded attempt, i.e. its wake was
+            // typed and never corroborated.
+            let cadence_applies = row_needs_renudge_cadence(false, false, last_attempt.is_some());
+            let may_deliver = !cadence_applies
+                || matches!(
+                    lifecycle_redelivery_decision(
+                        false,
+                        last_attempt,
+                        now,
+                        LIFECYCLE_RENUDGE_INTERVAL,
+                    ),
+                    LifecycleRedelivery::Deliver
+                );
+            if may_deliver {
+                interrupts += 1;
+                last_attempt = Some(now);
+            }
+            elapsed += poll;
+        }
+
+        assert!(
+            interrupts <= 11,
+            "10 minutes of polling produced {interrupts} interrupts; the cadence \
+             contract allows at most one per {}s interval",
+            LIFECYCLE_RENUDGE_INTERVAL.as_secs()
+        );
+        assert!(
+            interrupts >= 2,
+            "the redirect must still be RETRIED — holding it forever is the \
+             stranding this task fixes, not a fix for it"
         );
     }
 }

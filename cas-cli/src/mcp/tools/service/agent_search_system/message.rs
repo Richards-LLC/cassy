@@ -1229,18 +1229,31 @@ impl CasService {
                         }
                     ),
                 };
+                // cas-ac7e (GH #130): stage=delivered used to be the writer's
+                // unchecked claim about itself. Say out loud when the
+                // recipient side cannot corroborate it, instead of reporting
+                // "delivered" and leaving the operator to discover from the
+                // recipient that nothing arrived.
+                let transport_line = if r.stage == cas_store::DeliveryStage::Delivered
+                    && r.target != "all_workers"
+                    && r.recipient_transport_at.is_none()
+                {
+                    "recipient_transport: MISSING — this row reports stage=delivered with no \
+                     per-recipient transport stamp. Either it was delivered before CAS \
+                     recorded them, or the stamp and the stage have diverged; treat the \
+                     delivery as unproven and re-send.\n"
+                        .to_string()
+                } else {
+                    String::new()
+                };
                 Ok(Self::success(format!(
                     "Message {notification_id} status: {}\n\
                      stage: {}  pending_reason: {}  wake: {}  reaction: {}  \
                      confirmation_source: {}\n\
+                     {transport_line}\
                      {undelivered_line}\
                      {json}",
-                    r.legacy_status,
-                    r.stage,
-                    reason,
-                    r.wake,
-                    r.reaction,
-                    r.confirmation_source
+                    r.legacy_status, r.stage, reason, r.wake, r.reaction, r.confirmation_source
                 )))
             }
             None => Ok(Self::success(format!(

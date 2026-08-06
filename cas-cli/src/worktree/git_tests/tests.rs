@@ -916,3 +916,37 @@ fn epic_base_degrades_to_trunk_on_detached_head() {
     assert_eq!(choice.base_ref, trunk);
     assert!(choice.notice.is_none());
 }
+
+#[test]
+fn epic_base_states_the_merge_order_consequence_when_it_stacks() {
+    let (_temp, repo_path) = create_test_repo();
+    let trunk = trunk_of(&repo_path);
+    checkout_new(&repo_path, "epic/first-cas-aaaa");
+    commit_on(&repo_path, "one.txt", "epic work");
+
+    let git = GitOperations::new(repo_path);
+    let notice = git
+        .resolve_epic_base(&trunk)
+        .notice
+        .expect("stacking must be explained");
+
+    assert!(
+        notice.contains("CONTAINS") && notice.contains("epic/first-cas-aaaa"),
+        "stacking carries the base epic's commits — the operator must be told: {notice}"
+    );
+}
+
+#[test]
+fn epic_base_degrades_to_trunk_when_git_cannot_answer() {
+    // Not a git repository at all: every probe fails, and epic creation must
+    // still get a usable base rather than an error.
+    let temp = TempDir::new().unwrap();
+    let git = GitOperations::new(temp.path().to_path_buf());
+
+    let choice = git.resolve_epic_base("main");
+
+    assert_eq!(choice.base_ref, "main");
+    assert!(!choice.used_head);
+    assert!(choice.notice.is_none());
+    assert_eq!(choice.head_ahead, 0);
+}

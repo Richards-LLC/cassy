@@ -1928,3 +1928,71 @@ fn test_create_epic_branch_continues_the_active_epic_branch_instead_of_stranding
         "prior epic work must be present on the new epic branch: {files}"
     );
 }
+
+/// cas-a85e (GH #99): the other half of the decision — when the checkout's
+/// epic branch has diverged from trunk, stacking would silently drop the
+/// trunk-only commits, so trunk stays the base.
+#[test]
+fn test_create_epic_branch_keeps_trunk_when_active_epic_branch_has_diverged() {
+    let (_temp, repo_path) = create_test_repo();
+    let config = WorktreeConfig::default();
+
+    let trunk = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    let trunk = String::from_utf8_lossy(&trunk.stdout).trim().to_string();
+
+    let commit = |file: &str, msg: &str| {
+        std::fs::write(repo_path.join(file), msg).unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", msg])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+    };
+    let checkout = |branch: &str, create: bool| {
+        let mut args = vec!["checkout", "-q"];
+        if create {
+            args.push("-b");
+        }
+        args.push(branch);
+        Command::new("git")
+            .args(&args)
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+    };
+
+    checkout("epic/first-cas-aaaa", true);
+    commit("epic-only.txt", "epic only");
+    checkout(&trunk, false);
+    commit("trunk-only.txt", "trunk only");
+    let trunk_sha = Command::new("git")
+        .args(["rev-parse", &trunk])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    let trunk_sha = String::from_utf8_lossy(&trunk_sha.stdout).trim().to_string();
+    checkout("epic/first-cas-aaaa", false);
+
+    let manager = WorktreeManager::new(&repo_path, config).unwrap();
+    let branch = manager.create_epic_branch("Diverged Follow On").unwrap();
+
+    let new_tip = Command::new("git")
+        .args(["rev-parse", &branch])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    let new_tip = String::from_utf8_lossy(&new_tip.stdout).trim().to_string();
+    assert_eq!(
+        new_tip, trunk_sha,
+        "a diverged epic branch must not become the base — the trunk-only commit would be lost"
+    );
+}

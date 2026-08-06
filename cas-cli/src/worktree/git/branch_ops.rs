@@ -319,7 +319,9 @@ impl GitOperations {
                 base_ref: head.clone(),
                 notice: Some(format!(
                     "Based on the active epic branch '{head}' ({head_ahead} commit(s) ahead of \
-                     '{base_ref}') so work already on it is not stranded. Pass an explicit \
+                     '{base_ref}') so work already on it is not stranded. This branch therefore \
+                     CONTAINS those commits: merging it to '{base_ref}' also merges '{head}', so \
+                     land '{head}' first or accept that. Pass an explicit \
                      target_repo/target_branch, or check out '{base_ref}', to start from trunk \
                      instead."
                 )),

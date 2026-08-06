@@ -39,10 +39,16 @@ impl WorktreeManager {
                 tracing::warn!("{}", notice);
             }
         }
-        let base_sha = if base_choice.used_head {
-            self.git.ref_sha(&base_choice.base_ref).unwrap_or_default()
+        // `resolved.behind_count` describes local trunk vs origin/trunk. Once
+        // the base is HEAD's epic branch instead, that number describes a
+        // different pair of refs — report the base's own gap to trunk.
+        let (base_sha, base_behind) = if base_choice.used_head {
+            (
+                self.git.ref_sha(&base_choice.base_ref).unwrap_or_default(),
+                base_choice.head_behind,
+            )
         } else {
-            resolved.sha.clone()
+            (resolved.sha.clone(), resolved.behind_count)
         };
 
         let newly_created = match self
@@ -55,7 +61,7 @@ impl WorktreeManager {
                     branch_name,
                     base_choice.base_ref,
                     short_sha(&base_sha),
-                    resolved.behind_count,
+                    base_behind,
                 );
                 true
             }

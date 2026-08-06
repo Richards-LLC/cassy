@@ -33,10 +33,15 @@ impl FactoryApp {
                 tracing::warn!("{}", notice);
             }
         }
-        let base_sha = if base_choice.used_head {
-            git_ops.ref_sha(&base_choice.base_ref).unwrap_or_default()
+        // `resolved.behind_count` is local trunk vs origin/trunk; once the base
+        // is HEAD's epic branch it no longer describes the printed base.
+        let (base_sha, base_behind) = if base_choice.used_head {
+            (
+                git_ops.ref_sha(&base_choice.base_ref).unwrap_or_default(),
+                base_choice.head_behind,
+            )
         } else {
-            resolved.sha.clone()
+            (resolved.sha.clone(), resolved.behind_count)
         };
 
         if git_ops.create_branch_from(&branch_name, &base_choice.base_ref)? {
@@ -45,7 +50,7 @@ impl FactoryApp {
                 branch_name,
                 base_choice.base_ref,
                 &base_sha[..base_sha.len().min(7)],
-                resolved.behind_count,
+                base_behind,
             );
         } else {
             tracing::info!("Epic branch already exists: {}", branch_name);

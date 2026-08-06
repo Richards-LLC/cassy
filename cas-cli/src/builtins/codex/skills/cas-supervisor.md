@@ -40,7 +40,7 @@ New session? Run these steps in order. Open the linked reference for detail.
 3. **Intake gate** — Assess the request; detail in [intake.md](cas-supervisor/references/intake.md).
 4. **Create EPIC** — `mcp__cs__task action=create task_type=epic title="..." description="..."`; templates in [planning.md](cas-supervisor/references/planning.md).
 5. **Pin epic focus** — `mcp__cs__coordination action=focus_epic id=<epic-id>` shows the EPIC in TUI panels now.
-6. **Spawn a tiered mix, assign, end turn** — one `spawn_workers` call per tier needed, e.g. `count=2 isolate=true cli=codex model=gpt-5.6-terra effort=high` for standard tasks plus `count=1 isolate=true cli=codex model=gpt-5.6-sol effort=high` for a heavy one; never one default line for the fleet. Assign with `update` (not `transfer`), send context, stop. Phases/merge flow: [workflow.md](cas-supervisor/references/workflow.md).
+6. **Spawn a tiered mix, assign, end turn** — one `spawn_workers` call per tier needed, e.g. `count=2 isolate=true cli=codex model=gpt-5.6-terra effort=high` for standard tasks plus `count=1 isolate=true cli=codex model=gpt-5.6-sol effort=high` for a heavy one; never one default line for the fleet. Assign with `update` (not `transfer`), send context, stop. One-off follow-up with no epic open? `spawn_workers count=1 task_id=<task-id>` — an open, unassigned task authorizes the spawn by itself, so never invent a single-child epic. Phases/merge flow: [workflow.md](cas-supervisor/references/workflow.md).
 
 ## Heterogeneous Teams (Claude supervisor + Codex workers)
 

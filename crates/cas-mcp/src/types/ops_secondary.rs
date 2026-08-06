@@ -605,7 +605,7 @@ pub struct CoordinationRequest {
 
     /// Task ID (for loop_start, worktree_create, spawn_workers)
     #[schemars(
-        description = "Task ID. For loop_start/worktree_create: the task the loop/worktree is scoped to. For spawn_workers: pre-assign this task to the spawned worker (single-worker requests only) — see spawn_workers-specific docs."
+        description = "Task ID. For loop_start/worktree_create: the task the loop/worktree is scoped to. For spawn_workers: pre-assign this task to the spawned worker (single-worker requests only) — see spawn_workers-specific docs. An open task_id also authorizes the spawn on its own, so a standalone follow-up needs no active EPIC."
     )]
     #[serde(default)]
     pub task_id: Option<String>,

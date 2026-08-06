@@ -323,6 +323,10 @@ impl Mux {
                 None,
                 None,
                 teams,
+                // The whole initial fleet is known here, so every worker in it
+                // is derated against the real total rather than the assumed
+                // floor (cas-4614, GH #107).
+                Some(worker_names.len()),
             );
             let mut pty_config = pty_config;
             push_factory_session_env(&mut pty_config, cli, config.factory_session.as_deref());
@@ -418,6 +422,9 @@ impl Mux {
                 pane_cols,
                 teams,
                 config.factory_session.as_deref(),
+                // Same as `factory_pane_configs`: the initial fleet size is
+                // known before the first pane exists (cas-4614, GH #107).
+                Some(worker_names.len()),
             )?;
             mux.add_pane(pane);
         }
@@ -680,6 +687,10 @@ impl Mux {
             config_dir,
             config_dir_source,
             teams,
+            // Mirrors `add_worker`: this helper previews the config that
+            // spawn would produce, so it must derate identically or the
+            // preview would lie about the env (cas-4614, GH #107).
+            Some(self.worker_count() + 1),
         );
         push_factory_session_env(&mut config, effective.cli, self.factory_session.as_deref());
         config
@@ -726,6 +737,14 @@ impl Mux {
             (None, Some(dir)) => (Some(dir), Some("supervisor")),
             (None, None) => (None, None),
         };
+        // cas-4614 (GH #107): derate this worker's CARGO_BUILD_JOBS against
+        // the fleet it is joining. `worker_count()` is the live pane count
+        // *before* this insertion, so +1 counts the worker being spawned —
+        // otherwise the first worker of a fleet would size itself as if it
+        // were alone. The Mux is the right source: it owns the panes, so the
+        // number is exact at the moment the env is built, with nothing to
+        // thread through the caller.
+        let fleet_size = self.worker_count() + 1;
         let pane = Pane::worker(
             name,
             cwd,
@@ -741,6 +760,7 @@ impl Mux {
             self.cols,
             teams,
             self.factory_session.as_deref(),
+            Some(fleet_size),
         )?;
         let id = pane.id().to_string();
         // Persist the resolved spec so `effective_worker_spec(name, None)` is

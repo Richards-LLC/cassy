@@ -10,6 +10,8 @@ use std::time::Duration;
 use crate::cloud::{CloudConfig, SyncQueue};
 use crate::types::{Entry, Rule, Skill};
 
+mod knowledge;
+pub use knowledge::{KNOWLEDGE_ENTITY, KnowledgePageRecord, KnowledgePullReport, knowledge_share_scope};
 mod pull;
 mod push;
 mod team_push;
@@ -43,6 +45,8 @@ pub struct SyncResult {
     pub pushed_agents: usize,
     /// Number of worktrees pushed
     pub pushed_worktrees: usize,
+    /// Number of distilled knowledge pages pushed (T5)
+    pub pushed_knowledge_pages: usize,
     /// Number of entries pulled
     pub pulled_entries: usize,
     /// Number of tasks pulled
@@ -61,6 +65,8 @@ pub struct SyncResult {
     pub pulled_file_changes: usize,
     /// Number of commit links pulled
     pub pulled_commit_links: usize,
+    /// Number of distilled knowledge pages pulled (T5)
+    pub pulled_knowledge_pages: usize,
     /// Number of conflicts resolved
     pub conflicts_resolved: usize,
     /// Errors encountered during sync
@@ -83,6 +89,7 @@ impl SyncResult {
             + self.pushed_commit_links
             + self.pushed_agents
             + self.pushed_worktrees
+            + self.pushed_knowledge_pages
     }
 
     pub fn total_pulled(&self) -> usize {
@@ -95,6 +102,7 @@ impl SyncResult {
             + self.pulled_prompts
             + self.pulled_file_changes
             + self.pulled_commit_links
+            + self.pulled_knowledge_pages
     }
 
     pub fn has_errors(&self) -> bool {
@@ -312,6 +320,13 @@ struct PullResponse {
     file_changes: Option<Vec<serde_json::Value>>,
     #[serde(default)]
     commit_links: Option<Vec<serde_json::Value>>,
+    /// T5: distilled knowledge pages. Consumed by the dedicated
+    /// `pull_knowledge_pages` path (which needs a `KnowledgeStore` the generic
+    /// pull does not carry), declared here so the field is part of one
+    /// documented response contract rather than two.
+    #[serde(default)]
+    #[allow(dead_code)]
+    knowledge_pages: Option<Vec<serde_json::Value>>,
     pulled_at: Option<String>,
 }
 

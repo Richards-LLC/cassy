@@ -617,6 +617,14 @@ pub trait KnowledgeStore: Send + Sync {
     /// Clear the `pending_embedding` flag once an embedding has been computed.
     fn mark_embedded(&self, id: &str) -> Result<()>;
 
+    /// Re-arm `pending_embedding` on every page.
+    ///
+    /// Used when the embedding model changes: vectors from two different
+    /// models are not comparable, so the cached ones are discarded and every
+    /// page has to be embedded again — including pages that were previously
+    /// marked done. Returns the number of pages re-armed.
+    fn mark_all_pending_embedding(&self) -> Result<usize>;
+
     /// Set or clear the user-sovereignty lock on an existing page.
     ///
     /// This is the only way to lock a page after creation: `commit_ingest`
@@ -1119,6 +1127,18 @@ impl KnowledgeStore for SqliteKnowledgeStore {
             )));
         }
         Ok(())
+    }
+
+    fn mark_all_pending_embedding(&self) -> Result<usize> {
+        let conn = self.lock();
+        // `updated_at` is deliberately NOT bumped: re-embedding is an internal
+        // cache concern, and touching the timestamp would make every page look
+        // freshly edited to sync conflict resolution.
+        let rows = conn.execute(
+            "UPDATE knowledge_pages SET pending_embedding = 1 WHERE pending_embedding = 0",
+            [],
+        )?;
+        Ok(rows)
     }
 
     fn set_locked(&self, id: &str, locked: bool) -> Result<()> {
@@ -1927,6 +1947,52 @@ mod tests {
         assert_eq!(store.read_body(&p.rel_path).unwrap(), "llm overwrite");
 
         assert!(store.set_locked("cas-knmissing", true).is_err());
+    }
+
+    #[test]
+    fn mark_all_pending_embedding_rearms_every_page_without_touching_updated_at() {
+        let (_temp, store) = store();
+        let mut ids = Vec::new();
+        for title in ["Alpha", "Beta"] {
+            let p = page(&store, "subsystem", title, &["src/lib.rs"]);
+            ids.push(p.id.clone());
+            store
+                .commit_ingest(&IngestBatch {
+                    pages: vec![PageWrite {
+                        page: p,
+                        body: "body".to_string(),
+                    }],
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        for id in &ids {
+            store.mark_embedded(id).unwrap();
+        }
+        assert!(store.list_pending_embedding(10).unwrap().is_empty());
+        let before: Vec<_> = ids
+            .iter()
+            .map(|id| store.get_page(id).unwrap().updated_at)
+            .collect();
+
+        // This is what an embedding-model change triggers: every cached
+        // vector is now from the wrong space, so every page must be redone.
+        assert_eq!(store.mark_all_pending_embedding().unwrap(), 2);
+        assert_eq!(store.list_pending_embedding(10).unwrap().len(), 2);
+
+        let after: Vec<_> = ids
+            .iter()
+            .map(|id| store.get_page(id).unwrap().updated_at)
+            .collect();
+        assert_eq!(
+            before, after,
+            "re-arming embeddings is an internal cache concern; bumping \
+             updated_at would make every page look edited to sync conflict \
+             resolution and re-push the whole wiki"
+        );
+
+        // Idempotent: nothing left to re-arm on a second call.
+        assert_eq!(store.mark_all_pending_embedding().unwrap(), 0);
     }
 
     #[test]

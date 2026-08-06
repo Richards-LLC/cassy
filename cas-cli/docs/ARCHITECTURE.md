@@ -67,7 +67,26 @@ Two properties of the knowledge surface are load-bearing and easy to get wrong:
 
 `.claude/CODEMAP.md` and `docs/PRODUCT_OVERVIEW.md` are **views over this surface, not a parallel one**: both are ordinary distillable sources, so the `codemap` and `project-overview` skills query `cas knowledge search` before regenerating and run `cas knowledge build` after writing, which turns each doc into a page plus a source-ledger entry.
 
-**Search reality check:** every "search" above except the knowledge surface goes through the Tantivy BM25 index (`cas-core/src/search/`, doc types `entry`/`task`/`rule`/`skill`/`spec`/`code_symbol`/`code_file`). The knowledge surface has its own SQLite FTS5 index instead. **Neither is semantic.** There is no local embedder — `pending_embedding` columns exist and are populated, but nothing local consumes them.
+**Search reality check:** every "search" above except the knowledge surface goes through the Tantivy BM25 index (`cas-core/src/search/`, doc types `entry`/`task`/`rule`/`skill`/`spec`/`code_symbol`/`code_file`). The knowledge surface has its own SQLite FTS5 index instead. **Neither is semantic on its own.** There is no local embedder; the semantic channel exists only when the cloud does — see below.
+
+### The local/cloud boundary for project knowledge
+
+**Local is the source of truth. The cloud is an optional enhancement, never a dependency.** Concretely:
+
+| Concern | Owner |
+|---|---|
+| Pages, bodies, provenance, the `locked` bit | **Local** — SQLite + markdown on disk. Fully functional with no account, no network, no cloud build. |
+| Embedding vectors | **Cloud computes, local caches.** `cloud/embeddings.rs` posts page text to `/api/embeddings` and stores the vectors in an LMDB cache under `.cas/index/knowledge-vectors/`. |
+| Team distribution of pages | **Cloud transports.** `cloud/syncer/knowledge.rs` pushes/pulls pages over the existing `/api/sync` endpoints. |
+
+Rules that keep that boundary honest:
+
+- **No auth ⇒ no calls, no files, no channel.** `KnowledgeEmbedder::from_config` returns `None` when logged out, and every caller treats `None` as "this installation has no semantic channel" rather than a degraded mode. No LMDB environment is created. This is the same shape as the `dims = 0` provider-absent pattern: unconfigured storage is never materialised.
+- **`has_semantic()` tells the truth.** `HybridSearch::has_semantic` is true only when a channel is attached *and* vectors are actually cached. A configured-but-empty channel still reports false, so `SearchWeights::for_capabilities` keeps redistributing that weight to the live channels instead of allocating mass to a channel that can only return nothing.
+- **Never cache a zero vector.** A provider that fails soft would otherwise poison the cache with a vector equidistant from every query. Zero vectors are rejected and the page keeps `pending_embedding = 1`, so the next run retries it.
+- **A model change forces a reindex.** The cache is tagged with `{provider, model, dims}`; on mismatch it is wiped and `mark_all_pending_embedding` re-arms every page. Vectors from two models are not comparable, and mixing them corrupts ranking silently.
+- **The `locked` bit rides the wire and is honoured on arrival.** Incoming pages are applied through `commit_ingest`, whose `WHERE knowledge_pages.locked = 0` guard means a teammate's copy can no more overwrite a page you locked than distillation can. A page locked upstream arrives locked.
+- **Pulled pages always arrive `pending_embedding = 1`.** A teammate's vector lives in a teammate's cache; this machine embeds the page itself or it is semantically invisible here.
 
 ### Key Patterns
 

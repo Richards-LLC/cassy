@@ -1078,6 +1078,120 @@ fn execute_team_clear(cli: &Cli) -> anyhow::Result<()> {
 // LOGIN - Polished TUI with Device Flow
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// Local distilled-knowledge counts for `cas cloud status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct KnowledgeCounts {
+    pub pages: usize,
+    pub pending_embedding: usize,
+}
+
+/// Count local knowledge pages, or `None` when this project has no knowledge
+/// store yet. Never an error path: a status command must not fail because a
+/// repo has not been distilled.
+pub(crate) fn local_knowledge_counts(cas_root: &Path) -> Option<KnowledgeCounts> {
+    use cas_store::{KnowledgeStore, SqliteKnowledgeStore};
+
+    let store = SqliteKnowledgeStore::open(cas_root).ok()?;
+    let pages = store.list_pages().ok()?;
+    if pages.is_empty() {
+        return None;
+    }
+    let pending_embedding = pages.iter().filter(|p| p.pending_embedding).count();
+    Some(KnowledgeCounts {
+        pages: pages.len(),
+        pending_embedding,
+    })
+}
+
+/// Push, pull and embed distilled knowledge as part of `cas cloud sync`.
+///
+/// Entirely optional: without cloud auth this returns immediately, having made
+/// no network call and created no vector storage. Failures are reported and
+/// swallowed — knowledge distribution is an enhancement, and it must never
+/// take down a sync that already moved entries and tasks.
+pub(crate) fn sync_project_knowledge(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
+    use crate::cloud::embeddings::{KnowledgeEmbedder, KnowledgeVectorCache, embed_pending_pages};
+    use crate::cloud::{CloudSyncer, CloudSyncerConfig};
+    use cas_store::SqliteKnowledgeStore;
+    use std::sync::Arc;
+
+    let config = CloudConfig::load()?;
+    if !config.is_logged_in() {
+        return Ok(());
+    }
+
+    let store = match SqliteKnowledgeStore::open(cas_root) {
+        Ok(store) => store,
+        Err(e) => {
+            tracing::debug!(error = %e, "knowledge sync skipped: no knowledge store");
+            return Ok(());
+        }
+    };
+
+    let queue = Arc::new(SyncQueue::open(cas_root)?);
+    queue.init()?;
+    let syncer = CloudSyncer::new(queue, config.clone(), CloudSyncerConfig::default());
+
+    let pushed = match syncer.push_knowledge_pages(&store) {
+        Ok(count) => count,
+        Err(e) => {
+            tracing::warn!(error = %e, "knowledge page push failed (non-fatal)");
+            0
+        }
+    };
+    let pulled = match syncer.pull_knowledge_pages(&store) {
+        Ok(report) => {
+            for (rel_path, message) in &report.errors {
+                tracing::warn!(page = %rel_path, error = %message, "knowledge page pull error");
+            }
+            report
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "knowledge page pull failed (non-fatal)");
+            Default::default()
+        }
+    };
+
+    // Embeddings: only when the capability is present. `from_config` returning
+    // None is the gate — no embedder, no vector cache on disk, no cloud call.
+    let mut embedded = 0usize;
+    if let Some(embedder) = KnowledgeEmbedder::from_config(&config) {
+        match KnowledgeVectorCache::open(cas_root, embedder.meta()) {
+            Ok(cache) => match embed_pending_pages(&store, &embedder, &cache, 32) {
+                Ok(report) => {
+                    embedded = report.embedded;
+                    if report.reindexed {
+                        tracing::info!("embedding model changed: knowledge vectors re-indexed");
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "knowledge embedding failed (non-fatal)"),
+            },
+            Err(e) => tracing::warn!(error = %e, "could not open knowledge vector cache"),
+        }
+    }
+
+    if cli.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "knowledge": {
+                    "pushed": pushed,
+                    "pulled": pulled.applied,
+                    "locked_preserved": pulled.locked_preserved,
+                    "embedded": embedded,
+                }
+            })
+        );
+    } else if pushed > 0 || pulled.applied > 0 || embedded > 0 {
+        println!(
+            "  Knowledge: {pushed} pushed, {} pulled, {embedded} embedded",
+            pulled.applied
+        );
+    }
+
+    Ok(())
+}
+
 fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
     let config = CloudConfig::load()?;
 
@@ -1112,6 +1226,19 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                 let body: serde_json::Value = resp.into_json()?;
 
                 if cli.json {
+                    let mut body = body.clone();
+                    if let (Some(obj), Some(counts)) =
+                        (body.as_object_mut(), local_knowledge_counts(cas_root))
+                    {
+                        obj.insert(
+                            "local_knowledge_pages".to_string(),
+                            serde_json::json!(counts.pages),
+                        );
+                        obj.insert(
+                            "local_knowledge_pages_pending_embedding".to_string(),
+                            serde_json::json!(counts.pending_embedding),
+                        );
+                    }
                     println!("{}", serde_json::to_string(&body)?);
                 } else {
                     let theme = ActiveTheme::default();
@@ -1152,6 +1279,22 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                                 .unwrap_or(&serde_json::json!(0))
                                 .to_string(),
                         )?;
+                        fmt.newline()?;
+                    }
+
+                    // Local distilled knowledge (T5). Counted locally on
+                    // purpose: the local store is the source of truth for
+                    // project knowledge, so this line stays truthful even
+                    // when the server has never seen a page.
+                    if let Some(counts) = local_knowledge_counts(cas_root) {
+                        fmt.write_muted("  Knowledge: ")?;
+                        fmt.write_raw(&format!("{} pages", counts.pages))?;
+                        if counts.pending_embedding > 0 {
+                            fmt.write_muted(&format!(
+                                " ({} awaiting embedding)",
+                                counts.pending_embedding
+                            ))?;
+                        }
                         fmt.newline()?;
                     }
 
@@ -2237,6 +2380,13 @@ pub fn execute_sync(args: &CloudSyncArgs, cli: &Cli, cas_root: &Path) -> anyhow:
             cli,
             cas_root,
         )?;
+
+        // T5: distilled knowledge rides the same sync. Kept last and
+        // non-fatal — entries and tasks have already landed by here, and a
+        // cloud without knowledge support must not fail the whole command.
+        if let Err(e) = sync_project_knowledge(cli, cas_root) {
+            tracing::warn!(error = %e, "knowledge sync failed (non-fatal)");
+        }
     }
 
     Ok(())

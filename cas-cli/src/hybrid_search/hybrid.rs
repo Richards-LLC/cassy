@@ -21,6 +21,7 @@ use crate::hybrid_search::scorer::{
     ChannelCapabilities, SearchWeights, calibrate_scores, combine_multi_channel,
     percentile_normalize, rrf_with_magnitude,
 };
+use crate::hybrid_search::semantic::SemanticChannel;
 use crate::hybrid_search::temporal::{TemporalRetriever, TimePeriod};
 use crate::hybrid_search::{DocType, SearchIndex, SearchOptions, SearchResult};
 // Note: Local embeddings have been removed. Semantic search is now cloud-only.
@@ -225,6 +226,9 @@ pub struct HybridSearch {
     code_search: Option<CasCodeSearch>,
     /// Distilled project knowledge (FTS over knowledge pages)
     knowledge_store: Option<Arc<dyn KnowledgeStore>>,
+    /// Cloud-backed embedding channel (T5). `None` on any installation
+    /// without cloud auth — see `hybrid_search::semantic`.
+    semantic_channel: Option<Arc<SemanticChannel>>,
     /// Query and results cache for performance
     cache: Arc<SearchCache>,
 }
@@ -237,6 +241,7 @@ impl HybridSearch {
             graph_retriever: None,
             code_search: None,
             knowledge_store: None,
+            semantic_channel: None,
             cache: Arc::new(SearchCache::new()),
         }
     }
@@ -248,6 +253,7 @@ impl HybridSearch {
             graph_retriever: None,
             code_search: None,
             knowledge_store: None,
+            semantic_channel: None,
             cache,
         }
     }
@@ -259,6 +265,7 @@ impl HybridSearch {
             graph_retriever: Some(GraphRetriever::with_defaults(entity_store)),
             code_search: None,
             knowledge_store: None,
+            semantic_channel: None,
             cache: Arc::new(SearchCache::new()),
         }
     }
@@ -274,6 +281,7 @@ impl HybridSearch {
             graph_retriever: Some(GraphRetriever::new(entity_store, graph_config)),
             code_search: None,
             knowledge_store: None,
+            semantic_channel: None,
             cache: Arc::new(SearchCache::new()),
         }
     }
@@ -292,7 +300,8 @@ impl HybridSearch {
             bm25_index,
             graph_retriever: None, // Needs entity store to be set separately
             code_search: None,     // Needs code store to be set separately
-            knowledge_store: None, // Needs knowledge store to be set separately
+            knowledge_store: None,  // Needs knowledge store to be set separately
+            semantic_channel: None, // Needs cloud auth; see set_semantic_channel
             cache: Arc::new(SearchCache::new()),
         })
     }
@@ -359,14 +368,42 @@ impl HybridSearch {
         self.knowledge_store.is_some()
     }
 
+    /// Attach a cloud-backed semantic channel (T5).
+    ///
+    /// Optional by construction: retrieval is fully functional without it,
+    /// and [`has_semantic`](Self::has_semantic) keeps reporting `false` until
+    /// the channel can actually return rows.
+    pub fn set_semantic_channel(&mut self, channel: Arc<SemanticChannel>) {
+        self.semantic_channel = Some(channel);
+    }
+
+    /// Open and attach the semantic channel for `cas_dir` if the cloud
+    /// capability is present. Returns whether a channel was attached.
+    pub fn set_semantic_channel_from_config(
+        &mut self,
+        cas_dir: &StdPath,
+        config: &crate::cloud::CloudConfig,
+    ) -> bool {
+        match crate::hybrid_search::semantic::open_semantic_channel(cas_dir, config) {
+            Some(channel) => {
+                self.semantic_channel = Some(Arc::new(channel));
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Whether the embedding channel can return rows.
     ///
-    /// Always `false` locally: `semantic_search` is a stub since local
-    /// embeddings were removed. This is the capability flag that keeps
-    /// [`ChannelCapabilities`] honest, so weight tables stop allocating mass
-    /// to a channel that returns nothing.
+    /// True only when a cloud embedder is attached AND vectors are cached
+    /// locally. A configured-but-empty channel still reports `false`: it can
+    /// only return an empty list, and telling [`ChannelCapabilities`]
+    /// otherwise would re-introduce exactly the dishonest weight allocation
+    /// T3 removed.
     pub fn has_semantic(&self) -> bool {
-        false
+        self.semantic_channel
+            .as_ref()
+            .is_some_and(|channel| channel.is_live())
     }
 
     /// Which scored channels can actually contribute for this request.
@@ -785,14 +822,17 @@ impl HybridSearch {
         scores
     }
 
-    /// Perform semantic-only search (with caching)
-    /// Semantic search is now cloud-only. Returns empty results.
+    /// Perform semantic-only search.
     ///
-    /// Note: Local embeddings have been removed. For semantic search,
-    /// use the cloud API via CAS Cloud.
-    fn semantic_search(&self, _query: &str, _k: usize) -> Result<Vec<(String, f32)>> {
-        // Semantic search requires cloud - return empty results locally
-        Ok(Vec::new())
+    /// Cloud-only by design: the query is embedded through the cloud endpoint
+    /// and matched against locally cached page vectors. With no channel
+    /// attached this returns an empty list, which is why `has_semantic()`
+    /// reports the channel absent and the scorer reallocates its weight.
+    fn semantic_search(&self, query: &str, k: usize) -> Result<Vec<(String, f32)>> {
+        match &self.semantic_channel {
+            Some(channel) => channel.search(query, k),
+            None => Ok(Vec::new()),
+        }
     }
 
     /// Index a single entry (BM25 only - embeddings are now cloud-only)
@@ -961,6 +1001,66 @@ mod tests {
         let mut hybrid = HybridSearch::new(index);
         hybrid.set_knowledge_store(knowledge);
         (temp, hybrid)
+    }
+
+    #[test]
+    fn semantic_capability_is_false_with_no_channel_attached() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let index = SearchIndex::open(&temp.path().join("tantivy")).expect("open index");
+        let hybrid = HybridSearch::new(index);
+        assert!(
+            !hybrid.has_semantic(),
+            "a build with no cloud auth must report the semantic channel absent"
+        );
+        let opts = HybridSearchOptions {
+            enable_semantic: true,
+            ..Default::default()
+        };
+        assert!(
+            !hybrid.channel_capabilities(&opts).semantic,
+            "asking for semantic search cannot conjure a channel that isn't there"
+        );
+    }
+
+    #[test]
+    fn semantic_capability_tracks_the_attached_channel() {
+        use crate::cloud::embeddings::{KnowledgeEmbedder, KnowledgeVectorCache};
+        use crate::hybrid_search::semantic::SemanticChannel;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let index = SearchIndex::open(&temp.path().join("tantivy")).expect("open index");
+        let mut hybrid = HybridSearch::new(index);
+
+        let embedder = KnowledgeEmbedder::new("https://example.invalid", "t").with_model("m", 4);
+        let cache =
+            KnowledgeVectorCache::open(temp.path(), embedder.meta()).expect("open vector cache");
+
+        // Attached but empty: still not live, because it can only return
+        // nothing and the scorer must not allocate weight to it.
+        hybrid.set_semantic_channel(std::sync::Arc::new(SemanticChannel::new(
+            embedder.clone(),
+            cache,
+        )));
+        assert!(!hybrid.has_semantic());
+
+        // One cached vector and the channel becomes real.
+        let cache =
+            KnowledgeVectorCache::open(temp.path(), embedder.meta()).expect("reopen vector cache");
+        cache.put("cas-kn001", &[1.0, 0.0, 0.0, 0.0]).expect("put");
+        hybrid.set_semantic_channel(std::sync::Arc::new(SemanticChannel::new(embedder, cache)));
+        assert!(hybrid.has_semantic());
+
+        let opts = HybridSearchOptions {
+            enable_semantic: true,
+            ..Default::default()
+        };
+        assert!(hybrid.channel_capabilities(&opts).semantic);
+        // The per-request switch still wins over the capability.
+        let off = HybridSearchOptions {
+            enable_semantic: false,
+            ..Default::default()
+        };
+        assert!(!hybrid.channel_capabilities(&off).semantic);
     }
 
     #[test]

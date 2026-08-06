@@ -19,6 +19,9 @@ pub enum EntityType {
     CommitLink,
     Agent,
     Worktree,
+    /// A distilled project-knowledge page (T5). Local SQLite remains the
+    /// source of truth; the cloud carries pages so teammates share them.
+    KnowledgePage,
 }
 
 impl EntityType {
@@ -36,6 +39,7 @@ impl EntityType {
             EntityType::CommitLink => "commit_link",
             EntityType::Agent => "agent",
             EntityType::Worktree => "worktree",
+            EntityType::KnowledgePage => "knowledge_page",
         }
     }
 
@@ -53,6 +57,7 @@ impl EntityType {
             "commit_link" => Some(EntityType::CommitLink),
             "agent" => Some(EntityType::Agent),
             "worktree" => Some(EntityType::Worktree),
+            "knowledge_page" => Some(EntityType::KnowledgePage),
             _ => None,
         }
     }
@@ -150,6 +155,7 @@ pub struct PendingByType {
     pub commit_links: Vec<QueuedSync>,
     pub agents: Vec<QueuedSync>,
     pub worktrees: Vec<QueuedSync>,
+    pub knowledge_pages: Vec<QueuedSync>,
 }
 
 impl PendingByType {
@@ -166,6 +172,7 @@ impl PendingByType {
             && self.commit_links.is_empty()
             && self.agents.is_empty()
             && self.worktrees.is_empty()
+            && self.knowledge_pages.is_empty()
     }
 
     pub fn total(&self) -> usize {

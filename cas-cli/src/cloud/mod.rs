@@ -21,6 +21,8 @@ pub mod comments;
 mod config;
 mod coordinator;
 pub mod device;
+// T5: capability-gated cloud embeddings for distilled knowledge pages.
+pub mod embeddings;
 pub(crate) mod me;
 mod sync_queue;
 mod syncer;
@@ -38,9 +40,13 @@ pub(crate) use config::{default_endpoint, is_acceptable_endpoint, normalize_git_
 pub use me::{FetchTeamsOutcome, fetch_and_cache_teams, fetch_and_cache_teams_inner,
     teams_cache_stale};
 pub use coordinator::CloudCoordinator;
+pub use embeddings::{
+    EmbedReport, EmbeddingMeta, KnowledgeEmbedder, KnowledgeVectorCache, embed_pending_pages,
+};
 pub use device::DeviceConfig;
 pub use sync_queue::{EntityType, QueuedSync, SyncOperation, SyncQueue};
 pub use syncer::{
-    CloudSyncer, CloudSyncerConfig, ConflictAction, ConflictResolution, SyncConflict, SyncResult,
-    TeamMemoriesResponse, TeamProject, TeamProjectsResponse,
+    CloudSyncer, CloudSyncerConfig, ConflictAction, ConflictResolution, KNOWLEDGE_ENTITY,
+    KnowledgePageRecord, KnowledgePullReport, SyncConflict, SyncResult, TeamMemoriesResponse,
+    TeamProject, TeamProjectsResponse, knowledge_share_scope,
 };

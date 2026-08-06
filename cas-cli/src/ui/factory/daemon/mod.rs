@@ -236,6 +236,16 @@ pub struct FactoryDaemon {
     /// Tracks last idle-like message time per worker source for dedup.
     /// Prevents idle spam when workers send repeated "standing by" / "ready" messages.
     last_idle_message_times: HashMap<String, std::time::Instant>,
+    /// cas-d732 (GH #119): when each still-pending lifecycle row was last
+    /// delivered, keyed by `prompt_queue.id`.
+    ///
+    /// A wake-eligible lifecycle row is deliberately NOT consumed until it
+    /// actually wakes the pane (cas-f02b), so it is re-selected on every queue
+    /// poll — every ~100ms. Without this clock each of those passes re-wrote
+    /// the inbox and re-nudged the pane with the identical block, which is the
+    /// reported storm: one transition, ~50 byte-identical injections per turn.
+    /// Entries are dropped when the row is finally consumed or suppressed.
+    lifecycle_redelivery_attempts: HashMap<i64, std::time::Instant>,
     /// cas-f02b (GH #101): last observed PTY output byte count per pane, sampled
     /// when a supervisor wake is evaluated. Equality across two evaluations is
     /// the evidence that the pane is not mid-render and is safe to type into.

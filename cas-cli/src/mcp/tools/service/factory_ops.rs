@@ -5444,9 +5444,23 @@ pub(crate) fn format_worker_git_status(gs: &WorkerGitStatus) -> String {
     };
     let pr_label = gs.pr_url.clone(); // "none" or a URL
 
+    // cas-ecf7 (GH #118): a worktree that is behind its base was the failure
+    // mode that cost an epic three workers built on 25-commit-old history. The
+    // count alone reads as background noise in a wall of status lines, so state
+    // the consequence on its own line.
+    let stale_label = if gs.behind > 0 {
+        format!(
+            "\n    ⚠️ STALE BASE: {} commit(s) behind {} — this worktree is missing that work; \
+             rebase/sync before trusting builds or tests here.",
+            gs.behind, gs.base_branch,
+        )
+    } else {
+        String::new()
+    };
+
     format!(
         "\n    git: {} @ {} {} {}\
-         \n    ahead: {} behind: {} (vs {})\
+         \n    ahead: {} behind: {} (vs {}){}\
          \n    PR: {}",
         gs.branch,
         gs.head_sha,
@@ -5455,6 +5469,7 @@ pub(crate) fn format_worker_git_status(gs: &WorkerGitStatus) -> String {
         gs.ahead,
         gs.behind,
         gs.base_branch,
+        stale_label,
         pr_label,
     )
 }
@@ -8806,6 +8821,42 @@ effort = "high"
         assert!(
             out.contains("https://github.com"),
             "must contain PR URL: {out}"
+        );
+    }
+
+    /// cas-ecf7 (GH #118): a worktree behind its base must say so in words, not
+    /// just as a number in a status line the supervisor scrolls past — the
+    /// reported incident ran three workers on 25-commit-old history because the
+    /// `behind:` count was the only signal.
+    #[test]
+    fn format_git_status_calls_out_a_stale_base_loudly() {
+        let stale = WorkerGitStatus {
+            branch: "factory/late".to_string(),
+            head_sha: "0bd4a26".to_string(),
+            ahead: 0,
+            behind: 25,
+            base_branch: "origin/main".to_string(),
+            dirty: false,
+            pushed_ref: "none".to_string(),
+            pr_url: "none".to_string(),
+        };
+        let out = format_worker_git_status(&stale);
+        assert!(
+            out.contains("STALE BASE"),
+            "a behind worktree must carry an explicit stale-base callout: {out}"
+        );
+        assert!(
+            out.contains("25 commit(s) behind origin/main"),
+            "the callout must quantify the gap and name the base: {out}"
+        );
+
+        let current = WorkerGitStatus {
+            behind: 0,
+            ..stale
+        };
+        assert!(
+            !format_worker_git_status(&current).contains("STALE BASE"),
+            "an up-to-date worktree must not be flagged"
         );
     }
 

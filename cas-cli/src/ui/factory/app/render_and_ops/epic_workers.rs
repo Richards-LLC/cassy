@@ -71,6 +71,203 @@ fn worker_base_for_spawn(epic_branch: Option<&str>, manager: &WorktreeManager) -
     })
 }
 
+/// cas-7587 (GH #122): the epic branch a pre-assigned task belongs to,
+/// resolved from the task store at spawn time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TaskEpicBase {
+    /// The task the spawn was requested for (`spawn_workers task_id=...`).
+    pub task_id: String,
+    /// The epic that owns that task (or the task itself when it *is* an epic).
+    pub epic_id: String,
+    /// Branch recorded on that epic (or derived from its title).
+    pub branch: String,
+    /// Whether `branch` currently resolves to a commit in the repository.
+    pub branch_exists: bool,
+}
+
+/// cas-7587 (GH #122): where a worker's spawn base came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SpawnBaseSource {
+    /// Base is the branch of the epic that owns the pre-assigned task.
+    /// This outranks the pinned focus — the task, not the operator's last
+    /// `focus_epic`, decides which history the worker needs.
+    TaskEpic { task_id: String, epic_id: String },
+    /// No task context (or the task's epic has no branch on disk): the
+    /// session's pinned epic focus.
+    PinnedFocus,
+    /// Neither task epic nor focus: configured trunk / detected default.
+    Trunk,
+}
+
+/// cas-7587 (GH #122): resolve the branch a spawning worker must be cut from.
+///
+/// ROOT CAUSE this fixes: `prepare_worker_spawn` resolved the base purely from
+/// `self.epic_branch` (the session's *pinned focus*), while `spawn_workers`
+/// carried a `task_id` that could belong to a completely different epic. With
+/// focus pinned to epic A, `spawn_workers task_id=<task of epic B>` cut the
+/// worktree from epic A's branch even though epic B's branch existed — the
+/// worker then built on history its task had nothing to do with (observed
+/// twice on 2026-08-06, in both directions).
+///
+/// Precedence, highest first:
+///   1. the task's epic branch, when the spawn names a task and that epic's
+///      branch exists in the repo;
+///   2. the pinned epic focus (taskless spawns, and tasks whose epic has no
+///      branch yet — falling back to focus there preserves pre-fix behavior
+///      rather than silently dropping a worker onto trunk);
+///   3. configured trunk / detected default branch.
+///
+/// Pure so the precedence itself is unit-testable without a factory app.
+pub(crate) fn resolve_spawn_base(
+    task_epic: Option<&TaskEpicBase>,
+    focused_epic_branch: Option<&str>,
+    trunk: &str,
+) -> (String, SpawnBaseSource) {
+    if let Some(task_epic) = task_epic.filter(|t| t.branch_exists) {
+        return (
+            task_epic.branch.clone(),
+            SpawnBaseSource::TaskEpic {
+                task_id: task_epic.task_id.clone(),
+                epic_id: task_epic.epic_id.clone(),
+            },
+        );
+    }
+    match focused_epic_branch {
+        Some(branch) => (branch.to_string(), SpawnBaseSource::PinnedFocus),
+        None => (trunk.to_string(), SpawnBaseSource::Trunk),
+    }
+}
+
+/// cas-7587 (GH #122): one line naming the resolved base *and why it won*, so
+/// a supervisor reading spawn output never has to guess which epic's history a
+/// worker actually got. When the task's epic differs from the pinned focus the
+/// divergence is spelled out explicitly — that silent divergence was the bug.
+pub(crate) fn spawn_base_provenance_notice(
+    base: &str,
+    source: &SpawnBaseSource,
+    focused_epic_branch: Option<&str>,
+) -> String {
+    match source {
+        SpawnBaseSource::TaskEpic { task_id, epic_id } => {
+            let mut line = format!(
+                "SPAWN BASE: '{base}' — branch of epic {epic_id}, which owns pre-assigned task {task_id}."
+            );
+            match focused_epic_branch {
+                Some(focus) if focus != base => {
+                    line.push_str(&format!(
+                        " NOTE: this differs from the pinned focus branch '{focus}'; the task's \
+                         epic wins so the worker starts on the history its task belongs to."
+                    ));
+                }
+                Some(_) => line.push_str(" (Same branch as the pinned epic focus.)"),
+                None => line.push_str(" (No epic focus pinned.)"),
+            }
+            line
+        }
+        SpawnBaseSource::PinnedFocus => {
+            format!("SPAWN BASE: '{base}' — pinned epic focus (no task epic branch to prefer).")
+        }
+        SpawnBaseSource::Trunk => {
+            format!("SPAWN BASE: '{base}' — integration trunk (no task epic, no pinned focus).")
+        }
+    }
+}
+
+/// cas-7587 (GH #122): `true` when the task's epic decided the base *and* that
+/// base is not the pinned focus branch. That divergence is exactly what used to
+/// happen silently (and wrongly, in the other direction), so it is escalated to
+/// the supervisor rather than only written to the spawn audit trail.
+pub(crate) fn base_diverges_from_focus(
+    base: &str,
+    source: &SpawnBaseSource,
+    focused_epic_branch: Option<&str>,
+) -> bool {
+    matches!(source, SpawnBaseSource::TaskEpic { .. })
+        && focused_epic_branch.is_some_and(|focus| focus != base)
+}
+
+/// cas-7587: resolve `task_id` → its epic → that epic's branch.
+///
+/// A task that *is* an epic resolves to itself. The branch is the one persisted
+/// on the epic task, falling back to the title-derived name for legacy epics
+/// (same precedence as `epic_branch_for_state`). `branch_exists` records
+/// whether that branch is actually present in `repo_root` — the caller uses it
+/// to decide whether the task epic may outrank the pinned focus.
+///
+/// Returns `None` when the task/epic cannot be resolved at all; the caller then
+/// keeps the pre-cas-7587 focus-based behavior.
+pub(crate) fn task_epic_base(
+    cas_dir: &std::path::Path,
+    repo_root: &std::path::Path,
+    task_id: &str,
+) -> Option<TaskEpicBase> {
+    let store = match open_task_store(cas_dir) {
+        Ok(store) => store,
+        Err(error) => {
+            tracing::warn!(
+                task_id, %error,
+                "cas-7587: could not open task store to resolve spawn base from the task's epic"
+            );
+            return None;
+        }
+    };
+
+    let task = match store.get(task_id) {
+        Ok(task) => task,
+        Err(error) => {
+            tracing::warn!(
+                task_id, %error,
+                "cas-7587: pre-assigned task not found while resolving spawn base"
+            );
+            return None;
+        }
+    };
+
+    let epic = if task.task_type == cas_types::TaskType::Epic {
+        task
+    } else {
+        match store.get_parent_epic(task_id) {
+            Ok(Some(epic)) => epic,
+            Ok(None) => {
+                tracing::debug!(
+                    task_id,
+                    "cas-7587: task has no parent epic; spawn base falls back to pinned focus"
+                );
+                return None;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    task_id, %error,
+                    "cas-7587: parent-epic lookup failed while resolving spawn base"
+                );
+                return None;
+            }
+        }
+    };
+
+    let branch = epic
+        .branch
+        .clone()
+        .filter(|b| !b.trim().is_empty())
+        .unwrap_or_else(|| crate::ui::factory::app::epic_branch_name(&epic.title));
+    let branch_exists = ref_exists(repo_root, &branch);
+    if !branch_exists {
+        tracing::warn!(
+            task_id,
+            epic_id = %epic.id,
+            branch = %branch,
+            "cas-7587: task's epic branch does not exist in this repo; keeping focus-based spawn base"
+        );
+    }
+
+    Some(TaskEpicBase {
+        task_id: task_id.to_string(),
+        epic_id: epic.id,
+        branch,
+        branch_exists,
+    })
+}
+
 /// Return a supervisor-visible warning when a resolved spawn base cannot be
 /// proven to contain the focused epic's current tip.
 fn worker_base_mismatch_notice(
@@ -641,7 +838,7 @@ impl FactoryApp {
     /// Creates a worktree (if isolate is true and worktrees enabled) and spawns a Claude instance.
     /// For non-blocking spawning, use `prepare_worker_spawn` + `finish_worker_spawn`.
     pub fn spawn_worker(&mut self, name: Option<&str>, isolate: bool) -> anyhow::Result<String> {
-        let prep = self.prepare_worker_spawn(name, isolate)?;
+        let prep = self.prepare_worker_spawn(name, isolate, None)?;
         let result = match prep.run() {
             Ok(result) => result,
             Err(e) => {
@@ -672,10 +869,16 @@ impl FactoryApp {
     ///
     /// When `isolate` is true and worktrees are configured, each worker gets its
     /// own git worktree and branch. When false, workers share the main working directory.
+    ///
+    /// `task_id` is the task the spawn was requested for (`spawn_workers
+    /// task_id=...`). cas-7587 (GH #122): when present, the worktree base is
+    /// resolved from *that task's* epic branch, not from the session's pinned
+    /// epic focus — the two can name different epics, and the task is right.
     pub fn prepare_worker_spawn(
         &mut self,
         name: Option<&str>,
         isolate: bool,
+        task_id: Option<&str>,
     ) -> anyhow::Result<WorkerSpawnPrep> {
         // focus_epic is persisted outside cas.db, so reconcile the task
         // snapshot and session metadata synchronously at spawn time.
@@ -721,7 +924,7 @@ impl FactoryApp {
             anyhow::bail!("Worker '{worker_name}' already exists");
         }
 
-        let (worktree_info, base_warnings) = if isolate {
+        let (worktree_info, base_warnings, base_provenance) = if isolate {
             if let Some(manager) = &self.worktree_manager {
                 // Re-resolve the repository on every request. A daemon started
                 // before `git init` may have latched an ancestor repository;
@@ -743,22 +946,61 @@ impl FactoryApp {
                 let worktree_path = manager.worktree_path_for_worker(&worker_name);
                 let branch_name = manager.branch_name_for_worker(&worker_name);
                 let repo_root = manager.repo_root().to_path_buf();
-                // Dynamic spawns must match startup spawns: worker branches are
-                // cut from the active epic branch when present, otherwise from
-                // the detected trunk. Never use the supervisor's incidental HEAD.
-                let parent_branch = worker_base_for_spawn(self.epic_branch.as_deref(), manager);
+                // Dynamic spawns must match startup spawns: never the
+                // supervisor's incidental HEAD. cas-7587 (GH #122): precedence
+                // is the pre-assigned task's epic branch first, pinned epic
+                // focus second, trunk last.
+                let trunk = Config::configured_epic_base_branch(manager.repo_root())
+                    .unwrap_or_else(|| manager.git().detect_default_branch());
+                let task_epic = task_id
+                    .and_then(|tid| task_epic_base(&self.cas_dir, manager.repo_root(), tid));
+                let (parent_branch, base_source) = resolve_spawn_base(
+                    task_epic.as_ref(),
+                    self.epic_branch.as_deref(),
+                    &trunk,
+                );
                 let mut notices: Vec<String> = Vec::new();
-                if let Some(notice) = self.epic_branch.as_deref().and_then(|epic_branch| {
+                let provenance = spawn_base_provenance_notice(
+                    &parent_branch,
+                    &base_source,
+                    self.epic_branch.as_deref(),
+                );
+                if base_diverges_from_focus(
+                    &parent_branch,
+                    &base_source,
+                    self.epic_branch.as_deref(),
+                ) {
+                    notices.push(provenance.clone());
+                }
+                // The base must contain the epic it is meant to serve — the
+                // task's epic when that decided the base, otherwise the focus.
+                let epic_to_contain = match &base_source {
+                    SpawnBaseSource::TaskEpic { .. } => {
+                        task_epic.as_ref().map(|t| t.branch.clone())
+                    }
+                    _ => self.epic_branch.clone(),
+                };
+                if let Some(notice) = epic_to_contain.as_deref().and_then(|epic_branch| {
                     worker_base_mismatch_notice(manager, &parent_branch, epic_branch)
                 }) {
                     notices.push(notice);
+                }
+                // cas-7587: a task whose epic branch does not exist locally
+                // still lands on the focus base — say so instead of letting it
+                // look like the task's epic was honoured.
+                if let Some(unresolved) = task_epic.as_ref().filter(|t| !t.branch_exists) {
+                    notices.push(format!(
+                        "SPAWN BASE FALLBACK: task {} belongs to epic {} whose branch '{}' does \
+                         not exist in this repository; the worker was cut from '{parent_branch}' \
+                         instead. Create the epic branch (or fix the epic's branch field) before \
+                         relying on this worker's base.",
+                        unresolved.task_id, unresolved.epic_id, unresolved.branch
+                    ));
                 }
                 // cas-ecf7 (GH #118): the base ref is resolved live, but the
                 // branch it names can be far behind trunk. Surface that at
                 // spawn time instead of leaving it to whoever happens to read
                 // `behind:` in worker_status.
-                let trunk = Config::configured_epic_base_branch(manager.repo_root())
-                    .unwrap_or_else(|| manager.git().detect_default_branch());
                 if let Some(notice) =
                     stale_spawn_base_notice(manager.repo_root(), &parent_branch, &trunk)
                 {
@@ -773,6 +1015,7 @@ impl FactoryApp {
                         cas_dir: self.cas_dir.clone(),
                     }),
                     notices,
+                    Some(provenance),
                 )
             } else {
                 anyhow::bail!(
@@ -781,8 +1024,12 @@ impl FactoryApp {
                 );
             }
         } else {
-            (None, Vec::new())
+            (None, Vec::new(), None)
         };
+
+        if let Some(provenance) = &base_provenance {
+            tracing::info!("{provenance}");
+        }
 
         for notice in &base_warnings {
             tracing::warn!("{notice}");
@@ -801,6 +1048,7 @@ impl FactoryApp {
             worker_name,
             worktree_info,
             warnings: base_warnings,
+            base_provenance,
         })
     }
 
@@ -1385,6 +1633,253 @@ mod spawn_base_tests {
             .expect("git commit");
     }
 
+    /// cas-7587 (GH #122) fixtures: two epics with real branches, plus a task
+    /// store where a child task hangs off the *second* epic.
+    fn commit_file(repo: &std::path::Path, name: &str, body: &str) {
+        std::fs::write(repo.join(name), body).unwrap();
+        Command::new("git")
+            .args(["add", name])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", name])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+    }
+
+    fn branch_at(repo: &std::path::Path, branch: &str, start: &str) {
+        Command::new("git")
+            .args(["branch", branch, start])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+    }
+
+    fn seed_epic(
+        cas_dir: &std::path::Path,
+        epic_id: &str,
+        title: &str,
+        branch: Option<&str>,
+    ) {
+        let store = crate::store::open_task_store(cas_dir).unwrap();
+        let mut epic = cas_types::Task::new(epic_id.to_string(), title.to_string());
+        epic.task_type = cas_types::TaskType::Epic;
+        epic.branch = branch.map(str::to_string);
+        store.add(&epic).unwrap();
+    }
+
+    fn seed_child(cas_dir: &std::path::Path, task_id: &str, epic_id: &str) {
+        let store = crate::store::open_task_store(cas_dir).unwrap();
+        let child = cas_types::Task::new(task_id.to_string(), format!("child {task_id}"));
+        store.add(&child).unwrap();
+        store
+            .add_dependency(&cas_types::Dependency {
+                from_id: task_id.to_string(),
+                to_id: epic_id.to_string(),
+                dep_type: cas_types::DependencyType::ParentChild,
+                created_at: chrono::Utc::now(),
+                created_by: None,
+            })
+            .unwrap();
+    }
+
+    /// GH #122 repro, end to end: focus pinned to epic A, spawn requested with
+    /// a task belonging to epic B. Pre-fix the worktree was cut from epic A's
+    /// branch; it must now be cut from epic B's, and the resulting worktree
+    /// must actually contain epic B's commit.
+    #[test]
+    fn spawn_with_task_id_cuts_from_the_tasks_epic_not_the_pinned_focus_cas_7587() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
+
+        // epic A: focused, and deliberately behind — the wrong base.
+        Command::new("git")
+            .args(["checkout", "-q", "-b", "epic/alpha"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        commit_file(&repo, "alpha-only.txt", "alpha");
+        // epic B: owns the task being spawned for.
+        Command::new("git")
+            .args(["checkout", "-q", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["checkout", "-q", "-b", "epic/bravo"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        commit_file(&repo, "bravo-only.txt", "bravo");
+        Command::new("git")
+            .args(["checkout", "-q", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        seed_epic(&cas_dir, "cas-alpha", "Alpha epic", Some("epic/alpha"));
+        seed_epic(&cas_dir, "cas-bravo", "Bravo epic", Some("epic/bravo"));
+        seed_child(&cas_dir, "cas-child", "cas-bravo");
+
+        let task_epic = task_epic_base(&cas_dir, &repo, "cas-child")
+            .expect("child task must resolve to its parent epic");
+        assert_eq!(task_epic.epic_id, "cas-bravo");
+        assert_eq!(task_epic.branch, "epic/bravo");
+        assert!(task_epic.branch_exists);
+
+        let (base, source) = resolve_spawn_base(Some(&task_epic), Some("epic/alpha"), "main");
+        assert_eq!(
+            base, "epic/bravo",
+            "GH #122: the task's epic branch must win over the pinned focus"
+        );
+        assert_eq!(
+            source,
+            SpawnBaseSource::TaskEpic {
+                task_id: "cas-child".to_string(),
+                epic_id: "cas-bravo".to_string(),
+            }
+        );
+
+        // The mismatch must be named explicitly in spawn output.
+        assert!(base_diverges_from_focus(&base, &source, Some("epic/alpha")));
+        let provenance = spawn_base_provenance_notice(&base, &source, Some("epic/alpha"));
+        assert!(provenance.contains("epic/bravo"), "{provenance}");
+        assert!(provenance.contains("cas-bravo"), "{provenance}");
+        assert!(provenance.contains("cas-child"), "{provenance}");
+        assert!(provenance.contains("epic/alpha"), "{provenance}");
+        assert!(provenance.contains("differs"), "{provenance}");
+
+        // And the worktree really lands on epic B's history.
+        let worktree_root = repo.join(".cas").join("worktrees");
+        let worker_path = worktree_root.join("bravo-worker");
+        WorkerSpawnPrep {
+            worker_name: "bravo-worker".to_string(),
+            worktree_info: Some(WorktreePrep {
+                worktree_path: worker_path.clone(),
+                branch_name: "factory/bravo-worker".to_string(),
+                parent_branch: base,
+                repo_root: repo.clone(),
+                cas_dir: cas_dir.clone(),
+            }),
+            warnings: Vec::new(),
+            base_provenance: Some(provenance),
+        }
+        .run()
+        .unwrap();
+        assert!(
+            worker_path.join("bravo-only.txt").is_file(),
+            "worker must start with its own epic's commits"
+        );
+        assert!(
+            !worker_path.join("alpha-only.txt").exists(),
+            "worker must NOT be cut from the unrelated focused epic (GH #122)"
+        );
+    }
+
+    #[test]
+    fn taskless_spawn_keeps_pinned_focus_then_trunk_cas_7587() {
+        assert_eq!(
+            resolve_spawn_base(None, Some("epic/alpha"), "main"),
+            ("epic/alpha".to_string(), SpawnBaseSource::PinnedFocus),
+            "taskless spawns must keep the pre-fix focus-based behavior"
+        );
+        assert_eq!(
+            resolve_spawn_base(None, None, "main"),
+            ("main".to_string(), SpawnBaseSource::Trunk)
+        );
+        assert!(!base_diverges_from_focus(
+            "epic/alpha",
+            &SpawnBaseSource::PinnedFocus,
+            Some("epic/alpha")
+        ));
+    }
+
+    #[test]
+    fn task_epic_without_a_branch_on_disk_falls_back_to_focus_cas_7587() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
+        branch_at(&repo, "epic/alpha", "main");
+
+        seed_epic(&cas_dir, "cas-ghost", "Ghost epic", Some("epic/never-created"));
+        seed_child(&cas_dir, "cas-orphan", "cas-ghost");
+
+        let task_epic = task_epic_base(&cas_dir, &repo, "cas-orphan").unwrap();
+        assert_eq!(task_epic.branch, "epic/never-created");
+        assert!(
+            !task_epic.branch_exists,
+            "a branch that does not exist must be reported as such, not silently used"
+        );
+        assert_eq!(
+            resolve_spawn_base(Some(&task_epic), Some("epic/alpha"), "main"),
+            ("epic/alpha".to_string(), SpawnBaseSource::PinnedFocus),
+            "an unresolvable task epic branch keeps the focus base rather than failing the spawn"
+        );
+    }
+
+    #[test]
+    fn spawning_for_an_epic_task_uses_that_epics_own_branch_cas_7587() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
+        branch_at(&repo, "epic/bravo", "main");
+
+        seed_epic(&cas_dir, "cas-bravo", "Bravo epic", Some("epic/bravo"));
+
+        let task_epic = task_epic_base(&cas_dir, &repo, "cas-bravo").unwrap();
+        assert_eq!(task_epic.epic_id, "cas-bravo");
+        assert_eq!(task_epic.branch, "epic/bravo");
+        assert!(task_epic.branch_exists);
+        assert_eq!(
+            resolve_spawn_base(Some(&task_epic), Some("epic/alpha"), "main").0,
+            "epic/bravo"
+        );
+    }
+
+    #[test]
+    fn legacy_epic_without_persisted_branch_falls_back_to_title_slug_cas_7587() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
+        branch_at(&repo, "epic/legacy-burn-down", "main");
+
+        seed_epic(&cas_dir, "cas-legacy", "Legacy burn down", None);
+        seed_child(&cas_dir, "cas-legacy-child", "cas-legacy");
+
+        let task_epic = task_epic_base(&cas_dir, &repo, "cas-legacy-child").unwrap();
+        assert_eq!(
+            task_epic.branch, "epic/legacy-burn-down",
+            "legacy epics without a persisted branch keep the title-derived name"
+        );
+        assert!(task_epic.branch_exists);
+    }
+
+    #[test]
+    fn unknown_task_id_never_breaks_the_spawn_cas_7587() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
+
+        assert!(task_epic_base(&cas_dir, &repo, "cas-does-not-exist").is_none());
+        assert_eq!(
+            resolve_spawn_base(None, Some("epic/alpha"), "main"),
+            ("epic/alpha".to_string(), SpawnBaseSource::PinnedFocus)
+        );
+    }
+
     #[test]
     fn dynamic_worker_spawn_base_uses_epic_or_trunk_not_current_head() {
         let tmp = TempDir::new().unwrap();
@@ -1527,6 +2022,7 @@ mod spawn_base_tests {
                 cas_dir: repo.join(".cas"),
             }),
             warnings: Vec::new(),
+            base_provenance: None,
         }
         .run()
         .unwrap();
@@ -1913,6 +2409,7 @@ mod spawn_base_tests {
                 cas_dir: repo.join(".cas"),
             }),
             warnings: Vec::new(),
+            base_provenance: None,
         }
         .run()
         .expect("worktree creation from the stale base should still succeed");

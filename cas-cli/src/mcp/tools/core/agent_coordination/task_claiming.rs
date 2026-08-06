@@ -604,8 +604,17 @@ impl CasCore {
             ));
         }
 
+        // cas-e163 (GH #109): the total here was already honest, but nothing
+        // said the list had been cut — so a worker scanning for claimable work
+        // could read 20 rows, see a larger total it had no reason to connect to
+        // its own view, and never learn which call shows the rest. Same footer
+        // as `ready`/`blocked` (cas-06f9 / GH #104), same surface behaviour.
+        // Rows arrive priority-first from `list_ready`'s ORDER BY, so the
+        // withheld tail is genuinely lower-priority work.
         let limit = req.limit.unwrap_or(20);
-        let mut output = format!("Available Tasks ({} total):\n\n", available.len());
+        let total = available.len();
+        let shown = total.min(limit);
+        let mut output = format!("Available Tasks ({total} total):\n\n");
 
         for task in available.iter().take(limit) {
             output.push_str(&format!(
@@ -613,6 +622,7 @@ impl CasCore {
                 task.priority.0, task.id, task.title
             ));
         }
+        output.push_str(&crate::mcp::tools::truncated_list_footer(total, shown));
 
         Ok(Self::success(output))
     }

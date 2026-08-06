@@ -759,6 +759,111 @@ async fn test_task_ready_is_priority_sorted_and_states_the_true_total() {
     );
 }
 
+/// cas-e163 (GH #109): `tasks_available` — the surface idle workers are
+/// pointed at to self-serve work — caps at 20. Its total was already honest,
+/// but nothing said the list had been cut, so a worker could read 20 rows and
+/// never learn which call shows the rest.
+#[tokio::test]
+async fn test_tasks_available_names_withheld_rows() {
+    use cas::mcp::tools::LimitRequest;
+
+    let (_temp, service) = setup_cas();
+    for i in 0..25 {
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: format!("claimable {i}"),
+                description: None,
+                priority: 2,
+                task_type: "task".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: None,
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("create should succeed");
+    }
+
+    let text = extract_text(
+        service
+            .cas_tasks_available(Parameters(LimitRequest {
+                limit: None, // the default cap is what hides rows
+                scope: "all".to_string(),
+                sort: None,
+                sort_order: None,
+                team_id: None,
+            }))
+            .await
+            .expect("tasks_available should succeed"),
+    );
+
+    assert!(
+        text.contains("Available Tasks (25 total)"),
+        "the honest total stays: {text}"
+    );
+    assert!(
+        text.contains("and 5 more not shown"),
+        "the withheld rows must be named: {text}"
+    );
+    assert!(
+        text.contains("limit=25"),
+        "the footer must say how to see them: {text}"
+    );
+}
+
+/// cas-e163: a list that fits must not claim anything was withheld.
+#[tokio::test]
+async fn test_tasks_available_has_no_footer_when_nothing_is_withheld() {
+    use cas::mcp::tools::LimitRequest;
+
+    let (_temp, service) = setup_cas();
+    for i in 0..3 {
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                depth: None,
+                title: format!("claimable {i}"),
+                description: None,
+                priority: 2,
+                task_type: "task".to_string(),
+                labels: None,
+                notes: None,
+                blocked_by: None,
+                design: None,
+                acceptance_criteria: None,
+                external_ref: None,
+                assignee: None,
+                demo_statement: None,
+                execution_note: None,
+                epic: None,
+            }))
+            .await
+            .expect("create should succeed");
+    }
+
+    let text = extract_text(
+        service
+            .cas_tasks_available(Parameters(LimitRequest {
+                limit: None,
+                scope: "all".to_string(),
+                sort: None,
+                sort_order: None,
+                team_id: None,
+            }))
+            .await
+            .expect("tasks_available should succeed"),
+    );
+
+    assert!(text.contains("Available Tasks (3 total)"), "{text}");
+    assert!(!text.contains("more not shown"), "{text}");
+}
+
 /// cas-06f9: `blocked` carried the identical silent cap and creation-order
 /// default on the same triage surface. Half the shipped change had no
 /// end-to-end coverage, so a revert there would have left the suite green.

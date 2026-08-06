@@ -730,6 +730,44 @@ pub(super) enum UrgentWakeOutcome {
 /// more than the previous rule, which was "we called write() and it returned
 /// Ok". A pane whose count is frozen for the whole window did not react by any
 /// definition.
+/// cas-ac7e (GH #130): what `resolve_urgent_wake_probes` must DO with a
+/// verdict.
+///
+/// Split from [`UrgentWakeOutcome`] so the arm mapping — the part that decides
+/// whether a row is consumed or held — is a value a test can assert on. The
+/// verdict alone being right is worthless if the branch that consumes it is
+/// inverted, and that inversion is invisible to a test of the classifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum UrgentProbeAction {
+    /// Wake corroborated: retire the probe and stamp transport delivery.
+    ConsumeRow,
+    /// Wake missed: retire the probe, stamp a truthful pending reason, and
+    /// leave the row pending for a cadence-gated retry.
+    HoldRowPending,
+    /// No verdict yet: keep the probe and re-check on the next poll.
+    KeepProbing,
+}
+
+/// cas-ac7e (GH #130): the only mapping from verdict to action.
+pub(super) fn urgent_probe_action(outcome: UrgentWakeOutcome) -> UrgentProbeAction {
+    match outcome {
+        UrgentWakeOutcome::Observed => UrgentProbeAction::ConsumeRow,
+        UrgentWakeOutcome::Unobserved => UrgentProbeAction::HoldRowPending,
+        UrgentWakeOutcome::Pending => UrgentProbeAction::KeepProbing,
+    }
+}
+
+/// cas-ac7e (GH #130): is this row under the cadence contract because its
+/// urgent wake is still unresolved?
+///
+/// Named rather than inlined at the call site so the storm guard's actual
+/// condition is a thing a test can call. Inline, it was three tokens inside a
+/// three-`bool` argument list — the one shape where a transposition compiles
+/// and every existing test still passes.
+pub(super) fn urgent_wake_is_unresolved(urgent: bool, has_recorded_attempt: bool) -> bool {
+    urgent && has_recorded_attempt
+}
+
 pub(super) fn classify_urgent_wake(
     bytes_at_inject: u64,
     bytes_now: Option<u64>,
@@ -839,9 +877,9 @@ impl FactoryDaemon {
             .collect();
 
         for (row_id, outcome, pane) in verdicts {
-            match outcome {
-                UrgentWakeOutcome::Pending => {}
-                UrgentWakeOutcome::Observed => {
+            match urgent_probe_action(outcome) {
+                UrgentProbeAction::KeepProbing => {}
+                UrgentProbeAction::ConsumeRow => {
                     self.forget_row_delivery_state(row_id);
                     if let Err(error) = queue.mark_transport_delivered(row_id) {
                         tracing::error!(
@@ -860,7 +898,7 @@ impl FactoryDaemon {
                         );
                     }
                 }
-                UrgentWakeOutcome::Unobserved => {
+                UrgentProbeAction::HoldRowPending => {
                     // Keep the row pending. The cadence gate in the delivery
                     // loop makes the next re-interrupt at most one per
                     // LIFECYCLE_RENUDGE_INTERVAL, and the row's undelivered
@@ -2060,7 +2098,10 @@ impl FactoryDaemon {
             if row_needs_renudge_cadence(
                 Self::row_is_supervisor_wake(&queued.source, &queued.prompt),
                 self.inbox_deferred_writes.contains(&queued.id),
-                queued.urgent && self.lifecycle_redelivery_attempts.contains_key(&queued.id),
+                urgent_wake_is_unresolved(
+                    queued.urgent,
+                    self.lifecycle_redelivery_attempts.contains_key(&queued.id),
+                ),
             ) {
                 match lifecycle_redelivery_decision(
                     queued.acked_at.is_some(),
@@ -2698,8 +2739,16 @@ impl FactoryDaemon {
                                     )),
                                 );
                                 // cas-ceae: terminal row — drop its clocks.
-                                self.lifecycle_redelivery_attempts.remove(&queued.id);
-                                self.inbox_deferred_writes.remove(&queued.id);
+                                // cas-ac7e (GH #130): go through the helper
+                                // rather than open-coding the map removals.
+                                // This branch listed two of the daemon's
+                                // per-row maps by hand; once a third existed
+                                // (urgent_wake_probes) the copy became a leak
+                                // with teeth — an abandoned urgent row whose
+                                // probe survived would be resolved on the next
+                                // poll and stamped transport-delivered, i.e.
+                                // resurrected out of a terminal stage.
+                                self.forget_row_delivery_state(queued.id);
 
                                 // Record the drop and notify the supervisor so the
                                 // message isn't silently lost.
@@ -6254,8 +6303,8 @@ mod tests {
 mod urgent_wake_probe_tests {
     use super::{
         LIFECYCLE_RENUDGE_INTERVAL, LifecycleRedelivery, URGENT_WAKE_OBSERVE_WINDOW,
-        UrgentWakeOutcome, classify_urgent_wake, lifecycle_redelivery_decision,
-        row_needs_renudge_cadence,
+        UrgentProbeAction, UrgentWakeOutcome, classify_urgent_wake, lifecycle_redelivery_decision,
+        row_needs_renudge_cadence, urgent_probe_action, urgent_wake_is_unresolved,
     };
     use std::time::Duration;
 
@@ -6321,6 +6370,66 @@ mod urgent_wake_probe_tests {
             "a dead pane will never produce the evidence, so the row must not be \
              left waiting on it"
         );
+    }
+
+
+    /// The verdict being right is worthless if the branch that consumes it is
+    /// inverted. `resolve_urgent_wake_probes` matches on exactly this mapping,
+    /// so an inverted arm fails here rather than in production as either a
+    /// re-run of 7206 (missed wake stamped delivered) or its mirror image
+    /// (observed wake never consumed, re-interrupting a working recipient).
+    #[test]
+    fn only_an_observed_wake_consumes_the_row() {
+        assert_eq!(
+            urgent_probe_action(UrgentWakeOutcome::Observed),
+            UrgentProbeAction::ConsumeRow
+        );
+        assert_eq!(
+            urgent_probe_action(UrgentWakeOutcome::Unobserved),
+            UrgentProbeAction::HoldRowPending,
+            "an unobserved wake must NOT consume the row — that is the 7206 defect"
+        );
+        assert_eq!(
+            urgent_probe_action(UrgentWakeOutcome::Pending),
+            UrgentProbeAction::KeepProbing
+        );
+    }
+
+    /// The storm guard's real condition, as passed at the delivery-loop call
+    /// site. Pinned here because it is the third `bool` in a three-`bool`
+    /// argument list — the one shape where a transposition compiles cleanly.
+    #[test]
+    fn only_an_urgent_row_with_a_recorded_attempt_is_cadence_gated_for_wake() {
+        assert!(urgent_wake_is_unresolved(true, true));
+        assert!(
+            !urgent_wake_is_unresolved(true, false),
+            "an urgent row's FIRST interrupt must not be held back by the cadence"
+        );
+        assert!(
+            !urgent_wake_is_unresolved(false, true),
+            "an ordinary row carries the cadence for inbox reasons, not wake reasons; \
+             conflating them would gate normal traffic behind the 60s interrupt clock"
+        );
+        assert!(!urgent_wake_is_unresolved(false, false));
+    }
+
+    /// End-to-end over the two extracted seams: an unobserved wake must both
+    /// hold the row AND be cadence-gated, because either one alone is a bug
+    /// (consume = 7206 again; ungated = a 10Hz re-interrupt storm).
+    #[test]
+    fn an_unobserved_wake_both_holds_the_row_and_gates_the_retry() {
+        let outcome = classify_urgent_wake(
+            4_096,
+            Some(4_096),
+            URGENT_WAKE_OBSERVE_WINDOW,
+            URGENT_WAKE_OBSERVE_WINDOW,
+        );
+        assert_eq!(urgent_probe_action(outcome), UrgentProbeAction::HoldRowPending);
+        assert!(row_needs_renudge_cadence(
+            false,
+            false,
+            urgent_wake_is_unresolved(true, true)
+        ));
     }
 
     /// An unobserved urgent wake leaves the row pending, and `process_prompt_queue`

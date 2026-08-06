@@ -3164,6 +3164,30 @@ mod tests {
         );
     }
 
+    /// cas-ac7e (GH #130) AC1 — the third path that reaches Delivered.
+    ///
+    /// `mark_broadcast_outcome` with all recipients succeeding advances the row
+    /// to Delivered through the same shared stamp, so it must observe the same
+    /// `all_workers` exemption. Asserted separately because the existing
+    /// broadcast test only checks stage and counts and would not notice this
+    /// path growing per-recipient rows keyed on the literal string.
+    #[test]
+    fn an_all_succeeded_broadcast_still_records_no_recipient_transport_stamp() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue("supervisor", "all_workers", "stand down")
+            .unwrap();
+        store.mark_broadcast_outcome(id, 3, 3, 0, None).unwrap();
+
+        let report = store.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(report.stage, DeliveryStage::Delivered);
+        assert!(
+            report.recipient_transport_at.is_none(),
+            "a broadcast has no single addressed recipient to stamp"
+        );
+        assert!(recipient_transport_stamp(&store, id, "all_workers").is_none());
+    }
+
     /// cas-ac7e (GH #130) AC2 — the 7212 vanish shape.
     ///
     /// 7212 was transport-delivered, never surfaced to anyone, then stamped

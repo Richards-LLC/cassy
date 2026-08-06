@@ -193,12 +193,24 @@ after you killed a previous one, that is the first thing to check:
 cas__coordination action=gc_report
 ```
 
-Orphaned build tools are listed as reapable — "build tool with no parent to
-report to" — and `action=gc_cleanup force=true dry_run=false` clears them.
+Orphaned `rustc` shows up as reapable, annotated "build tool with no parent to
+report to".
+
+**Reporting is yours; cleanup is the supervisor's.** `gc_report` is read-only —
+run it freely. `gc_cleanup force=true dry_run=false` is **not** scoped to your
+worktree: it sweeps every worker's worktree on the host, because all workers run
+as the same user. Ask the supervisor rather than running it yourself, and say
+which pid you want gone. A worker clearing its own wedge with a host-wide kill
+is how one worker's recovery becomes another worker's mystery build failure.
 
 **Never select build processes by name to kill them.** `pkill -9 -f rustc` and
-`pgrep -x rustc` will match another worker's live compile on a shared host, and
-you will destroy their build without knowing. Only signal a pid you captured
-yourself from the process you started, or let `gc_cleanup` do it — it verifies a
-`/proc` start-time fingerprint before signalling anything, precisely so it
-cannot hit a recycled or unrelated pid.
+`pgrep -x rustc` match another worker's live compile on a shared host, and you
+will destroy their build without knowing — this has actually happened here. The
+only pid you may signal directly is one you captured yourself from a process you
+started (`$!`), and only after confirming its command line.
+
+Note what the fingerprint does and does not buy you: `gc_cleanup` revalidates a
+`/proc` start-time fingerprint before signalling, so it cannot hit a *recycled*
+pid — but that proves identity, not that the process is unwanted. It is a
+protection against killing the wrong process, not against killing the right
+process at the wrong time.

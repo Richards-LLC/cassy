@@ -80,18 +80,31 @@ const DEV_SERVER_PATTERNS: &[&str] = &[
     "bun",
 ];
 
-/// `comm` values of build tools that only ever exist to report a result back
-/// to the parent that spawned them (cas-4614, GH #107).
+/// `comm` values of build tools whose **only** possible parent is `cargo`, so
+/// that an adopted one provably has no reader left (cas-4614, GH #107).
 ///
-/// This list is load-bearing, not advisory like `DEV_SERVER_PATTERNS`. A
-/// `rustc` exists solely to hand its output to the `cargo` that launched it;
-/// once that parent has been reaped, the process cannot deliver anything to
-/// anyone and will run — or sit — to no purpose. That is a stronger statement
-/// than we can make about a dev server, which may well be serving somebody.
+/// This list is load-bearing, not advisory like `DEV_SERVER_PATTERNS`: it
+/// overrides the live-process-group spare. The justification is narrow and
+/// must stay narrow. `rustc` and `rustdoc` are spawned by `cargo` and by
+/// nothing else, and they deliver their result to that parent; once it is
+/// reaped they cannot deliver to anyone.
+///
+/// **`cargo` itself is deliberately NOT in this list.** Its parent is a
+/// launcher shell that exits *by design* in every background idiom — `cargo
+/// build &`, `nohup`, `setsid`, a detached harness step — and its result is
+/// artifacts in `CARGO_TARGET_DIR` plus an exit code in a log, neither
+/// delivered to the parent. An adopted `cargo` is routinely a live, working
+/// build. Including it would have made "adopted by systemd inside a worktree"
+/// — the normal shape of a backgrounded build on a factory host — sufficient
+/// to kill someone's in-flight compile. The GH #107 incident this exists for
+/// was an orphaned `rustc`, so nothing is lost by excluding `cargo`.
 ///
 /// Matched against `comm` (the kernel's 15-char executable name), not the
-/// command line, so a shell script that merely mentions `cargo` is not caught.
-const BUILD_TOOL_COMMS: &[&str] = &["rustc", "cargo", "rustdoc"];
+/// command line, so a wrapper merely named after a build tool is not caught.
+/// `comm` is not authenticated — a process can set it via `prctl` or argv[0] —
+/// but the only thing spoofing it buys is being selected for reaping, so
+/// exact-match on `comm` is sufficient here.
+const BUILD_TOOL_COMMS: &[&str] = &["rustc", "rustdoc"];
 
 /// What the parent of a worktree process tells us about ownership.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,14 +185,18 @@ pub(crate) fn registry_disposition(
 ///
 /// `is_build_tool` (cas-4614, GH #107) narrows one specific over-sparing case.
 /// Sharing a process group with a live worker normally means the worker still
-/// owns the process, so we spare it. That inference does not hold for a build
-/// tool whose parent has been reaped: `cargo` is the only thing that ever
-/// reads a `rustc`'s result, so once the parent is gone the child is waste no
-/// matter whose process group it sits in. Observed for real — a `rustc`
-/// orphaned by a killed `cargo` survived 57 minutes inside a live worker's
-/// group and blocked a later build in a different `CARGO_TARGET_DIR`; the
-/// report called it "spared (live owner)", which read as "something owns
-/// this" when nothing did.
+/// owns the process, so we spare it. That inference does not hold for a
+/// `rustc`/`rustdoc` whose parent has been reaped: `cargo` is the only thing
+/// that ever spawns one or reads its result, so once the parent is gone the
+/// child is waste no matter whose process group it sits in. Observed for real
+/// — a `rustc` orphaned by a killed `cargo` survived 57 minutes inside a live
+/// worker's group and blocked a later build in a different
+/// `CARGO_TARGET_DIR`; the report called it "spared (live owner)", which read
+/// as "something owns this" when nothing did.
+///
+/// See `BUILD_TOOL_COMMS` for why `cargo` itself is excluded: an adopted
+/// `cargo` is routinely a live backgrounded build, and killing those is worse
+/// than the leak this fixes.
 ///
 /// This never widens candidacy on its own: `parent.is_adopted()` is still
 /// checked first, so a build tool belonging to a *running* cargo (parent
@@ -793,11 +810,29 @@ mod tests {
         pid
     }
 
-    #[cfg(target_os = "linux")] // only the two /proc-based tests use it
+    #[cfg(target_os = "linux")] // only the /proc-based tests use it
     fn kill_if_alive(pid: u32) {
         #[cfg(unix)]
         unsafe {
             libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
+    }
+
+    /// Kills a planted process on drop, so a failed assertion cannot leak it.
+    ///
+    /// Without this the planted process outlives the test for its full sleep.
+    /// That matters most for the `rustc`-named decoy: production now reaps
+    /// processes with exactly that `comm`, and a concurrent run of this same
+    /// suite would find a stranger's leaked decoy sitting in a worktree.
+    /// Cleaning up on the failure path is what keeps the test from seeding the
+    /// condition it exists to detect.
+    #[cfg(target_os = "linux")]
+    struct PlantedProcess(u32);
+
+    #[cfg(target_os = "linux")]
+    impl Drop for PlantedProcess {
+        fn drop(&mut self) {
+            kill_if_alive(self.0);
         }
     }
 
@@ -919,7 +954,7 @@ mod tests {
 
     #[test]
     fn build_tool_detection_matches_comm_exactly() {
-        for comm in ["rustc", "cargo", "rustdoc"] {
+        for comm in ["rustc", "rustdoc"] {
             assert!(looks_like_build_tool(comm), "{comm} should be a build tool");
         }
         for comm in [
@@ -927,7 +962,7 @@ mod tests {
             "bash",
             "cas",
             // Substring matches must NOT count — `comm` is the executable
-            // name, and a wrapper merely named after cargo is not cargo.
+            // name, and a wrapper merely named after a build tool is not one.
             "cargo-nextest",
             "rustc-wrapper",
             "sccache",
@@ -938,6 +973,29 @@ mod tests {
                 "{comm:?} should not be treated as a build tool"
             );
         }
+    }
+
+    /// Regression guard for the review finding that killed the first draft:
+    /// `cargo` must NOT get the live-process-group override.
+    ///
+    /// An adopted `cargo` is the normal shape of a backgrounded build —
+    /// `cargo build &`, `nohup`, `setsid`, a detached harness step — whose
+    /// launcher shell exits by design while the build runs on. A live example
+    /// was found on the dev host during review: a working `cargo test`
+    /// adopted by `systemd --user`, cwd inside a worktree, which the first
+    /// draft classified `Reapable`.
+    #[test]
+    fn cargo_is_not_a_build_tool_because_adopted_cargo_is_usually_working() {
+        assert!(
+            !looks_like_build_tool("cargo"),
+            "an adopted cargo is routinely a live backgrounded build; giving it \
+             the live-owner override would kill in-flight compiles"
+        );
+        assert_eq!(
+            worktree_process_disposition(ParentState::Reaped, true, true, false),
+            Some(OrphanDisposition::SparedLiveOwner),
+            "a live worker's process group must still protect an adopted cargo"
+        );
     }
 
     #[test]
@@ -1109,6 +1167,9 @@ mod tests {
             pid
         };
 
+        // Guard before the first assertion: everything below can panic.
+        let _guard = PlantedProcess(pid);
+
         let stat = read_proc_stat(pid).expect("stat");
         assert_eq!(stat.comm, "rustc", "the planted orphan must look like rustc");
         // Claim its process group as a live worker's — the exact condition
@@ -1141,7 +1202,7 @@ mod tests {
             done.killed.contains(&pid),
             "the orphaned rustc should actually be reaped"
         );
-        kill_if_alive(pid);
+        // `_guard` reaps it on the failure path too.
     }
 
     #[test]

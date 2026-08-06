@@ -720,6 +720,44 @@ impl TeamsManager {
         Ok(())
     }
 
+    /// Whether `target`'s inbox still holds a row byte-identical to
+    /// `(from, message)` (cas-ceae, GH #124/#123).
+    ///
+    /// This is the daemon's only way to observe the agent-teams transport's
+    /// other half. The inbox file is co-owned: CAS appends, and the recipient
+    /// harness REMOVES rows as it picks them up. So "the row I wrote is gone"
+    /// is a positive delivery receipt — the harness took it — and it is the
+    /// signal `process_prompt_queue` needs to stop re-appending a message it
+    /// has already handed over. Without it, the content dedup in
+    /// [`Self::write_to_inbox_impl`] (which only asks whether an identical row
+    /// is *still present*) silently lapses the instant the harness drains the
+    /// file, and a queue row left pending for a wake re-appends a brand-new
+    /// copy on every poll — the reported 385x storm.
+    ///
+    /// A missing inbox file is `Ok(false)`: no file, no row. Read/parse
+    /// failures are `Err` on purpose — the caller must NOT read "I could not
+    /// tell" as "the harness took it", or an unreadable inbox would silently
+    /// consume undelivered messages.
+    pub fn inbox_holds_message(
+        &self,
+        target: &str,
+        from: &str,
+        message: &str,
+    ) -> anyhow::Result<bool> {
+        let inbox_path = self.inboxes_dir.join(format!("{}.json", target));
+        if !inbox_path.exists() {
+            return Ok(false);
+        }
+        Self::with_exclusive_inbox_lock(&inbox_path, || {
+            let content = std::fs::read_to_string(&inbox_path)?;
+            if content.trim().is_empty() {
+                return Ok(false);
+            }
+            let messages: Vec<InboxMessage> = serde_json::from_str(&content)?;
+            Ok(messages.iter().any(|m| m.from == from && m.text == message))
+        })
+    }
+
     /// Write a message to a target agent's inbox file.
     ///
     /// Uses file locking to prevent corruption when multiple writers
@@ -2095,6 +2133,83 @@ mod tests {
             inbox.len(),
             3,
             "redelivery-marked payload must not be content-deduped"
+        );
+    }
+
+    /// cas-ceae (GH #124/#123): the daemon's delivery receipt for the
+    /// agent-teams transport. The inbox file is co-owned — the recipient
+    /// harness REMOVES rows as it picks them up — so "the row I wrote is
+    /// gone" is the only observation CAS has that the message was actually
+    /// received. `write_to_inbox`'s content dedup lapses at exactly that
+    /// moment, which is why a queue row left pending for a wake re-appended a
+    /// brand-new copy on every 100ms poll (5 real messages → 385 injected).
+    #[test]
+    fn inbox_holds_message_tracks_the_harness_draining_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = manager_in(tmp.path(), "receipt");
+        std::fs::create_dir_all(&mgr.inboxes_dir).unwrap();
+
+        let msg = "You are assigned cas-ceae (P1)";
+
+        // No inbox file at all → definitely not holding it (never an error:
+        // "no inbox yet" is not a failure).
+        assert!(
+            !mgr.inbox_holds_message("swift-fox", "supervisor", msg)
+                .unwrap()
+        );
+
+        mgr.ensure_inbox("swift-fox").unwrap();
+        assert!(
+            !mgr.inbox_holds_message("swift-fox", "supervisor", msg)
+                .unwrap(),
+            "an empty inbox holds nothing"
+        );
+
+        mgr.write_to_inbox("swift-fox", "supervisor", msg, None, None)
+            .unwrap();
+        assert!(
+            mgr.inbox_holds_message("swift-fox", "supervisor", msg)
+                .unwrap(),
+            "the row we just wrote is still queued for the recipient"
+        );
+        assert!(
+            !mgr.inbox_holds_message("swift-fox", "director", msg)
+                .unwrap(),
+            "presence is keyed on (from, text), exactly like the write dedup"
+        );
+        assert!(
+            !mgr.inbox_holds_message("swift-fox", "supervisor", "some other message")
+                .unwrap()
+        );
+
+        // Simulate the Claude Code harness picking the message up: it removes
+        // the row from the file (observed live — the inbox drops back to `[]`
+        // every ~2 seconds).
+        std::fs::write(mgr.inboxes_dir.join("swift-fox.json"), "[]").unwrap();
+        assert!(
+            !mgr.inbox_holds_message("swift-fox", "supervisor", msg)
+                .unwrap(),
+            "once the harness drains the file the message has been RECEIVED — this is the \
+             receipt that must stop redelivery, not a licence to write it again"
+        );
+    }
+
+    /// An unreadable/corrupt inbox must surface as an error, never as
+    /// "nothing here". The caller reads `Ok(false)` on an already-written row
+    /// as a delivery receipt and consumes the queue row, so a parse failure
+    /// masquerading as absence would silently swallow undelivered messages.
+    #[test]
+    fn inbox_holds_message_errors_rather_than_faking_absence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = manager_in(tmp.path(), "corrupt");
+        std::fs::create_dir_all(&mgr.inboxes_dir).unwrap();
+        std::fs::write(mgr.inboxes_dir.join("swift-fox.json"), "{ this is not json").unwrap();
+
+        assert!(
+            mgr.inbox_holds_message("swift-fox", "supervisor", "anything")
+                .is_err(),
+            "a corrupt inbox must be an error so the daemon delivers unchanged instead of \
+             assuming the harness took the message"
         );
     }
 

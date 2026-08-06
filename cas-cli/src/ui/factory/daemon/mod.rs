@@ -236,16 +236,35 @@ pub struct FactoryDaemon {
     /// Tracks last idle-like message time per worker source for dedup.
     /// Prevents idle spam when workers send repeated "standing by" / "ready" messages.
     last_idle_message_times: HashMap<String, std::time::Instant>,
-    /// cas-d732 (GH #119): when each still-pending lifecycle row was last
-    /// delivered, keyed by `prompt_queue.id`.
+    /// cas-d732 (GH #119) / cas-ceae (GH #124): when each still-pending queue
+    /// row was last delivered, keyed by `prompt_queue.id`.
     ///
-    /// A wake-eligible lifecycle row is deliberately NOT consumed until it
-    /// actually wakes the pane (cas-f02b), so it is re-selected on every queue
-    /// poll — every ~100ms. Without this clock each of those passes re-wrote
-    /// the inbox and re-nudged the pane with the identical block, which is the
-    /// reported storm: one transition, ~50 byte-identical injections per turn.
+    /// A wake-eligible row is deliberately NOT consumed until it actually
+    /// wakes the pane (cas-f02b for the supervisor, cas-45c4 for workers), so
+    /// it is re-selected on every queue poll — every ~100ms. Without this
+    /// clock each of those passes re-wrote the inbox and re-nudged the pane
+    /// with the identical block, which is the reported storm: one transition,
+    /// ~50 byte-identical injections per turn.
+    ///
+    /// cas-ceae widened this from lifecycle-wake rows to EVERY row that has
+    /// been left pending once: the worker-inbox half of the same transport had
+    /// no cadence gate at all, so an ordinary supervisor→worker message
+    /// re-appended at the full poll rate (GH #124: 5 real messages became 385
+    /// injected copies).
     /// Entries are dropped when the row is finally consumed or suppressed.
-    lifecycle_redelivery_attempts: HashMap<i64, std::time::Instant>,
+    redelivery_attempts: HashMap<i64, std::time::Instant>,
+    /// cas-ceae (GH #124/#123): queue rows whose payload this daemon has
+    /// already written into the recipient's agent-teams inbox, keyed by
+    /// `prompt_queue.id`.
+    ///
+    /// The inbox file is co-owned — CAS appends, the recipient harness removes
+    /// rows as it picks them up — so `write_to_inbox`'s content dedup only
+    /// holds while the row is still sitting in the file. This set is the
+    /// daemon-side memory that survives the harness draining it: a row we
+    /// already wrote, which is no longer in the inbox, was RECEIVED, and must
+    /// be consumed rather than re-written. Entries are dropped when the row is
+    /// consumed, suppressed, or abandoned.
+    inbox_written_rows: std::collections::HashSet<i64>,
     /// cas-f02b (GH #101): last observed PTY output byte count per pane, sampled
     /// when a supervisor wake is evaluated. Equality across two evaluations is
     /// the evidence that the pane is not mid-render and is safe to type into.

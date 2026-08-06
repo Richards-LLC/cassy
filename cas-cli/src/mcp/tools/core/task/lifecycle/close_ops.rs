@@ -7435,9 +7435,14 @@ pub(crate) fn render_epic_status_report_with_stack(
         let quoted: Vec<String> = stacked_on.iter().map(|b| format!("'{b}'")).collect();
         let mut order = quoted.clone();
         order.push(format!("'{parent_branch}'"));
+        // Deliberately does NOT claim each entry contains the previous one:
+        // when an epic branch merges two independent unlanded epics, both are
+        // ancestors of it while neither contains the other. What is always
+        // true — and what the supervisor needs — is that this epic contains
+        // all of them, so none can be left behind.
         out.push_str(&format!(
             "Stacked on: {} unlanded epic branch(es) — {}\n\
-             Landing order: {} (each contains the ones before it)\n",
+             Landing order: {} (this epic contains all of them; merging it merges them)\n",
             stacked_on.len(),
             quoted.join(" → "),
             order.join(" → "),
@@ -14231,7 +14236,8 @@ mod epic_status_gate_tests {
             "the ancestry must be named in full: {report}"
         );
         assert!(
-            report.contains("Landing order: 'epic/a' → 'epic/b' → 'epic/c'"),
+            report.contains("Landing order: 'epic/a' → 'epic/b' → 'epic/c'")
+                && report.contains("merging it merges them"),
             "the order the branches must land in is the actionable part: {report}"
         );
     }

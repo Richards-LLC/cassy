@@ -326,8 +326,10 @@ impl GitOperations {
                 let mut order = ancestry.clone();
                 order.push(head.clone());
                 format!(
-                    " STACK DEPTH {}: '{head}' is itself based on unlanded epic branch(es) {}. \
-                     Everything above lands with it — merge order is {} → '{base_ref}'.",
+                    " STACK DEPTH {}: '{head}' already contains unlanded epic branch(es) {}. \
+                     Landing this epic lands all of them together — they cannot be left behind, \
+                     and no separate merge of each is required. Bottom-up they are {} → \
+                     '{base_ref}'.",
                     order.len(),
                     ancestry
                         .iter()
@@ -401,9 +403,13 @@ impl GitOperations {
     /// that can drift. "Unlanded" means not yet reachable from `trunk`: once an
     /// epic lands, it stops constraining anything and drops out of the chain.
     ///
-    /// Ordering is by distance from trunk ascending, so the returned list reads
-    /// in the order the branches must land. Ties (independent branches at the
-    /// same distance) keep a stable name order.
+    /// Ordering is by distance from trunk ascending, i.e. bottom-up. For a true
+    /// chain (each contained in the next) that is also the order they must land
+    /// in. It is NOT a dependency claim in general: a branch that merges two
+    /// independent unlanded epics has both as ancestors while neither contains
+    /// the other, and either may land first. Ties keep a stable name order so
+    /// the output is deterministic. Callers must not render this as a mandated
+    /// sequence — what is always true is that the base contains all of them.
     ///
     /// Never fails: any git error yields an empty chain, because an advisory
     /// display must not be able to break epic creation.
@@ -449,7 +455,18 @@ impl GitOperations {
         }
 
         chain.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-        chain.into_iter().map(|(_, name)| name).collect()
+        // Two names for the same commit (a rename whose old branch was never
+        // deleted) are one rung, not two — otherwise the reported depth and the
+        // printed order both inflate. Keeps the first name in sorted order.
+        let mut seen_shas = std::collections::HashSet::new();
+        chain
+            .into_iter()
+            .map(|(_, name)| name)
+            .filter(|name| {
+                let sha = self.ref_sha(name).unwrap_or_default();
+                sha.is_empty() || seen_shas.insert(sha)
+            })
+            .collect()
     }
 
     /// True when `ancestor` is reachable from `descendant`.
@@ -457,12 +474,29 @@ impl GitOperations {
     /// A git failure answers `false`: callers use this to decide whether to
     /// *add* a warning, so an unknown must not manufacture one.
     pub fn is_ancestor(&self, ancestor: &str, descendant: &str) -> bool {
-        Command::new("git")
+        match Command::new("git")
             .args(["merge-base", "--is-ancestor", ancestor, descendant])
             .current_dir(&self.repo_root)
             .status()
-            .map(|status| status.code() == Some(0))
-            .unwrap_or(false)
+        {
+            Ok(status) if status.code() == Some(0) => true,
+            // Exit 1 is git's ordinary "no". Anything else (128 for an
+            // unresolvable ref, a signal, a spawn failure) is git failing to
+            // answer — same `false` result, but it must not look identical to
+            // a real negative in the logs, or an environment problem renders
+            // as "no stack here".
+            Ok(status) if status.code() == Some(1) => false,
+            other => {
+                tracing::warn!(
+                    ancestor = %ancestor,
+                    descendant = %descendant,
+                    result = ?other,
+                    "cas-aae6: `git merge-base --is-ancestor` could not answer; \
+                     treating as not-an-ancestor, so a real epic stack may be under-reported"
+                );
+                false
+            }
+        }
     }
 
     /// Resolve the full SHA of a ref (branch name, "HEAD", etc.).

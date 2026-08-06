@@ -2851,7 +2851,28 @@ impl CasService {
         // away hours ago.
         let stacked_on = {
             use crate::worktree::GitOperations;
-            let trunk = crate::config::Config::configured_epic_base_branch(close_project_root)
+            // "Landed" is only meaningful against the trunk this epic is
+            // actually destined for. Prefer the target branch the epic itself
+            // declared (which is what epic creation branched from and what the
+            // close gate merges into); only fall back to config/repo defaults
+            // when the epic declared nothing. Re-deriving trunk from current
+            // config would misclassify an ancestor as landed on a repo
+            // configured with a different base (e.g. staging vs main).
+            let trunk = epic
+                .deliverables
+                .work_target
+                .as_ref()
+                .and_then(|target| {
+                    crate::mcp::tools::core::task::repo_context::resolve_repo_context(
+                        &self.inner.cas_root,
+                        target,
+                    )
+                    .ok()
+                })
+                .map(|context| context.target_branch)
+                .or_else(|| {
+                    crate::config::Config::configured_epic_base_branch(close_project_root)
+                })
                 .unwrap_or_else(|| {
                     GitOperations::new(close_project_root.to_path_buf()).detect_default_branch()
                 });

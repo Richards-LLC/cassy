@@ -1058,6 +1058,12 @@ fn epic_base_notice_names_the_full_stack_not_just_the_parent() {
             && notice.contains("'epic/a' → 'epic/b' → 'epic/c'"),
         "the notice must name the ancestry AND the landing order: {notice}"
     );
+    assert!(
+        notice.contains("already contains")
+            && notice.contains("no separate merge of each is required"),
+        "containment is the true claim — the branches ride along whether or not \
+         anyone plans for it, and no per-branch merge is implied: {notice}"
+    );
 }
 
 #[test]
@@ -1090,5 +1096,81 @@ fn ancestry_is_empty_when_git_cannot_answer() {
     assert!(
         git.unlanded_epic_ancestry("epic/c", "main").is_empty(),
         "an advisory display must never fail epic creation"
+    );
+}
+
+/// An epic branch can MERGE two independent unlanded epics rather than stack on
+/// one. Both are then ancestors while neither contains the other, so the report
+/// must not claim a containment order between them — only that this epic
+/// contains them all.
+#[test]
+fn independent_merged_epics_are_both_reported_without_claiming_a_chain_between_them() {
+    let (_temp, repo_path) = create_test_repo();
+    let trunk = trunk_of(&repo_path);
+    checkout_new(&repo_path, "epic/x");
+    commit_on(&repo_path, "x.txt", "epic x work");
+    Command::new("git")
+        .args(["checkout", "-q", &trunk])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    checkout_new(&repo_path, "epic/y");
+    commit_on(&repo_path, "y.txt", "epic y work");
+    checkout_new(&repo_path, "epic/z");
+    Command::new("git")
+        .args(["merge", "-q", "--no-ff", "epic/x", "-m", "z merges x"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+
+    let git = GitOperations::new(repo_path);
+    let chain = git.unlanded_epic_ancestry("epic/z", &trunk);
+    assert!(
+        chain.contains(&"epic/x".to_string()) && chain.contains(&"epic/y".to_string()),
+        "both unlanded epics ride along and must be named: {chain:?}"
+    );
+
+    // Neither contains the other, so wording implying a required sequence
+    // between them would be false. Assert on what the notice ACTUALLY says —
+    // an earlier version of this test asserted a phrase that appears nowhere in
+    // the source, so it passed no matter how misleading the text became.
+    let choice = git.resolve_epic_base(&trunk);
+    let notice = choice
+        .notice
+        .as_deref()
+        .expect("stacking on epic/z must be explained");
+    assert!(
+        notice.contains("Landing this epic lands all of them together")
+            && notice.contains("no separate merge of each is required"),
+        "the claim must be containment, not a mandated sequence: {notice}"
+    );
+    assert!(
+        !notice.contains("merge order is"),
+        "'merge order' reads as an instruction to merge each in turn, which is \
+         false for independent siblings: {notice}"
+    );
+}
+
+/// A rename that left the old branch name behind is one rung, not two.
+#[test]
+fn duplicate_branch_names_for_one_commit_do_not_inflate_the_stack() {
+    let (_temp, repo_path, trunk) = three_deep_stack();
+    Command::new("git")
+        .args(["branch", "epic/a-old-name", "epic/a"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+
+    let git = GitOperations::new(repo_path);
+    let chain = git.unlanded_epic_ancestry("epic/c", &trunk);
+
+    assert_eq!(
+        chain.len(),
+        2,
+        "two names for the same commit must count once: {chain:?}"
+    );
+    assert!(
+        chain.contains(&"epic/b".to_string()),
+        "the genuine second rung must survive dedupe: {chain:?}"
     );
 }

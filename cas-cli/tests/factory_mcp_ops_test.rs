@@ -5456,3 +5456,111 @@ async fn test_assignment_still_refuses_a_genuinely_stale_worker_cas_f8bc() {
         "the genuine staleness guard must survive the exemption: {error}"
     );
 }
+
+// ===========================================================================
+// cas-aae6 (GH #110): epic_status must show the chain for a stacked epic.
+// The renderer is unit-tested with a hand-built chain; this drives the real
+// handler against a real three-deep stack, which is the only thing that can
+// catch a mis-wiring (wrong branch, wrong trunk, swapped arguments).
+// ===========================================================================
+
+#[tokio::test]
+async fn test_epic_status_reports_a_three_deep_stack_end_to_end_cas_aae6() {
+    let home = TempDir::new().expect("home tempdir");
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_FACTORY_MODE", Some("1")),
+        ("HOME", Some(home.path().to_str().unwrap())),
+    ]);
+    let env = FactoryTestEnv::new();
+    let project = env.cas_root.parent().expect("project root").to_path_buf();
+
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&project)
+            .env("GIT_AUTHOR_NAME", "CAS Test")
+            .env("GIT_AUTHOR_EMAIL", "test@cas")
+            .env("GIT_COMMITTER_NAME", "CAS Test")
+            .env("GIT_COMMITTER_EMAIL", "test@cas")
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    let commit = |name: &str| {
+        std::fs::write(project.join(name), name).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", name]);
+    };
+
+    git(&["init", "-b", "main"]);
+    git(&["config", "user.email", "test@cas"]);
+    git(&["config", "user.name", "CAS Test"]);
+    commit("seed.txt");
+    git(&["checkout", "-b", "epic/a"]);
+    commit("a.txt");
+    git(&["checkout", "-b", "epic/b"]);
+    commit("b.txt");
+    git(&["checkout", "-b", "epic/c"]);
+    commit("c.txt");
+    git(&["checkout", "main"]);
+
+    add_epic_with_id(&env, "cas-top", TaskStatus::Open, "epic/c");
+
+    let mut req = factory_req("epic_status");
+    req.id = Some("cas-top".to_string());
+    let text = get_text(&env.service.factory(Parameters(req)).await.expect("status"));
+
+    assert!(
+        text.contains("Stacked on: 2 unlanded epic branch(es) — 'epic/a' → 'epic/b'"),
+        "the full chain must reach the supervisor-facing report: {text}"
+    );
+    assert!(
+        text.contains("Landing order: 'epic/a' → 'epic/b' → 'epic/c'"),
+        "bottom-up order must be shown: {text}"
+    );
+}
+
+#[tokio::test]
+async fn test_epic_status_omits_stack_lines_for_an_unstacked_epic_cas_aae6() {
+    let home = TempDir::new().expect("home tempdir");
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_FACTORY_MODE", Some("1")),
+        ("HOME", Some(home.path().to_str().unwrap())),
+    ]);
+    let env = FactoryTestEnv::new();
+    let project = env.cas_root.parent().expect("project root").to_path_buf();
+
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(&project)
+            .env("GIT_AUTHOR_NAME", "CAS Test")
+            .env("GIT_AUTHOR_EMAIL", "test@cas")
+            .env("GIT_COMMITTER_NAME", "CAS Test")
+            .env("GIT_COMMITTER_EMAIL", "test@cas")
+            .output()
+            .expect("git");
+    };
+    git(&["init", "-b", "main"]);
+    git(&["config", "user.email", "test@cas"]);
+    git(&["config", "user.name", "CAS Test"]);
+    std::fs::write(project.join("seed.txt"), "seed").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-m", "seed"]);
+    git(&["branch", "epic/solo"]);
+
+    add_epic_with_id(&env, "cas-solo", TaskStatus::Open, "epic/solo");
+
+    let mut req = factory_req("epic_status");
+    req.id = Some("cas-solo".to_string());
+    let text = get_text(&env.service.factory(Parameters(req)).await.expect("status"));
+
+    assert!(
+        !text.contains("Stacked on"),
+        "an epic cut straight from trunk must not claim a stack: {text}"
+    );
+}

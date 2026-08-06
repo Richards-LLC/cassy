@@ -109,6 +109,109 @@ fn worker_base_mismatch_notice(
     }
 }
 
+/// Count commits reachable from `newer` but not from `base` (how far `base` is
+/// behind `newer`). `None` when either ref is missing or git fails — a missing
+/// comparison ref is not evidence of staleness and must not manufacture a
+/// warning.
+fn commits_behind(repo_root: &std::path::Path, base: &str, newer: &str) -> Option<usize> {
+    let output = std::process::Command::new("git")
+        .args(["rev-list", "--count", &format!("{base}..{newer}")])
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
+/// `true` when `reference` resolves to a commit in `repo_root`.
+fn ref_exists(repo_root: &std::path::Path, reference: &str) -> bool {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", &format!("{reference}^{{commit}}")])
+        .current_dir(repo_root)
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+/// Short SHA for a ref, or `"unknown"` when it cannot be resolved.
+fn short_sha(repo_root: &std::path::Path, reference: &str) -> String {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--short", reference])
+        .current_dir(repo_root)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|sha| !sha.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// cas-ecf7 (GH #118): warn — loudly — when the branch a fresh worker worktree
+/// is about to be cut from is itself behind the history it is supposed to build
+/// on.
+///
+/// ROOT CAUSE this catches: `git worktree add <path> <worker_base>` always
+/// resolves `worker_base` live, so the base is never "cached" — but the base
+/// *branch* can be stale. In the reported incident three worktrees were created
+/// at a commit 25 behind `origin/main`: the factory had a focused epic pinned,
+/// `worker_base_for_spawn` correctly returned that epic branch, and the epic
+/// branch had been cut from trunk before a release merge and never refreshed.
+/// Nothing on the spawn path compared the base against trunk (the existing
+/// `worker_base_mismatch_notice` only asks whether the base contains the epic
+/// tip — trivially true when the base *is* the epic branch), so every worker
+/// silently started in the past.
+///
+/// Compares `worker_base` against, in order of interest: its own remote
+/// tracking branch, the integration trunk, and trunk's remote tracking branch.
+/// Refs that don't exist locally are skipped; only positive behind-counts
+/// produce a notice.
+fn stale_spawn_base_notice(
+    repo_root: &std::path::Path,
+    worker_base: &str,
+    trunk: &str,
+) -> Option<String> {
+    let mut candidates: Vec<String> = vec![format!("origin/{worker_base}")];
+    if trunk != worker_base {
+        candidates.push(trunk.to_string());
+        candidates.push(format!("origin/{trunk}"));
+    }
+
+    let mut stale: Vec<(String, usize)> = candidates
+        .into_iter()
+        .filter(|reference| ref_exists(repo_root, reference))
+        .filter_map(|reference| {
+            commits_behind(repo_root, worker_base, &reference)
+                .filter(|behind| *behind > 0)
+                .map(|behind| (reference, behind))
+        })
+        .collect();
+    if stale.is_empty() {
+        return None;
+    }
+    stale.sort_by(|a, b| b.1.cmp(&a.1));
+
+    let detail = stale
+        .iter()
+        .map(|(reference, behind)| {
+            format!(
+                "{behind} commit(s) behind '{reference}' ({})",
+                short_sha(repo_root, reference)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    Some(format!(
+        "⚠️ STALE WORKER BASE: new worker worktrees are being cut from '{worker_base}' ({}), \
+         which is {detail}. Every worker spawned now starts WITHOUT those commits and will \
+         rebuild/retest against old code. Refresh the base first (merge or rebase the newer \
+         ref into '{worker_base}'), or immediately run \
+         `coordination action=sync_all_workers branch={worker_base} force=true` after the spawn.",
+        short_sha(repo_root, worker_base)
+    ))
+}
+
 fn cleanup_cancelled_spawn_worktree_with_manager(
     manager: Option<&mut WorktreeManager>,
     result: &mut WorkerSpawnResult,
@@ -618,7 +721,7 @@ impl FactoryApp {
             anyhow::bail!("Worker '{worker_name}' already exists");
         }
 
-        let (worktree_info, base_mismatch_notice) = if isolate {
+        let (worktree_info, base_warnings) = if isolate {
             if let Some(manager) = &self.worktree_manager {
                 // Re-resolve the repository on every request. A daemon started
                 // before `git init` may have latched an ancestor repository;
@@ -644,9 +747,23 @@ impl FactoryApp {
                 // cut from the active epic branch when present, otherwise from
                 // the detected trunk. Never use the supervisor's incidental HEAD.
                 let parent_branch = worker_base_for_spawn(self.epic_branch.as_deref(), manager);
-                let notice = self.epic_branch.as_deref().and_then(|epic_branch| {
+                let mut notices: Vec<String> = Vec::new();
+                if let Some(notice) = self.epic_branch.as_deref().and_then(|epic_branch| {
                     worker_base_mismatch_notice(manager, &parent_branch, epic_branch)
-                });
+                }) {
+                    notices.push(notice);
+                }
+                // cas-ecf7 (GH #118): the base ref is resolved live, but the
+                // branch it names can be far behind trunk. Surface that at
+                // spawn time instead of leaving it to whoever happens to read
+                // `behind:` in worker_status.
+                let trunk = Config::configured_epic_base_branch(manager.repo_root())
+                    .unwrap_or_else(|| manager.git().detect_default_branch());
+                if let Some(notice) =
+                    stale_spawn_base_notice(manager.repo_root(), &parent_branch, &trunk)
+                {
+                    notices.push(notice);
+                }
                 (
                     Some(WorktreePrep {
                         worktree_path,
@@ -655,7 +772,7 @@ impl FactoryApp {
                         repo_root,
                         cas_dir: self.cas_dir.clone(),
                     }),
-                    notice,
+                    notices,
                 )
             } else {
                 anyhow::bail!(
@@ -664,12 +781,12 @@ impl FactoryApp {
                 );
             }
         } else {
-            (None, None)
+            (None, Vec::new())
         };
 
-        if let Some(notice) = base_mismatch_notice {
+        for notice in &base_warnings {
             tracing::warn!("{notice}");
-            self.set_error(notice);
+            self.set_error(notice.clone());
         }
 
         crate::telemetry::track(
@@ -683,6 +800,7 @@ impl FactoryApp {
         Ok(WorkerSpawnPrep {
             worker_name,
             worktree_info,
+            warnings: base_warnings,
         })
     }
 
@@ -1408,6 +1526,7 @@ mod spawn_base_tests {
                 repo_root: repo.clone(),
                 cas_dir: repo.join(".cas"),
             }),
+            warnings: Vec::new(),
         }
         .run()
         .unwrap();
@@ -1612,6 +1731,200 @@ mod spawn_base_tests {
         assert!(
             worktree_path.exists(),
             "the error path must not delete the worktree behind the caller's back"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // cas-ecf7 (GH #118): stale spawn base detection
+    // -----------------------------------------------------------------------
+
+    fn commit(repo: &std::path::Path, file: &str, message: &str) {
+        std::fs::write(repo.join(file), message).unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", message])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+    }
+
+    fn head_sha(repo: &std::path::Path, reference: &str) -> String {
+        let out = Command::new("git")
+            .args(["rev-parse", reference])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// The reported incident, reproduced end to end on the provisioning path:
+    /// a focused epic branch cut from trunk before a release merge, trunk then
+    /// advanced, and three spawns produced worktrees 25 commits in the past
+    /// with nothing said about it.
+    #[test]
+    fn spawn_base_behind_trunk_is_reported_at_provisioning_time() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+
+        // Epic branch cut here...
+        Command::new("git")
+            .args(["branch", "epic/burn-down", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        // ...trunk then moves on (release merge + version bump).
+        commit(&repo, "release.txt", "release v2.44.0");
+        commit(&repo, "bump.txt", "version bump");
+
+        let notice = stale_spawn_base_notice(&repo, "epic/burn-down", "main")
+            .expect("a base two commits behind trunk must produce a notice");
+        assert!(
+            notice.contains("STALE WORKER BASE"),
+            "notice must be self-labelling: {notice}"
+        );
+        assert!(
+            notice.contains("epic/burn-down"),
+            "notice must name the stale base: {notice}"
+        );
+        assert!(
+            notice.contains("2 commit(s) behind 'main'"),
+            "notice must quantify the gap against trunk: {notice}"
+        );
+    }
+
+    /// The base can also be stale against its OWN remote — the live checkout is
+    /// current, but the local branch the worktree is cut from was never
+    /// fast-forwarded after a fetch.
+    #[test]
+    fn spawn_base_behind_its_remote_tracking_branch_is_reported() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+
+        let stale_local = head_sha(&repo, "HEAD");
+        commit(&repo, "fetched.txt", "landed upstream");
+        let fetched = head_sha(&repo, "HEAD");
+
+        // origin/main knows about the newer commit; local main does not.
+        Command::new("git")
+            .args(["update-ref", "refs/remotes/origin/main", &fetched])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["update-ref", "refs/heads/main", &stale_local])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        let notice = stale_spawn_base_notice(&repo, "main", "main")
+            .expect("a base behind its own remote must produce a notice");
+        assert!(
+            notice.contains("1 commit(s) behind 'origin/main'"),
+            "notice must quantify the gap against the remote: {notice}"
+        );
+    }
+
+    /// No warning when the base is current — the notice has to stay rare enough
+    /// to be worth reading.
+    #[test]
+    fn current_spawn_base_produces_no_notice() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        commit(&repo, "work.txt", "more work");
+        Command::new("git")
+            .args(["branch", "epic/fresh", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["update-ref", "refs/remotes/origin/main", &head_sha(&repo, "main")])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        assert_eq!(
+            stale_spawn_base_notice(&repo, "epic/fresh", "main"),
+            None,
+            "a base that already contains trunk and the remote must not warn"
+        );
+        assert_eq!(
+            stale_spawn_base_notice(&repo, "main", "main"),
+            None,
+            "trunk level with its remote must not warn"
+        );
+    }
+
+    /// Missing comparison refs (no remote configured, trunk absent) are not
+    /// evidence of staleness — a fresh local-only repo must spawn silently.
+    #[test]
+    fn absent_comparison_refs_do_not_manufacture_a_warning() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        Command::new("git")
+            .args(["branch", "epic/solo", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        assert_eq!(
+            stale_spawn_base_notice(&repo, "epic/solo", "trunk-that-does-not-exist"),
+            None,
+            "an unresolvable trunk ref must not be reported as staleness"
+        );
+    }
+
+    /// A worker branched from a stale base really does end up missing the newer
+    /// commits — this is what the warning is protecting against, asserted on
+    /// the real `git worktree add` path rather than on the message text.
+    #[test]
+    fn worktree_cut_from_stale_base_lacks_trunk_commits() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+        Command::new("git")
+            .args(["branch", "epic/behind", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        commit(&repo, "release.txt", "release only on trunk");
+
+        let worktree_root = repo.join(".cas").join("worktrees");
+        let worker_path = worktree_root.join("late-worker");
+        WorkerSpawnPrep {
+            worker_name: "late-worker".to_string(),
+            worktree_info: Some(WorktreePrep {
+                worktree_path: worker_path.clone(),
+                branch_name: "factory/late-worker".to_string(),
+                parent_branch: "epic/behind".to_string(),
+                repo_root: repo.clone(),
+                cas_dir: repo.join(".cas"),
+            }),
+            warnings: Vec::new(),
+        }
+        .run()
+        .expect("worktree creation from the stale base should still succeed");
+
+        assert!(
+            !worker_path.join("release.txt").exists(),
+            "worker cut from a stale base must be missing trunk's newer commit — \
+             this is exactly the silent failure the spawn warning exists to announce"
+        );
+        assert!(
+            stale_spawn_base_notice(&repo, "epic/behind", "main").is_some(),
+            "and provisioning must have had a warning to report for it"
         );
     }
 }

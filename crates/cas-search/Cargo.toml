@@ -1,6 +1,6 @@
 [package]
 name = "cas-search"
-version = "2.44.0"
+version = "2.45.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Search infrastructure for CAS: BM25, semantic vectors, and hybrid search"

@@ -241,9 +241,47 @@ fn check_worktree_staleness(
             .status();
     }
 
-    // Check how many commits behind using git rev-list
+    let behind_count = count_unheld_behind(path, &sync_ref)?;
+
+    Some((behind_count, sync_ref))
+}
+
+/// Count commits on `sync_ref` whose **content** the worktree does not already
+/// have (cas-f8bc / GH #106).
+///
+/// The naive `git rev-list --count HEAD..<epic>` counts every commit reachable
+/// from the epic and not from HEAD — which includes the merge commit of the
+/// worker's *own* just-merged branch. That produced a circular deadlock: a
+/// worker's completed lane is merged, the merge itself makes the worker read
+/// as "1 commit behind epic", assignment is refused for staleness, and the
+/// refused assignment was the prerequisite for the merge that would clear it.
+/// The worker had nothing to gain from syncing: its work IS the epic's tip.
+///
+/// Two adjustments, both verified against real git rather than assumed:
+/// - `--no-merges` drops the merge *node* itself. Content is not lost: a merge
+///   of another worker's lane still contributes that worker's own non-merge
+///   commits, which are counted individually.
+/// - `--cherry-pick --right-only A...B` drops commits whose patch-id already
+///   exists on HEAD. This covers the supervisor rebasing/cherry-picking a
+///   worker's lane onto the epic instead of merging it, where the worker's own
+///   commits reappear under new SHAs and `--no-merges` alone still counts them.
+///
+/// Genuine staleness is unaffected: another worker's merged commits are absent
+/// from HEAD by both reachability and patch-id, so they still count.
+///
+/// Returns `None` only when git cannot answer at all.
+pub(crate) fn count_unheld_behind(path: &std::path::Path, sync_ref: &str) -> Option<u32> {
+    use std::process::Command;
+
     let output = Command::new("git")
-        .args(["rev-list", "--count", &format!("HEAD..{sync_ref}")])
+        .args([
+            "rev-list",
+            "--count",
+            "--no-merges",
+            "--cherry-pick",
+            "--right-only",
+            &format!("HEAD...{sync_ref}"),
+        ])
         .current_dir(path)
         .output()
         .ok()?;
@@ -252,12 +290,12 @@ fn check_worktree_staleness(
         return None;
     }
 
-    let behind_count = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse::<u32>()
-        .unwrap_or(0);
-
-    Some((behind_count, sync_ref))
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse::<u32>()
+            .unwrap_or(0),
+    )
 }
 
 fn list_git_branches(path: Option<&std::path::Path>, args: &[&str]) -> Vec<String> {

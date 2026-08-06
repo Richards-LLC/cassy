@@ -602,6 +602,62 @@ const SILENCE_FOR_ACTIVE_RECIPIENT_WAKE: std::time::Duration =
 /// has settled, not the primary evidence.
 const SILENCE_FOR_IDLE_RECIPIENT_WAKE: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// cas-d732 (GH #119): minimum wall-clock gap between two deliveries of the
+/// SAME still-pending lifecycle row.
+///
+/// A wake-eligible lifecycle row is intentionally left pending until it wakes
+/// the pane (cas-f02b), and `process_prompt_queue` polls every ~100ms, so
+/// "still pending" previously meant "delivered ten times a second". One
+/// transition then reached the supervisor as dozens of byte-identical blocks
+/// in a single turn. The transition is still retried while it goes
+/// unanswered — this only makes the retry a *nudge interval* instead of a
+/// poll interval.
+const LIFECYCLE_RENUDGE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// cas-d732: what to do with a lifecycle row that is up for (re)delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LifecycleRedelivery {
+    /// Deliver now and stamp the attempt.
+    Deliver,
+    /// Already delivered inside the current nudge interval — hold it back
+    /// without consuming it, so the transition is still retried later.
+    Cooldown,
+    /// The recipient acknowledged this notification; redelivery must stop
+    /// permanently, not merely pause.
+    StopAcknowledged,
+}
+
+/// cas-d732 (GH #119): decide whether a pending lifecycle row may be
+/// (re)delivered on this pass.
+///
+/// Pure so the storm shape is testable without a daemon, a PTY or a clock:
+/// feed it the same row across many simulated poll ticks and assert exactly
+/// one `Deliver` per interval.
+///
+/// `acked` is authoritative and checked first — an acknowledged transition has
+/// been seen by definition, so continuing to re-nudge it is pure noise. That
+/// is the half of the reported bug where the storm outlived an explicit
+/// `message_ack`. The complementary half — the task leaving the state that
+/// triggered the push — is handled upstream by the cas-bc8c staleness
+/// revalidation, which suppresses the row outright.
+pub(super) fn lifecycle_redelivery_decision(
+    acked: bool,
+    last_attempt: Option<std::time::Instant>,
+    now: std::time::Instant,
+    interval: std::time::Duration,
+) -> LifecycleRedelivery {
+    if acked {
+        return LifecycleRedelivery::StopAcknowledged;
+    }
+    match last_attempt {
+        None => LifecycleRedelivery::Deliver,
+        Some(previous) if now.saturating_duration_since(previous) >= interval => {
+            LifecycleRedelivery::Deliver
+        }
+        Some(_) => LifecycleRedelivery::Cooldown,
+    }
+}
+
 impl FactoryDaemon {
     pub(super) async fn handle_mux_event(&mut self, event: cas_mux::MuxEvent) {
         match event {
@@ -1627,7 +1683,60 @@ impl FactoryDaemon {
                         task_id = %envelope.task_id,
                         "cas-bc8c: suppressed stale task lifecycle prompt before transport"
                     );
+                    self.lifecycle_redelivery_attempts.remove(&queued.id);
                     continue;
+                }
+            }
+
+            // cas-d732 (GH #119): a lifecycle row is deliberately not consumed
+            // until it wakes the pane (cas-f02b), so on a 100ms poll it would
+            // otherwise be re-written and re-nudged ten times a second — the
+            // reported storm of byte-identical blocks. Rate-limit the RETRY of
+            // one unanswered transition, and stop it entirely once the
+            // recipient has acknowledged the notification.
+            if Self::row_is_supervisor_wake(&queued.source, &queued.prompt) {
+                match lifecycle_redelivery_decision(
+                    queued.acked_at.is_some(),
+                    self.lifecycle_redelivery_attempts.get(&queued.id).copied(),
+                    std::time::Instant::now(),
+                    LIFECYCLE_RENUDGE_INTERVAL,
+                ) {
+                    LifecycleRedelivery::Deliver => {
+                        self.lifecycle_redelivery_attempts
+                            .insert(queued.id, std::time::Instant::now());
+                    }
+                    LifecycleRedelivery::Cooldown => {
+                        // GatedNotReady: withheld by policy, not a failed
+                        // attempt — it must not burn the row's retry budget.
+                        let _ = queue.record_pending_reason(
+                            queued.id,
+                            cas_store::PendingReason::GatedNotReady,
+                            Some("lifecycle re-nudge cooldown — transition already delivered this interval"),
+                        );
+                        tracing::debug!(
+                            target: "cas::coordination",
+                            stage = "lifecycle_renudge_cooldown",
+                            prompt_id = queued.id,
+                            source = %queued.source,
+                            "cas-d732: held back a repeat delivery of an unanswered lifecycle row"
+                        );
+                        continue;
+                    }
+                    LifecycleRedelivery::StopAcknowledged => {
+                        let _ = queue.mark_suppressed(
+                            queued.id,
+                            Some("lifecycle notification already acknowledged by the recipient"),
+                        );
+                        self.lifecycle_redelivery_attempts.remove(&queued.id);
+                        tracing::info!(
+                            target: "cas::coordination",
+                            stage = "lifecycle_redelivery_stopped",
+                            prompt_id = queued.id,
+                            source = %queued.source,
+                            "cas-d732: stopped redelivering an acknowledged lifecycle transition"
+                        );
+                        continue;
+                    }
                 }
             }
 
@@ -2282,6 +2391,9 @@ impl FactoryDaemon {
                     "wake deferred; row stays pending so a later poll can grant the turn"
                 );
             } else if success {
+                // cas-d732: the row is consumed — its re-nudge clock is dead
+                // weight now, and leaving it would leak one entry per row.
+                self.lifecycle_redelivery_attempts.remove(&queued.id);
                 // cas-2c5f: authoritative transport handoff only.
                 if let Err(e) = queue.mark_transport_delivered(queued.id) {
                     tracing::error!(
@@ -4351,6 +4463,153 @@ mod tests {
                 "{why}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // cas-d732 (GH #119): one transition, one delivery per nudge interval
+    // -----------------------------------------------------------------------
+
+    use super::{LIFECYCLE_RENUDGE_INTERVAL, LifecycleRedelivery, lifecycle_redelivery_decision};
+
+    /// The reported storm, simulated on the decision the daemon actually
+    /// makes: a wake-eligible lifecycle row that never wakes the pane stays
+    /// pending, so `process_prompt_queue` re-selects it on EVERY 100ms poll.
+    /// Before this fix each of those passes re-delivered — ~50 byte-identical
+    /// blocks in one supervisor turn, and 9+ waves across the session.
+    #[test]
+    fn repeated_nudge_ticks_deliver_one_unanswered_transition_once_per_interval() {
+        let interval = LIFECYCLE_RENUDGE_INTERVAL;
+        let poll = std::time::Duration::from_millis(100);
+        let start = std::time::Instant::now();
+
+        let mut last_attempt: Option<std::time::Instant> = None;
+        let mut delivered = 0usize;
+
+        // Six minutes of polls — the live incident kept rows 3109/3110
+        // pending for ~6.5 minutes.
+        let ticks = (interval.as_millis() as u64 * 6) / poll.as_millis() as u64;
+        for tick in 0..ticks {
+            let now = start + poll * tick as u32;
+            match lifecycle_redelivery_decision(false, last_attempt, now, interval) {
+                LifecycleRedelivery::Deliver => {
+                    delivered += 1;
+                    last_attempt = Some(now);
+                }
+                LifecycleRedelivery::Cooldown => {}
+                LifecycleRedelivery::StopAcknowledged => {
+                    panic!("nothing acknowledged this transition")
+                }
+            }
+        }
+
+        assert_eq!(
+            delivered, 6,
+            "an unanswered transition must re-nudge once per interval, not once per poll \
+             (would have been {ticks} deliveries before cas-d732)"
+        );
+    }
+
+    /// The first pass always delivers: the fix throttles RETRIES, it must not
+    /// add latency to the push cas-f02b exists to provide.
+    #[test]
+    fn a_transitions_first_delivery_is_never_delayed() {
+        assert_eq!(
+            lifecycle_redelivery_decision(
+                false,
+                None,
+                std::time::Instant::now(),
+                LIFECYCLE_RENUDGE_INTERVAL,
+            ),
+            LifecycleRedelivery::Deliver,
+            "a freshly queued lifecycle row must go out on the very next poll"
+        );
+    }
+
+    /// Acknowledgement is terminal, not another cooldown: the live storm
+    /// continued through an explicit `message_ack` of the exact notification
+    /// ids, then through the triggering task being closed.
+    #[test]
+    fn acknowledged_transitions_stop_being_redelivered_forever() {
+        let start = std::time::Instant::now();
+        for elapsed in [
+            std::time::Duration::ZERO,
+            LIFECYCLE_RENUDGE_INTERVAL,
+            LIFECYCLE_RENUDGE_INTERVAL * 100,
+        ] {
+            assert_eq!(
+                lifecycle_redelivery_decision(
+                    true,
+                    Some(start),
+                    start + elapsed,
+                    LIFECYCLE_RENUDGE_INTERVAL,
+                ),
+                LifecycleRedelivery::StopAcknowledged,
+                "an acked transition must never be re-nudged again, however long it has been"
+            );
+        }
+    }
+
+    /// The throttle is keyed per row, so two genuinely distinct transitions
+    /// parked in the same tick both reach the supervisor. Batching them into
+    /// one would trade a storm for a silent drop.
+    #[test]
+    fn distinct_transitions_do_not_share_a_cooldown() {
+        let now = std::time::Instant::now();
+        let mut attempts: std::collections::HashMap<i64, std::time::Instant> =
+            std::collections::HashMap::new();
+
+        for row_id in [6984_i64, 6985] {
+            let decision = lifecycle_redelivery_decision(
+                false,
+                attempts.get(&row_id).copied(),
+                now,
+                LIFECYCLE_RENUDGE_INTERVAL,
+            );
+            assert_eq!(
+                decision,
+                LifecycleRedelivery::Deliver,
+                "row {row_id} is its own transition and must not be suppressed by its sibling"
+            );
+            attempts.insert(row_id, now);
+        }
+
+        assert_eq!(
+            lifecycle_redelivery_decision(
+                false,
+                attempts.get(&6984).copied(),
+                now,
+                LIFECYCLE_RENUDGE_INTERVAL,
+            ),
+            LifecycleRedelivery::Cooldown,
+            "the same row inside the interval is exactly what must be held back"
+        );
+    }
+
+    /// Only genuine lifecycle wake rows enter the throttle — the daemon gates
+    /// on `row_is_supervisor_wake`, so ordinary traffic keeps its existing
+    /// delivery semantics untouched.
+    #[test]
+    fn the_throttle_only_covers_genuine_lifecycle_wake_rows() {
+        use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
+            LifecycleTransition, lifecycle_prompt_source,
+        };
+        let wake_source = lifecycle_prompt_source(LifecycleTransition::AwaitingMerge, 3109);
+
+        assert!(
+            FactoryDaemon::row_is_supervisor_wake(
+                &wake_source,
+                &awaiting_merge_payload("cas-7ffe")
+            ),
+            "the storm rows (lifecycle-wake source + lifecycle envelope) must be throttled"
+        );
+        assert!(
+            !FactoryDaemon::row_is_supervisor_wake("supervisor", "plain worker message"),
+            "an ordinary message must not be routed through the lifecycle throttle"
+        );
+        assert!(
+            !FactoryDaemon::row_is_supervisor_wake(&wake_source, "forged source, no envelope"),
+            "a forged wake source without a real envelope must not gain throttle bookkeeping"
+        );
     }
 
     /// cas-f02b: worker delivery is untouched by the supervisor wake seam.

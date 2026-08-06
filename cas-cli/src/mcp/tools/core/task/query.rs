@@ -331,8 +331,6 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<TaskReadyBlockedRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use cas_types::TaskSortOptions;
-
         let task_store = self.open_task_store()?;
 
         // If epic filter specified, get subtasks and filter to blocked ones
@@ -363,9 +361,13 @@ impl CasCore {
                 })?
             };
 
-        // Apply sorting to the task field of each tuple
-        let sort_opts =
-            TaskSortOptions::from_params(req.sort.as_deref(), req.sort_order.as_deref());
+        // Apply sorting to the task field of each tuple. cas-06f9 (GH #104):
+        // same defaulting as `ready` — this is the same triage surface, and it
+        // carried the identical silent cap.
+        let sort_opts = crate::mcp::tools::ready_blocked_sort_options(
+            req.sort.as_deref(),
+            req.sort_order.as_deref(),
+        );
         sort_blocked_tasks(&mut blocked, &sort_opts);
 
         if blocked.is_empty() {
@@ -378,7 +380,10 @@ impl CasCore {
         }
 
         let limit = req.limit.unwrap_or(10);
-        let mut output = format!("Blocked tasks ({}):\n\n", blocked.len().min(limit));
+        let total = blocked.len();
+        let shown = total.min(limit);
+        let mut output =
+            crate::mcp::tools::truncated_list_header("Blocked tasks", total, shown, &sort_opts);
         for (task, blockers) in blocked.iter().take(limit) {
             let blocker_ids: Vec<_> = blockers.iter().map(|t| t.id.as_str()).collect();
             output.push_str(&format!(
@@ -390,6 +395,7 @@ impl CasCore {
                 blocker_ids.join(", ")
             ));
         }
+        output.push_str(&crate::mcp::tools::truncated_list_footer(total, shown));
 
         Ok(Self::success(output))
     }

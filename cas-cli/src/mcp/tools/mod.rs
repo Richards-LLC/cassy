@@ -45,16 +45,95 @@ fn sort_by_task_opts<T>(items: &mut [T], opts: &cas_types::TaskSortOptions, key:
             TaskSortField::Priority => a.priority.0.cmp(&b.priority.0),
             TaskSortField::Title => a.title.cmp(&b.title),
         };
-        match opts.effective_order() {
+        let cmp = match opts.effective_order() {
             SortOrder::Asc => cmp,
             SortOrder::Desc => cmp.reverse(),
-        }
+        };
+        // cas-06f9 (GH #104): break ties deterministically. `list_ready` /
+        // `list_blocked` carry an ORDER BY, but `get_subtasks` (the epic-
+        // filtered path) does not, so equal-priority rows arrived in
+        // SQLite-plan order — two identical calls could show different tasks
+        // inside a capped window, which is precisely the kind of "it moved and
+        // I don't know why" that truncation honesty is meant to remove.
+        cmp.then_with(|| b.created_at.cmp(&a.created_at))
+            .then_with(|| a.id.cmp(&b.id))
     });
 }
 
 /// Sort a vector of tasks based on sort options
 pub(super) fn sort_tasks(tasks: &mut [Task], opts: &cas_types::TaskSortOptions) {
     sort_by_task_opts(tasks, opts, |t| t);
+}
+
+/// cas-06f9 (GH #104): default the "what can I work on" queries to
+/// priority order.
+///
+/// `TaskSortOptions`' own default is `Created`, which is incidental ordering
+/// for this question — and combined with a silent 10-row cap it hid thirteen
+/// ready P0 tasks behind P2/P3 follow-ups while a supervisor assigned work
+/// from the visible window. An explicit `sort=` from the caller still wins;
+/// this only changes what "unspecified" means.
+pub(super) fn ready_blocked_sort_options(
+    sort: Option<&str>,
+    order: Option<&str>,
+) -> cas_types::TaskSortOptions {
+    use cas_types::TaskSortField;
+    // An unparseable `sort=` must NOT silently fall back to created/desc —
+    // that is the exact pre-fix ordering, so `sort=p0` or `sort=highest`
+    // (neither is a valid field) would hand the caller the incident behaviour
+    // back with no error. Unrecognised means unspecified, and unspecified means
+    // priority here.
+    cas_types::TaskSortOptions::new(
+        sort.and_then(|s| s.parse().ok())
+            .unwrap_or(TaskSortField::Priority),
+        order.and_then(|o| o.parse().ok()),
+    )
+}
+
+/// Human-readable name for the ordering actually applied, so the header can
+/// never imply an order the rows are not in (cas-06f9).
+pub(super) fn sort_order_label(opts: &cas_types::TaskSortOptions) -> &'static str {
+    use cas_types::{SortOrder, TaskSortField};
+    let ascending = matches!(opts.effective_order(), SortOrder::Asc);
+    match (opts.field, ascending) {
+        (TaskSortField::Priority, true) => "P0 first",
+        (TaskSortField::Priority, false) => "lowest priority first",
+        (TaskSortField::Created, true) => "oldest first",
+        (TaskSortField::Created, false) => "newest first",
+        (TaskSortField::Updated, true) => "least recently updated first",
+        (TaskSortField::Updated, false) => "most recently updated first",
+        (TaskSortField::Title, true) => "title A-Z",
+        (TaskSortField::Title, false) => "title Z-A",
+    }
+}
+
+/// Header that states the true total whenever the list is capped (cas-06f9).
+///
+/// `Ready tasks (3, P0 first):` when everything fits;
+/// `Ready tasks (showing 10 of 30, P0 first):` when it does not. The previous
+/// header printed only the shown count, so a capped list was indistinguishable
+/// from a drained queue.
+pub(super) fn truncated_list_header(
+    noun: &str,
+    total: usize,
+    shown: usize,
+    opts: &cas_types::TaskSortOptions,
+) -> String {
+    let order = sort_order_label(opts);
+    if shown < total {
+        format!("{noun} (showing {shown} of {total}, {order}):\n\n")
+    } else {
+        format!("{noun} ({total}, {order}):\n\n")
+    }
+}
+
+/// Footer naming what was withheld and how to see it (cas-06f9).
+pub(super) fn truncated_list_footer(total: usize, shown: usize) -> String {
+    if shown >= total {
+        return String::new();
+    }
+    let hidden = total - shown;
+    format!("\n... and {hidden} more not shown — pass limit={total} to see all of them.\n")
 }
 
 /// Sort a vector of blocked tasks (task, blockers) tuples based on sort options

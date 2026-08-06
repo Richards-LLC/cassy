@@ -720,6 +720,17 @@ impl TeamsManager {
         Ok(())
     }
 
+    /// Does this inbox row carry exactly the `(from, text)` pair we wrote?
+    ///
+    /// Single definition shared by [`Self::inbox_holds_message`] (the cas-ceae
+    /// delivery receipt) and the write-time dedup guard in
+    /// [`Self::write_to_inbox_impl`]: they ask opposite questions about the same
+    /// file, so a drift between the two predicates would either lose a message
+    /// or re-open the redelivery storm.
+    fn row_matches(row: &InboxMessage, from: &str, message: &str) -> bool {
+        row.from == from && row.text == message
+    }
+
     /// Whether `target`'s inbox still holds a row byte-identical to
     /// `(from, message)` (cas-ceae, GH #124/#123).
     ///
@@ -754,7 +765,9 @@ impl TeamsManager {
                 return Ok(false);
             }
             let messages: Vec<InboxMessage> = serde_json::from_str(&content)?;
-            Ok(messages.iter().any(|m| m.from == from && m.text == message))
+            Ok(messages
+                .iter()
+                .any(|message_row| Self::row_matches(message_row, from, message)))
         })
     }
 
@@ -929,10 +942,16 @@ impl TeamsManager {
             // message is still present in the inbox, skip the append — no
             // time window. Prevents director/prompt_queue/outbox replay and
             // post-handle redelivery without an intentional redelivery marker.
+            //
+            // cas-ceae: the receipt probe (`inbox_holds_message`) asks the
+            // MIRROR-IMAGE question about the same file, so both go through
+            // `row_matches`. If the two ever disagreed, the daemon would
+            // consume a row this guard is still deduplicating (message lost)
+            // or re-append one it thinks is absent (the storm, again).
             let is_content_duplicate = messages
                 .iter()
                 .rev()
-                .any(|m| m.from == from && m.text == message);
+                .any(|m| Self::row_matches(m, from, message));
 
             if is_content_duplicate {
                 tracing::debug!(
@@ -2211,6 +2230,50 @@ mod tests {
             "a corrupt inbox must be an error so the daemon delivers unchanged instead of \
              assuming the harness took the message"
         );
+    }
+
+    /// cas-ceae drift guard: the write-time dedup ("is an identical row still
+    /// present? then skip the append") and the receipt probe ("is our row gone?
+    /// then it was received") are opposite readings of ONE predicate. If they
+    /// ever disagreed, the daemon would consume a row the writer is still
+    /// deduplicating (message never delivered) or re-append one it believes
+    /// absent (the 385x storm). Both now call `row_matches`; this pins the
+    /// agreement behaviourally, not just structurally.
+    #[test]
+    fn the_receipt_probe_and_the_write_dedup_never_disagree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = manager_in(tmp.path(), "agree");
+        std::fs::create_dir_all(&mgr.inboxes_dir).unwrap();
+        let path = mgr.inboxes_dir.join("swift-fox.json");
+
+        let cases: [(&str, &str); 4] = [
+            ("supervisor", "start cas-ceae"),
+            ("supervisor", "start cas-ceae "), // trailing space: a different message
+            (DIRECTOR_AGENT_NAME, "start cas-ceae"),
+            ("supervisor", "unrelated"),
+        ];
+
+        mgr.write_to_inbox("swift-fox", "supervisor", "start cas-ceae", None, None)
+            .unwrap();
+
+        for (from, text) in cases {
+            let before = std::fs::read_to_string(&path).unwrap();
+            let rows_before: Vec<InboxMessage> = serde_json::from_str(&before).unwrap();
+            let holds = mgr.inbox_holds_message("swift-fox", from, text).unwrap();
+
+            mgr.write_to_inbox("swift-fox", from, text, None, None)
+                .unwrap();
+            let rows_after: Vec<InboxMessage> =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            let appended = rows_after.len() > rows_before.len();
+
+            assert_eq!(
+                holds, !appended,
+                "receipt probe said holds={holds} for ({from}, {text:?}) but the writer \
+                 {} — the two must be exact complements",
+                if appended { "appended a copy" } else { "deduped" }
+            );
+        }
     }
 
     /// Writes from different senders with the same text are independent —

@@ -40,6 +40,7 @@ pub mod fs_space;
 pub mod harness_policy;
 pub mod hooks;
 pub mod hybrid_search;
+pub mod knowledge;
 pub mod logging;
 pub mod migration;
 pub mod notifications;

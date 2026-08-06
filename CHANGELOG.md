@@ -7,7 +7,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
-## [2.41.0] - 2026-08-05
+## [2.42.0] - 2026-08-06
+
+### Added
+- **The GitHub-issues sweep is now a skill instead of folklore.** `cas-github-issues` ships as a builtin for every harness: dedupe double-filed copies, verify-and-close fixed claims, task new issues into the active github-issues epic (creating a successor epic when none is open — never tasking into a closed one), comment each issue with its task ID, unblock chained tasks when lanes merge, and file defects observed since the last sweep.
+
+### Fixed
+- **Codex workers no longer wedge silently in untrusted directories.** The factory pre-trusts worker and supervisor workdirs in `~/.codex/config.toml` before launch (hardened against config corruption), and the register-timeout diagnostic now names the trust-prompt cause instead of a generic timeout.
+- **Assigning a task actually wakes Codex workers now.** Assignee changes emit durable wake-ups on the Codex path — previously only Claude workers reacted, and assigned P0 work sat idle until a manual nudge. Director idle notices are stamped with the instant their snapshot was read, so stale "worker is idle" claims are identifiable.
+- **`task action=update` honours `blocked_by`.** Previously it silently dropped the field and reported "No changes specified", letting work start on stale inputs; blockers are now pre-validated and gated status re-armed, matching `create` semantics.
+- **`spawn_workers` no longer demands a ceremonial epic.** Supplying a concrete open `task_id` permits spawning after an epic closes, instead of forcing a single-child wrapper epic.
+- **A new epic no longer strands prior work by branching from a stale `main`.** Epic-branch creation compares the intended base against `HEAD`; when `HEAD` is ahead on an epic branch the divergence is surfaced instead of silently basing dozens of commits behind.
+
+### Investigated
+- **Dev-profile `split-debuginfo` measured end to end and rejected.** With mold and `debug = 1` already in place it buys no link time, no cold-build time, and no net disk at measurable scale; `packed` is strictly worse. Full numbers on the issue.
 
 ### Added
 - **Long-running services get a registry instead of an ambush.** `server_start`/`server_stop`/`server_list` register agent-launched servers with ownership, logs, and a pid-identity fingerprint; registered shared servers live in their own cgroup scope so worker teardown deliberately spares them, and `stop` refuses to signal a reused pid rather than killing a bystander.

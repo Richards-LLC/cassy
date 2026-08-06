@@ -44,6 +44,8 @@ If your output degrades to garbled multi-language text, or you find yourself rep
 
 Message supervisor immediately: "Context exhausted, need respawn." Do not attempt to continue working.
 
+Prevention lives in [discipline.md](discipline.md): report headroom in every milestone note, and checkpoint (commit + push + handoff note + respawn request) before you reach this state — never work into auto-compaction.
+
 ## Worktree Issues (Isolated Mode)
 
 **Submodule not initialized**: Worktrees don't include submodules. Symlink from the main repo:

@@ -341,7 +341,6 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<TaskReadyBlockedRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use cas_types::TaskSortOptions;
 
         let task_store = self.open_task_store()?;
 
@@ -370,9 +369,14 @@ impl CasCore {
             })?
         };
 
-        // Apply sorting
-        let sort_opts =
-            TaskSortOptions::from_params(req.sort.as_deref(), req.sort_order.as_deref());
+        // Apply sorting. cas-06f9 (GH #104): unspecified means priority order
+        // here, not creation order — this is the "what should I pick up next"
+        // surface, and incidental ordering combined with the cap below is what
+        // buried thirteen ready P0s behind P2/P3 follow-ups.
+        let sort_opts = crate::mcp::tools::ready_blocked_sort_options(
+            req.sort.as_deref(),
+            req.sort_order.as_deref(),
+        );
         sort_tasks(&mut tasks, &sort_opts);
 
         if tasks.is_empty() {
@@ -384,14 +388,22 @@ impl CasCore {
             return Ok(Self::success(msg));
         }
 
+        // cas-06f9 (GH #104): the cap stays (an unbounded dump is its own
+        // problem) but it is no longer silent — the header carries the true
+        // total and the footer says how to see the rest. "Ready tasks (10)"
+        // read as a drained queue when 30 were waiting.
         let limit = req.limit.unwrap_or(10);
-        let mut output = format!("Ready tasks ({}):\n\n", tasks.len().min(limit));
+        let total = tasks.len();
+        let shown = total.min(limit);
+        let mut output =
+            crate::mcp::tools::truncated_list_header("Ready tasks", total, shown, &sort_opts);
         for task in tasks.iter().take(limit) {
             output.push_str(&format!(
                 "- [{}] P{} {} - {}\n",
                 task.id, task.priority.0, task.task_type, task.title
             ));
         }
+        output.push_str(&crate::mcp::tools::truncated_list_footer(total, shown));
 
         Ok(Self::success(output))
     }

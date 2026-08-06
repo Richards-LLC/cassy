@@ -1,10 +1,92 @@
 #[cfg(test)]
 mod tests {
     use super::super::{
-        check_worktree_staleness, resolve_staleness_sync_ref, slugify_for_branch, truncate_str,
+        check_worktree_staleness, ready_blocked_sort_options, resolve_staleness_sync_ref,
+        slugify_for_branch, sort_order_label, truncate_str, truncated_list_footer,
+        truncated_list_header,
     };
     use std::process::Command;
     use tempfile::TempDir;
+
+    // ========================================================================
+    // cas-06f9 (GH #104): honest truncation + priority-first default
+    // ========================================================================
+
+    /// Unspecified sort means priority order on the ready/blocked surface.
+    /// `TaskSortOptions`' own default is Created, which is incidental ordering
+    /// for "what should I pick up next".
+    #[test]
+    fn unspecified_sort_defaults_to_priority_p0_first() {
+        let opts = ready_blocked_sort_options(None, None);
+        assert_eq!(opts.field, cas_types::TaskSortField::Priority);
+        assert_eq!(opts.effective_order(), cas_types::SortOrder::Asc);
+        assert_eq!(sort_order_label(&opts), "P0 first");
+    }
+
+    /// An explicit sort from the caller still wins — this only redefines
+    /// "unspecified".
+    #[test]
+    fn explicit_sort_is_not_overridden_by_the_default() {
+        let opts = ready_blocked_sort_options(Some("created"), Some("desc"));
+        assert_eq!(opts.field, cas_types::TaskSortField::Created);
+        assert_eq!(sort_order_label(&opts), "newest first");
+
+        // An order without a field keeps priority but honours the direction.
+        let reversed = ready_blocked_sort_options(None, Some("desc"));
+        assert_eq!(reversed.field, cas_types::TaskSortField::Priority);
+        assert_eq!(sort_order_label(&reversed), "lowest priority first");
+    }
+
+    /// The header must never imply an order the rows are not in.
+    #[test]
+    fn every_sort_field_has_a_distinct_honest_label() {
+        let cases = [
+            (Some("priority"), Some("asc"), "P0 first"),
+            (Some("priority"), Some("desc"), "lowest priority first"),
+            (Some("created"), Some("asc"), "oldest first"),
+            (Some("created"), Some("desc"), "newest first"),
+            (Some("updated"), Some("asc"), "least recently updated first"),
+            (Some("updated"), Some("desc"), "most recently updated first"),
+            (Some("title"), Some("asc"), "title A-Z"),
+            (Some("title"), Some("desc"), "title Z-A"),
+        ];
+        for (sort, order, expected) in cases {
+            let opts = ready_blocked_sort_options(sort, order);
+            assert_eq!(sort_order_label(&opts), expected, "{sort:?}/{order:?}");
+        }
+    }
+
+    /// A capped list states the true total; an uncapped one does not pretend
+    /// to be capped.
+    #[test]
+    fn header_states_the_true_total_only_when_something_is_withheld() {
+        let opts = ready_blocked_sort_options(None, None);
+
+        let truncated = truncated_list_header("Ready tasks", 30, 10, &opts);
+        assert!(
+            truncated.starts_with("Ready tasks (showing 10 of 30, P0 first):"),
+            "{truncated}"
+        );
+
+        let complete = truncated_list_header("Ready tasks", 3, 3, &opts);
+        assert!(
+            complete.starts_with("Ready tasks (3, P0 first):"),
+            "{complete}"
+        );
+        assert!(!complete.contains("showing"), "{complete}");
+    }
+
+    /// The footer names the withheld count and the exact way to see it; an
+    /// uncapped list gets no footer at all.
+    #[test]
+    fn footer_names_what_was_withheld_and_how_to_see_it() {
+        let footer = truncated_list_footer(30, 10);
+        assert!(footer.contains("and 20 more not shown"), "{footer}");
+        assert!(footer.contains("limit=30"), "{footer}");
+
+        assert!(truncated_list_footer(3, 3).is_empty());
+        assert!(truncated_list_footer(0, 0).is_empty());
+    }
 
     // ========================================================================
     // Epic Branch Slugification Tests

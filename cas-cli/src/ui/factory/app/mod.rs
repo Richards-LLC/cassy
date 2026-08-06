@@ -117,6 +117,12 @@ pub struct WorkerSpawnPrep {
     /// The daemon drains these into the spawn audit trail and the supervisor's
     /// inbox so a worker cut from old history is never a silent event.
     pub warnings: Vec<String>,
+    /// cas-7587 (GH #122): one line naming the resolved worktree base and why
+    /// it won (task's epic branch / pinned focus / trunk). Informational, not
+    /// an error: the daemon writes it to the spawn audit trail so a supervisor
+    /// can always see which epic's history a worker was cut from. `None` for
+    /// non-isolated spawns (no worktree, no base to resolve).
+    pub base_provenance: Option<String>,
 }
 
 /// Result of background worktree preparation (phase 2 output)
@@ -4902,6 +4908,7 @@ mod spawn_isolation_tests {
                     cas_dir: cas_dir.clone(),
                 }),
                 warnings: Vec::new(),
+                base_provenance: None,
             };
 
             let result = prep
@@ -4958,6 +4965,7 @@ mod spawn_isolation_tests {
                 cas_dir,
             }),
             warnings: Vec::new(),
+            base_provenance: None,
         };
 
         match prep.run() {

@@ -3183,7 +3183,9 @@ impl FactoryDaemon {
                 spec,
                 task_id,
             } => {
-                match self.app.prepare_worker_spawn(None, isolate) {
+                // cas-7587 (GH #122): task_id decides the worktree base (its
+                // epic branch), not the session's pinned epic focus.
+                match self.app.prepare_worker_spawn(None, isolate, task_id.as_deref()) {
                     Ok(prep) => {
                         let worker_name = prep.worker_name.clone();
                         append_spawn_audit(
@@ -3195,6 +3197,20 @@ impl FactoryDaemon {
                             "started",
                             "Preparing worker filesystem and worktree.",
                         );
+                        // cas-7587 (GH #122): record which branch this worker
+                        // was cut from and why (task's epic / pinned focus /
+                        // trunk) so base provenance is never a guess.
+                        if let Some(provenance) = &prep.base_provenance {
+                            append_spawn_audit(
+                                self.app.cas_dir(),
+                                &self.session_name,
+                                request_id,
+                                Some(&worker_name),
+                                "provision",
+                                "base",
+                                provenance,
+                            );
+                        }
                         // cas-ecf7 (GH #118): a base that is behind trunk must
                         // be reported before the worker starts working on it.
                         report_spawn_warnings(
@@ -3267,7 +3283,12 @@ impl FactoryDaemon {
                 spec,
                 task_id,
             } => {
-                match self.app.prepare_worker_spawn(Some(&name), isolate) {
+                // cas-7587 (GH #122): see the Anonymous arm — the task's epic
+                // branch outranks the pinned focus for base resolution.
+                match self
+                    .app
+                    .prepare_worker_spawn(Some(&name), isolate, task_id.as_deref())
+                {
                     Ok(prep) => {
                         let worker_name = prep.worker_name.clone();
                         append_spawn_audit(
@@ -3279,6 +3300,20 @@ impl FactoryDaemon {
                             "started",
                             "Preparing worker filesystem and worktree.",
                         );
+                        // cas-7587 (GH #122): record which branch this worker
+                        // was cut from and why (task's epic / pinned focus /
+                        // trunk) so base provenance is never a guess.
+                        if let Some(provenance) = &prep.base_provenance {
+                            append_spawn_audit(
+                                self.app.cas_dir(),
+                                &self.session_name,
+                                request_id,
+                                Some(&worker_name),
+                                "provision",
+                                "base",
+                                provenance,
+                            );
+                        }
                         // cas-ecf7 (GH #118): see the Anonymous arm.
                         report_spawn_warnings(
                             self.app.cas_dir(),

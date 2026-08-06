@@ -91,6 +91,47 @@ pub fn handle_pre_tool_use(
     }
 
     // ========================================================================
+    // REVIEW DISPATCH GATE — every harness entry path (cas-bcfb, GH #125)
+    //
+    // cas-4fef put the ownership gate on `cas_skill_use`, i.e. only on
+    // `mcp__cas__skill action=use id=cas-code-review`. No agent takes that
+    // path: the skill is installed on disk as a Claude Code skill and is
+    // invoked with the native `Skill` tool, and the Phase C workflow
+    // (`.claude/workflows/cas-code-review.js`) is callable straight from the
+    // `Workflow` tool. Both bypass the MCP server entirely, which is how a
+    // worker ran the full persona fan-out under `owner = "supervisor"` on a
+    // binary that provably contained the gate (GH #125: same refusal string
+    // compiled into both binary generations alive that day).
+    //
+    // PreToolUse is the only seam CAS owns for harness-native tool calls, so
+    // the gate is re-stated here — same pure `review_dispatch_decision`, same
+    // refusal text, so the MCP site and this one cannot drift. The matcher
+    // lists that make this hook fire for `Skill`/`Workflow` live in
+    // `ui/factory/daemon/runtime/teams.rs` (factory settings) and
+    // `config/hooks.rs` (generated settings); both must keep these tools.
+    //
+    // Hoisted above the cas_root check for the same reason the
+    // AskUserQuestion gate is: role comes from the hook's own snapshot, and a
+    // hook dispatch that cannot resolve a CAS root must still refuse (with
+    // cas_root=None `supervisor_owned_at` returns the cas-865b default).
+    // ========================================================================
+    if crate::harness_policy::is_worker(input)
+        && crate::code_review_dispatch::tool_call_enters_review(
+            tool_name,
+            input.tool_input.as_ref(),
+        )
+    {
+        if let crate::code_review_dispatch::ReviewDispatchDecision::Refused { message } =
+            crate::code_review_dispatch::review_dispatch_decision(
+                true,
+                crate::code_review_dispatch::supervisor_owned_at(cas_root),
+            )
+        {
+            return Ok(HookOutput::with_pre_tool_permission("deny", &message));
+        }
+    }
+
+    // ========================================================================
     // WORKER COMMIT GUARD — HOISTED ABOVE cas_root check (cas-bea2, LAYER 1)
     //
     // Must run before the hoisted FACTORY_AUTO_APPROVE block below. That

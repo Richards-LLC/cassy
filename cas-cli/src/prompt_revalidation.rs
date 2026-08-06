@@ -201,7 +201,24 @@ pub(crate) fn revalidate_lifecycle_prompt(
     let Some(envelope) = parse_lifecycle_envelope(prompt) else {
         return LifecyclePromptDecision::Unstructured;
     };
-    if current_status == envelope.new_status && current_updated_at == envelope.occurrence {
+    if current_status != envelope.new_status {
+        return LifecyclePromptDecision::SuppressStale {
+            task_id: envelope.task_id,
+        };
+    }
+    // cas-f02b (GH #101): occurrence equality is the right staleness test for a
+    // transient transition — it distinguishes one Open→InProgress cycle from
+    // the next. It is the WRONG test for a state the task is still sitting in.
+    // A parked task keeps accruing writes while it waits (e.g.
+    // `mark_awaiting_merge_conflicted` on a worker's close retry bumps
+    // `updated_at`), and every one of those would have made the park's own
+    // notification look stale and dropped it before transport — silently
+    // reproducing the stall this notification exists to prevent. While the task
+    // is still IN the state the envelope describes, the signal is still true.
+    if current_status.is_parked_awaiting_supervisor() {
+        return LifecyclePromptDecision::Deliver;
+    }
+    if current_updated_at == envelope.occurrence {
         LifecyclePromptDecision::Deliver
     } else {
         LifecyclePromptDecision::SuppressStale {
@@ -213,6 +230,65 @@ pub(crate) fn revalidate_lifecycle_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// cas-f02b (GH #101): a parked task keeps accruing writes while it waits
+    /// (a close retry setting `merge_conflicted`, a note, a dependency edit).
+    /// Occurrence equality would call the park's own notification stale and
+    /// drop it before transport — silently reproducing the stall the
+    /// notification exists to prevent.
+    #[test]
+    fn awaiting_merge_notice_survives_writes_while_the_task_stays_parked() {
+        let occurrence = Utc.with_ymd_and_hms(2026, 8, 6, 2, 10, 0).unwrap();
+        let prompt = format!(
+            "<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"cas-f02b\" \
+             old=\"in_progress\" new=\"awaiting_merge\" actor=\"swift-fox\" \
+             notification_id=\"41\" occurrence=\"{}\">\nparked\n</task-lifecycle>",
+            occurrence.to_rfc3339()
+        );
+
+        // Same occurrence: delivered, as before.
+        assert!(matches!(
+            revalidate_lifecycle_prompt(&prompt, TaskStatus::AwaitingMerge, occurrence),
+            LifecyclePromptDecision::Deliver
+        ));
+
+        // Later write while STILL parked: still true, still delivered.
+        let later = occurrence + chrono::Duration::seconds(90);
+        assert!(
+            matches!(
+                revalidate_lifecycle_prompt(&prompt, TaskStatus::AwaitingMerge, later),
+                LifecyclePromptDecision::Deliver
+            ),
+            "a write while the task stays parked must not silence the merge signal"
+        );
+
+        // Left the state: genuinely stale, suppressed.
+        assert!(matches!(
+            revalidate_lifecycle_prompt(&prompt, TaskStatus::Closed, later),
+            LifecyclePromptDecision::SuppressStale { .. }
+        ));
+    }
+
+    /// Transient transitions keep the strict occurrence test — one
+    /// Open→InProgress cycle must not be confirmed by the next one's write.
+    #[test]
+    fn transient_transitions_still_require_matching_occurrence() {
+        let occurrence = Utc.with_ymd_and_hms(2026, 8, 6, 2, 10, 0).unwrap();
+        let prompt = format!(
+            "<task-lifecycle transition=\"task_started\" task_id=\"cas-x\" old=\"open\" \
+             new=\"in_progress\" actor=\"w\" notification_id=\"1\" occurrence=\"{}\">\n\
+             </task-lifecycle>",
+            occurrence.to_rfc3339()
+        );
+        assert!(matches!(
+            revalidate_lifecycle_prompt(
+                &prompt,
+                TaskStatus::InProgress,
+                occurrence + chrono::Duration::seconds(5)
+            ),
+            LifecyclePromptDecision::SuppressStale { .. }
+        ));
+    }
+
     use chrono::{TimeZone, Utc};
     use std::process::Command;
 

@@ -920,6 +920,21 @@ impl Mux {
         self.panes.get(pane_id).map(|p| p.bytes_received())
     }
 
+    /// Whether an attached operator currently has an unsubmitted draft in this
+    /// pane's composer (cas-f02b).
+    ///
+    /// `Mux::inject` already defers on a dirty composer, but only for a bounded
+    /// window — after `COMPOSER_DEFER_TIMEOUT` it writes anyway. Callers that
+    /// would rather skip entirely than ever type over a human (the supervisor
+    /// wake path) check this first. An unknown pane reports `false`: absence of
+    /// a pane is not evidence of a draft, and the caller's own liveness checks
+    /// decide whether to proceed.
+    pub fn pane_composer_dirty(&self, pane_id: &str) -> bool {
+        self.panes
+            .get(pane_id)
+            .is_some_and(|p| p.is_composer_dirty())
+    }
+
     /// Break a specific worker's current turn by name by sending a single
     /// Esc (0x1b) — the canonical Claude Code "stop this turn" key.
     ///

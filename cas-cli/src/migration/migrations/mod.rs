@@ -193,6 +193,7 @@ pub mod m214_known_repo_bindings;
 mod m215_verifier_server_handoffs;
 mod m216_spawn_queue_add_requester_config_dir;
 mod m217_spawn_queue_add_lifecycle_state;
+mod m218_knowledge_store_create_tables;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -402,6 +403,9 @@ pub const MIGRATIONS: &[Migration] = &[
     // launched → registered/FAILED) so a spawn that never registers is
     // queryable as FAILED rather than silence.
     m217_spawn_queue_add_lifecycle_state::MIGRATION,
+    // Project knowledge distillation store: page index, content-hash source
+    // ledger and contentless FTS5 body index (EPIC cas-7d31 / cas-cbf1).
+    m218_knowledge_store_create_tables::MIGRATION,
 ];
 
 #[cfg(test)]

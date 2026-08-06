@@ -107,7 +107,13 @@ fn render_knowledge_index(ks: &dyn KnowledgeStore, token_budget: usize) -> (Stri
 /// Kept as one constant so the MCP surface (T4) can rename its actions without
 /// touching the context builder. `mcp__cas__` is remapped to the reader's own
 /// prefix by `remap_tool_prefix` at the end of `build_context_with_stores`.
-const KNOWLEDGE_PULL_INSTRUCTION: &str = "These are titles only. Read a page body with `mcp__cas__knowledge` (action: show, id) before answering questions about how this project works — do not guess from the title.";
+///
+/// It is `pub` on purpose: the action name it advertises must stay dispatchable
+/// by the real `knowledge` MCP router, which lives in `cas-cli` and cannot be
+/// reached from here. `cas-cli`'s `knowledge_tools` suite reads this constant
+/// and drives the named action end-to-end, so a rename on either side fails a
+/// test instead of silently shipping an index whose pull half 404s.
+pub const KNOWLEDGE_PULL_INSTRUCTION: &str = "These are titles only. Read a page body with `mcp__cas__knowledge` (action: read, id) before answering questions about how this project works — do not guess from the title.";
 
 /// Build context string for session start injection
 ///

@@ -5,6 +5,7 @@
 //! must come out `locked=true` so a later distillation pass cannot overwrite it.
 
 use crate::support::*;
+use cas::mcp::CasService;
 use cas_mcp::KnowledgeRequest;
 use cas_store::{KnowledgeStore, SqliteKnowledgeStore};
 use rmcp::handler::server::wrapper::Parameters;
@@ -337,4 +338,73 @@ async fn a_snippet_is_derived_from_the_body_when_the_caller_omits_one() {
         "A lease is a time-boxed claim on a task, renewed by heartbeat.",
         "the snippet should skip frontmatter and headings"
     );
+}
+
+/// The pull half of the SessionStart "index-inject / body-pull" contract
+/// (cas-86b2): the injected knowledge index carries titles only, plus one
+/// instruction telling the reader how to fetch a body.
+///
+/// That instruction is authored in `cas-core`, which cannot see the `knowledge`
+/// router in `cas-cli`, so nothing structurally stopped the two from drifting —
+/// and they did: the instruction shipped advertising `action: show`, which the
+/// router answers with "Unknown knowledge action". The index would have looked
+/// perfect and every pull would have failed.
+///
+/// This test closes that gap from the side that owns the router. It parses the
+/// action name out of the real constant and drives it through `CasService`, the
+/// same dispatch a live MCP client hits — not `CasCore` directly, because the
+/// action-name match arms live on the service, and dispatching around them is
+/// exactly the bug this is meant to catch.
+#[tokio::test]
+async fn the_injected_pull_instruction_names_an_action_the_router_accepts() {
+    let (temp, core) = setup_cas();
+
+    // Parse `action: <name>` out of the constant rather than hardcoding it, so
+    // renaming the instruction's action forces the rename to be a real one.
+    let instruction = cas_core::hooks::context::KNOWLEDGE_PULL_INSTRUCTION;
+    let action = instruction
+        .split("action: ")
+        .nth(1)
+        .and_then(|rest| rest.split([',', ')', ' ']).next())
+        .filter(|a| !a.is_empty())
+        .unwrap_or_else(|| {
+            panic!("pull instruction must name an action as `action: <name>`: {instruction}")
+        });
+
+    // Seed one page so the action has something real to return; an id-shaped
+    // request against an empty store cannot distinguish "unknown action" from
+    // "nothing to read".
+    let created = extract_text(
+        core.knowledge_write(Parameters(write_req(
+            "Hook Dispatcher",
+            "subsystem",
+            "# Hook Dispatcher\n\nFans SessionStart events out to handlers.\n",
+        )))
+        .await
+        .expect("write should succeed"),
+    );
+    let page_id = page_id_of(&created);
+
+    let service = CasService::new(core, None);
+    let result = service
+        .knowledge(Parameters(KnowledgeRequest {
+            action: action.to_string(),
+            id: Some(page_id.clone()),
+            ..req(action)
+        }))
+        .await;
+
+    let text = match result {
+        Ok(ok) => extract_text(ok),
+        Err(e) => panic!(
+            "the SessionStart index tells readers to call `knowledge` with \
+             action `{action}`, but the router rejected it: {e}"
+        ),
+    };
+    assert!(
+        text.contains(&page_id),
+        "action `{action}` dispatched but did not return the requested page {page_id}: {text}"
+    );
+
+    drop(temp);
 }

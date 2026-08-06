@@ -634,7 +634,7 @@ mod plan_mode;
 #[cfg(test)]
 mod tests;
 
-pub use build_start::build_context_with_stores;
+pub use build_start::{KNOWLEDGE_PULL_INSTRUCTION, build_context_with_stores};
 pub(crate) use coordination::{render_factory_coordination, render_normal_coordination};
 pub use plan_mode::build_plan_context_with_stores;
 

@@ -353,9 +353,20 @@ fn session_start_injects_the_knowledge_index_and_a_pull_instruction() {
         !context.contains("THE VERIFIER BODY PROSE"),
         "page body leaked into the injected block:\n{context}"
     );
+    // `contains("knowledge")` alone is not a test: the word appears in the
+    // section header too, so that assertion stayed green while the instruction
+    // advertised `action: show`, which the router rejects outright. Pin the
+    // whole constant, and pin the action name separately so the failure message
+    // says which half broke. `cas-cli`'s knowledge_tools suite proves the named
+    // action is actually dispatchable.
     assert!(
-        context.contains("knowledge"),
-        "expected a pull instruction naming the knowledge tool, got:\n{context}"
+        context.contains(super::KNOWLEDGE_PULL_INSTRUCTION),
+        "expected the verbatim pull instruction, got:\n{context}"
+    );
+    assert!(
+        super::KNOWLEDGE_PULL_INSTRUCTION.contains("action: read"),
+        "the pull instruction must name a real `knowledge` action; got: {}",
+        super::KNOWLEDGE_PULL_INSTRUCTION
     );
 }
 

@@ -1,4 +1,5 @@
 use crate::hooks::handlers::*;
+use crate::hooks::handlers::session_budget::SessionContextAssembler;
 
 pub fn handle_session_start(
     input: &HookInput,
@@ -204,45 +205,40 @@ pub fn handle_session_start(
     let agent_role = std::env::var("CAS_AGENT_ROLE").ok();
     let is_supervisor = agent_role.as_deref() == Some("supervisor");
 
-    let context = if let Some(staleness) =
+    // cas-b114: everything from here on is assembled through the aggregate
+    // size budget (see `session_budget`). Variable-length warning sections
+    // register a compact summary alongside their full rendering so an
+    // over-budget payload degrades to counts + remediation command instead of
+    // being silently truncated by the harness at ~10KB. The base context
+    // (role guidance + CAS header + memories/tasks) is protected.
+    let mut assembler = SessionContextAssembler::new(context);
+
+    if let Some(staleness) =
         crate::hooks::handlers::handlers_events::check_codemap_freshness(cas_root)
     {
-        let codemap_ctx = staleness.format_injection(is_supervisor);
-        if context.is_empty() {
-            codemap_ctx
-        } else if staleness.is_high_severity(is_supervisor) {
-            format!("{codemap_ctx}\n{context}")
+        let full = staleness.format_injection(is_supervisor);
+        let compact = staleness.format_injection_compact(is_supervisor);
+        if staleness.is_high_severity(is_supervisor) {
+            assembler.prepend_degradable(full, compact);
         } else {
-            format!("{context}\n{codemap_ctx}")
+            assembler.append_degradable(full, compact);
         }
-    } else {
-        context
-    };
+    }
 
-    let context = if let Some(repo_root) = cas_root.parent() {
+    if let Some(repo_root) = cas_root.parent() {
         match crate::hooks::handlers::handlers_events::project_overview::check_freshness(
             repo_root,
             agent_role.as_deref(),
         ) {
+            // Always append so codemap retains the preview top slot when both
+            // modules report high severity.
             Ok(Some(staleness)) => {
-                let overview_ctx = staleness.format_injection(is_supervisor);
-                if context.is_empty() {
-                    overview_ctx
-                } else {
-                    // Always append so codemap retains the preview top slot
-                    // when both modules report high severity.
-                    format!("{context}\n{overview_ctx}")
-                }
+                assembler.append_protected(staleness.format_injection(is_supervisor))
             }
-            Ok(None) => context,
-            Err(e) => {
-                eprintln!("cas: project-overview freshness check failed: {e}");
-                context
-            }
+            Ok(None) => {}
+            Err(e) => eprintln!("cas: project-overview freshness check failed: {e}"),
         }
-    } else {
-        context
-    };
+    }
 
     // Factory session-start hygiene triage (task cas-aeec): for supervisor
     // sessions, append a banner listing uncommitted files in the main
@@ -255,66 +251,62 @@ pub fn handle_session_start(
     // preview top slot they are explicitly engineered to land in (see
     // comments above). The banner is not severity-ranked against those
     // modules, so it sits below them in the supervisor's initial view.
-    let context = if is_supervisor {
-        match crate::hooks::handlers::session_hygiene::build_session_start_wip_banner(cas_root) {
-            Some(banner) if context.is_empty() => banner,
-            Some(banner) => format!("{context}\n{banner}"),
-            None => context,
+    if is_supervisor {
+        if let Some(banner) =
+            crate::hooks::handlers::session_hygiene::build_session_start_wip_banner_sized(cas_root)
+        {
+            assembler.append_degradable(banner.full, banner.compact);
         }
-    } else {
-        context
-    };
+    }
 
     // cas-b7dd (GH #88): leftovers from dead sessions — orphan processes still
     // running in worktrees and stale server registrations. Surfaced here
     // because a new session otherwise inherits them invisibly and meets them
     // as an EADDRINUSE failure with no hint that the squatter is CAS's own.
     // Visibility only: this banner never signals anything.
-    let context = if is_supervisor {
-        match crate::hooks::handlers::session_hygiene::build_session_start_orphan_banner(cas_root) {
-            Some(banner) if context.is_empty() => banner,
-            Some(banner) => format!("{context}\n{banner}"),
-            None => context,
+    if is_supervisor {
+        if let Some(banner) =
+            crate::hooks::handlers::session_hygiene::build_session_start_orphan_banner_sized(
+                cas_root,
+            )
+        {
+            assembler.append_degradable(banner.full, banner.compact);
         }
-    } else {
-        context
-    };
+    }
 
     // Read-only GitHub issue triage (cas-ce3d). Supervisors need the intake
     // signal before assigning work; workers do not, and should not pay its
     // latency or context cost. The helper is fully best-effort: unset config,
     // cache/query/parse failures, and a hard subprocess timeout all emit
     // nothing and cannot fail SessionStart.
-    let context = if is_supervisor {
-        match crate::hooks::handlers::issue_triage::build_session_start_banner(cas_root, &config) {
-            Some(banner) if context.is_empty() => banner,
-            Some(banner) => format!("{context}\n{banner}"),
-            None => context,
+    if is_supervisor {
+        if let Some(banner) = crate::hooks::handlers::issue_triage::build_session_start_banner_sized(
+            cas_root, &config,
+        ) {
+            assembler.append_degradable(banner.full, banner.compact);
         }
-    } else {
-        context
-    };
+    }
 
     // Phase 3 / cas-3efe: opt-in integrations staleness banner. Default
     // off — only fires when `[integrations] session_start_warn = true` in
     // .cas/config.toml *and* at least one platform reports a `Stale` ID.
     // Appended last so it sits below codemap / project-overview / WIP.
     // Reuses the already-loaded `config` from earlier in this handler.
-    let context = match build_integrations_session_start_banner(cas_root, &config) {
-        Some(banner) if context.is_empty() => banner,
-        Some(banner) => format!("{context}\n{banner}"),
-        None => context,
-    };
+    if let Some(banner) = build_integrations_session_start_banner(cas_root, &config) {
+        assembler.append_protected(banner);
+    }
 
     // Host-scoped staging convention for large generated artifacts. Appended
     // near the end with other runtime banners so immutable role guidance stays
     // budget-stable, while worker worktree assertions can still prepend above
     // it when they detect a more urgent safety issue.
-    let context = match build_large_artifact_staging_banner(&config) {
-        Some(banner) if context.is_empty() => banner,
-        Some(banner) => format!("{context}\n{banner}"),
-        None => context,
-    };
+    if let Some(banner) = build_large_artifact_staging_banner(&config) {
+        assembler.append_protected(banner);
+    }
+
+    // Render under the aggregate budget before the worktree assertion, which
+    // must stay verbatim at the very top of whatever survives.
+    let context = assembler.render();
 
     // ========================================================================
     // WORKER WORKTREE ASSERTION (cas-bea2 LAYER 3)

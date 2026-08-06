@@ -69,7 +69,16 @@ struct GraphQlIssues {
 /// Build the supervisor issue-triage banner, or return `None` for every
 /// disabled/failure case. A displayed cache is at most five minutes old;
 /// once stale, a failed refresh is not replaced with older data.
-pub(crate) fn build_session_start_banner(cas_root: &Path, config: &Config) -> Option<String> {
+///
+/// Returns full + compact renderings for the SessionStart size budget
+/// (cas-b114).
+///
+/// The compact form keeps the repo and open-issue count and drops the
+/// per-issue list, which is the only part that grows.
+pub(crate) fn build_session_start_banner_sized(
+    cas_root: &Path,
+    config: &Config,
+) -> Option<crate::hooks::handlers::session_hygiene::SessionStartBanner> {
     let repo = configured_repo(config)?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
     let cache_path = cas_root.join(CACHE_FILE);
@@ -77,7 +86,12 @@ pub(crate) fn build_session_start_banner(cas_root: &Path, config: &Config) -> Op
     let cache = read_fresh_cache(&cache_path, repo, now)
         .or_else(|| fetch_issues(repo, now).inspect(|cache| write_cache(&cache_path, cache)))?;
 
-    Some(render_banner(&cache, now))
+    let full = render_banner(&cache, now);
+    let compact = format!(
+        "## GitHub issue triage — {}\n{} open — run `gh issue list --repo {}` for the list.",
+        cache.repo, cache.total_count, cache.repo
+    );
+    Some(crate::hooks::handlers::session_hygiene::SessionStartBanner { full, compact })
 }
 
 fn configured_repo(config: &Config) -> Option<&str> {

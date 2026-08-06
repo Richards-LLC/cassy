@@ -755,6 +755,7 @@ mod tests_b3 {
             dirty: false,
             pushed_ref: "none".to_string(),
             pr_url: "none".to_string(),
+            is_shared_checkout: false,
         };
     }
 }

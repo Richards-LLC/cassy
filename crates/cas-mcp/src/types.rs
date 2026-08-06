@@ -360,12 +360,14 @@ pub struct TaskRequest {
     #[serde(default)]
     pub epic: Option<String>,
 
-    /// Sort field (for list, ready, blocked)
-    #[schemars(description = "Sort by: 'created', 'updated', 'priority', 'title'")]
+    /// Sort field (for list, ready, blocked, available)
+    #[schemars(
+        description = "Sort by: 'created', 'updated', 'priority', 'title'. Honoured by list, ready, blocked and available; ready/blocked/available default to priority when unset."
+    )]
     #[serde(default)]
     pub sort: Option<String>,
 
-    /// Sort order (for list, ready, blocked)
+    /// Sort order (for list, ready, blocked, available)
     #[schemars(
         description = "Sort order: 'asc' or 'desc' (default: desc for dates, asc for priority)"
     )]

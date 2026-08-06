@@ -622,8 +622,10 @@ impl CasCore {
         // could read 20 rows, see a larger total it had no reason to connect to
         // its own view, and never learn which call shows the rest. Same footer
         // as `ready`/`blocked` (cas-06f9 / GH #104), same surface behaviour.
-        // Rows arrive priority-first from `list_ready`'s ORDER BY, so the
-        // withheld tail is genuinely lower-priority work.
+        // The tail withheld here is the tail of whatever ordering was applied
+        // just above — lower-priority work by default, but the alphabetical
+        // tail under sort=title. The footer makes no ordering claim; the
+        // header names the order so the two cannot disagree.
         let limit = req.limit.unwrap_or(20);
         let total = available.len();
         let shown = total.min(limit);

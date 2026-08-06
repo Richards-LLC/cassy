@@ -479,6 +479,51 @@ impl std::fmt::Display for ObservationStatus {
         }
     }
 }
+/// Provenance of a message's `acked_at` stamp (cas-45c4 / GH #102).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfirmationSource {
+    /// No ack recorded.
+    Unconfirmed,
+    /// The recipient called `message_ack` for this message id — its own claim
+    /// about this specific message.
+    ExplicitAck,
+    /// CAS inferred consumption because the recipient later sent a message to
+    /// the same counterparty (cas-6ad2). Evidence that the recipient took a
+    /// turn, NOT that this message's content was surfaced to it.
+    InferredFromReply,
+    /// Ack recorded before provenance was tracked, or by an unknown path.
+    Unknown,
+}
+
+impl ConfirmationSource {
+    pub fn from_column(raw: Option<&str>, has_ack: bool) -> Self {
+        match (raw, has_ack) {
+            (_, false) => Self::Unconfirmed,
+            (Some("explicit_ack"), true) => Self::ExplicitAck,
+            (Some("inferred_from_reply"), true) => Self::InferredFromReply,
+            (_, true) => Self::Unknown,
+        }
+    }
+
+    /// Whether this confirmation is the recipient's own claim about this
+    /// message, rather than an inference from unrelated activity.
+    pub fn is_recipient_claim(self) -> bool {
+        matches!(self, Self::ExplicitAck)
+    }
+}
+
+impl std::fmt::Display for ConfirmationSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unconfirmed => write!(f, "unconfirmed"),
+            Self::ExplicitAck => write!(f, "explicit_ack"),
+            Self::InferredFromReply => write!(f, "inferred_from_reply"),
+            Self::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
 
 /// Stage-based delivery report for one prompt_queue message (cas-2c5f).
 ///
@@ -510,6 +555,11 @@ pub struct MessageDeliveryReport {
     /// Full transport handoff time only (not legacy processed_at / partial).
     pub delivered_at: Option<DateTime<Utc>>,
     pub confirmed_at: Option<DateTime<Utc>>,
+    /// cas-45c4 (GH #102): how `confirmed_at` was obtained. `Unconfirmed` when
+    /// there is no ack at all. Without this, a reply-inferred ack and an
+    /// explicit recipient acknowledgement are indistinguishable — and only one
+    /// of them is the recipient's own claim about THIS message.
+    pub confirmation_source: ConfirmationSource,
     /// Present when waiting/blocked, partial, or terminal non-delivery.
     pub pending_reason: Option<PendingReason>,
     /// Human-readable detail for the pending reason (error text, …).
@@ -567,6 +617,16 @@ ALTER TABLE prompt_queue ADD COLUMN next_attempt_at TEXT;
 "#;
 const PROMPT_QUEUE_FIRST_ATTEMPT_AT_MIGRATION: &str = r#"
 ALTER TABLE prompt_queue ADD COLUMN first_attempt_at TEXT;
+"#;
+
+/// cas-45c4 (GH #102): how `acked_at` was obtained. `acked_at` alone conflates
+/// two very different claims — the recipient explicitly acknowledged this
+/// message, versus CAS inferred consumption because the recipient later
+/// replied to that counterparty. Reporting both as "confirmed" is what let
+/// `message_status` claim a recipient confirmed content it may never have
+/// surfaced.
+const PROMPT_QUEUE_ACKED_VIA_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN acked_via TEXT;
 "#;
 
 /// Trait for prompt queue operations
@@ -1351,6 +1411,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 ),
                 ("next_attempt_at", PROMPT_QUEUE_NEXT_ATTEMPT_AT_MIGRATION),
                 ("first_attempt_at", PROMPT_QUEUE_FIRST_ATTEMPT_AT_MIGRATION),
+                ("acked_via", PROMPT_QUEUE_ACKED_VIA_MIGRATION),
                 ("dedupe_key", PROMPT_QUEUE_DEDUPE_KEY_MIGRATION),
             ] {
                 crate::shared_db::ensure_column(&conn, "prompt_queue", col, mig)?;
@@ -2034,7 +2095,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 AtomicStampOpts::clear_reason(),
             );
             conn.execute(
-                "UPDATE prompt_queue SET acked_at = ? WHERE id = ? AND acked_at IS NULL",
+                "UPDATE prompt_queue SET acked_at = ?, acked_via = 'explicit_ack' \
+                 WHERE id = ? AND acked_at IS NULL",
                 params![now, prompt_id],
             )?;
             // rows_affected == 0 means either not found or already acked — both idempotent
@@ -2067,6 +2129,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             let sql = format!(
                 "UPDATE prompt_queue
                  SET acked_at = ?,
+                     acked_via = 'inferred_from_reply',
                      highest_stage = 'confirmed',
                      last_pending_reason = NULL,
                      last_pending_detail = NULL
@@ -2153,7 +2216,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             "SELECT id, prompt, source, target, created_at, processed_at, factory_session,
                     priority, acked_at, urgent, selected_at, last_pending_reason,
                     last_pending_detail, transport_delivered_at, highest_stage,
-                    broadcast_attempted, broadcast_succeeded, broadcast_failed
+                    broadcast_attempted, broadcast_succeeded, broadcast_failed,
+                    acked_via
              FROM prompt_queue WHERE id = ?",
             params![prompt_id],
             |row| {
@@ -2176,6 +2240,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     row.get::<_, Option<i64>>(15).unwrap_or(None),
                     row.get::<_, Option<i64>>(16).unwrap_or(None),
                     row.get::<_, Option<i64>>(17).unwrap_or(None),
+                    row.get::<_, Option<String>>(18).unwrap_or(None),
                 ))
             },
         );
@@ -2199,6 +2264,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             bc_attempted,
             bc_succeeded,
             bc_failed,
+            acked_via_s,
         ) = match row {
             Ok(v) => v,
             Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
@@ -2301,6 +2367,10 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             selected_at,
             delivered_at,
             confirmed_at,
+            confirmation_source: ConfirmationSource::from_column(
+                acked_via_s.as_deref(),
+                confirmed_at.is_some(),
+            ),
             pending_reason,
             pending_detail,
             broadcast_attempted: bc_attempted.map(|n| n as u32),
@@ -2674,6 +2744,80 @@ mod tests {
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         (temp, store)
+    }
+
+    /// cas-45c4 (GH #102): an ack inferred from a later reply must never be
+    /// reported the same way as the recipient's own acknowledgement. The
+    /// inference proves the recipient took a turn; it does not prove this
+    /// message's content was ever surfaced to it — and reporting both as
+    /// "confirmed" is what let status claim a confirmation nobody made.
+    #[test]
+    fn confirmation_source_separates_an_explicit_ack_from_a_reply_inference() {
+        let (_temp, store) = create_test_store();
+
+        let explicit = store
+            .enqueue_with_session("supervisor", "swift-fox", "read this", "sess-1")
+            .unwrap();
+        let inferred = store
+            .enqueue_with_session("supervisor", "swift-fox", "and this", "sess-1")
+            .unwrap();
+
+        // Both reach the recipient's transport.
+        store.poll_all(10).unwrap();
+        store.mark_transport_delivered(explicit).unwrap();
+        store.mark_transport_delivered(inferred).unwrap();
+
+        let before = store.message_delivery_report(explicit).unwrap().unwrap();
+        assert_eq!(
+            before.confirmation_source,
+            ConfirmationSource::Unconfirmed,
+            "transport handoff is not a confirmation"
+        );
+
+        // The recipient explicitly acknowledges one of them...
+        store.ack(explicit).unwrap();
+        // ...and separately sends a reply, which sweeps the rest to acked.
+        store
+            .ack_delivered_for_recipient(&["swift-fox"], &["supervisor"], Some("sess-1"))
+            .unwrap();
+
+        let a = store.message_delivery_report(explicit).unwrap().unwrap();
+        let b = store.message_delivery_report(inferred).unwrap().unwrap();
+
+        assert_eq!(a.confirmation_source, ConfirmationSource::ExplicitAck);
+        assert!(
+            a.confirmation_source.is_recipient_claim(),
+            "the recipient acknowledged this message itself"
+        );
+
+        assert_eq!(b.confirmation_source, ConfirmationSource::InferredFromReply);
+        assert!(
+            !b.confirmation_source.is_recipient_claim(),
+            "a reply-inferred ack must not be presented as the recipient's claim about \
+             THIS message — it may never have been surfaced"
+        );
+        // Both still read as legacy-confirmed, so older clients are unaffected.
+        assert!(a.confirmed_at.is_some() && b.confirmed_at.is_some());
+    }
+
+    /// cas-45c4: rows acked before provenance tracking existed must report
+    /// `Unknown` rather than being upgraded to a claim nobody made.
+    #[test]
+    fn a_legacy_ack_without_provenance_is_reported_as_unknown_not_explicit() {
+        assert_eq!(
+            ConfirmationSource::from_column(None, true),
+            ConfirmationSource::Unknown
+        );
+        assert_eq!(
+            ConfirmationSource::from_column(None, false),
+            ConfirmationSource::Unconfirmed
+        );
+        // An ack stamp is required before any provenance is meaningful.
+        assert_eq!(
+            ConfirmationSource::from_column(Some("explicit_ack"), false),
+            ConfirmationSource::Unconfirmed
+        );
+        assert!(!ConfirmationSource::Unknown.is_recipient_claim());
     }
 
     #[test]

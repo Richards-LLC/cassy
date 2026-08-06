@@ -8,6 +8,18 @@ managed_by: cas
 
 ## Session Start (No Hooks)
 
+0. **Binary freshness check (cas-d0f9).** Before anything else — confirm the running `cas serve` binary matches HEAD of this repo. A stale binary may impose legacy global verification blocks instead of the current exact-task close gate. See the Pre-flight section in the cas-supervisor SKILL for the full command; the 10-second version:
+
+   ```
+   # cas --version format: cas 2.27.0 (9b52e17-dirty 2026-07-16)
+   # Fields after '(': short hash, optional -dirty (build tree had local mods), then build date.
+   # Do NOT use awk '{print $NF}' — that grabs the date token, not the hash.
+   cas --version | sed -E 's/.*\(([0-9a-f]+)(-dirty)? .*/\1/'   # → 9b52e17
+   git rev-parse --short HEAD                                   # hash of the repo right now
+   ```
+
+   If they don't match AND `git log --oneline HEAD --not <running-hash> -- cas-cli/src/mcp cas-cli/src/hooks cas-cli/src/cli/factory` returns anything, run `cargo build --release` and restart any live `cas serve` processes before continuing.
+
 1. Identify yourself: `mcp__cs__coordination action=whoami`
 2. Load EPIC/task context:
    ```
@@ -19,7 +31,31 @@ managed_by: cas
    ```
    mcp__cs__search action=search query="<keywords>" doc_type=entry limit=5
    ```
-4. Check worker availability: `mcp__cs__coordination action=worker_status`
+4. Check codemap freshness:
+   - If `.claude/CODEMAP.md` is missing → run the `codemap` skill to generate it.
+   - If it exists but is stale (structural changes since last update) → run the `codemap` skill to refresh.
+   - Codex has no SessionStart/PreToolUse banner to warn you, so check explicitly: `cas codemap status`.
+   - Workers reference CODEMAP for codebase orientation — ensure it's current before spawning them.
+5. Check worker availability: `mcp__cs__coordination action=worker_status`
+6. **Session hygiene triage** — on hook-enabled harnesses a SessionStart banner
+   flags prior-factory WIP left in the main worktree. Codex gets no such
+   banner, so run the report yourself, every session, before spawning workers:
+
+   ```
+   mcp__cs__coordination action=gc_report
+   ```
+
+   The report's "Prior-factory WIP candidates" section lists uncommitted
+   changes in the main worktree with per-file attribution (last `cas-xxxx`
+   commit) where git history permits, alongside stale agents and orphan
+   worktrees. Decide salvage / commit / discard **before** spawning workers —
+   otherwise a cherry-pick into `develop` will abort later. The report is safe
+   to re-run at any time; it never auto-deletes.
+
+   For the full history of what prior sessions left behind, see
+   `.cas/logs/factory-session-{YYYY-MM-DD}.log` (written automatically on
+   `SessionEnd`; each block records session id, agent, worktree, and a
+   `git status --porcelain` snapshot).
 
 Do not use `/cas-start`, `/cas-context`, or `/cas-end` — they are not available in Codex.
 
@@ -56,9 +92,11 @@ mcp__cs__memory action=remember title="..." content="..." tags="decision"
 
 ## Before Closing an EPIC
 
-- Verify all worker branches are merged into the epic branch
+- Run `mcp__cs__coordination action=epic_status id=<epic-id>` — confirms every child task's `factory/<assignee>` branch is merged into the epic branch (this check is now also enforced automatically at `mcp__cs__task action=close` for Epic-type tasks; bypass-immune)
 - Confirm task deliverables exist on the epic branch
 - Run full test suite on epic branch
+
+The `epic_status` action is a defense-in-depth diagnostic: the close-time gate (cas-8f8f) refuses to close an epic with stranded child branches regardless of `bypass_code_review=true`, but running `epic_status` mid-flight surfaces the same data so you can resolve merges without chasing a close-time error.
 
 ## Session End
 

@@ -91,6 +91,7 @@ Rust TUI over an in-process PTY mux (not tmux); `cas` with no subcommand launche
 - `cas-store/src/prompt_queue_store.rs` — prompt queue: enqueue, delivery stages, bounded retry/abandon, per-target progress
 - `cas-store/src/sync_queue/queue_ops.rs` — sync queue upsert; `UNIQUE(entity_type, entity_id, team_id)` with ON CONFLICT resetting payload/created_at/retry_count/last_error (so `created_at` is last-touch, not first-enqueue)
 - `cas-store/src/task_store.rs` — tasks are scoped by **database location**, not a column; `Scope::Project` is hardcoded at read time (~:224) and carries no provenance
+- `cas-store/src/knowledge_store.rs` — distilled repo knowledge (m218): markdown bodies on disk under `.cas/knowledge/`, index + blake3 source ledger in cas.db, contentless FTS5 (`content=''`) so no column holds body prose. `commit_ingest` applies rows + index + ledger + tombstone cascade in ONE SQLite tx, with bodies staged/published via `BodyTransaction` so the filesystem rolls back with the DB. `locked=1` is user-sovereign (distillation can neither overwrite nor set it); `classify_sources` is pure
 - `cas-store/src/{event_store,code_store,entity_store,file_change_store,layered,mock}.rs`
 - `cas-factory/src/spec_resolver.rs` — multi-layer worker/supervisor spec cascade + `apply_codex_fallback` (Codex→Claude, no reverse)
 - `cas-factory/src/probe.rs` — Codex availability probe (`codex --version` + `~/.codex/auth.json`)

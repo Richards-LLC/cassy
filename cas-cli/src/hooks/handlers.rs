@@ -261,6 +261,7 @@ pub(crate) fn truncate_display(s: &str, max_len: usize) -> String {
 mod handlers_session;
 mod handlers_state;
 pub(crate) mod issue_triage;
+pub(crate) mod session_budget;
 pub(crate) mod session_hygiene;
 
 #[cfg(test)]

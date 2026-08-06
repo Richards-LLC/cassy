@@ -45,6 +45,11 @@ Migration {
 | Entities | 111-130 | Entity/knowledge graph |
 | Verification | 131-150 | Task verification |
 | Loops | 151-170 | Iteration loops |
+| Knowledge | 218+ | Distilled project knowledge (knowledge_pages, knowledge_sources, FTS) |
+
+> **Note:** the per-subsystem ranges above only describe migrations up to ~170.
+> Beyond that, IDs are allocated **globally sequentially** regardless of
+> subsystem — take the next free number after the last entry in `MIGRATIONS`.
 
 ## Adding a New Migration
 

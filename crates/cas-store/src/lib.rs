@@ -43,6 +43,7 @@ mod entity_store;
 pub mod error;
 mod event_store;
 mod file_change_store;
+mod knowledge_store;
 pub mod layered;
 mod loop_store;
 pub mod markdown;
@@ -95,6 +96,16 @@ pub use sqlite_code_store::{CODE_SCHEMA, SqliteCodeStore};
 
 // Entity store for knowledge graph feature
 pub use entity_store::{ENTITY_SCHEMA, SqliteEntityStore};
+
+// Knowledge store for LLM-distilled repo prose (EPIC cas-7d31 / cas-cbf1):
+// markdown bodies on disk, index + content-hash source ledger in cas.db.
+pub use knowledge_store::{
+    DiskSource, IngestBatch, IngestReason, IngestReport, KNOWLEDGE_DIR_NAME, KNOWLEDGE_SCHEMA,
+    KNOWLEDGE_SCHEMA_STATEMENTS, KnowledgeHit, KnowledgePage, KnowledgeSource, KnowledgeStore,
+    PageWrite, PendingSource, SourceClassification, SourceOutcome, SourceStatus,
+    SqliteKnowledgeStore, blake3_hex, canonical_rel_path, classify_sources, hash_source_file,
+    slugify,
+};
 
 // Loop store for iteration loops
 pub use loop_store::{LOOP_SCHEMA, LoopStore, SqliteLoopStore};

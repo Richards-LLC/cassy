@@ -60,6 +60,8 @@ pub enum Subsystem {
     Recording,
     /// Terminal recordings for time-travel playback
     Recordings,
+    /// Distilled project knowledge (knowledge_pages, knowledge_sources, FTS)
+    Knowledge,
     // NOTE: Tracing has its own traces.db file and handles migrations internally
 }
 
@@ -80,6 +82,7 @@ impl Subsystem {
             Subsystem::Events => "events",
             Subsystem::Recording => "recording",
             Subsystem::Recordings => "recordings",
+            Subsystem::Knowledge => "knowledge",
         }
     }
 
@@ -101,6 +104,7 @@ impl Subsystem {
         Subsystem::Events,
         Subsystem::Recording,
         Subsystem::Recordings,
+        Subsystem::Knowledge,
     ];
 
     /// Apply this subsystem's base-schema bootstrap DDL to `conn`.
@@ -158,7 +162,8 @@ impl Subsystem {
             | Subsystem::Code
             | Subsystem::Events
             | Subsystem::Recording
-            | Subsystem::Recordings => (None, None),
+            | Subsystem::Recordings
+            | Subsystem::Knowledge => (None, None),
         };
 
         if let (Some(sentinel), Some(sql)) = (sentinel_table, ddl) {
@@ -951,6 +956,61 @@ mod tests {
             1,
             "m215 sealed-handoff table must survive repeated migration runs"
         );
+    }
+
+    /// cas-cbf1: the knowledge store lands on a DB that predates it — the
+    /// acceptance criterion "migration applies cleanly on existing DBs".
+    #[test]
+    fn test_run_migrations_creates_knowledge_store_on_legacy_db() {
+        let temp = TempDir::new().unwrap();
+        let db_path = temp.path().join("cas.db");
+
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+            // A DB from an older CAS version: entries/rules/tasks only.
+            conn.execute_batch(cas_store::ENTRIES_RULES_SCHEMA).unwrap();
+            conn.execute_batch(cas_store::TASK_SCHEMA).unwrap();
+            conn.execute(
+                "INSERT INTO tasks (id, title, status, created_at, updated_at)
+                 VALUES ('cas-old1', 'pre-existing task', 'open', '2026-01-01T00:00:00Z',
+                         '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let result = run_migrations(temp.path(), false).expect("migration must apply cleanly");
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+        let conn = Connection::open(&db_path).unwrap();
+        let tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name IN
+                 ('knowledge_pages', 'knowledge_sources', 'knowledge_pages_fts')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 3, "all three knowledge tables must exist");
+
+        // The FTS index must be usable (contentless_delete needs SQLite 3.43+).
+        conn.execute(
+            "INSERT INTO knowledge_pages_fts (rowid, title, snippet, body)
+             VALUES (1, 'T', 'S', 'body text')",
+            [],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM knowledge_pages_fts WHERE rowid = 1", [])
+            .unwrap();
+
+        // Pre-existing data is untouched.
+        let task_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tasks WHERE id = 'cas-old1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(task_count, 1);
     }
 
     /// cas-bdb9: pre-existing DB where stores HAVE been constructed continues

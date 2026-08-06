@@ -1,8 +1,11 @@
 //! Native Agent Teams integration for factory daemon.
 //!
 //! Manages Claude Code's native Agent Teams file structure:
-//! - `~/.claude/teams/{team-name}/config.json` — team member registry
-//! - `~/.claude/teams/{team-name}/inboxes/{agent-name}.json` — per-agent inbox files
+//! - `$CLAUDE_CONFIG_DIR/teams/{team-name}/config.json` — team member registry
+//! - `$CLAUDE_CONFIG_DIR/teams/{team-name}/inboxes/{agent-name}.json` — per-agent inbox files
+//!
+//! `$CLAUDE_CONFIG_DIR` defaults to `~/.claude`; two-account machines run
+//! sessions under e.g. `~/.claude-alt` and the team tree must follow (cas-3585).
 //!
 //! This replaces the old prompt_queue + mux.inject (PTY stdin injection) transport
 //! with native Teams mailbox writes that Claude Code polls internally.
@@ -188,14 +191,56 @@ pub struct TeamsManager {
     inboxes_dir: PathBuf,
 }
 
+/// Resolve the Claude config dir that owns the teams tree, from an explicit
+/// `CLAUDE_CONFIG_DIR` value plus the home directory (cas-3585).
+///
+/// Claude Code reads `$CLAUDE_CONFIG_DIR/teams/...` when the variable is set,
+/// so a factory launched by `cas claude alt` (which exports
+/// `CLAUDE_CONFIG_DIR=~/.claude-alt` into this process before anything spawns)
+/// must write its team dir, inboxes and `--settings` files there — otherwise
+/// the agents are told about a team directory that does not exist.
+///
+/// A `~`-prefixed or relative env value is expanded against `home`, matching
+/// [`crate::cli::hook::config_gen`] semantics (cas-5b96). Empty/whitespace
+/// values fall back to the default `<home>/.claude`.
+pub(crate) fn claude_config_dir_from(home: &std::path::Path, env_config_dir: Option<&str>) -> PathBuf {
+    match env_config_dir.map(str::trim) {
+        Some(raw) if !raw.is_empty() => {
+            if let Some(suffix) = raw.strip_prefix('~') {
+                let suffix = suffix.trim_start_matches('/');
+                if suffix.is_empty() {
+                    home.to_path_buf()
+                } else {
+                    home.join(suffix)
+                }
+            } else {
+                let candidate = PathBuf::from(raw);
+                if candidate.is_absolute() {
+                    candidate
+                } else {
+                    home.join(candidate)
+                }
+            }
+        }
+        _ => home.join(".claude"),
+    }
+}
+
+/// `<active claude config dir>/teams` for the current process.
+pub(crate) fn teams_root_dir() -> PathBuf {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let env_config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
+    claude_config_dir_from(&home, env_config_dir.as_deref()).join("teams")
+}
+
 impl TeamsManager {
     /// Create a new TeamsManager for the given factory session.
     ///
     /// The team name is derived from the session name.
-    /// Files are stored at `~/.claude/teams/{team-name}/`.
+    /// Files are stored at `$CLAUDE_CONFIG_DIR/teams/{team-name}/`, defaulting
+    /// to `~/.claude/teams/{team-name}/` when no config dir override is set.
     pub fn new(session_name: &str) -> Self {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        let teams_dir = home.join(".claude").join("teams").join(session_name);
+        let teams_dir = teams_root_dir().join(session_name);
         let inboxes_dir = teams_dir.join("inboxes");
 
         Self {
@@ -314,15 +359,13 @@ impl TeamsManager {
 
     /// Compute the on-disk path of the supervisor-only settings file for a
     /// given session name. The file lives alongside `config.json` under
-    /// `~/.claude/teams/{session}/supervisor-settings.json` and is written by
+    /// `$CLAUDE_CONFIG_DIR/teams/{session}/supervisor-settings.json` and is written by
     /// [`Self::build_configs_for_mux`] (eagerly, before PTY spawn) and
     /// re-written by [`Self::init_team_config`] (idempotent rewrite after the
     /// team directory is fully populated). See [`supervisor_settings_contents`]
     /// for the allowlist shape.
     pub fn supervisor_settings_path_for(session_name: &str) -> PathBuf {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        home.join(".claude")
-            .join("teams")
+        teams_root_dir()
             .join(session_name)
             .join("supervisor-settings.json")
     }
@@ -369,13 +412,11 @@ impl TeamsManager {
     }
 
     /// Compute the on-disk path of a worker's settings file. Lives alongside
-    /// `config.json` under `~/.claude/teams/{session}/{worker_name}-settings.json`.
+    /// `config.json` under `$CLAUDE_CONFIG_DIR/teams/{session}/{worker_name}-settings.json`.
     /// Mirrors [`Self::supervisor_settings_path_for`] — same eager-write
     /// invariant applies.
     pub fn worker_settings_path_for(session_name: &str, worker_name: &str) -> PathBuf {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        home.join(".claude")
-            .join("teams")
+        teams_root_dir()
             .join(session_name)
             .join(format!("{worker_name}-settings.json"))
     }
@@ -1065,7 +1106,7 @@ impl TeamsManager {
 
     /// Remove orphaned team directories whose daemon is no longer running.
     ///
-    /// Scans `~/.claude/teams/` for directories and checks if the corresponding
+    /// Scans the active config dir's `teams/` for directories and checks if the corresponding
     /// factory daemon socket (`~/.cas/factory-{name}.sock`) still exists. If the
     /// socket is gone, the daemon crashed without cleaning up and the team
     /// directory is safe to remove.
@@ -1073,7 +1114,7 @@ impl TeamsManager {
     /// Called once at daemon startup to clean up after previous crashes.
     pub fn cleanup_orphans() {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        let teams_root = home.join(".claude").join("teams");
+        let teams_root = teams_root_dir();
 
         let entries = match std::fs::read_dir(&teams_root) {
             Ok(entries) => entries,
@@ -1443,6 +1484,112 @@ mod tests {
             teams_dir,
             inboxes_dir,
         }
+    }
+
+    // ---- cas-3585: team dir must follow the active CLAUDE_CONFIG_DIR ----
+
+    #[test]
+    fn config_dir_defaults_to_dot_claude_when_env_unset() {
+        let home = std::path::Path::new("/home/tester");
+        assert_eq!(
+            claude_config_dir_from(home, None),
+            home.join(".claude"),
+            "no override must keep the historical ~/.claude layout"
+        );
+        assert_eq!(
+            claude_config_dir_from(home, Some("   ")),
+            home.join(".claude"),
+            "blank override must not produce a bare-home teams tree"
+        );
+    }
+
+    #[test]
+    fn config_dir_expands_tilde_and_relative_overrides_against_home() {
+        let home = std::path::Path::new("/home/tester");
+        assert_eq!(
+            claude_config_dir_from(home, Some("~/.claude-alt")),
+            home.join(".claude-alt")
+        );
+        assert_eq!(
+            claude_config_dir_from(home, Some(".claude-alt")),
+            home.join(".claude-alt")
+        );
+        assert_eq!(
+            claude_config_dir_from(home, Some("/srv/claude-cfg")),
+            std::path::PathBuf::from("/srv/claude-cfg")
+        );
+    }
+
+    /// AC1 + AC3: with `CLAUDE_CONFIG_DIR=~/.claude-alt` the team dir, inbox
+    /// dir and every `--settings` path handed to `claude` live under the alt
+    /// config dir — and nothing is written under the default `~/.claude`.
+    #[test]
+    fn team_paths_follow_non_default_config_dir() {
+        let mut guard = TestEnvGuard::temp_home();
+        let home = guard.home().to_path_buf();
+        guard.set("CLAUDE_CONFIG_DIR", home.join(".claude-alt"));
+
+        let session = "cas-src-alt-account-01";
+        let alt_team_dir = home.join(".claude-alt").join("teams").join(session);
+
+        let tm = TeamsManager::new(session);
+        assert_eq!(tm.teams_dir, alt_team_dir);
+        assert_eq!(tm.inboxes_dir, alt_team_dir.join("inboxes"));
+
+        assert_eq!(
+            TeamsManager::supervisor_settings_path_for(session),
+            alt_team_dir.join("supervisor-settings.json")
+        );
+        assert_eq!(
+            TeamsManager::worker_settings_path_for(session, "worker-1"),
+            alt_team_dir.join("worker-1-settings.json")
+        );
+
+        // The eager pre-write invariant must hold in the alt dir too: the
+        // `--settings` path in the spawn config has to exist on disk.
+        let workers = vec!["worker-1".to_string()];
+        let (configs, _lead) = TeamsManager::build_configs_for_mux(session, "supervisor", &workers);
+        for (name, cfg) in &configs {
+            let path = std::path::PathBuf::from(
+                cfg.settings_path
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("{name} has no settings path")),
+            );
+            assert!(
+                path.starts_with(&alt_team_dir),
+                "{name} settings path {path:?} escaped the alt config dir"
+            );
+            assert!(path.is_file(), "{name} settings file was not pre-written");
+        }
+
+        assert!(
+            !home.join(".claude").join("teams").exists(),
+            "nothing may be written under the default config dir when an override is active"
+        );
+    }
+
+    /// AC3: with no override the historical `~/.claude/teams/...` layout is
+    /// byte-for-byte unchanged.
+    #[test]
+    fn team_paths_default_to_dot_claude_without_override() {
+        let mut guard = TestEnvGuard::temp_home();
+        let home = guard.home().to_path_buf();
+        guard.remove("CLAUDE_CONFIG_DIR");
+
+        let session = "cas-src-default-account-01";
+        let default_team_dir = home.join(".claude").join("teams").join(session);
+
+        let tm = TeamsManager::new(session);
+        assert_eq!(tm.teams_dir, default_team_dir);
+        assert_eq!(tm.inboxes_dir, default_team_dir.join("inboxes"));
+        assert_eq!(
+            TeamsManager::supervisor_settings_path_for(session),
+            default_team_dir.join("supervisor-settings.json")
+        );
+        assert_eq!(
+            TeamsManager::worker_settings_path_for(session, "worker-1"),
+            default_team_dir.join("worker-1-settings.json")
+        );
     }
 
     #[cfg(unix)]

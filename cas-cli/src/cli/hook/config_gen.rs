@@ -1,16 +1,16 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use toml::map::Map;
 
-/// Check if a specific home directory's ~/.claude/settings.json has CAS hooks
-/// configured.
+/// Check whether a Claude *config directory* (e.g. `~/.claude`, `~/.claude-alt`)
+/// has CAS hooks in its `settings.json`.
 ///
-/// Extracted for test-isolation: callers can pass a fake home TempDir to avoid
-/// reading the real `~/.claude/settings.json` and eliminate the parallel-test
-/// race documented in cas-1888.
-pub(crate) fn global_has_cas_hooks_in(home_dir: &std::path::Path) -> bool {
-    let global_settings_path = home_dir.join(".claude").join("settings.json");
-    let Ok(content) = std::fs::read_to_string(&global_settings_path) else {
+/// The argument is the config dir itself, NOT the home dir — Claude Code reads
+/// `$CLAUDE_CONFIG_DIR/settings.json` and falls back to `~/.claude/settings.json`
+/// when the variable is unset.
+pub(crate) fn config_dir_has_cas_hooks(config_dir: &Path) -> bool {
+    let settings_path = config_dir.join("settings.json");
+    let Ok(content) = std::fs::read_to_string(&settings_path) else {
         return false;
     };
     let Ok(settings) = serde_json::from_str::<serde_json::Value>(&content) else {
@@ -19,20 +19,90 @@ pub(crate) fn global_has_cas_hooks_in(home_dir: &std::path::Path) -> bool {
     has_cas_hook_entries(&settings)
 }
 
-/// Check if the global ~/.claude/settings.json already has CAS hooks configured.
+/// Expand a leading `~` in a raw config-dir string against `home`.
+fn expand_tilde(raw: &str, home: Option<&Path>) -> PathBuf {
+    match (raw.strip_prefix('~'), home) {
+        (Some(suffix), Some(home)) => {
+            let suffix = suffix.trim_start_matches(['/', '\\']);
+            if suffix.is_empty() {
+                home.to_path_buf()
+            } else {
+                home.join(suffix)
+            }
+        }
+        _ => PathBuf::from(raw),
+    }
+}
+
+/// Every Claude config dir a CAS install has to keep hooked.
 ///
-/// Returns true if the global settings contain at least one hook entry whose
-/// command starts with "cas hook". When this is true, project-level settings
-/// should NOT add hooks (only permissions/statusLine) to avoid duplication.
+/// At minimum the default `<home>/.claude`, plus the active `CLAUDE_CONFIG_DIR`
+/// when one is set (two-subscription factory setups run workers under e.g.
+/// `~/.claude-alt`). Duplicates are collapsed; a relative or `~`-prefixed env
+/// value is expanded against `home`.
+pub(crate) fn known_claude_config_dirs_from(
+    home: Option<&Path>,
+    env_config_dir: Option<&str>,
+) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+
+    if let Some(home) = home {
+        dirs.push(home.join(".claude"));
+    }
+
+    if let Some(raw) = env_config_dir {
+        let raw = raw.trim();
+        if !raw.is_empty() {
+            let candidate = expand_tilde(raw, home);
+            if !dirs.iter().any(|d| d == &candidate) {
+                dirs.push(candidate);
+            }
+        }
+    }
+
+    dirs
+}
+
+/// Production wrapper over [`known_claude_config_dirs_from`] using the real home
+/// directory and the process `CLAUDE_CONFIG_DIR`.
+pub(crate) fn known_claude_config_dirs() -> Vec<PathBuf> {
+    let home = dirs::home_dir();
+    let env_config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
+    known_claude_config_dirs_from(home.as_deref(), env_config_dir.as_deref())
+}
+
+/// True only when EVERY known config dir already carries CAS hooks.
 ///
-/// Wraps [`global_has_cas_hooks_in`] with `dirs::home_dir()`. Tests should use
-/// `global_has_cas_hooks_in` with a controlled TempDir to avoid reading real
-/// user state (cas-1888).
+/// Deliberately conservative: if any config dir a session could be launched
+/// under lacks hooks, global hooks do NOT cover that session, so project-level
+/// hooks must be kept (cas-5b96). An empty dir list returns false — we cannot
+/// prove coverage, so we never strip.
+pub(crate) fn all_config_dirs_have_cas_hooks(dirs: &[PathBuf]) -> bool {
+    !dirs.is_empty() && dirs.iter().all(|dir| config_dir_has_cas_hooks(dir))
+}
+
+/// Config dirs that are missing CAS hooks (used for actionable diagnostics).
+pub(crate) fn config_dirs_missing_cas_hooks(dirs: &[PathBuf]) -> Vec<PathBuf> {
+    dirs.iter()
+        .filter(|dir| !config_dir_has_cas_hooks(dir))
+        .cloned()
+        .collect()
+}
+
+/// Check if global Claude settings already have CAS hooks configured for every
+/// config dir this machine uses.
+///
+/// Returns true only if *all* known config dirs (`~/.claude` plus the active
+/// `$CLAUDE_CONFIG_DIR`) contain at least one hook entry whose command starts
+/// with "cas hook". When this is true, project-level settings should NOT add
+/// hooks (only permissions/statusLine) to avoid duplication. When any dir lacks
+/// them, project hooks are the only thing keeping those sessions working, so
+/// they are kept.
+///
+/// Tests should use [`all_config_dirs_have_cas_hooks`] with controlled TempDirs
+/// to avoid reading real user state (cas-1888).
 pub fn global_has_cas_hooks() -> bool {
-    let Some(home) = dirs::home_dir() else {
-        return false;
-    };
-    global_has_cas_hooks_in(&home)
+    all_config_dirs_have_cas_hooks(&known_claude_config_dirs())
 }
 
 /// Check if a settings JSON value contains any CAS hook entries.

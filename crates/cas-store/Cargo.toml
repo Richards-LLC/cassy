@@ -1,6 +1,6 @@
 [package]
 name = "cas-store"
-version = "2.43.0"
+version = "2.44.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Storage layer for CAS (Coding Agent System)"
@@ -34,6 +34,8 @@ fs2 = "0.4"
 # Utilities
 rand = "0.9.2"
 sha2 = "0.10"
+# Content-hash identity for the knowledge source ledger (cas-cbf1)
+blake3 = "1.5"
 
 # Logging
 tracing = "0.1"

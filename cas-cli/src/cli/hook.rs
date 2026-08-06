@@ -153,26 +153,62 @@ fn init_hook_logging(verbose: bool) {
 
 /// Strip duplicate CAS hooks from project-level .claude/settings.json files
 fn execute_cleanup(dry_run: bool, cli: &Cli) -> anyhow::Result<()> {
-    if !global_has_cas_hooks() {
+    use config_gen::{config_dirs_missing_cas_hooks, known_claude_config_dirs};
+
+    // Mass-stripping project hooks is only safe when EVERY config dir a session
+    // could run under already has global CAS hooks. With
+    // CLAUDE_CONFIG_DIR=~/.claude-alt and hooks only in ~/.claude, stripping
+    // leaves alt-dir sessions with zero hooks (cas-5b96).
+    let config_dirs = known_claude_config_dirs();
+    let missing = config_dirs_missing_cas_hooks(&config_dirs);
+    if !missing.is_empty() {
+        let all_missing = missing.len() == config_dirs.len();
+        let missing_list: Vec<String> = missing
+            .iter()
+            .map(|p| p.join("settings.json").display().to_string())
+            .collect();
         if cli.json {
-            println!(r#"{{"status":"skipped","reason":"no_global_hooks"}}"#);
+            let reason = if all_missing {
+                "no_global_hooks"
+            } else {
+                "config_dir_missing_hooks"
+            };
+            println!(
+                r#"{{"status":"skipped","reason":"{reason}","missing_config_dirs":{}}}"#,
+                serde_json::to_string(&missing_list)?
+            );
         } else {
             let theme = ActiveTheme::default();
             let mut stdout = io::stdout();
             let mut fmt = Formatter::stdout(&mut stdout, theme);
-            StatusLine::info("No CAS hooks found in global ~/.claude/settings.json").render(&mut fmt)?;
+            if all_missing {
+                StatusLine::info("No CAS hooks found in global Claude settings")
+                    .render(&mut fmt)?;
+            } else {
+                StatusLine::info(
+                    "Some Claude config dirs have no global CAS hooks — refusing to strip project hooks",
+                )
+                .render(&mut fmt)?;
+            }
             fmt.newline()?;
-            fmt.info("Nothing to clean up. Run 'cas hook configure' in a project first, or add hooks to ~/.claude/settings.json.")?;
+            for path in &missing_list {
+                fmt.bullet(&format!("missing CAS hooks: {path}"))?;
+            }
+            fmt.newline()?;
+            fmt.info("Nothing to clean up. Sessions using those config dirs rely on project-level hooks; add CAS hooks there first (or run 'cas hook configure' in the project).")?;
         }
         return Ok(());
     }
 
     // Find all project-level .claude/settings.json files with CAS hooks
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
-    let global_path = home.join(".claude").join("settings.json");
+    let protected: Vec<std::path::PathBuf> = config_dirs
+        .iter()
+        .map(|d| d.join("settings.json"))
+        .collect();
 
     let mut candidates = Vec::new();
-    find_settings_files_with_cas_hooks(&home, &global_path, &mut candidates);
+    find_settings_files_with_cas_hooks(&home, &protected, &mut candidates);
 
     if candidates.is_empty() {
         if cli.json {
@@ -307,14 +343,17 @@ fn cleanup_single_file(path: &Path, dry_run: bool) -> anyhow::Result<CleanupActi
 }
 
 /// Recursively find .claude/settings.json files containing CAS hooks.
+///
+/// `protected` lists global settings files (one per known Claude config dir)
+/// that must never be treated as project-level duplicates.
 fn find_settings_files_with_cas_hooks(
     dir: &Path,
-    global_path: &Path,
+    protected: &[std::path::PathBuf],
     results: &mut Vec<std::path::PathBuf>,
 ) {
     // Check this directory for .claude/settings.json
     let settings_path = dir.join(".claude").join("settings.json");
-    if settings_path.exists() && settings_path != *global_path {
+    if settings_path.exists() && !protected.contains(&settings_path) {
         if let Ok(content) = std::fs::read_to_string(&settings_path) {
             if let Ok(settings) = serde_json::from_str::<serde_json::Value>(&content) {
                 if has_cas_hook_entries(&settings) {
@@ -350,7 +389,7 @@ fn find_settings_files_with_cas_hooks(
             continue;
         }
 
-        find_settings_files_with_cas_hooks(&path, global_path, results);
+        find_settings_files_with_cas_hooks(&path, protected, results);
     }
 }
 
@@ -379,7 +418,7 @@ fn execute_configure(force: bool, cli: &Cli) -> anyhow::Result<()> {
                     .render(&mut fmt)?;
                     fmt.newline()?;
                     StatusLine::info(
-                        "CAS hooks already in ~/.claude/settings.json — skipped to avoid duplicates.",
+                        "CAS hooks already in every known Claude config dir — skipped to avoid duplicates.",
                     )
                     .render(&mut fmt)?;
                 } else if created {
@@ -531,7 +570,29 @@ pub(crate) fn configure_claude_hooks_with_home(
     force: bool,
     home_dir: Option<&Path>,
 ) -> anyhow::Result<bool> {
-    use config_gen::global_has_cas_hooks_in;
+    use config_gen::known_claude_config_dirs_from;
+
+    // Resolve every config dir a session on this machine could launch under:
+    // `<home>/.claude` plus the active $CLAUDE_CONFIG_DIR (cas-5b96).
+    let home = home_dir.map(Path::to_path_buf).or_else(dirs::home_dir);
+    let env_config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
+    let config_dirs = known_claude_config_dirs_from(home.as_deref(), env_config_dir.as_deref());
+
+    configure_claude_hooks_with_config_dirs(project_root, force, &config_dirs)
+}
+
+/// Configure CAS hooks against an explicit list of Claude config dirs.
+///
+/// Project-level hooks are only skipped/stripped when EVERY config dir in
+/// `config_dirs` already has CAS hooks — otherwise a session launched under a
+/// hookless config dir (e.g. `CLAUDE_CONFIG_DIR=~/.claude-alt`) would end up
+/// with no CAS hooks at all (cas-5b96).
+pub(crate) fn configure_claude_hooks_with_config_dirs(
+    project_root: &Path,
+    force: bool,
+    config_dirs: &[std::path::PathBuf],
+) -> anyhow::Result<bool> {
+    use config_gen::all_config_dirs_have_cas_hooks;
 
     let claude_dir = project_root.join(".claude");
     let settings_path = claude_dir.join("settings.json");
@@ -553,12 +614,11 @@ pub(crate) fn configure_claude_hooks_with_home(
 
     let cas_hooks = get_cas_hooks_config(&hook_config);
 
-    // Check if global settings already have CAS hooks — if so, skip project-level
-    // hooks to avoid duplicate execution. Only write permissions and statusLine.
-    let skip_hooks = match home_dir {
-        Some(h) => global_has_cas_hooks_in(h),
-        None => global_has_cas_hooks(),
-    };
+    // Check if EVERY known config dir's global settings already have CAS hooks —
+    // if so, skip project-level hooks to avoid duplicate execution. Only write
+    // permissions and statusLine. If any config dir lacks them, project hooks
+    // stay: they are what keeps sessions under that dir working (cas-5b96).
+    let skip_hooks = all_config_dirs_have_cas_hooks(config_dirs);
 
     let created = if settings_path.exists() && !force {
         // Merge with existing settings

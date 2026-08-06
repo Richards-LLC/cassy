@@ -2,12 +2,29 @@
 
 Wrong field names and invalid actions waste dispatch cycles. This section covers exact valid actions and field names.
 
-**Valid `mcp__cs__task` actions** (do not invent others): `create`, `show`, `update`, `start`, `close`, `reopen`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `transfer`, `available`, `mine`.
+**Valid `mcp__cs__task` actions** (do not invent others): `create`, `show`, `update`, `start`, `close`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `available`, `mine`.
+
+Two of those are supervisor-specific and easy to confuse:
+
+- **`request_changes`** — the sanctioned exit from `awaiting_merge` whenever review fails: declined merge, amendment required after a merge landed, or work rejected outright. It reopens the task with its **assignee preserved**, so the same worker picks the rework back up. This is the rejection path — do not improvise one out of `update status=open`.
+- **`reset`** — revive a task **orphaned by a dead session**. Atomic: force-releases the lease, clears the assignee, forces `status=open`. Because it clears the assignee it is the wrong tool for "this worker must redo it" — use `request_changes` for that. `reset` does not require you to hold the lease; add `force=true` only to override a still-heartbeating assignee (logged as a forced-reset audit note).
 
 **Valid `mcp__cs__coordination` actions** (do not invent others):
-- *Agent*: `register`, `unregister`, `whoami`, `heartbeat`, `agent_list`, `agent_cleanup`, `session_start`, `session_end`, `loop_start`, `loop_cancel`, `loop_status`, `lease_history`, `queue_notify`, `queue_poll`, `queue_peek`, `queue_ack`, `inbox_poll`, `message`, `message_ack`, `message_status`
-- *Factory*: `spawn_workers`, `shutdown_workers`, `worker_status`, `worker_activity`, `clear_context`, `my_context`, `sync_all_workers`, `gc_report`, `gc_cleanup`, `epic_status`, `focus_epic`, `remind`, `remind_list`, `remind_cancel`
+- *Agent*: `register`, `unregister`, `whoami`, `heartbeat`, `agent_list`, `agent_cleanup`, `session_start`, `session_end`, `loop_start`, `loop_cancel`, `loop_status`, `lease_history`, `queue_notify`, `queue_poll`, `queue_peek`, `queue_ack`, `inbox_poll`, `message`, `interrupt`, `message_ack`, `message_status`
+- *Factory*: `spawn_workers`, `shutdown_workers`, `hold_worker`, `release_worker`, `worker_status`, `worker_activity`, `clear_context`, `my_context`, `sync_all_workers`, `gc_report`, `gc_cleanup`, `epic_status`, `focus_epic`, `remind`, `remind_list`, `remind_cancel`, `server_start`, `server_stop`, `server_list`
 - *Worktree*: `worktree_create`, `worktree_list`, `worktree_show`, `worktree_cleanup`, `worktree_merge`, `worktree_status`
+
+**`hold_worker` / `release_worker` — pause a worker without faking a task state.** `action=hold_worker target=<worker>` marks a worker as deliberately paused: the Director stops accumulating idle ticks for them and emits no `WorkerIdle` nudges until you `release_worker`. Use it for "stand by while I sort out the merge base" instead of parking the task in a misleading status. Supervisor-only, requires a live worker in your factory session; the hold survives a daemon restart of that session and clears on worker removal or session shutdown.
+
+**`server_start` / `server_stop` / `server_list` — the sanctioned way to run a long-lived server.** A raw `npm run dev &` from a worker dies with the worker and leaves no record of what is listening. Register it instead:
+
+```
+mcp__cs__coordination action=server_start command="npm run dev" cwd=<path> port=3000 shared=true
+mcp__cs__coordination action=server_list
+mcp__cs__coordination action=server_stop ...
+```
+
+`shared=true` places the server outside worker containment so it outlives worker teardown; the default (`false`) ties its lifetime to the worker that started it. `port` is advisory — `server_list` reports the ports actually bound, plus who started each server. stdout/stderr are captured to a log file, never inherited.
 
 **`spawn_workers` parameters:**
 
@@ -19,10 +36,12 @@ Wrong field names and invalid actions waste dispatch cycles. This section covers
 | `cli` | string | Explicit CLI backend for this spawn: `claude`, `codex`, or `grok`. If omitted, resolves through factory config, then stock fallback. |
 | `model` | string | Explicit model name. Codex uses `gpt-5.6-terra` for light/standard/taste work and `gpt-5.6-sol` for heavy/frontier work (no `-codex` suffix; bare `gpt-5.6` is invalid). Claude: `opus` for exceptional architecture/safety/rescue/challenge; Sonnet is not a normal worker lane. Grok: `grok-4.5` or `grok-composer-2.5-fast` (from `grok models`). Passed as `-m`/`--model`. If omitted, resolves through factory config, then backend stock fallback. |
 | `effort` | string | Explicit reasoning effort. CAS vocabulary: `minimal` \| `low` \| `medium` \| `high` \| `xhigh` (alias `x-high`). Mapping: Claude `--effort`; Codex `--config model_reasoning_effort=<v>`; Grok `--reasoning-effort`. If omitted, resolves through factory config, then stock fallback. For multi-step Claude workers prefer `high` as the ceiling — see [model-selection.md](model-selection.md). |
+| `task_id` | string | Pre-assign this task to the spawned worker. **Single-worker requests only** (`count=1`) — a multi-worker spawn is rejected. An open, unassigned `task_id` also *authorizes* the spawn on its own, so a post-epic follow-up needs no ceremonial single-child epic. Refused when the task is closed, already assigned, blocked/awaiting-merge/awaiting-review, or when a spawn for that task is already queued and unconsumed. |
+| `config_dir` | string | Claude account directory for the spawned workers (e.g. `~/.claude-alt`). **Claude-only** — Codex/Grok workers ignore it and the acknowledgement carries a warning. Resolution: an explicit `config_dir` wins; otherwise the requesting supervisor's `CLAUDE_CONFIG_DIR` is captured **at enqueue time** (the daemon may consume the queue row under a different environment). An explicit value also strips inherited `ANTHROPIC_API_KEY` so the selected OAuth account is actually used. |
 
 `cli`, `model`, and `effort` are per-spawn controls — they apply to the workers spawned by this call only. Supervisors MUST pass explicit `cli=`, `model=`, and `effort=` on every `spawn_workers` call; omitted fields resolve through the config cascade as a fallback and produce an acknowledgement warning. Copy-paste recipes for all three backends: [model-selection.md](model-selection.md#spawn-cookbook-all-three-harnesses).
 
-**Task ID is always `id`** — not `task_id`, `taskId`, or `_id`.
+**On `mcp__cs__task`, the task ID is always `id`** — not `task_id`, `taskId`, or `_id`. The exceptions are coordination actions that reference a task belonging to *another* object: `spawn_workers task_id=`, `worktree_merge task_id=`, and `worktree_create task_id=` all take `task_id` (their `id` means worker/worktree). Rule of thumb: `id` names the thing the action operates on; `task_id` names a task the action merely points at.
 
 **Priority** is `0=Critical, 1=High, 2=Medium (default), 3=Low, 4=Backlog`. Accepts numeric OR named alias: `priority=1` ≡ `priority="high"`. Other aliases: `critical`, `medium`, `low`, `backlog`, `p0`-`p4`.
 

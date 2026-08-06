@@ -6992,6 +6992,54 @@ fn commit_receipt_rejection(receipt: &str, parent_branch: &str, reason: &str) ->
     )
 }
 
+/// Resolve a close against the merge evidence the caller supplied, if any.
+///
+/// Returns `Some(outcome)` when evidence was offered — the anchor proves
+/// integration (cas-127f), or the receipt is adjudicated by
+/// [`validate_task_commit_receipt`] and either carries the close or is
+/// rejected on its own terms. Returns `None` only when NO evidence was
+/// offered, leaving the caller's heuristic to decide.
+///
+/// cas-cab3 (GH #128): this used to be inlined on the zero-commit path only,
+/// so the no-diff path rejected merged work that came with a valid receipt —
+/// the state a branch is in after the supervisor merges it and the worker
+/// syncs with the epic tip. Evidence outranks the heuristic on BOTH paths;
+/// one function so they cannot drift apart again.
+fn resolve_merge_evidence(
+    worker_worktree_path: &std::path::Path,
+    parent_branch: &str,
+    factory_branch_anchor: Option<&str>,
+    commit_receipt: Option<&str>,
+    commit_receipt_window: Option<&TaskCommitReceiptWindow>,
+) -> Option<ZeroCommitCloseOutcome> {
+    // cas-127f: merge-satisfied — parked tip is now on the parent.
+    if let Some(anchor) = factory_branch_anchor {
+        if commit_is_merged_into_parent(worker_worktree_path, anchor, parent_branch) {
+            return Some(ZeroCommitCloseOutcome::Proceed);
+        }
+    }
+    let receipt = commit_receipt?;
+    let Some(window) = commit_receipt_window else {
+        return Some(ZeroCommitCloseOutcome::AmbiguousCodeTask(
+            commit_receipt_rejection(
+                receipt,
+                parent_branch,
+                "task attribution window is unavailable; ask the supervisor for an audited bypass",
+            ),
+        ));
+    };
+    Some(
+        match validate_task_commit_receipt(worker_worktree_path, receipt, parent_branch, window) {
+            Ok(note) => ZeroCommitCloseOutcome::ProceedWithReceipt(note),
+            Err(reason) => ZeroCommitCloseOutcome::AmbiguousCodeTask(commit_receipt_rejection(
+                receipt,
+                parent_branch,
+                &reason,
+            )),
+        },
+    )
+}
+
 /// cas-ee2b: check whether a zero-commit close is ambiguous and should be
 /// rejected.
 ///
@@ -7011,13 +7059,19 @@ fn commit_receipt_rejection(receipt: &str, parent_branch: &str, reason: &str) ->
 ///    gate handles that case):
 ///    → `Proceed`. No ambiguity.
 ///
-/// 3. **Merge-satisfied** (cas-127f/cas-3d37): `count == 0` but
-///    `factory_branch_anchor` is set and that SHA is an ancestor of
-///    `parent_branch` (work was committed, the PostToolUse hook captured the
-///    tip, and the supervisor merged into the epic either before or after
-///    the first close). → `Proceed`. Without this path, post-merge close
-///    false-rejects ZERO-COMMIT because the worker tip is no longer *ahead
-///    of* parent even though the work landed.
+/// 3. **Merge-satisfied** (cas-127f/cas-3d37): `factory_branch_anchor` is set
+///    and that SHA is an ancestor of `parent_branch` (work was committed, the
+///    PostToolUse hook captured the tip, and the supervisor merged into the
+///    epic either before or after the first close), or a `commit_receipt`
+///    passes [`validate_task_commit_receipt`]. → `Proceed` /
+///    `ProceedWithReceipt`. Without this path, post-merge close
+///    false-rejects because the worker tip is no longer *ahead of* parent
+///    even though the work landed.
+///
+///    cas-cab3 (GH #128): this applies whether the branch has 0 commits or
+///    only zero-diff sync merges. A supervisor merge followed by a sync with
+///    the epic tip produces the latter, and it is what SUCCESS looks like —
+///    evidence is consulted before the no-diff heuristic on both shapes.
 ///
 /// 4. **Ambiguous zero-commit** (`count == 0`, no anchor / anchor not
 ///    integrated, no `execution_note`, task type is Bug/Feature/Task, no
@@ -7082,58 +7136,65 @@ pub(crate) fn check_zero_commit_close(
             return ZeroCommitCloseOutcome::Proceed;
         }
         // Case 3b: commit(s) exist but the diff vs parent is empty — a
-        // sync/merge-only close, not task work.
+        // sync/merge-only close.
+        //
+        // cas-cab3 (GH #128): "sync-only" is ALSO the shape of a successful
+        // post-merge close. Once the supervisor merges the factory branch and
+        // the worker syncs with the epic tip, the branch legitimately holds
+        // nothing but a zero-diff merge commit — the work is in the parent,
+        // which is where it belongs. Consult the merge evidence (anchor /
+        // receipt) FIRST, exactly as the zero-commit path below does; the
+        // heuristic only decides the cases evidence cannot.
+        if let Some(outcome) = resolve_merge_evidence(
+            worker_worktree_path,
+            parent_branch,
+            factory_branch_anchor,
+            commit_receipt,
+            commit_receipt_window,
+        ) {
+            return outcome;
+        }
         let task_type_str = format!("{task_type:?}").to_lowercase();
         let wt_display = worker_worktree_path.display();
         return ZeroCommitCloseOutcome::AmbiguousCodeTask(format!(
             "⚠️ NO-DIFF CLOSE ON CODE TASK\n\n\
             task close rejected: this is a {task_type_str} task with no \
-            code_review_findings, no execution_note, and {commit_count} \
-            commit(s) on the worker branch that produce an EMPTY diff vs \
-            {parent_branch} (a sync/merge-only commit, e.g. `git merge \
-            --no-ff` with no unique work, not task work). That combination \
-            is ambiguous — either the work wasn't committed yet, or this \
-            task was resolved without code.\n\n\
+            code_review_findings, no execution_note, no merge evidence, and \
+            {commit_count} commit(s) on the worker branch that produce an \
+            EMPTY diff vs {parent_branch} (a sync/merge-only commit, e.g. \
+            `git merge --no-ff` with no unique work, not task work). That \
+            combination is ambiguous — either the work wasn't committed yet, \
+            or this task was resolved without code.\n\n\
             📂 Worker worktree: {wt_display}\n\
             📊 Commits on branch: {commit_count} (zero-diff vs {parent_branch})\n\n\
             To resolve:\n\
             1. If you wrote code but forgot to commit: stage and commit your \
                changes, then retry close.\n\
-            2. If this task was resolved without code (fixed by a sibling task, \
+            2. If the supervisor already merged this task's work and you then \
+               synced this branch with {parent_branch}, that is exactly what \
+               a finished task looks like — do NOT reset or force-push the \
+               branch. Find the SHA of the worker task commit OR the merge \
+               commit that carried this task's work (never an unrelated \
+               historical commit), verify it with `git show --stat <sha>` and \
+               `git merge-base --is-ancestor <sha> {parent_branch}`, then \
+               retry close with `commit_receipt=<sha>` (full or an \
+               unambiguous abbreviation).\n\
+            3. If this task was resolved without code (fixed by a sibling task, \
                docs-only, characterization-only): update the task with an \
                execution_note to signal intentional no-code work:\n\
                `mcp__cas__task action=update id={task_id} execution_note=additive-only`\n\
-            3. Supervisors may bypass this gate with bypass_code_review=true \
+            4. Supervisors may bypass this gate with bypass_code_review=true \
                (logged as a decision note)."
         ));
     }
-    // cas-127f: merge-satisfied — parked tip is now on the parent.
-    if let Some(anchor) = factory_branch_anchor {
-        if commit_is_merged_into_parent(worker_worktree_path, anchor, parent_branch) {
-            return ZeroCommitCloseOutcome::Proceed;
-        }
-    }
-    if let Some(receipt) = commit_receipt {
-        let Some(window) = commit_receipt_window else {
-            return ZeroCommitCloseOutcome::AmbiguousCodeTask(commit_receipt_rejection(
-                receipt,
-                parent_branch,
-                "task attribution window is unavailable; ask the supervisor for an audited bypass",
-            ));
-        };
-        return match validate_task_commit_receipt(
-            worker_worktree_path,
-            receipt,
-            parent_branch,
-            window,
-        ) {
-            Ok(note) => ZeroCommitCloseOutcome::ProceedWithReceipt(note),
-            Err(reason) => ZeroCommitCloseOutcome::AmbiguousCodeTask(commit_receipt_rejection(
-                receipt,
-                parent_branch,
-                &reason,
-            )),
-        };
+    if let Some(outcome) = resolve_merge_evidence(
+        worker_worktree_path,
+        parent_branch,
+        factory_branch_anchor,
+        commit_receipt,
+        commit_receipt_window,
+    ) {
+        return outcome;
     }
     // Case 3: ambiguous zero-commit close.
     let task_type_str = format!("{task_type:?}").to_lowercase();
@@ -15869,6 +15930,285 @@ mod zero_change_close_tests {
         assert!(
             matches!(outcome, ZeroCommitCloseOutcome::AmbiguousCodeTask(_)),
             "unmerged anchor must not unlock zero-commit; got {outcome:?}"
+        );
+    }
+
+    // ── cas-cab3 (GH #128): merge evidence outranks the no-diff heuristic ──
+
+    /// Build the exact GH #128 shape and hand back the receipt SHA:
+    /// worker commits real work → supervisor merges it into the parent →
+    /// worker syncs the branch with the parent tip via `git merge --no-ff`.
+    /// The branch now holds ONE commit (the sync merge) whose diff vs parent
+    /// is empty, while the receipt commit is a merged ancestor carrying real
+    /// files. That is what a finished task looks like, not a no-code close.
+    fn build_gh128_post_merge_sync(dir: &Path) -> String {
+        std::fs::write(dir.join("guard_fix.rs"), "pub fn guard() {}\n").unwrap();
+        git(dir, &["add", "guard_fix.rs"]);
+        git(dir, &["commit", "-q", "-m", "fix: real task work"]);
+        let receipt = head_sha(dir);
+
+        // Supervisor merges the factory branch into the parent.
+        git(dir, &["checkout", "-q", "main"]);
+        git(
+            dir,
+            &[
+                "merge",
+                "--no-ff",
+                "-m",
+                "Merge branch 'factory/test-worker'",
+                "factory/test-worker",
+            ],
+        );
+        // Parent moves on (a sibling lane lands), so the worker's later sync
+        // is a genuine non-fast-forward merge, exactly as in the incident.
+        std::fs::write(dir.join("sibling_lane.rs"), "pub fn sibling() {}\n").unwrap();
+        git(dir, &["add", "sibling_lane.rs"]);
+        git(dir, &["commit", "-q", "-m", "sibling lane work"]);
+
+        // Worker syncs with the epic tip — the ONLY commit unique to the
+        // branch is now a zero-diff merge.
+        git(dir, &["checkout", "-q", "factory/test-worker"]);
+        git(dir, &["merge", "--no-ff", "-m", "sync to epic tip", "main"]);
+        receipt
+    }
+
+    /// THE GH #128 REGRESSION: receipt commit merged to the parent, branch is
+    /// parent tip + sync-merge only → close must pass on the receipt.
+    ///
+    /// Before this fix the no-diff heuristic rejected first and never looked
+    /// at the receipt, which pushed workers into `git reset --hard <epic tip>`
+    /// + force-push as routine post-merge hygiene.
+    #[test]
+    fn cascab3_merged_receipt_beats_no_diff_after_post_merge_sync_gh128() {
+        let dir = init_worker_repo();
+        let receipt = build_gh128_post_merge_sync(dir.path());
+
+        // Sanity: this really is the no-diff branch of the guard, not the
+        // zero-commit one — the sync merge counts, its diff is empty.
+        assert!(
+            count_worker_branch_commits(dir.path(), "main") > 0,
+            "sanity: the sync merge must count as a commit beyond the merge base"
+        );
+        assert!(
+            get_worker_diff_stat(dir.path(), "main").trim().is_empty(),
+            "sanity: a synced post-merge branch must have an empty diff vs parent"
+        );
+
+        let outcome = check_zero_commit_close(
+            dir.path(),
+            "main",
+            "cas-cab3",
+            &TaskType::Bug,
+            None,  // no execution_note
+            false, // no review findings
+            None,  // no anchor — receipt is the only evidence
+            Some(&receipt),
+            Some(&test_receipt_window()),
+        );
+        assert!(
+            matches!(outcome, ZeroCommitCloseOutcome::ProceedWithReceipt(_)),
+            "a merged receipt with a real diff must carry the close after a \
+             post-merge sync; got {outcome:?}"
+        );
+    }
+
+    /// Same shape, evidence supplied as the anchor instead of the receipt.
+    #[test]
+    fn cascab3_merged_anchor_beats_no_diff_after_post_merge_sync_gh128() {
+        let dir = init_worker_repo();
+        let anchor = build_gh128_post_merge_sync(dir.path());
+
+        let outcome = check_zero_commit_close(
+            dir.path(),
+            "main",
+            "cas-cab3",
+            &TaskType::Bug,
+            None,
+            false,
+            Some(&anchor),
+            None,
+            None,
+        );
+        assert!(
+            matches!(outcome, ZeroCommitCloseOutcome::Proceed),
+            "a merged factory anchor must satisfy the no-diff path too; got {outcome:?}"
+        );
+    }
+
+    /// STILL REJECTED #1: no receipt and no unique diff (the cas-9eae case
+    /// the guard exists for). Its wording must point at the receipt remedy
+    /// and must not read as an invitation to rewrite the branch.
+    #[test]
+    fn cascab3_no_diff_without_evidence_still_rejects_and_names_the_receipt_remedy() {
+        let dir = init_worker_repo();
+        // Parent moves; worker only syncs. No task work was ever committed.
+        git(dir.path(), &["checkout", "-q", "main"]);
+        std::fs::write(dir.path().join("epic_progress.txt"), "epic moved on\n").unwrap();
+        git(dir.path(), &["add", "epic_progress.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "unrelated epic progress"]);
+        git(dir.path(), &["checkout", "-q", "factory/test-worker"]);
+        git(dir.path(), &["merge", "--no-ff", "-m", "sync only", "main"]);
+
+        let outcome = check_zero_commit_close(
+            dir.path(),
+            "main",
+            "cas-cab3",
+            &TaskType::Bug,
+            None,
+            false,
+            None, // no anchor
+            None, // no receipt
+            None,
+        );
+        let ZeroCommitCloseOutcome::AmbiguousCodeTask(msg) = outcome else {
+            panic!("a sync-only branch with no evidence at all must still be rejected");
+        };
+        assert!(
+            msg.contains("NO-DIFF CLOSE ON CODE TASK"),
+            "the guard must still name itself: {msg}"
+        );
+        assert!(
+            msg.contains("commit_receipt=<sha>"),
+            "the refusal must name the receipt remedy: {msg}"
+        );
+        assert!(
+            msg.contains("do NOT reset or force-push"),
+            "the refusal must steer away from branch surgery (GH #128): {msg}"
+        );
+    }
+
+    /// STILL REJECTED #2: a receipt whose commit carries an empty diff is not
+    /// evidence of work, no matter that it is an ancestor of the parent.
+    #[test]
+    fn cascab3_no_diff_with_empty_diff_receipt_still_rejects() {
+        let dir = init_worker_repo();
+        // An empty commit on the parent — merged, but contributes nothing.
+        git(dir.path(), &["checkout", "-q", "main"]);
+        git(
+            dir.path(),
+            &["commit", "-q", "--allow-empty", "-m", "empty parent commit"],
+        );
+        let empty_receipt = head_sha(dir.path());
+        git(dir.path(), &["checkout", "-q", "factory/test-worker"]);
+        git(dir.path(), &["merge", "--no-ff", "-m", "sync only", "main"]);
+
+        let outcome = check_zero_commit_close(
+            dir.path(),
+            "main",
+            "cas-cab3",
+            &TaskType::Bug,
+            None,
+            false,
+            None,
+            Some(&empty_receipt),
+            Some(&test_receipt_window()),
+        );
+        let ZeroCommitCloseOutcome::AmbiguousCodeTask(msg) = outcome else {
+            panic!("an empty-diff receipt must not carry a close");
+        };
+        assert!(
+            msg.contains("INVALID TASK COMMIT RECEIPT"),
+            "an offered-but-invalid receipt must be rejected on its own terms: {msg}"
+        );
+    }
+
+    /// STILL REJECTED #3: a receipt that is NOT an ancestor of the parent —
+    /// real work, but not integrated, so the close is premature.
+    #[test]
+    fn cascab3_no_diff_with_unmerged_receipt_still_rejects() {
+        let dir = init_worker_repo();
+        // Real work on a side branch that is never merged into main.
+        git(dir.path(), &["checkout", "-q", "-b", "factory/side-lane"]);
+        std::fs::write(dir.path().join("unmerged.rs"), "pub fn unmerged() {}\n").unwrap();
+        git(dir.path(), &["add", "unmerged.rs"]);
+        git(dir.path(), &["commit", "-q", "-m", "fix: never merged"]);
+        let unmerged_receipt = head_sha(dir.path());
+
+        git(dir.path(), &["checkout", "-q", "main"]);
+        std::fs::write(dir.path().join("epic_progress.txt"), "epic moved on\n").unwrap();
+        git(dir.path(), &["add", "epic_progress.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "unrelated epic progress"]);
+        git(dir.path(), &["checkout", "-q", "factory/test-worker"]);
+        git(dir.path(), &["merge", "--no-ff", "-m", "sync only", "main"]);
+
+        let outcome = check_zero_commit_close(
+            dir.path(),
+            "main",
+            "cas-cab3",
+            &TaskType::Bug,
+            None,
+            false,
+            None,
+            Some(&unmerged_receipt),
+            Some(&test_receipt_window()),
+        );
+        let ZeroCommitCloseOutcome::AmbiguousCodeTask(msg) = outcome else {
+            panic!("an unmerged receipt must not carry a close");
+        };
+        assert!(
+            msg.contains("INVALID TASK COMMIT RECEIPT"),
+            "an unmerged receipt must be rejected on its own terms: {msg}"
+        );
+    }
+
+    /// An unmerged ANCHOR must not silently unlock the no-diff path either —
+    /// it falls through to the ordinary refusal (no receipt was offered).
+    #[test]
+    fn cascab3_no_diff_with_unmerged_anchor_still_rejects() {
+        let dir = init_worker_repo();
+        git(dir.path(), &["checkout", "-q", "-b", "factory/side-lane"]);
+        std::fs::write(dir.path().join("unmerged.rs"), "pub fn unmerged() {}\n").unwrap();
+        git(dir.path(), &["add", "unmerged.rs"]);
+        git(dir.path(), &["commit", "-q", "-m", "fix: never merged"]);
+        let unmerged_anchor = head_sha(dir.path());
+
+        git(dir.path(), &["checkout", "-q", "main"]);
+        std::fs::write(dir.path().join("epic_progress.txt"), "epic moved on\n").unwrap();
+        git(dir.path(), &["add", "epic_progress.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "unrelated epic progress"]);
+        git(dir.path(), &["checkout", "-q", "factory/test-worker"]);
+        git(dir.path(), &["merge", "--no-ff", "-m", "sync only", "main"]);
+
+        let outcome = check_zero_commit_close(
+            dir.path(),
+            "main",
+            "cas-cab3",
+            &TaskType::Bug,
+            None,
+            false,
+            Some(&unmerged_anchor),
+            None,
+            None,
+        );
+        assert!(
+            matches!(outcome, ZeroCommitCloseOutcome::AmbiguousCodeTask(_)),
+            "an unmerged anchor must not unlock the no-diff path; got {outcome:?}"
+        );
+    }
+
+    /// The commit-count>0 WITH a real diff case is untouched: normal
+    /// unmerged work still proceeds without needing any evidence.
+    #[test]
+    fn cascab3_branch_with_real_diff_is_unaffected() {
+        let dir = init_worker_repo();
+        std::fs::write(dir.path().join("work.rs"), "pub fn work() {}\n").unwrap();
+        git(dir.path(), &["add", "work.rs"]);
+        git(dir.path(), &["commit", "-q", "-m", "fix: unmerged work"]);
+
+        let outcome = check_zero_commit_close(
+            dir.path(),
+            "main",
+            "cas-cab3",
+            &TaskType::Bug,
+            None,
+            false,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            matches!(outcome, ZeroCommitCloseOutcome::Proceed),
+            "a branch with a real diff must proceed without evidence; got {outcome:?}"
         );
     }
 

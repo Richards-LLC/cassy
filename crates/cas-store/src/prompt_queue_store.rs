@@ -4802,6 +4802,110 @@ mod tests {
         assert!(prompts.iter().any(|p| p.prompt == "new urgent" && p.urgent));
     }
 
+    /// cas-ac7e (GH #130): the recipient-transport table has to appear on
+    /// stores that predate it, or every existing factory keeps reporting
+    /// `stage=delivered` with no recipient-side stamp — the bug, preserved.
+    #[test]
+    fn recipient_transport_table_is_created_on_a_preexisting_store() {
+        let temp = TempDir::new().unwrap();
+        let db_path = temp.path().join("cas.db");
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE prompt_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source TEXT NOT NULL,
+                    target TEXT NOT NULL,
+                    prompt TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    processed_at TEXT,
+                    factory_session TEXT,
+                    summary TEXT,
+                    priority INTEGER NOT NULL DEFAULT 2,
+                    acked_at TEXT
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO prompt_queue (source, target, prompt, created_at) \
+                 VALUES ('supervisor','worker-1','legacy', datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+
+        // A row delivered AFTER the upgrade gets the stamp...
+        let fresh = store.enqueue("supervisor", "worker-1", "post-upgrade").unwrap();
+        store.mark_transport_delivered(fresh).unwrap();
+        assert!(
+            recipient_transport_stamp(&store, fresh, "worker-1").is_some(),
+            "the table must exist and be written on an upgraded store"
+        );
+
+        // ...and the pre-existing row is untouched, not dropped.
+        assert!(
+            store
+                .peek_all(10)
+                .unwrap()
+                .iter()
+                .any(|p| p.prompt == "legacy"),
+            "adding the table must not disturb existing rows"
+        );
+    }
+
+    /// cas-ac7e (GH #130): the recipient's own drain is a delivery path too, so
+    /// it must leave the same corroboration as the daemon's handoff. Without
+    /// this a row could be reported `stage=delivered` with no stamp purely
+    /// because it reached the recipient by polling rather than by the daemon.
+    #[test]
+    fn a_drained_row_also_records_its_recipient_transport_stamp() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_with_session("supervisor", "worker-1", "assignment", "sess")
+            .unwrap();
+        assert!(recipient_transport_stamp(&store, id, "worker-1").is_none());
+
+        let drained = store
+            .poll_unseen_for_recipient("worker-1", Some("sess"), 10)
+            .unwrap();
+        assert_eq!(drained.len(), 1);
+
+        let report = store.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(report.stage, DeliveryStage::Delivered);
+        assert!(
+            report.recipient_transport_at.is_some(),
+            "a drain that advances the row to Delivered must leave the stamp too"
+        );
+    }
+
+    /// cas-ac7e (GH #130) AC2 — `unseen_for_recipient_summary` backs the unread
+    /// count and oldest-age the supervisor escalates on. If it kept the old
+    /// `acked_at IS NULL` predicate, a vanished message would read as zero
+    /// unread while `poll_unseen_for_recipient` still returned it.
+    #[test]
+    fn unread_count_agrees_with_the_drain_about_an_inferred_acked_row() {
+        let (_temp, store) = create_test_store();
+        let id = store.enqueue("worker-1", "supervisor", "report").unwrap();
+        store.mark_transport_delivered(id).unwrap();
+        stamp_ack_via(&store, id, Some("inferred_from_reply"));
+
+        assert_eq!(
+            store.count_unseen_for_recipient("supervisor", None).unwrap(),
+            1,
+            "the unread count must see exactly what the drain would return"
+        );
+        assert!(
+            store
+                .oldest_unseen_age_secs_for_recipient("supervisor", None)
+                .unwrap()
+                .is_some(),
+            "the undelivered clock must keep running on a row nobody has seen"
+        );
+    }
+
     /// cas-2bcb / cas-04a6 R1: lower-ID NULL-session legacy rows must not
     /// occupy the fetch LIMIT ahead of eligible live-session rows.
     #[test]

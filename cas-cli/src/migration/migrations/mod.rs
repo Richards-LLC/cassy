@@ -193,6 +193,7 @@ pub mod m214_known_repo_bindings;
 mod m215_verifier_server_handoffs;
 mod m216_spawn_queue_add_requester_config_dir;
 mod m217_spawn_queue_add_lifecycle_state;
+mod m218_prompt_queue_recipient_transport_create_table;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -402,6 +403,7 @@ pub const MIGRATIONS: &[Migration] = &[
     // launched → registered/FAILED) so a spawn that never registers is
     // queryable as FAILED rather than silence.
     m217_spawn_queue_add_lifecycle_state::MIGRATION,
+    m218_prompt_queue_recipient_transport_create_table::MIGRATION,
 ];
 
 #[cfg(test)]

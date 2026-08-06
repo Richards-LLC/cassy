@@ -116,6 +116,36 @@ fn first_task_id_token(text: &str) -> Option<String> {
         .map(|token| format!("cas-{}", &token[4..]))
 }
 
+/// cas-ac7e (GH #130): the operator-facing warning for a row that claims
+/// `stage=delivered` with no recipient-side transport stamp.
+///
+/// A free function, not an inline condition, because this warning IS the fix's
+/// visible surface: it is how an operator tells notification 7183's shape
+/// (delivered per the writer, unrecorded per the recipient) from a genuinely
+/// corroborated delivery. Three independent clauses have to be right and an
+/// inline expression let all three be wrong silently.
+///
+/// `all_workers` is exempt: a broadcast's per-recipient transport is its
+/// broadcast counts, so it legitimately has no single-recipient stamp.
+pub(crate) fn recipient_transport_warning(
+    stage: cas_store::DeliveryStage,
+    target: &str,
+    has_recipient_transport: bool,
+) -> Option<&'static str> {
+    if stage != cas_store::DeliveryStage::Delivered
+        || target == "all_workers"
+        || has_recipient_transport
+    {
+        return None;
+    }
+    Some(
+        "recipient_transport: MISSING — this row reports stage=delivered with no \
+         per-recipient transport stamp. Either it was delivered before CAS \
+         recorded them, or the stamp and the stage have diverged; treat the \
+         delivery as unproven and re-send.\n",
+    )
+}
+
 impl CasService {
     pub(in crate::mcp::tools::service) async fn message_send(
         &self,
@@ -1229,18 +1259,25 @@ impl CasService {
                         }
                     ),
                 };
+                // cas-ac7e (GH #130): stage=delivered used to be the writer's
+                // unchecked claim about itself. Say out loud when the
+                // recipient side cannot corroborate it, instead of reporting
+                // "delivered" and leaving the operator to discover from the
+                // recipient that nothing arrived.
+                let transport_line = recipient_transport_warning(
+                    r.stage,
+                    &r.target,
+                    r.recipient_transport_at.is_some(),
+                )
+                .unwrap_or("");
                 Ok(Self::success(format!(
                     "Message {notification_id} status: {}\n\
                      stage: {}  pending_reason: {}  wake: {}  reaction: {}  \
                      confirmation_source: {}\n\
+                     {transport_line}\
                      {undelivered_line}\
                      {json}",
-                    r.legacy_status,
-                    r.stage,
-                    reason,
-                    r.wake,
-                    r.reaction,
-                    r.confirmation_source
+                    r.legacy_status, r.stage, reason, r.wake, r.reaction, r.confirmation_source
                 )))
             }
             None => Ok(Self::success(format!(
@@ -1308,7 +1345,54 @@ fn enrich_report_from_harness_artifact(
 
 #[cfg(test)]
 mod inbox_poll_identity_tests {
-    use super::{enrich_report_from_harness_artifact, resolve_inbox_recipient};
+    use super::{
+        enrich_report_from_harness_artifact, recipient_transport_warning, resolve_inbox_recipient,
+    };
+    use cas_store::DeliveryStage;
+
+    /// cas-ac7e (GH #130): the 7183 shape — delivered per the writer, with
+    /// nothing on the recipient's side to corroborate it — must be called out.
+    #[test]
+    fn a_delivered_row_without_a_recipient_stamp_warns() {
+        let warning = recipient_transport_warning(DeliveryStage::Delivered, "fast-cobra-90", false);
+        assert!(
+            warning.is_some_and(|w| w.contains("MISSING")),
+            "silently reporting stage=delivered here is exactly the blind spot #130 reported"
+        );
+    }
+
+    #[test]
+    fn a_corroborated_delivery_does_not_warn() {
+        assert_eq!(
+            recipient_transport_warning(DeliveryStage::Delivered, "fast-cobra-90", true),
+            None
+        );
+    }
+
+    #[test]
+    fn a_broadcast_is_exempt_from_the_recipient_stamp_warning() {
+        assert_eq!(
+            recipient_transport_warning(DeliveryStage::Delivered, "all_workers", false),
+            None,
+            "a broadcast's per-recipient transport is its broadcast counts; warning here              would fire on every healthy broadcast and train operators to ignore it"
+        );
+    }
+
+    #[test]
+    fn a_row_that_never_reached_delivered_does_not_warn() {
+        for stage in [
+            DeliveryStage::Enqueued,
+            DeliveryStage::Selected,
+            DeliveryStage::Gated,
+            DeliveryStage::Confirmed,
+        ] {
+            assert_eq!(
+                recipient_transport_warning(stage, "worker-1", false),
+                None,
+                "{stage} has made no delivery claim to contradict"
+            );
+        }
+    }
 
     #[test]
     fn registered_identity_precedes_environment_fallback() {

@@ -7,7 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
-## [2.43.0] - 2026-08-06
+## [2.44.0] - 2026-08-06
+
+### Fixed
+- **Codex reviewers stopped rejecting finished work over a turn of phrase.** The Codex flavor of the completion reviewer still screened close reasons with a keyword blacklist ("pending", "partial", "remaining items") long after that approach was removed elsewhere for flagging work that was genuinely done but mentioned something another team still owed. It now judges a close reason against the task's own acceptance criteria, matching every other flavor, and its review recipes cover TypeScript and Python instead of assuming Rust.
+- **The startup briefing always fits, and always arrives.** On busy projects the session-start briefing could outgrow the chat window's size limit, get shunted to a file, and leave the assistant holding only the first couple of KB. The briefing now assembles under a fixed size budget: core guidance is never what gets cut, and bulky sections collapse to a count plus the command that brings the detail back.
+- **Team sessions on a second account find their own team.** Team folders, inboxes, and settings files are created inside whichever account the session is actually running as, instead of always landing in the primary account's folder where that session would never look for them. Single-account setups are unchanged.
+- **Hook setup follows the account you are configuring.** Installing and removing hooks now reads and writes the settings file of the active configuration directory rather than assuming the default one, so a session on an alternate account comes up with its hooks in place.
+- **The operator guides describe the system that actually shipped.** The supervisor and worker guides had drifted from the code: account selection when spawning workers, the long-lived server registry, the merge and fleet-sync commands that keep factory bookkeeping intact, and the evidence a completed review must carry were missing, incomplete, or documented as something the code no longer does. All corrected against the dispatch sites.
+
+### Added
+- **The three assistant flavors can no longer drift apart in silence.** A new test compares every shared builtin guide across all three flavors, normalizing only the differences that are meant to exist, and fails the build on any other divergence — the failure mode that had let one flavor sit four months behind the others.
 
 ### Fixed
 - **The supervisor now hears about parked closes.** A worker's close rejected with MERGE REQUIRED previously vanished — fleets idled silently until a human checked in; the event now reaches the supervisor as a push signal.

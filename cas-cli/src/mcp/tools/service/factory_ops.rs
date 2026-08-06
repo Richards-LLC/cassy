@@ -2086,6 +2086,126 @@ impl CasService {
         Ok(Self::success(output))
     }
 
+    /// Push a sync incident to the worker whose directory it is AND to the
+    /// supervisor (cas-0a6f / GH #103).
+    ///
+    /// A stranded stash or an unfinished rebase is invisible from inside the
+    /// worker's next turn — it just sees a working tree that lost its changes.
+    /// Best-effort by design: a queue failure must not mask the sync report,
+    /// so it is reported back as a line instead of an error. Returns the
+    /// delivery outcomes for the report.
+    fn notify_sync_incident(
+        &self,
+        worker_name: &str,
+        path: &std::path::Path,
+        sync_ref: &str,
+        failure: &SyncFailure,
+    ) -> Vec<String> {
+        use crate::store::{NotificationPriority, open_prompt_queue_store};
+
+        let mut body = format!(
+            "SYNC INCIDENT in your worktree ({}) while syncing to '{sync_ref}': {}",
+            path.display(),
+            failure.message
+        );
+        if let Some(stash) = failure.stranded_stash.as_deref() {
+            body.push_str(&format!(
+                "\n\nYour uncommitted work was stashed and could NOT be restored automatically. \
+                 It is not lost: recover it with `git stash pop {stash}` (inspect first with \
+                 `git stash show -p --include-untracked {stash}` — plain `stash show` renders \
+                 nothing when the WIP was untracked) in that worktree. Do this before making \
+                 further edits, or the pop will conflict."
+            ));
+        }
+        if failure.mid_rebase {
+            body.push_str(
+                "\n\nThe worktree was left MID-REBASE. Resolve the conflict and \
+                 `git rebase --continue`, or `git rebase --abort` to return to the prior state, \
+                 before doing anything else in it.",
+            );
+        }
+
+        let summary = if failure.stranded_stash.is_some() {
+            format!("sync stranded {worker_name} WIP in a stash")
+        } else {
+            format!("sync left {worker_name} mid-rebase")
+        };
+
+        let queue = match open_prompt_queue_store(&self.inner.cas_root) {
+            Ok(queue) => queue,
+            Err(error) => {
+                tracing::error!(
+                    target: "cas::coordination",
+                    stage = "sync_incident_queue_open_failed",
+                    worker = %worker_name,
+                    "{error}"
+                );
+                return vec![format!(
+                    "{worker_name}: COULD NOT NOTIFY (queue unavailable: {error}) — relay the \
+                     recovery instruction above by hand"
+                )];
+            }
+        };
+
+        let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
+        let supervisor = std::env::var("CAS_SUPERVISOR_NAME")
+            .ok()
+            .filter(|name| !name.trim().is_empty())
+            .or_else(|| {
+                use cas_types::{AgentRole, AgentStatus};
+                crate::store::open_agent_store(&self.inner.cas_root)
+                    .ok()
+                    .and_then(|store| store.list(None).ok())
+                    .and_then(|agents| {
+                        agents
+                            .into_iter()
+                            .find(|a| {
+                                a.role == AgentRole::Supervisor
+                                    && matches!(a.status, AgentStatus::Active | AgentStatus::Idle)
+                            })
+                            .map(|a| a.name)
+                    })
+            });
+
+        let mut outcomes = Vec::new();
+        let mut targets = vec![worker_name.to_string()];
+        match supervisor {
+            Some(name) if name != worker_name => targets.push(name),
+            Some(_) => {}
+            None => outcomes.push(format!(
+                "{worker_name}: supervisor identity unresolved — incident delivered to the worker \
+                 only"
+            )),
+        }
+
+        for target in targets {
+            match queue.enqueue_full(
+                "cas-sync",
+                &target,
+                &body,
+                factory_session.as_deref(),
+                Some(summary.as_str()),
+                Some(NotificationPriority::High),
+            ) {
+                Ok(id) => outcomes.push(format!("{target}: notified (message {id})")),
+                Err(error) => {
+                    tracing::error!(
+                        target: "cas::coordination",
+                        stage = "sync_incident_enqueue_failed",
+                        worker = %worker_name,
+                        notify_target = %target,
+                        "{error}"
+                    );
+                    outcomes.push(format!(
+                        "{target}: COULD NOT NOTIFY ({error}) — relay the recovery instruction by \
+                         hand"
+                    ));
+                }
+            }
+        }
+        outcomes
+    }
+
     pub(super) async fn factory_sync_all_workers(
         &self,
         req: FactoryRequest,
@@ -2147,6 +2267,13 @@ impl CasService {
         let mut synced = Vec::new();
         let mut skipped = Vec::new();
         let mut failed = Vec::new();
+        let mut notified = Vec::new();
+
+        // cas-0a6f (GH #103): sync is a bulk, supervisor-initiated rewrite of
+        // other agents' working directories. Live WIP and in-flight tasks are
+        // never collateral without explicit consent.
+        let force = req.force.unwrap_or(false);
+        let in_progress_by_assignee = in_progress_tasks_by_assignee(&self.inner.cas_root);
 
         for worker in workers {
             // cas-f53c: same path resolution as worker_status — do not require
@@ -2162,14 +2289,58 @@ impl CasService {
                 continue;
             };
 
+            let dirty_files = match dirty_file_count(&path) {
+                Ok(count) => count,
+                Err(err) => {
+                    // Cannot establish cleanliness ⇒ cannot claim consent.
+                    skipped.push(format!(
+                        "{} (refusing sync — could not read worktree status: {err})",
+                        worker.name
+                    ));
+                    continue;
+                }
+            };
+            let in_progress = in_progress_by_assignee
+                .get(&worker.name)
+                .map(String::as_str);
+            if let SyncGate::Refuse(reason) = sync_gate_for_worker(
+                &worker.name,
+                dirty_files,
+                rebase_in_progress(&path),
+                in_progress,
+                force,
+            ) {
+                skipped.push(reason);
+                continue;
+            }
+
             match sync_worker_clone(&path, &sync_ref) {
                 Ok(details) => synced.push(format!("{} ({})", worker.name, details)),
-                Err(err) => failed.push(format!("{} ({})", worker.name, err)),
+                Err(failure) => {
+                    // A stranded stash or an unfinished rebase is invisible to
+                    // the worker whose directory it is — push it to them and to
+                    // the supervisor rather than only into this report.
+                    if failure.stranded_stash.is_some() || failure.mid_rebase {
+                        notified.extend(self.notify_sync_incident(
+                            &worker.name,
+                            &path,
+                            &sync_ref,
+                            &failure,
+                        ));
+                    }
+                    failed.push(format!("{} ({})", worker.name, failure.report_line()));
+                }
             }
         }
 
-        let mut out =
-            format!("Worker Sync Report\n==================\n\nSync target: {sync_ref}\n");
+        let mut out = format!(
+            "Worker Sync Report\n==================\n\nSync target: {sync_ref}\nMode: {}\n",
+            if force {
+                "force=true (dirty worktrees stashed; mid-task workers rebased)"
+            } else {
+                "safe (dirty or mid-task worktrees are skipped — pass force=true to include them)"
+            }
+        );
         if !synced.is_empty() {
             out.push_str("\nSynced:\n");
             for item in synced {
@@ -2185,6 +2356,12 @@ impl CasService {
         if !failed.is_empty() {
             out.push_str("\nFailed:\n");
             for item in failed {
+                out.push_str(&format!("  - {item}\n"));
+            }
+        }
+        if !notified.is_empty() {
+            out.push_str("\nIncident notifications:\n");
+            for item in notified {
                 out.push_str(&format!("  - {item}\n"));
             }
         }
@@ -3247,12 +3424,181 @@ fn run_git(path: &std::path::Path, args: &[&str]) -> std::result::Result<String,
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Map worker display name -> the id of a task that makes its worktree unsafe
+/// to rebase (cas-0a6f / GH #103).
+///
+/// `InProgress` is the obvious one. `PendingSupervisorReview` and
+/// `AwaitingMerge` are included because their commits are already named by a
+/// delivery receipt: rebasing rewrites exactly the SHAs the supervisor is
+/// about to verify and merge.
+fn in_progress_tasks_by_assignee(
+    cas_root: &std::path::Path,
+) -> std::collections::HashMap<String, String> {
+    use cas_types::TaskStatus;
+
+    let mut map = std::collections::HashMap::new();
+    let Ok(store) = crate::store::open_task_store_local(cas_root) else {
+        return map;
+    };
+    for status in [
+        TaskStatus::InProgress,
+        TaskStatus::PendingSupervisorReview,
+        TaskStatus::AwaitingMerge,
+    ] {
+        let Ok(tasks) = store.list(Some(status)) else {
+            continue;
+        };
+        for task in tasks {
+            let Some(assignee) = task.assignee.as_ref() else {
+                continue;
+            };
+            let label = if status == TaskStatus::InProgress {
+                task.id.clone()
+            } else {
+                format!("{} [{}]", task.id, status)
+            };
+            map.entry(assignee.clone()).or_insert(label);
+        }
+    }
+    map
+}
+
+/// Why `sync_all_workers` must not touch a given worktree (cas-0a6f / GH #103).
+///
+/// Sync used to rebase every worker worktree unconditionally: uncommitted WIP
+/// was stashed without consent, a failed stash pop stranded it silently, and a
+/// conflicting rebase left the worktree mid-rebase in a state the worker never
+/// initiated. The decision is a pure function so every branch is testable
+/// without a git fixture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SyncGate {
+    Proceed,
+    /// Skip this worktree; the string is the operator-facing reason.
+    Refuse(String),
+}
+
+/// Decide whether a worker worktree may be rebased.
+///
+/// `force` covers exactly the two consent-shaped cases — dirty tree and a
+/// worker mid-task. It deliberately does NOT cover an in-flight rebase: that
+/// state was not created by sync, a second rebase on top of it destroys the
+/// resolution in progress, and no automated recovery is safe.
+pub(crate) fn sync_gate_for_worker(
+    worker_name: &str,
+    dirty_files: usize,
+    mid_rebase: bool,
+    in_progress_task: Option<&str>,
+    force: bool,
+) -> SyncGate {
+    if mid_rebase {
+        return SyncGate::Refuse(format!(
+            "{worker_name} (ALREADY MID-REBASE — sync did not start this and will not rebase on \
+             top of it; finish or `git rebase --abort` in the worktree, then re-run sync. \
+             force= does not override this)"
+        ));
+    }
+    if let Some(task_id) = in_progress_task
+        && !force
+    {
+        return SyncGate::Refuse(format!(
+            "{worker_name} (mid-task on {task_id} — rebasing under a working agent rewrites the \
+             commits it is building on; wait for the task to land, or pass force=true)"
+        ));
+    }
+    if dirty_files > 0 && !force {
+        return SyncGate::Refuse(format!(
+            "{worker_name} ({dirty_files} uncommitted change(s) — refusing to stash and rebase \
+             live WIP; commit it, or pass force=true to stash/rebase/restore)"
+        ));
+    }
+    SyncGate::Proceed
+}
+
+/// True when the worktree is sitting in an unfinished rebase.
+fn rebase_in_progress(path: &std::path::Path) -> bool {
+    for probe in ["rebase-merge", "rebase-apply"] {
+        if let Ok(dir) = run_git(path, &["rev-parse", "--git-path", probe]) {
+            let dir = dir.trim();
+            if dir.is_empty() {
+                continue;
+            }
+            let candidate = std::path::Path::new(dir);
+            let resolved = if candidate.is_absolute() {
+                candidate.to_path_buf()
+            } else {
+                path.join(candidate)
+            };
+            if resolved.exists() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Count of entries reported by `git status --porcelain`.
+fn dirty_file_count(path: &std::path::Path) -> std::result::Result<usize, String> {
+    let status = run_git(path, &["status", "--porcelain"])?;
+    Ok(status.lines().filter(|l| !l.trim().is_empty()).count())
+}
+
+/// A sync attempt that failed in a way the operator must act on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SyncFailure {
+    pub message: String,
+    /// Set when stashed WIP was NOT restored — the exact ref to recover from.
+    pub stranded_stash: Option<String>,
+    /// Set when the worktree was left in an unfinished rebase.
+    pub mid_rebase: bool,
+}
+
+impl SyncFailure {
+    fn plain(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            stranded_stash: None,
+            mid_rebase: false,
+        }
+    }
+
+    /// One-line render for the sync report.
+    pub(crate) fn report_line(&self) -> String {
+        let mut line = self.message.clone();
+        if let Some(stash) = self.stranded_stash.as_deref() {
+            // `--include-untracked` matters: the stash was taken with it, and
+            // plain `git stash show -p` renders nothing for untracked-only
+            // WIP — which reads as "my work is gone".
+            line.push_str(&format!(
+                " — WIP IS NOT LOST: recover with `git stash pop {stash}` (inspect with \
+                 `git stash show -p --include-untracked {stash}`) in the worktree"
+            ));
+        }
+        if self.mid_rebase {
+            line.push_str(
+                " — WORKTREE LEFT MID-REBASE: resolve or `git rebase --abort` before using it",
+            );
+        }
+        line
+    }
+}
+
+/// Resolve the stash just pushed to a durable ref (`refs/stash`'s SHA) so the
+/// recovery instruction survives later pushes shifting `stash@{0}`.
+fn resolve_stash_ref(path: &std::path::Path) -> String {
+    run_git(path, &["rev-parse", "refs/stash"])
+        .map(|sha| {
+            let short = &sha[..sha.len().min(12)];
+            format!("{short} (stash@{{0}} at sync time)")
+        })
+        .unwrap_or_else(|_| "stash@{0}".to_string())
+}
+
 fn sync_worker_clone(
     path: &std::path::Path,
     sync_ref: &str,
-) -> std::result::Result<String, String> {
-    let status = run_git(path, &["status", "--porcelain"])?;
-    let mut stashed = false;
+) -> std::result::Result<String, SyncFailure> {
+    let status = run_git(path, &["status", "--porcelain"]).map_err(SyncFailure::plain)?;
+    let mut stash_ref: Option<String> = None;
 
     if !status.trim().is_empty() {
         let stash_msg = format!(
@@ -3262,28 +3608,40 @@ fn sync_worker_clone(
         let stash_out = run_git(
             path,
             &["stash", "push", "--include-untracked", "-m", &stash_msg],
-        )?;
+        )
+        .map_err(SyncFailure::plain)?;
         if !stash_out.contains("No local changes") {
-            stashed = true;
+            stash_ref = Some(resolve_stash_ref(path));
         }
     }
 
     let _ = run_git(path, &["fetch", "origin"]);
 
     if let Err(rebase_err) = run_git(path, &["rebase", sync_ref]) {
-        let _ = run_git(path, &["rebase", "--abort"]);
-        if stashed {
-            let _ = run_git(path, &["stash", "pop"]);
-        }
-        return Err(format!("rebase failed: {rebase_err}"));
+        let abort = run_git(path, &["rebase", "--abort"]);
+        let still_mid_rebase = abort.is_err() && rebase_in_progress(path);
+        let pop_failed = match stash_ref.as_ref() {
+            Some(_) => run_git(path, &["stash", "pop"]).is_err(),
+            None => false,
+        };
+        return Err(SyncFailure {
+            message: format!("rebase failed: {rebase_err}"),
+            stranded_stash: if pop_failed { stash_ref } else { None },
+            mid_rebase: still_mid_rebase,
+        });
     }
 
-    if stashed {
-        run_git(path, &["stash", "pop"])
-            .map_err(|e| format!("sync applied but stash pop failed: {e}"))?;
+    if stash_ref.is_some()
+        && let Err(pop_err) = run_git(path, &["stash", "pop"])
+    {
+        return Err(SyncFailure {
+            message: format!("sync applied but stash pop failed: {pop_err}"),
+            stranded_stash: stash_ref,
+            mid_rebase: false,
+        });
     }
 
-    Ok(if stashed {
+    Ok(if stash_ref.is_some() {
         "stashed + rebased + restored".to_string()
     } else {
         "rebased cleanly".to_string()
@@ -8062,5 +8420,250 @@ effort = "high"
             status
         );
         assert_eq!(status.git_info, "\n    git: missing-worktree");
+    }
+}
+
+#[cfg(test)]
+mod sync_safety_tests {
+    //! cas-0a6f (GH #103): sync_all_workers used to rebase every worker
+    //! worktree unconditionally — stashing live WIP without consent, stranding
+    //! it silently when the pop failed, and leaving worktrees mid-rebase.
+
+    use super::*;
+    use std::process::Command;
+
+    fn git(repo: &std::path::Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@test.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@test.com")
+            .env("GIT_MERGE_AUTOEDIT", "no")
+            .env("GIT_EDITOR", "true")
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?} failed to run: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn commit(repo: &std::path::Path, file: &str, contents: &str) {
+        std::fs::write(repo.join(file), contents).unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-q", "-m", &format!("add {file}")]);
+    }
+
+    /// Repo with `main` carrying one commit ahead of the worker branch, so a
+    /// rebase onto `main` actually does work.
+    fn repo_with_upstream_commit() -> (tempfile::TempDir, std::path::PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().to_path_buf();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.email", "test@test.com"]);
+        git(&repo, &["config", "user.name", "Test"]);
+        commit(&repo, "base.txt", "base");
+        git(&repo, &["checkout", "-q", "-b", "factory/worker"]);
+        git(&repo, &["checkout", "-q", "main"]);
+        commit(&repo, "upstream.txt", "upstream work");
+        git(&repo, &["checkout", "-q", "factory/worker"]);
+        (temp, repo)
+    }
+
+    // ---- gate decisions (pure) --------------------------------------------
+
+    #[test]
+    fn dirty_worktree_is_skipped_without_force() {
+        let gate = sync_gate_for_worker("w1", 3, false, None, false);
+        let SyncGate::Refuse(reason) = gate else {
+            panic!("a dirty worktree must not be rebased without consent");
+        };
+        assert!(
+            reason.contains("3 uncommitted change(s)") && reason.contains("force=true"),
+            "reason must state the count and the way forward: {reason}"
+        );
+    }
+
+    #[test]
+    fn dirty_worktree_proceeds_with_force() {
+        assert_eq!(
+            sync_gate_for_worker("w1", 3, false, None, true),
+            SyncGate::Proceed
+        );
+    }
+
+    #[test]
+    fn worker_mid_task_is_skipped_without_force_and_named() {
+        let SyncGate::Refuse(reason) = sync_gate_for_worker("w1", 0, false, Some("cas-1234"), false)
+        else {
+            panic!("rebasing under a working agent needs consent");
+        };
+        assert!(
+            reason.contains("cas-1234"),
+            "reason must name the task holding the worktree: {reason}"
+        );
+        assert_eq!(
+            sync_gate_for_worker("w1", 0, false, Some("cas-1234"), true),
+            SyncGate::Proceed,
+            "force is the documented override"
+        );
+    }
+
+    #[test]
+    fn mid_rebase_worktree_is_refused_even_with_force() {
+        for force in [false, true] {
+            let SyncGate::Refuse(reason) =
+                sync_gate_for_worker("w1", 0, true, Some("cas-1234"), force)
+            else {
+                panic!("sync must never rebase on top of an unfinished rebase (force={force})");
+            };
+            assert!(
+                reason.contains("MID-REBASE") && reason.contains("rebase --abort"),
+                "reason must flag the state and how to clear it: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn clean_idle_worktree_proceeds() {
+        assert_eq!(
+            sync_gate_for_worker("w1", 0, false, None, false),
+            SyncGate::Proceed
+        );
+    }
+
+    // ---- git-level behaviour ----------------------------------------------
+
+    #[test]
+    fn dirty_count_and_rebase_probe_read_real_worktree_state() {
+        let (_temp, repo) = repo_with_upstream_commit();
+        assert_eq!(dirty_file_count(&repo).unwrap(), 0);
+        assert!(!rebase_in_progress(&repo));
+
+        std::fs::write(repo.join("wip.txt"), "uncommitted").unwrap();
+        assert_eq!(
+            dirty_file_count(&repo).unwrap(),
+            1,
+            "untracked WIP counts as dirty — it is exactly what auto-stash would sweep up"
+        );
+    }
+
+    #[test]
+    fn clean_sync_rebases_without_touching_a_stash() {
+        let (_temp, repo) = repo_with_upstream_commit();
+        let details = sync_worker_clone(&repo, "main").expect("clean rebase should succeed");
+        assert_eq!(details, "rebased cleanly");
+        assert!(
+            git(&repo, &["stash", "list"]).is_empty(),
+            "nothing should have been stashed"
+        );
+        assert!(repo.join("upstream.txt").exists(), "sync should have landed");
+    }
+
+    #[test]
+    fn stash_pop_failure_reports_the_stash_ref_and_does_not_lose_wip() {
+        let (_temp, repo) = repo_with_upstream_commit();
+
+        // WIP that collides with the incoming upstream commit: the rebase
+        // succeeds (the file is untracked locally) and the pop then fails.
+        std::fs::write(repo.join("upstream.txt"), "local uncommitted version").unwrap();
+
+        let failure =
+            sync_worker_clone(&repo, "main").expect_err("stash pop must fail on this collision");
+        assert!(
+            failure.message.contains("stash pop failed"),
+            "failure must say what happened: {}",
+            failure.message
+        );
+        let stash_ref = failure
+            .stranded_stash
+            .as_deref()
+            .expect("a stranded stash must be reported with its ref");
+
+        let line = failure.report_line();
+        assert!(
+            line.contains("WIP IS NOT LOST") && line.contains(stash_ref),
+            "report line must carry recovery instructions with the ref: {line}"
+        );
+
+        // The stash really is still there, and really does hold the WIP.
+        assert!(
+            !git(&repo, &["stash", "list"]).is_empty(),
+            "the stash entry must survive for recovery"
+        );
+        // `--include-untracked` is required here: the WIP was untracked, and
+        // plain `git stash show -p` prints nothing for it. That is precisely
+        // why the recovery guidance spells the flag out.
+        assert!(
+            git(
+                &repo,
+                &["stash", "show", "-p", "--include-untracked", "stash@{0}"]
+            )
+            .contains("local uncommitted version"),
+            "the stranded stash must contain the worker's WIP"
+        );
+        assert!(
+            line.contains("--include-untracked"),
+            "recovery guidance must use a command that actually shows untracked WIP: {line}"
+        );
+    }
+
+    #[test]
+    fn failed_rebase_restores_wip_and_reports_no_stranded_stash() {
+        let (_temp, repo) = repo_with_upstream_commit();
+
+        // Make the rebase itself conflict: commit a change to a file the
+        // upstream commit also introduces.
+        std::fs::write(repo.join("upstream.txt"), "worker version").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "worker version"]);
+        // Plus recoverable WIP on top.
+        std::fs::write(repo.join("wip.txt"), "worker wip").unwrap();
+
+        let failure = sync_worker_clone(&repo, "main").expect_err("conflicting rebase must fail");
+        assert!(
+            failure.message.contains("rebase failed"),
+            "failure must name the phase: {}",
+            failure.message
+        );
+        assert!(
+            !failure.mid_rebase,
+            "the abort succeeded, so the worktree must not be flagged mid-rebase"
+        );
+        assert!(
+            failure.stranded_stash.is_none(),
+            "the stash was popped back, so nothing is stranded"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("wip.txt")).unwrap(),
+            "worker wip",
+            "the worker's uncommitted WIP must be back in the worktree"
+        );
+        assert!(
+            !rebase_in_progress(&repo),
+            "the worktree must be left usable"
+        );
+    }
+
+    #[test]
+    fn report_line_flags_a_worktree_left_mid_rebase() {
+        let failure = SyncFailure {
+            message: "rebase failed: conflict".to_string(),
+            stranded_stash: Some("abc123def456 (stash@{0} at sync time)".to_string()),
+            mid_rebase: true,
+        };
+        let line = failure.report_line();
+        assert!(
+            line.contains("WORKTREE LEFT MID-REBASE") && line.contains("rebase --abort"),
+            "an unfinished rebase must be explicit in the report: {line}"
+        );
+        assert!(
+            line.contains("abc123def456"),
+            "the stash ref must ride along: {line}"
+        );
     }
 }

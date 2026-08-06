@@ -8,6 +8,7 @@ mod changelog;
 mod claude;
 mod claude_md;
 mod codemap_cmd;
+mod knowledge_cmd;
 mod known_repos;
 mod project_overview_cmd;
 mod provider_default;
@@ -221,6 +222,10 @@ pub enum Commands {
     #[command(subcommand)]
     Codemap(codemap_cmd::CodemapCommands),
 
+    /// Distilled project knowledge wiki (build/status/list)
+    #[command(subcommand)]
+    Knowledge(knowledge_cmd::KnowledgeCommands),
+
     /// PRODUCT_OVERVIEW.md staleness info and pending changes
     #[command(subcommand, name = "project-overview")]
     ProjectOverview(project_overview_cmd::ProjectOverviewCommands),
@@ -290,6 +295,7 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::Queue(_)
         | Commands::ClaudeMd(_)
         | Commands::Codemap(_)
+        | Commands::Knowledge(_)
         | Commands::ProjectOverview(_)
         | Commands::Integrate(_)
         | Commands::Memory(_)
@@ -467,6 +473,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::Device(_) => "device".to_string(),
         Commands::ClaudeMd(_) => "claude-md".to_string(),
         Commands::Codemap(_) => "codemap".to_string(),
+        Commands::Knowledge(_) => "knowledge".to_string(),
         Commands::ProjectOverview(_) => "project-overview".to_string(),
         Commands::Integrate(_) => "integrate".to_string(),
         Commands::Memory(_) => "memory".to_string(),
@@ -536,6 +543,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Device(cmd) => device::execute(cmd, cli),
         Commands::ClaudeMd(args) => claude_md::execute(args, cli),
         Commands::Codemap(cmd) => codemap_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
+        Commands::Knowledge(cmd) => knowledge_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::ProjectOverview(cmd) => {
             project_overview_cmd::execute(cmd, cli, require_cas_root(cas_root)?)
         }

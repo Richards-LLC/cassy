@@ -777,6 +777,12 @@ impl CloudSyncer {
 
         // Combine results
         Ok(SyncResult {
+            // Knowledge pages are synced by the dedicated
+            // `push_knowledge_pages` / `pull_knowledge_pages` pair (they need
+            // a KnowledgeStore this entry point does not take), so this
+            // combined result reports zero for them rather than guessing.
+            pushed_knowledge_pages: 0,
+            pulled_knowledge_pages: 0,
             pushed_entries: push_result.pushed_entries + team_push_result.pushed_entries,
             pushed_tasks: push_result.pushed_tasks + team_push_result.pushed_tasks,
             pushed_rules: push_result.pushed_rules + team_push_result.pushed_rules,

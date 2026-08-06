@@ -373,6 +373,11 @@ impl CloudSyncer {
                                 EntityType::CommitLink => result.upsert_commit_links.push(value),
                                 EntityType::Agent => result.upsert_agents.push(value),
                                 EntityType::Worktree => result.upsert_worktrees.push(value),
+                                // Pages ship via `push_knowledge_pages` (it
+                                // needs the body from disk), so nothing
+                                // enqueues them today. Arm kept explicit so a
+                                // future queue producer is a compile error.
+                                EntityType::KnowledgePage => {}
                             }
                         }
                     }
@@ -396,6 +401,7 @@ impl CloudSyncer {
                     }
                     EntityType::Agent => result.delete_agents.push(item.entity_id.clone()),
                     EntityType::Worktree => result.delete_worktrees.push(item.entity_id.clone()),
+                    EntityType::KnowledgePage => {}
                 },
             }
         }

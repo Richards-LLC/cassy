@@ -94,6 +94,7 @@ impl SyncQueue {
                 EntityType::CommitLink => grouped.commit_links.push(item),
                 EntityType::Agent => grouped.agents.push(item),
                 EntityType::Worktree => grouped.worktrees.push(item),
+                EntityType::KnowledgePage => grouped.knowledge_pages.push(item),
             }
         }
         grouped

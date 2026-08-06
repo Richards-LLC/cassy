@@ -76,8 +76,10 @@ pub use entity_search::{EntityQuery, EntitySearch, EntitySearchResult};
 pub mod hybrid;
 pub mod metrics;
 pub mod scorer;
+pub mod semantic;
 
 pub use hybrid::{HybridSearch, HybridSearchOptions};
+pub use semantic::{SemanticChannel, open_semantic_channel};
 pub use metrics::{LatencyTimer, MetricsStore, SearchEvent, SearchMethod, generate_event_id};
 
 pub mod filter_grammar;

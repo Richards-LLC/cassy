@@ -448,7 +448,7 @@ impl CloudSyncer {
     /// `PushResponse::default()` is returned — `skipped` is then `None`,
     /// which `skipped_count_for` reports as `0`, preserving legacy
     /// "trust the 200" behavior.
-    fn push_sub_batch(
+    pub(super) fn push_sub_batch(
         &self,
         values: Vec<serde_json::Value>,
         entity_type: &str,

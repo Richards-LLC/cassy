@@ -447,7 +447,7 @@ pub struct FactoryRequest {
 
     /// Supervisor policy hint for shutdown safety checks
     #[schemars(
-        description = "Supervisor should verify worktree state before shutdown. Kept for compatibility (default: false)."
+        description = "sync_all_workers: consent to rebase worktrees that are dirty (WIP is stashed and restored) or whose assignee is mid-task; a worktree already mid-rebase is refused regardless. shutdown_workers: supervisor should verify worktree state first. Default false."
     )]
     #[serde(default)]
     pub force: Option<bool>,
@@ -593,7 +593,7 @@ pub struct FactoryRequest {
 pub struct CoordinationRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: agent ops (register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message, interrupt, message_ack, message_status), factory ops (spawn_workers, shutdown_workers, hold_worker, release_worker, worker_status, worker_activity, clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, focus_epic, remind, remind_list, remind_cancel), worktree ops (worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status). Only available in factory mode. 'interrupt' is shorthand for 'message' with urgent=true (breaks the target's in-flight turn, then injects). For shutdown_workers, supervisor should verify worktree cleanliness/policy before issuing shutdown."
+        description = "Action: agent ops (register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message, interrupt, message_ack, message_status), factory ops (spawn_workers, shutdown_workers, hold_worker, release_worker, worker_status, worker_activity, clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, focus_epic, remind, remind_list, remind_cancel), worktree ops (worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status). Only available in factory mode. 'interrupt' is shorthand for 'message' with urgent=true (breaks the target's in-flight turn, then injects). For shutdown_workers, supervisor should verify worktree cleanliness/policy before issuing shutdown. sync_all_workers skips worktrees that are dirty or whose assignee is mid-task unless force=true, and always refuses one already mid-rebase."
     )]
     pub action: String,
 
@@ -638,9 +638,9 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub urgent: Option<bool>,
 
-    /// Force operation (shutdown, worktree cleanup/merge, gc_cleanup)
+    /// Force operation (shutdown, worktree cleanup/merge, gc_cleanup, sync_all_workers)
     #[schemars(
-        description = "Force operation even with uncommitted changes (dirty worktree cleanup/merge). Does NOT authorize trunk as a merge target — use allow_trunk for that (cas-0b32)."
+        description = "Force operation even with uncommitted changes (dirty worktree cleanup/merge). For sync_all_workers: consent to rebase worktrees that are dirty (WIP is stashed and restored) or whose assignee is mid-task — without it those are skipped; a worktree already mid-rebase is refused either way. Does NOT authorize trunk as a merge target — use allow_trunk for that (cas-0b32)."
     )]
     #[serde(default)]
     pub force: Option<bool>,

@@ -6,7 +6,7 @@ managed_by: cas
 
 # Close Gate — Self-Verification
 
-Run all 6 self-verification checks before `cas__task action=close`. The gate is the same regardless of task type. Skip and you eat a verifier rejection round-trip.
+Run all 6 self-verification checks before `cas__task action=close`. They apply to every task type — but a few types add a gate on top of them (see "Task-type extras" below), so the close path is not identical everywhere. Skip the checks and you eat a verifier rejection round-trip.
 
 ## Depth: `light` tasks skip this gate
 
@@ -16,13 +16,27 @@ If the task you're closing is `depth=light` (check the `Depth:` line in `task sh
 
 Close runs a merge-state guard before anything else: every commit on your `factory/<name>` branch must already be on the task's parent branch, or close rejects with `⚠️ MERGE REQUIRED`. This is a **data-state guard** — `bypass_code_review=true` does not skip it, and neither can the supervisor. Get merged *before* attempting close:
 
-- **Parent is `epic/<slug>`** — epic branches are supervisor-local by convention. Run `cas__coordination action=inbox_poll` to pull unread supervisor messages, capture the current tip with `git rev-parse factory/<name>`, then push and send a freshness-qualified merge request only if one is still needed. **Never `gh pr create --base epic/...`** — that ref doesn't exist on origin; the call always fails.
+- **Parent is `epic/<slug>`** — epic branches are supervisor-local by convention. Run `cas__coordination action=inbox_poll` **repeatedly until it returns `No unread messages`** to drain unread supervisor messages — one poll returns at most 10 rows, so a single call is not a freshness check — then capture the current tip with `git rev-parse factory/<name>`, then push and send a freshness-qualified merge request only if one is still needed. **Never `gh pr create --base epic/...`** — that ref doesn't exist on origin; the call always fails.
 - **Parent is `main`/`master`/`staging`** — push and complete the project's PR/merge flow (or the merge flow the supervisor stated at assignment), then close.
-- **Guard still fires after a confirmed merge?** Squash-merges rewrite SHAs, so the guard can count already-merged commits as missing. Send the supervisor the exact guard text — they fix the stale branch ref. Do not retry-loop.
+- **Guard still fires after a confirmed merge?** Squash-merges rewrite SHAs, so the guard can count already-merged commits as missing. You can usually clear this yourself: re-close with `commit_receipt=<sha>` naming the commit that carries your work. A receipt that resolves to a commit with a **non-empty diff** that is already **reachable from the parent branch** (or `origin/<parent>`) IS the delivery evidence, and close proceeds with a note even if the lane branch still carries unrelated residue (cas-e74c). If the receipt is rejected, send the supervisor the exact guard text plus the rejection reason — they fix the stale branch ref. Do not retry-loop.
 
 **Never bypass the close path.** Setting `status=closed` via `action=update` and hand-writing a `cas__verification action=add` record forges the verification audit trail — the task looks verified when nobody verified it. If close keeps rejecting, that is a supervisor conversation, not a workaround opportunity.
 
 **Code review is not your job at close** under the v2.13.0+ default `[code_review] owner = "supervisor"`. The supervisor runs a lightweight gate when merging each worker diff, then one full `/cas-code-review` pass when the epic is code-complete. Do not invoke the multi-persona review yourself unless your supervisor explicitly tells you to, or your project has opted in to legacy `owner = "worker"` in `.cas/config.toml` — the worker-inline path adds ~14 min and ~100K tokens per close, which is exactly what the v2.13.0 flip was designed to eliminate.
+
+## Delivery receipts (worker-supplied close evidence)
+
+Two distinct `close` fields — you supply them, no supervisor needed:
+
+- **`commit_receipt=<sha>`** — full SHA or unambiguous abbreviation of the commit this task delivered. CAS resolves it to an immutable commit id, validates a **non-empty diff** and **ancestry from the parent branch**, and persists only the resolved id. This is the self-serve remedy for squash-merge SHA drift, and for cherry-picked delivery out of a lane branch that still carries other tasks' commits: a valid receipt clears the merge-state guard and close proceeds with a note about the lane's residue (cas-e74c). If the receipt is rejected, close tells you why — fix that, don't retry blind.
+- **`completion_receipt=<json>`** — opt-in transactional close. Serialize a `WorkerCompletionReceiptInput`: `{task_id, worker_agent_id, repo_selector, source_branch, commit_sha, merge_base_sha, target_branch, target_sha, proof_reference, scope_summary}`. CAS revalidates every identity-bearing field against registered agent state and live Git before persisting an immutable delivery transaction, then releases your lease and moves the task to `pending_supervisor_review` awaiting a fresh verification verdict. Omit it and the legacy close path is unchanged. Rejection returns `DELIVERY RECEIPT REJECTED` and changes nothing.
+
+## Task-type extras
+
+The 6 checks below apply to every task type. These gates sit on top of them:
+
+- **Spike** (`task_type=spike`) — optional `search_manifest`: a JSON array of the search steps you ran, e.g. `[{"command": "rg -c foo src/", "hits": 3}]`. **Opt-in and warning-only** — it never blocks close. Entries with `hits: 0` (or a manifest that fails to parse) are appended to the task as a loud `ZERO_HIT_SEARCH_WARNING` note, because a search that matches nothing anywhere is more often a broken pattern than a clean corpus (cas-49f1). Supply it whenever your conclusion rests on "I searched and found nothing".
+- **Epic** — closing an epic additionally walks its children and blocks on any child whose recorded work is not merged into the parent branch, not just on child status.
 
 ## Pre-Close Self-Verification
 

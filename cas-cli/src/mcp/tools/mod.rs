@@ -136,6 +136,14 @@ pub(super) fn truncated_list_footer(total: usize, shown: usize) -> String {
     format!("\n... and {hidden} more not shown — pass limit={total} to see all of them.\n")
 }
 
+/// Sort a slice of task references (cas-61d3 / GH #111).
+///
+/// `tasks_available` filters `list_ready`'s output into a `Vec<&Task>`, so it
+/// cannot use `sort_tasks` without cloning every row it is about to print.
+pub(super) fn sort_task_refs(tasks: &mut [&Task], opts: &cas_types::TaskSortOptions) {
+    sort_by_task_opts(tasks, opts, |t| *t);
+}
+
 /// Sort a vector of blocked tasks (task, blockers) tuples based on sort options
 pub(super) fn sort_blocked_tasks(
     blocked: &mut [(Task, Vec<Task>)],

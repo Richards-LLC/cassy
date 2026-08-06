@@ -770,6 +770,36 @@ pub trait PromptQueueStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>>;
 
+    /// Count the messages `recipient` has NOT yet seen, without consuming them.
+    ///
+    /// cas-e728 (GH #105): `worker_status` needs to say whether a quiet worker
+    /// has mail waiting, and a supervisor reading status must never mark that
+    /// mail seen — so this shares `poll_unseen_for_recipient`'s predicate
+    /// (recipient-seen state, stale/terminal-stage exclusion, `all_workers`
+    /// fan-out) but takes no write and returns only a count.
+    ///
+    /// Deliberately NOT `processed_at IS NULL`: the daemon stamps
+    /// `processed_at` the instant it hands a row to the transport, so that
+    /// column answers "has the daemon ticked", not "has the worker read it".
+    /// The whole point here is the row that WAS delivered and never consumed.
+    fn count_unseen_for_recipient(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+    ) -> Result<usize>;
+
+    /// Age in seconds of the oldest message `recipient` has not seen.
+    ///
+    /// `None` when the recipient's inbox is empty. cas-e728 uses this to tell
+    /// a worker that is merely between turns (no mail) from one that was handed
+    /// work and never woke (old unseen mail) — the latter is a real stall on a
+    /// harness whose turns CAS cannot observe.
+    fn oldest_unseen_age_secs_for_recipient(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+    ) -> Result<Option<i64>>;
+
     /// Poll all pending prompts (for Factory TUI to process)
     fn poll_all(&self, limit: usize) -> Result<Vec<QueuedPrompt>>;
 
@@ -1371,6 +1401,65 @@ impl<'a> AtomicStampOpts<'a> {
     }
 }
 
+/// cas-e728 (GH #105): shared read-only evaluation of a recipient's unseen
+/// inbox — count plus the age of its oldest row. Mirrors
+/// `poll_unseen_for_recipient`'s predicate exactly (recipient-seen state,
+/// stale/terminal-stage exclusion, `all_workers` fan-out) so status can never
+/// disagree with what the recipient's own next poll would hand it.
+impl SqlitePromptQueueStore {
+    fn unseen_for_recipient_summary(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+    ) -> Result<(usize, Option<i64>)> {
+        if recipient.trim().is_empty() {
+            return Ok((0, None));
+        }
+        let conn = self.conn.lock().unwrap();
+        let stale_cutoff =
+            (Utc::now() - chrono::Duration::seconds(PROMPT_QUEUE_STALE_TTL_SECS)).to_rfc3339();
+        let deliverable_sql = format!(
+            "AND q.created_at >= ?
+             AND (q.highest_stage IS NULL
+                  OR q.highest_stage NOT IN {TERMINAL_NON_DELIVERY_STAGES})"
+        );
+        let session_sql = if factory_session.is_some() {
+            "AND (q.factory_session = ? OR q.factory_session IS NULL)"
+        } else {
+            "AND q.factory_session IS NULL"
+        };
+        let sql = format!(
+            "SELECT COUNT(*), MIN(q.created_at)
+             FROM prompt_queue q
+             LEFT JOIN prompt_queue_recipient_seen seen
+               ON seen.prompt_id = q.id AND seen.recipient = ?
+             WHERE (q.target = 'all_workers' OR q.acked_at IS NULL)
+               AND seen.prompt_id IS NULL
+               {deliverable_sql}
+               AND (q.target = ? OR q.target = 'all_workers')
+               {session_sql}"
+        );
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
+            Box::new(recipient.to_string()),
+            Box::new(stale_cutoff),
+            Box::new(recipient.to_string()),
+        ];
+        if let Some(session) = factory_session {
+            params.push(Box::new(session.to_string()));
+        }
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let (count, oldest): (i64, Option<String>) = conn.query_row(
+            &sql,
+            rusqlite::params_from_iter(param_refs),
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let oldest_age = oldest
+            .and_then(|created| DateTime::parse_from_rfc3339(&created).ok())
+            .map(|created| (Utc::now() - created.with_timezone(&Utc)).num_seconds().max(0));
+        Ok((usize::try_from(count).unwrap_or(0), oldest_age))
+    }
+}
+
 impl PromptQueueStore for SqlitePromptQueueStore {
     fn init(&self) -> Result<()> {
         // cas-88d8: concurrent openers race on check-then-ALTER. SQLite
@@ -1788,6 +1877,26 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             tx.commit()?;
             Ok(prompts)
         })
+    }
+
+    fn count_unseen_for_recipient(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+    ) -> Result<usize> {
+        Ok(self
+            .unseen_for_recipient_summary(recipient, factory_session)?
+            .0)
+    }
+
+    fn oldest_unseen_age_secs_for_recipient(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+    ) -> Result<Option<i64>> {
+        Ok(self
+            .unseen_for_recipient_summary(recipient, factory_session)?
+            .1)
     }
 
     fn poll_all(&self, limit: usize) -> Result<Vec<QueuedPrompt>> {
@@ -3111,6 +3220,121 @@ mod tests {
         assert_eq!(prompts_b.len(), 1);
         assert_eq!(prompts_b[0].target, "worker-b1");
         assert_eq!(prompts_b[0].factory_session.as_deref(), Some("session-b"));
+    }
+
+    /// cas-e728 (GH #105): the count must mean "the recipient has not read
+    /// this", not "the daemon has not touched it". worker_status uses it to
+    /// tell a worker that is merely between turns from one that was handed
+    /// work and never woke, so a row the transport already delivered must
+    /// still count until the recipient actually consumes it.
+    #[test]
+    fn count_unseen_survives_transport_delivery_and_stops_at_recipient_read() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue("supervisor", "worker-a", "start this")
+            .unwrap();
+
+        assert_eq!(
+            store.count_unseen_for_recipient("worker-a", None).unwrap(),
+            1
+        );
+
+        // The daemon hands it to the transport: `processed_at` is stamped, but
+        // the worker has still not read it.
+        store.mark_transport_delivered(id).unwrap();
+        assert_eq!(
+            store.count_unseen_for_recipient("worker-a", None).unwrap(),
+            1,
+            "transport delivery is not the worker reading it"
+        );
+
+        // The worker polls its inbox — now it is seen.
+        store
+            .poll_unseen_for_recipient("worker-a", None, 10)
+            .unwrap();
+        assert_eq!(
+            store.count_unseen_for_recipient("worker-a", None).unwrap(),
+            0
+        );
+    }
+
+    /// Broadcasts are real inbox items with per-recipient read state; missing
+    /// them made worker_status report "inbox empty" for every worker that had
+    /// just been asked to report.
+    #[test]
+    fn count_unseen_includes_all_workers_broadcasts_per_recipient() {
+        let (_temp, store) = create_test_store();
+        store
+            .enqueue("supervisor", "all_workers", "everyone report")
+            .unwrap();
+
+        assert_eq!(
+            store.count_unseen_for_recipient("worker-a", None).unwrap(),
+            1
+        );
+        assert_eq!(
+            store.count_unseen_for_recipient("worker-b", None).unwrap(),
+            1
+        );
+
+        store
+            .poll_unseen_for_recipient("worker-a", None, 10)
+            .unwrap();
+        assert_eq!(
+            store.count_unseen_for_recipient("worker-a", None).unwrap(),
+            0,
+            "one worker draining a broadcast must not hide it from peers"
+        );
+        assert_eq!(
+            store.count_unseen_for_recipient("worker-b", None).unwrap(),
+            1
+        );
+    }
+
+    /// The age of the oldest unread row is what separates "just delivered" from
+    /// "delivered and ignored"; an empty inbox has no age.
+    #[test]
+    fn oldest_unseen_age_is_none_for_an_empty_inbox_and_set_otherwise() {
+        let (_temp, store) = create_test_store();
+        assert_eq!(
+            store
+                .oldest_unseen_age_secs_for_recipient("worker-a", None)
+                .unwrap(),
+            None
+        );
+
+        store.enqueue("supervisor", "worker-a", "hello").unwrap();
+        let age = store
+            .oldest_unseen_age_secs_for_recipient("worker-a", None)
+            .unwrap()
+            .expect("a pending row must have an age");
+        assert!(
+            (0..5).contains(&age),
+            "fresh row age should be ~0s, got {age}"
+        );
+    }
+
+    /// Counting must never mark anything seen — a supervisor reading status
+    /// must not consume a worker's mail.
+    #[test]
+    fn counting_does_not_consume_the_inbox() {
+        let (_temp, store) = create_test_store();
+        store.enqueue("supervisor", "worker-a", "keep me").unwrap();
+
+        for _ in 0..3 {
+            assert_eq!(
+                store.count_unseen_for_recipient("worker-a", None).unwrap(),
+                1
+            );
+        }
+        assert_eq!(
+            store
+                .poll_unseen_for_recipient("worker-a", None, 10)
+                .unwrap()
+                .len(),
+            1,
+            "the message must still be deliverable after being counted"
+        );
     }
 
     #[test]

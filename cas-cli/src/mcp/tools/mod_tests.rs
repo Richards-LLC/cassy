@@ -304,6 +304,65 @@ mod tests {
         );
     }
 
+    /// A squash-merge collapses the worker's commits into one new commit whose
+    /// patch-id matches none of the originals, so commit-level rules alone
+    /// still count it. Tree equality is what closes this.
+    #[test]
+    fn own_squash_merged_lane_does_not_count_as_behind_cas_f8bc() {
+        let (_dir, p) = seeded_epic_repo();
+        git(&p, &["checkout", "-q", "-b", "factory/worker"]);
+        commit_file(&p, "w1.txt", "worker work 1");
+        commit_file(&p, "w2.txt", "worker work 2");
+        git(&p, &["checkout", "-q", "epic/a"]);
+        git(&p, &["merge", "-q", "--squash", "factory/worker"]);
+        git(&p, &["commit", "-q", "-m", "Squashed worker lane"]);
+        git(&p, &["checkout", "-q", "factory/worker"]);
+
+        // Precondition: the commit-level measure alone would still deadlock.
+        let by_commits = String::from_utf8_lossy(
+            &Command::new("git")
+                .args([
+                    "rev-list",
+                    "--count",
+                    "--no-merges",
+                    "--cherry-pick",
+                    "--right-only",
+                    "HEAD...epic/a",
+                ])
+                .current_dir(&p)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .trim()
+        .parse::<u32>()
+        .unwrap();
+        assert_eq!(
+            by_commits, 1,
+            "precondition: a squashed lane is invisible to patch-id matching"
+        );
+
+        let (behind, _) =
+            check_worktree_staleness(p.to_str().unwrap(), Some("epic/a")).expect("staleness");
+        assert_eq!(
+            behind, 0,
+            "the worker's own squash-merged lane must not read as staleness"
+        );
+    }
+
+    /// A worker holding unmerged work of its own, with nothing new on the epic,
+    /// is not behind — being ahead is not being stale.
+    #[test]
+    fn worker_ahead_of_epic_is_not_behind_cas_f8bc() {
+        let (_dir, p) = seeded_epic_repo();
+        git(&p, &["checkout", "-q", "-b", "factory/worker"]);
+        commit_file(&p, "wip.txt", "unmerged work");
+
+        let (behind, _) =
+            check_worktree_staleness(p.to_str().unwrap(), Some("epic/a")).expect("staleness");
+        assert_eq!(behind, 0, "ahead is not behind");
+    }
+
     /// A worker that has simply not synced is still reported as stale.
     #[test]
     fn plain_unsynced_worker_is_still_behind_cas_f8bc() {

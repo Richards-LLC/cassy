@@ -2263,9 +2263,10 @@ impl CasCore {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeliveryMergePreflight, classify_delivery_merge_preflight,
-        derive_delivery_supervisor_authority, is_cas_pattern_worktree, is_factory_style_worktree,
-        is_git_worktree, path_is_under, resolve_worktree_merge_cleanup, worktree_merge_mcp_error,
+        DeliveryMergePreflight, authorize_explicit_task_for_system_b_worker,
+        classify_delivery_merge_preflight, derive_delivery_supervisor_authority,
+        is_cas_pattern_worktree, is_factory_style_worktree, is_git_worktree, path_is_under,
+        resolve_worktree_merge_cleanup, worktree_merge_mcp_error,
     };
     use crate::worktree::{GitError, WorktreeError};
     use std::path::Path;
@@ -2505,5 +2506,81 @@ mod tests {
         assert!(dirty_message.contains("paths this merge would write"));
         assert!(dirty_message.contains("does NOT touch is ignored"));
         assert!(dirty_message.contains("git worktree add --detach"));
+    }
+
+    // -----------------------------------------------------------------------
+    // cas-f8bc (GH #106): the deadlock's exit depends on rule 2 — an assignee
+    // match authorizes the merge with NO lease. The behindness fix is only a
+    // real exit if that stays true, so pin it.
+    // -----------------------------------------------------------------------
+
+    fn agent_store_with_worker(cas_dir: &Path, worker: &str) -> std::sync::Arc<dyn cas_store::AgentStore> {
+        let store = crate::store::open_agent_store(cas_dir).expect("open agent store");
+        let mut agent = cas_types::Agent::new(format!("{worker}-session"), worker.to_string());
+        agent.role = cas_types::AgentRole::Worker;
+        store.register(&agent).expect("register worker");
+        store
+    }
+
+    fn task_assigned_to(assignee: Option<&str>) -> cas_types::Task {
+        let mut task = cas_types::Task::new("cas-b001".to_string(), "standalone fix".to_string());
+        task.assignee = assignee.map(str::to_string);
+        task
+    }
+
+    #[test]
+    fn assignee_match_authorizes_system_b_merge_without_any_lease_cas_f8bc() {
+        let temp = TempDir::new().unwrap();
+        let store = agent_store_with_worker(temp.path(), "wolf");
+
+        // No lease was ever taken — this is the post-assignment state the
+        // behindness fix unblocks.
+        assert!(
+            store.get_lease("cas-b001").expect("lease read").is_none(),
+            "precondition: no lease exists for the task"
+        );
+
+        authorize_explicit_task_for_system_b_worker(
+            &task_assigned_to(Some("wolf")),
+            "wolf",
+            store.as_ref(),
+        )
+        .expect("assignee match must authorize the merge with no lease (GH #106 exit)");
+    }
+
+    #[test]
+    fn unassigned_leaseless_task_is_still_refused_cas_f8bc() {
+        let temp = TempDir::new().unwrap();
+        let store = agent_store_with_worker(temp.path(), "wolf");
+
+        let error = authorize_explicit_task_for_system_b_worker(
+            &task_assigned_to(None),
+            "wolf",
+            store.as_ref(),
+        )
+        .expect_err("the conservative rule must survive: this is what asks for the assignment");
+        assert!(
+            error.message.contains("no assignee and no active lease"),
+            "refusal must state why: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn foreign_assignee_is_still_refused_cas_f8bc() {
+        let temp = TempDir::new().unwrap();
+        let store = agent_store_with_worker(temp.path(), "wolf");
+
+        let error = authorize_explicit_task_for_system_b_worker(
+            &task_assigned_to(Some("other-worker")),
+            "wolf",
+            store.as_ref(),
+        )
+        .expect_err("cas-bd5f must keep refusing a foreign task's epic");
+        assert!(
+            error.message.contains("is assigned to"),
+            "refusal must name the mismatch: {}",
+            error.message
+        );
     }
 }

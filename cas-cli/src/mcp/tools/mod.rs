@@ -273,6 +273,26 @@ fn check_worktree_staleness(
 pub(crate) fn count_unheld_behind(path: &std::path::Path, sync_ref: &str) -> Option<u32> {
     use std::process::Command;
 
+    // Content check first, and it is the authoritative one: if the worktree's
+    // tree is identical to the sync target's, there is by definition nothing
+    // to sync, whatever the commit topology says.
+    //
+    // This is what catches a SQUASH-merged lane. A squash collapses N of the
+    // worker's commits into one new commit whose patch-id matches none of the
+    // originals, so the commit-level rules below still count it and the GH #106
+    // deadlock returns. Comparing trees is immune to how the lane was landed —
+    // merge, rebase, cherry-pick or squash.
+    match Command::new("git")
+        .args(["diff", "--quiet", "HEAD", sync_ref, "--"])
+        .current_dir(path)
+        .status()
+    {
+        Ok(status) if status.code() == Some(0) => return Some(0),
+        // code 1 = trees differ (expected); anything else = git could not
+        // answer, so fall through to the commit count rather than trusting it.
+        _ => {}
+    }
+
     let output = Command::new("git")
         .args([
             "rev-list",

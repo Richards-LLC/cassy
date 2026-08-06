@@ -102,6 +102,14 @@ impl GraphRetriever {
         Self::new(entity_store, SpreadingActivationConfig::default())
     }
 
+    /// The entity store this retriever activates over.
+    ///
+    /// Exposed so other channels can resolve the entity IDs that
+    /// [`Self::spread_activation`] returns back into entity names.
+    pub fn entity_store(&self) -> &Arc<dyn EntityStore> {
+        &self.entity_store
+    }
+
     /// Extract potential entity mentions from a query
     ///
     /// This is a simple heuristic - in production you might use NER

@@ -1,3 +1,4 @@
+use crate::hybrid_search::DocType;
 use crate::hybrid_search::cache::*;
 
 #[test]
@@ -186,6 +187,8 @@ fn test_hybrid_results_cache() {
         graph_score: 0.6,
         code_score: 0.0,
         rerank_score: None,
+        doc_type: DocType::Entry,
+        knowledge_score: 0.0,
     }];
 
     let options_hash = 12345u64;
@@ -239,6 +242,8 @@ fn test_invalidation_clears_affected_entries() {
             graph_score: 0.0,
             code_score: 0.0,
             rerank_score: None,
+            doc_type: DocType::Entry,
+            knowledge_score: 0.0,
         },
         HybridSearchResult {
             id: "entry-b".to_string(),
@@ -249,6 +254,8 @@ fn test_invalidation_clears_affected_entries() {
             graph_score: 0.0,
             code_score: 0.0,
             rerank_score: None,
+            doc_type: DocType::Entry,
+            knowledge_score: 0.0,
         },
     ];
 
@@ -261,6 +268,8 @@ fn test_invalidation_clears_affected_entries() {
         graph_score: 0.0,
         code_score: 0.0,
         rerank_score: None,
+        doc_type: DocType::Entry,
+        knowledge_score: 0.0,
     }];
 
     // Cache both result sets

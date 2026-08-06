@@ -18,7 +18,8 @@ use crate::hybrid_search::cache::SearchCache;
 use crate::hybrid_search::code::{CasCodeSearch, open_code_search};
 use crate::hybrid_search::graph::{GraphRetriever, SpreadingActivationConfig};
 use crate::hybrid_search::scorer::{
-    SearchWeights, calibrate_scores, combine_multi_channel, rrf_with_magnitude,
+    ChannelCapabilities, SearchWeights, calibrate_scores, combine_multi_channel,
+    percentile_normalize, rrf_with_magnitude,
 };
 use crate::hybrid_search::temporal::{TemporalRetriever, TimePeriod};
 use crate::hybrid_search::{DocType, SearchIndex, SearchOptions, SearchResult};
@@ -28,6 +29,11 @@ use crate::error::Result;
 use crate::store::EntityStore;
 use crate::types::Entry;
 use cas_search::CodeSearchOptions;
+use cas_store::{KnowledgeStore, SqliteKnowledgeStore};
+
+/// How many activated entities the knowledge channel follows back into the
+/// page index. Each one costs an FTS query, so this bounds the fan-out.
+const GRAPH_LINK_SEEDS: usize = 5;
 
 /// Options specific to hybrid search
 #[derive(Debug, Clone)]
@@ -47,6 +53,9 @@ pub struct HybridSearchOptions {
     /// Enable code search component (searches indexed code symbols)
     pub enable_code: bool,
 
+    /// Enable the distilled-knowledge component (searches knowledge pages)
+    pub enable_knowledge: bool,
+
     /// Weight for BM25 score (0.0-1.0) - only used if use_adaptive_weights is false
     pub bm25_weight: f32,
 
@@ -61,6 +70,13 @@ pub struct HybridSearchOptions {
 
     /// Weight for code score (0.0-1.0) - only used if use_adaptive_weights is false
     pub code_weight: f32,
+
+    /// Weight for the knowledge channel (0.0-1.0)
+    ///
+    /// Unlike graph/code this is not a boost on existing rows: knowledge page
+    /// IDs never collide with entry IDs, so knowledge hits are unioned into
+    /// the result set at this weight.
+    pub knowledge_weight: f32,
 
     /// Enable reranking of top results
     pub enable_rerank: bool,
@@ -92,11 +108,16 @@ impl Default for HybridSearchOptions {
             enable_temporal: true, // Enable by default for Hindsight-style search
             enable_graph: true,    // Enable by default for Hindsight-style search
             enable_code: false,    // Disabled by default (requires indexed codebase)
-            bm25_weight: 0.30,     // Fallback weights (not used when adaptive is enabled)
+            // Disabled by default: opt-in, because knowledge pages are a
+            // different doc type and entry-only callers (the SessionStart
+            // scorer) must not receive them.
+            enable_knowledge: false,
+            bm25_weight: 0.30, // Fallback weights (not used when adaptive is enabled)
             semantic_weight: 0.30,
             temporal_weight: 0.15,
             graph_weight: 0.15,
-            code_weight: 0.10, // Code search weight
+            code_weight: 0.10,      // Code search weight
+            knowledge_weight: 0.25, // Distilled knowledge weight
             enable_rerank: false,
             rerank_candidates: 10, // Reduced from 20 for better performance
             use_rrf: false,
@@ -118,6 +139,7 @@ impl HybridSearchOptions {
         self.enable_temporal.hash(&mut hasher);
         self.enable_graph.hash(&mut hasher);
         self.enable_code.hash(&mut hasher);
+        self.enable_knowledge.hash(&mut hasher);
         self.enable_rerank.hash(&mut hasher);
         self.use_rrf.hash(&mut hasher);
         self.use_adaptive_weights.hash(&mut hasher);
@@ -127,6 +149,7 @@ impl HybridSearchOptions {
         self.temporal_weight.to_bits().hash(&mut hasher);
         self.graph_weight.to_bits().hash(&mut hasher);
         self.code_weight.to_bits().hash(&mut hasher);
+        self.knowledge_weight.to_bits().hash(&mut hasher);
         // Hash filter options
         for tag in &self.base.tags {
             tag.hash(&mut hasher);
@@ -142,8 +165,10 @@ impl HybridSearchOptions {
 /// Extended search result with hybrid scores
 #[derive(Debug, Clone)]
 pub struct HybridSearchResult {
-    /// Entry ID
+    /// Entry ID, or knowledge page ID when `doc_type` is `KnowledgePage`
     pub id: String,
+    /// What `id` refers to. Entries unless the knowledge channel produced it.
+    pub doc_type: DocType,
     /// Final combined score
     pub score: f64,
     /// BM25 component score (normalized)
@@ -156,6 +181,8 @@ pub struct HybridSearchResult {
     pub graph_score: f64,
     /// Code search component score
     pub code_score: f64,
+    /// Distilled-knowledge component score
+    pub knowledge_score: f64,
     /// Rerank score (if reranking enabled)
     pub rerank_score: Option<f64>,
 }
@@ -171,13 +198,14 @@ struct ChannelScores {
     temporal: f64,
     graph: f64,
     code: f64,
+    knowledge: f64,
 }
 
 impl From<HybridSearchResult> for SearchResult {
     fn from(h: HybridSearchResult) -> Self {
         SearchResult {
+            doc_type: h.doc_type,
             id: h.id,
-            doc_type: DocType::Entry, // Hybrid search currently only supports entries
             score: h.score,
             bm25_score: h.bm25_score,
             boosted_score: h.score,
@@ -195,6 +223,8 @@ pub struct HybridSearch {
     graph_retriever: Option<GraphRetriever>,
     /// Code search for semantic code symbol search
     code_search: Option<CasCodeSearch>,
+    /// Distilled project knowledge (FTS over knowledge pages)
+    knowledge_store: Option<Arc<dyn KnowledgeStore>>,
     /// Query and results cache for performance
     cache: Arc<SearchCache>,
 }
@@ -206,6 +236,7 @@ impl HybridSearch {
             bm25_index,
             graph_retriever: None,
             code_search: None,
+            knowledge_store: None,
             cache: Arc::new(SearchCache::new()),
         }
     }
@@ -216,6 +247,7 @@ impl HybridSearch {
             bm25_index,
             graph_retriever: None,
             code_search: None,
+            knowledge_store: None,
             cache,
         }
     }
@@ -226,6 +258,7 @@ impl HybridSearch {
             bm25_index,
             graph_retriever: Some(GraphRetriever::with_defaults(entity_store)),
             code_search: None,
+            knowledge_store: None,
             cache: Arc::new(SearchCache::new()),
         }
     }
@@ -240,6 +273,7 @@ impl HybridSearch {
             bm25_index,
             graph_retriever: Some(GraphRetriever::new(entity_store, graph_config)),
             code_search: None,
+            knowledge_store: None,
             cache: Arc::new(SearchCache::new()),
         }
     }
@@ -258,6 +292,7 @@ impl HybridSearch {
             bm25_index,
             graph_retriever: None, // Needs entity store to be set separately
             code_search: None,     // Needs code store to be set separately
+            knowledge_store: None, // Needs knowledge store to be set separately
             cache: Arc::new(SearchCache::new()),
         })
     }
@@ -306,6 +341,42 @@ impl HybridSearch {
     /// Set the code search directly from an existing instance
     pub fn set_code_search(&mut self, code_search: CasCodeSearch) {
         self.code_search = Some(code_search);
+    }
+
+    /// Attach the distilled-knowledge store, enabling the knowledge channel.
+    pub fn set_knowledge_store(&mut self, store: Arc<dyn KnowledgeStore>) {
+        self.knowledge_store = Some(store);
+    }
+
+    /// Open and attach the knowledge store rooted at `cas_dir`.
+    pub fn set_knowledge_store_from_path(&mut self, cas_dir: &StdPath) -> Result<()> {
+        self.knowledge_store = Some(Arc::new(SqliteKnowledgeStore::open(cas_dir)?));
+        Ok(())
+    }
+
+    /// Whether the distilled-knowledge channel can return rows.
+    pub fn has_knowledge_store(&self) -> bool {
+        self.knowledge_store.is_some()
+    }
+
+    /// Whether the embedding channel can return rows.
+    ///
+    /// Always `false` locally: `semantic_search` is a stub since local
+    /// embeddings were removed. This is the capability flag that keeps
+    /// [`ChannelCapabilities`] honest, so weight tables stop allocating mass
+    /// to a channel that returns nothing.
+    pub fn has_semantic(&self) -> bool {
+        false
+    }
+
+    /// Which scored channels can actually contribute for this request.
+    fn channel_capabilities(&self, opts: &HybridSearchOptions) -> ChannelCapabilities {
+        ChannelCapabilities {
+            // Structurally always live: no `HybridSearch` without a SearchIndex.
+            bm25: true,
+            semantic: opts.enable_semantic && self.has_semantic(),
+            temporal: opts.enable_temporal,
+        }
     }
 
     /// Perform hybrid search (6-channel: BM25 + semantic + temporal + graph + code + rerank)
@@ -415,6 +486,13 @@ impl HybridSearch {
             Vec::new()
         };
 
+        // 5b. Distilled-knowledge search (if enabled and a store is attached)
+        let knowledge_scores: Vec<(String, f64)> = if opts.enable_knowledge {
+            self.knowledge_scores(&search_query, opts.base.limit * 3)
+        } else {
+            Vec::new()
+        };
+
         // 6. Combine scores using the new scoring system
         let semantic_f64: Vec<(String, f64)> = semantic_scores
             .into_iter()
@@ -433,14 +511,21 @@ impl HybridSearch {
             if !code_scores.is_empty() {
                 rankings.push(code_scores.clone());
             }
+            if !knowledge_scores.is_empty() {
+                rankings.push(knowledge_scores.clone());
+            }
             rrf_with_magnitude(&rankings, opts.rrf_k)
         } else {
-            // Determine weights - adaptive or manual
+            // Determine weights - adaptive or manual, then renormalize over the
+            // channels that can actually fire. Without this, a Conceptual query
+            // hands 0.60 to the semantic channel, which returns nothing locally.
+            let caps = self.channel_capabilities(opts);
             let weights = if opts.use_adaptive_weights {
                 SearchWeights::from_query(&search_query)
             } else {
                 SearchWeights::custom(opts.bm25_weight, opts.semantic_weight, opts.temporal_weight)
-            };
+            }
+            .for_capabilities(caps);
 
             // Single-step multi-channel combination
             let mut combined =
@@ -484,6 +569,17 @@ impl HybridSearch {
                 combined.sort_by(|a, b| b.1.total_cmp(&a.1));
             }
 
+            // Union in knowledge hits. Graph and code are applied above as
+            // multiplicative boosts because their IDs can coincide with entry
+            // IDs; knowledge page IDs (`cas-kn…`) never do, so a boost would be
+            // a guaranteed no-op and the pages could never surface at all.
+            if !knowledge_scores.is_empty() && opts.knowledge_weight > 0.0 {
+                for (id, score) in percentile_normalize(&knowledge_scores, 90.0) {
+                    combined.push((id, (opts.knowledge_weight as f64) * score));
+                }
+                combined.sort_by(|a, b| b.1.total_cmp(&a.1));
+            }
+
             combined
         };
 
@@ -510,6 +606,11 @@ impl HybridSearch {
         for (id, score) in &code_scores {
             score_map.entry(id.clone()).or_default().code = *score;
         }
+        let knowledge_ids: std::collections::HashSet<&str> =
+            knowledge_scores.iter().map(|(id, _)| id.as_str()).collect();
+        for (id, score) in &knowledge_scores {
+            score_map.entry(id.clone()).or_default().knowledge = *score;
+        }
 
         let mut results: Vec<HybridSearchResult> = combined
             .into_iter()
@@ -520,12 +621,19 @@ impl HybridSearch {
             })
             .map(|(id, score)| {
                 let channel_scores = score_map.get(&id).cloned().unwrap_or_default();
+                let doc_type = if knowledge_ids.contains(id.as_str()) {
+                    DocType::KnowledgePage
+                } else {
+                    DocType::Entry
+                };
                 HybridSearchResult {
                     bm25_score: channel_scores.bm25,
                     semantic_score: channel_scores.semantic,
                     temporal_score: channel_scores.temporal,
                     graph_score: channel_scores.graph,
                     code_score: channel_scores.code,
+                    knowledge_score: channel_scores.knowledge,
+                    doc_type,
                     id,
                     score,
                     rerank_score: None,
@@ -588,6 +696,92 @@ impl HybridSearch {
         scores.sort_by(|a, b| b.1.total_cmp(&a.1));
         scores.truncate(limit);
 
+        scores
+    }
+
+    /// Retrieve distilled knowledge pages for a query.
+    ///
+    /// Two passes over the same store:
+    ///
+    /// 1. **Lexical** — FTS5 over page title + snippet + body. SQLite's
+    ///    `bm25()` is a cost (more negative = better match), so it is negated
+    ///    into a relevance where larger = better, matching every other channel.
+    /// 2. **Entity-graph links** — the query's entity candidates are resolved
+    ///    to seed entities and spread over the existing entity graph; each
+    ///    activated entity's name is then looked up in the page index. This is
+    ///    what surfaces a page that never mentions the query's words but is
+    ///    about an entity the query is about. Linked hits are scaled by their
+    ///    activation and only fill in pages the lexical pass missed, so a
+    ///    weak graph link can never outrank a direct textual match.
+    ///
+    /// Errors are swallowed to empty results: knowledge is an enrichment
+    /// channel and must never fail a search.
+    fn knowledge_scores(&self, query: &str, limit: usize) -> Vec<(String, f64)> {
+        let Some(ref store) = self.knowledge_store else {
+            return Vec::new();
+        };
+        if query.trim().is_empty() || limit == 0 {
+            return Vec::new();
+        }
+
+        let mut scores: Vec<(String, f64)> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for hit in store.search(query, limit).unwrap_or_default() {
+            // SQLite bm25() is a cost: 0 is "no information", negative is a
+            // match, and more negative is better. Negate so bigger = better.
+            let relevance = (-hit.score).max(0.0);
+            if seen.insert(hit.page.id.clone()) {
+                scores.push((hit.page.id, relevance));
+            }
+        }
+
+        // Cap graph-linked relevance at the weakest direct hit so a linked page
+        // can never outrank a page that literally matched the query. With no
+        // direct hits there is nothing to stay below, so use the full range.
+        let lexical_floor = if scores.is_empty() {
+            1.0
+        } else {
+            scores
+                .iter()
+                .map(|(_, s)| *s)
+                .fold(f64::INFINITY, f64::min)
+                .clamp(0.0, 1.0)
+        };
+
+        if let Some(ref retriever) = self.graph_retriever {
+            let candidates = retriever.extract_entity_candidates(query);
+            if !candidates.is_empty() {
+                if let Ok(seeds) = retriever.find_seed_entities(&candidates) {
+                    if let Ok(activations) = retriever.spread_activation(&seeds) {
+                        // Deterministic order: activation desc, then entity id.
+                        let mut activated: Vec<(String, f32)> = activations.into_iter().collect();
+                        activated.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+                        for (entity_id, activation) in activated.into_iter().take(GRAPH_LINK_SEEDS)
+                        {
+                            if activation <= 0.0 {
+                                continue;
+                            }
+                            let Ok(entity) = retriever.entity_store().get_entity(&entity_id) else {
+                                continue;
+                            };
+                            for hit in store.search(&entity.name, limit).unwrap_or_default() {
+                                if !seen.insert(hit.page.id.clone()) {
+                                    continue;
+                                }
+                                let linked = lexical_floor * (activation as f64) * 0.5;
+                                scores.push((hit.page.id, linked));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Stable order for prompt-cache friendliness: score desc, then id.
+        scores.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        scores.truncate(limit);
         scores
     }
 
@@ -707,6 +901,8 @@ mod tests {
             graph_score: 0.5,
             code_score: 0.4,
             rerank_score: Some(0.85),
+            doc_type: DocType::Entry,
+            knowledge_score: 0.0,
         };
 
         let search_result: SearchResult = hybrid.into();
@@ -723,5 +919,150 @@ mod tests {
             // Period should cover ~7 days ago to now
             assert!(period.start < chrono::Utc::now());
         }
+    }
+
+    // ── Distilled-knowledge channel (EPIC cas-7d31 / cas-86b2) ──────────
+
+    fn knowledge_fixture(
+        pages: &[(&str, &str, &str)],
+    ) -> (tempfile::TempDir, std::sync::Arc<dyn KnowledgeStore>) {
+        use cas_store::{IngestBatch, KnowledgePage, PageWrite};
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = SqliteKnowledgeStore::open(temp.path()).expect("open knowledge store");
+        let writes: Vec<PageWrite> = pages
+            .iter()
+            .map(|(page_type, title, body)| {
+                let id = store.generate_id().expect("id");
+                let mut page = KnowledgePage::new(id, *page_type, *title);
+                page.snippet = (*body).to_string();
+                page.sources = vec!["docs/s.md".to_string()];
+                PageWrite {
+                    page,
+                    body: (*body).to_string(),
+                }
+            })
+            .collect();
+        store
+            .commit_ingest(&IngestBatch {
+                pages: writes,
+                ..Default::default()
+            })
+            .expect("commit");
+        (temp, std::sync::Arc::new(store))
+    }
+
+    /// A HybridSearch with only a knowledge store attached, over a scratch
+    /// tantivy index, so the knowledge channel is what is under test.
+    fn search_with_knowledge(
+        knowledge: std::sync::Arc<dyn KnowledgeStore>,
+    ) -> (tempfile::TempDir, HybridSearch) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let index = SearchIndex::open(&temp.path().join("tantivy")).expect("open index");
+        let mut hybrid = HybridSearch::new(index);
+        hybrid.set_knowledge_store(knowledge);
+        (temp, hybrid)
+    }
+
+    #[test]
+    fn the_knowledge_channel_surfaces_pages_that_no_entry_could_match() {
+        let (_kt, ks) = knowledge_fixture(&[
+            ("subsystem", "Verifier", "the verifier enforces close gates"),
+            (
+                "subsystem",
+                "Scheduler",
+                "the scheduler assigns idle workers",
+            ),
+        ]);
+        let (_it, hybrid) = search_with_knowledge(ks);
+
+        let opts = HybridSearchOptions {
+            base: SearchOptions {
+                query: "verifier".to_string(),
+                limit: 10,
+                ..Default::default()
+            },
+            enable_knowledge: true,
+            enable_temporal: false,
+            enable_graph: false,
+            ..Default::default()
+        };
+
+        // No entries at all: every hit must come from the knowledge channel.
+        let results = hybrid.search(&opts, &[]).expect("search");
+
+        assert!(
+            !results.is_empty(),
+            "knowledge channel returned nothing for a term that is in a page"
+        );
+        assert!(
+            results.iter().all(|r| r.doc_type == DocType::KnowledgePage),
+            "knowledge hits must be tagged as knowledge pages, not entries"
+        );
+        assert!(
+            results.iter().any(|r| r.knowledge_score > 0.0),
+            "knowledge hits must carry a positive channel score; a sign error \
+             on SQLite's bm25() cost would show up here"
+        );
+    }
+
+    #[test]
+    fn the_knowledge_channel_stays_silent_when_disabled() {
+        let (_kt, ks) = knowledge_fixture(&[("subsystem", "Verifier", "close gates")]);
+        let (_it, hybrid) = search_with_knowledge(ks);
+
+        let opts = HybridSearchOptions {
+            base: SearchOptions {
+                query: "verifier".to_string(),
+                limit: 10,
+                ..Default::default()
+            },
+            enable_knowledge: false,
+            enable_temporal: false,
+            enable_graph: false,
+            ..Default::default()
+        };
+
+        let results = hybrid.search(&opts, &[]).expect("search");
+        assert!(
+            results.is_empty(),
+            "knowledge pages leaked into a search that did not opt in"
+        );
+    }
+
+    #[test]
+    fn knowledge_results_are_deterministically_ordered() {
+        let (_kt, ks) = knowledge_fixture(&[
+            ("subsystem", "Verifier One", "verifier gates"),
+            ("subsystem", "Verifier Two", "verifier gates"),
+            ("subsystem", "Verifier Three", "verifier gates"),
+        ]);
+        let (_it, hybrid) = search_with_knowledge(ks);
+
+        let opts = HybridSearchOptions {
+            base: SearchOptions {
+                query: "verifier".to_string(),
+                limit: 10,
+                ..Default::default()
+            },
+            enable_knowledge: true,
+            enable_temporal: false,
+            enable_graph: false,
+            ..Default::default()
+        };
+
+        // Tied scores must break on id, not on hash-map iteration order.
+        let first: Vec<String> = hybrid
+            .search(&opts, &[])
+            .expect("search")
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        let second: Vec<String> = hybrid
+            .search(&opts, &[])
+            .expect("search")
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(first, second, "knowledge ordering is not stable");
     }
 }

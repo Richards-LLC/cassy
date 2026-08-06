@@ -21,7 +21,9 @@ use cas_core::hooks::{
     build_context_with_stores, build_plan_context_with_stores, estimate_tokens, rule_matches_path,
     token_display, truncate,
 };
-use cas_store::{AgentStore, RuleStore, SkillStore, Store, TaskStore};
+use cas_store::{
+    AgentStore, KnowledgeStore, RuleStore, SkillStore, SqliteKnowledgeStore, Store, TaskStore,
+};
 use cas_types::{Entry, Rule, RuleStatus, Skill, Task, TaskStatus};
 
 use crate::hooks::get_session_files;
@@ -54,6 +56,12 @@ pub fn build_context(input: &HookInput, limit: usize, cas_root: &Path) -> Result
     let task_store: Option<Arc<dyn TaskStore>> = open_task_store(cas_root).ok();
     let agent_store: Option<Arc<dyn AgentStore>> = open_agent_store(cas_root).ok();
     let project_skill_store: Option<Arc<dyn SkillStore>> = open_skill_store(cas_root).ok();
+    // Distilled project knowledge (EPIC cas-7d31). An absent store just means
+    // no knowledge section: SessionStart must still build on a repo that has
+    // never been distilled.
+    let knowledge_store: Option<Arc<dyn KnowledgeStore>> = SqliteKnowledgeStore::open(cas_root)
+        .ok()
+        .map(|s| Arc::new(s) as Arc<dyn KnowledgeStore>);
 
     let config = Config::load(cas_root).unwrap_or_default();
 
@@ -88,6 +96,7 @@ pub fn build_context(input: &HookInput, limit: usize, cas_root: &Path) -> Result
         agent_store: agent_store.as_ref().map(|s| s.as_ref()),
         global_skill_store: None, // Global store removed
         project_skill_store: project_skill_store.as_ref().map(|s| s.as_ref()),
+        knowledge_store: knowledge_store.as_ref().map(|s| s.as_ref()),
         entry_scorer: scorer_ref,
         rule_match_cache: Some(&rule_cache),
         recent_files,
@@ -474,6 +483,12 @@ pub fn build_plan_context(
     let project_rule_store: Option<Arc<dyn RuleStore>> = open_rule_store(cas_root).ok();
     let task_store: Option<Arc<dyn TaskStore>> = open_task_store(cas_root).ok();
     let project_skill_store: Option<Arc<dyn SkillStore>> = open_skill_store(cas_root).ok();
+    // Distilled project knowledge (EPIC cas-7d31). An absent store just means
+    // no knowledge section: SessionStart must still build on a repo that has
+    // never been distilled.
+    let knowledge_store: Option<Arc<dyn KnowledgeStore>> = SqliteKnowledgeStore::open(cas_root)
+        .ok()
+        .map(|s| Arc::new(s) as Arc<dyn KnowledgeStore>);
 
     let config = Config::load(cas_root).unwrap_or_default();
 
@@ -506,6 +521,7 @@ pub fn build_plan_context(
         agent_store: None,
         global_skill_store: None, // Global store removed
         project_skill_store: project_skill_store.as_ref().map(|s| s.as_ref()),
+        knowledge_store: knowledge_store.as_ref().map(|s| s.as_ref()),
         entry_scorer: scorer_ref,
         rule_match_cache: Some(&rule_cache),
         recent_files,

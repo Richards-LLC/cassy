@@ -252,3 +252,232 @@ fn test_is_factory_participant() {
     assert!(!is_factory_participant(Some(AgentRole::Director)));
     assert!(!is_factory_participant(None));
 }
+
+// ============================================================================
+// Distilled-knowledge index injection (EPIC cas-7d31 / cas-86b2)
+//
+// SessionStart injects the knowledge *index* and toolizes the body: page
+// titles + snippets + ids go into the prompt, prose does not. These tests pin
+// the three properties that make that shape safe — no bodies, bounded size,
+// and byte-stability for prompt caching.
+// ============================================================================
+
+use crate::hooks::config::DefaultHooksConfig;
+use crate::hooks::context::{ContextStores, build_context_with_stores};
+use crate::hooks::types::HookInput;
+use cas_store::{
+    IngestBatch, KnowledgePage, KnowledgeStore, PageWrite, SqliteKnowledgeStore, SqliteStore, Store,
+};
+
+/// A knowledge store in a throwaway dir, holding `pages` of (type, title,
+/// snippet, body).
+fn knowledge_fixture(
+    pages: &[(&str, &str, &str, &str)],
+) -> (tempfile::TempDir, SqliteKnowledgeStore) {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = SqliteKnowledgeStore::open(temp.path()).expect("open knowledge store");
+    let writes: Vec<PageWrite> = pages
+        .iter()
+        .map(|(page_type, title, snippet, body)| {
+            let id = store.generate_id().expect("generate id");
+            let mut page = KnowledgePage::new(id, *page_type, *title);
+            page.snippet = (*snippet).to_string();
+            page.sources = vec!["docs/source.md".to_string()];
+            PageWrite {
+                page,
+                body: (*body).to_string(),
+            }
+        })
+        .collect();
+    store
+        .commit_ingest(&IngestBatch {
+            pages: writes,
+            ..Default::default()
+        })
+        .expect("commit ingest");
+    (temp, store)
+}
+
+fn session_start_input() -> HookInput {
+    HookInput {
+        cwd: "/project".to_string(),
+        hook_event_name: "SessionStart".to_string(),
+        ..Default::default()
+    }
+}
+
+fn build_with_knowledge(ks: &dyn KnowledgeStore, store: Option<&dyn Store>) -> String {
+    let stores = ContextStores {
+        project_store: store,
+        knowledge_store: Some(ks),
+        ..ContextStores::empty()
+    };
+    let config = DefaultHooksConfig::new();
+    let (context, _) = build_context_with_stores(
+        &session_start_input(),
+        &stores,
+        &config,
+        10,
+        None,
+        "mcp__cas__",
+    )
+    .expect("build context");
+    context
+}
+
+#[test]
+fn session_start_injects_the_knowledge_index_and_a_pull_instruction() {
+    let (_temp, ks) = knowledge_fixture(&[(
+        "subsystem",
+        "Task Verifier",
+        "Gates task close on evidence.",
+        "THE VERIFIER BODY PROSE that must never be injected verbatim.",
+    )]);
+
+    let context = build_with_knowledge(&ks, None);
+
+    assert!(
+        context.contains("## 📚 Project Knowledge"),
+        "expected the knowledge index section, got:\n{context}"
+    );
+    assert!(
+        context.contains("Task Verifier") && context.contains("Gates task close on evidence."),
+        "expected title + snippet in the index, got:\n{context}"
+    );
+    assert!(
+        context.contains("[subsystem]"),
+        "expected the page type in the index, got:\n{context}"
+    );
+    // The whole point: the index points at the body, it does not carry it.
+    assert!(
+        !context.contains("THE VERIFIER BODY PROSE"),
+        "page body leaked into the injected block:\n{context}"
+    );
+    // `contains("knowledge")` alone is not a test: the word appears in the
+    // section header too, so that assertion stayed green while the instruction
+    // advertised `action: show`, which the router rejects outright. Pin the
+    // whole constant, and pin the action name separately so the failure message
+    // says which half broke. `cas-cli`'s knowledge_tools suite proves the named
+    // action is actually dispatchable.
+    assert!(
+        context.contains(super::KNOWLEDGE_PULL_INSTRUCTION),
+        "expected the verbatim pull instruction, got:\n{context}"
+    );
+    assert!(
+        super::KNOWLEDGE_PULL_INSTRUCTION.contains("action: read"),
+        "the pull instruction must name a real `knowledge` action; got: {}",
+        super::KNOWLEDGE_PULL_INSTRUCTION
+    );
+}
+
+#[test]
+fn the_injected_block_is_byte_identical_across_builds_on_an_unchanged_store() {
+    let (_temp, ks) = knowledge_fixture(&[
+        ("subsystem", "Task Verifier", "Gates close.", "body a"),
+        ("architecture", "Build System", "Cargo workspace.", "body b"),
+        ("workflow", "Release Cutting", "Bump, tag, notes.", "body c"),
+    ]);
+
+    let first = build_with_knowledge(&ks, None);
+    let second = build_with_knowledge(&ks, None);
+
+    assert_eq!(
+        first, second,
+        "injected block drifted between builds on an unchanged store; \
+         a prompt-cache prefix must be byte-stable"
+    );
+}
+
+#[test]
+fn the_knowledge_index_is_ordered_by_type_then_title_not_by_insertion() {
+    // Inserted in an order that is neither type-sorted nor title-sorted, so a
+    // pass-through of store order would fail this.
+    let (_temp, ks) = knowledge_fixture(&[
+        ("workflow", "Zebra", "z", "body"),
+        ("architecture", "Yak", "y", "body"),
+        ("architecture", "Ant", "a", "body"),
+    ]);
+
+    let context = build_with_knowledge(&ks, None);
+    let ant = context.find("Ant").expect("Ant present");
+    let yak = context.find("Yak").expect("Yak present");
+    let zebra = context.find("Zebra").expect("Zebra present");
+
+    assert!(
+        ant < yak,
+        "architecture/Ant should precede architecture/Yak"
+    );
+    assert!(yak < zebra, "architecture/* should precede workflow/*");
+}
+
+#[test]
+fn the_knowledge_index_respects_the_hook_token_budget() {
+    // Far more pages than the section budget can hold.
+    let long_snippet = "a snippet long enough to consume real budget ".repeat(3);
+    let owned: Vec<(String, String, String, String)> = (0..200)
+        .map(|i| {
+            (
+                "subsystem".to_string(),
+                format!("Page {i:03}"),
+                long_snippet.clone(),
+                "body".to_string(),
+            )
+        })
+        .collect();
+    let pages: Vec<(&str, &str, &str, &str)> = owned
+        .iter()
+        .map(|(t, ti, s, b)| (t.as_str(), ti.as_str(), s.as_str(), b.as_str()))
+        .collect();
+    let (_temp, ks) = knowledge_fixture(&pages);
+
+    let context = build_with_knowledge(&ks, None);
+
+    let rendered = context.matches("[subsystem]").count();
+    assert!(rendered > 0, "expected at least some pages rendered");
+    assert!(
+        rendered < 200,
+        "index rendered all {rendered} pages, ignoring the section budget"
+    );
+    // Truncation must be reported, not silent.
+    assert!(
+        context.contains("/200 pages indexed"),
+        "truncated index did not disclose how many pages it dropped:\n{context}"
+    );
+    assert!(
+        estimate_tokens(&context) <= DefaultHooksConfig::new().token_budget,
+        "injected block blew the hook token budget"
+    );
+}
+
+#[test]
+fn no_raw_memory_bodies_are_injected_alongside_the_knowledge_index() {
+    // Regression guard for the index-inject/pull contract: non-pinned memories
+    // are surfaced as previews, never as bodies. Pinned entries are the single
+    // deliberate exception (persona/critical context, injected verbatim).
+    let body = "UNPINNED MEMORY BODY that is far longer than the sixty character preview budget and must not appear.";
+    let entry = Entry {
+        id: "cas-mem1".to_string(),
+        content: body.to_string(),
+        entry_type: EntryType::Learning,
+        created: chrono::Utc::now(),
+        ..Default::default()
+    };
+    let (_temp, ks) = knowledge_fixture(&[("subsystem", "Verifier", "Gates close.", "kbody")]);
+    // Same cas_dir as the knowledge fixture: one cas.db, as in a real project.
+    let store = SqliteStore::open(_temp.path()).expect("open entry store");
+    store.init().expect("init entry store");
+    store.add(&entry).expect("add entry");
+
+    let context = build_with_knowledge(&ks, Some(&store));
+
+    // Guard against a vacuous pass: the memory must actually be surfaced —
+    // as a pointer — for "no body" to mean anything.
+    assert!(
+        context.contains("cas-mem1"),
+        "memory was not surfaced at all, so the no-body assertion proves nothing:\n{context}"
+    );
+    assert!(
+        !context.contains(body),
+        "a non-pinned memory body was injected verbatim:\n{context}"
+    );
+}

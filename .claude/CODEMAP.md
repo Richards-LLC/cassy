@@ -28,7 +28,7 @@ Binary lives in `cas-cli`; everything else is a library consumed by it. Release 
 - `crates/cas-types` — shared types (Task, Agent, Memory, HookInput, `search_manifest.rs`, `verification.rs`, `visibility.rs`)
 - `crates/cas-store` — SQLite storage layer, schema, store traits
 - `crates/cas-search` — hybrid BM25 + semantic search over memories/tasks/code
-- `crates/cas-core` — business logic and hook context computation
+- `crates/cas-core` — business logic and hook context computation. `hooks/context/build_start.rs` builds the SessionStart block on an index-inject/body-pull contract: pinned memories go in verbatim, everything else (memories, and the distilled-knowledge pages from `render_knowledge_index`) is a pointer line — id + title/preview + token cost — plus an instruction to pull the body through MCP. The knowledge section is capped at 600 tokens, ordered by `(page_type, title, id)` and free of timestamps so the injected prefix stays byte-identical across runs for prompt caching
 - `crates/cas-code` — code indexing and symbol search
 - `crates/cas-mcp` — MCP protocol types/handlers; `types/ops_secondary.rs` holds `CoordinationRequest`
 - `crates/cas-mcp-proxy` — MCP proxy engine
@@ -84,7 +84,7 @@ Rust TUI over an in-process PTY mux (not tmux); `cas` with no subcommand launche
 - `store/` — layered project+global store, `notifying_*`/`syncing_*` wrappers, `share_policy.rs`, `mock/`
 - `cloud/syncer/` — `pull.rs` (`sync_with_sessions` drains personal push, team queue, then pull), project-scoping guards, push envelope carrying `project_canonical_id`
 - `sync/`, `bridge/`, `daemon/` — builtin→`.claude/` sync, HTTP bridge, background maintenance
-- `extraction/`, `consolidation/`, `hybrid_search/`, `rules/` — memory pipeline
+- `extraction/`, `consolidation/`, `hybrid_search/`, `rules/` — memory pipeline. `hybrid_search/scorer.rs` carries `ChannelCapabilities`: weight tables are an *ideal* allocation, so `SearchWeights::for_capabilities` zeroes channels that cannot fire and redistributes their mass proportionally over the live ones (local embeddings are gone, so `semantic` is dead and Conceptual would otherwise leak 0.60 of its weight). `hybrid_search/hybrid.rs` adds the knowledge channel: FTS over `knowledge_pages` plus entity-graph link expansion, **unioned** into results rather than applied as a boost, because page ids never collide with entry ids (a boost would be a no-op). Off by default (`enable_knowledge`)
 - `knowledge/` — distillation pass over `cas-store/knowledge_store.rs` (EPIC cas-7d31). `sources.rs` picks docs/key configs and synthesizes `code://<module>` summaries from indexed symbols; `chunk.rs` splits headings→paragraphs→hard slice with tail overlap; `prompt.rs` holds the two-stage prompts plus the role-isolation armor (untrusted content is neutralized and marker-quoted; `DistilledPage` has no path field, so a model-proposed path cannot be honored); `merge.rs` defines the provenance-tagged body fragments (`<!-- cas:sources [...] -->`) and the cost tiers (containment→union only / small page→rewrite / large page→append delta); `llm.rs` is the `LlmRunner` trait + `claude -p` runner + `ScriptedLlm` mock (its call count is the token meter); `pipeline.rs` runs the pass and repairs provenance and dangling wikilinks after a cascade delete. An unchanged repo short-circuits before any prompt is built
 - `telemetry/`, `tracing/`, `otel.rs`, `sentry.rs`, `logging.rs` — observability
 - `worktree/` — worktree creation, salvage, sweep, cleanup

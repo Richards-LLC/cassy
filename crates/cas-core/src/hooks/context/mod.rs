@@ -23,6 +23,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use cas_store::KnowledgeStore;
 use cas_store::{AgentStore, RuleStore, SkillStore, Store, TaskStore};
 use cas_types::{Entry, EntryType, Rule, RuleCategory, Skill, Task};
 
@@ -471,6 +472,12 @@ pub struct ContextStores<'a> {
     pub global_skill_store: Option<&'a dyn SkillStore>,
     /// Project skill store (optional)
     pub project_skill_store: Option<&'a dyn SkillStore>,
+    /// Distilled project-knowledge store (optional)
+    ///
+    /// Present means SessionStart injects the knowledge *index* (title +
+    /// snippet + id per page) and an instruction to pull bodies on demand.
+    /// Bodies themselves never enter the injected block.
+    pub knowledge_store: Option<&'a dyn KnowledgeStore>,
     /// Entry scorer for context selection (optional, defaults to BasicContextScorer)
     pub entry_scorer: Option<&'a dyn ContextScorer>,
     /// Rule match cache for avoiding repeated glob parsing (optional)
@@ -491,6 +498,7 @@ impl<'a> ContextStores<'a> {
             agent_store: None,
             global_skill_store: None,
             project_skill_store: None,
+            knowledge_store: None,
             entry_scorer: None,
             rule_match_cache: None,
             recent_files: Vec::new(),
@@ -626,7 +634,7 @@ mod plan_mode;
 #[cfg(test)]
 mod tests;
 
-pub use build_start::build_context_with_stores;
+pub use build_start::{KNOWLEDGE_PULL_INSTRUCTION, build_context_with_stores};
 pub(crate) use coordination::{render_factory_coordination, render_normal_coordination};
 pub use plan_mode::build_plan_context_with_stores;
 

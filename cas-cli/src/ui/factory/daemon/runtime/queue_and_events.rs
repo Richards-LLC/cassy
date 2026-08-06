@@ -408,6 +408,67 @@ fn append_spawn_audit_line(paths: impl IntoIterator<Item = std::path::PathBuf>, 
     }
 }
 
+/// cas-ecf7 (GH #118): deliver a spawn-time base warning (e.g. "the branch this
+/// worker was cut from is 25 commits behind origin/main") to the supervisor's
+/// inbox. Separate from [`enqueue_spawn_outcome_notice`] because the spawn did
+/// NOT fail — the worker exists, it just started on old history, and calling
+/// that a failure would train supervisors to ignore it.
+fn enqueue_spawn_warning_notice(
+    cas_dir: &std::path::Path,
+    supervisor_name: &str,
+    factory_session: &str,
+    request_id: Option<i64>,
+    worker_name: &str,
+    warning: &str,
+) -> anyhow::Result<i64> {
+    let queue = open_prompt_queue_store(cas_dir)?;
+    let request = request_id
+        .map(|id| format!("request {id}"))
+        .unwrap_or_else(|| "direct spawn".to_string());
+    let summary = format!("Worker spawn base warning: {worker_name}");
+    let message = format!(
+        "Factory spawn {request} for worker '{worker_name}': {warning}"
+    );
+    Ok(queue.enqueue_with_summary(
+        "director",
+        supervisor_name,
+        &message,
+        Some(factory_session),
+        Some(&summary),
+    )?)
+}
+
+/// Drain spawn-prep warnings into the audit trail + the supervisor inbox.
+fn report_spawn_warnings(
+    cas_dir: &std::path::Path,
+    supervisor_name: &str,
+    factory_session: &str,
+    request_id: Option<i64>,
+    worker_name: &str,
+    warnings: &[String],
+) {
+    for warning in warnings {
+        tracing::warn!(worker = %worker_name, "{warning}");
+        append_spawn_audit(
+            cas_dir,
+            factory_session,
+            request_id,
+            Some(worker_name),
+            "provision",
+            "warning",
+            warning,
+        );
+        let _ = enqueue_spawn_warning_notice(
+            cas_dir,
+            supervisor_name,
+            factory_session,
+            request_id,
+            worker_name,
+            warning,
+        );
+    }
+}
+
 fn enqueue_spawn_outcome_notice(
     cas_dir: &std::path::Path,
     supervisor_name: &str,
@@ -2820,6 +2881,16 @@ impl FactoryDaemon {
                             "started",
                             "Preparing worker filesystem and worktree.",
                         );
+                        // cas-ecf7 (GH #118): a base that is behind trunk must
+                        // be reported before the worker starts working on it.
+                        report_spawn_warnings(
+                            self.app.cas_dir(),
+                            self.app.supervisor_name(),
+                            &self.session_name,
+                            request_id,
+                            &worker_name,
+                            &prep.warnings,
+                        );
                         // cas-7a94: bind task_id as soon as the worker name is
                         // known — before the isolate worktree finishes — so
                         // codex+isolate async gaps cannot skip pre-assign.
@@ -2893,6 +2964,15 @@ impl FactoryDaemon {
                             "provision",
                             "started",
                             "Preparing worker filesystem and worktree.",
+                        );
+                        // cas-ecf7 (GH #118): see the Anonymous arm.
+                        report_spawn_warnings(
+                            self.app.cas_dir(),
+                            self.app.supervisor_name(),
+                            &self.session_name,
+                            request_id,
+                            &worker_name,
+                            &prep.warnings,
                         );
                         // cas-7a94: early pre-assign once name is final (see Anonymous).
                         if let Some(ref tid) = task_id {

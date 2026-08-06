@@ -129,6 +129,63 @@ pub enum QueryType {
 // Search Weights
 // ============================================================================
 
+/// Which scored channels can actually return rows in this process.
+///
+/// Weight tables like [`SearchWeights::for_query_type`] describe an *ideal*
+/// allocation across every channel the design imagines. That is only honest
+/// while every channel is live. Local embeddings were removed — `semantic`
+/// search returns an empty vec unconditionally (see
+/// `HybridSearch::semantic_search`) — so a Conceptual query was handing 60% of
+/// its weight mass to a channel that contributes nothing, silently scaling
+/// every result down and distorting the relative order of the channels that
+/// did fire.
+///
+/// Capabilities make "this channel is dead" a first-class input instead of an
+/// unwritten assumption: [`SearchWeights::for_capabilities`] zeroes the dead
+/// channels and renormalizes, so the surviving weights always sum to 1.0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChannelCapabilities {
+    /// Lexical channel. Structurally always live: `HybridSearch` cannot be
+    /// constructed without a `SearchIndex`.
+    pub bm25: bool,
+    /// Embedding channel. Cloud-only since local embeddings were removed.
+    pub semantic: bool,
+    /// Time-aware channel.
+    pub temporal: bool,
+}
+
+impl Default for ChannelCapabilities {
+    /// Every channel live — the shape the weight tables were written for.
+    fn default() -> Self {
+        Self {
+            bm25: true,
+            semantic: true,
+            temporal: true,
+        }
+    }
+}
+
+impl ChannelCapabilities {
+    /// All channels available.
+    pub const ALL: Self = Self {
+        bm25: true,
+        semantic: true,
+        temporal: true,
+    };
+
+    /// What a purely local CAS can actually do today: no embeddings.
+    pub const LOCAL: Self = Self {
+        bm25: true,
+        semantic: false,
+        temporal: true,
+    };
+
+    /// Number of live channels.
+    pub fn live_count(&self) -> usize {
+        self.bm25 as usize + self.semantic as usize + self.temporal as usize
+    }
+}
+
 /// Weights for combining search channels
 #[derive(Debug, Clone, Copy)]
 pub struct SearchWeights {
@@ -184,6 +241,59 @@ impl SearchWeights {
     pub fn from_query(query: &str) -> Self {
         let features = QueryFeatures::extract(query);
         Self::for_query_type(features.query_type())
+    }
+
+    /// Redistribute this allocation over the channels that can actually fire.
+    ///
+    /// Dead channels are zeroed and their mass is spread across the live ones
+    /// **in proportion to the live channels' original weights**, so the
+    /// designed emphasis is preserved: a Conceptual query (bm25 0.20, semantic
+    /// 0.60, temporal 0.20) with no embeddings becomes bm25 0.50 / temporal
+    /// 0.50 rather than bm25 0.20 / temporal 0.20 summing to 0.4.
+    ///
+    /// The result always sums to 1.0. If a table allocates *nothing* to any
+    /// live channel (or no channel is live at all) there is no proportion to
+    /// preserve, so this falls back to bm25-only — the one channel that is
+    /// structurally always present.
+    pub fn for_capabilities(&self, caps: ChannelCapabilities) -> Self {
+        let masked = Self {
+            bm25: if caps.bm25 { self.bm25 } else { 0.0 },
+            semantic: if caps.semantic { self.semantic } else { 0.0 },
+            temporal: if caps.temporal { self.temporal } else { 0.0 },
+        };
+
+        let sum = masked.bm25 + masked.semantic + masked.temporal;
+        if sum < 1e-6 {
+            return Self {
+                bm25: 1.0,
+                semantic: 0.0,
+                temporal: 0.0,
+            };
+        }
+
+        Self {
+            bm25: masked.bm25 / sum,
+            semantic: masked.semantic / sum,
+            temporal: masked.temporal / sum,
+        }
+    }
+
+    /// Weights for a query type, honest about which channels are live.
+    pub fn for_query_type_with_capabilities(
+        query_type: QueryType,
+        caps: ChannelCapabilities,
+    ) -> Self {
+        Self::for_query_type(query_type).for_capabilities(caps)
+    }
+
+    /// Weights from query analysis, honest about which channels are live.
+    pub fn from_query_with_capabilities(query: &str, caps: ChannelCapabilities) -> Self {
+        Self::from_query(query).for_capabilities(caps)
+    }
+
+    /// Sum of all channel weights. `1.0` for any normalized allocation.
+    pub fn total(&self) -> f32 {
+        self.bm25 + self.semantic + self.temporal
     }
 
     /// Normalize weights to sum to 1.0
@@ -762,5 +872,103 @@ mod tests {
     fn test_rrf_empty() {
         let result = reciprocal_rank_fusion(&[], 60.0);
         assert!(result.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use crate::hybrid_search::scorer::*;
+
+    const ALL_QUERY_TYPES: [QueryType; 6] = [
+        QueryType::Exact,
+        QueryType::Technical,
+        QueryType::Temporal,
+        QueryType::Keyword,
+        QueryType::Conceptual,
+        QueryType::Balanced,
+    ];
+
+    #[test]
+    fn conceptual_weights_sum_to_one_across_live_channels_only() {
+        // The defect this fixes: Conceptual allocated 0.60 to the semantic
+        // channel, which returns an empty vec locally. 60% of every conceptual
+        // query's weight mass evaporated.
+        let ideal = SearchWeights::for_query_type(QueryType::Conceptual);
+        assert!(
+            ideal.semantic > 0.5,
+            "precondition: the ideal table leans on semantic"
+        );
+
+        let honest = ideal.for_capabilities(ChannelCapabilities::LOCAL);
+
+        assert_eq!(
+            honest.semantic, 0.0,
+            "a dead channel must carry no weight at all"
+        );
+        assert!(
+            (honest.total() - 1.0).abs() < 1e-6,
+            "live weights must sum to 1.0, got {} ({honest:?})",
+            honest.total()
+        );
+    }
+
+    #[test]
+    fn every_query_type_sums_to_one_with_no_embeddings() {
+        for qt in ALL_QUERY_TYPES {
+            let w = SearchWeights::for_query_type_with_capabilities(qt, ChannelCapabilities::LOCAL);
+            assert!(
+                (w.total() - 1.0).abs() < 1e-6,
+                "{qt:?} weights sum to {} instead of 1.0: {w:?}",
+                w.total()
+            );
+            assert_eq!(w.semantic, 0.0, "{qt:?} still funds the dead channel");
+        }
+    }
+
+    #[test]
+    fn dead_channel_mass_is_redistributed_proportionally_not_uniformly() {
+        // Temporal leans hard on the temporal channel (0.25/0.30/0.45).
+        // Dropping semantic must preserve that lean, not flatten it to 50/50.
+        let honest = SearchWeights::for_query_type(QueryType::Temporal)
+            .for_capabilities(ChannelCapabilities::LOCAL);
+
+        assert!(
+            honest.temporal > honest.bm25,
+            "a temporal query must still favour the temporal channel: {honest:?}"
+        );
+        // 0.25 : 0.45 preserved → 0.357… : 0.642…
+        assert!((honest.bm25 - 0.25 / 0.70).abs() < 1e-5, "{honest:?}");
+        assert!((honest.temporal - 0.45 / 0.70).abs() < 1e-5, "{honest:?}");
+    }
+
+    #[test]
+    fn full_capabilities_leave_the_designed_weights_untouched() {
+        for qt in ALL_QUERY_TYPES {
+            let ideal = SearchWeights::for_query_type(qt);
+            let same = ideal.for_capabilities(ChannelCapabilities::ALL);
+            // The tables already sum to 1.0, so renormalizing is a no-op.
+            assert!((same.bm25 - ideal.bm25).abs() < 1e-6, "{qt:?}");
+            assert!((same.semantic - ideal.semantic).abs() < 1e-6, "{qt:?}");
+            assert!((same.temporal - ideal.temporal).abs() < 1e-6, "{qt:?}");
+        }
+    }
+
+    #[test]
+    fn no_live_channel_falls_back_to_bm25_rather_than_zeroing_every_score() {
+        let dead = ChannelCapabilities {
+            bm25: false,
+            semantic: false,
+            temporal: false,
+        };
+        let w = SearchWeights::for_query_type(QueryType::Balanced).for_capabilities(dead);
+
+        assert_eq!(w.bm25, 1.0, "must not silently zero out all scoring");
+        assert!((w.total() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn live_count_reports_usable_channels() {
+        assert_eq!(ChannelCapabilities::ALL.live_count(), 3);
+        assert_eq!(ChannelCapabilities::LOCAL.live_count(), 2);
     }
 }

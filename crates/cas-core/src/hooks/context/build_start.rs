@@ -7,10 +7,107 @@ use crate::hooks::context::{
     render_normal_coordination, rule_matches_path, token_display,
 };
 use crate::hooks::types::HookInput;
+use crate::truncate;
+use cas_store::KnowledgeStore;
 use cas_types::{
     AgentRole, AgentStatus, Entry, EntryType, Rule, RuleStatus, Skill, SkillStatus, TaskStatus,
 };
 use std::collections::HashSet;
+
+/// Token ceiling for the distilled-knowledge index section.
+///
+/// The index is a *pointer list*, not content: it must stay small enough that
+/// it never crowds out tasks, rules or memories no matter how many pages the
+/// distillation pipeline has produced.
+const KNOWLEDGE_SECTION_TOKEN_BUDGET: usize = 600;
+
+/// Longest snippet rendered per page before truncation.
+const KNOWLEDGE_SNIPPET_CHARS: usize = 120;
+
+/// Render the distilled-knowledge index: one line per page, no bodies.
+///
+/// This is the "inject the index, toolize the body" shape. Every line carries
+/// the page id, so the agent can pull the full prose on demand through the
+/// knowledge MCP tool instead of paying for it in every session.
+///
+/// Determinism matters as much as size here. The injected block is a prompt-
+/// cache prefix, so it must be byte-identical across runs on an unchanged
+/// store: pages are ordered by `(page_type, title, id)` — never by a score or
+/// a timestamp — and nothing time-derived is rendered. `list_pages` already
+/// orders by type then title; the explicit re-sort makes the guarantee local
+/// to this function instead of an assumption about the store.
+///
+/// Returns the section text (empty when there are no pages) and the tokens it
+/// consumed.
+fn render_knowledge_index(ks: &dyn KnowledgeStore, token_budget: usize) -> (String, usize) {
+    let Ok(mut pages) = ks.list_pages() else {
+        return (String::new(), 0);
+    };
+    if pages.is_empty() {
+        return (String::new(), 0);
+    }
+    pages.sort_by(|a, b| {
+        a.page_type
+            .cmp(&b.page_type)
+            .then_with(|| a.title.cmp(&b.title))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    let total_pages = pages.len();
+    let mut lines: Vec<String> = Vec::new();
+    let mut used = 0usize;
+
+    for page in &pages {
+        let snippet = truncate(&page.snippet.replace('\n', " "), KNOWLEDGE_SNIPPET_CHARS);
+        let line = if snippet.is_empty() {
+            format!("- {} [{}] {}", page.id, page.page_type, page.title)
+        } else {
+            format!(
+                "- {} [{}] {} — {}",
+                page.id, page.page_type, page.title, snippet
+            )
+        };
+        let line_tokens = estimate_tokens(&line) + 4;
+        if used + line_tokens > token_budget {
+            break;
+        }
+        used += line_tokens;
+        lines.push(line);
+    }
+
+    if lines.is_empty() {
+        return (String::new(), 0);
+    }
+
+    let header = if lines.len() < total_pages {
+        format!(
+            "## 📚 Project Knowledge ({}/{} pages indexed)",
+            lines.len(),
+            total_pages
+        )
+    } else {
+        format!("## 📚 Project Knowledge ({total_pages} pages)")
+    };
+
+    let mut section = String::with_capacity(header.len() + used * 4);
+    section.push_str(&header);
+    section.push('\n');
+    section.push('\n');
+    section.push_str(&lines.join("\n"));
+    section.push('\n');
+    section.push('\n');
+    section.push_str(KNOWLEDGE_PULL_INSTRUCTION);
+
+    used += estimate_tokens(&header) + estimate_tokens(KNOWLEDGE_PULL_INSTRUCTION);
+    (section, used)
+}
+
+/// The pull half of "index-inject / body-pull".
+///
+/// Kept as one constant so the MCP surface (T4) can rename its actions without
+/// touching the context builder. `mcp__cas__` is remapped to the reader's own
+/// prefix by `remap_tool_prefix` at the end of `build_context_with_stores`.
+const KNOWLEDGE_PULL_INSTRUCTION: &str = "These are titles only. Read a page body with `mcp__cas__knowledge` (action: show, id) before answering questions about how this project works — do not guess from the title.";
 
 /// Build context string for session start injection
 ///
@@ -654,6 +751,25 @@ pub fn build_context_with_stores(
                 }
             }
             stats.items_omitted += omitted;
+        }
+
+        // Add the distilled-knowledge index (index-inject / body-pull)
+        if !minimal_start && budget_remaining(total_tokens) > 100 {
+            if let Some(ks) = stores.knowledge_store {
+                let (section, used) = render_knowledge_index(
+                    ks,
+                    budget_remaining(total_tokens)
+                        .min(KNOWLEDGE_SECTION_TOKEN_BUDGET)
+                        .saturating_sub(50),
+                );
+                if !section.is_empty() {
+                    if !context_parts.is_empty() {
+                        context_parts.push(String::new());
+                    }
+                    context_parts.push(section);
+                    total_tokens += used;
+                }
+            }
         }
 
         // Add "Related to Current Work" section using semantic search

@@ -105,6 +105,8 @@ pub enum DocType {
     Spec,
     CodeSymbol,
     CodeFile,
+    /// A distilled project-knowledge page (`.cas/knowledge/<type>/<slug>.md`)
+    KnowledgePage,
 }
 
 impl DocType {
@@ -117,6 +119,7 @@ impl DocType {
             DocType::Spec => "spec",
             DocType::CodeSymbol => "code_symbol",
             DocType::CodeFile => "code_file",
+            DocType::KnowledgePage => "knowledge_page",
         }
     }
 
@@ -129,6 +132,9 @@ impl DocType {
             "spec" | "specs" | "specification" | "specifications" => Some(DocType::Spec),
             "code_symbol" | "codesymbol" | "symbol" | "symbols" => Some(DocType::CodeSymbol),
             "code_file" | "codefile" | "file" | "files" | "code" => Some(DocType::CodeFile),
+            "knowledge_page" | "knowledgepage" | "knowledge" | "page" | "pages" => {
+                Some(DocType::KnowledgePage)
+            }
             _ => None,
         }
     }

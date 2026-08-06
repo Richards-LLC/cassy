@@ -15,6 +15,7 @@ release order:
 2. `2026-08-06-builtin-refresh-slack.md` — v2.44.0 content
 3. `2026-08-06-session-start-size-budget-slack.md` — v2.44.0 content
 4. `2026-08-06-v2.45.0-slack.md` — v2.45.0
+5. `2026-08-06-v2.46.0-slack.md` — v2.46.0
 
 **Verify before assuming posted** — these two same-day drafts have no Status
 header; check `#cas-internal` history (or ask pippenz) before posting or skipping:
@@ -30,5 +31,6 @@ with exactly one threaded reply, per `docs/RELEASE_SLACK_RUBRIC.md`, posted via
 draft's Status header to posted, close the task, delete this file).
 
 **Caveat before announcing:** both tags' Release runs failed on the 2026-08-06
-GitHub Actions outage and needed reruns — verify `gh release view v2.44.0` and
-`gh release view v2.45.0` succeed before announcing artifacts that may not exist.
+GitHub Actions outage and needed reruns — verify `gh release view v2.44.0`,
+`gh release view v2.45.0` and `gh release view v2.46.0` succeed before announcing
+artifacts that may not exist.

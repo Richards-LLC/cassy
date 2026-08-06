@@ -10,17 +10,29 @@
 //!
 //! That marker is what makes cascade delete cheap and exact: when a source dies,
 //! its fragments are cut out of every page that cites it without asking an LLM
-//! anything. Text before the first marker is treated as hand-written and is
-//! never touched.
+//! anything. Text before the first marker is treated as hand-written and its
+//! prose is never rewritten by distillation.
+//!
+//! Because the marker is in-band, [`escape_markers`] defangs any marker-shaped
+//! line inside incoming prose before it is composed into a body — otherwise a
+//! source file (or a model reply) could forge provenance and make its text
+//! survive, or trigger, a cascade delete.
 //!
 //! Merging is cost-tiered, most passes costing nothing:
 //!
 //! - **(a) normalized containment** — the incoming text is already stated by the
-//!   page: union the provenance, keep the body byte-identical, no LLM call.
+//!   page: widen the provenance and leave the prose unchanged, no LLM call. The
+//!   file is still rewritten (frontmatter and marker lines are re-rendered), so
+//!   this is prose-identical, not byte-identical.
 //! - **(b) small page** — rewrite the whole page so it reads as one voice
-//!   (one LLM call, and it falls back to (c) if the call fails).
-//! - **(c) large page** — append the new material as its own fragment. The old
-//!   body is preserved verbatim; nothing is ever silently lost.
+//!   (one LLM call, and it falls back to (c) if the call fails). The
+//!   hand-written preamble, if any, is held out of the rewrite.
+//! - **(c) large page** — append the new material as its own fragment. Existing
+//!   fragment prose is preserved verbatim.
+//!
+//! One caveat the reader must know: frontmatter is *regenerated* from the fields
+//! CAS owns (see [`Frontmatter`]). Unrecognized keys are carried through
+//! verbatim, but comments and key order inside the block are not preserved.
 
 use std::collections::BTreeSet;
 
@@ -62,7 +74,7 @@ impl Fragment {
     }
 }
 
-/// Frontmatter fields CAS owns.
+/// Frontmatter fields CAS owns, plus everything it does not.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Frontmatter {
     pub title: String,
@@ -70,7 +82,14 @@ pub struct Frontmatter {
     pub sources: Vec<String>,
     pub locked: bool,
     pub updated: Option<String>,
+    /// Lines CAS does not own, carried through a round trip verbatim. Without
+    /// this, a `tags:` or `owner:` key a human added to a page would be
+    /// silently destroyed by the next distillation pass.
+    pub passthrough: Vec<String>,
 }
+
+/// Keys CAS owns and therefore regenerates; everything else is passthrough.
+const OWNED_KEYS: &[&str] = &["title", "type", "sources", "locked", "updated"];
 
 /// Split a body into `(frontmatter_block_without_fences, rest)`.
 pub fn split_frontmatter(body: &str) -> (Option<&str>, &str) {
@@ -94,9 +113,10 @@ pub fn split_frontmatter(body: &str) -> (Option<&str>, &str) {
     (None, body)
 }
 
-/// Parse the frontmatter fields CAS writes. Deliberately a tiny reader, not a
-/// YAML engine: unknown keys are ignored, and a malformed block simply yields
-/// defaults (which means `locked` stays false only if it is not asserted).
+/// Parse the frontmatter fields CAS writes, keeping every other line for
+/// passthrough. Deliberately a tiny reader, not a YAML engine: a malformed
+/// block simply yields defaults (which means `locked` reads false unless it is
+/// explicitly asserted).
 pub fn parse_frontmatter(body: &str) -> Frontmatter {
     let (Some(block), _) = split_frontmatter(body) else {
         return Frontmatter::default();
@@ -114,6 +134,9 @@ pub fn parse_frontmatter(body: &str) -> Frontmatter {
             in_sources = false;
         }
         let Some((key, value)) = trimmed.split_once(':') else {
+            if !trimmed.is_empty() {
+                frontmatter.passthrough.push(line.to_string());
+            }
             continue;
         };
         let value = value.trim();
@@ -129,7 +152,13 @@ pub fn parse_frontmatter(body: &str) -> Frontmatter {
                     frontmatter.sources = list;
                 }
             }
-            _ => {}
+            other => {
+                // A key CAS does not own. Keep the original line so a user's
+                // page metadata survives every future pass.
+                if !OWNED_KEYS.contains(&other) {
+                    frontmatter.passthrough.push(line.to_string());
+                }
+            }
         }
     }
     frontmatter
@@ -163,23 +192,39 @@ pub fn render_frontmatter(meta: &Frontmatter) -> String {
         out.push_str(&format!("  - {}\n", yaml_scalar(source)));
     }
     if let Some(updated) = &meta.updated {
-        out.push_str(&format!("updated: {updated}\n"));
+        out.push_str(&format!("updated: {}\n", yaml_scalar(updated)));
     }
     out.push_str(&format!("locked: {}\n", meta.locked));
+    for line in &meta.passthrough {
+        out.push_str(line);
+        out.push('\n');
+    }
     out.push_str("---\n");
     out
 }
 
+/// Quote unless the value is unambiguously a plain YAML string. The allowlist
+/// is deliberate: a title like `[Draft] Build`, `- Build`, `true` or `*ref`
+/// reads as a non-string to a real YAML parser if emitted bare.
 fn yaml_scalar(value: &str) -> String {
-    if value.is_empty()
-        || value.contains(':')
-        || value.contains('#')
-        || value.starts_with(' ')
-        || value.ends_with(' ')
-    {
-        serde_json::to_string(value).unwrap_or_else(|_| format!("\"{value}\""))
-    } else {
+    let plain = !value.is_empty()
+        && value.trim() == value
+        && value
+            .chars()
+            .all(|ch| ch.is_alphanumeric() || matches!(ch, ' ' | '.' | '_' | '/' | '-' | '(' | ')'))
+        && value
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_alphanumeric() || ch == '/' || ch == '.')
+        && !matches!(
+            value.to_ascii_lowercase().as_str(),
+            "true" | "false" | "null" | "yes" | "no" | "on" | "off" | "y" | "n"
+        );
+
+    if plain {
         value.to_string()
+    } else {
+        serde_json::to_string(value).unwrap_or_else(|_| format!("\"{value}\""))
     }
 }
 
@@ -187,6 +232,31 @@ fn yaml_scalar(value: &str) -> String {
 pub fn fragment_marker(sources: &[String]) -> String {
     let json = serde_json::to_string(sources).unwrap_or_else(|_| "[]".to_string());
     format!("{MARKER_PREFIX}{json}{MARKER_SUFFIX}")
+}
+
+/// Defang any marker-shaped line inside prose that is about to be composed into
+/// a page body.
+///
+/// The provenance marker is in-band, so without this a source file — or a model
+/// reply that echoed one — could forge a fragment boundary. Forged provenance is
+/// not cosmetic: [`strip_source`] cuts and keeps spans by exactly those lists,
+/// so a forgery could make injected text survive the deletion of the source that
+/// really produced it, claim a sourceless (never-stripped) preamble, or trigger
+/// the deletion of legitimate prose.
+pub fn escape_markers(text: &str) -> String {
+    if !text.contains(MARKER_PREFIX.trim_end()) {
+        return text.to_string();
+    }
+    text.lines()
+        .map(|line| {
+            if parse_marker(line).is_some() || line.trim().starts_with(MARKER_PREFIX) {
+                line.replacen("<!--", "&lt;!--", 1)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn parse_marker(line: &str) -> Option<Vec<String>> {
@@ -300,7 +370,7 @@ pub fn fragments_text(body: &str) -> String {
 }
 
 /// Tier (c): append `incoming` as its own provenance-tagged fragment, leaving
-/// every existing fragment byte-identical.
+/// every existing fragment's prose untouched.
 pub fn append_delta(
     existing_body: &str,
     incoming: &str,
@@ -311,7 +381,7 @@ pub fn append_delta(
     let text = format!(
         "## Update from `{source}` ({})\n\n{}",
         at.format("%Y-%m-%d"),
-        incoming.trim()
+        escape_markers(incoming.trim())
     );
     fragments.push(Fragment::new(vec![source.to_string()], text));
     fragments
@@ -340,8 +410,8 @@ pub enum StripOutcome {
 }
 
 /// Cut every fragment belonging solely to `source`, and narrow the provenance
-/// of fragments it merely co-authored. Frontmatter `sources` is updated to
-/// match. No LLM call.
+/// of fragments it merely co-authored. The dead source is also removed from the
+/// frontmatter `sources` list, which mirrors the page row. No LLM call.
 pub fn strip_source(body: &str, source: &str) -> StripOutcome {
     let fragments = split_fragments(body);
     let mut kept: Vec<Fragment> = Vec::new();
@@ -395,6 +465,7 @@ mod tests {
             sources: vec!["README.md".to_string()],
             locked: false,
             updated: Some("2026-08-06T00:00:00Z".to_string()),
+            passthrough: Vec::new(),
         }
     }
 
@@ -573,6 +644,7 @@ mod tests {
             sources: vec!["docs/a: b.md".to_string()],
             locked: false,
             updated: None,
+            passthrough: Vec::new(),
         };
         let rendered = render_frontmatter(&meta);
         let parsed = parse_frontmatter(&format!("{rendered}\nbody\n"));

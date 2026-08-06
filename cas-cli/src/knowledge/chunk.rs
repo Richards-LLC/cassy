@@ -37,9 +37,13 @@ pub struct Chunk {
     pub text: String,
 }
 
-/// Split `text` into chunks no larger than `opts.max_chars` (except when a
-/// single character run cannot be split further, which cannot happen because
-/// tier 3 always slices).
+/// Split `text` into chunks.
+///
+/// Size bound: a chunk holds at most `max(opts.max_chars, 200)` characters of
+/// its own content, plus up to `opts.overlap_chars` repeated from the previous
+/// slice when tier 3 fires. Budget against `max_chars + overlap_chars`. The
+/// 200-character floor exists because a smaller window cannot carry a heading
+/// plus a sentence, and a chunk that small distils to noise.
 pub fn chunk_markdown(text: &str, opts: &ChunkOptions) -> Vec<Chunk> {
     let max_chars = opts.max_chars.max(200);
     let mut chunks = Vec::new();
@@ -219,9 +223,9 @@ mod tests {
         );
         for chunk in &chunks {
             assert!(
-                chunk.text.chars().count() <= 260 + 8,
-                "chunk too big: {}",
-                chunk.text.len()
+                chunk.text.chars().count() <= 260 + 20,
+                "chunk exceeds max_chars + overlap_chars: {}",
+                chunk.text.chars().count()
             );
         }
     }

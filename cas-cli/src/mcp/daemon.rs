@@ -682,14 +682,22 @@ impl EmbeddedDaemon {
                 .parent()
                 .map(std::path::Path::to_path_buf)
                 .ok_or_else(|| anyhow::anyhow!("cannot resolve project root"))?;
-            let sources = crate::knowledge::collect_sources(&project_root, &[]);
+            // The source set MUST be the complete one: `run_distillation`
+            // tombstones every ledger path missing from it, so handing it a
+            // set with no `code://` module sources would cascade-delete every
+            // module page the CLI had built (and re-bill them next pass).
+            let symbols = crate::cli::knowledge_symbols_with_limit(&cas_root, crate::cli::KNOWLEDGE_MAX_SYMBOLS);
+            let sources = crate::knowledge::collect_sources(&project_root, &symbols.symbols);
             let runner = crate::knowledge::ClaudeCliRunner::new(Some(model));
-            crate::knowledge::run_distillation(
-                &store,
-                &runner,
-                &sources,
-                &crate::knowledge::DistillConfig::default(),
-            )
+            let config = crate::knowledge::DistillConfig {
+                protected_prefixes: if symbols.truncated {
+                    vec![crate::knowledge::sources::CODE_MODULE_SCHEME.to_string()]
+                } else {
+                    Vec::new()
+                },
+                ..crate::knowledge::DistillConfig::default()
+            };
+            crate::knowledge::run_distillation(&store, &runner, &sources, &config)
         })
         .await;
 

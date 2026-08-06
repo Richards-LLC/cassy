@@ -36,7 +36,7 @@ pub struct BuildArgs {
     pub max_sources: usize,
 
     /// Maximum indexed symbols loaded when seeding code module summaries
-    #[arg(long, default_value_t = 5_000)]
+    #[arg(long, default_value_t = DEFAULT_MAX_SYMBOLS)]
     pub max_symbols: usize,
 }
 
@@ -67,37 +67,97 @@ fn project_root_of(cas_root: &Path) -> anyhow::Result<PathBuf> {
         .ok_or_else(|| anyhow::anyhow!("cannot resolve project root from {}", cas_root.display()))
 }
 
+/// How many symbols to pull per query while paging the code index.
+const SYMBOL_PAGE: usize = 2_000;
+
+/// Default ceiling on symbols loaded to seed `code://` module sources.
+pub const DEFAULT_MAX_SYMBOLS: usize = 5_000;
+
+/// What a symbol load produced, and whether it saw the whole index.
+pub struct SymbolLoad {
+    pub symbols: Vec<SymbolLite>,
+    /// True when the load stopped at `limit` rather than at the end of the
+    /// index. The module source set is then a partial view of the code, and
+    /// acting on it as if it were complete would tombstone real modules.
+    pub truncated: bool,
+}
+
 /// Load indexed symbols to seed code-module sources. A missing or empty code
 /// index is not an error — the pass just has no module summaries.
-fn load_symbols(cas_root: &Path, limit: usize) -> Vec<SymbolLite> {
+///
+/// The load is paged rather than a single `LIMIT`, because `search_symbols`
+/// orders by name: a bare limit returns the alphabetically-first N symbols
+/// repo-wide, so whole modules would drop out of the source set (and be
+/// cascade-deleted) whenever an early-sorting symbol was added.
+pub fn load_symbols(cas_root: &Path, limit: usize) -> SymbolLoad {
     let Ok(store) = crate::store::open_code_store(cas_root) else {
-        return Vec::new();
+        return SymbolLoad {
+            symbols: Vec::new(),
+            truncated: false,
+        };
     };
-    store
-        .search_symbols("%", None, None, limit)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|symbol| SymbolLite {
+
+    let mut symbols = Vec::new();
+    let mut offset = 0usize;
+    let mut truncated = false;
+
+    while symbols.len() < limit {
+        let want = SYMBOL_PAGE.min(limit - symbols.len());
+        let page = store
+            .search_symbols_paginated("%", None, None, want, offset)
+            .unwrap_or_default();
+        let received = page.len();
+
+        symbols.extend(page.into_iter().map(|symbol| SymbolLite {
             file_path: symbol.file_path,
             name: symbol.name,
             kind: format!("{:?}", symbol.kind).to_lowercase(),
             signature: symbol.signature,
             doc: symbol.documentation,
-        })
-        .collect()
+        }));
+
+        if received < want {
+            break; // index exhausted
+        }
+        offset += received;
+        if symbols.len() >= limit {
+            // We stopped because of the cap, not because the index ran out.
+            truncated = !store
+                .search_symbols_paginated("%", None, None, 1, offset)
+                .unwrap_or_default()
+                .is_empty();
+        }
+    }
+
+    SymbolLoad { symbols, truncated }
 }
 
 fn execute_build(args: &BuildArgs, cas_root: &Path) -> anyhow::Result<()> {
     let project_root = project_root_of(cas_root)?;
     let store = SqliteKnowledgeStore::open(cas_root)?;
-    let symbols = load_symbols(cas_root, args.max_symbols);
-    let sources = collect_sources(&project_root, &symbols);
+    let load = load_symbols(cas_root, args.max_symbols);
+    let sources = collect_sources(&project_root, &load.symbols);
 
     let config = DistillConfig {
         max_sources_per_pass: args.max_sources,
         dry_run: args.dry_run,
+        // A truncated symbol load means the `code://` source set is a partial
+        // view of the code. Protect those ledger rows so "I could not see it"
+        // is not mistaken for "it was deleted".
+        protected_prefixes: if load.truncated {
+            vec![crate::knowledge::sources::CODE_MODULE_SCHEME.to_string()]
+        } else {
+            Vec::new()
+        },
         ..DistillConfig::default()
     };
+
+    if load.truncated {
+        eprintln!(
+            "[CAS] Only the first {} indexed symbols were loaded; code module pages are left untouched this pass (raise --max-symbols).",
+            args.max_symbols
+        );
+    }
 
     // A dry run classifies for real but never prompts, so the runner it is
     // handed is one that would refuse to answer — proof it is never used.
@@ -114,8 +174,8 @@ fn execute_build(args: &BuildArgs, cas_root: &Path) -> anyhow::Result<()> {
         println!("  sources scanned:    {}", report.sources_scanned);
         println!("  unchanged (skipped):{}", report.sources_skipped);
         println!("  would distill:      {}", report.sources_pending);
-        for error in &report.errors {
-            println!("  {error}");
+        for note in &report.notes {
+            println!("  {note}");
         }
         return Ok(());
     }
@@ -144,6 +204,9 @@ fn execute_build(args: &BuildArgs, cas_root: &Path) -> anyhow::Result<()> {
     );
     println!("  llm calls:          {}", report.llm_calls);
 
+    for note in &report.notes {
+        println!("  note: {note}");
+    }
     for error in report.errors.iter().take(10) {
         eprintln!("  ! {error}");
     }
@@ -218,7 +281,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         // No code store initialized: the loader degrades to an empty list
         // rather than failing the whole pass.
-        let symbols = load_symbols(&dir.path().join("nonexistent"), 10);
-        assert!(symbols.is_empty());
+        let load = load_symbols(&dir.path().join("nonexistent"), 10);
+        assert!(load.symbols.is_empty());
+        assert!(!load.truncated, "an absent index is complete, not truncated");
     }
 }

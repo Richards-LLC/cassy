@@ -9,6 +9,10 @@ mod claude;
 mod claude_md;
 mod codemap_cmd;
 mod knowledge_cmd;
+
+// EPIC cas-7d31: the daemon's auto-distill path needs the same complete symbol
+// load the CLI does — a narrower source set would cascade-delete module pages.
+pub use knowledge_cmd::{DEFAULT_MAX_SYMBOLS as KNOWLEDGE_MAX_SYMBOLS, SymbolLoad, load_symbols as knowledge_symbols_with_limit};
 mod known_repos;
 mod project_overview_cmd;
 mod provider_default;

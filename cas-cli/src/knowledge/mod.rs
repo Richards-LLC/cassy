@@ -33,12 +33,15 @@ pub const AUTO_DISTILL_ENV: &str = "CAS_KNOWLEDGE_AUTO_DISTILL";
 
 /// Should the daemon distill after a code-index cycle detects changes?
 pub fn auto_distill_enabled() -> bool {
+    parse_auto_distill(&std::env::var(AUTO_DISTILL_ENV).unwrap_or_default())
+}
+
+/// The opt-in rule itself, split out so it can be tested without mutating the
+/// process environment. Anything that is not an explicit yes is a no — the
+/// default must never be "spend tokens in the background".
+pub fn parse_auto_distill(value: &str) -> bool {
     matches!(
-        std::env::var(AUTO_DISTILL_ENV)
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
+        value.trim().to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on"
     )
 }
@@ -60,15 +63,15 @@ mod tests {
 
     #[test]
     fn auto_distill_is_off_unless_explicitly_enabled() {
-        // The gate reads a process-wide env var; assert the parser directly on
-        // representative values rather than mutating the environment.
-        for value in ["", "0", "false", "no", "off", "maybe"] {
+        for value in ["1", "true", "TRUE", " on ", "yes", "Yes"] {
+            assert!(parse_auto_distill(value), "{value:?} must opt in");
+        }
+        for value in ["", "   ", "0", "false", "no", "off", "maybe", "onx", "1x", "enable"] {
             assert!(
-                !matches!(value, "1" | "true" | "yes" | "on"),
-                "{value} must not enable auto distillation"
+                !parse_auto_distill(value),
+                "{value:?} must NOT start a background pass that spends tokens"
             );
         }
-        assert!(!auto_distill_enabled() || std::env::var(AUTO_DISTILL_ENV).is_ok());
     }
 
     #[test]

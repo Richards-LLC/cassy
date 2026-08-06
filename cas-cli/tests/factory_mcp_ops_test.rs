@@ -4818,3 +4818,180 @@ async fn test_sync_all_workers_notifies_worker_and_supervisor_on_stranded_stash_
         "the stash entry must survive for recovery"
     );
 }
+
+// ===========================================================================
+// cas-f8bc (GH #106): the circular authorization deadlock.
+//
+//   worker closes A → produces a standalone fix for new task B on its branch
+//   → worktree_merge refuses (task B has no assignee/lease)
+//   → assignment refuses ("N commits behind epic")
+//   → but it is behind ONLY because the worker's own lane was merged, and the
+//     assignment it is refusing is the prerequisite the merge path asked for.
+//
+// These drive the real assignment gate through the MCP surface.
+// ===========================================================================
+
+/// Build the exact post-merge state from the live repro: the worker's own lane
+/// is merged into the epic, so the epic is one merge commit "ahead".
+fn repo_with_worker_lane_merged(env: &FactoryTestEnv, worker: &str) -> PathBuf {
+    let worker_path = init_sync_repo(env, worker);
+    let project = env.cas_root.parent().expect("project root");
+
+    let run = |dir: &std::path::Path, args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "CAS Test")
+            .env("GIT_AUTHOR_EMAIL", "test@cas")
+            .env("GIT_COMMITTER_NAME", "CAS Test")
+            .env("GIT_COMMITTER_EMAIL", "test@cas")
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    // The worker starts current with the epic — the deadlock is about a worker
+    // whose ONLY gap is its own landed work, so any pre-existing staleness must
+    // be out of the picture first.
+    run(&worker_path, &["rebase", "epic/requested"]);
+
+    // Worker does its work on its own branch.
+    std::fs::write(worker_path.join("fix.txt"), "worker fix").unwrap();
+    run(&worker_path, &["add", "."]);
+    run(&worker_path, &["commit", "-m", "worker fix"]);
+
+    // Supervisor merges that lane into the epic branch.
+    run(project, &["checkout", "epic/requested"]);
+    run(
+        project,
+        &[
+            "merge",
+            "--no-ff",
+            &format!("factory/{worker}"),
+            "-m",
+            "Merge worker lane",
+        ],
+    );
+    run(project, &["checkout", "main"]);
+    worker_path
+}
+
+fn child_task_of_epic(env: &FactoryTestEnv, epic_id: &str, title: &str) -> String {
+    let store = env.task_store();
+    let id = store.generate_id().expect("generate_id");
+    let task = Task::new(id.clone(), title.to_string());
+    store.add(&task).expect("add child task");
+    store
+        .add_dependency(&cas::types::Dependency {
+            from_id: id.clone(),
+            to_id: epic_id.to_string(),
+            dep_type: cas::types::DependencyType::ParentChild,
+            created_at: chrono::Utc::now(),
+            created_by: Some("test".to_string()),
+        })
+        .expect("link child to epic");
+    id
+}
+
+async fn assign(env: &FactoryTestEnv, task_id: &str, assignee: &str) -> Result<String, String> {
+    let req: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "update",
+        "id": task_id,
+        "assignee": assignee,
+    }))
+    .expect("task request");
+    match env.service.task(Parameters(req)).await {
+        Ok(result) => Ok(get_text(&result)),
+        Err(error) => Err(error.message.to_string()),
+    }
+}
+
+#[tokio::test]
+async fn test_assignment_is_not_blocked_by_the_workers_own_merged_lane_cas_f8bc() {
+    let home = TempDir::new().expect("home tempdir");
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_FACTORY_MODE", Some("1")),
+        ("CAS_FACTORY_SESSION", Some("session-f8bc-own")),
+        ("HOME", Some(home.path().to_str().unwrap())),
+    ]);
+    let env = FactoryTestEnv::new();
+    let worker = "f8bc-own-worker";
+    let worker_path = repo_with_worker_lane_merged(&env, worker);
+    add_epic_with_id(&env, "cas-3b7c", TaskStatus::Open, "epic/requested");
+
+    {
+        let store = env.agent_store();
+        let mut agent = Agent::new(Agent::generate_fallback_id(), worker.to_string());
+        agent.role = AgentRole::Worker;
+        agent.factory_session = Some("session-f8bc-own".to_string());
+        agent.metadata.insert(
+            "clone_path".to_string(),
+            worker_path.to_str().unwrap().to_string(),
+        );
+        store.register(&agent).expect("register worker");
+    }
+
+    let task_b = child_task_of_epic(&env, "cas-3b7c", "standalone fix follow-up");
+    let outcome = assign(&env, &task_b, worker).await;
+
+    let text = outcome.unwrap_or_else(|error| {
+        panic!(
+            "assignment must not be refused for the worker's own merged lane \
+             — that refusal is the deadlock (GH #106): {error}"
+        )
+    });
+    assert!(
+        text.contains("assignee"),
+        "the assignment must actually be applied: {text}"
+    );
+    assert!(
+        !text.contains("commit(s) behind"),
+        "no staleness warning is warranted for a worker's own landed work: {text}"
+    );
+
+    // And the sanctioned merge path is now open: worktree_merge's conservative
+    // rule authorizes on assignee match, no lease required.
+    let task = env.task_store().get(&task_b).expect("task");
+    assert_eq!(task.assignee.as_deref(), Some(worker));
+}
+
+#[tokio::test]
+async fn test_assignment_still_refuses_a_genuinely_stale_worker_cas_f8bc() {
+    let home = TempDir::new().expect("home tempdir");
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_FACTORY_MODE", Some("1")),
+        ("CAS_FACTORY_SESSION", Some("session-f8bc-stale")),
+        ("HOME", Some(home.path().to_str().unwrap())),
+    ]);
+    let env = FactoryTestEnv::new();
+    let worker = "f8bc-stale-worker";
+    // init_sync_repo leaves epic/requested one real commit ahead of the
+    // worker's branch, and nothing of the worker's has been merged.
+    let worker_path = init_sync_repo(&env, worker);
+    add_epic_with_id(&env, "cas-3b7c", TaskStatus::Open, "epic/requested");
+
+    {
+        let store = env.agent_store();
+        let mut agent = Agent::new(Agent::generate_fallback_id(), worker.to_string());
+        agent.role = AgentRole::Worker;
+        agent.factory_session = Some("session-f8bc-stale".to_string());
+        agent.metadata.insert(
+            "clone_path".to_string(),
+            worker_path.to_str().unwrap().to_string(),
+        );
+        store.register(&agent).expect("register worker");
+    }
+
+    let task_b = child_task_of_epic(&env, "cas-3b7c", "work needing fresh base");
+    let error = assign(&env, &task_b, worker)
+        .await
+        .expect_err("a worker missing real epic commits must still be refused");
+    assert!(
+        error.contains("commits behind") && error.contains("epic/requested"),
+        "the genuine staleness guard must survive the exemption: {error}"
+    );
+}

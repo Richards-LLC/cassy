@@ -223,19 +223,13 @@ pub(super) fn execute_check_staleness(branch: Option<&str>, fetch: bool) -> Resu
         }
     }
 
-    let output = Command::new("git")
-        .args(["rev-list", "--count", &format!("HEAD..{sync_ref}")])
-        .current_dir(&cwd)
-        .output()?;
-
-    if !output.status.success() {
+    // cas-f8bc (GH #106): count only commits whose content this worktree
+    // lacks. A plain `HEAD..<epic>` counts the merge of this worker's OWN
+    // lane, so a worker was told it was stale by its own landed work.
+    let Some(behind_count) = crate::mcp::tools::count_unheld_behind(&cwd, &sync_ref) else {
         return Ok(());
-    }
-
-    let behind_count: usize = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse()
-        .unwrap_or(0);
+    };
+    let behind_count = behind_count as usize;
 
     if behind_count > 0 {
         let mut stderr = io::stderr();

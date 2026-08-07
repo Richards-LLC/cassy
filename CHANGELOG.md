@@ -7,6 +7,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+- **A background CAS server no longer keeps a project's database open after the session that started it is gone.** Servers were being left behind — four of them on one machine, still holding write-side handles on the shared project database a day and a half after the tools that launched them had died — and because they sit idle they show up in no status view. The mechanism everyone assumed was responsible turned out to work: measured directly, a server whose launcher is killed does shut itself down when its input stream closes. The leak needs the input stream to stay open with nobody on the other end, which happens whenever that stream is a terminal, or was inherited by some unrelated process that is still running, and no amount of input handling fixes it. The server now watches for the disappearance of the process that started it instead, and shuts down within seconds of confirming it, releasing whatever work it was holding on the way out. Confirmation deliberately takes two independent facts — the launcher has been replaced *and* the replacement is the operating system's adopt-orphans process — so a session that is merely quiet is never mistaken for a dead one, and a server started deliberately in the background is left alone entirely. Each server only ever inspects its own launcher and only ever exits itself, so a cleanup in one project cannot reach a live server in another on the same machine.
+
 ## [2.50.0] - 2026-08-07
 
 ### Fixed

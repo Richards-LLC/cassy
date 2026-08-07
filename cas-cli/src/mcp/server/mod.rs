@@ -865,6 +865,7 @@ impl CasCore {
     }
 }
 
+pub(crate) mod parent_watchdog;
 mod prompts;
 mod resources;
 mod runtime;

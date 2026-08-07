@@ -12,6 +12,8 @@ First use each session — load MCP schemas: ToolSearch(query="select:mcp__cas__
 - `mcp__cas__search` with action: search - Search all context
 
 CAS provides persistent context across sessions. Built-in tools are ephemeral.
+
+Release notes: every PR merged to `staging` or `main` must be announced in Slack per `docs/release-notes/RUBRIC.md` (run the `release-notes` skill; it installs the rubric if missing).
 <!-- CAS:END -->
 
 # CLAUDE.md

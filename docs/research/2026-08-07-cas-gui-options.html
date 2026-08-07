@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CAS GUI Control Plane — Options &amp; Recommendation (2026-08-07)</title>
+<style>
+  :root {
+    --bg: #fafaf8;
+    --surface: #ffffff;
+    --ink: #1c1e21;
+    --ink-soft: #55595f;
+    --ink-faint: #8a8f96;
+    --line: #e3e2de;
+    --accent: #2f6f4f;
+    --accent-soft: #e8f1ec;
+    --warn: #8a5a1e;
+    --warn-soft: #f6ecdd;
+    --reject: #8a3038;
+    --reject-soft: #f5e6e7;
+    --neutral-soft: #eef0f2;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16181b;
+      --surface: #1e2126;
+      --ink: #e8e7e3;
+      --ink-soft: #b3b1ac;
+      --ink-faint: #7d7b76;
+      --line: #32363c;
+      --accent: #6fbf95;
+      --accent-soft: #22322a;
+      --warn: #d9a862;
+      --warn-soft: #33291a;
+      --reject: #d98a92;
+      --reject-soft: #332224;
+      --neutral-soft: #262a30;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.65 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { max-width: 62rem; margin: 0 auto; padding: 3rem 1.5rem 5rem; }
+  h1 { font-size: 1.7rem; line-height: 1.3; margin: 0 0 .5rem; letter-spacing: -0.01em; }
+  h2 { font-size: 1.25rem; margin: 3rem 0 1rem; letter-spacing: -0.01em; }
+  h3 { font-size: 1.02rem; margin: 0 0 .35rem; }
+  p { margin: 0 0 1rem; }
+  code { font-family: var(--mono); font-size: .85em; background: var(--neutral-soft); padding: .1em .35em; border-radius: 4px; }
+  a { color: var(--accent); }
+  .kicker { color: var(--ink-faint); font-size: .8rem; text-transform: uppercase; letter-spacing: .12em; margin-bottom: .75rem; }
+  .goal {
+    border-left: 3px solid var(--accent);
+    padding: .25rem 0 .25rem 1.1rem;
+    color: var(--ink-soft);
+    font-size: 1.05rem;
+    margin: 1.25rem 0;
+  }
+  .verdict {
+    background: var(--accent-soft);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 1rem 1.25rem;
+    margin: 1.5rem 0 0;
+  }
+  .verdict strong { color: var(--accent); }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 1.5rem 1.6rem 1.3rem;
+    margin: 1.25rem 0;
+  }
+  .card-head { display: flex; align-items: baseline; gap: .75rem; flex-wrap: wrap; margin-bottom: .75rem; }
+  .badge {
+    font-size: .72rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+    padding: .2rem .6rem; border-radius: 999px; white-space: nowrap;
+  }
+  .b-progress  { background: var(--neutral-soft); color: var(--ink-soft); }
+  .b-rec       { background: var(--accent-soft); color: var(--accent); }
+  .b-reject    { background: var(--reject-soft); color: var(--reject); }
+  .b-partial   { background: var(--warn-soft); color: var(--warn); }
+  .opt-letter { font-family: var(--mono); color: var(--ink-faint); font-size: .95rem; }
+  .facts {
+    display: grid; grid-template-columns: 10.5rem 1fr; gap: .35rem 1rem;
+    margin: .9rem 0 0; font-size: .92rem;
+  }
+  .facts dt { color: var(--ink-faint); }
+  .facts dd { margin: 0; color: var(--ink); }
+  .facts dd em { color: var(--ink-soft); }
+  @media (max-width: 560px) { .facts { grid-template-columns: 1fr; } .facts dt { margin-top: .5rem; } }
+
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0 0; font-size: .88rem; }
+  th, td { text-align: left; padding: .55rem .7rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--ink-faint); font-weight: 600; font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; }
+  td.good { color: var(--accent); font-weight: 600; }
+  td.bad { color: var(--reject); }
+  td.mid { color: var(--warn); }
+  .tablewrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: .5rem 1rem 1rem; }
+
+  ol.steps { padding-left: 1.3rem; }
+  ol.steps li { margin-bottom: .9rem; }
+  ol.steps li strong { display: block; margin-bottom: .15rem; }
+
+  .foot { margin-top: 3.5rem; padding-top: 1.5rem; border-top: 1px solid var(--line); font-size: .85rem; color: var(--ink-soft); }
+  .foot ul { padding-left: 1.2rem; margin: .5rem 0; }
+  .foot li { margin-bottom: .3rem; }
+  .small { font-size: .85rem; color: var(--ink-soft); }
+</style>
+</head>
+<body>
+<main>
+
+  <div class="kicker">Decision document &middot; 2026-08-07 &middot; cas-src research</div>
+  <h1>A graphical control plane for CAS sessions across machines</h1>
+
+  <p class="goal">Operator goal, in the operator's words: <em>&ldquo;a graphical way to control CAS sessions on multiple systems without pissing off Codex/Claude sub usage.&rdquo;</em> Hard constraint: the GUI must observe and steer the existing subscription-authenticated CLI sessions — never re-implement agent calls over metered APIs, never multiply session count, never poll agents.</p>
+
+  <div class="verdict">
+    <strong>One-line verdict:</strong> build a thin per-machine <strong>&ldquo;cas hub&rdquo;</strong> (auth + one stable port over the daemon WebSocket and <code>cas bridge</code> that already exist) plus a small web client that vendors t3code's MIT-licensed ghostty-WASM terminal — Option&nbsp;B below. It adds <em>zero</em> model calls by construction, and roughly 80% of the server side is extension of code already in cas-src.
+  </div>
+
+  <h2>The options</h2>
+
+  <!-- OPTION A -->
+  <div class="card">
+    <div class="card-head">
+      <span class="opt-letter">A</span>
+      <h3>Native remote control only (per-session phone steering)</h3>
+      <span class="badge b-progress">Already in progress</span>
+    </div>
+    <p>Lean on each harness's own remote-steering (Claude Code's native remote control from the phone/claude.ai), with the CAS-side environment fix (tracked as <strong>cas-7d8e</strong>, per the coordinator — in progress) so factory worker sessions are eligible for it. Related groundwork already filed: per-worker <code>CLAUDE_CONFIG_DIR</code> control on <code>spawn_workers</code> (<code>docs/requests/2026-08-04-per-worker-claude-config-dir.md</code>).</p>
+    <dl class="facts">
+      <dt>What you get</dt><dd>Steer an individual worker's session from a phone through the provider's own app. Uses the exact session that already exists &mdash; no new processes, no new auth surface to build.</dd>
+      <dt>What has to be built</dt><dd>Essentially nothing new in this decision's scope: finish the env fix so spawned workers register for remote control. All provider-side.</dd>
+      <dt>Effort</dt><dd><strong>S</strong> (finish work already underway)</dd>
+      <dt>Quota risk</dt><dd><em>None.</em> Same session, same subscription; steering is not an extra model call beyond the turns you initiate anyway.</dd>
+      <dt>What it does NOT give you</dt><dd>No fleet view &mdash; no list of factories across machines, no pane grid, no worker/epic status, no supervisor visibility. Per-session and per-provider only: nothing equivalent is confirmed for Codex or Grok workers, so coverage is uneven across a mixed fleet. It answers &ldquo;poke this one worker from my phone&rdquo;, not &ldquo;see and run my factories&rdquo;.</dd>
+    </dl>
+  </div>
+
+  <!-- OPTION B -->
+  <div class="card">
+    <div class="card-head">
+      <span class="opt-letter">B</span>
+      <h3>Thin fleet dashboard: per-machine <code>cas hub</code> + new web client</h3>
+      <span class="badge b-rec">Recommended</span>
+    </div>
+    <p>Adopt t3code's decentralized topology (no central control plane; client holds a machine list and fans out) on CAS's existing substrate. The factory daemon <em>already</em> serves a GUI-shaped WebSocket protocol &mdash; <code>DaemonMessage::Output</code> streams raw VT bytes per pane with scrollback, and <code>ClientMessage::Input/Focus/Resize</code> inject keystrokes<sup>[1]</sup> &mdash; but bound loopback-only on an ephemeral port with no auth<sup>[2]</sup>. <code>cas bridge</code> already provides token-authed HTTP + SSE: session events, pane tails, inbox, activity<sup>[3]</sup>.</p>
+    <dl class="facts">
+      <dt>What you get</dt><dd>One browser UI (desktop and phone): machine list &rarr; factory list &rarr; live pane grid; read worker panes, send messages (same PTY-inject path the supervisor's <code>deliver_to_worker</code> uses), interrupt, watch worker/epic status from SQLite. Works uniformly for Claude, Codex, and Grok workers because it observes PTYs, not providers.</dd>
+      <dt>Reuse vs build</dt><dd><em>Reuse (fork, MIT):</em> t3code's libghostty-WASM terminal component<sup>[4]</sup>; its pairing-token &rarr; short-lived WebSocket-ticket auth design<sup>[5]</sup>; its ~200-line <code>tailscale serve</code> manager pattern<sup>[6]</sup>. <em>Extend (Rust, in cas-src):</em> daemon WS + bridge into one authed stable port per machine that enumerates sessions and proxies pane streams. <em>Build fresh:</em> the web SPA itself (session list, pane grid, input/interrupt affordances).</dd>
+      <dt>Effort</dt><dd><strong>M</strong> &mdash; hub is mostly extension of existing bridge/daemon code; the web client is the genuinely new piece.</dd>
+      <dt>Quota risk</dt><dd><em>Zero by construction.</em> Attaches to PTYs the factory already runs, reads SQLite, injects keystrokes. Push-only (WS frames + SSE), no agent polling; N viewers of a pane share one PTY. Session count never changes.</dd>
+      <dt>What it does NOT give you</dt><dd>Not a chat-style rendered transcript per worker (v1 shows real terminal panes, which is what the TUI shows today); no offline/relay path for machines outside the tailnet unless added later; no mobile-native app (the web app on a phone is the v1 answer).</dd>
+    </dl>
+  </div>
+
+  <!-- OPTION C -->
+  <div class="card">
+    <div class="card-head">
+      <span class="opt-letter">C</span>
+      <h3>Fork t3code wholesale and adapt its server to drive CAS</h3>
+      <span class="badge b-reject">Considered &amp; rejected</span>
+    </div>
+    <p>t3code is MIT-licensed and explicitly fork-friendly<sup>[7]</sup>, and its execution model is genuinely subscription-native: all five providers are spawned local CLIs on the user's existing login (Claude via Agent SDK <code>pathToClaudeCodeExecutable</code><sup>[8]</sup>, <code>codex app-server</code><sup>[9]</sup>, Cursor <code>agent acp</code>, <code>grok agent stdio</code><sup>[10]</sup>, OpenCode SDK), with zero metered inference anywhere in the server. So the fork is legal and the model is quota-safe &mdash; <em>for t3code's own sessions</em>.</p>
+    <dl class="facts">
+      <dt>What you get</dt><dd>A polished, shipped product surface immediately: web + Electron + mobile clients, remote access (bearer/Tailscale/relay/SSH), checkpoint diffs, approvals, terminals.</dd>
+      <dt>What has to be built</dt><dd>The hard, wrong part: t3code's server <em>owns</em> agent sessions through its provider drivers and assumes it is the sole execution boundary<sup>[11]</sup>. To &ldquo;drive CAS&rdquo; it would either (a) run its own Claude/Codex sessions alongside the CAS factory's &mdash; <strong>doubling live session count against the same subscriptions, the exact failure mode this project exists to avoid</strong> &mdash; or (b) require gutting its orchestration core to become a viewer of CAS PTYs, at which point you've rewritten it into Option&nbsp;B with a Node runtime dependency CAS doesn't have.</dd>
+      <dt>Effort</dt><dd><strong>L</strong> &mdash; large adaptation of an alpha (v0.0.32, &ldquo;very very early&rdquo;<sup>[7]</sup>) Effect-TS event-sourced codebase, plus permanent divergence from upstream.</dd>
+      <dt>Quota risk</dt><dd><em>High</em> in variant (a): parallel session ownership multiplies concurrent CLI sessions per account. Zero only after the rewrite that makes it Option&nbsp;B.</dd>
+      <dt>What it does NOT give you</dt><dd>Any awareness of CAS concepts &mdash; factories, epics, tasks, worktrees, the MCP tool surface, supervisor/worker roles &mdash; all of which would need bolting on.</dd>
+    </dl>
+  </div>
+
+  <!-- OPTION D -->
+  <div class="card">
+    <div class="card-head">
+      <span class="opt-letter">D</span>
+      <h3>No new UI: tailnet + existing surfaces (<code>cas bridge</code> + SSH attach)</h3>
+      <span class="badge b-partial">Viable stopgap</span>
+    </div>
+    <p>Use what ships today, remotely: <code>cas attach device:factory-id</code> already resolves a device via the cloud API (<code>GET /api/devices</code>, Bearer) and execs <code>ssh -t host -- cas attach &lt;id&gt;</code><sup>[12]</sup>, giving the full factory TUI from any terminal on the tailnet. <code>cas bridge</code> exposes authed HTTP endpoints (pane tail snapshots, SSE session events, inbox, activity) that scripts or a phone SSH client can hit<sup>[3]</sup>.</p>
+    <dl class="facts">
+      <dt>What you get</dt><dd>Cross-machine observation and control <em>now</em>, with zero new code: full TUI over SSH, pane text over HTTP, message delivery via existing paths.</dd>
+      <dt>What has to be built</dt><dd>Nothing (optionally: a static bearer token per bridge and SSH keys on the fleet, which is configuration, not code).</dd>
+      <dt>Effort</dt><dd><strong>S</strong> (near-zero)</dd>
+      <dt>Quota risk</dt><dd><em>None.</em> Same sessions, same paths as the local TUI.</dd>
+      <dt>What it does NOT give you</dt><dd>Anything graphical &mdash; it is exactly the terminal experience the operator asked to move beyond. One session per SSH window, no fleet overview, phone usability is poor (TUI in a mobile SSH client), and bridge auth is a static token with no pairing/revocation story.</dd>
+    </dl>
+  </div>
+
+  <h2>Comparison</h2>
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr>
+          <th></th>
+          <th>A &middot; Native remote</th>
+          <th>B &middot; cas hub + web</th>
+          <th>C &middot; Fork t3code</th>
+          <th>D &middot; Tailnet + existing</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>Fleet view (all machines)</td><td class="bad">No</td><td class="good">Yes</td><td class="mid">Yes, after large adaptation</td><td class="bad">No (one session at a time)</td></tr>
+        <tr><td>Graphical UI</td><td class="mid">Provider app only</td><td class="good">Yes (web, all providers)</td><td class="good">Yes</td><td class="bad">No (TUI over SSH)</td></tr>
+        <tr><td>Phone access</td><td class="good">Yes (Claude sessions)</td><td class="good">Yes (web app)</td><td class="good">Yes (incl. native apps)</td><td class="mid">Poor (mobile SSH)</td></tr>
+        <tr><td>Covers Claude + Codex + Grok workers</td><td class="bad">Claude only (confirmed)</td><td class="good">Yes &mdash; observes PTYs</td><td class="mid">Only its own sessions</td><td class="good">Yes</td></tr>
+        <tr><td>Extra model calls / session growth</td><td class="good">Zero</td><td class="good">Zero by construction</td><td class="bad">Session multiplication risk</td><td class="good">Zero</td></tr>
+        <tr><td>Message inject + interrupt</td><td class="mid">Per session, provider UI</td><td class="good">Yes (PTY inject path)</td><td class="mid">Its threads, not CAS workers</td><td class="good">Yes (TUI)</td></tr>
+        <tr><td>Build effort</td><td class="good">S</td><td class="mid">M</td><td class="bad">L</td><td class="good">S</td></tr>
+        <tr><td>License risk</td><td class="good">None</td><td class="good">None (MIT vendoring)</td><td class="good">None (MIT)</td><td class="good">None</td></tr>
+        <tr><td>New auth surface required</td><td class="good">No</td><td class="mid">Yes (pairing + tickets)</td><td class="mid">Yes (theirs, adapted)</td><td class="good">No (SSH/tailnet)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Recommendation</h2>
+  <p><strong>Option B, with A continuing in parallel and D as the interim.</strong> B is the only path that delivers the actual ask &mdash; a graphical, multi-machine fleet view &mdash; while keeping the quota guarantee structural rather than behavioral: the GUI can only watch PTYs, read SQLite, and type. A is complementary (per-worker phone steering through the provider's own app) and already moving; it should not be blocked on B. C is rejected on the session-multiplication ground above; its value survives as vendored components and design patterns inside B. D costs nothing and covers the gap until B's first milestone.</p>
+
+  <p>First three build steps for B:</p>
+  <ol class="steps">
+    <li><strong>1 &mdash; <code>cas hub</code> MVP (Rust, cas-src).</strong> One stable, configurable port per machine. Extend <code>cas bridge</code> to enumerate factory sessions from session metadata + <code>.cas/cas.db</code> and to proxy WebSocket attaches to each daemon's existing loopback <code>ws_port</code> (daemons stay loopback-only). Port t3code's auth design: one-time pairing token (URL/QR) &rarr; stored session &rarr; short-lived WS ticket on upgrade, with revocation<sup>[5]</sup>.</li>
+    <li><strong>2 &mdash; Thin web client.</strong> Served statically by the hub. Browser-local machine list (t3-style, no central roster) &rarr; per-machine session list &rarr; pane grid. Render <code>DaemonMessage::Output</code> in a terminal surface &mdash; start with xterm.js for speed, evaluate swapping in the vendored ghostty-WASM component<sup>[4]</sup> (zig is already vendored in cas-src). Input box &rarr; <code>ClientMessage::Input</code>; status sidebar from bridge SSE + <code>worker_status</code>/<code>epic_status</code> reads.</li>
+    <li><strong>3 &mdash; Tailnet exposure + first-class interrupt.</strong> Optional <code>tailscale serve</code> integration on the hub (port of t3code's manager<sup>[6]</sup>) so phones reach it over HTTPS MagicDNS; add a <code>ClientMessage::Interrupt&#123;pane_id&#125;</code> routed through the daemon's existing interrupt handling rather than raw byte injection.</li>
+  </ol>
+
+  <div class="foot">
+    <p><strong>Full review:</strong> <a href="./2026-08-07-t3code-gui-control-plane-review.md">docs/research/2026-08-07-t3code-gui-control-plane-review.md</a> (stack, license, agent execution model, multi-machine architecture, UI/state-sync, reuse verdict, open questions).</p>
+    <p><strong>Key evidence</strong> (t3code paths under <code>/mnt/datacube/staging/t3code-main</code>, CAS paths under <code>cas-src</code>):</p>
+    <ul>
+      <li>[1] <code>cas-cli/src/ui/factory/protocol.rs:11-51</code> (<code>ClientMessage</code>), <code>:128-168</code> (<code>DaemonMessage</code>); WS serving in <code>cas-cli/src/ui/factory/daemon/runtime/ws_client.rs:13</code>.</li>
+      <li>[2] <code>cas-cli/src/ui/factory/daemon/runtime/lifecycle.rs:66</code> &mdash; <code>TcpListener::bind("127.0.0.1:0")</code>, no auth; port persisted via <code>protocol.rs:289</code>.</li>
+      <li>[3] <code>cas-cli/src/bridge/server/mod.rs:34-74,122</code> (token auth, CORS), <code>:139-160</code> (SSE <code>/v1/sessions/&lt;name&gt;/events</code>); <code>routes.rs:53</code> (pane tail); <code>factory.rs</code> (factory start).</li>
+      <li>[4] <code>apps/web/src/terminal/ghostty/</code> + <code>apps/web/scripts/build-libghostty-wasm.sh</code>.</li>
+      <li>[5] <code>apps/server/src/auth/SessionStore.ts</code> (<code>DEFAULT_WEBSOCKET_TOKEN_TTL</code>, 5-min WS tickets), <code>docs/internals/environment-auth.md</code>, <code>packages/shared/src/remote.ts</code> (pairing-URL helpers).</li>
+      <li>[6] <code>packages/tailscale/src/tailscale.ts</code>; server-side <code>ensureTailscaleServe</code> in <code>apps/server/src/server.ts</code>.</li>
+      <li>[7] <code>LICENSE:1-3</code> (MIT, T3 Tools Inc. 2026); <code>README.md:11</code> (fork-friendly), <code>:73-75</code> (&ldquo;very very early&rdquo;, v0.0.32).</li>
+      <li>[8] <code>apps/server/src/provider/Layers/ClaudeAdapter.ts:1653</code> (<code>query()</code>), <code>:4096</code> (<code>pathToClaudeCodeExecutable</code>); <code>Drivers/ClaudeDriver.ts:77</code> (<code>executable: "claude"</code>); <code>Drivers/ClaudeHome.ts:29</code> (keychain access for stored CLI credentials).</li>
+      <li>[9] <code>apps/server/src/provider/Layers/codexLaunchArgs.ts:14</code> (<code>["app-server", ...]</code>); <code>CodexSessionRuntime.ts:849</code>.</li>
+      <li>[10] <code>apps/server/src/provider/acp/GrokAcpSupport.ts:38-39</code> (<code>"grok"</code>, <code>["agent","stdio"]</code>); <code>Layers/CursorAdapter.ts:2</code>.</li>
+      <li>[11] <code>docs/internals/overview.md</code> &mdash; &ldquo;every provider process &hellip; happens there, never in the client&rdquo;; driver/adapter session ownership per <code>docs/internals/providers.md</code>.</li>
+      <li>[12] <code>cas-cli/src/cli/factory/remote_attach.rs:1-50</code> (device lookup via <code>GET /api/devices</code> + <code>ssh -t &hellip; cas attach</code>).</li>
+    </ul>
+    <p class="small">Note: &ldquo;cas-7d8e&rdquo; (Option A's env fix) is operator/coordinator-provided context about in-flight work; it does not appear in this cas-src checkout and is cited as such, alongside the related filed request <code>docs/requests/2026-08-04-per-worker-claude-config-dir.md</code>.</p>
+  </div>
+
+</main>
+</body>
+</html>

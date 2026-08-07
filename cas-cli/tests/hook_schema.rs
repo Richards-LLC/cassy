@@ -96,13 +96,22 @@ fn assert_schema_valid(value: &Value, event: &str) {
     }
 }
 
+/// cas-f3e3: built by PARSING the common wire envelope, not by struct literal.
+///
+/// Every field below appears verbatim on real Claude Code 2.1.224 payloads,
+/// including `prompt_id`, which CAS deliberately does not declare — so this
+/// helper also pins that an undeclared harness key can never make a hook fail
+/// to deserialize.
 fn base_input(event: &str) -> HookInput {
-    HookInput {
-        session_id: "schema-test-session".into(),
-        cwd: "/tmp/cas-schema-test".into(),
-        hook_event_name: event.into(),
-        ..Default::default()
-    }
+    serde_json::from_value(serde_json::json!({
+        "session_id": "schema-test-session",
+        "transcript_path": "/tmp/cas-schema-test/transcript.jsonl",
+        "cwd": "/tmp/cas-schema-test",
+        "prompt_id": "d323a56b-73b1-4afc-8b3f-32605be51b91",
+        "permission_mode": "default",
+        "hook_event_name": event,
+    }))
+    .expect("common hook envelope must deserialize")
 }
 
 #[test]

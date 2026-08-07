@@ -16,10 +16,23 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
         None => return Ok(HookOutput::empty()),
     };
 
+    // cas-f3e3: Claude Code sets `stop_hook_active: true` when the session is
+    // ALREADY continuing because a previous Stop hook returned
+    // decision: "block". The harness's documented loop-prevention contract is
+    // that a Stop hook must not block again in that state — a blocker the model
+    // cannot clear by continuing (e.g. draft rules it will not review) would
+    // otherwise re-block on every stop, forever. CAS blocks Stop in five places
+    // below and, until this change, declared and read the field nowhere, so it
+    // had no brake at all.
+    //
+    // Honest scope note: no live loop was ever reproduced. This wires the
+    // documented brake; it is not a fix for a measured incident.
+    let stop_is_reentrant = input.stop_hook_is_reentrant();
+
     // Check for exit blockers (open tasks, active children) before allowing stop
     // Skip for factory agents (Worker, Supervisor, Director) - supervisor manages task reassignment
     let config = Config::load(cas_root).unwrap_or_default();
-    if config.block_exit_on_open() {
+    if config.block_exit_on_open() && !stop_is_reentrant {
         // Check if this is a factory agent
         let is_factory_agent = if let Ok(agent_store) = open_agent_store(cas_root) {
             let agent_id = current_agent_id(input);
@@ -576,8 +589,14 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
         .map(|role| role.to_lowercase() == "worker")
         .unwrap_or(false);
 
-    // Only trigger maintenance agents for non-worker agents
-    if !is_factory_worker {
+    // Only trigger maintenance agents for non-worker agents.
+    //
+    // cas-f3e3: also skipped when `stop_hook_active` is true. All four blockers
+    // below ask the agent to spawn a maintenance subagent; if it declines, the
+    // condition still holds at the next Stop and the block repeats. These are
+    // exactly the non-self-clearing blockers the harness's loop-prevention
+    // signal exists for.
+    if !is_factory_worker && !stop_is_reentrant {
         // Check for unreviewed learnings that need review before stop
         if let Some(review_context) = build_learning_review_context(store.as_ref(), &config) {
             eprintln!("cas: Blocking stop - unreviewed learnings need review");

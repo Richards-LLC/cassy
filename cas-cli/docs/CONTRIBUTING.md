@@ -84,6 +84,18 @@ Dev dependencies include: `insta` (snapshot testing), `wiremock` (HTTP mocking),
 
 CAS auto-syncs rules to `.claude/rules/` and skills to `.claude/skills/` as SKILL.md files with YAML frontmatter. The sync logic lives in `cas-cli/src/sync/`. Rule promotion: Draft -> Proven via `mcp__cas__rule action=helpful`.
 
+### Builtin skill references
+
+Files under `cas-cli/src/builtins/**/references/` are owned by their skill and synced with a baseline ledger: a destination that differs from both the recorded baseline and every version CAS has shipped is preserved as a local customization (and surfaced in a SessionStart banner). The set of "versions CAS has shipped" is the embedded `cas-cli/src/builtins/reference-history.json`.
+
+**After changing any builtin reference file — and before cutting a release — run:**
+
+```bash
+./scripts/gen-builtin-reference-history.sh
+```
+
+and commit the regenerated JSON. Skipping it means the version you just replaced is not recognized as CAS content downstream, so installs that still hold it will keep it forever instead of upgrading (cas-0c0a).
+
 ## Releasing
 
 ### Version policy

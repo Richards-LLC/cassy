@@ -259,6 +259,18 @@ pub fn handle_session_start(
         }
     }
 
+    // cas-0c0a: builtin skill references the last sync refused to update.
+    // Surfaced to every role, not just supervisors — the stale files are the
+    // worker's own operating guidance, and the `cas update --sync` warning that
+    // reports the skip is invisible to unattended/scripted syncs.
+    if let Some(banner) =
+        crate::hooks::handlers::session_hygiene::build_session_start_stale_reference_banner_sized(
+            cas_root,
+        )
+    {
+        assembler.append_degradable(banner.full, banner.compact);
+    }
+
     // cas-b7dd (GH #88): leftovers from dead sessions — orphan processes still
     // running in worktrees and stale server registrations. Surfaced here
     // because a new session otherwise inherits them invisibly and meets them

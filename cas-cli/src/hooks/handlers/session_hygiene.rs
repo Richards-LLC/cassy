@@ -486,6 +486,57 @@ pub fn build_session_start_orphan_banner(cas_root: &Path) -> Option<String> {
     build_session_start_orphan_banner_sized(cas_root).map(|b| b.full)
 }
 
+/// Full + compact renderings of the stale-builtin-reference banner (cas-0c0a).
+///
+/// `cas update --sync` refuses to overwrite a skill reference whose content
+/// matches neither its recorded baseline nor any version CAS shipped, and says
+/// so only in CLI output that scripted/unattended syncs discard. Eight
+/// supervisor/worker reference files sat six weeks stale that way, including
+/// worker-recovery guidance whose absence can strand live workers. This
+/// surfaces the same skip where every session sees it.
+///
+/// Returns `None` when the last sync skipped nothing — the common case.
+pub fn build_session_start_stale_reference_banner_sized(
+    cas_root: &Path,
+) -> Option<SessionStartBanner> {
+    let skipped = crate::builtins::skipped_owned_references(cas_root);
+    if skipped.is_empty() {
+        return None;
+    }
+    Some(render_stale_reference_banner(&skipped))
+}
+
+/// Pure renderer for the stale-reference banner — separated from the ledger
+/// read so tests (and the SessionStart budget test) can drive it directly.
+pub(crate) fn render_stale_reference_banner(
+    skipped: &std::collections::BTreeMap<String, Vec<String>>,
+) -> SessionStartBanner {
+    let total: usize = skipped.values().map(Vec::len).sum();
+    let compact = format!(
+        "⚠ {total} builtin skill reference file(s) are NOT being updated by `cas update --sync` \
+         — they differ from every version CAS shipped and are preserved as local edits. \
+         Run `cas update --sync` for the path list; to accept the CAS version, delete the file \
+         and rerun the sync.\n"
+    );
+
+    let mut full = format!(
+        "⚠ {total} builtin skill reference file(s) are NOT being updated by `cas update --sync`: \
+         their content matches neither the last synced baseline nor any version CAS shipped, so \
+         sync preserves them as local customizations. Until resolved these files stay stale \
+         forever.\n"
+    );
+    for (harness, paths) in skipped {
+        for path in paths {
+            full.push_str(&format!("  ! .{harness}/{path}\n"));
+        }
+    }
+    full.push_str(
+        "  Review each file; to accept the CAS version, delete it and rerun `cas update --sync`.\n",
+    );
+
+    SessionStartBanner { full, compact }
+}
+
 /// Full + compact renderings of the orphan/stale-server banner (cas-b114).
 pub fn build_session_start_orphan_banner_sized(cas_root: &Path) -> Option<SessionStartBanner> {
     let report = crate::ui::factory::orphan_gc::scan(

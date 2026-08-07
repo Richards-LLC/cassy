@@ -51,7 +51,7 @@ use cas::store::{
 };
 use cas::types::{Entry, EntryType, Scope};
 use tempfile::TempDir;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// Process-global lock for CAS_ROOT mutations. `cargo test` runs each
@@ -343,6 +343,23 @@ fn init_all_stores_at(cas_root: &Path) {
 /// push/pull mocks return empty success bodies. Team push mock matches the
 /// real server contract (a `synced` count map). Team pull returns a single
 /// shared entry so the test can prove rows actually land in the local store.
+/// Mount the knowledge-pull endpoint the T5 tail of `cas cloud sync` hits:
+/// the same `/api/sync/pull` path, discriminated by `types=knowledge_pages`.
+///
+/// Kept as its own mock so the two logical pulls are counted separately —
+/// this is what makes "each pull endpoint exactly once" mean what it says.
+async fn mount_knowledge_pull(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/api/sync/pull"))
+        .and(query_param("types", "knowledge_pages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "knowledge_pages": [],
+        })))
+        .expect(1)
+        .mount(server)
+        .await;
+}
+
 async fn mount_full_sync_mocks(server: &MockServer, team_entry_id: &str) {
     // Personal push: any payload, success. Empty stores still produce 1 batch.
     Mock::given(method("POST"))
@@ -352,8 +369,16 @@ async fn mount_full_sync_mocks(server: &MockServer, team_entry_id: &str) {
         .await;
 
     // Personal pull: empty body. `.expect(1)` locks in exactly-one call.
+    //
+    // `query_param_is_missing("types")` is load-bearing, not decoration: the
+    // knowledge tail (T5) issues a SECOND, different request to this same
+    // path — `?types=knowledge_pages` — by design (docs/requests/
+    // 2026-08-06-cloud-knowledge-sync-and-embeddings.md §"pull"). A path-only
+    // matcher absorbs that request into this mock and reports two personal
+    // pulls where the product made one personal pull and one knowledge pull.
     Mock::given(method("GET"))
         .and(path("/api/sync/pull"))
+        .and(query_param_is_missing("types"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "entries": [], "tasks": [], "rules": [], "skills": [],
             "specs": [], "events": [], "prompts": [],
@@ -363,6 +388,12 @@ async fn mount_full_sync_mocks(server: &MockServer, team_entry_id: &str) {
         .expect(1)
         .mount(server)
         .await;
+
+    // Knowledge pull: the T5 tail, asserted explicitly rather than left to be
+    // silently swallowed by the personal-pull matcher. `.expect(1)` gives the
+    // knowledge request the same exactly-once contract every other endpoint
+    // in this test has.
+    mount_knowledge_pull(server).await;
 
     // Team push: success with empty counts (empty team queue).
     Mock::given(method("POST"))
@@ -480,8 +511,11 @@ async fn execute_sync_does_not_hit_team_pull_when_no_team_configured() {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
         .mount(&server)
         .await;
+    // `types` discriminates the personal pull from the knowledge pull that
+    // shares this path — see `mount_knowledge_pull`.
     Mock::given(method("GET"))
         .and(path("/api/sync/pull"))
+        .and(query_param_is_missing("types"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "entries": [], "tasks": [], "rules": [], "skills": [],
             "specs": [], "events": [], "prompts": [],
@@ -491,6 +525,7 @@ async fn execute_sync_does_not_hit_team_pull_when_no_team_configured() {
         .expect(1)
         .mount(&server)
         .await;
+    mount_knowledge_pull(&server).await;
 
     // Team endpoints: zero traffic. `.expect(0)` on both fails the test
     // if either fires.

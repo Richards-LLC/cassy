@@ -143,6 +143,69 @@ compressed rows or any `raw_content`; a legacy MarkdownStore directory
 (`<root>/entries` or `<root>/archive`). Each aborts rather than silently
 dropping data with no destination.
 
+**G10 — Backups taken, and taken in the right order.** See §2.1.
+
+### 2.1 Backups — cost, ordering, and what they are actually for
+
+**What a backup is for here, and what it is not.** The normal undo path (§7) is
+the ledger-driven rollback; it does not consult a backup and cannot be helped by
+one. A backup buys exactly one thing: the break-glass path (§7.4) when the
+**ledger is lost**. Take it anyway — it is cheap relative to the alternative —
+but do not let its existence become the reason the ledger is treated casually.
+
+**Cost, measured on this machine:**
+
+| Database | File size | Notes |
+|---|---|---|
+| Project `.cas/cas.db` | **431 MB** (451,756,032 bytes) | Also carries a live ~4 MB WAL |
+| Global `~/.cas/cas.db` | **86 MB** (89,935,872 bytes) | WAL empty at rest |
+| **Both** | **~517 MB per full backup** | |
+
+Consequences that follow from those numbers:
+
+- **Never stage a backup in `/tmp`.** `/tmp` is tmpfs — RAM — on this host. Half
+  a gigabyte of backup plus the rehearsal copies from §3 is a way to wedge the
+  machine during the one procedure whose purpose is safety. Use
+  `/mnt/datacube/staging` (543 GB free at time of writing).
+- **Never `cp` the database.** The project DB has a non-empty WAL right now, so a
+  file copy can be torn. Back up the same way the rehearsal makes copies — with
+  `VACUUM INTO` from a read-only connection, which produces a consistent,
+  compacted snapshot. The output is often *smaller* than the source file because
+  free pages are dropped; that is not a defect and not data loss.
+
+```
+B=/mnt/datacube/staging/cas-b129-backup
+mkdir -p $B
+sqlite3 "file:$PWD/.cas/cas.db?mode=ro"   "VACUUM INTO '$B/project-cas.db'"
+sqlite3 "file:$HOME/.cas/cas.db?mode=ro"  "VACUUM INTO '$B/global-cas.db'"
+sha256sum $B/*.db | tee $B/SHA256SUMS
+```
+
+**Ordering — this is the part that is easy to get wrong.** Take both backups
+**before any mutating step, and specifically before the `sync_queue` decision of
+G7**, not just before the apply. The reason:
+
+- Backing up **first** captures the 11 stranded GLOBAL `sync_queue` rows while
+  they still exist, so a break-glass restore recovers the queue state along with
+  everything else.
+- Backing up **after** `--invalidate-sync-queue` produces a backup in which those
+  rows are already gone. A break-glass restore from it would silently drop them,
+  and their only remaining copy would be `sync-queue-invalidated.jsonl` — which
+  is the ledger, i.e. the very artifact the break-glass path exists to survive
+  the loss of.
+- Backing up after a `cas cloud sync` drain is less bad — the rows were delivered
+  rather than deleted — but the ordering rule stays the same, because "was it
+  drained or invalidated?" is not a question you want to be reconstructing under
+  pressure.
+
+So the correct sequence is: **backup → G7 decision (drain or accept
+invalidation) → apply**. Record the backup path and the `SHA256SUMS` output in
+the task notes at the same time as the dry-run audit, so the two artifacts are
+timestamped against each other.
+
+Delete the backups only after the cutover has been verified (§5) and accepted;
+until then they are the last resort if both the pages and the ledger are lost.
+
 ---
 
 ## 3. Rehearse on copies first — and how not to hit the live store while doing it
@@ -201,6 +264,11 @@ delete the copies.
 ## 4. Cutover
 
 Run these in order, from the repo root, with the factory quiesced (G8).
+
+### Step 0 — backups
+
+Per §2.1, before anything mutating and before the G7 `sync_queue` decision.
+`VACUUM INTO` both databases to `/mnt/datacube/staging`, record the sha256s.
 
 ### Step 1 — dry run against the live stores (read-only)
 
@@ -525,6 +593,14 @@ only when all of the following hold, and say so in writing on the task:
    migration.
 4. The surgical rollback has already failed or is impossible (ledger lost).
 
+The backup it restores from is the one taken at §2.1 / step 0 —
+`/mnt/datacube/staging/cas-b129-backup/{project,global}-cas.db`. Verify it
+against the recorded `SHA256SUMS` before restoring; a backup nobody checked is a
+belief, not a backup. If it was taken *after* the `sync_queue` decision, the 11
+stranded rows are not in it (§2.1 ordering) — which is precisely the failure this
+path cannot rescue you from, since the ledger holding their payloads is by
+assumption already lost.
+
 If you do it, back up the *current* `cas.db` first, so the choice remains
 reversible.
 
@@ -557,6 +633,12 @@ nothing but `mcp__cas__knowledge` and a truncated index block can reach.*
 **Cutover, happy path**
 
 ```
+# 0. backups FIRST — before the sync_queue decision, not just before the apply (§2.1)
+B=/mnt/datacube/staging/cas-b129-backup; mkdir -p $B
+sqlite3 "file:$PWD/.cas/cas.db?mode=ro"  "VACUUM INTO '$B/project-cas.db'"   # 431MB source
+sqlite3 "file:$HOME/.cas/cas.db?mode=ro" "VACUUM INTO '$B/global-cas.db'"    #  86MB source
+sha256sum $B/*.db | tee $B/SHA256SUMS
+
 cas memory-migrate                                     # 1. dry run — read the audit + quarantine
 cas memory-migrate --apply --invalidate-sync-queue     # 2. apply (factory quiesced)
 cas memory-migrate --reindex                           # 3. FTS rebuild + retrievability check

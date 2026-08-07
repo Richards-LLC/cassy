@@ -844,3 +844,28 @@ and set `user_prompt` directly. All seven passed, continuously, while the featur
 dead in production for a full release. A struct-literal test cannot catch a deserialization-contract
 bug; only parsing the real wire shape can. The regression tests added with this fix parse raw JSON
 in the shape Claude actually sends, and the payload literals in them are the contract.
+
+### Live post-fix measurement — 2026-08-07T23:14:01Z
+
+Taken out-of-tree against the live database, per the supervisor's ruling: the installed
+`~/.local/bin/cas` was deliberately **not** replaced, because hooks exec the installed binary per
+call and a swap would have changed behaviour under four running workers mid-flight. Fleet binary
+updates ride a supervised release. In-fleet confirmation is therefore deferred to this epic's
+mandated post-release mining re-run.
+
+Subject: **row 8026, a real supervisor→worker message**, not a synthetic probe — chosen because it
+happened to be sitting unseen and unacked at the moment of the test.
+
+| | `acked_at` | `acked_via` |
+|---|---|---|
+| before | *(null)* | *(null)* |
+| after one turn | `2026-08-07T23:14:01.404056Z` | **`hook_surfaced`** |
+
+The rebuilt binary was fed Claude's real wire shape — `{"hook_event_name":"UserPromptSubmit",
+"prompt":"…"}`, the exact payload that returned `{}` before the fix — and returned the message as
+`additionalContext` while writing a matching `prompt_queue_recipient_seen` row
+(`source = hook_surfaced`, same timestamp, same transaction).
+
+That is the acceptance condition for GH #165: a message consumed by a worker gains `acked_via`
+within one turn. The unreconciled pair is no longer the 100% steady state, which is the precondition
+#166 and #167 were blocked on.

@@ -57,6 +57,15 @@ pub struct MemoryMigrateArgs {
     /// Rows read per extraction page.
     #[arg(long, default_value_t = 500)]
     pub page_size: usize,
+
+    /// Undo a previous apply, driven by the ledger (M5 rollback).
+    ///
+    /// Report-only unless `--apply` is also given, exactly like the migration
+    /// itself. Only pages this migration's ledger records are considered, and a
+    /// page whose `rel_path` no longer matches the ledger is reported and left
+    /// alone rather than deleted.
+    #[arg(long, conflicts_with = "reindex")]
+    pub rollback: bool,
 }
 
 /// Resolve which databases this invocation reads and writes.
@@ -158,7 +167,12 @@ pub fn execute(args: &MemoryMigrateArgs, cas_root: &Path) -> anyhow::Result<()> 
     // report — the operator gets to see the paths before that happens.
     println!(
         "{} — sources:",
-        if config.apply { "APPLY" } else { "DRY RUN" }
+        match (args.rollback, config.apply) {
+            (true, true) => "ROLLBACK",
+            (true, false) => "ROLLBACK PLAN",
+            (false, true) => "APPLY",
+            (false, false) => "DRY RUN",
+        }
     );
     for db in &config.sources {
         println!(
@@ -169,6 +183,28 @@ pub fn execute(args: &MemoryMigrateArgs, cas_root: &Path) -> anyhow::Result<()> 
         );
     }
     println!();
+
+    if args.rollback {
+        // Rollback never re-reads the legacy corpus: it undoes exactly what the
+        // ledger says was written, so a source database that has moved on since
+        // the apply cannot change what gets removed.
+        let audit = memory_migration::rollback(&config.sources, &config.ledger_dir, config.apply)?;
+        print!("{}", audit.render(config.apply));
+        println!("ledger: {}", config.ledger_dir.display());
+        if !audit.is_clean() {
+            anyhow::bail!(
+                "rollback did not account for every ledgered page — {} diverged, {} of {} \
+                 resolved. Nothing further was attempted; resolve by hand.",
+                audit.diverged.len(),
+                audit.removed + audit.already_absent,
+                audit.ledgered
+            );
+        }
+        if !config.apply {
+            println!("ROLLBACK PLAN — nothing was deleted. Re-run with --apply to execute.");
+        }
+        return Ok(());
+    }
 
     let outcome = memory_migration::run(&config)?;
 
@@ -240,6 +276,7 @@ mod tests {
             invalidate_sync_queue: false,
             reindex: false,
             page_size: 500,
+            rollback: false,
         }
     }
 

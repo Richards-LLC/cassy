@@ -82,6 +82,33 @@ impl Ledger {
         })
     }
 
+    /// Every applied record, in the order the migration wrote them.
+    ///
+    /// Rollback is driven from this list rather than from a `LIKE 'cas-kn-mig-%'`
+    /// sweep of the destination: the ledger is the only record of what THIS
+    /// migration created, so a page that merely resembles a migrated one — hand
+    /// written, or left by an unrelated run — cannot be caught in the blast.
+    pub fn read_applied(dir: &Path) -> Result<Vec<AppliedRecord>> {
+        let path = dir.join(APPLIED_FILE);
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let file = File::open(&path).with_context(|| format!("reading {}", path.display()))?;
+        let mut records = Vec::new();
+        for line in BufReader::new(file).lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            records.push(
+                serde_json::from_str(&line).with_context(|| {
+                    format!("corrupt ledger line in {}: {line}", path.display())
+                })?,
+            );
+        }
+        Ok(records)
+    }
+
     pub fn is_applied(&self, db: &str, legacy_id: &str) -> bool {
         self.applied
             .contains(&(db.to_string(), legacy_id.to_string()))

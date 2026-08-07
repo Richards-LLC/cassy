@@ -28,6 +28,7 @@ pub mod frontmatter;
 pub mod ledger;
 pub mod preconditions;
 pub mod reindex;
+pub mod rollback;
 pub mod routing;
 pub mod source;
 
@@ -40,6 +41,7 @@ pub use apply::{body_after_frontmatter, compose_body};
 pub use audit::LossAudit;
 pub use ledger::{AppliedRecord, QuarantineRecord};
 pub use reindex::PageIndexReport;
+pub use rollback::{RollbackAudit, rollback};
 pub use routing::Disposition;
 
 /// Which legacy database a row came from. Also the `cas_legacy_db` value.
@@ -381,9 +383,18 @@ fn invalidate_sync_queue(db: &SourceDb, ledger: &ledger::Ledger) -> Result<()> {
         Ok(serde_json::Value::Object(object))
     })?;
 
+    // Each payload records WHICH database it came from. Without that, a
+    // rollback has no way to route the rows home and would restore them into
+    // whichever root it happened to try first — silently moving another store's
+    // queue. (Caught by exercising the rollback: 11 global rows came back into
+    // the project database.)
     let mut recorded = String::new();
     for payload in payloads {
-        recorded.push_str(&format!("{}\n", serde_json::to_string(&payload?)?));
+        let record = serde_json::json!({
+            "cas_migration_db": db.label.as_str(),
+            "row": payload?,
+        });
+        recorded.push_str(&format!("{}\n", serde_json::to_string(&record)?));
     }
     drop(stmt);
     if recorded.is_empty() {

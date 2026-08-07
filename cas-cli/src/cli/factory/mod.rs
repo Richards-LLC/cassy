@@ -225,15 +225,15 @@ pub struct FactoryArgs {
     #[arg(long, global = true)]
     pub tabbed: bool,
 
-    /// Record terminal sessions for time-travel playback (requires factory-recording feature)
+    /// Record terminal sessions for time-travel playback
     #[arg(long, global = true)]
     pub record: bool,
 
-    /// Supervisor CLI to use (claude, codex, or pi)
+    /// Supervisor CLI to use (claude, codex, or grok)
     #[arg(long, default_value = "claude")]
     pub supervisor_cli: String,
 
-    /// Worker CLI to use (claude, codex, or pi)
+    /// Worker CLI to use (claude, codex, or grok)
     #[arg(long, default_value = "claude")]
     pub worker_cli: String,
 
@@ -391,11 +391,11 @@ pub enum FactoryCommands {
         #[arg(long)]
         notify: bool,
 
-        /// Supervisor CLI to use (claude, codex, or pi)
+        /// Supervisor CLI to use (claude, codex, or grok)
         #[arg(long, default_value = "claude")]
         supervisor_cli: String,
 
-        /// Worker CLI to use (claude, codex, or pi)
+        /// Worker CLI to use (claude, codex, or grok)
         #[arg(long, default_value = "claude")]
         worker_cli: String,
 

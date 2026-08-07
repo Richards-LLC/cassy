@@ -39,8 +39,8 @@ fn report_modified_builtin_references(
     let mut fmt = Formatter::stdout(&mut out, theme.clone());
     fmt.write_raw("  ")?;
     fmt.warning(&format!(
-        "{} locally modified or pre-ledger builtin reference file(s) in {location} \
-         were preserved:",
+        "{} locally modified builtin reference file(s) in {location} were preserved \
+         (content matches no version CAS has shipped):",
         result.modified_reference_files.len()
     ))?;
     for file in &result.modified_reference_files {

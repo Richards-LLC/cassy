@@ -499,3 +499,77 @@ Actionable = STILL-LIVE + REGRESSED only.
    does not).
 
 Three of thirteen findings changed status under temporal analysis — the amendment was worth it.
+
+---
+
+# Unified root-cause hypothesis: one defect, four faces
+
+Four instances of the delivery defect occurred **on this task, within ~90 minutes**, while the
+task was being written. They are listed here because together they constrain the root cause more
+tightly than the corpus statistics do.
+
+| # | Instance | Direction | Evidence |
+|---|---|---|---|
+| 1 | 5 binding amendments never surfaced | inbound | rows 7877/7879/7880/7881, `delivered` + unacked |
+| 2 | 356 `suppressed_idle` messages dropped | corpus | 356/356 never delivered, through 08-07 20:59:38 |
+| 3 | Phase-1 checkpoint idle-gate-declined | outbound | id 7893, `wake_attempt_detail="idle gate declined the wake for this pass"` |
+| 4 | Consumed inbox rows replayed | inbound | 7869–7881 re-delivered after `inbox_poll` marked them seen |
+
+**Hypothesis.** `prompt_queue` carries two independent notions of "the recipient got it" and
+nothing reconciles them:
+
+- `transport_delivered_at` — stamped when the row is handed to *a channel*
+- `acked_at` — stamped when the *recipient* confirms
+
+A row whose transport succeeded but whose ack never arrives is simultaneously:
+
+- **treated as delivered**, so no path retries it → **silent loss** (instances 1, 2, 3)
+- **still unacked**, so another channel re-offers it → **duplicate delivery** (instance 4)
+
+Silent loss and duplicate delivery are therefore not two bugs but one unreconciled state pair,
+observed from either side. All six rows addressed to this worker sit in exactly that state:
+`transport_delivered_at IS NOT NULL AND acked_at IS NULL`.
+
+This predicts the corpus-level findings rather than merely coexisting with them: the redelivery
+hot-loop (F1) is the duplicate face running unbounded against a row that can never ack because
+its target never registered; the idle-gate drop (F3) is the loss face. It also explains why
+`stage="delivered"` appears in the log while the row reads NULL — the log records the transport
+event, and the transport event is not receipt.
+
+**Falsifiable.** If true, a single reconciliation — treat unacked-after-TTL as undelivered and
+retry with backoff, and make ack (not transport) the terminal state — should close F1, F2, F3
+and the amendment incident together. If F3's `suppressed_idle` rows prove to be dropped *before*
+transport rather than after, the mechanism differs and F3 needs its own fix. **Test this before
+filing four issues that may be one** — the supervisor's ruling already folds F3 into F2's issue
+"unless the mechanism provably differs", and this is the check that decides it.
+
+## Phase 2 issue map (ruled; filing gated on daemon restart)
+
+Per the AC8 ruling. No issues filed by this worker — Phase 2 executes after the operator restarts
+the daemon on v2.49.0, so the restart timestamp becomes the FIXED-VERIFIED epoch boundary the
+amendment incident needs.
+
+| Finding | Disposition | Target |
+|---|---|---|
+| Amendment incident | COMMENT — row ids + "restart on 2.49.0 and re-measure" | GH #155 |
+| Redelivery hot-loop (55,868×, 464 MB) | **NEW ISSUE** | — |
+| Undelivered-rate regression | fold into the above **unless mechanism differs** (test above) | — |
+| Idle-gate message **loss** | **NEW ISSUE**, separate from #147 (banner ≠ loss) | — |
+| `worker_died` quantification (2044/100%) | COMMENT | GH #160 |
+| `worker_died` silent emitter | **NEW ISSUE** (not covered by cas-7787) | — |
+| Death-notice duplication (1452×) | check root, comment or file | GH #161 |
+| `delivery_attempts` dead instrumentation | **NEW ISSUE** (small) | — |
+| `dead-lettered` FIXED-VERIFIED | no issue; appendix evidence | — |
+
+## Coverage gaps carried into Phase 2
+
+Stated, not silent, per the coverage-honesty requirement:
+
+- **Vector index not built.** Pre-approved but skipped: no AC7 verdict depended on it
+  (epoch classification is timestamp comparison, and verdicts are required to be behavioural),
+  and the build did not fit remaining context. Ruled the correct call. Revisit only if
+  transcript mining needs semantic clustering.
+- **Transcript corpus (160 MB, 50 sessions) inventoried, not mined.** Re-ask rate, instruction
+  drift and wasted-turn accounting remain unmeasured. This is the one corpus that would quantify
+  the *human* cost of the delivery defect above — how many turns were spent re-deriving context
+  that had already been sent.

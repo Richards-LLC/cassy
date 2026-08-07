@@ -1,0 +1,224 @@
+//! Turn-start inbox surfacing for factory agents (cas-7a01, GH #155).
+//!
+//! # Why this file exists
+//!
+//! CAS had a delivery path and no surfacing path. The daemon wrote a message
+//! into a Claude teammate's inbox file, stamped the queue row
+//! `stage=delivered`, and stopped — nothing anywhere read that queue back and
+//! put it in front of the recipient. Every hook handler in `hooks/` touched the
+//! prompt queue exactly once, and that one touch was an *enqueue*
+//! (`handlers_events/pre_tool.rs`, the `SendMessage` auto-route). "Delivery ≠
+//! surfacing" was not a race or a filter: the surfacing half was never built.
+//!
+//! The consequences were reported three times (GH #130, #139, #155): a
+//! non-urgent message to an idle Claude worker could sit unread across turns
+//! the worker took, while `message_status` reported `delivered` and
+//! `wake: unobserved`. Only urgent messages ever arrived, because the urgent
+//! path is structurally different — an unconditional PTY interrupt that
+//! bypasses the inbox entirely.
+//!
+//! # What this does
+//!
+//! On `UserPromptSubmit`, a factory agent's unread queue rows are drained and
+//! injected into the turn that is starting. The drain writes its surfacing
+//! receipt in the same transaction it selects the rows, so:
+//!
+//! - A row that reaches the model is always receipted (never re-injected —
+//!   that is the GH #124 storm, cas-ceae).
+//! - A row whose receipt failed to persist was never returned, so it stays
+//!   unread and is retried at the next turn start (never silently dropped —
+//!   that is GH #139).
+//!
+//! There is no third state. The storm guard and the silent-drop guard are the
+//! same invariant read from two directions, which is why the atomicity lives
+//! in the store rather than in a policy here.
+//!
+//! # What this deliberately does not do
+//!
+//! It does not consume an inbox *drain*: `inbox_poll` remains non-consuming
+//! exactly as cas-ef14 left it. Only an actual injection into a turn marks a
+//! row seen.
+
+use std::path::Path;
+
+use cas_core::hooks::types::HookInput;
+use cas_store::QueuedPrompt;
+
+/// Rows surfaced into a single turn.
+///
+/// Bounded because the injection lands in the model's context window: an agent
+/// returning from a long absence with a large backlog must still get a usable
+/// turn. Anything beyond this stays unread and surfaces at the next turn — it
+/// is not dropped.
+const SURFACE_LIMIT: usize = 10;
+
+/// Resolve the queue recipient names this agent answers to.
+///
+/// A worker answers to exactly one name. A supervisor answers to two: its pane
+/// name and the logical `"supervisor"` alias that the whole factory addresses
+/// it by (the daemon resolves `target == "supervisor"` to the pane at delivery
+/// time). Surfacing only the pane name would leave every supervisor-addressed
+/// message — which is nearly all of them — invisible.
+fn recipient_aliases(input: &HookInput) -> Vec<String> {
+    let mut aliases: Vec<String> = Vec::new();
+    if let Ok(name) = std::env::var("CAS_AGENT_NAME") {
+        let name = name.trim().to_string();
+        if !name.is_empty() {
+            aliases.push(name);
+        }
+    }
+    if crate::harness_policy::is_supervisor(input) && !aliases.iter().any(|a| a == "supervisor") {
+        aliases.push("supervisor".to_string());
+    }
+    aliases
+}
+
+fn factory_session() -> Option<String> {
+    std::env::var("CAS_FACTORY_SESSION")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Drain and render this agent's unread mail for the turn that is starting.
+///
+/// `None` when there is nothing to surface, when CAS is not initialised, or
+/// when the agent has no resolvable factory identity. Every failure is silent
+/// by design: a hook that errors is a hook the harness may disable, and losing
+/// prompt capture to a queue problem would be a worse bug than the one this
+/// fixes.
+pub fn surface_factory_inbox(cas_root: Option<&Path>, input: &HookInput) -> Option<String> {
+    if !crate::harness_policy::is_factory_agent(input) {
+        return None;
+    }
+    let cas_root = cas_root?;
+    let aliases = recipient_aliases(input);
+    if aliases.is_empty() {
+        return None;
+    }
+    let session = factory_session();
+    let queue = crate::store::open_prompt_queue_store(cas_root).ok()?;
+
+    let mut rows: Vec<QueuedPrompt> = Vec::new();
+    for alias in &aliases {
+        let remaining = SURFACE_LIMIT.saturating_sub(rows.len());
+        if remaining == 0 {
+            break;
+        }
+        match queue.surface_unseen_for_recipient(alias, session.as_deref(), remaining) {
+            Ok(found) => {
+                for row in found {
+                    // A supervisor's two aliases are two distinct recipient
+                    // keys in the receipt table, so a broadcast row can come
+                    // back from both. Injecting it twice into one turn is the
+                    // duplicate this task must not create.
+                    if rows.iter().any(|existing| existing.id == row.id) {
+                        continue;
+                    }
+                    rows.push(row);
+                }
+            }
+            Err(error) => {
+                tracing::debug!(
+                    target: "cas::coordination",
+                    recipient = %alias,
+                    %error,
+                    "cas-7a01: turn-start inbox surfacing failed"
+                );
+            }
+        }
+    }
+
+    if rows.is_empty() {
+        return None;
+    }
+    Some(render_surfaced(&rows))
+}
+
+/// Render surfaced rows for injection into the turn.
+///
+/// Pure so the shape is testable without a store. The rendering states the
+/// sender and the message id for every row, because the recipient's only way
+/// to acknowledge or reply is to name that id back.
+pub(crate) fn render_surfaced(rows: &[QueuedPrompt]) -> String {
+    let mut out = String::from(
+        "[incoming messages]\nThe following message(s) arrived while you were not in a turn. \
+         They are delivered here once — act on them now.\n",
+    );
+    for row in rows {
+        out.push_str(&format!(
+            "\n--- from {} (message {}{}) ---\n{}\n",
+            row.source,
+            row.id,
+            if row.urgent { ", urgent" } else { "" },
+            row.prompt.trim()
+        ));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cas_store::{NotificationPriority, PromptQueueStore, SqlitePromptQueueStore};
+    use chrono::Utc;
+    use tempfile::TempDir;
+
+    fn row(id: i64, source: &str, prompt: &str) -> QueuedPrompt {
+        QueuedPrompt {
+            id,
+            source: source.to_string(),
+            target: "worker-1".to_string(),
+            prompt: prompt.to_string(),
+            created_at: Utc::now(),
+            processed_at: None,
+            factory_session: Some("session".to_string()),
+            summary: None,
+            priority: NotificationPriority::Normal,
+            acked_at: None,
+            urgent: false,
+        }
+    }
+
+    /// The injected block must name the sender and the message id: a recipient
+    /// that cannot identify the message cannot ack or reply to it.
+    #[test]
+    fn rendering_names_sender_and_message_id() {
+        let rendered = render_surfaced(&[row(7640, "supervisor", "start cas-7a01")]);
+        assert!(rendered.contains("supervisor"), "{rendered}");
+        assert!(rendered.contains("7640"), "{rendered}");
+        assert!(rendered.contains("start cas-7a01"), "{rendered}");
+    }
+
+    #[test]
+    fn rendering_marks_urgent_rows() {
+        let mut urgent = row(1, "supervisor", "stop");
+        urgent.urgent = true;
+        assert!(render_surfaced(&[urgent]).contains("urgent"));
+    }
+
+    /// AC2/AC3 core: a row surfaced once is receipted at injection time, so a
+    /// second turn start never re-injects it. This is the GH #124 storm guard.
+    #[test]
+    fn a_surfaced_row_is_never_surfaced_twice() {
+        let temp = TempDir::new().unwrap();
+        let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        store
+            .enqueue_with_session("supervisor", "worker-1", "do the thing", "session")
+            .unwrap();
+
+        let first = store
+            .surface_unseen_for_recipient("worker-1", Some("session"), 10)
+            .unwrap();
+        assert_eq!(first.len(), 1, "the message must reach the first turn");
+
+        let second = store
+            .surface_unseen_for_recipient("worker-1", Some("session"), 10)
+            .unwrap();
+        assert!(
+            second.is_empty(),
+            "re-injecting a receipted row into a later turn is the GH #124 storm"
+        );
+    }
+}

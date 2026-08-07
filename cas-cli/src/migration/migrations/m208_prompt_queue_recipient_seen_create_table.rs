@@ -92,6 +92,14 @@ mod tests {
         assert_eq!(after, 1);
     }
 
+    /// The ledger CHAIN and the baseline schema must describe the same table.
+    ///
+    /// cas-7a01 (GH #155) added `source` to this table via m220, so the
+    /// comparison is against this migration plus every later one that touches
+    /// it — not against this one alone. A migrated store replays the whole
+    /// chain, so that is the shape it actually ends up with; comparing a fresh
+    /// store to a single link would start failing the moment any column is
+    /// added, which is what it just did.
     #[test]
     fn baseline_and_migration_recipient_seen_shapes_match() {
         let temp = TempDir::new().unwrap();
@@ -100,7 +108,11 @@ mod tests {
         let baseline = Connection::open(temp.path().join("cas.db")).unwrap();
 
         let migrated = Connection::open_in_memory().unwrap();
-        for sql in super::MIGRATION.up {
+        for sql in super::MIGRATION
+            .up
+            .iter()
+            .chain(super::super::m220_prompt_queue_wake_observability::MIGRATION.up.iter())
+        {
             migrated.execute(sql, []).unwrap();
         }
 

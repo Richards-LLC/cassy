@@ -17,8 +17,38 @@
 //! decision so it can no longer drift per call site.
 
 use cas_mux::{InjectOutcome, SupervisorCli};
+use cas_store::WakeAttempt;
 
 use super::super::FactoryDaemon;
+
+/// The result of a delivery that may carry a wake nudge (cas-7a01, GH #155).
+///
+/// `outcome` is the transport answer the caller has always acted on. `wake` is
+/// the answer the caller could never get: whether CAS actually woke the
+/// recipient, tried and failed, or never tried. Keeping them in one value makes
+/// it impossible for a delivery site to record transport state while silently
+/// dropping the wake state, which is precisely how three GH incidents produced
+/// a `wake: unobserved` with no way to tell what had happened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NudgeReport {
+    /// Transport outcome for the primary delivery.
+    pub(crate) outcome: InjectOutcome,
+    /// What the wake nudge did.
+    pub(crate) wake: WakeAttempt,
+    /// Why a wake failed, or which gate declined it.
+    pub(crate) wake_detail: Option<String>,
+}
+
+impl NudgeReport {
+    /// A delivery where no wake was attempted, with the reason stated.
+    pub(crate) fn not_attempted(outcome: InjectOutcome, detail: &str) -> Self {
+        Self {
+            outcome,
+            wake: WakeAttempt::NotAttempted,
+            wake_detail: Some(detail.to_string()),
+        }
+    }
+}
 
 /// The channel a message should be delivered over, decided by the recipient's
 /// harness and whether the factory is running native Agent Teams.
@@ -474,13 +504,22 @@ impl FactoryDaemon {
         color: Option<&str>,
         worker_is_idle: bool,
         retract_task: Option<&str>,
-    ) -> anyhow::Result<InjectOutcome> {
+    ) -> anyhow::Result<NudgeReport> {
         let primary_outcome = self
             .deliver_to_worker(target, source, text, summary, color, None, retract_task, None)
             .await?;
 
-        if primary_outcome != InjectOutcome::Delivered || !worker_is_idle {
-            return Ok(primary_outcome);
+        if primary_outcome != InjectOutcome::Delivered {
+            return Ok(NudgeReport::not_attempted(
+                primary_outcome,
+                "primary delivery did not complete; no wake attempted",
+            ));
+        }
+        if !worker_is_idle {
+            return Ok(NudgeReport::not_attempted(
+                primary_outcome,
+                "idle gate declined the wake for this pass",
+            ));
         }
 
         self.pty_nudge(target, source, text).await
@@ -505,23 +544,34 @@ impl FactoryDaemon {
         source: &str,
         text: &str,
         worker_is_idle: bool,
-    ) -> anyhow::Result<InjectOutcome> {
+    ) -> anyhow::Result<NudgeReport> {
         if !worker_is_idle {
-            return Ok(InjectOutcome::Delivered);
+            return Ok(NudgeReport::not_attempted(
+                InjectOutcome::Delivered,
+                "idle gate declined the wake for this pass",
+            ));
         }
         self.pty_nudge(target, source, text).await
     }
 
     /// Shared PTY-nudge tail: frame the payload for the recipient's harness and
-    /// type it into the pane. Best-effort — every failure mode is logged and
-    /// reported as `Delivered`, because by construction the recipient already
-    /// holds an inbox copy by the time this runs.
+    /// type it into the pane. Best-effort — every failure mode is logged and the
+    /// `InjectOutcome` half stays `Delivered`, because by construction the
+    /// recipient already holds an inbox copy by the time this runs.
+    ///
+    /// cas-7a01 (GH #155): the `WakeAttempt` half is the part that used to be
+    /// thrown away. All three arms below returned a bare
+    /// `InjectOutcome::Delivered`, so a nudge that fired, a nudge the channel
+    /// vetoed and a nudge that errored were indistinguishable to every caller —
+    /// and `message_status` had nothing to report but the constant
+    /// `wake: unobserved`. The states were always computed here; they are now
+    /// carried out instead of discarded.
     async fn pty_nudge(
         &self,
         target: &str,
         source: &str,
         text: &str,
-    ) -> anyhow::Result<InjectOutcome> {
+    ) -> anyhow::Result<NudgeReport> {
         let pane_target = if target == "supervisor" {
             self.app.supervisor_name()
         } else {
@@ -531,11 +581,14 @@ impl FactoryDaemon {
         let harness = self.app.harness_for(pane_target);
         if !idle_nudge_applies(choose_channel(harness, teams_active)) {
             // Already PTY-delivered by the primary call above.
-            return Ok(InjectOutcome::Delivered);
+            return Ok(NudgeReport::not_attempted(
+                InjectOutcome::Delivered,
+                "recipient channel is PTY; the delivery itself is the turn",
+            ));
         }
 
         let payload = frame_pty_payload(harness, source, text);
-        match self.app.mux.inject(pane_target, &payload).await {
+        let report = match self.app.mux.inject(pane_target, &payload).await {
             Ok(InjectOutcome::Delivered) => {
                 tracing::info!(
                     target: "cas::coordination",
@@ -543,6 +596,11 @@ impl FactoryDaemon {
                     target_agent = %pane_target,
                     "cas-893c: nudged idle worker via PTY in addition to teams-inbox write"
                 );
+                NudgeReport {
+                    outcome: InjectOutcome::Delivered,
+                    wake: WakeAttempt::Fired,
+                    wake_detail: None,
+                }
             }
             Ok(InjectOutcome::DeferredComposerDirty) => {
                 tracing::info!(
@@ -551,6 +609,11 @@ impl FactoryDaemon {
                     target_agent = %pane_target,
                     "cas-893c: skipped idle PTY nudge because the operator composer is dirty; inbox write already succeeded"
                 );
+                NudgeReport {
+                    outcome: InjectOutcome::Delivered,
+                    wake: WakeAttempt::Failed,
+                    wake_detail: Some("operator composer is dirty".to_string()),
+                }
             }
             Err(e) => {
                 tracing::warn!(
@@ -561,9 +624,14 @@ impl FactoryDaemon {
                     "cas-893c: idle PTY nudge failed; inbox write already succeeded, worker will \
                      still see the message at its next natural turn boundary"
                 );
+                NudgeReport {
+                    outcome: InjectOutcome::Delivered,
+                    wake: WakeAttempt::Failed,
+                    wake_detail: Some(format!("pane inject failed: {e}")),
+                }
             }
-        }
-        Ok(InjectOutcome::Delivered)
+        };
+        Ok(report)
     }
 }
 

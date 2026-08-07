@@ -198,10 +198,18 @@ CREATE INDEX IF NOT EXISTS idx_prompt_queue_pending ON prompt_queue(target) WHER
 -- (daemon transport) and acked_at (delivery confirmation). A broadcast has
 -- one prompt_queue row but many recipients, so its read state cannot live on
 -- that row without one worker hiding the message from every other worker.
+-- `source` (cas-7a01, GH #155) records WHICH surfacing path wrote the receipt.
+-- A row drained by `inbox_poll` was handed to a tool result the recipient
+-- asked for; a row stamped `hook_surfaced` was injected into the recipient's
+-- turn by the UserPromptSubmit hook. Both are surfacing receipts, but only
+-- the second one proves the content entered a turn without the recipient
+-- having to know it should look — which is the distinction GH #155 needed and
+-- the evidence `message_status` now reports as an observed wake.
 CREATE TABLE IF NOT EXISTS prompt_queue_recipient_seen (
     prompt_id INTEGER NOT NULL,
     recipient TEXT NOT NULL,
     seen_at TEXT NOT NULL,
+    source TEXT,
     PRIMARY KEY (prompt_id, recipient)
 );
 
@@ -569,6 +577,112 @@ impl std::fmt::Display for ObservationStatus {
         }
     }
 }
+/// Which surfacing path wrote a `prompt_queue_recipient_seen` receipt
+/// (cas-7a01, GH #155).
+///
+/// Both values are genuine surfacing receipts — the row's content was put in
+/// front of the recipient — but they are not the same evidence. `InboxPoll`
+/// requires the recipient to have decided to look; `HookSurfaced` means CAS
+/// injected the content into the recipient's turn at turn start, which is the
+/// only path that can rescue a message the recipient does not know exists.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SurfacingSource {
+    /// The recipient's own `inbox_poll` drain (cas-2816 / cas-d047 path).
+    InboxPoll,
+    /// The `UserPromptSubmit` hook injected the row into the recipient's turn.
+    HookSurfaced,
+}
+
+impl SurfacingSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InboxPoll => "inbox_poll",
+            Self::HookSurfaced => "hook_surfaced",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "inbox_poll" => Some(Self::InboxPoll),
+            "hook_surfaced" => Some(Self::HookSurfaced),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for SurfacingSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// What the daemon's wake nudge actually did for this row (cas-7a01, GH #155).
+///
+/// The non-urgent delivery path already computes all three states and used to
+/// throw every one of them away: `pty_nudge` returns `InjectOutcome::Delivered`
+/// from its success arm, its composer-deferred arm AND its error arm, so a
+/// fired nudge, a vetoed nudge
+/// and a failed nudge were indistinguishable at every caller. That is why
+/// three separate incidents (GH #139, #155) could not tell "the nudge never
+/// fired" from "the nudge fired but the harness started a turn without
+/// surfacing the message" — the blanket `wake: unobserved` in
+/// [`MessageDeliveryReport`] carried no information at all.
+///
+/// This is deliberately about CAS's own action, not about the harness: a
+/// `Fired` nudge is proof CAS typed into the pane, never proof the recipient
+/// read anything. Recipient-side evidence stays in
+/// [`MessageDeliveryReport::wake`], which is only raised by a concrete
+/// surfacing receipt.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WakeAttempt {
+    /// No wake was attempted for this row: the idle gate vetoed it, the
+    /// recipient's channel is PTY (delivery already *is* a turn), or the row
+    /// never reached the nudge seam. The default for every historical row.
+    #[default]
+    NotAttempted,
+    /// CAS injected the wake into the recipient's pane and the mux reported
+    /// the write as delivered.
+    Fired,
+    /// A wake was attempted and did not land — the inject errored, or it was
+    /// deferred because the operator composer was dirty.
+    Failed,
+}
+
+impl WakeAttempt {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotAttempted => "nudge_not_attempted",
+            Self::Fired => "nudge_fired",
+            Self::Failed => "nudge_failed",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "nudge_not_attempted" => Some(Self::NotAttempted),
+            "nudge_fired" => Some(Self::Fired),
+            "nudge_failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+
+    /// Read a stored column value. An absent column is `NotAttempted` (no wake
+    /// was ever recorded); an unrecognised value is also `NotAttempted` rather
+    /// than an error, because a corrupt observability field must never make a
+    /// delivery report unreadable.
+    pub fn from_column(raw: Option<&str>) -> Self {
+        raw.and_then(Self::parse).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Display for WakeAttempt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 /// Provenance of a message's `acked_at` stamp (cas-45c4 / GH #102).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -582,6 +696,17 @@ pub enum ConfirmationSource {
     /// the same counterparty (cas-6ad2). Evidence that the recipient took a
     /// turn, NOT that this message's content was surfaced to it.
     InferredFromReply,
+    /// cas-7a01 (GH #155): the `UserPromptSubmit` hook injected this message's
+    /// content into the recipient's turn and recorded the receipt
+    /// synchronously, at injection time.
+    ///
+    /// Deliberately a distinct value rather than an overload of
+    /// [`ConfirmationSource::ExplicitAck`]: this is CAS's own observation of
+    /// the injection it performed, not the recipient's assertion that it read
+    /// anything. It is nevertheless a claim about THIS message and THIS
+    /// recipient — unlike [`ConfirmationSource::InferredFromReply`], which is
+    /// only evidence that some turn happened.
+    HookSurfaced,
     /// Ack recorded before provenance was tracked, or by an unknown path.
     Unknown,
 }
@@ -592,14 +717,19 @@ impl ConfirmationSource {
             (_, false) => Self::Unconfirmed,
             (Some("explicit_ack"), true) => Self::ExplicitAck,
             (Some("inferred_from_reply"), true) => Self::InferredFromReply,
+            (Some("hook_surfaced"), true) => Self::HookSurfaced,
             (_, true) => Self::Unknown,
         }
     }
 
     /// Whether this confirmation is the recipient's own claim about this
     /// message, rather than an inference from unrelated activity.
+    ///
+    /// `HookSurfaced` qualifies: it is a per-message, per-recipient record
+    /// that this content entered that recipient's turn. `InferredFromReply`
+    /// does not, and never did.
     pub fn is_recipient_claim(self) -> bool {
-        matches!(self, Self::ExplicitAck)
+        matches!(self, Self::ExplicitAck | Self::HookSurfaced)
     }
 }
 
@@ -609,6 +739,7 @@ impl std::fmt::Display for ConfirmationSource {
             Self::Unconfirmed => write!(f, "unconfirmed"),
             Self::ExplicitAck => write!(f, "explicit_ack"),
             Self::InferredFromReply => write!(f, "inferred_from_reply"),
+            Self::HookSurfaced => write!(f, "hook_surfaced"),
             Self::Unknown => write!(f, "unknown"),
         }
     }
@@ -669,6 +800,22 @@ pub struct MessageDeliveryReport {
     pub broadcast_succeeded: Option<u32>,
     pub broadcast_failed: Option<u32>,
     pub wake: ObservationStatus,
+    /// cas-7a01 (GH #155): what CAS's own wake nudge did for this row.
+    ///
+    /// Independent of [`MessageDeliveryReport::wake`], and answers a different
+    /// question. `wake_attempt` is CAS reporting on the action it took;
+    /// `wake` is CAS reporting whether the recipient demonstrably received a
+    /// turn carrying this content. A row can be `nudge_fired` + `unobserved`
+    /// (CAS typed into the pane, harness never surfaced it — the GH #155
+    /// failure) or `nudge_not_attempted` + `observed` (no nudge was warranted,
+    /// the recipient's next turn surfaced it through the hook anyway).
+    pub wake_attempt: WakeAttempt,
+    /// When the wake attempt recorded in `wake_attempt` was made.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wake_attempt_at: Option<DateTime<Utc>>,
+    /// Why a `nudge_failed` failed, or which gate declined a nudge.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wake_attempt_detail: Option<String>,
     /// Timestamp carried by the concrete harness wake artifact.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wake_observed_at: Option<DateTime<Utc>>,
@@ -727,6 +874,33 @@ ALTER TABLE prompt_queue ADD COLUMN first_attempt_at TEXT;
 /// surfaced.
 const PROMPT_QUEUE_ACKED_VIA_MIGRATION: &str = r#"
 ALTER TABLE prompt_queue ADD COLUMN acked_via TEXT;
+"#;
+
+/// cas-7a01 (GH #155): persist the wake outcome the daemon already computes.
+///
+/// Before this, `pty_nudge`'s three arms all returned `Delivered` and nothing
+/// was written anywhere, so `message_status` could only ever say
+/// `wake: unobserved` — a constant, not a measurement. Three incidents
+/// produced no signal because the column that would have split
+/// "the nudge never fired" from "the nudge fired and the turn started without
+/// surfacing" did not exist.
+const PROMPT_QUEUE_WAKE_ATTEMPT_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN wake_attempt TEXT;
+"#;
+const PROMPT_QUEUE_WAKE_ATTEMPT_AT_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN wake_attempt_at TEXT;
+"#;
+const PROMPT_QUEUE_WAKE_ATTEMPT_DETAIL_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN wake_attempt_detail TEXT;
+"#;
+
+/// cas-7a01 (GH #155): which surfacing path wrote a receipt. NULL on rows
+/// receipted before this column existed — those all came from `inbox_poll`,
+/// the only writer at the time, but they are left NULL rather than
+/// back-filled so a historical receipt is never presented as evidence of a
+/// hook surfacing that never happened.
+const PROMPT_QUEUE_RECIPIENT_SEEN_SOURCE_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue_recipient_seen ADD COLUMN source TEXT;
 "#;
 
 /// Trait for prompt queue operations
@@ -869,6 +1043,49 @@ pub trait PromptQueueStore: Send + Sync {
         factory_session: Option<&str>,
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>>;
+
+    /// Turn-start surfacing drain for the `UserPromptSubmit` hook (cas-7a01,
+    /// GH #155).
+    ///
+    /// Same eligibility predicate as [`PromptQueueStore::poll_unseen_for_recipient`],
+    /// with three differences that matter:
+    ///
+    /// 1. The receipt is stamped `source = 'hook_surfaced'`, so
+    ///    `message_status` can tell "the recipient chose to look" from "CAS
+    ///    put this in front of the recipient".
+    /// 2. The row is also acked with `acked_via = 'hook_surfaced'`, because
+    ///    injection into a turn is a per-message claim about this recipient —
+    ///    the evidence class `inferred_from_reply` only pretended to be.
+    /// 3. Selection and receipt happen in ONE transaction. That is the
+    ///    GH #124 storm guard stated as an invariant rather than a policy: a
+    ///    caller can never hold content whose receipt failed to persist, so a
+    ///    retried turn either re-surfaces a row that was genuinely never
+    ///    surfaced, or surfaces nothing. It can never duplicate content into a
+    ///    turn that already received it.
+    ///
+    /// Returns the rows injected, in queue order. Callers MUST render every
+    /// returned row: the receipt is already written when this returns.
+    ///
+    /// [`PromptQueueStore::poll_unseen_for_recipient`]: PromptQueueStore::poll_unseen_for_recipient
+    fn surface_unseen_for_recipient(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<QueuedPrompt>>;
+
+    /// Record what the daemon's wake nudge did for this row (cas-7a01).
+    ///
+    /// Best-effort observability: callers should not fail a delivery because
+    /// the wake outcome could not be persisted. Writing `NotAttempted` over an
+    /// existing `Fired` is rejected so a later, unrelated pass cannot erase the
+    /// evidence that a wake was once sent.
+    fn record_wake_attempt(
+        &self,
+        prompt_id: i64,
+        attempt: WakeAttempt,
+        detail: Option<&str>,
+    ) -> Result<()>;
 
     /// Count the messages `recipient` has NOT yet seen, without consuming them.
     ///
@@ -1658,9 +1875,24 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 ("first_attempt_at", PROMPT_QUEUE_FIRST_ATTEMPT_AT_MIGRATION),
                 ("acked_via", PROMPT_QUEUE_ACKED_VIA_MIGRATION),
                 ("dedupe_key", PROMPT_QUEUE_DEDUPE_KEY_MIGRATION),
+                ("wake_attempt", PROMPT_QUEUE_WAKE_ATTEMPT_MIGRATION),
+                ("wake_attempt_at", PROMPT_QUEUE_WAKE_ATTEMPT_AT_MIGRATION),
+                (
+                    "wake_attempt_detail",
+                    PROMPT_QUEUE_WAKE_ATTEMPT_DETAIL_MIGRATION,
+                ),
             ] {
                 crate::shared_db::ensure_column(&conn, "prompt_queue", col, mig)?;
             }
+
+            // cas-7a01 (GH #155): the receipt table predates the surfacing
+            // path, so existing databases need the provenance column added.
+            crate::shared_db::ensure_column(
+                &conn,
+                "prompt_queue_recipient_seen",
+                "source",
+                PROMPT_QUEUE_RECIPIENT_SEEN_SOURCE_MIGRATION,
+            )?;
 
             // Pre-telemetry rows only have the legacy processed_at marker. Hydrate
             // both lifecycle fields so delivery reports stay internally consistent.
@@ -1897,141 +2129,56 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         factory_session: Option<&str>,
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>> {
-        if recipient.trim().is_empty() {
-            return Err(StoreError::Other(
-                "poll_unseen_for_recipient requires a recipient".to_string(),
-            ));
-        }
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let sql_limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.drain_unseen_for_recipient(
+            recipient,
+            factory_session,
+            limit,
+            SurfacingSource::InboxPoll,
+        )
+    }
 
+    /// cas-7a01 (GH #155): the turn-start counterpart of the inbox drain.
+    /// Identical eligibility and identical atomicity; the receipt it writes
+    /// carries different provenance and the row is acked as hook-surfaced.
+    fn surface_unseen_for_recipient(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<QueuedPrompt>> {
+        self.drain_unseen_for_recipient(
+            recipient,
+            factory_session,
+            limit,
+            SurfacingSource::HookSurfaced,
+        )
+    }
+
+    fn record_wake_attempt(
+        &self,
+        prompt_id: i64,
+        attempt: WakeAttempt,
+        detail: Option<&str>,
+    ) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
             let conn = self.conn.lock().unwrap();
-            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
-            // cas-d047 (GH #69): never hand a recipient a months-old item, and
-            // (GH #70 sibling) never hand it a row the daemon already
-            // terminally quarantined as dropped/suppressed/abandoned — neither
-            // is actionable content, and both read as live instructions to the
-            // worker that receives them.
-            let stale_cutoff =
-                (Utc::now() - chrono::Duration::seconds(PROMPT_QUEUE_STALE_TTL_SECS)).to_rfc3339();
-            let deliverable_sql = format!(
-                "AND q.created_at >= ?
-                 AND (q.highest_stage IS NULL
-                      OR q.highest_stage NOT IN {TERMINAL_NON_DELIVERY_STAGES})"
-            );
-
-            let (sql, query_params): (String, Vec<Box<dyn rusqlite::ToSql>>) =
-                if let Some(session) = factory_session {
-                    (
-                        format!(
-                            "SELECT q.id, q.source, q.target, q.prompt, q.created_at,
-                                q.processed_at, q.summary, q.priority, q.acked_at,
-                                q.urgent, q.factory_session
-                         FROM prompt_queue q
-                         LEFT JOIN prompt_queue_recipient_seen seen
-                           ON seen.prompt_id = q.id AND seen.recipient = ?
-                         WHERE seen.prompt_id IS NULL
-                           {UNSURFACED_UNLESS_EXPLICIT_ACK_SQL}
-                           {deliverable_sql}
-                           AND (q.target = ? OR q.target = 'all_workers')
-                           AND (q.factory_session = ? OR q.factory_session IS NULL)
-                         ORDER BY q.priority ASC, q.id ASC
-                         LIMIT ?"
-                        ),
-                        vec![
-                            Box::new(recipient.to_string()),
-                            Box::new(stale_cutoff.clone()),
-                            Box::new(recipient.to_string()),
-                            Box::new(session.to_string()),
-                            Box::new(sql_limit),
-                        ],
-                    )
-                } else {
-                    (
-                        format!(
-                            "SELECT q.id, q.source, q.target, q.prompt, q.created_at,
-                                q.processed_at, q.summary, q.priority, q.acked_at,
-                                q.urgent, q.factory_session
-                         FROM prompt_queue q
-                         LEFT JOIN prompt_queue_recipient_seen seen
-                           ON seen.prompt_id = q.id AND seen.recipient = ?
-                         WHERE seen.prompt_id IS NULL
-                           {UNSURFACED_UNLESS_EXPLICIT_ACK_SQL}
-                           {deliverable_sql}
-                           AND (q.target = ? OR q.target = 'all_workers')
-                           AND q.factory_session IS NULL
-                         ORDER BY q.priority ASC, q.id ASC
-                         LIMIT ?"
-                        ),
-                        vec![
-                            Box::new(recipient.to_string()),
-                            Box::new(stale_cutoff.clone()),
-                            Box::new(recipient.to_string()),
-                            Box::new(sql_limit),
-                        ],
-                    )
-                };
-
-            let prompts: Vec<QueuedPrompt> = {
-                let mut stmt = tx.prepare_cached(&sql)?;
-                stmt.query_map(
-                    rusqlite::params_from_iter(query_params.iter().map(|p| p.as_ref())),
-                    Self::prompt_from_row,
-                )?
-                .collect::<std::result::Result<Vec<_>, _>>()?
+            let now = Utc::now().to_rfc3339();
+            // Never downgrade a recorded `Fired` to `NotAttempted`: a later
+            // pass that declines to nudge says nothing about the wake this row
+            // already received, and erasing it would recreate exactly the
+            // blind spot this column exists to remove.
+            let sql = if attempt == WakeAttempt::NotAttempted {
+                "UPDATE prompt_queue
+                    SET wake_attempt = ?, wake_attempt_at = ?, wake_attempt_detail = ?
+                  WHERE id = ?
+                    AND (wake_attempt IS NULL OR wake_attempt = 'nudge_not_attempted')"
+            } else {
+                "UPDATE prompt_queue
+                    SET wake_attempt = ?, wake_attempt_at = ?, wake_attempt_detail = ?
+                  WHERE id = ?"
             };
-
-            if !prompts.is_empty() {
-                let seen_at = Utc::now().to_rfc3339();
-                let mut stmt = tx.prepare_cached(
-                    "INSERT OR IGNORE INTO prompt_queue_recipient_seen
-                         (prompt_id, recipient, seen_at)
-                     VALUES (?, ?, ?)",
-                )?;
-                for prompt in &prompts {
-                    stmt.execute(params![prompt.id, recipient, seen_at])?;
-                }
-                drop(stmt);
-
-                // cas-d047 (GH #70): a direct row the addressed recipient just
-                // pulled has been *received* — a stronger fact than transport
-                // handoff. Stamp it in the same transaction so it leaves the
-                // pending set; leaving it `processed_at IS NULL` is what let a
-                // later daemon tick re-write it to the inbox and re-type it
-                // into an idle pane. `all_workers` is excluded: its read state
-                // is per-recipient, so one drain must not consume the row for
-                // peers.
-                for prompt in &prompts {
-                    if prompt.target == "all_workers" {
-                        continue;
-                    }
-                    if let Err(error) = Self::atomic_stage_stamp_in_tx(
-                        &tx,
-                        prompt.id,
-                        DeliveryStage::Delivered,
-                        AtomicStampOpts::reason(
-                            PendingReason::AwaitingAck,
-                            Some("consumed by recipient inbox poll"),
-                        ),
-                    ) {
-                        // A row in a terminal non-delivery stage cannot advance
-                        // to Delivered. Those are filtered out above, so this is
-                        // defensive only: never fail the recipient's drain over
-                        // bookkeeping.
-                        tracing::debug!(
-                            prompt_id = prompt.id,
-                            %error,
-                            "cas-d047: could not stamp drained prompt as delivered"
-                        );
-                    }
-                }
-            }
-
-            tx.commit()?;
-            Ok(prompts)
+            conn.execute(sql, params![attempt.as_str(), now, detail, prompt_id])?;
+            Ok(())
         })
     }
 
@@ -2562,7 +2709,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     priority, acked_at, urgent, selected_at, last_pending_reason,
                     last_pending_detail, transport_delivered_at, highest_stage,
                     broadcast_attempted, broadcast_succeeded, broadcast_failed,
-                    acked_via
+                    acked_via, wake_attempt, wake_attempt_at, wake_attempt_detail
              FROM prompt_queue WHERE id = ?",
             params![prompt_id],
             |row| {
@@ -2586,6 +2733,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     row.get::<_, Option<i64>>(16).unwrap_or(None),
                     row.get::<_, Option<i64>>(17).unwrap_or(None),
                     row.get::<_, Option<String>>(18).unwrap_or(None),
+                    row.get::<_, Option<String>>(19).unwrap_or(None),
+                    row.get::<_, Option<String>>(20).unwrap_or(None),
+                    row.get::<_, Option<String>>(21).unwrap_or(None),
                 ))
             },
         );
@@ -2610,6 +2760,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             bc_succeeded,
             bc_failed,
             acked_via_s,
+            wake_attempt_s,
+            wake_attempt_at_s,
+            wake_attempt_detail,
         ) = match row {
             Ok(v) => v,
             Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
@@ -2632,6 +2785,37 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             .flatten()
             .as_deref()
             .and_then(Self::parse_datetime);
+
+        // cas-7a01 (GH #155): the only concrete artifact CAS holds that a turn
+        // actually carried this row's content — the `hook_surfaced` receipt
+        // written synchronously by the recipient's own `UserPromptSubmit`
+        // surfacing. This is what finally makes `wake` a measurement instead
+        // of the hardcoded `Unobserved` constant it was for three incidents.
+        //
+        // Note the deliberate asymmetry with `wake_attempt`: an `inbox_poll`
+        // receipt does NOT raise `wake`. A recipient that polled its inbox
+        // demonstrably took a turn on its own; the question `wake` answers is
+        // whether CAS put the content in front of a recipient that would
+        // otherwise never have looked.
+        let hook_surfaced_at: Option<DateTime<Utc>> = conn
+            .query_row(
+                "SELECT seen_at FROM prompt_queue_recipient_seen
+                  WHERE prompt_id = ? AND recipient = ? AND source = 'hook_surfaced'",
+                params![id, &target],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+            .as_deref()
+            .and_then(Self::parse_datetime);
+
+        let wake_evidence = hook_surfaced_at.map(|_| {
+            format!(
+                "prompt_queue_recipient_seen(prompt_id={id}, recipient={target}, \
+                 source=hook_surfaced): UserPromptSubmit injected this row into the \
+                 recipient's turn"
+            )
+        });
 
         let enqueued_at = Self::require_datetime(&created_at_s, "created_at", id)?;
         let selected_at = Self::optional_datetime(selected_at_s.as_deref(), "selected_at", id)?;
@@ -2739,9 +2923,20 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             broadcast_attempted: bc_attempted.map(|n| n as u32),
             broadcast_succeeded: bc_succeeded.map(|n| n as u32),
             broadcast_failed: bc_failed.map(|n| n as u32),
-            wake: ObservationStatus::Unobserved,
-            wake_observed_at: None,
-            wake_evidence: None,
+            wake: if hook_surfaced_at.is_some() {
+                ObservationStatus::Observed
+            } else {
+                ObservationStatus::Unobserved
+            },
+            wake_attempt: WakeAttempt::from_column(wake_attempt_s.as_deref()),
+            wake_attempt_at: Self::optional_datetime(
+                wake_attempt_at_s.as_deref(),
+                "wake_attempt_at",
+                id,
+            )?,
+            wake_attempt_detail,
+            wake_observed_at: hook_surfaced_at,
+            wake_evidence,
             reaction: ObservationStatus::Unobserved,
             reaction_observed_at: None,
             reaction_evidence: None,
@@ -3093,6 +3288,183 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
     fn close(&self) -> Result<()> {
         Ok(())
+    }
+}
+
+impl SqlitePromptQueueStore {
+    /// Shared body of [`PromptQueueStore::poll_unseen_for_recipient`] and
+    /// [`PromptQueueStore::surface_unseen_for_recipient`] (cas-7a01).
+    ///
+    /// The two paths differ only in the provenance they record, so they must
+    /// not drift in eligibility: a row the hook would surface and a row the
+    /// inbox poll would drain are by definition the same row.
+    fn drain_unseen_for_recipient(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+        limit: usize,
+        source: SurfacingSource,
+    ) -> Result<Vec<QueuedPrompt>> {
+        if recipient.trim().is_empty() {
+            return Err(StoreError::Other(
+                "poll_unseen_for_recipient requires a recipient".to_string(),
+            ));
+        }
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let sql_limit = i64::try_from(limit).unwrap_or(i64::MAX);
+
+        crate::shared_db::with_write_retry(|| {
+            let conn = self.conn.lock().unwrap();
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            // cas-d047 (GH #69): never hand a recipient a months-old item, and
+            // (GH #70 sibling) never hand it a row the daemon already
+            // terminally quarantined as dropped/suppressed/abandoned — neither
+            // is actionable content, and both read as live instructions to the
+            // worker that receives them.
+            let stale_cutoff =
+                (Utc::now() - chrono::Duration::seconds(PROMPT_QUEUE_STALE_TTL_SECS)).to_rfc3339();
+            let deliverable_sql = format!(
+                "AND q.created_at >= ?
+                 AND (q.highest_stage IS NULL
+                      OR q.highest_stage NOT IN {TERMINAL_NON_DELIVERY_STAGES})"
+            );
+
+            let (sql, query_params): (String, Vec<Box<dyn rusqlite::ToSql>>) =
+                if let Some(session) = factory_session {
+                    (
+                        format!(
+                            "SELECT q.id, q.source, q.target, q.prompt, q.created_at,
+                                q.processed_at, q.summary, q.priority, q.acked_at,
+                                q.urgent, q.factory_session
+                         FROM prompt_queue q
+                         LEFT JOIN prompt_queue_recipient_seen seen
+                           ON seen.prompt_id = q.id AND seen.recipient = ?
+                         WHERE seen.prompt_id IS NULL
+                           {UNSURFACED_UNLESS_EXPLICIT_ACK_SQL}
+                           {deliverable_sql}
+                           AND (q.target = ? OR q.target = 'all_workers')
+                           AND (q.factory_session = ? OR q.factory_session IS NULL)
+                         ORDER BY q.priority ASC, q.id ASC
+                         LIMIT ?"
+                        ),
+                        vec![
+                            Box::new(recipient.to_string()),
+                            Box::new(stale_cutoff.clone()),
+                            Box::new(recipient.to_string()),
+                            Box::new(session.to_string()),
+                            Box::new(sql_limit),
+                        ],
+                    )
+                } else {
+                    (
+                        format!(
+                            "SELECT q.id, q.source, q.target, q.prompt, q.created_at,
+                                q.processed_at, q.summary, q.priority, q.acked_at,
+                                q.urgent, q.factory_session
+                         FROM prompt_queue q
+                         LEFT JOIN prompt_queue_recipient_seen seen
+                           ON seen.prompt_id = q.id AND seen.recipient = ?
+                         WHERE seen.prompt_id IS NULL
+                           {UNSURFACED_UNLESS_EXPLICIT_ACK_SQL}
+                           {deliverable_sql}
+                           AND (q.target = ? OR q.target = 'all_workers')
+                           AND q.factory_session IS NULL
+                         ORDER BY q.priority ASC, q.id ASC
+                         LIMIT ?"
+                        ),
+                        vec![
+                            Box::new(recipient.to_string()),
+                            Box::new(stale_cutoff.clone()),
+                            Box::new(recipient.to_string()),
+                            Box::new(sql_limit),
+                        ],
+                    )
+                };
+
+            let prompts: Vec<QueuedPrompt> = {
+                let mut stmt = tx.prepare_cached(&sql)?;
+                stmt.query_map(
+                    rusqlite::params_from_iter(query_params.iter().map(|p| p.as_ref())),
+                    Self::prompt_from_row,
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+            };
+
+            if !prompts.is_empty() {
+                let seen_at = Utc::now().to_rfc3339();
+                let mut stmt = tx.prepare_cached(
+                    "INSERT OR IGNORE INTO prompt_queue_recipient_seen
+                         (prompt_id, recipient, seen_at, source)
+                     VALUES (?, ?, ?, ?)",
+                )?;
+                for prompt in &prompts {
+                    stmt.execute(params![prompt.id, recipient, seen_at, source.as_str()])?;
+                }
+                drop(stmt);
+
+                // cas-7a01 (GH #155): a hook surfacing is a per-message,
+                // per-recipient record that this content entered a turn, so it
+                // confirms the row. The inbox-poll path deliberately does NOT
+                // ack here — that has always been the recipient's own
+                // `message_ack` decision, and changing it is out of scope.
+                if source == SurfacingSource::HookSurfaced {
+                    let mut ack_stmt = tx.prepare_cached(
+                        "UPDATE prompt_queue
+                            SET acked_at = ?, acked_via = 'hook_surfaced'
+                          WHERE id = ? AND acked_at IS NULL",
+                    )?;
+                    for prompt in &prompts {
+                        // A broadcast has one row and many recipients; one
+                        // recipient's turn must not mark it confirmed for the
+                        // peers that have not seen it (its read state lives in
+                        // the per-recipient receipt table).
+                        if prompt.target == "all_workers" {
+                            continue;
+                        }
+                        ack_stmt.execute(params![seen_at, prompt.id])?;
+                    }
+                    drop(ack_stmt);
+                }
+
+                // cas-d047 (GH #70): a direct row the addressed recipient just
+                // pulled has been *received* — a stronger fact than transport
+                // handoff. Stamp it in the same transaction so it leaves the
+                // pending set; leaving it `processed_at IS NULL` is what let a
+                // later daemon tick re-write it to the inbox and re-type it
+                // into an idle pane. `all_workers` is excluded: its read state
+                // is per-recipient, so one drain must not consume the row for
+                // peers.
+                for prompt in &prompts {
+                    if prompt.target == "all_workers" {
+                        continue;
+                    }
+                    if let Err(error) = Self::atomic_stage_stamp_in_tx(
+                        &tx,
+                        prompt.id,
+                        DeliveryStage::Delivered,
+                        AtomicStampOpts::reason(
+                            PendingReason::AwaitingAck,
+                            Some("consumed by recipient inbox poll"),
+                        ),
+                    ) {
+                        // A row in a terminal non-delivery stage cannot advance
+                        // to Delivered. Those are filtered out above, so this is
+                        // defensive only: never fail the recipient's drain over
+                        // bookkeeping.
+                        tracing::debug!(
+                            prompt_id = prompt.id,
+                            %error,
+                            "cas-d047: could not stamp drained prompt as delivered"
+                        );
+                    }
+                }
+            }
+
+            tx.commit()?;
+            Ok(prompts)
+        })
     }
 }
 
@@ -6819,5 +7191,246 @@ mod tests {
             .unwrap();
         assert_eq!(polled.len(), 1, "only the live row is deliverable");
         assert_eq!(polled[0].id, live);
+    }
+
+    // ---- cas-7a01 (GH #155): wake observability + turn-start surfacing ----
+
+    /// AC1. `wake: unobserved` used to be a constant with no backing column,
+    /// so a nudge that fired, one that failed and one that was never attempted
+    /// were the same string in `message_status`. Each must now round-trip.
+    #[test]
+    fn wake_attempt_states_round_trip_through_the_report() {
+        let (_temp, store) = create_test_store();
+        for (attempt, detail) in [
+            (WakeAttempt::Fired, None),
+            (WakeAttempt::Failed, Some("pane inject failed: broken pipe")),
+            (WakeAttempt::NotAttempted, Some("idle gate declined")),
+        ] {
+            let id = store.enqueue("supervisor", "worker-a", "work").unwrap();
+            store.record_wake_attempt(id, attempt, detail).unwrap();
+            let report = store.message_delivery_report(id).unwrap().unwrap();
+            assert_eq!(report.wake_attempt, attempt);
+            assert_eq!(report.wake_attempt_detail.as_deref(), detail);
+            assert!(
+                report.wake_attempt_at.is_some(),
+                "a recorded attempt must carry when it happened"
+            );
+        }
+    }
+
+    /// A row with no wake bookkeeping at all — every row written before this
+    /// column existed — must read as `NotAttempted`, never as a fired nudge.
+    #[test]
+    fn a_row_with_no_wake_record_reports_not_attempted() {
+        let (_temp, store) = create_test_store();
+        let id = store.enqueue("supervisor", "worker-a", "work").unwrap();
+        let report = store.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(report.wake_attempt, WakeAttempt::NotAttempted);
+        assert_eq!(report.wake_attempt_at, None);
+    }
+
+    /// A later pass that declines to nudge says nothing about a wake this row
+    /// already received. Letting it overwrite `Fired` would recreate the blind
+    /// spot the column exists to remove.
+    #[test]
+    fn a_later_non_attempt_cannot_erase_a_recorded_wake() {
+        let (_temp, store) = create_test_store();
+        let id = store.enqueue("supervisor", "worker-a", "work").unwrap();
+        store.record_wake_attempt(id, WakeAttempt::Fired, None).unwrap();
+        store
+            .record_wake_attempt(id, WakeAttempt::NotAttempted, Some("gate declined"))
+            .unwrap();
+        assert_eq!(
+            store.message_delivery_report(id).unwrap().unwrap().wake_attempt,
+            WakeAttempt::Fired
+        );
+    }
+
+    /// A genuine failure after a fired nudge IS newer information and must land.
+    #[test]
+    fn a_failure_after_a_fire_is_recorded() {
+        let (_temp, store) = create_test_store();
+        let id = store.enqueue("supervisor", "worker-a", "work").unwrap();
+        store.record_wake_attempt(id, WakeAttempt::Fired, None).unwrap();
+        store
+            .record_wake_attempt(id, WakeAttempt::Failed, Some("pane gone"))
+            .unwrap();
+        assert_eq!(
+            store.message_delivery_report(id).unwrap().unwrap().wake_attempt,
+            WakeAttempt::Failed
+        );
+    }
+
+    /// AC2/AC3, the reproduction. A message enqueued seconds AFTER the worker
+    /// drained its inbox to "No unread messages" is the exact shape reported in
+    /// GH #155: the drain consumed nothing because nothing had arrived yet, and
+    /// the row then had no path to the worker. It must surface at the next turn
+    /// start.
+    #[test]
+    fn a_message_arriving_just_after_a_drain_surfaces_at_the_next_turn() {
+        let (_temp, store) = create_test_store();
+
+        // The worker drains: empty inbox, exactly as the incident reported.
+        let drained = store
+            .poll_unseen_for_recipient("ready-cheetah-71", Some("session"), 10)
+            .unwrap();
+        assert!(drained.is_empty(), "precondition: the inbox drained empty");
+
+        // The supervisor's message lands seconds later.
+        let id = store
+            .enqueue_with_session("supervisor", "ready-cheetah-71", "start cas-7a01", "session")
+            .unwrap();
+
+        // The worker takes its next turn.
+        let surfaced = store
+            .surface_unseen_for_recipient("ready-cheetah-71", Some("session"), 10)
+            .unwrap();
+        assert_eq!(
+            surfaced.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![id],
+            "a post-drain message must reach the worker's next turn"
+        );
+        assert_eq!(surfaced[0].prompt, "start cas-7a01");
+    }
+
+    /// AC1's recipient-side half: once the hook has injected a row into a turn,
+    /// `message_status` reports an OBSERVED wake with concrete provenance —
+    /// not the blanket `unobserved` that made three incidents unreadable.
+    #[test]
+    fn a_hook_surfaced_row_reports_an_observed_wake_with_evidence() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_with_session("supervisor", "worker-a", "work", "session")
+            .unwrap();
+
+        let before = store.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(before.wake, ObservationStatus::Unobserved);
+
+        store
+            .surface_unseen_for_recipient("worker-a", Some("session"), 10)
+            .unwrap();
+
+        let after = store.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(after.wake, ObservationStatus::Observed);
+        assert!(after.wake_observed_at.is_some());
+        assert!(
+            after
+                .wake_evidence
+                .as_deref()
+                .is_some_and(|e| e.contains("hook_surfaced")),
+            "an observed wake must name the artifact that proves it: {:?}",
+            after.wake_evidence
+        );
+        assert_eq!(after.confirmation_source, ConfirmationSource::HookSurfaced);
+        assert!(
+            after.confirmation_source.is_recipient_claim(),
+            "a per-message injection record is a claim about THIS message"
+        );
+    }
+
+    /// An `inbox_poll` drain must NOT raise the wake observation: a recipient
+    /// that polled demonstrably took a turn on its own. Conflating the two
+    /// would make every healthy poll look like a rescued message.
+    #[test]
+    fn an_inbox_poll_drain_does_not_claim_an_observed_wake() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_with_session("supervisor", "worker-a", "work", "session")
+            .unwrap();
+        store
+            .poll_unseen_for_recipient("worker-a", Some("session"), 10)
+            .unwrap();
+        let report = store.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(report.wake, ObservationStatus::Unobserved);
+        assert_ne!(report.confirmation_source, ConfirmationSource::HookSurfaced);
+    }
+
+    /// The GH #124 / cas-ceae storm guard, stated as the supervisor required:
+    /// a receipted row is never injected again, on any later turn.
+    #[test]
+    fn a_receipted_row_is_never_injected_into_a_second_turn() {
+        let (_temp, store) = create_test_store();
+        store
+            .enqueue_with_session("supervisor", "worker-a", "do it", "session")
+            .unwrap();
+
+        let first = store
+            .surface_unseen_for_recipient("worker-a", Some("session"), 10)
+            .unwrap();
+        assert_eq!(first.len(), 1);
+
+        for turn in 0..3 {
+            let later = store
+                .surface_unseen_for_recipient("worker-a", Some("session"), 10)
+                .unwrap();
+            assert!(
+                later.is_empty(),
+                "turn {turn} re-injected an already-surfaced row (the #124 storm)"
+            );
+        }
+    }
+
+    /// The other half of the same invariant: selection and receipt share one
+    /// transaction, so a single surfacing call can never hand back the same row
+    /// twice — no duplicate content within one turn.
+    #[test]
+    fn one_surfacing_call_never_returns_a_row_twice() {
+        let (_temp, store) = create_test_store();
+        for n in 0..5 {
+            store
+                .enqueue_with_session("supervisor", "worker-a", &format!("msg {n}"), "session")
+                .unwrap();
+        }
+        let surfaced = store
+            .surface_unseen_for_recipient("worker-a", Some("session"), 10)
+            .unwrap();
+        let mut ids: Vec<i64> = surfaced.iter().map(|r| r.id).collect();
+        let total = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), total, "the same row was injected twice in one turn");
+        assert_eq!(total, 5);
+    }
+
+    /// Surfacing and polling must agree on what is deliverable: they are the
+    /// same rows read by two paths, so any eligibility drift would make a
+    /// message visible to one and invisible to the other.
+    #[test]
+    fn surfacing_and_polling_select_the_same_rows() {
+        let (_temp, store) = create_test_store();
+        let abandoned = store.enqueue("supervisor", "worker-a", "stale").unwrap();
+        store.mark_abandoned(abandoned, Some("target gone")).unwrap();
+        let live = store.enqueue("supervisor", "worker-a", "real work").unwrap();
+
+        let surfaced = store
+            .surface_unseen_for_recipient("worker-a", None, 10)
+            .unwrap();
+        assert_eq!(surfaced.iter().map(|r| r.id).collect::<Vec<_>>(), vec![live]);
+    }
+
+    /// A broadcast has one row and many recipients. One agent's turn must not
+    /// confirm it for peers who have never seen it.
+    #[test]
+    fn surfacing_a_broadcast_does_not_confirm_it_for_peers() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_with_session("supervisor", "all_workers", "stand down", "session")
+            .unwrap();
+
+        let first = store
+            .surface_unseen_for_recipient("worker-a", Some("session"), 10)
+            .unwrap();
+        assert_eq!(first.len(), 1, "the first worker sees the broadcast");
+
+        let report = store.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(
+            report.confirmed_at, None,
+            "one recipient's turn must not ack a broadcast for everyone"
+        );
+
+        let peer = store
+            .surface_unseen_for_recipient("worker-b", Some("session"), 10)
+            .unwrap();
+        assert_eq!(peer.len(), 1, "a peer must still receive the broadcast");
     }
 }

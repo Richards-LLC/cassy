@@ -536,6 +536,28 @@ impl TeamsManager {
                         }
                     ]
                 }
+            ],
+            // cas-7a01 (GH #155): the turn-start seam. Without this event a
+            // factory agent fires only PreToolUse and PermissionRequest, so
+            // the inbox-surfacing handler in
+            // `hooks::handlers::handle_user_prompt_submit` could be written
+            // and still never run for the exact population that needed it —
+            // the workers whose messages were being silently stranded.
+            //
+            // Deliberately the ONLY event added here. `cli/hook/config_gen.rs`
+            // installs fourteen for non-factory sessions; auditing that
+            // difference is separate work, and widening this block further
+            // would change factory behaviour well beyond the delivery bug.
+            "UserPromptSubmit": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "cas hook UserPromptSubmit",
+                            "timeout": 2000
+                        }
+                    ]
+                }
             ]
         })
     }
@@ -3447,5 +3469,51 @@ mod tests {
             .args(["worktree", "remove", "--force", &wt_path.to_string_lossy()])
             .current_dir(repo)
             .output();
+    }
+
+    // ---- cas-7a01 (GH #155): the turn-start hook must be installed ----
+
+    /// A handler that never fires is not a fix. Factory settings installed
+    /// exactly two events (`PreToolUse`, `PermissionRequest`), so the inbox
+    /// surfacing added at `UserPromptSubmit` would have been dead code for the
+    /// very population it exists to serve.
+    #[test]
+    fn factory_settings_wire_the_turn_start_hook_for_both_roles() {
+        for (role, body) in [
+            ("worker", TeamsManager::worker_settings_contents()),
+            ("supervisor", TeamsManager::supervisor_settings_contents()),
+        ] {
+            let entries = body["hooks"]["UserPromptSubmit"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{role} settings install no UserPromptSubmit hook"));
+            let command = entries[0]["hooks"][0]["command"]
+                .as_str()
+                .expect("hook entry must carry a shell command");
+            assert_eq!(
+                command, "cas hook UserPromptSubmit",
+                "{role}: turn-start hook must dispatch to the cas handler"
+            );
+        }
+    }
+
+    /// Scope guard from the supervisor's ruling: extend the factory block
+    /// minimally. `cli/hook/config_gen.rs` installs fourteen events; auditing
+    /// that difference is separate work, and silently widening this block
+    /// changes factory behaviour far beyond the delivery bug.
+    #[test]
+    fn the_factory_hooks_block_gains_only_the_turn_start_event() {
+        let body = TeamsManager::worker_settings_contents();
+        let mut events: Vec<&str> = body["hooks"]
+            .as_object()
+            .expect("hooks block is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        events.sort_unstable();
+        assert_eq!(
+            events,
+            vec!["PermissionRequest", "PreToolUse", "UserPromptSubmit"],
+            "the factory hooks block must not drift beyond the three wired events"
+        );
     }
 }

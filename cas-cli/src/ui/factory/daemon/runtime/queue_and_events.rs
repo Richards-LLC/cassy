@@ -2587,7 +2587,8 @@ impl FactoryDaemon {
                 } else {
                     target.clone()
                 };
-                let inject_result: anyhow::Result<cas_mux::InjectOutcome> = if queued.urgent {
+                let inject_result: anyhow::Result<super::delivery::NudgeReport> = if queued.urgent
+                {
                     // Urgent: interrupt-and-redirect by name via the PTY,
                     // bypassing the inbox even in teams mode. Break the turn
                     // (Esc), wait the bounded settle window for the turn to
@@ -2633,7 +2634,17 @@ impl FactoryDaemon {
                         );
                         urgent_wake_probe_opened = true;
                     }
-                    outcome
+                    // cas-7a01 (GH #155): urgent delivery is an unconditional
+                    // PTY interrupt-and-inject — it always attempts a wake, and
+                    // that asymmetry with the gated non-urgent path is the
+                    // whole reason only urgent messages ever surfaced. Record
+                    // it as such so the two paths are comparable in
+                    // `message_status` instead of both reading `unobserved`.
+                    outcome.map(|outcome| super::delivery::NudgeReport {
+                        outcome,
+                        wake: cas_store::WakeAttempt::Fired,
+                        wake_detail: Some("urgent interrupt-and-inject".to_string()),
+                    })
                 } else {
                     // Recipient-aware routing (cas-b68a): delivery channel +
                     // name normalisation handled inside the helper.
@@ -2730,6 +2741,26 @@ impl FactoryDaemon {
                         .await
                     }
                 };
+                // cas-7a01 (GH #155): persist what the wake nudge actually did
+                // BEFORE branching on transport, so the record survives every
+                // arm below — including the failure arms, which are exactly the
+                // ones an operator debugging a silent worker needs to read.
+                // Best-effort: a delivery is never failed over observability.
+                if let Ok(ref report) = inject_result {
+                    if let Err(error) = queue.record_wake_attempt(
+                        queued.id,
+                        report.wake,
+                        report.wake_detail.as_deref(),
+                    ) {
+                        tracing::debug!(
+                            target: "cas::coordination",
+                            message_id = queued.id,
+                            %error,
+                            "cas-7a01: could not persist wake attempt"
+                        );
+                    }
+                }
+                let inject_result = inject_result.map(|report| report.outcome);
                 match inject_result {
                     Ok(cas_mux::InjectOutcome::Delivered) => {
                         success = true;

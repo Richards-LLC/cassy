@@ -222,14 +222,11 @@ impl CloudSyncer {
         if let Some(since) = self.queue().get_metadata(LAST_PULL_KEY)? {
             params.push(format!("since={since}"));
         }
-        if let Some(project_id) = get_project_canonical_id() {
-            params.push(format!("project_id={}", project_id.replace('/', "%2F")));
-        }
-        let url = format!(
-            "{}/api/sync/pull?{}",
-            self.cloud_config.endpoint,
-            params.join("&")
-        );
+        // Fail closed on an unresolvable project scope, exactly like the
+        // canonical builder: without `project_id=` this would ask the server
+        // for every project's knowledge pages (cas-2eb3 / cas-ed15).
+        let (url, _project_id) =
+            super::pull::build_scoped_pull_url(&self.cloud_config.endpoint, &params)?;
 
         let response = ureq::get(&url)
             .timeout(self.config.timeout)
@@ -454,7 +451,7 @@ mod tests {
 
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/api/sync/pull"))
+            .and(path(super::super::pull::PULL_PATH))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "knowledge_pages": [new_page, collide]
             })))
@@ -509,7 +506,7 @@ mod tests {
 
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/api/sync/pull"))
+            .and(path(super::super::pull::PULL_PATH))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "knowledge_pages": [locked_remote]
             })))

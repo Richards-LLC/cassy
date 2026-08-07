@@ -159,6 +159,15 @@ fn scoped_pull_builder_appends_project_id() {
         "{} must call `get_project_canonical_id()` to resolve the project scope.",
         pull_rs.display(),
     );
+    // cas-0be9: the builder must FAIL CLOSED. Dropping `project_id=` when the
+    // scope is unresolvable (an `if let Some(..)` around the push) issues an
+    // unscoped pull, which is the contamination this guard exists to prevent.
+    assert!(
+        src.contains("Cannot pull: not inside a CAS project directory"),
+        "{} must abort the pull when the project scope cannot be resolved, \
+         rather than silently omitting `project_id=`.",
+        pull_rs.display(),
+    );
 }
 
 #[tokio::test]

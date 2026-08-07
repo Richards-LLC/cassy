@@ -7054,6 +7054,24 @@ effort = "high"
         }
     }
 
+    /// The classifier must accept whatever the PRODUCER actually writes, not
+    /// whatever this test file believes it writes. `fire_reminder` builds its
+    /// prompt with `cas_store::format_reminder_delivery`, so the classifier is
+    /// pointed at that same function's real output here: reword the format and
+    /// this fails, rather than the false positive quietly coming back.
+    #[test]
+    fn the_classifier_accepts_what_the_producer_actually_writes() {
+        for prompt in [
+            cas_store::format_reminder_delivery(44, "check CI again", None),
+            cas_store::format_reminder_delivery(7, "review the merge", Some("cas-1 completed")),
+        ] {
+            assert!(
+                is_reminder_delivery(&prompt),
+                "producer output must classify as a reminder delivery: {prompt}"
+            );
+        }
+    }
+
     /// Only the daemon's `Reminder #<id>: ` delivery shape counts. A human (or
     /// supervisor) message that merely talks about reminders is real mail and
     /// must never be discounted.

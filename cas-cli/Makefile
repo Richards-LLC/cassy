@@ -25,7 +25,7 @@
 # - [ ] Status line updates correctly
 # - [ ] No visual artifacts or flickering
 
-.PHONY: test test-full test-clean-env coverage coverage-html clean build build-full release release-fast test-release-panic check check-full lint dev-build dev-test timings benchmark-build check-build-regression
+.PHONY: test test-full test-clean-env coverage coverage-html clean build build-full release release-fast test-release-panic test-release-panic-release test-release-panic-release-fast check check-full lint dev-build dev-test timings benchmark-build check-build-regression
 
 CARGO ?= cargo
 
@@ -147,9 +147,18 @@ release-fast:
 # Run A2/A3/B3 panic-isolation tests under release profiles (EPIC cas-c351).
 # Verifies the MCP panic catcher survives release-mode LTO + inlining and
 # that the release-fast profile has not re-introduced panic=abort.
-test-release-panic:
+#
+# Split into one target per profile so CI can run the two profiles as parallel
+# jobs (they are two independent full LTO builds; in series they were a 30-min
+# step). `test-release-panic` still runs both, so the local command documented
+# in CLAUDE.md is unchanged.
+test-release-panic: test-release-panic-release test-release-panic-release-fast
+
+test-release-panic-release:
 	$(CARGO) test -p cas --release --lib panic_regression
 	$(CARGO) test -p cas --release --test search_utf8_regression_test
+
+test-release-panic-release-fast:
 	$(CARGO) test -p cas --profile release-fast --lib panic_regression
 	$(CARGO) test -p cas --profile release-fast --test search_utf8_regression_test
 

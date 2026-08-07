@@ -1,0 +1,49 @@
+name: Setup Rust (Linux)
+description: >-
+  Shared toolchain setup for every ubuntu-latest CI job: apt deps aligned with
+  .cargo/config.toml, stable Rust, Zig (ghostty_vt_sys builds its native library
+  with Zig even for cargo check), sccache, and the cargo cache.
+
+inputs:
+  cache-key:
+    description: >-
+      Discriminator appended to the cargo cache key. Jobs that compile a
+      DIFFERENT profile or feature set must pass a distinct value so they do not
+      evict each other's artifacts through one shared key.
+    required: true
+  save-cache:
+    description: >-
+      Set to "false" for jobs that run `cargo clean` mid-job. Saving from such a
+      job persists an empty target dir and makes every subsequent run pay a cold
+      build (see the Build Benchmark job).
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Install dependencies
+      shell: bash
+      run: |
+        sudo apt-get update
+        # Keep this aligned with .cargo/config.toml's gcc + mold toolchain.
+        sudo apt-get install -y gcc mold
+        gcc --version
+        mold --version
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install Zig
+      shell: bash
+      run: ./scripts/bootstrap-zig.sh
+
+    - name: Setup sccache
+      uses: mozilla-actions/sccache-action@v0.0.5
+
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+      with:
+        key: ${{ inputs.cache-key }}
+        cache-on-failure: true
+        save-if: ${{ inputs.save-cache == 'true' }}

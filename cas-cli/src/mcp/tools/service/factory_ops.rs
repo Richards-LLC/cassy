@@ -41,6 +41,12 @@ pub(crate) fn worker_cli_from_agent(agent: &cas_types::Agent) -> cas_mux::Superv
         .unwrap_or(cas_mux::SupervisorCli::Claude)
 }
 
+/// First 8 characters of a session UUID — enough to compare two sessions at a
+/// glance without wrapping the line (cas-dffe).
+fn short_session(session_id: &str) -> &str {
+    &session_id[..8.min(session_id.len())]
+}
+
 fn worker_effort_from_agent(agent: &cas_types::Agent) -> Option<cas_mux::Effort> {
     agent
         .metadata
@@ -2154,11 +2160,44 @@ impl CasService {
         Ok(Self::success(output))
     }
 
+    /// cas-dffe (GH #145): reset a worker's context for real, and prove it —
+    /// or fail loudly.
+    ///
+    /// The old implementation enqueued the four characters `/clear` as an
+    /// ordinary message. A Claude worker under Agent Teams therefore received
+    /// the *string* "/clear" in its inbox, acknowledged it as a teammate note,
+    /// and carried on with its whole conversation loaded — while this tool
+    /// reported `Queued /clear for <worker>`. Six such calls across four
+    /// workers in one session all "succeeded" and none reset anything.
+    ///
+    /// What happens now, per target:
+    ///
+    /// 1. Resolve the recipient's harness. A harness with no verified in-place
+    ///    reset command is refused here, before anything is queued
+    ///    ([`crate::factory_context_reset::context_reset_command`]).
+    /// 2. Snapshot the recipient's existing session transcripts.
+    /// 3. Queue a control command — the
+    ///    [`crate::factory_context_reset::CONTEXT_RESET_CONTROL`] sentinel, not
+    ///    readable text — which the daemon hard-routes to the PTY and delivers
+    ///    as the harness's own command.
+    /// 4. Wait (bounded) for the post-condition: a NEW session transcript whose
+    ///    head records the `/clear`. That is the "new conversation id" evidence
+    ///    the supervisor could never get before, and it is measured, not
+    ///    assumed.
+    /// 5. On confirmation, record the new session id on the agent so
+    ///    `worker_status` follows the live transcript (its context band resets
+    ///    with it) instead of reading the dead pre-reset file forever.
+    ///
+    /// If step 4 does not land inside the window the call returns an **error**
+    /// naming exactly what was and was not observed. A reset CAS cannot prove
+    /// is never reported as a success.
     pub(super) async fn factory_clear_context(
         &self,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
-        use crate::store::open_prompt_queue_store;
+        use crate::factory_context_reset as reset;
+        use crate::store::{open_agent_store, open_prompt_queue_store};
+        use cas_types::{AgentRole, AgentStatus};
 
         let target = req.target.ok_or_else(|| {
             Self::error(
@@ -2183,46 +2222,225 @@ impl CasService {
             }
         }
 
+        let agent_store = open_agent_store(&self.inner.cas_root).map_err(|e| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to open agent store: {e}"),
+            )
+        })?;
+        let factory_session = current_factory_session();
+        let owned = supervisor_owned_workers();
+        let live_agents = agent_store.list(Some(AgentStatus::Active)).map_err(|e| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to list agents: {e}"),
+            )
+        })?;
+
+        // Resolve the concrete recipients. `all_workers` fans out over this
+        // supervisor's live workers; every other target names exactly one.
+        let recipients: Vec<cas_types::Agent> = if target == "all_workers" {
+            live_agents
+                .into_iter()
+                .filter(|agent| {
+                    agent.role == AgentRole::Worker
+                        && agent.visible_to_factory_session(factory_session.as_deref())
+                        && owned.as_ref().is_none_or(|set| set.contains(&agent.name))
+                })
+                .collect()
+        } else {
+            let found = live_agents
+                .into_iter()
+                .find(|agent| agent.name == target)
+                .ok_or_else(|| {
+                    Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        format!(
+                            "No live agent named '{target}' — cannot reset the context of an \
+                             agent CAS cannot see. Check `worker_status`."
+                        ),
+                    )
+                })?;
+            vec![found]
+        };
+
+        if recipients.is_empty() {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "No live workers to reset.".to_string(),
+            ));
+        }
+
         let queue = open_prompt_queue_store(&self.inner.cas_root).map_err(|e| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
                 format!("Failed to open message queue: {e}"),
             )
         })?;
-
-        // Use the MCP caller's agent ID as the source
         let source = self
             .inner
             .get_agent_id()
             .unwrap_or_else(|_| "unknown".to_string());
 
-        // Enqueue /clear directly without XML wrapping - this is a raw command
-        let factory_session = current_factory_session();
-        if let Some(ref session) = factory_session {
+        // Pre-flight every recipient BEFORE queueing anything: an unsupported
+        // harness or an unlocatable transcript directory means CAS could never
+        // confirm the reset, so it must not claim one.
+        struct PendingReset {
+            agent: cas_types::Agent,
+            dirs: Vec<std::path::PathBuf>,
+            before: std::collections::BTreeSet<std::path::PathBuf>,
+        }
+        let mut pending: Vec<PendingReset> = Vec::new();
+        let mut refusals: Vec<String> = Vec::new();
+
+        for agent in recipients {
+            let cli = worker_cli_from_agent(&agent);
+            if reset::context_reset_command(cli).is_none() {
+                refusals.push(format!(
+                    "{}: {}",
+                    agent.name,
+                    reset::unsupported_reason(cli)
+                ));
+                continue;
+            }
+            let Some(clone_path) = agent.metadata.get("clone_path").cloned() else {
+                refusals.push(format!(
+                    "{}: no clone_path recorded for this worker, so CAS cannot locate its session \
+                     transcripts and could not verify a reset. Refusing rather than reporting an \
+                     unverifiable success.",
+                    agent.name
+                ));
+                continue;
+            };
+            let dirs = reset::transcript_dirs_for(&clone_path);
+            if dirs.is_empty() {
+                refusals.push(format!(
+                    "{}: no Claude project directory found for {clone_path} under {}. CAS could \
+                     not verify a reset, so it did not attempt one.",
+                    agent.name,
+                    reset::claude_config_roots()
+                        .iter()
+                        .map(|root| root.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                continue;
+            }
+            let before = reset::snapshot_transcripts(&dirs);
+            pending.push(PendingReset {
+                agent,
+                dirs,
+                before,
+            });
+        }
+
+        if pending.is_empty() {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!(
+                    "No context reset was attempted:\n  • {}",
+                    refusals.join("\n  • ")
+                ),
+            ));
+        }
+
+        for item in &pending {
             queue
-                .enqueue_with_session(&source, &target, "/clear", session)
+                .enqueue_urgent_with_outcome(
+                    &source,
+                    &item.agent.name,
+                    reset::CONTEXT_RESET_CONTROL,
+                    factory_session.as_deref(),
+                    Some(reset::CONTEXT_RESET_SUMMARY),
+                    Some(cas_store::NotificationPriority::Critical),
+                    // Control rows take the interrupt-and-inject lane: a worker
+                    // mid-turn must have its turn broken before the reset
+                    // command can be typed, and two resets in a row must never
+                    // be content-deduped into one.
+                    true,
+                )
                 .map_err(|e| {
                     Self::error(
                         ErrorCode::INTERNAL_ERROR,
-                        format!("Failed to queue clear command: {e}"),
+                        format!("Failed to queue context reset for {}: {e}", item.agent.name),
                     )
                 })?;
-        } else {
-            queue.enqueue(&source, &target, "/clear").map_err(|e| {
-                Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("Failed to queue clear command: {e}"),
-                )
-            })?;
         }
 
-        let msg = if target == "all_workers" {
-            "Queued /clear for all workers".to_string()
-        } else {
-            format!("Queued /clear for {target}")
-        };
+        // Wait for the post-condition. Polling the filesystem is what makes the
+        // result verifiable: the daemon can only prove it typed bytes into a
+        // pane, and "bytes typed" is precisely the evidence that was never
+        // enough (GH #145).
+        let deadline = std::time::Instant::now() + reset::confirmation_timeout();
+        let mut confirmed: Vec<(String, reset::ContextResetEvidence, String)> = Vec::new();
+        let mut outstanding: Vec<PendingReset> = pending;
+        while !outstanding.is_empty() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(reset::CONFIRMATION_POLL).await;
+            outstanding.retain(|item| {
+                match reset::detect_context_reset(&item.dirs, &item.before) {
+                    Some(evidence) => {
+                        let previous = item
+                            .agent
+                            .cc_session_id
+                            .clone()
+                            .unwrap_or_else(|| item.agent.id.clone());
+                        // Point CAS's transcript resolution at the live session
+                        // so worker_status/worker_activity/is-wedged stop
+                        // reading the pre-reset file (AC4).
+                        let mut updated = item.agent.clone();
+                        updated.cc_session_id = Some(evidence.session_id.clone());
+                        if let Err(e) = agent_store.update(&updated) {
+                            tracing::warn!(
+                                agent = %item.agent.name,
+                                error = %e,
+                                "cas-dffe: context reset confirmed but recording the new session \
+                                 id failed; worker_status will keep resolving the old transcript"
+                            );
+                        }
+                        confirmed.push((item.agent.name.clone(), evidence, previous));
+                        false
+                    }
+                    None => true,
+                }
+            });
+        }
 
-        Ok(Self::success(msg))
+        let mut output = String::new();
+        for (name, evidence, previous) in &confirmed {
+            output.push_str(&format!(
+                "✅ {name}: context reset CONFIRMED\n    session: {} → {} (new conversation)\n    \
+                 evidence: {}\n    preserved: registration, worktree, model/effort settings (the \
+                 worker process was not restarted)\n",
+                short_session(previous),
+                short_session(&evidence.session_id),
+                evidence.transcript.display(),
+            ));
+        }
+        for item in &outstanding {
+            output.push_str(&format!(
+                "❌ {}: reset UNCONFIRMED after {}s — no new session transcript recording a \
+                 /clear appeared under {}. The command is still queued and may yet land; verify \
+                 with worker_status, and if the worker is wedged use shutdown_workers + \
+                 spawn_workers (same name/worktree).\n",
+                item.agent.name,
+                reset::confirmation_timeout().as_secs(),
+                item.dirs
+                    .iter()
+                    .map(|dir| dir.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ));
+        }
+        for refusal in &refusals {
+            output.push_str(&format!("❌ {refusal}\n"));
+        }
+
+        if !outstanding.is_empty() || !refusals.is_empty() {
+            // Never report success for a reset that was not observed.
+            return Err(Self::error(ErrorCode::INTERNAL_ERROR, output));
+        }
+
+        Ok(Self::success(output))
     }
 
     pub(super) async fn factory_my_context(

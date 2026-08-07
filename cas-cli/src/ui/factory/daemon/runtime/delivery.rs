@@ -50,6 +50,20 @@ impl NudgeReport {
     }
 }
 
+/// Outcome of executing a context-reset control command (cas-dffe, GH #145).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ContextResetDelivery {
+    /// The harness's reset command was typed into the pane.
+    Injected,
+    /// The pane is not ready for injection yet — retry on a later tick.
+    NotReady,
+    /// The recipient's harness has no verified in-place reset command. This is
+    /// terminal: no amount of retrying makes a reset possible.
+    Unsupported { detail: String },
+    /// The PTY write failed — retryable.
+    Failed { detail: String },
+}
+
 /// The channel a message should be delivered over, decided by the recipient's
 /// harness and whether the factory is running native Agent Teams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -552,6 +566,62 @@ impl FactoryDaemon {
             ));
         }
         self.pty_nudge(target, source, text).await
+    }
+
+    /// cas-dffe (GH #145): execute a queued context-reset control command.
+    ///
+    /// This is deliberately NOT part of the message-delivery path. A context
+    /// reset is a command for the harness itself, so it is typed into the pane
+    /// as the harness's own command
+    /// ([`crate::factory_context_reset::context_reset_command`]) over the same
+    /// interrupt-and-inject channel urgent messages use — never written to a
+    /// team inbox, never framed with sender attribution, and never rendered as
+    /// readable content. Routing it as a message is exactly the reported bug:
+    /// the worker read the four characters "/clear" as a teammate note,
+    /// acknowledged them, and kept its whole conversation loaded.
+    ///
+    /// Returns the queue bookkeeping the caller should apply, so the decision
+    /// stays in one place and can't drift from the log lines that explain it.
+    pub(crate) async fn deliver_context_reset(&mut self, target: &str) -> ContextResetDelivery {
+        use crate::factory_context_reset::context_reset_command;
+
+        let pane_target = if target == "supervisor" {
+            self.app.supervisor_name().to_string()
+        } else {
+            target.to_string()
+        };
+        let harness = self.app.harness_for(&pane_target);
+        let Some(command) = context_reset_command(harness) else {
+            return ContextResetDelivery::Unsupported {
+                detail: crate::factory_context_reset::unsupported_reason(harness),
+            };
+        };
+
+        if !self.app.mux.pane_ready_for_injection(&pane_target) {
+            return ContextResetDelivery::NotReady;
+        }
+
+        let settle = self.urgent_settle_duration(&pane_target);
+        tracing::info!(
+            target: "cas::coordination",
+            stage = "context_reset_inject",
+            target_agent = %pane_target,
+            harness = harness.as_str(),
+            command = %command,
+            settle_ms = settle.as_millis() as u64,
+            "cas-dffe: typing the harness's own context-reset command into the pane"
+        );
+        match self
+            .app
+            .mux
+            .interrupt_and_inject(&pane_target, command, settle)
+            .await
+        {
+            Ok(()) => ContextResetDelivery::Injected,
+            Err(error) => ContextResetDelivery::Failed {
+                detail: format!("pane inject failed: {error}"),
+            },
+        }
     }
 
     /// Shared PTY-nudge tail: frame the payload for the recipient's harness and

@@ -1,10 +1,10 @@
 {
   "version": 1,
   "machine": "soundwave",
-  "captured_at": "2026-08-07T16:06:50.194865874+00:00",
+  "captured_at": "2026-08-07T19:23:24.857445035+00:00",
   "cas_dir": "/home/pippenz/Petrastella/cas-src/.cas",
   "corpus": {
-    "active_entries": 1246,
+    "active_entries": 1251,
     "entry_types": [
       "context",
       "learning",
@@ -13,6 +13,7 @@
     ],
     "tiers": [
       "archive",
+      "cold",
       "working"
     ]
   },
@@ -47,18 +48,26 @@
           "fp": "a5d97ff77bd026f3",
           "label": "2026-07-30 harness diary sweep completed",
           "entry_type": "context",
-          "tier": "working"
+          "tier": "cold"
         },
         {
           "rank": 3,
-          "id": "2026-08-07-11",
-          "fp": "45a69238659c0929",
-          "label": "cas-b129 M2 prep: knowledge_pages cannot hold legacy entry state; frontmatter pa…",
+          "id": "2026-08-07-18",
+          "fp": "4c459174d4d0122a",
+          "label": "Contamination/quarantine token lists must be proper nouns, verified against the …",
           "entry_type": "learning",
           "tier": "working"
         },
         {
           "rank": 4,
+          "id": "2026-08-07-17",
+          "fp": "1b574d7c15033989",
+          "label": "Migration ledger: never ALTER prompt_queue; chain-compare shape tests",
+          "entry_type": "learning",
+          "tier": "working"
+        },
+        {
+          "rank": 5,
           "id": "2026-08-07-10",
           "fp": "9cf0c4e6e5265e5c",
           "label": "Reminder deliveries share the prompt_queue with work mail (cas-f08d / GH #147)",
@@ -66,7 +75,47 @@
           "tier": "working"
         },
         {
-          "rank": 5,
+          "rank": 6,
+          "id": "2026-08-07-15",
+          "fp": "157fe2f96fb10b7c",
+          "label": "Rehearsing a destructive CAS tool on copies: redirect EVERY root, not just one",
+          "entry_type": "learning",
+          "tier": "working"
+        },
+        {
+          "rank": 7,
+          "id": "2026-08-06-26",
+          "fp": "26669a76ada95575",
+          "label": "Gating agent behavior in CAS: MCP tool gates miss harness-native paths",
+          "entry_type": "learning",
+          "tier": "working"
+        },
+        {
+          "rank": 8,
+          "id": "2026-08-07-13",
+          "fp": "f791e4c55150b326",
+          "label": "cas-src: read-looking APIs that actually WRITE, plus the -p cas package-name got…",
+          "entry_type": "learning",
+          "tier": "working"
+        },
+        {
+          "rank": 9,
+          "id": "2026-08-07-12",
+          "fp": "165ef7013910254b",
+          "label": "cas-90fd retrieval-parity harness: design residue not in the committed docs",
+          "entry_type": "learning",
+          "tier": "working"
+        },
+        {
+          "rank": 10,
+          "id": "2026-08-07-11",
+          "fp": "45a69238659c0929",
+          "label": "cas-b129 M2 prep: knowledge_pages cannot hold legacy entry state; frontmatter pa…",
+          "entry_type": "learning",
+          "tier": "working"
+        },
+        {
+          "rank": 11,
           "id": "2026-08-07-9",
           "fp": "93f29db92fff4e51",
           "label": "cas-src close-gate lint: two notions of parent, and fictional line numbers",
@@ -74,7 +123,7 @@
           "tier": "working"
         },
         {
-          "rank": 6,
+          "rank": 12,
           "id": "2026-08-07-8",
           "fp": "83b19ed4016700cf",
           "label": "cas-src CI: wall-clock is max(job); cargo test's fail-fast hides failures",
@@ -82,7 +131,7 @@
           "tier": "working"
         },
         {
-          "rank": 7,
+          "rank": 13,
           "id": "2026-08-07-7",
           "fp": "28124ee5220c6840",
           "label": "cas-src release cut: Unreleased is not a reliable inventory",
@@ -90,7 +139,7 @@
           "tier": "working"
         },
         {
-          "rank": 8,
+          "rank": 14,
           "id": "2026-08-07-6",
           "fp": "d4befe59535f8e36",
           "label": "Empty-result conflation is a recurring CAS bug class",
@@ -98,7 +147,7 @@
           "tier": "working"
         },
         {
-          "rank": 9,
+          "rank": 15,
           "id": "2026-08-07-5",
           "fp": "3f529655aae683a7",
           "label": "CAS nativity check: cloud pull's upsert surface is the native/replica discrimina…",
@@ -106,7 +155,7 @@
           "tier": "working"
         },
         {
-          "rank": 10,
+          "rank": 16,
           "id": "2026-08-07-4",
           "fp": "9309305a5e827167",
           "label": "cas-src: canonical_id resolution + clean-env test guard (cas-f699 / cas-43ce)",
@@ -114,7 +163,7 @@
           "tier": "working"
         },
         {
-          "rank": 11,
+          "rank": 17,
           "id": "2026-08-07-3",
           "fp": "b5605652fb47503f",
           "label": "Claude Code teammate inbox drain is not a turn",
@@ -122,7 +171,7 @@
           "tier": "working"
         },
         {
-          "rank": 12,
+          "rank": 18,
           "id": "2026-06-08-1",
           "fp": "1a380d7809782ab3",
           "label": "Claude Code changelog diary — CAS response ledger",
@@ -130,7 +179,7 @@
           "tier": "archive"
         },
         {
-          "rank": 13,
+          "rank": 19,
           "id": "2026-08-07-2",
           "fp": "35c1f641d31d149a",
           "label": "cas-src: merge/close ref-agreement rules (origin vs local) — worktree_merge now …",
@@ -138,7 +187,7 @@
           "tier": "working"
         },
         {
-          "rank": 14,
+          "rank": 20,
           "id": "2026-07-29-2",
           "fp": "5b57e1c8e1506d64",
           "label": "codex exec --output-schema requires strict JSON schemas",
@@ -146,7 +195,7 @@
           "tier": "archive"
         },
         {
-          "rank": 15,
+          "rank": 21,
           "id": "2026-07-29-3",
           "fp": "f11b1609b8593fde",
           "label": "Epic cas-c6ef reboot handoff — fix-round SHAs and resume plan",
@@ -154,7 +203,7 @@
           "tier": "archive"
         },
         {
-          "rank": 16,
+          "rank": 22,
           "id": "2026-08-07-1",
           "fp": "cb804b1bdd788eb8",
           "label": "Destructive-path guards must fail closed — and check the row loop, not just prep…",
@@ -162,7 +211,7 @@
           "tier": "working"
         },
         {
-          "rank": 17,
+          "rank": 23,
           "id": "2026-08-06-33",
           "fp": "641231af9a8f4c5e",
           "label": "Session summary 2026-08-06 evening: v2.46.0 released, burn-down v5 epic closed, …",
@@ -170,58 +219,10 @@
           "tier": "working"
         },
         {
-          "rank": 18,
+          "rank": 24,
           "id": "2026-08-06-32",
           "fp": "4b4fc79f5b59fdcb",
           "label": "epic_status phantom unmerged counts come from the anchor, not missing branch ref…",
-          "entry_type": "learning",
-          "tier": "working"
-        },
-        {
-          "rank": 19,
-          "id": "2026-08-06-31",
-          "fp": "bbda4af934f86015",
-          "label": "Cross-crate string contracts drift silently; assert the contract, not a substrin…",
-          "entry_type": "learning",
-          "tier": "working"
-        },
-        {
-          "rank": 20,
-          "id": "2026-08-06-13",
-          "fp": "c74728ddb88479af",
-          "label": "CAS hook coverage must span all Claude config dirs",
-          "entry_type": "learning",
-          "tier": "working"
-        },
-        {
-          "rank": 21,
-          "id": "2026-08-04-9",
-          "fp": "0e7b0e61c31b9e1f",
-          "label": "Worktree merges must never checkout in the shared main checkout (cas-4702)",
-          "entry_type": "learning",
-          "tier": "working"
-        },
-        {
-          "rank": 22,
-          "id": "2026-08-06-28",
-          "fp": "08e607c9a43b4f7f",
-          "label": "cas-src factory spawn base resolution (cas-7587 / GH #122)",
-          "entry_type": "learning",
-          "tier": "working"
-        },
-        {
-          "rank": 23,
-          "id": "2026-07-21-2",
-          "fp": "4fa5b122f0e23d6c",
-          "label": "cas-887b shipped: factory multi-epic + close/merge reliability on main",
-          "entry_type": "learning",
-          "tier": "archive"
-        },
-        {
-          "rank": 24,
-          "id": "2026-08-06-26",
-          "fp": "b190b6b8af852b23",
-          "label": "Gating agent behavior in CAS: MCP tool gates miss harness-native paths",
           "entry_type": "learning",
           "tier": "working"
         }
@@ -237,6 +238,46 @@
       "hits": [
         {
           "rank": 0,
+          "id": "2026-08-07-18",
+          "fp": "4c459174d4d0122a",
+          "label": "Contamination/quarantine token lists must be proper nouns, verified against the …",
+          "entry_type": "learning",
+          "tier": "working"
+        },
+        {
+          "rank": 1,
+          "id": "2026-08-07-17",
+          "fp": "1b574d7c15033989",
+          "label": "Migration ledger: never ALTER prompt_queue; chain-compare shape tests",
+          "entry_type": "learning",
+          "tier": "working"
+        },
+        {
+          "rank": 2,
+          "id": "2026-08-07-15",
+          "fp": "157fe2f96fb10b7c",
+          "label": "Rehearsing a destructive CAS tool on copies: redirect EVERY root, not just one",
+          "entry_type": "learning",
+          "tier": "working"
+        },
+        {
+          "rank": 3,
+          "id": "2026-08-07-13",
+          "fp": "f791e4c55150b326",
+          "label": "cas-src: read-looking APIs that actually WRITE, plus the -p cas package-name got…",
+          "entry_type": "learning",
+          "tier": "working"
+        },
+        {
+          "rank": 4,
+          "id": "2026-08-07-12",
+          "fp": "165ef7013910254b",
+          "label": "cas-90fd retrieval-parity harness: design residue not in the committed docs",
+          "entry_type": "learning",
+          "tier": "working"
+        },
+        {
+          "rank": 5,
           "id": "2026-08-07-11",
           "fp": "45a69238659c0929",
           "label": "cas-b129 M2 prep: knowledge_pages cannot hold legacy entry state; frontmatter pa…",
@@ -244,7 +285,7 @@
           "tier": "working"
         },
         {
-          "rank": 1,
+          "rank": 6,
           "id": "2026-08-07-10",
           "fp": "9cf0c4e6e5265e5c",
           "label": "Reminder deliveries share the prompt_queue with work mail (cas-f08d / GH #147)",
@@ -252,7 +293,7 @@
           "tier": "working"
         },
         {
-          "rank": 2,
+          "rank": 7,
           "id": "2026-08-07-9",
           "fp": "93f29db92fff4e51",
           "label": "cas-src close-gate lint: two notions of parent, and fictional line numbers",
@@ -260,7 +301,7 @@
           "tier": "working"
         },
         {
-          "rank": 3,
+          "rank": 8,
           "id": "2026-08-07-8",
           "fp": "83b19ed4016700cf",
           "label": "cas-src CI: wall-clock is max(job); cargo test's fail-fast hides failures",
@@ -268,7 +309,7 @@
           "tier": "working"
         },
         {
-          "rank": 4,
+          "rank": 9,
           "id": "2026-08-07-7",
           "fp": "28124ee5220c6840",
           "label": "cas-src release cut: Unreleased is not a reliable inventory",
@@ -276,7 +317,7 @@
           "tier": "working"
         },
         {
-          "rank": 5,
+          "rank": 10,
           "id": "2026-08-07-6",
           "fp": "d4befe59535f8e36",
           "label": "Empty-result conflation is a recurring CAS bug class",
@@ -284,7 +325,7 @@
           "tier": "working"
         },
         {
-          "rank": 6,
+          "rank": 11,
           "id": "2026-08-07-5",
           "fp": "3f529655aae683a7",
           "label": "CAS nativity check: cloud pull's upsert surface is the native/replica discrimina…",
@@ -292,7 +333,7 @@
           "tier": "working"
         },
         {
-          "rank": 7,
+          "rank": 12,
           "id": "2026-08-07-4",
           "fp": "9309305a5e827167",
           "label": "cas-src: canonical_id resolution + clean-env test guard (cas-f699 / cas-43ce)",
@@ -300,7 +341,7 @@
           "tier": "working"
         },
         {
-          "rank": 8,
+          "rank": 13,
           "id": "2026-08-07-3",
           "fp": "b5605652fb47503f",
           "label": "Claude Code teammate inbox drain is not a turn",
@@ -308,7 +349,7 @@
           "tier": "working"
         },
         {
-          "rank": 9,
+          "rank": 14,
           "id": "2026-08-07-2",
           "fp": "35c1f641d31d149a",
           "label": "cas-src: merge/close ref-agreement rules (origin vs local) — worktree_merge now …",
@@ -316,7 +357,7 @@
           "tier": "working"
         },
         {
-          "rank": 10,
+          "rank": 15,
           "id": "2026-08-07-1",
           "fp": "cb804b1bdd788eb8",
           "label": "Destructive-path guards must fail closed — and check the row loop, not just prep…",
@@ -324,7 +365,7 @@
           "tier": "working"
         },
         {
-          "rank": 11,
+          "rank": 16,
           "id": "2026-08-06-33",
           "fp": "641231af9a8f4c5e",
           "label": "Session summary 2026-08-06 evening: v2.46.0 released, burn-down v5 epic closed, …",
@@ -332,7 +373,7 @@
           "tier": "working"
         },
         {
-          "rank": 12,
+          "rank": 17,
           "id": "2026-08-06-32",
           "fp": "4b4fc79f5b59fdcb",
           "label": "epic_status phantom unmerged counts come from the anchor, not missing branch ref…",
@@ -340,7 +381,7 @@
           "tier": "working"
         },
         {
-          "rank": 13,
+          "rank": 18,
           "id": "2026-08-06-31",
           "fp": "bbda4af934f86015",
           "label": "Cross-crate string contracts drift silently; assert the contract, not a substrin…",
@@ -348,7 +389,7 @@
           "tier": "working"
         },
         {
-          "rank": 14,
+          "rank": 19,
           "id": "2026-08-06-28",
           "fp": "08e607c9a43b4f7f",
           "label": "cas-src factory spawn base resolution (cas-7587 / GH #122)",
@@ -356,15 +397,15 @@
           "tier": "working"
         },
         {
-          "rank": 15,
+          "rank": 20,
           "id": "2026-08-06-26",
-          "fp": "b190b6b8af852b23",
+          "fp": "26669a76ada95575",
           "label": "Gating agent behavior in CAS: MCP tool gates miss harness-native paths",
           "entry_type": "learning",
           "tier": "working"
         },
         {
-          "rank": 16,
+          "rank": 21,
           "id": "2026-08-06-25",
           "fp": "cf289d982a8892d0",
           "label": "PENDING: post v2.44.0 + v2.45.0 release Slack threads (drafts ready, transport w…",
@@ -372,7 +413,7 @@
           "tier": "working"
         },
         {
-          "rank": 17,
+          "rank": 22,
           "id": "2026-08-06-24",
           "fp": "4b743e43fee1e806",
           "label": "Prompt-overflow worker death (distinct from Ink crash): terminal on first failur…",
@@ -380,7 +421,7 @@
           "tier": "working"
         },
         {
-          "rank": 18,
+          "rank": 23,
           "id": "2026-08-06-22",
           "fp": "ec344bb121fbde5e",
           "label": "2026-08-06 handoff: cas-2dd1 on main @ 5cf566c4, pending epic close + v2.45.0 cu…",
@@ -388,51 +429,11 @@
           "tier": "working"
         },
         {
-          "rank": 19,
+          "rank": 24,
           "id": "2026-08-06-20",
           "fp": "b2f3e0c0077b1d01",
           "label": "cas-src builtin flavor drift guard: how it works and how to satisfy it",
           "entry_type": "learning",
-          "tier": "working"
-        },
-        {
-          "rank": 20,
-          "id": "2026-08-06-19",
-          "fp": "df90c3075c9cf908",
-          "label": "cas-src builtin flavor drift: fix by prefix-normalized regeneration, not hand-po…",
-          "entry_type": "learning",
-          "tier": "working"
-        },
-        {
-          "rank": 21,
-          "id": "2026-08-06-17",
-          "fp": "86bc5392bc307440",
-          "label": "SessionStart payload has a 9KB aggregate budget (cas-b114)",
-          "entry_type": "learning",
-          "tier": "working"
-        },
-        {
-          "rank": 22,
-          "id": "2026-08-06-15",
-          "fp": "e75c5d7335561857",
-          "label": "Codex/ChatGPT quota exhausted until 2026-08-08 10:07 — spawn Claude workers",
-          "entry_type": "context",
-          "tier": "working"
-        },
-        {
-          "rank": 23,
-          "id": "2026-08-06-13",
-          "fp": "c74728ddb88479af",
-          "label": "CAS hook coverage must span all Claude config dirs",
-          "entry_type": "learning",
-          "tier": "working"
-        },
-        {
-          "rank": 24,
-          "id": "2026-08-06-12",
-          "fp": "a2dacd80891bc392",
-          "label": "Cross-repo feature requests: file GitHub issues in the target repo (petra-stella…",
-          "entry_type": "context",
           "tier": "working"
         }
       ]
@@ -456,6 +457,46 @@
       "hits": [
         {
           "rank": 0,
+          "id": "2026-08-07-18",
+          "fp": "4c459174d4d0122a",
+          "label": "Contamination/quarantine token lists must be proper nouns, verified against the …",
+          "entry_type": "learning",
+          "tier": "working"
+        },
+        {
+          "rank": 1,
+          "id": "2026-08-07-17",
+          "fp": "1b574d7c15033989",
+          "label": "Migration ledger: never ALTER prompt_queue; chain-compare shape tests",
+          "entry_type": "learning",
+          "tier": "working"
+        },
+        {
+          "rank": 2,
+          "id": "2026-08-07-15",
+          "fp": "157fe2f96fb10b7c",
+          "label": "Rehearsing a destructive CAS tool on copies: redirect EVERY root, not just one",
+          "entry_type": "learning",
+          "tier": "working"
+        },
+        {
+          "rank": 3,
+          "id": "2026-08-07-13",
+          "fp": "f791e4c55150b326",
+          "label": "cas-src: read-looking APIs that actually WRITE, plus the -p cas package-name got…",
+          "entry_type": "learning",
+          "tier": "working"
+        },
+        {
+          "rank": 4,
+          "id": "2026-08-07-12",
+          "fp": "165ef7013910254b",
+          "label": "cas-90fd retrieval-parity harness: design residue not in the committed docs",
+          "entry_type": "learning",
+          "tier": "working"
+        },
+        {
+          "rank": 5,
           "id": "2026-08-07-11",
           "fp": "45a69238659c0929",
           "label": "cas-b129 M2 prep: knowledge_pages cannot hold legacy entry state; frontmatter pa…",
@@ -463,7 +504,7 @@
           "tier": "working"
         },
         {
-          "rank": 1,
+          "rank": 6,
           "id": "2026-08-07-10",
           "fp": "9cf0c4e6e5265e5c",
           "label": "Reminder deliveries share the prompt_queue with work mail (cas-f08d / GH #147)",
@@ -471,7 +512,7 @@
           "tier": "working"
         },
         {
-          "rank": 2,
+          "rank": 7,
           "id": "2026-08-07-9",
           "fp": "93f29db92fff4e51",
           "label": "cas-src close-gate lint: two notions of parent, and fictional line numbers",
@@ -479,7 +520,7 @@
           "tier": "working"
         },
         {
-          "rank": 3,
+          "rank": 8,
           "id": "2026-08-07-8",
           "fp": "83b19ed4016700cf",
           "label": "cas-src CI: wall-clock is max(job); cargo test's fail-fast hides failures",
@@ -487,7 +528,7 @@
           "tier": "working"
         },
         {
-          "rank": 4,
+          "rank": 9,
           "id": "2026-08-07-7",
           "fp": "28124ee5220c6840",
           "label": "cas-src release cut: Unreleased is not a reliable inventory",
@@ -495,7 +536,7 @@
           "tier": "working"
         },
         {
-          "rank": 5,
+          "rank": 10,
           "id": "2026-08-07-6",
           "fp": "d4befe59535f8e36",
           "label": "Empty-result conflation is a recurring CAS bug class",
@@ -503,7 +544,7 @@
           "tier": "working"
         },
         {
-          "rank": 6,
+          "rank": 11,
           "id": "2026-08-07-5",
           "fp": "3f529655aae683a7",
           "label": "CAS nativity check: cloud pull's upsert surface is the native/replica discrimina…",
@@ -511,7 +552,7 @@
           "tier": "working"
         },
         {
-          "rank": 7,
+          "rank": 12,
           "id": "2026-08-07-4",
           "fp": "9309305a5e827167",
           "label": "cas-src: canonical_id resolution + clean-env test guard (cas-f699 / cas-43ce)",
@@ -519,7 +560,7 @@
           "tier": "working"
         },
         {
-          "rank": 8,
+          "rank": 13,
           "id": "2026-08-07-3",
           "fp": "b5605652fb47503f",
           "label": "Claude Code teammate inbox drain is not a turn",
@@ -527,7 +568,7 @@
           "tier": "working"
         },
         {
-          "rank": 9,
+          "rank": 14,
           "id": "2026-08-07-2",
           "fp": "35c1f641d31d149a",
           "label": "cas-src: merge/close ref-agreement rules (origin vs local) — worktree_merge now …",
@@ -535,7 +576,7 @@
           "tier": "working"
         },
         {
-          "rank": 10,
+          "rank": 15,
           "id": "2026-08-07-1",
           "fp": "cb804b1bdd788eb8",
           "label": "Destructive-path guards must fail closed — and check the row loop, not just prep…",
@@ -543,7 +584,7 @@
           "tier": "working"
         },
         {
-          "rank": 11,
+          "rank": 16,
           "id": "2026-08-06-33",
           "fp": "641231af9a8f4c5e",
           "label": "Session summary 2026-08-06 evening: v2.46.0 released, burn-down v5 epic closed, …",
@@ -551,7 +592,7 @@
           "tier": "working"
         },
         {
-          "rank": 12,
+          "rank": 17,
           "id": "2026-08-06-32",
           "fp": "4b4fc79f5b59fdcb",
           "label": "epic_status phantom unmerged counts come from the anchor, not missing branch ref…",
@@ -559,7 +600,7 @@
           "tier": "working"
         },
         {
-          "rank": 13,
+          "rank": 18,
           "id": "2026-08-06-31",
           "fp": "bbda4af934f86015",
           "label": "Cross-crate string contracts drift silently; assert the contract, not a substrin…",
@@ -567,7 +608,7 @@
           "tier": "working"
         },
         {
-          "rank": 14,
+          "rank": 19,
           "id": "2026-08-06-28",
           "fp": "08e607c9a43b4f7f",
           "label": "cas-src factory spawn base resolution (cas-7587 / GH #122)",
@@ -575,15 +616,15 @@
           "tier": "working"
         },
         {
-          "rank": 15,
+          "rank": 20,
           "id": "2026-08-06-26",
-          "fp": "b190b6b8af852b23",
+          "fp": "26669a76ada95575",
           "label": "Gating agent behavior in CAS: MCP tool gates miss harness-native paths",
           "entry_type": "learning",
           "tier": "working"
         },
         {
-          "rank": 16,
+          "rank": 21,
           "id": "2026-08-06-25",
           "fp": "cf289d982a8892d0",
           "label": "PENDING: post v2.44.0 + v2.45.0 release Slack threads (drafts ready, transport w…",
@@ -591,7 +632,7 @@
           "tier": "working"
         },
         {
-          "rank": 17,
+          "rank": 22,
           "id": "2026-08-06-24",
           "fp": "4b743e43fee1e806",
           "label": "Prompt-overflow worker death (distinct from Ink crash): terminal on first failur…",
@@ -599,7 +640,7 @@
           "tier": "working"
         },
         {
-          "rank": 18,
+          "rank": 23,
           "id": "2026-08-06-22",
           "fp": "ec344bb121fbde5e",
           "label": "2026-08-06 handoff: cas-2dd1 on main @ 5cf566c4, pending epic close + v2.45.0 cu…",
@@ -607,7 +648,7 @@
           "tier": "working"
         },
         {
-          "rank": 19,
+          "rank": 24,
           "id": "2026-08-06-20",
           "fp": "b2f3e0c0077b1d01",
           "label": "cas-src builtin flavor drift guard: how it works and how to satisfy it",
@@ -615,7 +656,7 @@
           "tier": "working"
         },
         {
-          "rank": 20,
+          "rank": 25,
           "id": "2026-08-06-19",
           "fp": "df90c3075c9cf908",
           "label": "cas-src builtin flavor drift: fix by prefix-normalized regeneration, not hand-po…",
@@ -623,7 +664,7 @@
           "tier": "working"
         },
         {
-          "rank": 21,
+          "rank": 26,
           "id": "2026-08-06-17",
           "fp": "86bc5392bc307440",
           "label": "SessionStart payload has a 9KB aggregate budget (cas-b114)",
@@ -631,7 +672,7 @@
           "tier": "working"
         },
         {
-          "rank": 22,
+          "rank": 27,
           "id": "2026-08-06-15",
           "fp": "e75c5d7335561857",
           "label": "Codex/ChatGPT quota exhausted until 2026-08-08 10:07 — spawn Claude workers",
@@ -639,7 +680,7 @@
           "tier": "working"
         },
         {
-          "rank": 23,
+          "rank": 28,
           "id": "2026-08-06-13",
           "fp": "c74728ddb88479af",
           "label": "CAS hook coverage must span all Claude config dirs",
@@ -647,7 +688,7 @@
           "tier": "working"
         },
         {
-          "rank": 24,
+          "rank": 29,
           "id": "2026-08-06-12",
           "fp": "a2dacd80891bc392",
           "label": "Cross-repo feature requests: file GitHub issues in the target repo (petra-stella…",
@@ -655,7 +696,7 @@
           "tier": "working"
         },
         {
-          "rank": 25,
+          "rank": 30,
           "id": "2026-08-06-11",
           "fp": "54e59905e250dc4f",
           "label": "TencentDB-Agent-Memory review (2026-08-06): findings + CAS adoption list",
@@ -663,7 +704,7 @@
           "tier": "working"
         },
         {
-          "rank": 26,
+          "rank": 31,
           "id": "2026-08-06-10",
           "fp": "1b1c5bfc16477088",
           "label": "Test-design trap: negative assertion against a string you invented",
@@ -671,7 +712,7 @@
           "tier": "working"
         },
         {
-          "rank": 27,
+          "rank": 32,
           "id": "2026-08-06-9",
           "fp": "9dc6959b14bd79a4",
           "label": "cas-src: git archaeology traps and where parity guards go blind",
@@ -679,7 +720,7 @@
           "tier": "working"
         },
         {
-          "rank": 28,
+          "rank": 33,
           "id": "2026-08-06-8",
           "fp": "91da9df23c2946e8",
           "label": "Check the store's ORDER BY before assuming what creation order implies in a test",
@@ -687,7 +728,7 @@
           "tier": "working"
         },
         {
-          "rank": 29,
+          "rank": 34,
           "id": "2026-08-06-7",
           "fp": "59eaf353f5216f6e",
           "label": "cas-src: adversarially re-review your own diff before close — 3 HIGH self-defect…",
@@ -695,7 +736,7 @@
           "tier": "working"
         },
         {
-          "rank": 30,
+          "rank": 35,
           "id": "2026-08-06-6",
           "fp": "659aa97596288bb9",
           "label": "Measuring \"is this worktree behind\" — compare trees, not commits",
@@ -703,7 +744,7 @@
           "tier": "working"
         },
         {
-          "rank": 31,
+          "rank": 36,
           "id": "2026-08-06-5",
           "fp": "ab229391dd13f003",
           "label": "git stash recovery guidance: pop rejects SHAs, show hides untracked",
@@ -711,7 +752,7 @@
           "tier": "working"
         },
         {
-          "rank": 32,
+          "rank": 37,
           "id": "2026-08-06-4",
           "fp": "c775a608e7827734",
           "label": "cas-src: verify oom_kill/own-env before blaming the host; -p --all-targets misse…",
@@ -719,7 +760,7 @@
           "tier": "working"
         },
         {
-          "rank": 33,
+          "rank": 38,
           "id": "2026-08-06-3",
           "fp": "29bb5b77f77e8022",
           "label": "cas-src builds: OOM-killed rustc looks like a hang; orphan rustc wedges the next…",
@@ -727,7 +768,7 @@
           "tier": "working"
         },
         {
-          "rank": 34,
+          "rank": 39,
           "id": "2026-08-06-2",
           "fp": "5a8687f099afa497",
           "label": "cas-src dev profile: split-debuginfo does not help; the link tax is mold-fast al…",
@@ -735,7 +776,7 @@
           "tier": "working"
         },
         {
-          "rank": 35,
+          "rank": 40,
           "id": "2026-08-06-1",
           "fp": "3a3f997890cbe4c9",
           "label": "spawn_workers: an open unassigned task_id substitutes for an active epic",
@@ -743,7 +784,7 @@
           "tier": "working"
         },
         {
-          "rank": 36,
+          "rank": 41,
           "id": "2026-08-05-7",
           "fp": "55008d8b71a08cf7",
           "label": "Codex CLI wedges on untrusted dirs; only an on-disk [projects] entry fixes it",
@@ -751,7 +792,7 @@
           "tier": "working"
         },
         {
-          "rank": 37,
+          "rank": 42,
           "id": "2026-08-05-6",
           "fp": "04a941e075d9aa1b",
           "label": "Factory: three codex-only silent-loss paths for PTY-delivered wake-ups",
@@ -759,7 +800,7 @@
           "tier": "working"
         },
         {
-          "rank": 38,
+          "rank": 43,
           "id": "2026-08-05-4",
           "fp": "ffd7c1eea08d8abc",
           "label": "cas-src supervisor landing playbook: lifecycle recovery, release recipe, macOS g…",
@@ -767,7 +808,7 @@
           "tier": "working"
         },
         {
-          "rank": 39,
+          "rank": 44,
           "id": "2026-08-05-3",
           "fp": "7170ee439702a1ce",
           "label": "Debugging pattern: piped cargo test stalls = leaked child holding the pipe",
@@ -775,7 +816,7 @@
           "tier": "working"
         },
         {
-          "rank": 40,
+          "rank": 45,
           "id": "2026-08-05-2",
           "fp": "393f8ae79bb73b6d",
           "label": "cas-src: never run unscoped cargo test -p cas; background long commands",
@@ -783,7 +824,7 @@
           "tier": "working"
         },
         {
-          "rank": 41,
+          "rank": 46,
           "id": "2026-08-05-1",
           "fp": "577fd5276c91be29",
           "label": "Never run cargo test binaries directly; and git diff --stat hides untracked file…",
@@ -791,7 +832,7 @@
           "tier": "working"
         },
         {
-          "rank": 42,
+          "rank": 47,
           "id": "2026-08-04-11",
           "fp": "e657039bd91c972c",
           "label": "CAS close-guard: measure against both local and origin target refs, and attribut…",
@@ -799,7 +840,7 @@
           "tier": "working"
         },
         {
-          "rank": 43,
+          "rank": 48,
           "id": "2026-08-04-10",
           "fp": "85e6151055fa32d6",
           "label": "Proxy-snapshot test fixtures must pin HOME/XDG_CONFIG_HOME for the whole test bo…",
@@ -807,7 +848,7 @@
           "tier": "working"
         },
         {
-          "rank": 44,
+          "rank": 49,
           "id": "2026-08-04-9",
           "fp": "0e7b0e61c31b9e1f",
           "label": "Worktree merges must never checkout in the shared main checkout (cas-4702)",
@@ -815,7 +856,7 @@
           "tier": "working"
         },
         {
-          "rank": 45,
+          "rank": 50,
           "id": "2026-08-04-8",
           "fp": "2eb0af193b7fecc3",
           "label": "cas-src: never run `cargo fmt --all` (repo formatted with older rustfmt)",
@@ -823,7 +864,7 @@
           "tier": "working"
         },
         {
-          "rank": 46,
+          "rank": 51,
           "id": "2026-08-04-7",
           "fp": "210e22092e1ba20a",
           "label": "cas-src issue intake moved to GitHub Issues (pippenz/cas)",
@@ -831,7 +872,7 @@
           "tier": "working"
         },
         {
-          "rank": 47,
+          "rank": 52,
           "id": "2026-08-04-6",
           "fp": "f4a6c80f0b9f8111",
           "label": "Post Slack notes via Codex when Claude has no Slack connector",
@@ -839,7 +880,7 @@
           "tier": "working"
         },
         {
-          "rank": 48,
+          "rank": 53,
           "id": "2026-08-04-5",
           "fp": "2bee1c9e5159307b",
           "label": "Supervisor: spawn workers, don't block on codex exec shell-outs",
@@ -847,7 +888,7 @@
           "tier": "working"
         },
         {
-          "rank": 49,
+          "rank": 54,
           "id": "2026-08-04-4",
           "fp": "335063e3bad01520",
           "label": "Full-gate runs from factory panes: tty makes git-merge tests hang on $EDITOR",
@@ -855,7 +896,7 @@
           "tier": "working"
         },
         {
-          "rank": 50,
+          "rank": 55,
           "id": "2026-08-04-3",
           "fp": "5d62aed24b18f156",
           "label": "Alt-account worker spawning: CAS is inheritance-only for CLAUDE_CONFIG_DIR",
@@ -863,7 +904,7 @@
           "tier": "working"
         },
         {
-          "rank": 51,
+          "rank": 56,
           "id": "2026-08-04-1",
           "fp": "f19cb29375ea514c",
           "label": "worktree_merge leaves supervisor checkout on the epic branch — guard before epic…",
@@ -871,7 +912,7 @@
           "tier": "working"
         },
         {
-          "rank": 52,
+          "rank": 57,
           "id": "2026-08-01-2",
           "fp": "8cc1c7fda5d691f9",
           "label": "Merge the branch ref, never a SHA pasted in a worker message",
@@ -879,7 +920,7 @@
           "tier": "working"
         },
         {
-          "rank": 53,
+          "rank": 58,
           "id": "2026-08-01-1",
           "fp": "22aaf781929831d0",
           "label": "A green test suite doesn't prove the new regressions ran — check the count arith…",
@@ -887,51 +928,11 @@
           "tier": "working"
         },
         {
-          "rank": 54,
+          "rank": 59,
           "id": "2026-07-31-9",
           "fp": "daf9ba8b5a5fe063",
           "label": "HANDOFF 2026-07-31 late: 5 fixes on main fd328c68, reinstall + factory restart p…",
           "entry_type": "context",
-          "tier": "working"
-        },
-        {
-          "rank": 55,
-          "id": "2026-07-31-6",
-          "fp": "c0b4850fd7663567",
-          "label": "Codex PTY injection needs bracketed paste (cas-5fff)",
-          "entry_type": "learning",
-          "tier": "working"
-        },
-        {
-          "rank": 56,
-          "id": "2026-07-31-5",
-          "fp": "68be33080f0466ba",
-          "label": "\"database is locked\" on task create → orphaned cas process in a stale worker wor…",
-          "entry_type": "learning",
-          "tier": "working"
-        },
-        {
-          "rank": 57,
-          "id": "2026-07-31-4",
-          "fp": "03e3b8dd7255ad6c",
-          "label": "Tightened store validation breaks test fixtures in waves — sweep every test surf…",
-          "entry_type": "learning",
-          "tier": "working"
-        },
-        {
-          "rank": 58,
-          "id": "2026-07-31-3",
-          "fp": "c4f2a1998e81f822",
-          "label": "Multi-ALTER migrations with all-or-nothing detect wedge mixed-schema DBs (fixed …",
-          "entry_type": "learning",
-          "tier": "working"
-        },
-        {
-          "rank": 59,
-          "id": "2026-07-31-2",
-          "fp": "9aa7f972f3de7e27",
-          "label": "Crashed-session zombies kill fresh codex worker spawns; focus_epic before spawn",
-          "entry_type": "learning",
           "tier": "working"
         }
       ]
@@ -978,6 +979,22 @@
         },
         {
           "rank": 4,
+          "id": "2026-08-07-10",
+          "fp": "9cf0c4e6e5265e5c",
+          "label": "Reminder deliveries share the prompt_queue with work mail (cas-f08d / GH #147)",
+          "entry_type": "learning",
+          "tier": "working"
+        },
+        {
+          "rank": 5,
+          "id": "2026-08-06-26",
+          "fp": "26669a76ada95575",
+          "label": "Gating agent behavior in CAS: MCP tool gates miss harness-native paths",
+          "entry_type": "learning",
+          "tier": "working"
+        },
+        {
+          "rank": 6,
           "id": "2026-08-06-13",
           "fp": "c74728ddb88479af",
           "label": "CAS hook coverage must span all Claude config dirs",
@@ -985,7 +1002,7 @@
           "tier": "working"
         },
         {
-          "rank": 5,
+          "rank": 7,
           "id": "2026-08-04-9",
           "fp": "0e7b0e61c31b9e1f",
           "label": "Worktree merges must never checkout in the shared main checkout (cas-4702)",
@@ -993,7 +1010,7 @@
           "tier": "working"
         },
         {
-          "rank": 6,
+          "rank": 8,
           "id": "2026-04-23-13",
           "fp": "540127684cc1b7b8",
           "label": "Claude Code 2.1.117 and 2.1.118 ship a Bun/React-Ink regression: subagents in Ag…",
@@ -1001,7 +1018,7 @@
           "tier": "archive"
         },
         {
-          "rank": 7,
+          "rank": 9,
           "id": "2026-05-26-5",
           "fp": "90e6685cb10192b3",
           "label": "CC v2.1.146 `/simplify` renamed to `/code-review` — disambiguated from cas-code-…",
@@ -1009,7 +1026,7 @@
           "tier": "archive"
         },
         {
-          "rank": 8,
+          "rank": 10,
           "id": "2026-08-04-4",
           "fp": "335063e3bad01520",
           "label": "Full-gate runs from factory panes: tty makes git-merge tests hang on $EDITOR",
@@ -1017,7 +1034,7 @@
           "tier": "working"
         },
         {
-          "rank": 9,
+          "rank": 11,
           "id": "2026-08-06-15",
           "fp": "e75c5d7335561857",
           "label": "Codex/ChatGPT quota exhausted until 2026-08-08 10:07 — spawn Claude workers",
@@ -1025,7 +1042,7 @@
           "tier": "working"
         },
         {
-          "rank": 10,
+          "rank": 12,
           "id": "2026-08-04-7",
           "fp": "210e22092e1ba20a",
           "label": "cas-src issue intake moved to GitHub Issues (pippenz/cas)",
@@ -1033,7 +1050,7 @@
           "tier": "working"
         },
         {
-          "rank": 11,
+          "rank": 13,
           "id": "2026-07-10-1",
           "fp": "6496bba0656dc0a9",
           "label": "Codex GPT-5.6 Sol worker slug is gpt-5.6-sol",
@@ -1041,7 +1058,7 @@
           "tier": "archive"
         },
         {
-          "rank": 12,
+          "rank": 14,
           "id": "2026-06-25-2",
           "fp": "f4b947fe3f249671",
           "label": "Factory msg delivery routes on supervisor team-mode, not recipient harness — cod…",
@@ -1049,7 +1066,7 @@
           "tier": "archive"
         },
         {
-          "rank": 13,
+          "rank": 15,
           "id": "2026-07-31-6",
           "fp": "c0b4850fd7663567",
           "label": "Codex PTY injection needs bracketed paste (cas-5fff)",
@@ -1057,7 +1074,7 @@
           "tier": "working"
         },
         {
-          "rank": 14,
+          "rank": 16,
           "id": "2026-06-25-1",
           "fp": "afb558521ed72378",
           "label": "Codex workers register then immediately show [stale] — no heartbeat hook",
@@ -1065,7 +1082,7 @@
           "tier": "archive"
         },
         {
-          "rank": 15,
+          "rank": 17,
           "id": "2026-07-06-6",
           "fp": "6a8925ddd6dccf08",
           "label": "cas-code-review Workflow args: stringified-args false \"empty diff\" + embedded-ar…",
@@ -1073,7 +1090,7 @@
           "tier": "archive"
         },
         {
-          "rank": 16,
+          "rank": 18,
           "id": "2026-07-21-5",
           "fp": "79ee233a9a618816",
           "label": "Session end 2026-07-21: factory reliability fleet complete",
@@ -1081,7 +1098,7 @@
           "tier": "working"
         },
         {
-          "rank": 17,
+          "rank": 19,
           "id": "2026-07-09-5",
           "fp": "8e941042eb22856d",
           "label": "cas-3417 factory-reliability epic SHIPPED to main (ab41c12); Grok Phase 1 in fli…",
@@ -1089,7 +1106,7 @@
           "tier": "archive"
         },
         {
-          "rank": 18,
+          "rank": 20,
           "id": "2026-06-08-1",
           "fp": "1a380d7809782ab3",
           "label": "Claude Code changelog diary — CAS response ledger",
@@ -1097,7 +1114,7 @@
           "tier": "archive"
         },
         {
-          "rank": 19,
+          "rank": 21,
           "id": "2026-07-23-5",
           "fp": "dfa64bfc2c847388",
           "label": "Factory supervisor: MERGE REQUIRED lag, epic commit guard, untracked reports",
@@ -1105,7 +1122,7 @@
           "tier": "archive"
         },
         {
-          "rank": 20,
+          "rank": 22,
           "id": "2026-07-09-3",
           "fp": "4fe85f983e020ac9",
           "label": "Never stamp execution_note=additive-only on tasks that edit existing files",
@@ -1113,7 +1130,7 @@
           "tier": "archive"
         },
         {
-          "rank": 21,
+          "rank": 23,
           "id": "2026-06-02-85",
           "fp": "f7a7a969a3867fff",
           "label": "Don't run Rust build/test gates in /tmp — it's a 32G tmpfs",
@@ -1121,27 +1138,11 @@
           "tier": "archive"
         },
         {
-          "rank": 22,
+          "rank": 24,
           "id": "2026-07-22-4",
           "fp": "7c3bf81fa87c0748",
           "label": "Parallel gate restored on ≥v2.28.2 — stop defaulting to --test-threads=1",
           "entry_type": "context",
-          "tier": "archive"
-        },
-        {
-          "rank": 23,
-          "id": "2026-06-27-1",
-          "fp": "4227ae4311f35bae",
-          "label": "Factory worker reality: start-then-idle stall, urgent-only wakes, session-churn …",
-          "entry_type": "learning",
-          "tier": "archive"
-        },
-        {
-          "rank": 24,
-          "id": "2026-07-06-3",
-          "fp": "4ee3efeddfa1e2a6",
-          "label": "Director false task_completed events fire at task START (cas-dbbe, 5 repros)",
-          "entry_type": "learning",
           "tier": "archive"
         }
       ]
@@ -1156,6 +1157,46 @@
       "hits": [
         {
           "rank": 0,
+          "id": "2026-08-07-18",
+          "fp": "4c459174d4d0122a",
+          "label": "Contamination/quarantine token lists must be proper nouns, verified against the …",
+          "entry_type": "learning",
+          "tier": "working"
+        },
+        {
+          "rank": 1,
+          "id": "2026-08-07-17",
+          "fp": "1b574d7c15033989",
+          "label": "Migration ledger: never ALTER prompt_queue; chain-compare shape tests",
+          "entry_type": "learning",
+          "tier": "working"
+        },
+        {
+          "rank": 2,
+          "id": "2026-08-07-15",
+          "fp": "157fe2f96fb10b7c",
+          "label": "Rehearsing a destructive CAS tool on copies: redirect EVERY root, not just one",
+          "entry_type": "learning",
+          "tier": "working"
+        },
+        {
+          "rank": 3,
+          "id": "2026-08-07-13",
+          "fp": "f791e4c55150b326",
+          "label": "cas-src: read-looking APIs that actually WRITE, plus the -p cas package-name got…",
+          "entry_type": "learning",
+          "tier": "working"
+        },
+        {
+          "rank": 4,
+          "id": "2026-08-07-12",
+          "fp": "165ef7013910254b",
+          "label": "cas-90fd retrieval-parity harness: design residue not in the committed docs",
+          "entry_type": "learning",
+          "tier": "working"
+        },
+        {
+          "rank": 5,
           "id": "2026-08-07-11",
           "fp": "45a69238659c0929",
           "label": "cas-b129 M2 prep: knowledge_pages cannot hold legacy entry state; frontmatter pa…",
@@ -1163,7 +1204,7 @@
           "tier": "working"
         },
         {
-          "rank": 1,
+          "rank": 6,
           "id": "2026-08-07-10",
           "fp": "9cf0c4e6e5265e5c",
           "label": "Reminder deliveries share the prompt_queue with work mail (cas-f08d / GH #147)",
@@ -1171,7 +1212,7 @@
           "tier": "working"
         },
         {
-          "rank": 2,
+          "rank": 7,
           "id": "2026-08-07-9",
           "fp": "93f29db92fff4e51",
           "label": "cas-src close-gate lint: two notions of parent, and fictional line numbers",
@@ -1179,7 +1220,7 @@
           "tier": "working"
         },
         {
-          "rank": 3,
+          "rank": 8,
           "id": "2026-08-07-8",
           "fp": "83b19ed4016700cf",
           "label": "cas-src CI: wall-clock is max(job); cargo test's fail-fast hides failures",
@@ -1187,7 +1228,7 @@
           "tier": "working"
         },
         {
-          "rank": 4,
+          "rank": 9,
           "id": "2026-08-07-7",
           "fp": "28124ee5220c6840",
           "label": "cas-src release cut: Unreleased is not a reliable inventory",
@@ -1195,7 +1236,7 @@
           "tier": "working"
         },
         {
-          "rank": 5,
+          "rank": 10,
           "id": "2026-08-07-6",
           "fp": "d4befe59535f8e36",
           "label": "Empty-result conflation is a recurring CAS bug class",
@@ -1203,7 +1244,7 @@
           "tier": "working"
         },
         {
-          "rank": 6,
+          "rank": 11,
           "id": "2026-08-07-5",
           "fp": "3f529655aae683a7",
           "label": "CAS nativity check: cloud pull's upsert surface is the native/replica discrimina…",
@@ -1211,7 +1252,7 @@
           "tier": "working"
         },
         {
-          "rank": 7,
+          "rank": 12,
           "id": "2026-08-07-4",
           "fp": "9309305a5e827167",
           "label": "cas-src: canonical_id resolution + clean-env test guard (cas-f699 / cas-43ce)",
@@ -1219,7 +1260,7 @@
           "tier": "working"
         },
         {
-          "rank": 8,
+          "rank": 13,
           "id": "2026-08-07-3",
           "fp": "b5605652fb47503f",
           "label": "Claude Code teammate inbox drain is not a turn",
@@ -1227,7 +1268,7 @@
           "tier": "working"
         },
         {
-          "rank": 9,
+          "rank": 14,
           "id": "2026-08-07-2",
           "fp": "35c1f641d31d149a",
           "label": "cas-src: merge/close ref-agreement rules (origin vs local) — worktree_merge now …",
@@ -1235,7 +1276,7 @@
           "tier": "working"
         },
         {
-          "rank": 10,
+          "rank": 15,
           "id": "2026-08-07-1",
           "fp": "cb804b1bdd788eb8",
           "label": "Destructive-path guards must fail closed — and check the row loop, not just prep…",
@@ -1243,7 +1284,7 @@
           "tier": "working"
         },
         {
-          "rank": 11,
+          "rank": 16,
           "id": "2026-08-06-33",
           "fp": "641231af9a8f4c5e",
           "label": "Session summary 2026-08-06 evening: v2.46.0 released, burn-down v5 epic closed, …",
@@ -1251,7 +1292,7 @@
           "tier": "working"
         },
         {
-          "rank": 12,
+          "rank": 17,
           "id": "2026-08-06-32",
           "fp": "4b4fc79f5b59fdcb",
           "label": "epic_status phantom unmerged counts come from the anchor, not missing branch ref…",
@@ -1259,7 +1300,7 @@
           "tier": "working"
         },
         {
-          "rank": 13,
+          "rank": 18,
           "id": "2026-08-06-31",
           "fp": "bbda4af934f86015",
           "label": "Cross-crate string contracts drift silently; assert the contract, not a substrin…",
@@ -1267,7 +1308,7 @@
           "tier": "working"
         },
         {
-          "rank": 14,
+          "rank": 19,
           "id": "2026-08-06-28",
           "fp": "08e607c9a43b4f7f",
           "label": "cas-src factory spawn base resolution (cas-7587 / GH #122)",
@@ -1275,15 +1316,15 @@
           "tier": "working"
         },
         {
-          "rank": 15,
+          "rank": 20,
           "id": "2026-08-06-26",
-          "fp": "b190b6b8af852b23",
+          "fp": "26669a76ada95575",
           "label": "Gating agent behavior in CAS: MCP tool gates miss harness-native paths",
           "entry_type": "learning",
           "tier": "working"
         },
         {
-          "rank": 16,
+          "rank": 21,
           "id": "2026-08-06-24",
           "fp": "4b743e43fee1e806",
           "label": "Prompt-overflow worker death (distinct from Ink crash): terminal on first failur…",
@@ -1291,7 +1332,7 @@
           "tier": "working"
         },
         {
-          "rank": 17,
+          "rank": 22,
           "id": "2026-08-06-20",
           "fp": "b2f3e0c0077b1d01",
           "label": "cas-src builtin flavor drift guard: how it works and how to satisfy it",
@@ -1299,7 +1340,7 @@
           "tier": "working"
         },
         {
-          "rank": 18,
+          "rank": 23,
           "id": "2026-08-06-19",
           "fp": "df90c3075c9cf908",
           "label": "cas-src builtin flavor drift: fix by prefix-normalized regeneration, not hand-po…",
@@ -1307,50 +1348,10 @@
           "tier": "working"
         },
         {
-          "rank": 19,
+          "rank": 24,
           "id": "2026-08-06-17",
           "fp": "86bc5392bc307440",
           "label": "SessionStart payload has a 9KB aggregate budget (cas-b114)",
-          "entry_type": "learning",
-          "tier": "working"
-        },
-        {
-          "rank": 20,
-          "id": "2026-08-06-13",
-          "fp": "c74728ddb88479af",
-          "label": "CAS hook coverage must span all Claude config dirs",
-          "entry_type": "learning",
-          "tier": "working"
-        },
-        {
-          "rank": 21,
-          "id": "2026-08-06-10",
-          "fp": "1b1c5bfc16477088",
-          "label": "Test-design trap: negative assertion against a string you invented",
-          "entry_type": "learning",
-          "tier": "working"
-        },
-        {
-          "rank": 22,
-          "id": "2026-08-06-9",
-          "fp": "9dc6959b14bd79a4",
-          "label": "cas-src: git archaeology traps and where parity guards go blind",
-          "entry_type": "learning",
-          "tier": "working"
-        },
-        {
-          "rank": 23,
-          "id": "2026-08-06-8",
-          "fp": "91da9df23c2946e8",
-          "label": "Check the store's ORDER BY before assuming what creation order implies in a test",
-          "entry_type": "learning",
-          "tier": "working"
-        },
-        {
-          "rank": 24,
-          "id": "2026-08-06-7",
-          "fp": "59eaf353f5216f6e",
-          "label": "cas-src: adversarially re-review your own diff before close — 3 HIGH self-defect…",
           "entry_type": "learning",
           "tier": "working"
         }
@@ -1426,7 +1427,7 @@
           "fp": "a5d97ff77bd026f3",
           "label": "2026-07-30 harness diary sweep completed",
           "entry_type": "context",
-          "tier": "working"
+          "tier": "cold"
         },
         {
           "rank": 8,
@@ -1821,6 +1822,46 @@
       "hits": [
         {
           "rank": 0,
+          "id": "2026-08-07-18",
+          "fp": "4c459174d4d0122a",
+          "label": "Contamination/quarantine token lists must be proper nouns, verified against the …",
+          "entry_type": "learning",
+          "tier": "working"
+        },
+        {
+          "rank": 1,
+          "id": "2026-08-07-17",
+          "fp": "1b574d7c15033989",
+          "label": "Migration ledger: never ALTER prompt_queue; chain-compare shape tests",
+          "entry_type": "learning",
+          "tier": "working"
+        },
+        {
+          "rank": 2,
+          "id": "2026-08-07-15",
+          "fp": "157fe2f96fb10b7c",
+          "label": "Rehearsing a destructive CAS tool on copies: redirect EVERY root, not just one",
+          "entry_type": "learning",
+          "tier": "working"
+        },
+        {
+          "rank": 3,
+          "id": "2026-08-07-13",
+          "fp": "f791e4c55150b326",
+          "label": "cas-src: read-looking APIs that actually WRITE, plus the -p cas package-name got…",
+          "entry_type": "learning",
+          "tier": "working"
+        },
+        {
+          "rank": 4,
+          "id": "2026-08-07-12",
+          "fp": "165ef7013910254b",
+          "label": "cas-90fd retrieval-parity harness: design residue not in the committed docs",
+          "entry_type": "learning",
+          "tier": "working"
+        },
+        {
+          "rank": 5,
           "id": "2026-08-07-11",
           "fp": "45a69238659c0929",
           "label": "cas-b129 M2 prep: knowledge_pages cannot hold legacy entry state; frontmatter pa…",
@@ -1828,7 +1869,7 @@
           "tier": "working"
         },
         {
-          "rank": 1,
+          "rank": 6,
           "id": "2026-08-07-10",
           "fp": "9cf0c4e6e5265e5c",
           "label": "Reminder deliveries share the prompt_queue with work mail (cas-f08d / GH #147)",
@@ -1836,7 +1877,7 @@
           "tier": "working"
         },
         {
-          "rank": 2,
+          "rank": 7,
           "id": "2026-08-07-9",
           "fp": "93f29db92fff4e51",
           "label": "cas-src close-gate lint: two notions of parent, and fictional line numbers",
@@ -1844,7 +1885,7 @@
           "tier": "working"
         },
         {
-          "rank": 3,
+          "rank": 8,
           "id": "2026-08-07-8",
           "fp": "83b19ed4016700cf",
           "label": "cas-src CI: wall-clock is max(job); cargo test's fail-fast hides failures",
@@ -1852,7 +1893,7 @@
           "tier": "working"
         },
         {
-          "rank": 4,
+          "rank": 9,
           "id": "2026-08-07-7",
           "fp": "28124ee5220c6840",
           "label": "cas-src release cut: Unreleased is not a reliable inventory",
@@ -1860,7 +1901,7 @@
           "tier": "working"
         },
         {
-          "rank": 5,
+          "rank": 10,
           "id": "2026-08-07-6",
           "fp": "d4befe59535f8e36",
           "label": "Empty-result conflation is a recurring CAS bug class",
@@ -1868,7 +1909,7 @@
           "tier": "working"
         },
         {
-          "rank": 6,
+          "rank": 11,
           "id": "2026-08-07-5",
           "fp": "3f529655aae683a7",
           "label": "CAS nativity check: cloud pull's upsert surface is the native/replica discrimina…",
@@ -1876,7 +1917,7 @@
           "tier": "working"
         },
         {
-          "rank": 7,
+          "rank": 12,
           "id": "2026-08-07-4",
           "fp": "9309305a5e827167",
           "label": "cas-src: canonical_id resolution + clean-env test guard (cas-f699 / cas-43ce)",
@@ -1884,7 +1925,7 @@
           "tier": "working"
         },
         {
-          "rank": 8,
+          "rank": 13,
           "id": "2026-08-07-3",
           "fp": "b5605652fb47503f",
           "label": "Claude Code teammate inbox drain is not a turn",
@@ -1892,7 +1933,7 @@
           "tier": "working"
         },
         {
-          "rank": 9,
+          "rank": 14,
           "id": "2026-08-07-2",
           "fp": "35c1f641d31d149a",
           "label": "cas-src: merge/close ref-agreement rules (origin vs local) — worktree_merge now …",
@@ -1900,7 +1941,7 @@
           "tier": "working"
         },
         {
-          "rank": 10,
+          "rank": 15,
           "id": "2026-08-07-1",
           "fp": "cb804b1bdd788eb8",
           "label": "Destructive-path guards must fail closed — and check the row loop, not just prep…",
@@ -1908,7 +1949,7 @@
           "tier": "working"
         },
         {
-          "rank": 11,
+          "rank": 16,
           "id": "2026-08-06-33",
           "fp": "641231af9a8f4c5e",
           "label": "Session summary 2026-08-06 evening: v2.46.0 released, burn-down v5 epic closed, …",
@@ -1916,7 +1957,7 @@
           "tier": "working"
         },
         {
-          "rank": 12,
+          "rank": 17,
           "id": "2026-08-06-32",
           "fp": "4b4fc79f5b59fdcb",
           "label": "epic_status phantom unmerged counts come from the anchor, not missing branch ref…",
@@ -1924,7 +1965,7 @@
           "tier": "working"
         },
         {
-          "rank": 13,
+          "rank": 18,
           "id": "2026-08-06-31",
           "fp": "bbda4af934f86015",
           "label": "Cross-crate string contracts drift silently; assert the contract, not a substrin…",
@@ -1932,7 +1973,7 @@
           "tier": "working"
         },
         {
-          "rank": 14,
+          "rank": 19,
           "id": "2026-08-06-28",
           "fp": "08e607c9a43b4f7f",
           "label": "cas-src factory spawn base resolution (cas-7587 / GH #122)",
@@ -1940,15 +1981,15 @@
           "tier": "working"
         },
         {
-          "rank": 15,
+          "rank": 20,
           "id": "2026-08-06-26",
-          "fp": "b190b6b8af852b23",
+          "fp": "26669a76ada95575",
           "label": "Gating agent behavior in CAS: MCP tool gates miss harness-native paths",
           "entry_type": "learning",
           "tier": "working"
         },
         {
-          "rank": 16,
+          "rank": 21,
           "id": "2026-08-06-25",
           "fp": "cf289d982a8892d0",
           "label": "PENDING: post v2.44.0 + v2.45.0 release Slack threads (drafts ready, transport w…",
@@ -1956,7 +1997,7 @@
           "tier": "working"
         },
         {
-          "rank": 17,
+          "rank": 22,
           "id": "2026-08-06-24",
           "fp": "4b743e43fee1e806",
           "label": "Prompt-overflow worker death (distinct from Ink crash): terminal on first failur…",
@@ -1964,7 +2005,7 @@
           "tier": "working"
         },
         {
-          "rank": 18,
+          "rank": 23,
           "id": "2026-08-06-22",
           "fp": "ec344bb121fbde5e",
           "label": "2026-08-06 handoff: cas-2dd1 on main @ 5cf566c4, pending epic close + v2.45.0 cu…",
@@ -1972,51 +2013,11 @@
           "tier": "working"
         },
         {
-          "rank": 19,
+          "rank": 24,
           "id": "2026-08-06-20",
           "fp": "b2f3e0c0077b1d01",
           "label": "cas-src builtin flavor drift guard: how it works and how to satisfy it",
           "entry_type": "learning",
-          "tier": "working"
-        },
-        {
-          "rank": 20,
-          "id": "2026-08-06-19",
-          "fp": "df90c3075c9cf908",
-          "label": "cas-src builtin flavor drift: fix by prefix-normalized regeneration, not hand-po…",
-          "entry_type": "learning",
-          "tier": "working"
-        },
-        {
-          "rank": 21,
-          "id": "2026-08-06-17",
-          "fp": "86bc5392bc307440",
-          "label": "SessionStart payload has a 9KB aggregate budget (cas-b114)",
-          "entry_type": "learning",
-          "tier": "working"
-        },
-        {
-          "rank": 22,
-          "id": "2026-08-06-15",
-          "fp": "e75c5d7335561857",
-          "label": "Codex/ChatGPT quota exhausted until 2026-08-08 10:07 — spawn Claude workers",
-          "entry_type": "context",
-          "tier": "working"
-        },
-        {
-          "rank": 23,
-          "id": "2026-08-06-13",
-          "fp": "c74728ddb88479af",
-          "label": "CAS hook coverage must span all Claude config dirs",
-          "entry_type": "learning",
-          "tier": "working"
-        },
-        {
-          "rank": 24,
-          "id": "2026-08-06-12",
-          "fp": "a2dacd80891bc392",
-          "label": "Cross-repo feature requests: file GitHub issues in the target repo (petra-stella…",
-          "entry_type": "context",
           "tier": "working"
         }
       ]
@@ -2028,7 +2029,16 @@
       "status": {
         "state": "ok"
       },
-      "hits": []
+      "hits": [
+        {
+          "rank": 0,
+          "id": "2026-07-30-1",
+          "fp": "a5d97ff77bd026f3",
+          "label": "2026-07-30 harness diary sweep completed",
+          "entry_type": "context",
+          "tier": "cold"
+        }
+      ]
     },
     {
       "id": "tier-archive",
@@ -2981,14 +2991,6 @@
           "label": "Session summary 2026-08-06 evening: v2.46.0 released, burn-down v5 epic closed, …",
           "entry_type": "learning",
           "tier": "working"
-        },
-        {
-          "rank": 4,
-          "id": "2026-06-25-1",
-          "fp": "afb558521ed72378",
-          "label": "Codex workers register then immediately show [stale] — no heartbeat hook",
-          "entry_type": "observation",
-          "tier": "archive"
         }
       ]
     },
@@ -3068,10 +3070,10 @@
         },
         {
           "rank": 3,
-          "id": "2026-08-06-12",
-          "fp": "a2dacd80891bc392",
-          "label": "Cross-repo feature requests: file GitHub issues in the target repo (petra-stella…",
-          "entry_type": "context",
+          "id": "2026-08-07-18",
+          "fp": "4c459174d4d0122a",
+          "label": "Contamination/quarantine token lists must be proper nouns, verified against the …",
+          "entry_type": "learning",
           "tier": "working"
         },
         {
@@ -3084,6 +3086,14 @@
         },
         {
           "rank": 5,
+          "id": "2026-08-06-12",
+          "fp": "a2dacd80891bc392",
+          "label": "Cross-repo feature requests: file GitHub issues in the target repo (petra-stella…",
+          "entry_type": "context",
+          "tier": "working"
+        },
+        {
+          "rank": 6,
           "id": "2026-04-16-1",
           "fp": "d35ffd929b1d84c4",
           "label": "Rocketship-template architectural standards (2026-04-16)",
@@ -3091,7 +3101,7 @@
           "tier": "archive"
         },
         {
-          "rank": 6,
+          "rank": 7,
           "id": "2026-07-21-6",
           "fp": "c738e50944427325",
           "label": "Communication spike scope and provisional SLOs (cas-04a6)",
@@ -3099,7 +3109,7 @@
           "tier": "archive"
         },
         {
-          "rank": 7,
+          "rank": 8,
           "id": "2026-08-04-6",
           "fp": "f4a6c80f0b9f8111",
           "label": "Post Slack notes via Codex when Claude has no Slack connector",
@@ -3107,19 +3117,11 @@
           "tier": "working"
         },
         {
-          "rank": 8,
+          "rank": 9,
           "id": "2026-08-06-13",
           "fp": "c74728ddb88479af",
           "label": "CAS hook coverage must span all Claude config dirs",
           "entry_type": "learning",
-          "tier": "working"
-        },
-        {
-          "rank": 9,
-          "id": "2026-08-06-25",
-          "fp": "cf289d982a8892d0",
-          "label": "PENDING: post v2.44.0 + v2.45.0 release Slack threads (drafts ready, transport w…",
-          "entry_type": "context",
           "tier": "working"
         }
       ]

@@ -62,7 +62,13 @@ jobs:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo nextest run -p cas --no-fail-fast
 
+      # `!cancelled()` so a failure in the step above cannot hide this one's
+      # result. Letting it skip would re-create, one step later, exactly the
+      # under-reporting this job was changed to fix: `cargo test` used to abort
+      # after the first failing test BINARY, so main went red having executed
+      # 4401 of 4594 tests and never said so (GH #142).
       - name: Test (doctests — the part nextest cannot run)
+        if: ${{ !cancelled() }}
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo test -p cas --doc

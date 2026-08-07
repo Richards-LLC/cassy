@@ -243,7 +243,7 @@ pub struct SearchResult {
 
 /// Expected number of fields in the current schema version.
 /// Bump this when adding new fields to trigger automatic index rebuild.
-const EXPECTED_FIELD_COUNT: usize = 15;
+pub(crate) const EXPECTED_FIELD_COUNT: usize = 15;
 
 #[cfg(test)]
 mod tests {

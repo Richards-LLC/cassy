@@ -2661,7 +2661,31 @@ impl CasCore {
                 // vouch for. Non-blocking by design: these are audit facts,
                 // not fabrication claims, and turning them into rejections
                 // would break every close in a non-git checkout.
-                if let Some(note) = receipt.discrepancy_note(req.commit_receipt.as_deref()) {
+                //
+                // cas-8aba: classify the receipt before judging it. After a
+                // MERGE REQUIRED rejection the correct receipt IS the
+                // supervisor's merge commit, which can never equal the
+                // worker's HEAD — reporting that as a divergence trained
+                // everyone to ignore the guard.
+                let provenance = match req.commit_receipt.as_deref() {
+                    Some(claimed) => classify_commit_receipt(
+                        worker_wt,
+                        receipt.head.as_deref(),
+                        claimed,
+                        &resolved_parent_branch,
+                    ),
+                    None => ReceiptProvenance::Unknown,
+                };
+                if let Some(note) = req
+                    .commit_receipt
+                    .as_deref()
+                    .and_then(|claimed| provenance.merge_evidence_note(claimed))
+                {
+                    append_close_decision_note(task_store.as_ref(), &mut task, &note);
+                }
+                if let Some(note) = receipt
+                    .discrepancy_note_with_provenance(req.commit_receipt.as_deref(), &provenance)
+                {
                     append_close_decision_note(task_store.as_ref(), &mut task, &note);
                 }
             }
@@ -4555,6 +4579,31 @@ impl CleanTreeReceipt {
     /// an unavailable check, stray untracked files, and a HEAD that is not
     /// the commit the worker claims to have delivered.
     pub(crate) fn discrepancy_note(&self, claimed_commit: Option<&str>) -> Option<String> {
+        self.discrepancy_note_with_provenance(claimed_commit, &ReceiptProvenance::Unknown)
+    }
+
+    /// As [`Self::discrepancy_note`], but told what the claimed commit
+    /// actually *is* relative to the worker's tip.
+    ///
+    /// cas-8aba: the HEAD-vs-receipt comparison assumed the only honest
+    /// receipt is the worker's own HEAD. That is false for the sanctioned
+    /// merge-then-close cycle: a `MERGE REQUIRED` rejection is resolved by
+    /// the supervisor merging the factory branch, and the worker then
+    /// re-closes with *the merge commit* — which is the definitive delivery
+    /// evidence and, by construction, never equals the worker's HEAD. The
+    /// guard fired on every such close (observed on cas-9d92 and cas-ab75
+    /// within one session), stamping a scary permanent note on correctly
+    /// delivered work. That is cry-wolf erosion of a real check, so the
+    /// merge case is now recognised rather than reported as divergence.
+    ///
+    /// Everything the guard exists for still fires: a receipt that is
+    /// neither the worker's HEAD nor a commit carrying the worker's tip is
+    /// still named, because that is the misattributed-diff case.
+    pub(crate) fn discrepancy_note_with_provenance(
+        &self,
+        claimed_commit: Option<&str>,
+        provenance: &ReceiptProvenance,
+    ) -> Option<String> {
         const MAX_LISTED: usize = 10;
 
         if let Some(reason) = self.unavailable.as_deref() {
@@ -4590,6 +4639,9 @@ impl CleanTreeReceipt {
 
         if let Some(claimed) = claimed_commit.map(str::trim).filter(|c| !c.is_empty()) {
             match self.head.as_deref() {
+                // cas-8aba: the receipt carries this worker's tip and is
+                // integrated — that is delivery evidence, not divergence.
+                Some(_) if provenance.is_merge_of_worker_tip() => {}
                 Some(head) if !commit_ids_match(head, claimed) => {
                     parts.push(format!(
                         "worktree HEAD is {head} but the close claims commit {claimed}"
@@ -4613,6 +4665,139 @@ impl CleanTreeReceipt {
             parts.join("; ")
         ))
     }
+}
+
+/// cas-8aba: what a worker-supplied `commit_receipt` actually is, relative
+/// to that worker's own worktree HEAD.
+///
+/// The close path used to model this as a boolean — the receipt either was
+/// the worker's HEAD or was "a divergence". The sanctioned merge-then-close
+/// cycle is a third thing, and it is the *good* one: after `MERGE REQUIRED`
+/// the supervisor merges the factory branch and the worker re-closes with
+/// the merge commit, which contains the worker's tip and is reachable from
+/// the target branch.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) enum ReceiptProvenance {
+    /// The receipt names an integrated commit that carries the worker's
+    /// tip — the supervisor's merge of this lane.
+    MergeOfWorkerTip {
+        /// The worker's worktree HEAD that this receipt contains.
+        worker_tip: String,
+        /// How the receipt was shown to be integrated: the ref it is
+        /// reachable from, or that it is itself a merge commit.
+        integration: String,
+    },
+    /// Nothing better could be established — the receipt is unresolvable in
+    /// this repo, does not carry the worker's tip, or git could not answer.
+    #[default]
+    Unknown,
+}
+
+impl ReceiptProvenance {
+    pub(crate) fn is_merge_of_worker_tip(&self) -> bool {
+        matches!(self, Self::MergeOfWorkerTip { .. })
+    }
+
+    /// The positive audit fact to record when the receipt is a merge that
+    /// carries the worker's delivery. Recording it (rather than staying
+    /// silent) keeps the close trail explicit about *why* HEAD and the
+    /// receipt legitimately differ.
+    pub(crate) fn merge_evidence_note(&self, claimed_commit: &str) -> Option<String> {
+        match self {
+            Self::MergeOfWorkerTip {
+                worker_tip,
+                integration,
+            } => Some(format!(
+                "CLEAN-TREE RECEIPT: MERGE EVIDENCE (cas-8aba): commit_receipt {claimed_commit} \
+                 is not this worker's HEAD ({worker_tip}) because it is the integrated merge \
+                 that carries it — {integration}. This is the expected shape after a MERGE \
+                 REQUIRED rejection is resolved by a supervisor merge, and is recorded as \
+                 valid delivery evidence rather than a divergence."
+            )),
+            Self::Unknown => None,
+        }
+    }
+}
+
+/// Classify a worker-supplied `commit_receipt` against the worker's own
+/// worktree (cas-8aba).
+///
+/// Returns [`ReceiptProvenance::MergeOfWorkerTip`] only when BOTH hold:
+///   1. the receipt resolves to a real commit that **contains the worker's
+///      HEAD as an ancestor** — i.e. it demonstrably carries the delivered
+///      work; and
+///   2. the receipt is **integrated**: reachable from the task's target
+///      branch (local or `origin/`), or itself a merge commit.
+///
+/// Condition 1 is the load-bearing one: a receipt that does not contain the
+/// worker's tip cannot be that worker's delivery, which is precisely the
+/// misattributed-diff case the guard was built for. Anything unresolvable
+/// (receipt not fetched into this worktree, git unavailable) falls through
+/// to `Unknown`, so the guard keeps its old behaviour rather than failing
+/// open on an unverifiable claim.
+pub(crate) fn classify_commit_receipt(
+    worker_worktree: &std::path::Path,
+    worker_head: Option<&str>,
+    claimed_commit: &str,
+    target_branch: &str,
+) -> ReceiptProvenance {
+    let claimed = claimed_commit.trim();
+    let Some(head) = worker_head.map(str::trim).filter(|h| !h.is_empty()) else {
+        return ReceiptProvenance::Unknown;
+    };
+    if claimed.is_empty() || commit_ids_match(head, claimed) {
+        // Identical: the plain HEAD-match path already handles this.
+        return ReceiptProvenance::Unknown;
+    }
+    // Resolve the receipt in the worker's own object database. A receipt the
+    // worker never fetched cannot be verified here, and an unverifiable
+    // claim must NOT be upgraded to evidence.
+    let Some(resolved) = resolve_branch_sha(worker_worktree, &format!("{claimed}^{{commit}}"))
+    else {
+        return ReceiptProvenance::Unknown;
+    };
+    // 1. Does the receipt actually carry this worker's work?
+    if !git_commit_is_ancestor(worker_worktree, head, &resolved) {
+        return ReceiptProvenance::Unknown;
+    }
+    // 2. Is it integrated? Prefer naming the target ref it landed on.
+    let target = target_branch.trim();
+    let candidates = [target.to_string(), format!("origin/{target}")];
+    for candidate in candidates.iter().filter(|c| !c.trim().is_empty()) {
+        if resolve_branch_sha(worker_worktree, candidate).is_some()
+            && git_commit_is_ancestor(worker_worktree, &resolved, candidate)
+        {
+            return ReceiptProvenance::MergeOfWorkerTip {
+                worker_tip: head.to_string(),
+                integration: format!("it carries {head} and is reachable from {candidate}"),
+            };
+        }
+    }
+    if git_commit_parent_count(worker_worktree, &resolved) >= 2 {
+        return ReceiptProvenance::MergeOfWorkerTip {
+            worker_tip: head.to_string(),
+            integration: format!("it is a merge commit carrying {head}"),
+        };
+    }
+    ReceiptProvenance::Unknown
+}
+
+/// Number of parents of `commit`, or 0 when git cannot answer.
+fn git_commit_parent_count(repo_path: &std::path::Path, commit: &str) -> usize {
+    let out = match std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["rev-list", "--parents", "-n", "1", commit])
+        .output()
+    {
+        Ok(out) if out.status.success() => out,
+        _ => return 0,
+    };
+    // Output is "<commit> <parent1> <parent2> ..."
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .count()
+        .saturating_sub(1)
 }
 
 /// Two commit ids refer to the same commit when one is a prefix of the
@@ -9286,6 +9471,179 @@ mod additive_only_tests {
         // The exact SHA, and an abbreviation of it, both match.
         assert_eq!(receipt.discrepancy_note(Some(&head)), None);
         assert_eq!(receipt.discrepancy_note(Some(&head[..8])), None);
+    }
+
+    // --- cas-8aba: merge-then-close receipts are evidence, not divergence -
+
+    /// Build the exact shape the guard used to false-alarm on: a worker
+    /// branch with a commit, merged into `main` by the supervisor with a
+    /// real merge commit. Returns (repo, worker_tip, merge_sha).
+    fn init_repo_with_supervisor_merge() -> (tempfile::TempDir, String, String) {
+        let dir = init_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "-b", "factory/worker"]);
+        std::fs::write(p.join("delivered.txt"), "work\n").unwrap();
+        git(p, &["add", "delivered.txt"]);
+        git(p, &["commit", "-q", "-m", "worker delivery"]);
+        let worker_tip = resolve_branch_sha(p, "HEAD").expect("worker tip");
+
+        git(p, &["checkout", "-q", "main"]);
+        // --no-ff guarantees a real merge commit with two parents, which is
+        // what a supervisor's `worktree_merge` produces.
+        git(
+            p,
+            &["merge", "-q", "--no-ff", "-m", "Merge factory/worker", "factory/worker"],
+        );
+        let merge_sha = resolve_branch_sha(p, "HEAD").expect("merge sha");
+
+        // Put the worker back on their own tip: this is the real situation —
+        // the worker's worktree HEAD is the factory tip, never the merge.
+        git(p, &["checkout", "-q", "factory/worker"]);
+        (dir, worker_tip, merge_sha)
+    }
+
+    /// AC(1): the supervisor's merge commit, supplied as `commit_receipt`
+    /// after a MERGE REQUIRED rejection, must NOT be reported as a
+    /// discrepancy — it is the definitive delivery evidence.
+    ///
+    /// This is the cas-9d92 / cas-ab75 false alarm, reproduced.
+    #[test]
+    fn merge_receipt_carrying_worker_tip_is_evidence_not_discrepancy() {
+        let (repo, worker_tip, merge_sha) = init_repo_with_supervisor_merge();
+        let receipt = clean_tree_receipt(repo.path());
+        assert_eq!(
+            receipt.head.as_deref(),
+            Some(worker_tip.as_str()),
+            "the worker's HEAD is their factory tip, not the merge"
+        );
+        assert_ne!(
+            worker_tip, merge_sha,
+            "by construction the merge is never the worker's HEAD"
+        );
+
+        let provenance =
+            classify_commit_receipt(repo.path(), Some(&worker_tip), &merge_sha, "main");
+        assert!(
+            provenance.is_merge_of_worker_tip(),
+            "a merge on the target branch carrying the worker's tip is evidence: {provenance:?}"
+        );
+
+        assert_eq!(
+            receipt.discrepancy_note_with_provenance(Some(&merge_sha), &provenance),
+            None,
+            "the merge-then-close cycle must not stamp a discrepancy note"
+        );
+
+        // The positive fact is recorded instead of silence.
+        let note = provenance
+            .merge_evidence_note(&merge_sha)
+            .expect("merge evidence must be named");
+        assert!(note.contains("MERGE EVIDENCE"), "{note}");
+        assert!(note.contains("cas-8aba"), "{note}");
+        assert!(note.contains(&worker_tip), "note must name the tip: {note}");
+
+        // An abbreviated receipt is the same fact.
+        let abbrev = classify_commit_receipt(
+            repo.path(),
+            Some(&worker_tip),
+            &merge_sha[..8],
+            "main",
+        );
+        assert!(abbrev.is_merge_of_worker_tip(), "{abbrev:?}");
+    }
+
+    /// AC(2): the guard still fires for the case it exists for — a receipt
+    /// that is neither the worker's HEAD nor a commit carrying their work.
+    #[test]
+    fn receipt_not_carrying_worker_tip_still_reports_discrepancy() {
+        let (repo, worker_tip, _merge) = init_repo_with_supervisor_merge();
+        let receipt = clean_tree_receipt(repo.path());
+
+        // A commit that exists but predates (does not contain) the worker's
+        // delivery — the misattributed-diff shape.
+        let unrelated =
+            resolve_branch_sha(repo.path(), "factory/worker~1").expect("parent commit");
+        let provenance =
+            classify_commit_receipt(repo.path(), Some(&worker_tip), &unrelated, "main");
+        assert_eq!(
+            provenance,
+            ReceiptProvenance::Unknown,
+            "a commit that does not carry the worker's tip is never evidence"
+        );
+        let note = receipt
+            .discrepancy_note_with_provenance(Some(&unrelated), &provenance)
+            .expect("a receipt that drops the worker's work must still be named");
+        assert!(note.contains("CLEAN-TREE RECEIPT DISCREPANCY"), "{note}");
+
+        // A SHA that does not resolve at all cannot be upgraded to evidence.
+        let bogus = "0".repeat(worker_tip.len());
+        let bogus_provenance =
+            classify_commit_receipt(repo.path(), Some(&worker_tip), &bogus, "main");
+        assert_eq!(bogus_provenance, ReceiptProvenance::Unknown);
+        assert!(
+            receipt
+                .discrepancy_note_with_provenance(Some(&bogus), &bogus_provenance)
+                .is_some(),
+            "an unresolvable receipt must keep firing the guard"
+        );
+    }
+
+    /// The cas-9d92 shape, which is NOT the cas-ab75 false alarm despite
+    /// being filed as the same class: there the receipt was the worker's own
+    /// (already-merged) branch tip and their HEAD had moved *past* it with a
+    /// correction commit that was not yet on main. The receipt therefore does
+    /// not carry HEAD, and the note is a TRUE positive — the worker really
+    /// did have delivered-looking work beyond what the receipt claimed.
+    /// Suppressing it would hide exactly what the guard is for.
+    #[test]
+    fn receipt_behind_worker_head_keeps_firing() {
+        let dir = init_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "-b", "factory/worker"]);
+        std::fs::write(p.join("delivered.txt"), "work\n").unwrap();
+        git(p, &["add", "delivered.txt"]);
+        git(p, &["commit", "-q", "-m", "delivered work"]);
+        let delivered = resolve_branch_sha(p, "HEAD").expect("delivered tip");
+
+        // The worker keeps going after the receipt was earned.
+        std::fs::write(p.join("correction.txt"), "later fix\n").unwrap();
+        git(p, &["add", "correction.txt"]);
+        git(p, &["commit", "-q", "-m", "correction after delivery"]);
+        let head = resolve_branch_sha(p, "HEAD").expect("head");
+
+        let receipt = clean_tree_receipt(p);
+        let provenance = classify_commit_receipt(p, Some(&head), &delivered, "main");
+        assert_eq!(
+            provenance,
+            ReceiptProvenance::Unknown,
+            "a receipt BEHIND the worker's HEAD leaves later commits unaccounted for"
+        );
+        let note = receipt
+            .discrepancy_note_with_provenance(Some(&delivered), &provenance)
+            .expect("the un-delivered later commit must still be named");
+        assert!(note.contains("CLEAN-TREE RECEIPT DISCREPANCY"), "{note}");
+    }
+
+    /// Untracked-path reporting is independent of the merge-evidence path:
+    /// recognising the receipt must not swallow the other audit facts.
+    #[test]
+    fn merge_evidence_does_not_suppress_untracked_reporting() {
+        let (repo, worker_tip, merge_sha) = init_repo_with_supervisor_merge();
+        std::fs::write(repo.path().join("scratch.log"), "noise\n").unwrap();
+
+        let receipt = clean_tree_receipt(repo.path());
+        let provenance =
+            classify_commit_receipt(repo.path(), Some(&worker_tip), &merge_sha, "main");
+        assert!(provenance.is_merge_of_worker_tip());
+
+        let note = receipt
+            .discrepancy_note_with_provenance(Some(&merge_sha), &provenance)
+            .expect("untracked paths must still be reported");
+        assert!(note.contains("scratch.log"), "{note}");
+        assert!(
+            !note.contains("but the close claims commit"),
+            "the HEAD/receipt mismatch must be gone, only untracked remains: {note}"
+        );
     }
 
     /// `commit_receipt` accepts unambiguous abbreviations, so prefix

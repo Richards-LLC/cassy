@@ -329,6 +329,38 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-servers/SKILL.md",
         content: include_str!("builtins/skills/cas-servers/SKILL.md"),
     },
+    BuiltinFile {
+        path: "skills/cas-html-reports/SKILL.md",
+        content: include_str!("builtins/skills/cas-html-reports/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/report-types.md",
+        content: include_str!("builtins/skills/cas-html-reports/references/report-types.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/presentation-rules.md",
+        content: include_str!("builtins/skills/cas-html-reports/references/presentation-rules.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/technical-contract.md",
+        content: include_str!("builtins/skills/cas-html-reports/references/technical-contract.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/review-checklist.md",
+        content: include_str!("builtins/skills/cas-html-reports/references/review-checklist.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/sources.md",
+        content: include_str!("builtins/skills/cas-html-reports/references/sources.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/engineering-investigation.html",
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/engineering-investigation.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/financial-quarterly-brief.html",
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/financial-quarterly-brief.html"),
+    },
     // design-spec skill (GH #64): generates DESIGN.md — the UI/UX source of
     // truth (normative token frontmatter + 8 sections). Design counterpart to
     // codemap (structure) and project-overview (domain).
@@ -624,6 +656,38 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-servers/SKILL.md",
         content: include_str!("builtins/codex/skills/cas-servers/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/SKILL.md",
+        content: include_str!("builtins/codex/skills/cas-html-reports/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/report-types.md",
+        content: include_str!("builtins/codex/skills/cas-html-reports/references/report-types.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/presentation-rules.md",
+        content: include_str!("builtins/codex/skills/cas-html-reports/references/presentation-rules.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/technical-contract.md",
+        content: include_str!("builtins/codex/skills/cas-html-reports/references/technical-contract.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/review-checklist.md",
+        content: include_str!("builtins/codex/skills/cas-html-reports/references/review-checklist.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/sources.md",
+        content: include_str!("builtins/codex/skills/cas-html-reports/references/sources.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/engineering-investigation.html",
+        content: include_str!("builtins/codex/skills/cas-html-reports/references/examples/engineering-investigation.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/financial-quarterly-brief.html",
+        content: include_str!("builtins/codex/skills/cas-html-reports/references/examples/financial-quarterly-brief.html"),
     },
     // design-spec skill (GH #64) — codex mirror.
     BuiltinFile {
@@ -951,6 +1015,38 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-servers/SKILL.md",
         content: include_str!("builtins/grok/skills/cas-servers/SKILL.md"),
     },
+    BuiltinFile {
+        path: "skills/cas-html-reports/SKILL.md",
+        content: include_str!("builtins/grok/skills/cas-html-reports/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/report-types.md",
+        content: include_str!("builtins/grok/skills/cas-html-reports/references/report-types.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/presentation-rules.md",
+        content: include_str!("builtins/grok/skills/cas-html-reports/references/presentation-rules.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/technical-contract.md",
+        content: include_str!("builtins/grok/skills/cas-html-reports/references/technical-contract.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/review-checklist.md",
+        content: include_str!("builtins/grok/skills/cas-html-reports/references/review-checklist.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/sources.md",
+        content: include_str!("builtins/grok/skills/cas-html-reports/references/sources.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/engineering-investigation.html",
+        content: include_str!("builtins/grok/skills/cas-html-reports/references/examples/engineering-investigation.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/financial-quarterly-brief.html",
+        content: include_str!("builtins/grok/skills/cas-html-reports/references/examples/financial-quarterly-brief.html"),
+    },
     // design-spec skill (GH #64) — grok twin.
     BuiltinFile {
         path: "skills/design-spec/SKILL.md",
@@ -1178,6 +1274,17 @@ pub const GENERAL_PARITY_CAPABILITIES: &[RequiredCapability] = &[
         claude: Some("skills/cas-github-issues"),
         codex: Some("skills/cas-github-issues"),
         grok: Some("skills/cas-github-issues"),
+        note: "",
+    },
+    RequiredCapability {
+        // cas-b176: report deliverables ship as self-contained HTML beside their
+        // markdown source. Any harness can be the one writing the report, so all
+        // three own a twin. The skill makes no CAS MCP tool calls, so the twins
+        // are byte-identical to the claude source.
+        id: "cas-html-reports",
+        claude: Some("skills/cas-html-reports"),
+        codex: Some("skills/cas-html-reports"),
+        grok: Some("skills/cas-html-reports"),
         note: "",
     },
     RequiredCapability {
@@ -2731,6 +2838,147 @@ This is the body content."#;
                 "{label} cas-servers SKILL.md must match the claude copy except for the \
                  harness tool prefix — the guidance itself must not drift per harness"
             );
+        }
+    }
+
+    /// cas-b176: the cas-html-reports skill must ship for every harness with its
+    /// full reference set. The load-bearing content is the two-axis taxonomy
+    /// (type x audience), the invariant technical contract, the judgment rules
+    /// that keep chat answers out of HTML, and the two worked examples. The
+    /// examples are also asserted to be genuinely self-contained — an example
+    /// that reaches for a CDN teaches the opposite of the contract it documents.
+    #[test]
+    fn test_builtin_skills_contains_cas_html_reports() {
+        const FILES: &[&str] = &[
+            "skills/cas-html-reports/SKILL.md",
+            "skills/cas-html-reports/references/report-types.md",
+            "skills/cas-html-reports/references/presentation-rules.md",
+            "skills/cas-html-reports/references/technical-contract.md",
+            "skills/cas-html-reports/references/review-checklist.md",
+            "skills/cas-html-reports/references/sources.md",
+            "skills/cas-html-reports/references/examples/engineering-investigation.html",
+            "skills/cas-html-reports/references/examples/financial-quarterly-brief.html",
+        ];
+
+        let mut claude_bodies: Vec<(&str, &str)> = Vec::new();
+
+        for (label, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ] {
+            let get = |path: &str| -> &'static str {
+                catalog
+                    .iter()
+                    .find(|b| b.path == path)
+                    .unwrap_or_else(|| panic!("{path} missing from {label} catalog"))
+                    .content
+            };
+
+            let skill = get(FILES[0]);
+            assert!(
+                is_managed_by_cas(skill),
+                "{label} cas-html-reports SKILL.md must be managed_by: cas"
+            );
+            for required in [
+                "name: cas-html-reports",
+                // The core stance the whole skill hangs off.
+                "Markdown is the source of truth",
+                // Trigger + the judgment rule that prevents HTML overuse.
+                "What counts as a report",
+                "When HTML is NOT required",
+                "Task notes",
+                // The invariant contract, summarized on the front page.
+                "No CDN",
+                "progressive enhancement",
+                "Print-ready",
+                "Provenance per figure",
+                // Both worked examples must be advertised, not just shipped.
+                "engineering-investigation.html",
+                "financial-quarterly-brief.html",
+            ] {
+                assert!(
+                    skill.contains(required),
+                    "{label} cas-html-reports SKILL.md missing required marker: {required:?}"
+                );
+            }
+
+            // The two-axis taxonomy is the acceptance surface: every report type
+            // AND the audience axis must be reachable from one reference file.
+            let types = get(FILES[1]);
+            for required in [
+                "Executive",
+                "Practitioner",
+                "External",
+                "Investigation / diagnostic",
+                "Metrics / mining analysis",
+                "Decision brief",
+                "Comparison / benchmark",
+                "Incident / post-mortem",
+                "Status / release summary",
+                "Financial report",
+                "Executive / C-suite brief",
+                "Board / stakeholder update",
+                "Client-facing deliverable",
+                "Research / market analysis",
+                // Financial encodings (IBCS-derived) must be spelled out, not implied.
+                "Actual** = solid fill",
+                "outlined",
+                "hatched",
+                // Executive ordering rule.
+                "methodology is present but LAST",
+            ] {
+                assert!(
+                    types.contains(required),
+                    "{label} cas-html-reports report-types.md missing marker: {required:?}"
+                );
+            }
+
+            // Attribution-only citation of all three research sources.
+            let sources = get(FILES[5]);
+            for required in [
+                "html-artifact-best-practices",
+                "IBCS",
+                "pi-skill-html-report",
+                "attribution only",
+            ] {
+                assert!(
+                    sources.contains(required),
+                    "{label} cas-html-reports sources.md missing marker: {required:?}"
+                );
+            }
+
+            // The examples must practice what the contract preaches.
+            for example in &FILES[6..] {
+                let html = get(example);
+                for banned in ["https://", "http://", "@import", "<img", "cdn."] {
+                    assert!(
+                        !html.to_lowercase().contains(banned),
+                        "{label} {example} must be self-contained (found {banned:?})"
+                    );
+                }
+                for required in ["<!DOCTYPE html>", "@media print", "role=\"img\"", "<table"] {
+                    assert!(
+                        html.contains(required),
+                        "{label} {example} missing required element: {required:?}"
+                    );
+                }
+            }
+
+            // The skill makes no CAS MCP tool calls, so the twins are held
+            // byte-identical — no per-harness prefix to swap.
+            if label == "claude" {
+                claude_bodies = FILES.iter().map(|f| (*f, get(f))).collect();
+            } else {
+                for (path, claude) in &claude_bodies {
+                    assert_eq!(
+                        get(path),
+                        *claude,
+                        "{label} {path} must be byte-identical to the claude copy \
+                         (cas-html-reports is harness-neutral)"
+                    );
+                }
+            }
         }
     }
 

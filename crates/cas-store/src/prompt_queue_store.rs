@@ -46,6 +46,18 @@ pub const PROMPT_QUEUE_STALE_TTL_SECS: i64 = 24 * 60 * 60;
 /// Rows the daemon terminally quarantined are not deliverable content.
 const TERMINAL_NON_DELIVERY_STAGES: &str = "('dropped', 'suppressed', 'abandoned')";
 
+/// `last_pending_detail` written when a recipient's own drain consumes a row.
+/// Accurate for the inbox-poll path, which does not ack: the row really is
+/// waiting on the recipient's `message_ack`.
+const DRAIN_DELIVERED_DETAIL: &str = "consumed by recipient inbox poll";
+
+/// `last_pending_detail` written when the turn-start hook surfaced and acked a
+/// row (cas-aac2). The raw `prompt_queue` table is what the delivery-mining
+/// analysis reads, so a hook-acked row must not describe itself as an
+/// inbox-poll consumption still awaiting an ack it already holds.
+const HOOK_SURFACED_CONFIRMED_DETAIL: &str =
+    "acked by turn-start hook surfacing into the recipient's prompt";
+
 /// Daemon selection must skip rows the addressed recipient already consumed
 /// (cas-d047, GH #70).
 ///
@@ -1892,6 +1904,20 @@ impl<'a> AtomicStampOpts<'a> {
         }
     }
 
+    /// Not pending on anything, but with a detail recording *why* the stage
+    /// moved (cas-aac2). Reason stays `None` so no reader mistakes an
+    /// already-settled row for one still waiting on something.
+    fn detail(detail: &'a str) -> Self {
+        Self {
+            reason: None,
+            detail: Some(detail),
+            set_processed: false,
+            broadcast_attempted: None,
+            broadcast_succeeded: None,
+            broadcast_failed: None,
+        }
+    }
+
     fn clear_reason() -> Self {
         Self {
             reason: None,
@@ -3713,7 +3739,7 @@ impl SqlitePromptQueueStore {
                         DeliveryStage::Delivered,
                         AtomicStampOpts::reason(
                             PendingReason::AwaitingAck,
-                            Some("consumed by recipient inbox poll"),
+                            Some(DRAIN_DELIVERED_DETAIL),
                         ),
                     ) {
                         // A row in a terminal non-delivery stage cannot advance
@@ -3724,6 +3750,32 @@ impl SqlitePromptQueueStore {
                             prompt_id = prompt.id,
                             %error,
                             "cas-d047: could not stamp drained prompt as delivered"
+                        );
+                        continue;
+                    }
+
+                    // cas-aac2: the hook path acked this row a few lines up, so
+                    // stopping at Delivered/awaiting_ack left the raw row saying
+                    // it was waiting for an ack it already holds, and naming the
+                    // inbox poll as the source of a hook surfacing. Raise it to
+                    // Confirmed with an accurate detail. The Delivered stamp
+                    // above still runs first, so transport_delivered_at,
+                    // processed_at and the per-recipient transport receipt
+                    // (cas-ac7e) are written exactly as before. The inbox-poll
+                    // path is untouched: it does not ack, so awaiting_ack is a
+                    // true statement about it.
+                    if source == SurfacingSource::HookSurfaced
+                        && let Err(error) = Self::atomic_stage_stamp_in_tx(
+                            &tx,
+                            prompt.id,
+                            DeliveryStage::Confirmed,
+                            AtomicStampOpts::detail(HOOK_SURFACED_CONFIRMED_DETAIL),
+                        )
+                    {
+                        tracing::debug!(
+                            prompt_id = prompt.id,
+                            %error,
+                            "cas-aac2: could not stamp hook-surfaced prompt as confirmed"
                         );
                     }
                 }
@@ -7792,6 +7844,224 @@ mod tests {
             .surface_unseen_for_recipient("worker-b", Some("session"), 10)
             .unwrap();
         assert_eq!(peer.len(), 1, "a peer must still receive the broadcast");
+    }
+}
+
+/// cas-aac2: the raw `prompt_queue` row a hook surfacing leaves behind is what
+/// the delivery-mining analysis reads, so it must describe what actually
+/// happened. Before this fix the hook path acked the row and then stamped
+/// `delivered` / `awaiting_ack` / "consumed by recipient inbox poll" over it —
+/// a row waiting for an ack it already held, crediting the wrong source.
+#[cfg(test)]
+mod cas_aac2_hook_surfaced_stamp_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn create_test_store() -> (TempDir, SqlitePromptQueueStore) {
+        let temp = TempDir::new().unwrap();
+        let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        (temp, store)
+    }
+
+    struct RawRow {
+        highest_stage: Option<String>,
+        pending_reason: Option<String>,
+        pending_detail: Option<String>,
+        acked_at: Option<String>,
+        acked_via: Option<String>,
+        transport_delivered_at: Option<String>,
+        processed_at: Option<String>,
+    }
+
+    /// Read the columns the mining scripts read, not the report's derived view.
+    fn raw_row(store: &SqlitePromptQueueStore, id: i64) -> RawRow {
+        let conn = store.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT highest_stage, last_pending_reason, last_pending_detail,
+                    acked_at, acked_via, transport_delivered_at, processed_at
+             FROM prompt_queue WHERE id = ?",
+            params![id],
+            |row| {
+                Ok(RawRow {
+                    highest_stage: row.get(0)?,
+                    pending_reason: row.get(1)?,
+                    pending_detail: row.get(2)?,
+                    acked_at: row.get(3)?,
+                    acked_via: row.get(4)?,
+                    transport_delivered_at: row.get(5)?,
+                    processed_at: row.get(6)?,
+                })
+            },
+        )
+        .unwrap()
+    }
+
+    /// AC1: a hook-acked row ends at `confirmed`, with a detail naming hook
+    /// surfacing and no lingering `awaiting_ack`.
+    #[test]
+    fn a_hook_surfaced_row_ends_at_confirmed_naming_the_hook() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_with_session("supervisor", "worker-a", "work", "session")
+            .unwrap();
+
+        store
+            .surface_unseen_for_recipient("worker-a", Some("session"), 10)
+            .unwrap();
+
+        let raw = raw_row(&store, id);
+        assert_eq!(
+            raw.acked_via.as_deref(),
+            Some("hook_surfaced"),
+            "precondition: the hook path acked the row"
+        );
+        assert!(raw.acked_at.is_some());
+        assert_eq!(
+            raw.highest_stage.as_deref(),
+            Some(DeliveryStage::Confirmed.as_str()),
+            "an acked row must reach Confirmed in the raw table, not stop at delivered"
+        );
+        assert_eq!(
+            raw.pending_reason, None,
+            "a confirmed row is not pending on anything; awaiting_ack was the misleading state"
+        );
+        let detail = raw.pending_detail.unwrap_or_default();
+        assert!(
+            detail.contains("hook surfacing"),
+            "the detail must name hook surfacing: {detail:?}"
+        );
+        assert!(
+            !detail.contains("inbox poll"),
+            "the detail must not credit the inbox poll for a hook surfacing: {detail:?}"
+        );
+    }
+
+    /// The Confirmed stamp rides ON TOP of the cas-d047 Delivered stamp, so the
+    /// transport bookkeeping that keeps a drained row out of the pending set is
+    /// still written — including the cas-ac7e per-recipient transport receipt.
+    #[test]
+    fn confirming_preserves_the_transport_bookkeeping() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_with_session("supervisor", "worker-a", "work", "session")
+            .unwrap();
+        store
+            .surface_unseen_for_recipient("worker-a", Some("session"), 10)
+            .unwrap();
+
+        let raw = raw_row(&store, id);
+        assert!(
+            raw.transport_delivered_at.is_some(),
+            "transport_delivered_at must still be stamped"
+        );
+        assert!(
+            raw.processed_at.is_some(),
+            "processed_at must still be stamped or the daemon can re-type the row"
+        );
+
+        let report = store.message_delivery_report(id).unwrap().unwrap();
+        assert!(
+            report.recipient_transport_at.is_some(),
+            "the cas-ac7e per-recipient transport receipt must survive"
+        );
+    }
+
+    /// AC2: the inbox-poll path is untouched. It does not ack, so
+    /// `delivered` / `awaiting_ack` / "inbox poll" remains the true statement.
+    #[test]
+    fn the_inbox_poll_path_still_stamps_delivered_awaiting_ack() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_with_session("supervisor", "worker-a", "work", "session")
+            .unwrap();
+
+        store
+            .poll_unseen_for_recipient("worker-a", Some("session"), 10)
+            .unwrap();
+
+        let raw = raw_row(&store, id);
+        assert_eq!(raw.acked_at, None, "the poll path must not ack");
+        assert_eq!(
+            raw.highest_stage.as_deref(),
+            Some(DeliveryStage::Delivered.as_str())
+        );
+        assert_eq!(
+            raw.pending_reason.as_deref(),
+            Some(PendingReason::AwaitingAck.as_str())
+        );
+        assert_eq!(
+            raw.pending_detail.as_deref(),
+            Some(DRAIN_DELIVERED_DETAIL),
+            "the inbox-poll detail is unchanged"
+        );
+    }
+
+    /// A broadcast row is acked per recipient, not per row, so one worker's
+    /// turn must not confirm it — the Confirmed stamp inherits that exclusion.
+    #[test]
+    fn surfacing_a_broadcast_does_not_confirm_the_row() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_with_session("supervisor", "all_workers", "stand down", "session")
+            .unwrap();
+
+        store
+            .surface_unseen_for_recipient("worker-a", Some("session"), 10)
+            .unwrap();
+
+        let raw = raw_row(&store, id);
+        assert_eq!(raw.acked_at, None);
+        assert_ne!(
+            raw.highest_stage.as_deref(),
+            Some(DeliveryStage::Confirmed.as_str()),
+            "one recipient's turn must not confirm a broadcast for its peers"
+        );
+    }
+
+    /// AC3: no delivery decision moves. The report already derived Confirmed
+    /// from `acked_at` at read time, and every `highest_stage IS NOT 'confirmed'`
+    /// predicate conjoins `acked_at IS NULL` — so the row was already excluded
+    /// from the unacked set before this fix and still is after it.
+    #[test]
+    fn the_read_time_derivation_stays_authoritative() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue_with_session("supervisor", "worker-a", "work", "session")
+            .unwrap();
+        store
+            .surface_unseen_for_recipient("worker-a", Some("session"), 10)
+            .unwrap();
+
+        let report = store.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(
+            report.stage,
+            DeliveryStage::Confirmed,
+            "the report reported Confirmed before this fix and must still"
+        );
+        // One honest behaviour change, and the only one: the report derives
+        // pending_reason from the STORED stage (before the acked_at override),
+        // so a hook-acked row used to report `awaiting_ack` alongside
+        // stage=confirmed. It now reports nothing pending, which is what the
+        // stage always claimed. No delivery decision reads this field.
+        assert_eq!(report.pending_reason, None);
+        assert_eq!(report.confirmation_source, ConfirmationSource::HookSurfaced);
+
+        let unacked: i64 = {
+            let conn = store.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM prompt_queue
+                  WHERE acked_at IS NULL AND highest_stage IS NOT 'confirmed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            unacked, 0,
+            "the acked_at conjunction already excluded this row; the stage column only \
+             ever agreed with it late"
+        );
     }
 }
 

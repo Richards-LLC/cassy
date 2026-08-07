@@ -474,8 +474,22 @@ impl TeamsManager {
     /// actually fires for the tools that reach the pipeline, and both of them
     /// bypass CAS MCP entirely. They must NOT be auto-approved — they are
     /// intercept-only, exactly like `SendMessage`.
-    fn factory_pre_tool_intercept_list() -> &'static [&'static str] {
-        &["SendMessage", "AskUserQuestion", "Skill", "Workflow"]
+    /// `Agent` is here for cas-62b0 (GH #152): the review gate's cost lives in
+    /// the persona fan-out, and a worker that spawns those personas itself
+    /// reaches the pipeline without touching `Skill` or `Workflow`. `Agent` is
+    /// the current spelling of that tool and appeared in no matcher CAS
+    /// generated, so the fan-out had no seam at all. It is intercept-only for
+    /// exactly one purpose — `pre_tool.rs` refuses a review dispatch and then
+    /// returns no decision for every other `Agent` call, so adding it here does
+    /// not switch on the other `Task | "Agent"` branches in that handler.
+    pub(crate) fn factory_pre_tool_intercept_list() -> &'static [&'static str] {
+        &[
+            "SendMessage",
+            "AskUserQuestion",
+            "Skill",
+            "Workflow",
+            "Agent",
+        ]
     }
 
     /// `hooks` block for per-role settings files. Wires `PreToolUse` (belt
@@ -518,6 +532,28 @@ impl TeamsManager {
                         {
                             "type": "command",
                             "command": "cas hook PermissionRequest",
+                            "timeout": 2000
+                        }
+                    ]
+                }
+            ],
+            // cas-7a01 (GH #155): the turn-start seam. Without this event a
+            // factory agent fires only PreToolUse and PermissionRequest, so
+            // the inbox-surfacing handler in
+            // `hooks::handlers::handle_user_prompt_submit` could be written
+            // and still never run for the exact population that needed it —
+            // the workers whose messages were being silently stranded.
+            //
+            // Deliberately the ONLY event added here. `cli/hook/config_gen.rs`
+            // installs fourteen for non-factory sessions; auditing that
+            // difference is separate work, and widening this block further
+            // would change factory behaviour well beyond the delivery bug.
+            "UserPromptSubmit": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "cas hook UserPromptSubmit",
                             "timeout": 2000
                         }
                     ]
@@ -1862,7 +1898,15 @@ mod tests {
         // cas-bcfb: `Skill`/`Workflow` must reach the hook (review dispatch
         // gate) but must never be pre-approved, or the gate's deny would race
         // an allow already granted by the permissions list.
-        for tool in ["SendMessage", "AskUserQuestion", "Skill", "Workflow"] {
+        // cas-62b0: `Agent` joins them — it is intercepted only so the review
+        // gate can see a hand-spawned persona fan-out, never pre-approved.
+        for tool in [
+            "SendMessage",
+            "AskUserQuestion",
+            "Skill",
+            "Workflow",
+            "Agent",
+        ] {
             assert!(
                 !names.contains(&tool),
                 "worker allowlist must not auto-allow intercept-only tool {tool}: {names:?}"
@@ -1925,6 +1969,9 @@ mod tests {
                 // cas-bcfb: without these the review dispatch gate never runs.
                 "Skill",
                 "Workflow",
+                // cas-62b0 (GH #152): and without this it never sees the
+                // persona fan-out, which is where the tokens actually go.
+                "Agent",
             ] {
                 assert!(
                     matcher.contains(tool),
@@ -3422,5 +3469,51 @@ mod tests {
             .args(["worktree", "remove", "--force", &wt_path.to_string_lossy()])
             .current_dir(repo)
             .output();
+    }
+
+    // ---- cas-7a01 (GH #155): the turn-start hook must be installed ----
+
+    /// A handler that never fires is not a fix. Factory settings installed
+    /// exactly two events (`PreToolUse`, `PermissionRequest`), so the inbox
+    /// surfacing added at `UserPromptSubmit` would have been dead code for the
+    /// very population it exists to serve.
+    #[test]
+    fn factory_settings_wire_the_turn_start_hook_for_both_roles() {
+        for (role, body) in [
+            ("worker", TeamsManager::worker_settings_contents()),
+            ("supervisor", TeamsManager::supervisor_settings_contents()),
+        ] {
+            let entries = body["hooks"]["UserPromptSubmit"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{role} settings install no UserPromptSubmit hook"));
+            let command = entries[0]["hooks"][0]["command"]
+                .as_str()
+                .expect("hook entry must carry a shell command");
+            assert_eq!(
+                command, "cas hook UserPromptSubmit",
+                "{role}: turn-start hook must dispatch to the cas handler"
+            );
+        }
+    }
+
+    /// Scope guard from the supervisor's ruling: extend the factory block
+    /// minimally. `cli/hook/config_gen.rs` installs fourteen events; auditing
+    /// that difference is separate work, and silently widening this block
+    /// changes factory behaviour far beyond the delivery bug.
+    #[test]
+    fn the_factory_hooks_block_gains_only_the_turn_start_event() {
+        let body = TeamsManager::worker_settings_contents();
+        let mut events: Vec<&str> = body["hooks"]
+            .as_object()
+            .expect("hooks block is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        events.sort_unstable();
+        assert_eq!(
+            events,
+            vec!["PermissionRequest", "PreToolUse", "UserPromptSubmit"],
+            "the factory hooks block must not drift beyond the three wired events"
+        );
     }
 }

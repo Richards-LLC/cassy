@@ -8556,6 +8556,46 @@ fn format_review_execution_unreported(task_id: &str, supervisor_owned: bool) -> 
 }
 
 fn format_code_review_required(supervisor_owned: bool) -> String {
+    // cas-62b0 (GH #152): a factory worker under supervisor-owned review must
+    // never be told to produce this envelope.
+    //
+    // Before this fix, `supervisor_owned` only swapped the *mode* argument in
+    // step 1 — autofix became interactive — while steps 1-3 still instructed
+    // the worker to run the persona pipeline and return the envelope. That is
+    // the trap the incident reporter named in one line: "a worker who follows
+    // your rule exactly cannot close this task without coming to you." The
+    // gate demanded from the worker precisely the artifact the mode says the
+    // supervisor produces, and it demanded it at the exact moment the rule
+    // applied. Instruction beats memory every time; three memory entries
+    // across three days lost to this text, ~500k subagent tokens per loss.
+    //
+    // The caller's role decides the guidance, not just the owner setting.
+    // A solo (non-factory) close under the supervisor-owned default has no
+    // supervisor to defer to — that caller IS the review owner and keeps the
+    // original instructions. Only a factory worker is redirected.
+    if supervisor_owned && crate::code_review_dispatch::is_factory_worker_from_env() {
+        return "⚠️ SUPERVISOR-OWNED REVIEW — DO NOT RUN cas-code-review\n\n\
+             task close rejected: this task has reviewable code changes and no \
+             review has been recorded for them.\n\n\
+             You are a factory worker and this project sets \
+             `[code_review] owner = \"supervisor\"` (verify with \
+             `cas config get code_review.owner`). You must NOT dispatch the \
+             cas-code-review skill, its workflow, or its personas as \
+             subagents — the supervisor runs the pipeline once, off their \
+             review queue.\n\n\
+             Do this instead:\n\
+             1. Do NOT pass `code_review_findings`. There is no envelope for \
+                you to produce in this mode.\n\
+             2. Push your branch and tell your supervisor it is ready for \
+                review; they own the dispatch and the close from here.\n\
+             3. If this close reached this gate on an epic or another shape \
+                the review queue does not cover, say so in that message — the \
+                supervisor closes it (optionally with \
+                bypass_code_review=true, which is supervisor-only).\n\n\
+             To opt this project back into worker-run review, set \
+             `cas config set code_review.owner worker`."
+            .to_string();
+    }
     let step1 = if supervisor_owned {
         "1. Invoke the cas-code-review skill via the Skill or Task tool with \
          mode=interactive (or mode=headless for skill-to-skill) and the \
@@ -11974,6 +12014,14 @@ mod code_review_gate_tests {
     #[test]
     fn code_change_without_findings_is_rejected_as_required() {
         let _g = env_lock();
+        // cas-62b0: this test asserts the SOLO-caller guidance (mode=interactive
+        // / mode=headless), which since cas-62b0 is only one of two shapes
+        // `format_code_review_required` can produce — a factory worker now gets
+        // the "do not run it, go to your supervisor" redirect instead. The role
+        // must therefore be pinned rather than inherited: this suite is run by
+        // CAS factory workers, whose sessions export CAS_AGENT_ROLE=worker, and
+        // left ambient this test passes on CI and fails inside the factory.
+        let _role = CallerRoleEnv::solo();
         let dir = repo_with_staged(&[("src/foo.rs", "fn new() {}\n")]);
         let t = base_task();
         let req = base_req(&t.id);
@@ -12160,6 +12208,195 @@ mod code_review_gate_tests {
                 );
             }
             other => panic!("expected parse reject, got {other:?}"),
+        }
+    }
+
+    /// Pins the caller-role env `format_code_review_required` keys on
+    /// (`code_review_dispatch::is_factory_worker_from_env`) and restores it on
+    /// drop — including on panic, which a plain restore-at-the-end helper does
+    /// not do. A leaked `CAS_AGENT_ROLE` would silently change the branch every
+    /// later test in this module takes.
+    ///
+    /// Every test that asserts on this gate's TEXT must hold one. cas-62b0 made
+    /// the guidance caller-aware, so the ambient environment now decides which
+    /// message is produced — and this suite is routinely run by a CAS factory
+    /// worker, whose own session exports `CAS_AGENT_ROLE=worker` and
+    /// `CAS_FACTORY_MODE=1`. Left implicit, these tests pass on CI and fail on
+    /// the machine of anyone who runs them from inside the factory (which is
+    /// exactly how the first cut of this change was caught).
+    struct CallerRoleEnv {
+        prev_role: Option<String>,
+        prev_mode: Option<String>,
+    }
+
+    impl CallerRoleEnv {
+        /// A registered factory worker: the caller the supervisor-owned
+        /// redirect is FOR.
+        fn factory_worker() -> Self {
+            Self::set(Some("worker"), Some("1"))
+        }
+
+        /// A solo `claude`/CLI session with no factory around it: owns its own
+        /// review even under the supervisor-owned default.
+        fn solo() -> Self {
+            Self::set(None, None)
+        }
+
+        fn set(role: Option<&str>, mode: Option<&str>) -> Self {
+            let guard = Self {
+                prev_role: std::env::var("CAS_AGENT_ROLE").ok(),
+                prev_mode: std::env::var("CAS_FACTORY_MODE").ok(),
+            };
+            unsafe {
+                match role {
+                    Some(v) => std::env::set_var("CAS_AGENT_ROLE", v),
+                    None => std::env::remove_var("CAS_AGENT_ROLE"),
+                }
+                match mode {
+                    Some(v) => std::env::set_var("CAS_FACTORY_MODE", v),
+                    None => std::env::remove_var("CAS_FACTORY_MODE"),
+                }
+            }
+            guard
+        }
+    }
+
+    impl Drop for CallerRoleEnv {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.prev_role {
+                    Some(v) => std::env::set_var("CAS_AGENT_ROLE", v),
+                    None => std::env::remove_var("CAS_AGENT_ROLE"),
+                }
+                match &self.prev_mode {
+                    Some(v) => std::env::set_var("CAS_FACTORY_MODE", v),
+                    None => std::env::remove_var("CAS_FACTORY_MODE"),
+                }
+            }
+        }
+    }
+
+    /// cas-62b0 / GH #152 — the rocketship shape, pinned.
+    ///
+    /// A factory worker closes a task with reviewable code changes in a
+    /// project that sets `[code_review] owner = "supervisor"`. Before this
+    /// fix the gate answered CODE_REVIEW_REQUIRED and step 1 read "Invoke
+    /// the cas-code-review skill via the Skill or Task tool" — so the close
+    /// path itself was the thing dispatching the ~500k-token persona run,
+    /// eleven-plus times in one downstream session, against an explicit
+    /// project policy. The rejection must now contain NO instruction to run
+    /// the pipeline and must route the worker to the supervisor instead.
+    #[test]
+    fn supervisor_owned_close_never_tells_a_worker_to_run_the_review_cas_62b0() {
+        let _g = env_lock();
+        let dir = repo_with_staged(&[("src/foo.rs", "fn shipped() {}\n")]);
+        let _role = CallerRoleEnv::factory_worker();
+
+        let t = base_task();
+        let req = base_req(&t.id);
+        // No envelope — the worker is forbidden from producing one here.
+        let out = run_code_review_gate(&t, &req, dir.path(), true);
+
+        match out {
+            CodeReviewGateOutcome::Reject(msg) => {
+                // The refusal must not be a review dispatch in disguise.
+                assert!(
+                    msg.contains("DO NOT RUN cas-code-review"),
+                    "worker must be told not to run it, got:\n{msg}"
+                );
+                for instruction in ["Invoke the cas-code-review skill", "mode=autofix"] {
+                    assert!(
+                        !msg.contains(instruction),
+                        "supervisor-owned worker refusal must not carry {instruction:?}:\n{msg}"
+                    );
+                }
+                assert!(
+                    !msg.contains("Re-call task.close with the envelope"),
+                    "worker must not be told to produce an envelope:\n{msg}"
+                );
+                // It must name the mechanism, and the readback command that
+                // GH #152 reported as "Unknown config key".
+                assert!(
+                    msg.contains("[code_review] owner = \"supervisor\""),
+                    "refusal must name the config that causes it:\n{msg}"
+                );
+                assert!(
+                    msg.contains("cas config get code_review.owner"),
+                    "refusal must name how to verify the setting:\n{msg}"
+                );
+                // A refusal with no legal next move is what got rationalized
+                // away last time.
+                assert!(
+                    msg.contains("supervisor") && msg.contains("ready for"),
+                    "refusal must name the legal next move:\n{msg}"
+                );
+                // Personas hand-spawned as subagents are the same violation.
+                assert!(
+                    msg.contains("subagents"),
+                    "refusal must close the hand-spawned-persona route:\n{msg}"
+                );
+            }
+            other => panic!("expected Reject, got {other:?}"),
+        }
+    }
+
+    /// AC4 regression: `owner = "worker"` is untouched.
+    ///
+    /// The legacy inline flow is a documented escape hatch. A worker under
+    /// `owner = "worker"` must still get the original instructions — the fix
+    /// keys on ownership, not on "is a worker".
+    #[test]
+    fn worker_owned_review_still_instructs_the_worker_cas_62b0() {
+        let _g = env_lock();
+        let dir = repo_with_staged(&[("src/foo.rs", "fn shipped() {}\n")]);
+        let _role = CallerRoleEnv::factory_worker();
+
+        let t = base_task();
+        let req = base_req(&t.id);
+        let out = run_code_review_gate(&t, &req, dir.path(), false);
+
+        match out {
+            CodeReviewGateOutcome::Reject(msg) => {
+                assert!(
+                    msg.contains("CODE_REVIEW_REQUIRED"),
+                    "owner=worker must keep the legacy gate:\n{msg}"
+                );
+                assert!(
+                    msg.contains("mode=autofix"),
+                    "owner=worker must keep the legacy autofix instruction:\n{msg}"
+                );
+            }
+            other => panic!("expected Reject, got {other:?}"),
+        }
+    }
+
+    /// A solo (non-factory) close under the supervisor-owned DEFAULT must
+    /// keep its instructions.
+    ///
+    /// This is the trap the fix must not spring in the other direction:
+    /// `owner = "supervisor"` is the default for every project, including
+    /// ones with no factory and no supervisor to defer to. Redirecting that
+    /// caller to a supervisor who does not exist would turn a working close
+    /// into an unclearable one.
+    #[test]
+    fn solo_close_under_the_supervisor_owned_default_is_not_redirected_cas_62b0() {
+        let _g = env_lock();
+        let dir = repo_with_staged(&[("src/foo.rs", "fn shipped() {}\n")]);
+        let _role = CallerRoleEnv::solo();
+
+        let t = base_task();
+        let req = base_req(&t.id);
+        let out = run_code_review_gate(&t, &req, dir.path(), true);
+
+        match out {
+            CodeReviewGateOutcome::Reject(msg) => {
+                assert!(
+                    msg.contains("CODE_REVIEW_REQUIRED")
+                        && msg.contains("Invoke the cas-code-review skill"),
+                    "a non-factory caller owns the review itself:\n{msg}"
+                );
+            }
+            other => panic!("expected Reject, got {other:?}"),
         }
     }
 

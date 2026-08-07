@@ -1020,3 +1020,108 @@ fn test_knowledge_read_of_unknown_page_fails_loudly() {
         .assert()
         .failure();
 }
+
+/// cas-b69a (GH #157): the cas-b129 M3 incident in miniature — copy a project
+/// store, `cd` into the copy, and run a MUTATING command while `CAS_ROOT` (as a
+/// factory session exports it) still points at the live store.
+///
+/// The write must still land in the CAS_ROOT store (precedence is deliberately
+/// unchanged — factory workers in clones depend on it), but the operator must be
+/// told, on stderr, that the store under their feet lost.
+#[test]
+fn cas_root_override_of_a_differing_cwd_root_is_announced_on_stderr() {
+    let temp = TempDir::new().unwrap();
+    let live = temp.path().join("live");
+    let copy = temp.path().join("copy");
+    std::fs::create_dir_all(&live).unwrap();
+    std::fs::create_dir_all(&copy).unwrap();
+
+    // Two independent projects, each with its own .cas.
+    cas_cmd(temp.path())
+        .current_dir(&live)
+        .args(["init", "--yes"])
+        .assert()
+        .success();
+    cas_cmd(temp.path())
+        .current_dir(&copy)
+        .args(["init", "--yes"])
+        .assert()
+        .success();
+
+    let live_root = live.join(".cas");
+    let copy_root = copy.join(".cas");
+
+    // A mutating command, run from the copy, with CAS_ROOT aimed at the live store.
+    let output = cas_cmd(temp.path())
+        .current_dir(&copy)
+        .env("CAS_ROOT", &live_root)
+        .args(["config", "set", "sync.min_helpful", "7"])
+        .output()
+        .expect("cas config set must run");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // (1) Both roots named, winner stated.
+    assert!(
+        stderr.contains(&live_root.display().to_string()),
+        "stderr must name the winning CAS_ROOT store.\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains(&copy_root.display().to_string()),
+        "stderr must name the working-directory store that lost.\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("CAS_ROOT wins"),
+        "stderr must state which root won.\nstderr: {stderr}"
+    );
+
+    // (3) stderr only — stdout stays parseable.
+    assert!(
+        !stdout.contains("CAS_ROOT override"),
+        "the notice must never reach stdout.\nstdout: {stdout}"
+    );
+
+    // (2) Precedence itself is unchanged: the write really did land in the
+    // CAS_ROOT store, which is exactly why the notice has to exist.
+    let live_config = std::fs::read_to_string(live_root.join("config.toml")).unwrap();
+    let copy_config = std::fs::read_to_string(copy_root.join("config.toml")).unwrap();
+    assert!(
+        live_config.contains("min_helpful = 7"),
+        "CAS_ROOT must keep winning.\nlive config: {live_config}"
+    );
+    assert!(
+        !copy_config.contains("min_helpful = 7"),
+        "the working-directory store must be untouched.\ncopy config: {copy_config}"
+    );
+}
+
+/// The other half of the honesty contract: when there is nothing to
+/// disambiguate — CAS_ROOT pointing at the very store the working directory
+/// would have resolved on its own — there must be no notice at all. A banner
+/// that fires on every ordinary factory command is a banner nobody reads.
+#[test]
+fn cas_root_matching_the_cwd_root_produces_no_notice() {
+    let temp = TempDir::new().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+
+    cas_cmd(temp.path())
+        .current_dir(&project)
+        .args(["init", "--yes"])
+        .assert()
+        .success();
+
+    let output = cas_cmd(temp.path())
+        .current_dir(&project)
+        .env("CAS_ROOT", project.join(".cas"))
+        .args(["config", "set", "sync.min_helpful", "7"])
+        .output()
+        .expect("cas config set must run");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("CAS_ROOT override"),
+        "no conflict means no notice.\nstderr: {stderr}"
+    );
+}

@@ -165,6 +165,15 @@ impl Config {
                 "staging.tmpfs_warning_threshold_bytes".to_string(),
                 staging.tmpfs_warning_threshold_bytes.to_string(),
             ),
+            // Code-review section (cas-62b0, GH #152)
+            (
+                "code_review.owner".to_string(),
+                self.code_review
+                    .clone()
+                    .unwrap_or_default()
+                    .owner
+                    .to_lowercase(),
+            ),
             // Issues section
             ("issues.repo".to_string(), issues.repo.unwrap_or_default()),
             // Notifications section

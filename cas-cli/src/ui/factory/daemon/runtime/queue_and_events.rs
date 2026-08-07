@@ -1938,6 +1938,63 @@ impl FactoryDaemon {
         for queued in prompts {
             let target = &queued.target;
 
+            // cas-dffe (GH #145): a context-reset control command is not a
+            // message and must never enter message routing — that is precisely
+            // how `/clear` used to end up as inbox text a Claude worker read
+            // and ignored. Handle it first, in its own lane: type the harness's
+            // own reset command into the pane, or refuse and say why.
+            if crate::factory_context_reset::is_context_reset_control(&queued.prompt) {
+                let target = target.clone();
+                match self.deliver_context_reset(&target).await {
+                    super::delivery::ContextResetDelivery::Injected => {
+                        if let Err(e) = queue.mark_transport_delivered(queued.id) {
+                            tracing::warn!(
+                                prompt_id = queued.id,
+                                error = %e,
+                                "cas-dffe: failed to stamp a delivered context-reset command"
+                            );
+                        }
+                        tracing::info!(
+                            target: "cas::coordination",
+                            stage = "context_reset_delivered",
+                            message_id = queued.id,
+                            target_agent = %target,
+                            "cas-dffe: context-reset command typed into the pane; the requester \
+                             confirms the reset from the recipient's new session transcript"
+                        );
+                    }
+                    super::delivery::ContextResetDelivery::NotReady => {
+                        let _ = queue.record_pending_reason(
+                            queued.id,
+                            cas_store::PendingReason::GatedNotReady,
+                            Some("pane not ready for injection — context reset retries next tick"),
+                        );
+                    }
+                    super::delivery::ContextResetDelivery::Unsupported { detail } => {
+                        // Terminal: retrying cannot make an unsupported harness
+                        // resettable, and leaving the row pending would wedge
+                        // the queue behind an impossible command.
+                        let _ = queue.mark_dropped(queued.id, Some(&detail));
+                        tracing::warn!(
+                            target: "cas::coordination",
+                            stage = "context_reset_unsupported",
+                            message_id = queued.id,
+                            target_agent = %target,
+                            detail = %detail,
+                            "cas-dffe: refused a context reset instead of pretending it happened"
+                        );
+                    }
+                    super::delivery::ContextResetDelivery::Failed { detail } => {
+                        let _ = queue.record_retry(
+                            queued.id,
+                            cas_store::PendingReason::AdapterRetryable,
+                            Some(&detail),
+                        );
+                    }
+                }
+                continue;
+            }
+
             // cas-bc8c: structured transition prompts are only actionable
             // while the state they describe is still current. Revalidate at
             // the last shared point before inbox/PTY transport, after any
@@ -2587,7 +2644,8 @@ impl FactoryDaemon {
                 } else {
                     target.clone()
                 };
-                let inject_result: anyhow::Result<cas_mux::InjectOutcome> = if queued.urgent {
+                let inject_result: anyhow::Result<super::delivery::NudgeReport> = if queued.urgent
+                {
                     // Urgent: interrupt-and-redirect by name via the PTY,
                     // bypassing the inbox even in teams mode. Break the turn
                     // (Esc), wait the bounded settle window for the turn to
@@ -2633,7 +2691,17 @@ impl FactoryDaemon {
                         );
                         urgent_wake_probe_opened = true;
                     }
-                    outcome
+                    // cas-7a01 (GH #155): urgent delivery is an unconditional
+                    // PTY interrupt-and-inject — it always attempts a wake, and
+                    // that asymmetry with the gated non-urgent path is the
+                    // whole reason only urgent messages ever surfaced. Record
+                    // it as such so the two paths are comparable in
+                    // `message_status` instead of both reading `unobserved`.
+                    outcome.map(|outcome| super::delivery::NudgeReport {
+                        outcome,
+                        wake: cas_store::WakeAttempt::Fired,
+                        wake_detail: Some("urgent interrupt-and-inject".to_string()),
+                    })
                 } else {
                     // Recipient-aware routing (cas-b68a): delivery channel +
                     // name normalisation handled inside the helper.
@@ -2730,6 +2798,26 @@ impl FactoryDaemon {
                         .await
                     }
                 };
+                // cas-7a01 (GH #155): persist what the wake nudge actually did
+                // BEFORE branching on transport, so the record survives every
+                // arm below — including the failure arms, which are exactly the
+                // ones an operator debugging a silent worker needs to read.
+                // Best-effort: a delivery is never failed over observability.
+                if let Ok(ref report) = inject_result {
+                    if let Err(error) = queue.record_wake_attempt(
+                        queued.id,
+                        report.wake,
+                        report.wake_detail.as_deref(),
+                    ) {
+                        tracing::debug!(
+                            target: "cas::coordination",
+                            message_id = queued.id,
+                            %error,
+                            "cas-7a01: could not persist wake attempt"
+                        );
+                    }
+                }
+                let inject_result = inject_result.map(|report| report.outcome);
                 match inject_result {
                     Ok(cas_mux::InjectOutcome::Delivered) => {
                         success = true;

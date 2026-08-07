@@ -195,6 +195,7 @@ mod m216_spawn_queue_add_requester_config_dir;
 mod m217_spawn_queue_add_lifecycle_state;
 mod m218_prompt_queue_recipient_transport_create_table;
 mod m219_knowledge_store_create_tables;
+mod m220_prompt_queue_wake_observability;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -408,6 +409,7 @@ pub const MIGRATIONS: &[Migration] = &[
     // Project knowledge distillation store: page index, content-hash source
     // ledger and contentless FTS5 body index (EPIC cas-7d31 / cas-cbf1).
     m219_knowledge_store_create_tables::MIGRATION,
+    m220_prompt_queue_wake_observability::MIGRATION,
 ];
 
 #[cfg(test)]

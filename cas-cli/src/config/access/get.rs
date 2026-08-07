@@ -81,6 +81,21 @@ impl Config {
             "staging.tmpfs_warning_threshold_bytes" => {
                 Some(staging.tmpfs_warning_threshold_bytes.to_string())
             }
+            // Code-review section (cas-62b0, GH #152).
+            //
+            // The runtime has read this value since cas-b51a; only the CLI
+            // surface was blind to it, so `cas config get code_review.owner`
+            // answered "Unknown config key" for a setting that was actually
+            // in force. Reporting the effective value — including the
+            // supervisor-owned default when the section is absent — is what
+            // makes the dispatch and close gates auditable from outside.
+            "code_review.owner" => Some(
+                self.code_review
+                    .clone()
+                    .unwrap_or_default()
+                    .owner
+                    .to_lowercase(),
+            ),
             // Issues section
             "issues.repo" => Some(issues.repo.unwrap_or_default()),
             // Notifications section

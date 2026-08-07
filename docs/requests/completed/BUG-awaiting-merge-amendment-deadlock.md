@@ -1,3 +1,5 @@
+> **Disposition (2026-08-07, cas-ab75):** RESOLVED — filed as [#55](https://github.com/pippenz/cas/issues/55) (closed completed). Fix verified on `main`: `d0d95f29` "fix(cas-aee6): sanctioned request_changes exit from awaiting_merge" (epic cas-7e66); `task action=request_changes` is now the documented exit from `awaiting_merge` with the assignee preserved. Archived.
+
 > Migrated to GitHub Issues: [#55](https://github.com/pippenz/cas/issues/55)
 
 # BUG: awaiting_merge has no lifecycle path for an amendment-required review verdict

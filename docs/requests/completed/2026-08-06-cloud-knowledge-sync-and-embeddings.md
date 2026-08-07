@@ -6,6 +6,8 @@ priority: P1
 pinned_client: cas-cli @ 845ace3f (impl) / fdef6ce8 (style), merged to the knowledge epic as 9424b300
 ---
 
+> **Disposition (2026-08-07, cas-ab75):** ANSWERED — outbound request to the Petra Stella Cloud team (not a cas-cli defect, so no GitHub issue in this repo). The cloud team replied in full: see `RESPONSE-cloud-knowledge-sync-and-embeddings.md` in this directory (status: COMPLETE — all eight original questions and all eight amendment questions answered; their task cas-369a). Archived together with its response.
+
 # Feature Request: server-side knowledge-page sync + an embeddings endpoint
 
 ## What already shipped, and what is missing

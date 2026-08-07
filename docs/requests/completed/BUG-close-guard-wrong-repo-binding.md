@@ -5,6 +5,8 @@ priority: medium
 cas_task: cas-4fa1
 ---
 
+> **Disposition (2026-08-07, cas-ab75):** RESOLVED — filed as [#56](https://github.com/pippenz/cas/issues/56) (closed completed; second filing #85 closed as duplicate). Fix verified on `main`: `56f893e9` "fix(cas-fdc9): resolve close-guard refs against the real target" (merge `de06785b`, epic cas-7e66); the close guard now resolves against the task's `target_repo`/`target_branch` instead of the spawn-repo anchor. Archived.
+
 > Migrated to GitHub Issues: [#56](https://github.com/pippenz/cas/issues/56)
 
 # BUG: close guard binds to spawn-repo factory anchor; cross-repo tasks cannot close

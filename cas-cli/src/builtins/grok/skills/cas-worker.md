@@ -95,13 +95,15 @@ Before setting `status=blocked`, re-read with `action=show`. If the task already
 
 ## Running Scripts Against Prod
 
-For Vercel-deployed projects, `vercel env pull .env.<env> --environment=<env>` (run from the linked project dir) pulls real credentials for prod services (Neon, QStash, etc.) into a local file. Add that file to `.gitignore` — never commit credentials.
+For Vercel projects, `vercel env pull .env.<env> --environment=<env>` (from the linked project dir) pulls real prod credentials (Neon, QStash, etc.) into a local file. Add it to `.gitignore` — never commit credentials.
 
 ## Running Tests in a Worker
 
-**Scope first:** `cargo test --lib` / `cargo test --test <name>` for targeted changes. A full suite is a close gate for shared/public surfaces only — background it.
+**Batch the fixes, then verify once.** Collect every fix you know you need first. A full re-run per micro-fix is your biggest time sink.
 
-**Then check the clean-CI shape.** Your shell exports ~15 `CAS_*` variables; a test that reads one passes for you and fails only in CI. Before you push, if your diff touches agent resolution, coordination, messaging, cloud config or anything else that reads the environment, re-run the SCOPED binary through `make -C cas-cli test-clean-env CLEAN_ENV_ARGS='--test <name>'` — it strips every `CAS_*` variable it finds and prints the list. See [discipline.md](cas-worker/references/discipline.md).
+**Inner loop — seconds:** `cargo test --lib <module>` / `cargo test --test <name>` / a name filter, guard armed. **Final proof — the full scoped suite, at most twice:** after the batch, then as the pre-close receipt. Prefer `cargo nextest run` if installed. Background anything over ~2 min and do other work meanwhile — never foreground-`sleep` on it.
+
+**Then check the clean-CI shape.** Your shell exports ~15 `CAS_*` variables; a test that reads one passes for you and fails only in CI. Before pushing env-reading code, re-run the scoped binary through `make -C cas-cli test-clean-env`. Recipes: [discipline.md](cas-worker/references/discipline.md).
 
 ## References
 

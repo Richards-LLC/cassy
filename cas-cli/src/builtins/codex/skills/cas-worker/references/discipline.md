@@ -103,10 +103,50 @@ Scope before you run. A full suite in this repo links dozens of test binaries; a
 change rarely needs it:
 
 - `cargo test --lib` — library unit tests only
+- `cargo test --lib <module>` / `cargo test <name-substring>` — one module or one test
 - `cargo test --test <name>` — one integration-test file
 - `cargo test -p <crate>` — one crate
 
 Reserve the full suite for close gates on shared/public surfaces — and background it.
+
+### The test loop: inner loop vs final proof
+
+Most multi-fix tasks are lost here, not in the thinking. The failure looks like this, observed
+live: a worker fixing several test entry points ran the full `cargo test -p <crate> --lib`
+sweep (~3,700 tests, ~5 minutes) after **each individual fix**, foreground-`sleep`ing between
+checks. 47+ minutes of wall-clock, almost all of it waiting, for maybe 4 minutes of edits.
+
+Two loops, and they are not the same loop:
+
+**Inner loop — seconds, run constantly.** Targeted filters only: the module, the test name, the
+one integration binary. This is where you iterate. If your inner loop takes minutes, it is not
+an inner loop — narrow the filter further.
+
+**Final proof — minutes, run at most twice.** The full scoped suite runs once after you have
+landed the whole batch of fixes, and once more as the pre-close receipt. That is the budget.
+A third full run means you skipped the batching step.
+
+The rules that follow from that:
+
+1. **Batch before you verify.** When you find three broken call sites, fix all three, then run.
+   Do not fix-run-fix-run. Each unnecessary full run costs you ~5 minutes and buys information
+   you were about to get anyway.
+2. **Reuse a banked receipt.** If a full sweep already passed at the commit you are closing on
+   and your later edits are provably outside its blast radius, cite it — do not re-run it to
+   feel better. Say which commit it was taken at and what it covered.
+3. **`cargo nextest run` when it is installed** (`cargo nextest run --lib <filter>`) — it runs
+   test binaries in parallel and fails fast, which is often several times quicker than
+   `cargo test` on a suite this size. Check once with `cargo nextest --version`; if it is
+   missing, fall back to `cargo test` and do not spend the task installing it.
+4. **Never foreground-`sleep` waiting on a run.** Background it (Recipe 1) and spend the
+   minutes on other deliverable work: the next fix, the task note, the close-gate checks, the
+   PR body. A worker asleep in the foreground cannot even receive a stand-down order.
+5. **Arm the relevant guard in the inner loop**, not just in the final sweep. A guard that only
+   runs in the 5-minute sweep teaches you nothing for 5 minutes.
+
+A worked shape, start to close: targeted filters while fixing → one full scoped sweep after the
+batch, backgrounded → other work while it cooks → close on that receipt, or on a banked sweep
+plus a targeted run covering exactly what changed since.
 
 ### Running tests in the clean-CI environment shape
 

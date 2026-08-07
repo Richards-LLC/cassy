@@ -5593,12 +5593,21 @@ async fn test_epic_status_omits_stack_lines_for_an_unstacked_epic_cas_aae6() {
 /// on the counting branch.
 #[tokio::test]
 async fn cas99d2_status_keeps_counting_when_a_reply_lacks_a_surfacing_receipt_gh126() {
+    // Pin BOTH supervisor-resolution sources (message.rs `resolve_supervisor_name`:
+    // CAS_SUPERVISOR_NAME first, then an Active/Idle Supervisor in the agent
+    // store). `FactoryTestEnv::new()` registers no supervisor and the fixture's
+    // cas_root is a fresh TempDir, so without this the worker's reply below can
+    // only resolve `target="supervisor"` from an ambient CAS_SUPERVISOR_NAME
+    // inherited from the surrounding shell — green inside a factory session,
+    // red in clean CI (GH #136).
     let _guard = EnvGuard::set(&[
         ("CAS_AGENT_ROLE", "worker"),
         ("CAS_AGENT_NAME", "watchful-koala-20"),
+        ("CAS_SUPERVISOR_NAME", "cosmic-bear-43"),
     ]);
     let env = FactoryTestEnv::new();
     env.register_worker("watchful-koala-20");
+    env.register_supervisor("cosmic-bear-43");
 
     // Supervisor -> worker, handed to the transport (no inbox drain by the
     // worker, exactly as in the incident).
@@ -5675,12 +5684,17 @@ async fn cas99d2_status_keeps_counting_when_a_reply_lacks_a_surfacing_receipt_gh
 /// evidence gates do not simply disable reply-inference.
 #[tokio::test]
 async fn cas99d2_reply_after_an_inbox_drain_still_confirms_gh126() {
+    // Same deterministic supervisor pinning as the negative case above: the
+    // reply at the end of this test resolves `target="supervisor"`, which
+    // otherwise depends on an ambient CAS_SUPERVISOR_NAME (GH #136).
     let _guard = EnvGuard::set(&[
         ("CAS_AGENT_ROLE", "worker"),
         ("CAS_AGENT_NAME", "watchful-koala-20"),
+        ("CAS_SUPERVISOR_NAME", "cosmic-bear-43"),
     ]);
     let env = FactoryTestEnv::new();
     env.register_worker("watchful-koala-20");
+    env.register_supervisor("cosmic-bear-43");
 
     let message_id = env
         .prompt_queue()

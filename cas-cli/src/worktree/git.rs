@@ -12,6 +12,8 @@ use crate::types::GitContext;
 
 mod branch_ops;
 
+pub use branch_ops::TargetPushOutcome;
+
 /// Errors that can occur during git operations
 #[derive(Debug, Error)]
 pub enum GitError {

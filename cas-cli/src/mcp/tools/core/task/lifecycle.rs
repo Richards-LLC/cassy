@@ -574,6 +574,48 @@ impl CasCore {
             }
         }
 
+        // cas-156b (GH #135): a task with no work target used to be leased with
+        // no nativity check at all, so replicated foreign rows were claimed,
+        // worked and closed from the wrong repository. Gather the four local
+        // signals and warn (never block) when none of them anchors this task
+        // here. Evaluated before the assignee defaults to the starting agent
+        // further down — otherwise `start` would manufacture its own anchor and
+        // the check could never fire. Every lookup is best-effort: a failed read
+        // must not turn an advisory check into a failed start, and each
+        // "unknown" resolves toward silence, preserving the fail-silent contract.
+        let unanchored_warning = {
+            let evidence = super::repo_context::TaskAnchorEvidence {
+                has_work_target: task.deliverables.work_target.is_some(),
+                dependency_edge_count: task_store
+                    .get_dependencies(&req.id)
+                    .map(|deps| deps.len())
+                    .unwrap_or(usize::MAX),
+                assignee_is_local_agent: match task.assignee.as_deref() {
+                    // `None` status filter on purpose: a registered agent that
+                    // is idle or stopped is still local provenance.
+                    Some(assignee) => agent_store
+                        .list(None)
+                        .map(|agents| agents.iter().any(|agent| agent.name == assignee))
+                        // An unreadable agent registry must not manufacture a
+                        // warning about an assignee we simply could not check.
+                        .unwrap_or(true),
+                    None => false,
+                },
+                cloud_sync_configured: crate::cloud::CloudConfig::load()
+                    .map(|config| config.is_logged_in())
+                    .unwrap_or(false),
+            };
+            if super::repo_context::task_has_no_local_anchor(&evidence) {
+                Some(super::repo_context::unanchored_task_start_warning(
+                    &req.id,
+                    &self.cas_root,
+                    crate::cloud::get_project_canonical_id().as_deref(),
+                ))
+            } else {
+                None
+            }
+        };
+
         let config = self.load_config();
         let lease_duration = (config.lease().default_duration_mins as i64) * 60;
 
@@ -877,10 +919,14 @@ impl CasCore {
         );
 
         Ok(Self::success(format!(
-            "Started task: {} - {}{}{}{}{}{}{}",
+            "Started task: {} - {}{}{}{}{}{}{}{}",
             req.id,
             task.title,
             claim_info.unwrap_or_default(),
+            // cas-156b: placed directly after the claim line so the nativity
+            // warning cannot be pushed out of view by long sibling-note or
+            // worktree blocks.
+            unanchored_warning.unwrap_or_default(),
             epic_ownership_info.unwrap_or_default(),
             wt_info,
             sibling_notes_info.unwrap_or_default(),

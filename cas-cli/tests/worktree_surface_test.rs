@@ -4762,3 +4762,207 @@ async fn terminal_task_rejects_fresh_completion_receipt_without_any_mutation() {
         "terminal replay must not create receipts, transactions, events, dispatches, or verdicts"
     );
 }
+
+// =============================================================================
+// cas-f102 (GH #140): worktree_cleanup gets the cas-1d11 System-B fallback
+// =============================================================================
+
+/// Commit something on the worktree's branch and merge it into the repo's
+/// default branch, so the factory branch is genuinely reachable from elsewhere
+/// — the state a retired worker leaves behind after its merge landed.
+fn merge_worktree_branch_into_default(repo: &GitRepo, wt_path: &Path, branch: &str) {
+    let run_in = |dir: &Path, args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "git {:?} in {} failed: {}",
+            args,
+            dir.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    std::fs::write(wt_path.join("worker.txt"), "worker output\n").unwrap();
+    run_in(wt_path, &["add", "worker.txt"]);
+    run_in(wt_path, &["commit", "-m", "worker work"]);
+    run_in(&repo.root, &["merge", "--no-ff", "-m", "merge worker", branch]);
+}
+
+/// AC1: a retired worker's System-B worktree — merged branch, no live agent,
+/// System A flag off — is removed through CAS, and the reply says what went.
+///
+/// This is the whole bug: `worktree_merge` on this exact worktree succeeds
+/// (cas-1d11 exempted it), while `worktree_cleanup` refused with "experimental
+/// and disabled", leaving `git worktree remove` — which bypasses factory
+/// tracking — as the only option.
+#[tokio::test]
+async fn test_worktree_cleanup_removes_retired_system_b_worktree() {
+    let repo = GitRepo::new();
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
+    disable_system_a(&cas_root);
+
+    let wt_path = cas_root.join("worktrees").join("retired-fox");
+    repo.add_worktree(&wt_path, "factory/retired-fox");
+    merge_worktree_branch_into_default(&repo, &wt_path, "factory/retired-fox");
+
+    let svc = make_service(cas_root.clone());
+    let mut req = coord_req("worktree_cleanup");
+    req.id = Some("retired-fox".to_string());
+    let text = get_text(&svc.coordination(Parameters(req)).await.expect("cleanup"));
+
+    assert!(
+        !text.contains("experimental and disabled"),
+        "the flag-off gate must no longer swallow a System-B cleanup: {text}"
+    );
+    assert!(
+        text.contains("Removed System B worktree"),
+        "reply must state what was removed: {text}"
+    );
+    assert!(
+        text.contains("factory/retired-fox"),
+        "reply must name the branch it deleted: {text}"
+    );
+    assert!(
+        !wt_path.exists(),
+        "the worktree directory must actually be gone"
+    );
+}
+
+/// AC2: a nonexistent target gets an accurate not-found naming BOTH places
+/// that were searched — never the 'disabled' text, which is the misdiagnosis
+/// this task exists to kill.
+#[tokio::test]
+async fn test_worktree_cleanup_unknown_target_reports_not_found_not_disabled() {
+    let repo = GitRepo::new();
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
+    disable_system_a(&cas_root);
+
+    let svc = make_service(cas_root.clone());
+    let mut req = coord_req("worktree_cleanup");
+    req.id = Some("no-such-worker".to_string());
+    let err = svc
+        .coordination(Parameters(req))
+        .await
+        .expect_err("unknown target must be an error, not a success message");
+
+    let message = err.message.to_string();
+    assert!(
+        message.contains("Worktree not found: no-such-worker"),
+        "not-found must name the target: {message}"
+    );
+    assert!(
+        message.contains("System A worktree store") && message.contains("System B path"),
+        "not-found must name both systems it searched: {message}"
+    );
+    assert!(
+        !message.contains("experimental and disabled"),
+        "a genuine absence must never render as the disabled gate: {message}"
+    );
+}
+
+/// AC2: a branch whose commits exist on no other branch is refused without
+/// force. `WorktreeManager::abandon` deletes the branch with `-D`, so without
+/// this gate a P3 cleanup would silently destroy unmerged work.
+#[tokio::test]
+async fn test_worktree_cleanup_refuses_unmerged_branch_without_force() {
+    let repo = GitRepo::new();
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
+    disable_system_a(&cas_root);
+
+    let wt_path = cas_root.join("worktrees").join("unmerged-owl");
+    repo.add_worktree(&wt_path, "factory/unmerged-owl");
+    // Commit on the branch but never merge it.
+    let run_in = |dir: &Path, args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git");
+    };
+    std::fs::write(wt_path.join("wip.txt"), "unmerged\n").unwrap();
+    run_in(&wt_path, &["add", "wip.txt"]);
+    run_in(&wt_path, &["commit", "-m", "unmerged work"]);
+
+    let svc = make_service(cas_root.clone());
+    let mut req = coord_req("worktree_cleanup");
+    req.id = Some("unmerged-owl".to_string());
+    let text = get_text(&svc.coordination(Parameters(req)).await.expect("cleanup"));
+
+    assert!(
+        text.contains("Refused") && text.contains("exist on no other branch"),
+        "unmerged commits must block removal: {text}"
+    );
+    assert!(
+        wt_path.exists(),
+        "a refused cleanup must leave the worktree in place"
+    );
+}
+
+/// AC2: a worktree whose assignee is a live agent is refused, and `force` does
+/// NOT override it — force is a dirty-tree bypass, not a licence to delete a
+/// running worker's working directory.
+#[tokio::test]
+async fn test_worktree_cleanup_refuses_live_assignee_even_with_force() {
+    let repo = GitRepo::new();
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
+    disable_system_a(&cas_root);
+
+    let wt_path = cas_root.join("worktrees").join("busy-lynx");
+    repo.add_worktree(&wt_path, "factory/busy-lynx");
+    merge_worktree_branch_into_default(&repo, &wt_path, "factory/busy-lynx");
+
+    let agent_store = open_agent_store(&cas_root).unwrap();
+    let mut agent = Agent::new("agent-busy-lynx".to_string(), "busy-lynx".to_string());
+    agent.role = AgentRole::Worker;
+    agent.agent_type = AgentType::Worker;
+    agent.status = cas::types::AgentStatus::Active;
+    agent_store.register(&agent).unwrap();
+
+    let svc = make_service(cas_root.clone());
+    let mut req = coord_req("worktree_cleanup");
+    req.id = Some("busy-lynx".to_string());
+    req.force = Some(true);
+    let text = get_text(&svc.coordination(Parameters(req)).await.expect("cleanup"));
+
+    assert!(
+        text.contains("Refused") && text.contains("still a live agent"),
+        "a live assignee must block removal: {text}"
+    );
+    assert!(
+        text.contains("does NOT override"),
+        "the reply must say force cannot bypass this: {text}"
+    );
+    assert!(
+        wt_path.exists(),
+        "a refused cleanup must leave the live worker's cwd in place"
+    );
+}
+
+/// AC3: the 'disabled' refusal survives for genuine System-A CRUD with the flag
+/// off. Lifting the gate for cleanup must not lift it for create/show.
+#[tokio::test]
+async fn test_system_a_crud_still_reports_disabled_with_flag_off() {
+    let repo = GitRepo::new();
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
+    disable_system_a(&cas_root);
+
+    let svc = make_service(cas_root.clone());
+    for action in ["worktree_create", "worktree_show"] {
+        let mut req = coord_req(action);
+        req.id = Some("anything".to_string());
+        req.task_id = Some("anything".to_string());
+        let text = get_text(&svc.coordination(Parameters(req)).await.expect(action));
+        assert!(
+            text.contains("experimental and disabled"),
+            "{action} is System-A-only CRUD and must still be gated: {text}"
+        );
+    }
+}

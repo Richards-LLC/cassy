@@ -99,7 +99,9 @@ For Vercel-deployed projects, `vercel env pull .env.<env> --environment=<env>` (
 
 ## Running Tests in a Worker
 
-**Scope first:** `cargo test --lib` / `cargo test --test <name>` for targeted changes. A full suite is a close gate for shared/public surfaces only — background it, and run it through the canonical sanitized `env -u ...` command in [discipline.md](cas-worker/references/discipline.md), which strips the factory identity variables that change test behavior.
+**Scope first:** `cargo test --lib` / `cargo test --test <name>` for targeted changes. A full suite is a close gate for shared/public surfaces only — background it.
+
+**Then check the clean-CI shape.** Your shell exports ~15 `CAS_*` variables; a test that reads one passes for you and fails only in CI. Before you push, if your diff touches agent resolution, coordination, messaging, cloud config or anything else that reads the environment, re-run the SCOPED binary through `make -C cas-cli test-clean-env CLEAN_ENV_ARGS='--test <name>'` — it strips every `CAS_*` variable it finds and prints the list. See [discipline.md](cas-worker/references/discipline.md).
 
 ## References
 

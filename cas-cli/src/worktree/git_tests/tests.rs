@@ -1174,3 +1174,271 @@ fn duplicate_branch_names_for_one_commit_do_not_inflate_the_stack() {
         "the genuine second rung must survive dedupe: {chain:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// cas-5ee0 (GH #137): worktree_merge receipt tells the truth about push state.
+//
+// A merge that moves only the LOCAL target ref is invisible to every other
+// checkout and to the task-close merge-state guard, which measures ancestry
+// against BOTH `<parent>` and `origin/<parent>`. Before this, worktree_merge
+// returned a bare "Merged ..." success with no push-state information at all,
+// so the merge receipt and the close guard could disagree about which ref was
+// authoritative — a guaranteed close-rejection loop that only a manual
+// `git push origin <target>` could break.
+// ---------------------------------------------------------------------------
+
+/// Commit a file on the currently checked-out branch of `repo`.
+fn commit_file(repo: &Path, name: &str, body: &str) {
+    std::fs::write(repo.join(name), body).unwrap();
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-q", "-m", name])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+}
+
+/// Reproduce the exact defect shape: a factory branch merged into LOCAL `main`
+/// while `origin/main` stays at the pre-merge tip.
+///
+/// Returns (temp, origin bare path, local clone path, merge commit sha).
+fn merged_locally_with_origin_behind() -> (TempDir, PathBuf, PathBuf, String) {
+    let (temp, origin_path, local_path) = create_repo_with_origin();
+    let pre_merge_origin_tip = GitOperations::new(local_path.clone())
+        .resolve_commit("origin/main")
+        .unwrap();
+
+    Command::new("git")
+        .args(["checkout", "-q", "-b", "factory/kind-newt-49"])
+        .current_dir(&local_path)
+        .output()
+        .unwrap();
+    commit_file(&local_path, "worker.txt", "worker work\n");
+
+    Command::new("git")
+        .args(["checkout", "-q", "main"])
+        .current_dir(&local_path)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args([
+            "merge",
+            "--no-ff",
+            "-q",
+            "-m",
+            "merge worker",
+            "factory/kind-newt-49",
+        ])
+        .current_dir(&local_path)
+        .output()
+        .unwrap();
+
+    let git = GitOperations::new(local_path.clone());
+    let merge_sha = git.resolve_commit("main").unwrap();
+    assert_ne!(
+        merge_sha, pre_merge_origin_tip,
+        "fixture must actually advance local main"
+    );
+    assert_eq!(
+        git.resolve_commit("origin/main").as_deref(),
+        Some(pre_merge_origin_tip.as_str()),
+        "fixture must leave origin/main at the PRE-merge tip — that is the defect"
+    );
+
+    (temp, origin_path, local_path, merge_sha)
+}
+
+#[test]
+fn publish_branch_to_origin_reports_no_remote_for_local_only_repo() {
+    let (_temp, repo_path) = create_test_repo();
+    let git = GitOperations::new(repo_path);
+    let trunk = git.detect_default_branch();
+
+    // No `origin` at all: nothing downstream can consult a remote ref either,
+    // so this must NOT read as "you forgot to push".
+    assert_eq!(
+        git.publish_branch_to_origin(&trunk),
+        TargetPushOutcome::NoRemote
+    );
+    assert!(git.publish_branch_to_origin(&trunk).is_published());
+}
+
+#[test]
+fn publish_branch_to_origin_never_creates_an_absent_remote_branch() {
+    let (_temp, origin_path, local_path) = create_repo_with_origin();
+    let git = GitOperations::new(local_path.clone());
+
+    Command::new("git")
+        .args(["checkout", "-q", "-b", "epic/local-only"])
+        .current_dir(&local_path)
+        .output()
+        .unwrap();
+    commit_file(&local_path, "epic.txt", "epic work\n");
+
+    assert_eq!(
+        git.publish_branch_to_origin("epic/local-only"),
+        TargetPushOutcome::RemoteBranchAbsent,
+        "a branch that was never published must not be created by a merge side effect"
+    );
+
+    // Prove the remote really is untouched.
+    let refs = Command::new("git")
+        .args([
+            "--git-dir",
+            origin_path.to_str().unwrap(),
+            "branch",
+            "--list",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&refs.stdout).contains("epic/local-only"),
+        "origin must not have gained the branch"
+    );
+}
+
+#[test]
+fn publish_branch_to_origin_is_already_current_when_nothing_to_push() {
+    let (_temp, _origin_path, local_path) = create_repo_with_origin();
+    let git = GitOperations::new(local_path);
+
+    let sha = git.resolve_commit("main").unwrap();
+    assert_eq!(
+        git.publish_branch_to_origin("main"),
+        TargetPushOutcome::AlreadyCurrent { sha }
+    );
+}
+
+/// AC1 + AC2: the merged-locally-but-origin-behind case is repaired by the
+/// merge itself, so the receipt's target ref and the close guard's
+/// `origin/<parent>` view agree without a manual push step.
+#[test]
+fn publish_branch_to_origin_pushes_a_locally_merged_target() {
+    let (_temp, _origin_path, local_path, merge_sha) = merged_locally_with_origin_behind();
+    let git = GitOperations::new(local_path);
+
+    assert_eq!(
+        git.publish_branch_to_origin("main"),
+        TargetPushOutcome::Pushed {
+            sha: merge_sha.clone()
+        }
+    );
+    assert_eq!(
+        git.resolve_commit("origin/main").as_deref(),
+        Some(merge_sha.as_str()),
+        "origin/main must now carry the merge"
+    );
+}
+
+/// AC3: the close guard's own measurement — which is what rejected the worker
+/// with "N commit(s) from this task not on main" — flips from stranded to
+/// merged once the target is published, and nothing else changes.
+#[test]
+fn close_guard_origin_view_only_sees_the_merge_after_the_target_is_published() {
+    use crate::mcp::tools::core::task::lifecycle::close_ops::count_unmerged_against_targets;
+
+    let (_temp, _origin_path, local_path, merge_sha) = merged_locally_with_origin_behind();
+    let git = GitOperations::new(local_path.clone());
+
+    // A checkout that only ever sees origin (the shape of any other worker's
+    // repo, and of the close guard after it fetches) still calls this work
+    // stranded while the merge is local-only.
+    let origin_only = Command::new("git")
+        .args([
+            "rev-list",
+            "--count",
+            "factory/kind-newt-49",
+            "--not",
+            "origin/main",
+        ])
+        .current_dir(&local_path)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&origin_only.stdout).trim(),
+        "1",
+        "pre-push, origin/main must not contain the worker commit"
+    );
+
+    assert!(matches!(
+        git.publish_branch_to_origin("main"),
+        TargetPushOutcome::Pushed { .. }
+    ));
+
+    // Post-push both refs agree, so the guard proceeds.
+    assert_eq!(
+        count_unmerged_against_targets(&local_path, "factory/kind-newt-49", "main"),
+        Some(0),
+        "after publishing, the merge-state guard must see zero stranded commits"
+    );
+    assert_eq!(
+        git.resolve_commit("origin/main").as_deref(),
+        Some(merge_sha.as_str())
+    );
+}
+
+/// A diverged remote must be reported, never force-pushed over.
+#[test]
+fn publish_branch_to_origin_reports_not_pushed_on_diverged_remote() {
+    let (temp, origin_path, local_path, merge_sha) = merged_locally_with_origin_behind();
+    advance_origin_main(&temp, &origin_path, 1);
+
+    let git = GitOperations::new(local_path.clone());
+    let origin_tip_before = {
+        // Read the remote's real tip, not this clone's stale tracking ref.
+        let out = Command::new("git")
+            .args([
+                "--git-dir",
+                origin_path.to_str().unwrap(),
+                "rev-parse",
+                "main",
+            ])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    let outcome = git.publish_branch_to_origin("main");
+    match &outcome {
+        TargetPushOutcome::NotPushed { sha, reason, .. } => {
+            assert_eq!(sha.as_deref(), Some(merge_sha.as_str()));
+            assert!(!reason.is_empty(), "the failure must carry a reason");
+        }
+        other => panic!("diverged remote must report NotPushed, got {other:?}"),
+    }
+    assert!(!outcome.is_published());
+
+    let out = Command::new("git")
+        .args([
+            "--git-dir",
+            origin_path.to_str().unwrap(),
+            "rev-parse",
+            "main",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        origin_tip_before,
+        "a non-fast-forward must never be clobbered"
+    );
+}
+
+#[test]
+fn publish_branch_to_origin_bounds_its_wall_clock() {
+    let (_temp, _origin_path, local_path, _sha) = merged_locally_with_origin_behind();
+    let git = GitOperations::new(local_path);
+
+    // A zero timeout kills the push before it can finish; the point is that a
+    // hung remote degrades to a loud NotPushed instead of blocking the MCP
+    // handler forever.
+    let outcome = git.publish_branch_to_origin_bounded("main", std::time::Duration::from_millis(0));
+    assert!(
+        matches!(outcome, TargetPushOutcome::NotPushed { .. }),
+        "a timed-out push must report NotPushed, got {outcome:?}"
+    );
+}

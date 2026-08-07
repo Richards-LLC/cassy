@@ -108,20 +108,29 @@ change rarely needs it:
 
 Reserve the full suite for close gates on shared/public surfaces — and background it.
 
-### Running the full test suite in a worker
+### Running tests in the clean-CI environment shape
 
-Factory identity variables inherited by worker processes can change test behavior. Use this
-canonical sanitized command for full-suite gates; do not shorten the list:
+Your shell exports ~15 `CAS_*` identity variables. A test that reads one passes for you and
+fails only on a clean CI runner. That is not hypothetical: GH #136's tests shipped red exactly
+this way — they resolved a supervisor name from the ambient `CAS_SUPERVISOR_NAME` and passed
+100% of the time in every factory shell.
 
 ```bash
-env -u CAS_AGENT_ROLE -u CAS_AGENT_NAME -u CAS_AGENT_ID -u CAS_FACTORY_MODE \
-    -u CAS_FACTORY_SESSION -u CAS_FACTORY_SUPERVISOR_CLI -u CAS_FACTORY_WORKER_CLI \
-    -u CAS_SESSION_ID -u CAS_SUPERVISOR_NAME -u CAS_CLONE_PATH -u CAS_ROOT \
-    cargo test --no-fail-fast
+make -C cas-cli test-clean-env                                     # one binary, clean env
+make -C cas-cli test-clean-env CLEAN_ENV_ARGS='--lib cloud::config'
 ```
 
-That is what the factory actually injects. `CAS_ROOT`/`CAS_CLONE_PATH` matter most — left set,
-a test can reach the *main* checkout's `.cas`. There is no `CAS_TASK_ID`; don't add it back.
+It enumerates `CAS_*` from your live environment, prints what it stripped, and runs the scoped
+tests without them. **Use it for scoped runs too**, not just full-suite gates, whenever your
+diff touches agent resolution, coordination, messaging, cloud config, or anything else that
+reads the environment. Scoped is where this bites: the GH #136 tests were only ever run with
+`--test factory_mcp_ops_test`, so a full-suite-only rule would not have caught them.
+
+Do not hand-maintain an `env -u ...` list. The one that used to live here had drifted in both
+directions — it missed `CAS_CLOUD_TOKEN` and `CAS_CLOUD_ENDPOINT` (a "sanitized" run could
+still reach the real cloud) and stripped two variables that no longer exist. `CAS_ROOT` and
+`CAS_CLONE_PATH` matter most: left set, a test can reach the *main* checkout's `.cas`. There is
+no `CAS_TASK_ID`; don't add it back.
 
 ### If you are already blocked
 

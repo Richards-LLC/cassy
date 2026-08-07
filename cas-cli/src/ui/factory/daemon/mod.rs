@@ -255,9 +255,17 @@ pub struct FactoryDaemon {
     /// only previous guard against duplicate copies) goes blind the moment a
     /// row is drained and the next ~100ms poll appends a brand-new copy — one
     /// per drain, forever. Knowing we already wrote a row lets the delivery
-    /// path check the inbox for the drain and consume the queue row instead.
+    /// path check the inbox for the drain and stop re-writing.
+    ///
+    /// cas-ef14 (GH #139): the value carries the recipient pane's output byte
+    /// count at write time. The drain alone is NOT evidence the recipient took
+    /// a turn — Claude Code's teammate layer files the inbox row into its own
+    /// pending-message store on a watcher, within a second, whether or not the
+    /// recipient is idle — so consuming on it stranded exactly the messages
+    /// the cas-f02b wake contract exists to deliver. Pane output after the
+    /// write is the consume signal now.
     /// Entries are dropped when the row is consumed, suppressed or abandoned.
-    inbox_deferred_writes: std::collections::HashSet<i64>,
+    inbox_deferred_writes: HashMap<i64, crate::ui::factory::daemon::runtime::InboxDeferredWrite>,
     /// cas-ac7e (GH #130): urgent rows whose interrupt-and-inject has been
     /// written to the PTY but whose wake has not yet been corroborated by pane
     /// output. Keyed by `prompt_queue.id`.

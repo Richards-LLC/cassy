@@ -152,23 +152,29 @@ dropping data with no destination.
 live database, so `cd`-ing into a copy of a `.cas` tree does **not** retarget the
 command. Rehearsals must pass explicit roots.
 
+Stage the copies on **disk, not `/tmp`**. `/tmp` is tmpfs on this host (RAM), and
+each database is ~90 MB — copying both plus their ledgers is a quarter-gigabyte
+of memory, and CAS warns above a 1 GiB tmpfs threshold. The approved staging
+location is `/mnt/datacube/staging`.
+
 Make copies with `VACUUM INTO` from a read-only connection — never `cp` a live
 WAL database:
 
 ```
-mkdir -p /tmp/m5rehearsal/proj /tmp/m5rehearsal/glob
-sqlite3 "file:$PWD/.cas/cas.db?mode=ro"   "VACUUM INTO '/tmp/m5rehearsal/proj/cas.db'"
-sqlite3 "file:$HOME/.cas/cas.db?mode=ro"  "VACUUM INTO '/tmp/m5rehearsal/glob/cas.db'"
+R=/mnt/datacube/staging/m5rehearsal
+mkdir -p $R/proj $R/glob
+sqlite3 "file:$PWD/.cas/cas.db?mode=ro"   "VACUUM INTO '$R/proj/cas.db'"
+sqlite3 "file:$HOME/.cas/cas.db?mode=ro"  "VACUUM INTO '$R/glob/cas.db'"
 ```
 
 Then drive every invocation with explicit roots **and** `CAS_ROOT` pointed at a
 copy, so no resolution path can reach the live tree:
 
 ```
-CAS_ROOT=/tmp/m5rehearsal/proj cas memory-migrate \
-  --project-root /tmp/m5rehearsal/proj \
-  --global-root  /tmp/m5rehearsal/glob \
-  --ledger       /tmp/m5rehearsal/ledger
+CAS_ROOT=$R/proj cas memory-migrate \
+  --project-root $R/proj \
+  --global-root  $R/glob \
+  --ledger       $R/ledger
 ```
 
 Three safety properties are already built in and worth knowing:

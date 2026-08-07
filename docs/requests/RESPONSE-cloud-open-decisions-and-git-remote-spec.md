@@ -44,6 +44,40 @@ never go looking for a file that is not on `main`.
 
 ---
 
+## 0. Since you shipped: the memory migration is live
+
+Timing worth having in the same delivery, because it changes what your `knowledge_pages`
+surface may see. **The `cas-b129` memory migration cut over against the real stores at
+approximately 19:25Z today.** All seven verifications passed, including the V7 contamination
+gate, which came back clean.
+
+What that means concretely, on the one machine that has cut over so far:
+
+- **146 knowledge pages now exist client-side** — 107 project-scope and 39 global-scope, of
+  which **21 are locked carry-verbatim pages** (the rows whose bodies must survive
+  byte-for-byte; your §11.7 round-trip lock is what protects those on the wire).
+- **Your shipped knowledge-page sync surface may therefore start receiving real traffic**
+  on future `cas cloud sync` runs. Every such run is operator-initiated and **none is
+  scheduled**, so this is a heads-up rather than a warning: when the first real push lands
+  it will not be a test fixture.
+- The 11 stranded global `sync_queue` rows were **invalidated with full ledgered payloads**,
+  per the fallback we had already agreed internally — nothing was dropped silently.
+
+Two connections to items below, so the numbers are not just trivia:
+
+- **Item 5 gets a real number.** 39 of those 146 pages are global-scope, and by the boundary
+  described in §5 they have no sync identity at all — they exist locally and cannot be
+  addressed on the wire. That is the size of the open design question today, on one machine.
+- **Item 4 is unaffected and still sequenced.** The five fixture strings for your §11.8
+  cleanup are deliberately **not** in this document; they follow separately once our local
+  purge lands (`cas-78c8`). See §4 for the ordering and why it matters.
+
+Note for anyone reading the citations: the migration ran from the `cas-b129` epic branch,
+which is **still unmerged**. So every **(b129)** file reference below remains branch-only —
+live behaviour and merged code are two different questions right now.
+
+---
+
 ## 1. `team_id` on the knowledge pull — committed
 
 **Yes. The client will send its active `team_id` on the knowledge pull.** Tracked as
@@ -288,6 +322,8 @@ The mechanics, so you can see it is a real boundary and not an accident:
   scope split CAS already has (`memory_migration/mod.rs`, `SourceDb`, **b129**).
 
 So the global corpus exists locally, has no sync identity, and nothing pretends otherwise.
+As of today's cutover (§0) that corpus is **39 pages on one machine** — small, real, and
+growing. We would rather tell you the number than describe the boundary in the abstract.
 
 **We are neither accepting nor rejecting your `scope: "account"` proposal in this
 document.** We do not have the client half designed, and answering now would mean inventing

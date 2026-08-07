@@ -557,14 +557,18 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
 }
 
 /// Resolve every known local CAS root to its canonical id + repository
-/// identity, for the collision check. Best-effort: a registry that cannot be
-/// opened yields an empty list and the collision check simply stays silent
-/// (it is an advisory check, not a gate).
-fn collect_local_root_identities() -> Vec<crate::cloud::LocalRootIdentity> {
-    let Ok(repos) = crate::worktree::discovery::list_tracked_repos() else {
-        return Vec::new();
-    };
-    repos
+/// identity, for the collision check.
+///
+/// Returns `Err` when the host known-repos registry cannot be read. It is
+/// deliberately NOT mapped to an empty list: an empty list is indistinguishable
+/// from "checked everything, found no collisions", and a silently-skipped
+/// collision check on the one surface a contamination-suspicious user consults
+/// is the same reassuring-zero failure mode this epic exists to kill. The check
+/// stays advisory — the caller reports the skip as a warning rather than
+/// failing `cas doctor`.
+fn collect_local_root_identities() -> Result<Vec<crate::cloud::LocalRootIdentity>, String> {
+    let repos = crate::worktree::discovery::list_tracked_repos().map_err(|e| e.to_string())?;
+    Ok(repos
         .into_iter()
         .filter(|repo| repo.healthy)
         .filter_map(|repo| {
@@ -577,14 +581,18 @@ fn collect_local_root_identities() -> Vec<crate::cloud::LocalRootIdentity> {
                 canonical_id,
             })
         })
-        .collect()
+        .collect())
 }
 
 /// Build the canonical-id doctor rows. Pure given the resolved root list, so
 /// the collision warning is testable without touching the host registry.
+///
+/// `known_roots` carries the registry read outcome, not just its rows: an
+/// `Err` becomes a Warning row naming the failure, so a skipped collision
+/// check can never masquerade as a clean one.
 fn canonical_id_checks(
     cas_root: &Path,
-    known_roots: Vec<crate::cloud::LocalRootIdentity>,
+    known_roots: Result<Vec<crate::cloud::LocalRootIdentity>, String>,
 ) -> Vec<Check> {
     let mut checks = Vec::new();
 
@@ -612,6 +620,23 @@ fn canonical_id_checks(
         status: CheckStatus::Ok,
         message,
     });
+
+    let known_roots = match known_roots {
+        Ok(roots) => roots,
+        Err(e) => {
+            checks.push(Check {
+                name: "canonical id collision".to_string(),
+                status: CheckStatus::Warning,
+                message: format!(
+                    "Could not read the known-repos registry: {e} — canonical-id collision \
+                     check SKIPPED. This is not a clean result: other local projects may share \
+                     bucket `{canonical_id}` and go unreported. Run `cas known-repos list` to \
+                     confirm the registry is readable."
+                ),
+            });
+            return checks;
+        }
+    };
 
     for collision in crate::cloud::detect_canonical_id_collisions(&known_roots) {
         let roots = collision
@@ -665,7 +690,7 @@ mod tests {
         let cas_root = temp.path().join("gabber-studio/.cas");
         fs::create_dir_all(&cas_root).unwrap();
 
-        let checks = canonical_id_checks(&cas_root, Vec::new());
+        let checks = canonical_id_checks(&cas_root, Ok(Vec::new()));
         let msg = messages(&checks, "canonical id").join("");
         assert!(msg.contains("gabber-studio"), "got: {msg}");
         assert!(msg.contains("folder name"), "got: {msg}");
@@ -691,7 +716,7 @@ mod tests {
                 git_remote: Some("gitlab.com/client-two/accounting".to_string()),
             },
         ];
-        let checks = canonical_id_checks(&cas_root, known);
+        let checks = canonical_id_checks(&cas_root, Ok(known));
         let collision = checks
             .iter()
             .find(|c| c.name == "canonical id collision")
@@ -700,6 +725,53 @@ mod tests {
         assert!(collision.message.contains("client-one/accounting"));
         assert!(collision.message.contains("client-two/accounting"));
         assert!(collision.message.contains("cas cloud project set"));
+    }
+
+    #[test]
+    fn unreadable_registry_is_named_as_a_skipped_check_never_silence() {
+        // The reassuring-zero failure mode: if the known-repos registry can
+        // not be read, the collision check does not run — and an absent
+        // warning would read as "no collisions" on the exact surface a
+        // contamination-suspicious user consults. It must say so out loud.
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join("some-project/.cas");
+        fs::create_dir_all(&cas_root).unwrap();
+
+        let checks = canonical_id_checks(&cas_root, Err("disk I/O error".to_string()));
+        let row = checks
+            .iter()
+            .find(|c| c.name == "canonical id collision")
+            .expect("an unreadable registry must still emit a collision row");
+        assert!(matches!(row.status, CheckStatus::Warning));
+        assert!(row.message.contains("disk I/O error"), "{}", row.message);
+        assert!(row.message.contains("SKIPPED"), "{}", row.message);
+        // The bucket row is still reported — the skip is scoped to the
+        // collision check, not the whole diagnostic.
+        assert_eq!(messages(&checks, "canonical id").len(), 1);
+    }
+
+    #[test]
+    fn collect_local_root_identities_propagates_a_corrupt_registry() {
+        // End-to-end companion to the seam test above: a real `~/.cas/cas.db`
+        // that is not a database must surface as Err, not as an empty list.
+        crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
+            let host_cas = home.join(".cas");
+            fs::create_dir_all(&host_cas).unwrap();
+            fs::write(host_cas.join("cas.db"), b"this is not a sqlite database").unwrap();
+
+            let result = collect_local_root_identities();
+            assert!(
+                result.is_err(),
+                "a corrupt host registry must not read as an empty (=no collisions) list, got {:?}",
+                result
+            );
+
+            // Fail-closed must not become fail-always: a healthy registry with
+            // no rows still reads Ok(empty), which is a genuine "no collisions".
+            fs::remove_file(host_cas.join("cas.db")).unwrap();
+            crate::store::known_repos::ensure_host_schema().unwrap();
+            assert_eq!(collect_local_root_identities().unwrap(), Vec::new());
+        });
     }
 
     #[test]
@@ -724,7 +796,7 @@ mod tests {
                 .unwrap();
         }
 
-        let checks = canonical_id_checks(&cas_root, Vec::new());
+        let checks = canonical_id_checks(&cas_root, Ok(Vec::new()));
         let msg = messages(&checks, "canonical id").join("");
         assert!(msg.contains("github.com/acme/renamed"), "got: {msg}");
         assert!(

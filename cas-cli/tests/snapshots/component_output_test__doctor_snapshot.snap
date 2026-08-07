@@ -8,7 +8,7 @@ cas doctor
 [OK] database: SQLite database found
 [OK] schema: v220 (up to date)
 [OK] supervisor relay: no undelivered lifecycle relays
-[OK] tables: [N] tables, 607 columns, 180 rows total
+[OK] tables: [N] tables, 604 columns, 180 rows total
 [OK] entry store: [N] entries accessible
 [WARN] search index: Index not found. Will be created on first search.
 [OK] configuration: Loaded (sync: enabled)

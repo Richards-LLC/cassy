@@ -747,3 +747,100 @@ reaching the store.
 - The silent-loss / duplicate-delivery pairing still stands on evidence that never relied on the
   ack column: 47 duplicate transcript injections (worst 9×) and the #155 amendment incident.
   Only the mechanism attribution changed.
+
+---
+
+## PHASE 3 ADDENDUM — 2026-08-07, post-fix: the seam is named and closed (cas-78d3, GH #165)
+
+The Phase-2 addendum ended by locating the fault "between the hook firing and
+`SurfacingSource::HookSurfaced` reaching the store" and stopped there. This addendum names the
+line, reproduces it, and re-runs the ack queries that were the measurement gate.
+
+### The break
+
+The hook fires. The handler bails on line 2.
+
+Claude Code's `UserPromptSubmit` payload carries the submitted text under the key **`prompt`**.
+`HookInput` declared it as `user_prompt`, aliased only to `user_prompt` / `userPrompt`
+(`crates/cas-core/src/hooks/types.rs:58-60`). The key `prompt` *was* aliased — onto a different
+field, `subagent_prompt` (`types.rs:85-87`), which has no readers anywhere in the tree.
+
+So `input.user_prompt` was `None` on every real turn, and
+`cas-cli/src/hooks/handlers/handlers_middle/prompt_capture.rs:49-52`
+
+```
+let prompt_text = match &input.user_prompt {
+    Some(p) if !p.trim().is_empty() => p.trim(),
+    _ => return Ok(HookOutput::empty()),
+};
+```
+
+returned before reaching the cas-7a01 factory block twenty lines below it. The store-side
+reconciliation at `prompt_queue_store.rs:3558-3561` is correct and always was. It was never called.
+
+### Reproduction
+
+Against the installed v2.50.0 binary, with a probe row targeted at a synthetic recipient:
+
+| payload shape | result |
+|---|---|
+| `{"hook_event_name":"UserPromptSubmit","prompt":"…"}` — what Claude actually sends | `{}` — mail not surfaced |
+| `{"hook_event_name":"UserPromptSubmit","user_prompt":"…"}` — what CAS assumed | `additionalContext` carrying the message |
+
+### The corroboration that settles "inert vs. never-fires"
+
+Phase 2 could not distinguish *the hook never runs* from *the hook runs and does nothing*. The
+`prompts` attribution table settles it. That table is written by the same handler, a few lines past
+the same early return, for every non-supervisor turn. Across the entire life of this database —
+**2026-03-20 to 2026-08-07 — it holds zero rows.**
+
+The hook has been firing all along. `handle_user_prompt_submit` has never once executed past line
+52 in production. GH #165 is therefore the visible half of a wider dead hook: prompt-attribution
+capture, the feature the `prompts` table and `cas blame` exist for, has never captured anything.
+That deserves its own issue; it is out of scope here.
+
+### Ack queries re-run — 2026-08-07T23:10Z
+
+`acked_via` distribution over `prompt_queue` (synthetic probe rows removed before counting):
+
+| `acked_via` | rows | first | last |
+|---|---|---|---|
+| (null) | 7,763 | 2026-03-20T12:23:24 | 2026-08-07T23:07:48 |
+| `inferred_from_reply` | 223 | 2026-08-06T12:50:08 | 2026-08-07T22:37:17 |
+| `explicit_ack` | 12 | 2026-07-09T18:10:29 | 2026-07-09T18:16:26 |
+| **`hook_surfaced`** | **2** | **2026-08-07T22:58:06** | **2026-08-07T22:58:08** |
+
+`prompt_queue_recipient_seen` by source: 555 legacy-blank, 47 `inbox_poll`, **2 `hook_surfaced`**.
+
+Those two rows are the first `hook_surfaced` acks this database has ever held. They are real
+messages (8003, 8005 — the spawn brief and the task assignment) to a real worker, surfaced through
+the real handler and acked in the same transaction as the receipt, exactly as v2.49.0 designed.
+They were produced by invoking the hook with the correctly-shaped payload, which is precisely the
+demonstration: the mechanism works and only the payload contract was wrong.
+
+Note the direction of the correction. Phase 2 read `hook_surfaced = 0` as evidence the drain
+"appears never to run" and Phase 1 read a missing column as a missing design; both inferred a
+missing mechanism from missing data. The mechanism was present both times. What was missing was a
+key name.
+
+### What this changes about the mining conclusions
+
+- The unreconciled pair (`transport_delivered_at NOT NULL, acked_at NULL`) being the **100% steady
+  state** now has a single sufficient cause, and it is one line. The Phase-1 falsifiable claim —
+  that one reconciliation should collapse F1/F2/F3 together — survives, but its cost is a serde
+  alias rather than a redesign.
+- **#166 / #167** (retry, retire) were correctly identified as blocked on this. They were being
+  asked to build retry and dead-lettering on top of a state machine in which the terminal state was
+  unreachable. Any backoff or TTL tuned against the old numbers was tuned against a constant.
+- The clean-post-epoch figure "0 of 21 rows acked by any means" is explained rather than superseded:
+  `inferred_from_reply` was the only ack path with a live wire, and it is a heuristic fallback, not
+  a receipt.
+
+### Standing methodological note
+
+Every pre-existing test of this handler — including the seven `factory_inbox_surfacing` tests
+shipped with cas-7a01 specifically to prove surfacing worked — constructed `HookInput` **by hand**
+and set `user_prompt` directly. All seven passed, continuously, while the feature they covered was
+dead in production for a full release. A struct-literal test cannot catch a deserialization-contract
+bug; only parsing the real wire shape can. The regression tests added with this fix parse raw JSON
+in the shape Claude actually sends, and the payload literals in them are the contract.

@@ -23,6 +23,69 @@ pub fn handle_pre_tool_use(
     let is_factory_agent = crate::harness_policy::is_factory_agent(input);
 
     // ========================================================================
+    // REVIEW DISPATCH GATE — hoisted to the top (cas-62b0, GH #152)
+    //
+    // cas-bcfb put this gate below, above the `cas_root` check. That was
+    // enough while the recognized entry tools were `Skill` and `Workflow`.
+    // cas-62b0 adds `Task`/`Agent`, because the pipeline's cost is not the
+    // orchestrator — it is the persona fan-out, and a worker that spawns the
+    // personas itself never touches `Skill` or `Workflow`. That is what
+    // happened in factory session rocketship-template-ready-stork-75: eight
+    // personas ran to completion under `owner = "supervisor"` on a binary
+    // containing this gate, with a settings file that matched `Skill|Workflow`.
+    //
+    // It runs first so the refusal is decided before any other branch can
+    // return, and so the containment block immediately below cannot skip it.
+    // Role comes from the hook's own snapshot, and a dispatch that cannot
+    // resolve a CAS root must still refuse (`supervisor_owned_at(None)`
+    // returns the cas-865b default).
+    // ========================================================================
+    if crate::harness_policy::is_worker(input)
+        && crate::code_review_dispatch::tool_call_enters_review(
+            tool_name,
+            input.tool_input.as_ref(),
+        )
+    {
+        if let crate::code_review_dispatch::ReviewDispatchDecision::Refused { message } =
+            crate::code_review_dispatch::review_dispatch_decision(
+                true,
+                crate::code_review_dispatch::supervisor_owned_at(cas_root),
+            )
+        {
+            return Ok(HookOutput::with_pre_tool_permission("deny", &message));
+        }
+    }
+
+    // ========================================================================
+    // `Agent` CONTAINMENT (cas-62b0) — new matcher entry, one new effect
+    //
+    // `Agent` is the current Claude Code spelling of the subagent tool, and
+    // before this commit it appeared in NO PreToolUse matcher CAS generates:
+    // `default_pre_tool_use_matcher` (config/hooks.rs) and
+    // `factory_pre_tool_intercept_list` (daemon/runtime/teams.rs) both listed
+    // `Task` only, from an older harness generation. Adding it is what makes
+    // the gate above reachable for a hand-spawned persona.
+    //
+    // But several branches further down are keyed on `Task | "Agent"` and
+    // have therefore never fired for the `Agent` spelling: the supervisor
+    // isolation deny, and — the dangerous one — the sealed task-verifier
+    // handoff, whose binding half (`SubagentStart`) is wired in the config
+    // dir rather than in the factory settings file. A handoff minted here
+    // that never binds denies the parent's NEXT verifier spawn with "already
+    // awaiting SubagentStart". Switching those on is a real change to
+    // verification authority with its own failure modes; it is not a
+    // side effect a review-cost fix gets to smuggle in.
+    //
+    // So a factory agent's `Agent` call gets exactly one new behaviour — the
+    // refusal above — and otherwise returns no decision, exactly as when the
+    // matcher never fired. Activating the other `Agent` branches deliberately
+    // is tracked separately.
+    // ========================================================================
+    if tool_name == "Agent" && is_factory_agent {
+        return Ok(HookOutput::empty());
+    }
+
+    // ========================================================================
     // SUPERVISOR DISCIPLINE: Block Agent(isolation="worktree") for supervisors
     //
     // Supervisors must spawn workers via `mcp__cas__coordination spawn_workers`
@@ -91,45 +154,14 @@ pub fn handle_pre_tool_use(
     }
 
     // ========================================================================
-    // REVIEW DISPATCH GATE — every harness entry path (cas-bcfb, GH #125)
-    //
-    // cas-4fef put the ownership gate on `cas_skill_use`, i.e. only on
-    // `mcp__cas__skill action=use id=cas-code-review`. No agent takes that
-    // path: the skill is installed on disk as a Claude Code skill and is
-    // invoked with the native `Skill` tool, and the Phase C workflow
-    // (`.claude/workflows/cas-code-review.js`) is callable straight from the
-    // `Workflow` tool. Both bypass the MCP server entirely, which is how a
-    // worker ran the full persona fan-out under `owner = "supervisor"` on a
-    // binary that provably contained the gate (GH #125: same refusal string
-    // compiled into both binary generations alive that day).
-    //
-    // PreToolUse is the only seam CAS owns for harness-native tool calls, so
-    // the gate is re-stated here — same pure `review_dispatch_decision`, same
-    // refusal text, so the MCP site and this one cannot drift. The matcher
-    // lists that make this hook fire for `Skill`/`Workflow` live in
-    // `ui/factory/daemon/runtime/teams.rs` (factory settings) and
-    // `config/hooks.rs` (generated settings); both must keep these tools.
-    //
-    // Hoisted above the cas_root check for the same reason the
-    // AskUserQuestion gate is: role comes from the hook's own snapshot, and a
-    // hook dispatch that cannot resolve a CAS root must still refuse (with
-    // cas_root=None `supervisor_owned_at` returns the cas-865b default).
+    // (The review dispatch gate — cas-4fef / cas-bcfb / cas-62b0 — used to sit
+    // here. It now runs at the very top of this function so no earlier branch
+    // can return before it; see the comment there for why `Skill`/`Workflow`
+    // alone never enforced anything. The matcher lists that make this hook
+    // fire for those tools live in `ui/factory/daemon/runtime/teams.rs`
+    // (factory settings) and `config/hooks.rs` (generated settings); both
+    // must keep every entry in `REVIEW_ENTRY_TOOLS` reachable.)
     // ========================================================================
-    if crate::harness_policy::is_worker(input)
-        && crate::code_review_dispatch::tool_call_enters_review(
-            tool_name,
-            input.tool_input.as_ref(),
-        )
-    {
-        if let crate::code_review_dispatch::ReviewDispatchDecision::Refused { message } =
-            crate::code_review_dispatch::review_dispatch_decision(
-                true,
-                crate::code_review_dispatch::supervisor_owned_at(cas_root),
-            )
-        {
-            return Ok(HookOutput::with_pre_tool_permission("deny", &message));
-        }
-    }
 
     // ========================================================================
     // WORKER COMMIT GUARD — HOISTED ABOVE cas_root check (cas-bea2, LAYER 1)

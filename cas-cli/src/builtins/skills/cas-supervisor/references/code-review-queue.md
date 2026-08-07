@@ -77,3 +77,6 @@ Default as of cas-865b is `owner = "supervisor"` — no config entry is needed f
 [code_review]
 owner = "worker"
 ```
+Read the effective value back with `cas config get code_review.owner`, or set it with `cas config set code_review.owner supervisor` (cas-62b0 — before that the key existed in the runtime but was invisible to the CLI, so a project could not confirm which mode it was in).
+
+Under `owner = "supervisor"` a worker is refused at the dispatch layer if it reaches for the review — including hand-spawning the personas as `Agent`/`Task` subagents rather than invoking the skill — and the close path no longer asks a worker for a review envelope. That refusal is a PreToolUse hook, so it can only fire for tools the session's settings route to `cas hook PreToolUse`; workers spawned by a current binary get a settings file that routes them, sessions on stale hand-edited settings may not.

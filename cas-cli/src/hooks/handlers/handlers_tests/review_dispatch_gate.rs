@@ -284,3 +284,221 @@ fn non_factory_sessions_are_not_gated_cas_bcfb() {
         "a non-factory session must not be gated"
     );
 }
+
+// ============================================================================
+// cas-62b0 / GH #152 — the persona fan-out is an entry path of its own.
+//
+// Every test above refuses the ORCHESTRATOR. The orchestrator is cheap; the
+// personas are the ~500k subagent tokens. A worker that reads the skill body
+// and spawns the personas itself reaches the pipeline without touching
+// `Skill` or `Workflow` — and the close gate's own remediation text used to
+// point workers at exactly that route ("via the Skill or Task tool").
+// ============================================================================
+
+/// PATH 5 — worker spawns the pipeline as a subagent (`Task`, legacy spelling).
+#[test]
+fn worker_task_tool_dispatch_of_the_review_is_refused_cas_62b0() {
+    let _env = worker_env();
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    let out = handle_pre_tool_use(
+        &hook_input(
+            "Task",
+            serde_json::json!({
+                "subagent_type": "general-purpose",
+                "description": "run cas-code-review",
+                "prompt": "Run cas-code-review over the current diff and return the envelope."
+            }),
+        ),
+        Some(tmp.path()),
+    )
+    .expect("handler ok");
+
+    assert_is_the_cas_4fef_refusal(
+        &deny_reason(&out).expect("Task-tool review dispatch must be refused"),
+        "Task-tool review dispatch",
+    );
+}
+
+/// PATH 6 — same thing under the current `Agent` spelling.
+///
+/// This is the spelling that had no seam at all: neither generated matcher
+/// listed `Agent` before cas-62b0, so the hook was never even invoked for it.
+#[test]
+fn worker_agent_tool_dispatch_of_the_review_is_refused_cas_62b0() {
+    let _env = worker_env();
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    let out = handle_pre_tool_use(
+        &hook_input(
+            "Agent",
+            serde_json::json!({
+                "subagent_type": "cas-code-review",
+                "prompt": "You are the correctness persona. Review the diff."
+            }),
+        ),
+        Some(tmp.path()),
+    )
+    .expect("handler ok");
+
+    assert_is_the_cas_4fef_refusal(
+        &deny_reason(&out).expect("Agent-tool review dispatch must be refused"),
+        "Agent-tool review dispatch",
+    );
+}
+
+/// The refusal must name the config key AND how to read it back.
+///
+/// GH #152's first symptom was `cas config get code_review.owner` answering
+/// "Unknown config key" for a setting that was in force. A refusal that cites
+/// a setting nobody can verify is how "the gate is advisory" gets believed.
+#[test]
+fn the_refusal_names_the_config_and_how_to_verify_it_cas_62b0() {
+    let _env = worker_env();
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    let out = handle_pre_tool_use(
+        &hook_input("Agent", serde_json::json!({"prompt": "cas-code-review personas"})),
+        Some(tmp.path()),
+    )
+    .expect("handler ok");
+
+    let reason = deny_reason(&out).expect("must be refused");
+    assert!(
+        reason.contains("[code_review] owner = \"supervisor\""),
+        "refusal must name the config: {reason}"
+    );
+    assert!(
+        reason.contains("cas config get code_review.owner"),
+        "refusal must name the readback command: {reason}"
+    );
+    assert!(
+        reason.contains("Task/Agent"),
+        "refusal must close the hand-spawned-persona route by name: {reason}"
+    );
+}
+
+/// The sealed task-verifier handoff must be untouched.
+///
+/// `task-verifier` spawns carry server-side authority minted in this same
+/// handler and their prompts legitimately quote review findings. Refusing one
+/// would break close verification in the name of saving review tokens.
+#[test]
+fn task_verifier_spawns_are_never_refused_by_the_review_gate_cas_62b0() {
+    let _env = worker_env();
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    for tool in ["Task", "Agent"] {
+        let out = handle_pre_tool_use(
+            &hook_input(
+                tool,
+                serde_json::json!({
+                    "subagent_type": "task-verifier",
+                    "prompt": "Verify task cas-1234. Prior cas-code-review envelope: {...}"
+                }),
+            ),
+            Some(tmp.path()),
+        )
+        .expect("handler ok");
+
+        assert_ne!(
+            deny_reason(&out).as_deref(),
+            Some(crate::code_review_dispatch::supervisor_owned_review_refusal().as_str()),
+            "{tool}(task-verifier) must not be refused as a review dispatch"
+        );
+    }
+}
+
+/// Ordinary subagent work must pass through untouched.
+///
+/// Over-refusal here would be worse than the bug: a worker that cannot spawn
+/// an Explore agent cannot work at all.
+#[test]
+fn unrelated_subagent_spawns_are_untouched_cas_62b0() {
+    let _env = worker_env();
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    for tool in ["Task", "Agent"] {
+        let out = handle_pre_tool_use(
+            &hook_input(
+                tool,
+                serde_json::json!({
+                    "subagent_type": "Explore",
+                    "description": "locate the close gate",
+                    "prompt": "Find where the close gate rejects a missing envelope."
+                }),
+            ),
+            Some(tmp.path()),
+        )
+        .expect("handler ok");
+
+        assert!(
+            deny_reason(&out).is_none(),
+            "an unrelated {tool} spawn must not be refused"
+        );
+    }
+}
+
+/// `owner = "worker"` keeps the fan-out legal too — the escape hatch is not
+/// silently narrowed by covering more entry paths.
+#[test]
+fn worker_owned_projects_may_still_spawn_personas_cas_62b0() {
+    let _env = worker_env();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        tmp.path().join("config.toml"),
+        "[code_review]\nowner = \"worker\"\n",
+    )
+    .expect("write config");
+
+    let out = handle_pre_tool_use(
+        &hook_input(
+            "Agent",
+            serde_json::json!({"prompt": "Run cas-code-review persona: security"}),
+        ),
+        Some(tmp.path()),
+    )
+    .expect("handler ok");
+
+    assert!(
+        deny_reason(&out).is_none(),
+        "`owner = \"worker\"` must still permit the worker-run fan-out"
+    );
+}
+
+/// Every recognized entry tool must be reachable by the hook.
+///
+/// The gate is only as real as the matcher that invokes it: cas-bcfb's gate
+/// was compiled into the binary that ran 8 personas because the tool it
+/// needed to see was not in any matcher. This test fails the moment
+/// `REVIEW_ENTRY_TOOLS` grows an entry the generated settings do not route.
+#[test]
+fn every_review_entry_tool_is_routed_to_the_hook_cas_62b0() {
+    let factory_matcher =
+        crate::ui::factory::daemon::runtime::teams::TeamsManager::factory_pre_tool_intercept_list();
+    let generated_matcher = crate::config::hooks::default_pre_tool_use_matcher();
+
+    for tool in crate::code_review_dispatch::REVIEW_ENTRY_TOOLS {
+        // `Task` is the legacy spelling of `Agent`; the factory settings route
+        // the current one. Both are recognized by the gate so a harness that
+        // still emits `Task` (and whose config-dir settings match it) is
+        // covered, but only the current spelling is required in the factory
+        // matcher — adding `Task` there would newly activate the sealed
+        // verifier handoff for factory agents, which is a separate change.
+        if *tool == "Task" {
+            assert!(
+                generated_matcher.iter().any(|t| t == tool),
+                "generated settings must route {tool} to PreToolUse"
+            );
+            continue;
+        }
+        assert!(
+            factory_matcher.contains(tool),
+            "factory settings must route {tool} to PreToolUse, else the gate cannot fire"
+        );
+        assert!(
+            generated_matcher.iter().any(|t| t == tool),
+            "generated settings must route {tool} to PreToolUse"
+        );
+    }
+}

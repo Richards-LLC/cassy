@@ -23,6 +23,10 @@ pub(super) fn add_section_descriptions(registry: &mut ConfigRegistry) {
         "issues",
         "GitHub repository routing for CAS-system bug reports",
     );
+    registry.section_descriptions.insert(
+        "code_review",
+        "Ownership of the multi-persona cas-code-review pipeline",
+    );
     registry
         .section_descriptions
         .insert("dev", "Development and tracing options");

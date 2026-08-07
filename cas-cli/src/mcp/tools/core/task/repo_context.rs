@@ -146,6 +146,106 @@ fn bounded_git_layout(
     Ok((canonical(repo_root), common_dir))
 }
 
+/// Canonicalize the payload of a `remote:` selector to `<host>/<owner>/<repo>`.
+///
+/// cas-1a1c (GH #151). [`crate::cloud::normalize_git_remote_url`] already
+/// parses every URL shape a checkout's `origin` can take (https, http,
+/// `ssh://git@`, scp-like `git@host:owner/repo`, ±`.git`), but it deliberately
+/// returns `None` for an already-bare `host/owner/repo` so that canonical-id
+/// derivation never mistakes a local filesystem path for a remote. Selectors
+/// persisted on a task ARE in that bare form, so the matcher needs the extra
+/// step — added here rather than by loosening the cloud helper, whose `None`
+/// is load-bearing for a different caller.
+///
+/// The host component is lowercased (DNS is case-insensitive); the owner and
+/// repo segments are left exactly as written, because path case is significant
+/// on some forges.
+fn canonical_remote_payload(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let normalized = crate::cloud::normalize_git_remote_url(trimmed)
+        .or_else(|| bare_host_owner_repo(trimmed))?;
+    let (host, path) = normalized.split_once('/')?;
+    if host.is_empty() || path.is_empty() {
+        return None;
+    }
+    Some(format!("{}/{path}", host.to_ascii_lowercase()))
+}
+
+/// Accept an already-normalized `host/owner/repo[/...]` selector payload.
+///
+/// Deliberately strict so a filesystem path can never be read as a remote: the
+/// value must carry no scheme and no userinfo, must not be absolute, must have
+/// at least two `/` separators, and its first segment must look like a host
+/// (contains a `.`, or is exactly `localhost`).
+fn bare_host_owner_repo(raw: &str) -> Option<String> {
+    if raw.contains("://") || raw.contains('@') || raw.starts_with('/') {
+        return None;
+    }
+    let clean = raw.trim_end_matches('/');
+    let clean = clean.strip_suffix(".git").unwrap_or(clean);
+    if clean.matches('/').count() < 2 {
+        return None;
+    }
+    let host = clean.split('/').next()?;
+    if host.is_empty() || (!host.contains('.') && host != "localhost") {
+        return None;
+    }
+    Some(clean.to_string())
+}
+
+/// Canonical comparison form for a work-target selector.
+///
+/// `project:` selectors compare verbatim (the id is opaque). `remote:`
+/// selectors compare on their canonicalized payload so that every URL shape of
+/// the same repository collapses to one value. An unparseable `remote:` payload
+/// falls back to its trimmed literal rather than vanishing, so a malformed
+/// selector still compares equal to itself.
+pub(crate) fn canonical_selector(selector: &str) -> String {
+    let trimmed = selector.trim();
+    match trimmed.split_once(':') {
+        Some(("remote", payload)) => canonical_remote_payload(payload)
+            .map(|payload| format!("remote:{payload}"))
+            .unwrap_or_else(|| trimmed.to_string()),
+        _ => trimmed.to_string(),
+    }
+}
+
+/// Every selector a checkout legitimately answers to, most authoritative first.
+///
+/// cas-1a1c (GH #151). [`selector_for_repo`] returns a single selector on a
+/// priority order — a `[project] canonical_id` pin wins and the git remote is
+/// never consulted. That is correct for *stamping* a new work target, but wrong
+/// for *matching* an existing one: `declare_work_target` records whichever
+/// selector was authoritative at creation time, so pinning a canonical_id
+/// afterwards left every previously-created task holding the `remote:` form
+/// unable to match its own repository. A checkout has a set of identities, not
+/// one; matching tests membership in that set.
+fn repo_identities(repo_root: &Path) -> Vec<String> {
+    let mut identities = Vec::new();
+    let cas_root = repo_root.join(".cas");
+    if let Some(project_id) = crate::cloud::canonical_id_from_config_toml(&cas_root)
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+    {
+        identities.push(format!("project:{project_id}"));
+    }
+    if let Some(remote) = crate::cloud::derive_canonical_id_from_git_remote(repo_root) {
+        identities.push(format!("remote:{remote}"));
+    }
+    identities
+}
+
+/// Whether a checkout answers to the declared target selector.
+fn repo_answers_to(repo_root: &Path, target_selector: &str) -> bool {
+    let want = canonical_selector(target_selector);
+    repo_identities(repo_root)
+        .iter()
+        .any(|identity| canonical_selector(identity) == want)
+}
+
 fn selector_for_repo(repo_root: &Path) -> Result<String, String> {
     let cas_root = repo_root.join(".cas");
     if let Some(project_id) = crate::cloud::canonical_id_from_config_toml(&cas_root)
@@ -266,6 +366,33 @@ fn bounded_selector_for_repo(
     crate::cloud::normalize_git_remote_url(&remote)
         .map(|remote| format!("remote:{remote}"))
         .ok_or(BoundedRepoError::Unavailable)
+}
+
+/// Bounded twin of [`repo_identities`] — same set semantics under the preflight
+/// deadline. A missing or unparseable `origin` contributes no remote identity
+/// rather than failing the probe: the pin alone is still a valid identity.
+fn bounded_repo_identities(
+    repo_root: &Path,
+    probe: &BoundedRepoProbe,
+) -> Result<Vec<String>, BoundedRepoError> {
+    let mut identities = Vec::new();
+    let cas_root = repo_root.join(".cas");
+    if let Some(project_id) = crate::cloud::canonical_id_from_config_toml(&cas_root)
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+    {
+        identities.push(format!("project:{project_id}"));
+    }
+    match probe.output(repo_root, &["remote", "get-url", "origin"]) {
+        Ok(remote) => {
+            if let Some(remote) = crate::cloud::normalize_git_remote_url(&remote) {
+                identities.push(format!("remote:{remote}"));
+            }
+        }
+        Err(BoundedRepoError::Unavailable) => {}
+        Err(error) => return Err(error),
+    }
+    Ok(identities)
 }
 
 pub(crate) fn resolve_default_branch(repo_root: &Path) -> Result<String, String> {
@@ -601,13 +728,20 @@ pub(crate) fn resolve_repo_context(
         });
     }
     let mut matches = Vec::new();
+    let mut observed = Vec::new();
     for candidate in candidate_paths(cas_root) {
-        if selector_for_repo(&candidate).ok().as_deref() == Some(&target.repo_selector)
+        let identities = repo_identities(&candidate);
+        if identities
+            .iter()
+            .any(|identity| canonical_selector(identity) == canonical_selector(&target.repo_selector))
             && let Ok((repo_root, git_common_dir)) = git_layout(&candidate)
         {
             matches.push((repo_root, git_common_dir));
         }
+        observed.extend(identities.iter().map(|identity| canonical_selector(identity)));
     }
+    observed.sort();
+    observed.dedup();
     matches.sort();
     matches.dedup();
     match matches.as_slice() {
@@ -622,10 +756,18 @@ pub(crate) fn resolve_repo_context(
         }
         [] => Err(format!(
             "⚠️ WORK TARGET REPOSITORY MISMATCH\n\n\
-             Task targets `{}`, but no current-host known repository or verified \
-             path hint resolves to that selector. Register/open the target repo \
-             with CAS, then retry. No git merge/reachability check was run.",
-            target.repo_selector
+             Task targets `{}` (normalized `{}`), but no current-host known \
+             repository or verified path hint resolves to that selector. \
+             Normalized identities seen on this host: {}. Register/open the \
+             target repo with CAS, then retry. No git merge/reachability check \
+             was run.",
+            target.repo_selector,
+            canonical_selector(&target.repo_selector),
+            if observed.is_empty() {
+                "none".to_string()
+            } else {
+                observed.join(", ")
+            }
         )),
         many => Err(format!(
             "⚠️ AMBIGUOUS WORK TARGET\n\n\
@@ -659,10 +801,15 @@ pub(crate) fn resolve_repo_context_bounded(
                 target_branch,
             });
     }
+    let want = canonical_selector(&target.repo_selector);
     let mut matches = Vec::new();
     for (repo_root, git_common_dir) in bounded_candidate_paths(cas_root, probe)? {
-        match bounded_selector_for_repo(&repo_root, probe) {
-            Ok(selector) if selector == target.repo_selector => {
+        match bounded_repo_identities(&repo_root, probe) {
+            Ok(identities)
+                if identities
+                    .iter()
+                    .any(|identity| canonical_selector(identity) == want) =>
+            {
                 matches.push((repo_root, git_common_dir));
             }
             Ok(_) | Err(BoundedRepoError::Unavailable) => {}
@@ -722,7 +869,19 @@ pub(crate) fn validate_worktree_binding(
     actual_branch: &str,
     worktree_path: &Path,
 ) -> Result<(), String> {
-    if actual.repo_selector == expected.repo_selector
+    // cas-1a1c (GH #151). `expected.repo_selector` is copied verbatim from the
+    // task by `resolve_repo_context`, while `actual.repo_selector` is computed
+    // fresh by `selector_for_repo`, which returns only the highest-priority
+    // identity. A pinned checkout therefore compared `project:<pin>` against a
+    // task's `remote:<origin>` and failed on its own repository — the same
+    // defect as the work-target matcher, one door further in. Compare against
+    // the checkout's full identity set, canonicalized on both sides.
+    let want = canonical_selector(&expected.repo_selector);
+    let selector_matches = canonical_selector(&actual.repo_selector) == want
+        || repo_identities(&actual.repo_root)
+            .iter()
+            .any(|identity| canonical_selector(identity) == want);
+    if selector_matches
         && actual.repo_root == expected.repo_root
         && actual.git_common_dir == expected.git_common_dir
         && actual_branch == expected.target_branch
@@ -731,14 +890,15 @@ pub(crate) fn validate_worktree_binding(
     }
     Err(format!(
         "⚠️ WORKTREE REPOSITORY MISMATCH\n\n\
-         Task {task_id} targets repository `{}` branch `{}`, but worktree {} \
-         resolves to repository `{}` branch `{actual_branch}` with a different \
-         canonical host-local root/common-dir identity. Refusing before \
-         merge/reachability checks.",
+         Task {task_id} targets repository `{}` (normalized `{want}`) branch \
+         `{}`, but worktree {} resolves to repository `{}` (normalized `{}`) \
+         branch `{actual_branch}` with a different canonical host-local \
+         root/common-dir identity. Refusing before merge/reachability checks.",
         expected.repo_selector,
         expected.target_branch,
         worktree_path.display(),
         actual.repo_selector,
+        canonical_selector(&actual.repo_selector),
     ))
 }
 
@@ -1147,6 +1307,213 @@ mod tests {
             let error = resolve_repo_context(dir.path(), &target).unwrap_err();
             assert!(error.contains("no current-host known repository"));
             assert!(error.contains("No git merge/reachability check was run"));
+        });
+    }
+
+    /// cas-1a1c (GH #151) reproduction. The checkout carries BOTH identities:
+    /// a `[project] canonical_id` pin and an `origin` that normalizes to
+    /// exactly the selector the task declares. `selector_for_repo` only ever
+    /// returns the higher-priority one, so the remote-form task could never
+    /// match and `task start` reported a mismatch against its own repository.
+    #[test]
+    fn remote_form_target_matches_a_checkout_that_also_carries_a_project_pin() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            crate::store::known_repos::ensure_host_schema().unwrap();
+            let repo = home.join("cas-src");
+            std::fs::create_dir_all(&repo).unwrap();
+            git(&repo, &["init", "-q", "-b", "main"]);
+            git(
+                &repo,
+                &["remote", "add", "origin", "git@github.com:pippenz/cas.git"],
+            );
+            std::fs::create_dir(repo.join(".cas")).unwrap();
+            std::fs::write(
+                repo.join(".cas/config.toml"),
+                "[project]\ncanonical_id = \"cas-src\"\n",
+            )
+            .unwrap();
+
+            let target = WorkTarget {
+                repo_selector: "remote:github.com/pippenz/cas".to_string(),
+                target_branch: "main".to_string(),
+            };
+            let resolved = resolve_repo_context(&repo.join(".cas"), &target)
+                .expect("a remote-form target must match its own checkout");
+            assert_eq!(resolved.repo_root, canonical(repo.clone()));
+            assert_eq!(resolved.target_branch, "main");
+        });
+    }
+
+    /// AC1: every URL shape a checkout's `origin` can take must match the same
+    /// remote-form target, including from a linked worktree, and including the
+    /// bare `host/owner/repo` form a persisted selector actually carries.
+    #[test]
+    fn remote_form_target_matches_every_origin_url_shape_and_linked_worktrees() {
+        for origin in [
+            "https://github.com/pippenz/cas.git",
+            "https://github.com/pippenz/cas",
+            "http://github.com/pippenz/cas.git",
+            "git@github.com:pippenz/cas.git",
+            "git@github.com:pippenz/cas",
+            "ssh://git@github.com/pippenz/cas.git",
+        ] {
+            TestEnvGuard::run_with_temp_home(|home| {
+                crate::store::known_repos::ensure_host_schema().unwrap();
+                let repo = home.join("checkout");
+                std::fs::create_dir_all(&repo).unwrap();
+                git(&repo, &["init", "-q", "-b", "main"]);
+                git(&repo, &["remote", "add", "origin", origin]);
+                // `candidate_paths` drops non-existent hints, and this checkout
+                // carries no pin — the origin is its only identity, which is
+                // exactly the case under test.
+                std::fs::create_dir(repo.join(".cas")).unwrap();
+                std::fs::write(repo.join("a"), "a").unwrap();
+                git(&repo, &["add", "a"]);
+                git(
+                    &repo,
+                    &[
+                        "-c",
+                        "user.name=CAS",
+                        "-c",
+                        "user.email=cas@example.com",
+                        "commit",
+                        "-q",
+                        "-m",
+                        "base",
+                    ],
+                );
+
+                let target = WorkTarget {
+                    repo_selector: "remote:github.com/pippenz/cas".to_string(),
+                    target_branch: "main".to_string(),
+                };
+                resolve_repo_context(&repo.join(".cas"), &target)
+                    .unwrap_or_else(|e| panic!("origin {origin} must match the target: {e}"));
+
+                // Same repository, reached through a linked worktree: git_layout
+                // resolves it to the primary checkout, so the identity holds.
+                let linked = home.join("linked");
+                git(
+                    &repo,
+                    &[
+                        "worktree",
+                        "add",
+                        "-q",
+                        "-b",
+                        "factory/w",
+                        linked.to_str().unwrap(),
+                    ],
+                );
+                let from_linked = resolve_path_context(&linked, "main").unwrap();
+                assert!(
+                    repo_answers_to(&from_linked.repo_root, &target.repo_selector),
+                    "linked worktree of origin {origin} must answer to the target"
+                );
+            });
+        }
+    }
+
+    /// AC1 (selector side): the persisted selector itself may be written in any
+    /// shape; all of them canonicalize to one comparison value.
+    #[test]
+    fn selector_payloads_canonicalize_across_url_shapes() {
+        let want = "remote:github.com/pippenz/cas";
+        for selector in [
+            "remote:github.com/pippenz/cas",
+            "remote:github.com/pippenz/cas.git",
+            "remote:https://github.com/pippenz/cas",
+            "remote:https://github.com/pippenz/cas.git",
+            "remote:git@github.com:pippenz/cas.git",
+            "remote:ssh://git@github.com/pippenz/cas.git",
+            "remote:GitHub.com/pippenz/cas",
+            "remote:github.com/pippenz/cas/",
+        ] {
+            assert_eq!(canonical_selector(selector), want, "selector {selector}");
+        }
+        // Opaque project ids are untouched, and a malformed remote payload
+        // still compares equal to itself instead of collapsing to empty.
+        assert_eq!(canonical_selector("project:cas-src"), "project:cas-src");
+        assert_eq!(canonical_selector("remote:nonsense"), "remote:nonsense");
+        // A filesystem path must never be read as a bare remote.
+        assert_eq!(bare_host_owner_repo("/tmp/foo/bar"), None);
+        assert_eq!(bare_host_owner_repo("tmp/foo/bar"), None);
+        assert_eq!(bare_host_owner_repo("github.com/pippenz"), None);
+    }
+
+    /// AC2 regression: canonicalization must not turn the matcher into a
+    /// rubber stamp. A genuinely different repository still mismatches, and the
+    /// error names both normalized sides (AC3).
+    #[test]
+    fn a_genuinely_different_repository_still_mismatches_and_names_both_sides() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            crate::store::known_repos::ensure_host_schema().unwrap();
+            let repo = home.join("other");
+            std::fs::create_dir_all(&repo).unwrap();
+            git(&repo, &["init", "-q", "-b", "main"]);
+            git(
+                &repo,
+                &["remote", "add", "origin", "git@github.com:someone/other.git"],
+            );
+            std::fs::create_dir(repo.join(".cas")).unwrap();
+            std::fs::write(
+                repo.join(".cas/config.toml"),
+                "[project]\ncanonical_id = \"other-project\"\n",
+            )
+            .unwrap();
+
+            let target = WorkTarget {
+                repo_selector: "remote:github.com/pippenz/cas".to_string(),
+                target_branch: "main".to_string(),
+            };
+            let error = resolve_repo_context(&repo.join(".cas"), &target)
+                .expect_err("a different repository must still mismatch");
+            assert!(error.contains("WORK TARGET REPOSITORY MISMATCH"));
+            // AC3: both normalized sides are printed.
+            assert!(
+                error.contains("normalized `remote:github.com/pippenz/cas`"),
+                "target side missing from: {error}"
+            );
+            assert!(
+                error.contains("remote:github.com/someone/other"),
+                "observed side missing from: {error}"
+            );
+            assert!(
+                error.contains("project:other-project"),
+                "pin identity missing from: {error}"
+            );
+        });
+    }
+
+    /// AC4: an absolute-path target still stamps exactly the selector it always
+    /// did — `declare_work_target` is untouched by the matcher change.
+    #[test]
+    fn absolute_path_target_declaration_is_unchanged() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            crate::store::known_repos::ensure_host_schema().unwrap();
+            let repo = home.join("abs-target");
+            std::fs::create_dir_all(&repo).unwrap();
+            git(&repo, &["init", "-q", "-b", "main"]);
+            git(
+                &repo,
+                &["remote", "add", "origin", "git@github.com:pippenz/cas.git"],
+            );
+            std::fs::create_dir(repo.join(".cas")).unwrap();
+            std::fs::write(
+                repo.join(".cas/config.toml"),
+                "[project]\ncanonical_id = \"pinned-id\"\n",
+            )
+            .unwrap();
+
+            let declared = declare_work_target(
+                &repo.join(".cas"),
+                Some(repo.to_str().unwrap()),
+                Some("main"),
+            )
+            .unwrap()
+            .expect("an explicit target must be declared");
+            // The pin still wins when stamping: priority order is preserved.
+            assert_eq!(declared.repo_selector, "project:pinned-id");
+            assert_eq!(declared.target_branch, "main");
         });
     }
 

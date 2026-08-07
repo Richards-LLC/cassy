@@ -4,19 +4,28 @@
 //! row as `InProgress` with no supervisor signal. This module parks eligible
 //! tasks Open with an audit note, records a `WorkerDied` event, and queues a
 //! critical `worker_died` notification for active supervisors.
+//!
+//! cas-3dcb (GH #168): that notification used to be `supervisor_queue`-only, so
+//! 2,044 critical death alerts — 100% of them — never entered a supervisor turn
+//! and deaths surfaced only if someone polled `worker_status`. It now follows
+//! the cas-ecff outbox: durable row keyed by death incident, then a prompt-path
+//! relay the daemon can inject, wake an idle pane with, and report as a lost
+//! relay if it never lands. The incident key also bounds re-emission — the same
+//! corpse re-detected on every maintenance tick used to yield a fresh critical
+//! notice each time (1,452 for a single agent over ten days).
 
 use std::path::Path;
 use std::sync::Arc;
 
-use cas_types::{
-    Agent, AgentRole, AgentStatus, Event, EventEntityType, EventType, TaskStatus,
-};
+use cas_types::{Agent, AgentRole, AgentStatus, Event, EventEntityType, EventType, TaskStatus};
 use chrono::Utc;
 
+use crate::mcp::tools::core::task::lifecycle::supervisor_push::LIFECYCLE_WAKE_SOURCE_PREFIX;
 use crate::store::{
-    AgentStore, NotificationPriority, TaskStore, open_event_store, open_supervisor_queue_store,
-    open_task_store,
+    AgentStore, NotificationPriority, TaskStore, open_event_store, open_prompt_queue_store,
+    open_supervisor_queue_store, open_task_store,
 };
+use cas_store::{NotifyIdempotentResult, PromptQueueStore, SupervisorQueueStore};
 
 /// Summary of a single recovery pass.
 #[derive(Debug, Default, Clone)]
@@ -207,10 +216,7 @@ fn emit_worker_died_signals(
     // Activity feed event.
     if let Ok(event_store) = open_event_store(cas_root) {
         let summary_text = if summary.held_task_ids.is_empty() {
-            format!(
-                "Worker {} died ({reason}); no held tasks",
-                agent.name
-            )
+            format!("Worker {} died ({reason}); no held tasks", agent.name)
         } else {
             format!(
                 "Worker {} died mid-task ({reason}); held=[{held}]; recovered=[{recovered}]",
@@ -243,25 +249,164 @@ fn emit_worker_died_signals(
 
     if let Ok(queue) = open_supervisor_queue_store(cas_root) {
         let payload_str = payload.to_string();
-        for sup in &supervisors {
-            let _ = queue.notify(
-                &sup.id,
-                "worker_died",
-                &payload_str,
-                NotificationPriority::Critical,
-            );
-        }
+        let prompt_queue = open_prompt_queue_store(cas_root).ok();
+        let incident = death_incident_key(agent);
+
+        let mut recipients: Vec<String> = supervisors.iter().map(|s| s.id.clone()).collect();
         // If no live supervisor rows, still notify parent_id when set.
-        if supervisors.is_empty() {
-            if let Some(ref parent) = agent.parent_id {
-                let _ = queue.notify(
-                    parent,
-                    "worker_died",
-                    &payload_str,
-                    NotificationPriority::Critical,
-                );
+        if recipients.is_empty() {
+            if let Some(parent) = agent.parent_id.clone() {
+                recipients.push(parent);
             }
         }
+
+        for recipient in &recipients {
+            deliver_worker_died_notice(
+                queue.as_ref(),
+                prompt_queue.as_deref(),
+                recipient,
+                agent,
+                summary,
+                reason,
+                &incident,
+                &payload_str,
+            );
+        }
+    }
+}
+
+/// Identity of ONE death of ONE agent (cas-3dcb, GH #168).
+///
+/// `last_heartbeat` is the discriminator, and it is the right one: `mark_stale`
+/// deliberately does not touch it, so every re-detection of the same corpse —
+/// by daemon maintenance, `agent_cleanup`, or expired-lease recovery — computes
+/// the same key and collapses onto the same notice. Only a genuine revive →
+/// heartbeat → die-again cycle moves the heartbeat and earns a second notice.
+/// This is what makes the reported 1,452-notices-for-one-agent class impossible
+/// rather than merely unlikely.
+fn death_incident_key(agent: &Agent) -> String {
+    format!(
+        "worker_died:{}:{}",
+        agent.id,
+        agent.last_heartbeat.timestamp_millis()
+    )
+}
+
+/// Durable notice + prompt-path injection for one recipient (cas-3dcb).
+///
+/// Mirrors the cas-ecff task-lifecycle outbox exactly:
+///   1. `notify_idempotent` under the death-incident key (durable, deduped)
+///   2. if the prompt was not already handed off, `enqueue_idempotent` into
+///      `prompt_queue` under the notification's own key
+///   3. stamp `prompt_delivered_at`
+///
+/// Every step is replay-safe, so a crash between 2 and 3 costs at most a
+/// repeated no-op enqueue — never a second prompt row.
+#[allow(clippy::too_many_arguments)]
+fn deliver_worker_died_notice(
+    queue: &dyn SupervisorQueueStore,
+    prompt_queue: Option<&dyn PromptQueueStore>,
+    recipient: &str,
+    agent: &Agent,
+    summary: &OrphanRecoverySummary,
+    reason: &str,
+    incident: &str,
+    payload_str: &str,
+) {
+    let transition_key = format!("{incident}:{recipient}");
+    let (notification_id, prompt_already_delivered) = match queue.notify_idempotent(
+        recipient,
+        "worker_died",
+        payload_str,
+        NotificationPriority::Critical,
+        &transition_key,
+    ) {
+        Ok(NotifyIdempotentResult::Created(id)) => (id, false),
+        Ok(NotifyIdempotentResult::AlreadyExists {
+            id,
+            prompt_delivered,
+        }) => (id, prompt_delivered),
+        Err(error) => {
+            tracing::error!(
+                target: "cas::coordination",
+                stage = "worker_died_durable_enqueue_failed",
+                worker = %agent.name,
+                recipient = %recipient,
+                %error,
+                "cas-3dcb: could not record a worker death for the supervisor"
+            );
+            return;
+        }
+    };
+
+    if prompt_already_delivered {
+        return;
+    }
+
+    let Some(prompt_queue) = prompt_queue else {
+        tracing::error!(
+            target: "cas::coordination",
+            stage = "worker_died_prompt_queue_unavailable",
+            worker = %agent.name,
+            recipient = %recipient,
+            notification_id,
+            "cas-3dcb: worker death recorded but prompt_queue is unavailable; the durable row \
+             is left unstamped so a later pass retries injection"
+        );
+        return;
+    };
+
+    let body = crate::prompt_revalidation::format_worker_died_relay(
+        &agent.id,
+        &agent.name,
+        incident,
+        reason,
+        &summary.held_task_ids,
+        &summary.recovered_task_ids,
+        notification_id,
+    );
+    // `lifecycle-wake:` is what makes the daemon corroborate, wake an idle
+    // supervisor pane, bound re-nudges, and surface the row in
+    // `list_undelivered_lifecycle_relays` if it never lands. The dead worker's
+    // own name must NOT be the source: `is_dead_worker_source` drops those.
+    let source = format!(
+        "{}worker-died:{notification_id}",
+        LIFECYCLE_WAKE_SOURCE_PREFIX
+    );
+    let display = format!("worker died: {}", agent.name);
+
+    if let Err(error) = prompt_queue.enqueue_idempotent(
+        &source,
+        "supervisor",
+        &body,
+        agent.factory_session.as_deref(),
+        Some(&display),
+        Some(NotificationPriority::Critical),
+        &format!("worker-died-outbox:{notification_id}"),
+    ) {
+        tracing::error!(
+            target: "cas::coordination",
+            stage = "worker_died_prompt_enqueue_failed",
+            worker = %agent.name,
+            recipient = %recipient,
+            notification_id,
+            %error,
+            "cas-3dcb: worker death recorded but could not be injected into the supervisor's \
+             session; durable row left unstamped for retry"
+        );
+        return;
+    }
+
+    if let Err(error) = queue.mark_prompt_delivered(notification_id) {
+        // The enqueue is idempotent under its dedupe key, so an unstamped row
+        // costs a repeated no-op on the next pass, not a duplicate prompt.
+        tracing::warn!(
+            target: "cas::coordination",
+            stage = "worker_died_stamp_failed",
+            notification_id,
+            %error,
+            "cas-3dcb: failed to stamp prompt_delivered_at for a worker-death notice"
+        );
     }
 }
 
@@ -385,4 +530,220 @@ pub fn format_recently_died_while_leased(
         lines.len(),
         lines.join("\n")
     )
+}
+
+#[cfg(test)]
+mod cas_3dcb_death_relay_tests {
+    use super::*;
+    use crate::store::{open_agent_store, open_prompt_queue_store};
+    use cas_types::AgentRole;
+
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        cas_root: std::path::PathBuf,
+        agent_store: Arc<dyn AgentStore>,
+        supervisor_id: String,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let cas_root = dir.path().to_path_buf();
+            let agent_store = open_agent_store(&cas_root).expect("agent store");
+
+            let supervisor_id = Agent::generate_fallback_id();
+            let mut supervisor = Agent::new(supervisor_id.clone(), "sup".to_string());
+            supervisor.role = AgentRole::Supervisor;
+            agent_store.register(&supervisor).expect("register sup");
+
+            Self {
+                _dir: dir,
+                cas_root,
+                agent_store,
+                supervisor_id,
+            }
+        }
+
+        fn dead_worker(&self, name: &str, dead_for_secs: i64) -> Agent {
+            let mut agent = Agent::new(Agent::generate_fallback_id(), name.to_string());
+            agent.role = AgentRole::Worker;
+            agent.last_heartbeat = Utc::now() - chrono::Duration::seconds(dead_for_secs);
+            self.agent_store.register(&agent).expect("register worker");
+            agent
+        }
+
+        fn emit(&self, agent: &Agent) {
+            emit_worker_died_signals(
+                &self.cas_root,
+                self.agent_store.as_ref(),
+                agent,
+                &OrphanRecoverySummary {
+                    held_task_ids: vec!["cas-held1".to_string()],
+                    recovered_task_ids: vec!["cas-held1".to_string()],
+                },
+                "daemon maintenance: heartbeat stale",
+            );
+        }
+
+        fn prompt_relays(&self) -> Vec<cas_store::QueuedPrompt> {
+            open_prompt_queue_store(&self.cas_root)
+                .expect("prompt queue")
+                .peek_all(200)
+                .expect("peek")
+                .into_iter()
+                .filter(|row| row.prompt.starts_with("<worker-died "))
+                .collect()
+        }
+
+        fn durable_notices(&self) -> usize {
+            open_supervisor_queue_store(&self.cas_root)
+                .expect("queue")
+                .peek(&self.supervisor_id, 500)
+                .expect("peek")
+                .into_iter()
+                .filter(|n| n.event_type == "worker_died")
+                .count()
+        }
+    }
+
+    /// The reported defect (GH #168): the emitter wrote to `supervisor_queue`
+    /// only, so 2,044 critical death alerts never entered a supervisor turn.
+    #[test]
+    fn a_death_lands_on_the_prompt_path_with_wake_semantics() {
+        let fixture = Fixture::new();
+        let worker = fixture.dead_worker("lost-worker", 900);
+        fixture.emit(&worker);
+
+        let relays = fixture.prompt_relays();
+        assert_eq!(relays.len(), 1, "one death, one prompt relay: {relays:?}");
+        let relay = &relays[0];
+        assert_eq!(relay.target, "supervisor");
+        assert!(
+            crate::mcp::tools::core::task::lifecycle::supervisor_push::is_lifecycle_wake_source(
+                &relay.source
+            ),
+            "the relay must be wake-eligible or it neither wakes an idle supervisor nor \
+             surfaces as a lost relay. source={}",
+            relay.source
+        );
+        // `is_dead_worker_source` drops rows sourced from a dead worker's name.
+        assert!(!relay.source.contains(&worker.name));
+        let envelope = crate::prompt_revalidation::parse_worker_died_envelope(&relay.prompt)
+            .expect("the daemon must be able to classify what we wrote");
+        assert_eq!(envelope.worker_name, "lost-worker");
+        assert!(relay.prompt.contains("cas-held1"));
+    }
+
+    /// The 1,452-notices-for-one-agent class, proven at the emitter: however
+    /// many times the same corpse is re-detected, one incident yields one
+    /// notice on each channel.
+    #[test]
+    fn re_detecting_the_same_death_cannot_storm() {
+        let fixture = Fixture::new();
+        let worker = fixture.dead_worker("re-detected", 900);
+
+        for _ in 0..50 {
+            fixture.emit(&worker);
+        }
+
+        assert_eq!(
+            fixture.prompt_relays().len(),
+            1,
+            "50 re-detections must not produce 50 prompt relays"
+        );
+        assert_eq!(
+            fixture.durable_notices(),
+            1,
+            "50 re-detections must not produce 50 durable notices"
+        );
+    }
+
+    /// Dedup keys the death INCIDENT, not the agent: a worker that comes back,
+    /// heartbeats, and dies again is a new fact the supervisor must hear.
+    #[test]
+    fn a_genuinely_separate_death_is_reported_again() {
+        let fixture = Fixture::new();
+        let mut worker = fixture.dead_worker("twice-dead", 900);
+        fixture.emit(&worker);
+        fixture.emit(&worker);
+        assert_eq!(fixture.prompt_relays().len(), 1);
+
+        // Revived, worked, died again — a later heartbeat is a later incident.
+        worker.last_heartbeat = Utc::now() - chrono::Duration::seconds(60);
+        fixture.emit(&worker);
+        fixture.emit(&worker);
+
+        assert_eq!(
+            fixture.prompt_relays().len(),
+            2,
+            "the second death must be reported; dedup must not silence a live worker's \
+             later death"
+        );
+        assert_eq!(fixture.durable_notices(), 2);
+    }
+
+    /// Existing `supervisor_queue` consumers must keep seeing the death, and
+    /// the durable row must record that the prompt handoff completed.
+    #[test]
+    fn durable_row_survives_and_is_stamped_delivered() {
+        let fixture = Fixture::new();
+        let worker = fixture.dead_worker("stamped", 900);
+        fixture.emit(&worker);
+
+        let queue = open_supervisor_queue_store(&fixture.cas_root).expect("queue");
+        let notices: Vec<_> = queue
+            .peek(&fixture.supervisor_id, 50)
+            .expect("peek")
+            .into_iter()
+            .filter(|n| n.event_type == "worker_died")
+            .collect();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].priority, NotificationPriority::Critical);
+        assert!(
+            notices[0].payload.contains("stamped"),
+            "existing consumers still read the same payload shape: {}",
+            notices[0].payload
+        );
+        assert!(
+            notices[0].prompt_delivered_at.is_some(),
+            "prompt handoff must be stamped so the outbox does not retry forever"
+        );
+    }
+
+    /// With no live supervisor row, the notice still goes to the parent agent
+    /// rather than being dropped — and stays deduped there.
+    #[test]
+    fn falls_back_to_parent_when_no_supervisor_is_registered() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cas_root = dir.path().to_path_buf();
+        let agent_store = open_agent_store(&cas_root).expect("agent store");
+
+        let parent_id = Agent::generate_fallback_id();
+        let mut worker = Agent::new(Agent::generate_fallback_id(), "orphan".to_string());
+        worker.role = AgentRole::Worker;
+        worker.parent_id = Some(parent_id.clone());
+        worker.last_heartbeat = Utc::now() - chrono::Duration::seconds(900);
+        agent_store.register(&worker).expect("register");
+
+        for _ in 0..5 {
+            emit_worker_died_signals(
+                &cas_root,
+                agent_store.as_ref(),
+                &worker,
+                &OrphanRecoverySummary::default(),
+                "no supervisor present",
+            );
+        }
+
+        let queue = open_supervisor_queue_store(&cas_root).expect("queue");
+        let notices = queue.peek(&parent_id, 50).expect("peek");
+        assert_eq!(
+            notices
+                .iter()
+                .filter(|n| n.event_type == "worker_died")
+                .count(),
+            1,
+            "the parent fallback must fire exactly once, not once per tick"
+        );
+    }
 }

@@ -345,6 +345,85 @@ pub(crate) fn declare_work_target(
     }))
 }
 
+/// Local evidence about whether a task is anchored in the current project.
+///
+/// cas-156b (GH #135). `declare_work_target` returns `Ok(None)` whenever a task
+/// carries neither `target_repo` nor `target_branch`, so `task start` had
+/// nothing to check and silently leased tasks foreign to the current project.
+/// One contaminated database ended up with live `task_lease_history` and
+/// `verifications` rows for tasks belonging to two other repositories,
+/// including a supervisor-bypass close recorded against a replica while the
+/// authoritative row never moved.
+///
+/// The naive rule — "no `target_repo` means foreign" — is unusable: factory
+/// tasks routinely carry no work target at all, so it would fire on nearly
+/// every legitimate start and train people to ignore the warning. The usable
+/// discriminator is structural rather than name-based, and it comes from the
+/// sync surface itself: [`crate::cloud::syncer`]'s pull path upserts only
+/// entries, tasks, rules, skills and specs — it never writes rows to
+/// `dependencies`, and per-project pull never writes `agents`. A
+/// cloud-replicated foreign task therefore arrives as a *dependency orphan*
+/// whose assignee names nobody registered on this host, while a native factory
+/// task is created through `create_atomic(&task, &blocked_by_ids, epic_id)`
+/// and carries a `ParentChild` edge to its epic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TaskAnchorEvidence {
+    /// The task declares an explicit work target. Those tasks are already
+    /// resolved (and failed closed) by [`resolve_repo_context`].
+    pub has_work_target: bool,
+    /// Count of dependency edges of any type touching this task in the local
+    /// database — epic parent, blockers, children, related.
+    pub dependency_edge_count: usize,
+    /// The task's assignee matches an agent registered on this host.
+    pub assignee_is_local_agent: bool,
+    /// Cloud sync is configured for this project. A database that never syncs
+    /// cannot have received a replica, so it can never produce this warning.
+    pub cloud_sync_configured: bool,
+}
+
+/// Whether a task about to be started has no anchor in the current project.
+///
+/// Fail-silent by design: each field is a *veto*, so the burden of proof is on
+/// warning, not on staying quiet. Only a task that clears every veto at once is
+/// reported. See [`TaskAnchorEvidence`] for why these four signals discriminate.
+pub(crate) fn task_has_no_local_anchor(evidence: &TaskAnchorEvidence) -> bool {
+    !evidence.has_work_target
+        && evidence.dependency_edge_count == 0
+        && !evidence.assignee_is_local_agent
+        && evidence.cloud_sync_configured
+}
+
+/// Advisory text for a start whose task has no anchor in the current project.
+///
+/// Deliberately non-blocking: the lease still proceeds. A false positive must
+/// cost a line of output, never a blocked start.
+pub(crate) fn unanchored_task_start_warning(
+    task_id: &str,
+    repo_root: &Path,
+    canonical_id: Option<&str>,
+) -> String {
+    let project = match canonical_id {
+        Some(id) => format!("{} (cloud project `{id}`)", repo_root.display()),
+        None => repo_root.display().to_string(),
+    };
+    format!(
+        "\n\n⚠️  NO ANCHOR IN THIS PROJECT — task {task_id} has no evidence of belonging here.\n\
+         It declares no target repository, has no dependency edge (no epic parent, no \
+         blocker, no child) in this database, and its assignee is not an agent registered \
+         on this host. Current project: {project}.\n\
+         That is the fingerprint of a task replicated from another project: cloud pull \
+         writes tasks but never dependency edges, so a foreign row arrives orphaned. The \
+         lease was still taken — this is advisory, not a block — but if this task belongs \
+         to a different repository, stop now: working it here records lease, verification \
+         and close rows against a replica while the authoritative task never updates, \
+         corrupting both projects' histories.\n\
+         If it does belong here: `mcp__cas__task action=update id={task_id} \
+         target_repo=<path> target_branch=<branch>` to anchor it and silence this.\n\
+         If it is contamination: `cas cloud purge-foreign` (preview first) to drop \
+         foreign rows and re-pull."
+    )
+}
+
 fn candidate_paths(cas_root: &Path) -> Vec<PathBuf> {
     let mut raw = Vec::new();
     if let Ok(store) = crate::store::known_repos::open_host_known_repo_store()
@@ -1409,6 +1488,149 @@ mod tests {
                 Path::new("/runtime/work/wt")
             )
             .is_ok()
+        );
+    }
+}
+
+/// cas-156b (GH #135): the nativity predicate guarding `task start`.
+///
+/// AC2 is proven by ABSENCE — the normal case must stay silent — so each
+/// zero-friction shape gets its own no-warn test rather than one combined
+/// case. A refactor that silently breaks a single veto then fails a named
+/// test instead of quietly making every start noisy.
+#[cfg(test)]
+mod task_anchor_tests {
+    use super::*;
+
+    /// The shape observed in GH #135: a task replicated from another project.
+    /// Cloud pull writes the task row but never dependency edges and never
+    /// per-project agents, so the replica lands orphaned with an assignee that
+    /// means nothing on this host.
+    fn foreign_replica() -> TaskAnchorEvidence {
+        TaskAnchorEvidence {
+            has_work_target: false,
+            dependency_edge_count: 0,
+            assignee_is_local_agent: false,
+            cloud_sync_configured: true,
+        }
+    }
+
+    #[test]
+    fn foreign_replica_start_is_reported_cas_156b() {
+        assert!(
+            task_has_no_local_anchor(&foreign_replica()),
+            "the #135 incident shape must be reported"
+        );
+    }
+
+    // ── AC2: each zero-friction shape stays silent, pinned individually ──
+
+    #[test]
+    fn epic_child_task_never_warns_cas_156b() {
+        // The overwhelmingly common factory shape. `create_atomic` writes a
+        // ParentChild edge for the epic, which cloud pull can never produce.
+        assert!(!task_has_no_local_anchor(&TaskAnchorEvidence {
+            dependency_edge_count: 1,
+            ..foreign_replica()
+        }));
+    }
+
+    #[test]
+    fn director_assigned_task_never_warns_cas_156b() {
+        // Assignee resolves to an agent registered on this host.
+        assert!(!task_has_no_local_anchor(&TaskAnchorEvidence {
+            assignee_is_local_agent: true,
+            ..foreign_replica()
+        }));
+    }
+
+    #[test]
+    fn explicitly_targeted_task_never_warns_cas_156b() {
+        // Work-target tasks are resolved (and failed closed) by
+        // `resolve_repo_context`; this predicate must not double-report them.
+        assert!(!task_has_no_local_anchor(&TaskAnchorEvidence {
+            has_work_target: true,
+            ..foreign_replica()
+        }));
+    }
+
+    #[test]
+    fn cloud_unconfigured_project_never_warns_cas_156b() {
+        // A database that never syncs cannot have received a replica.
+        assert!(!task_has_no_local_anchor(&TaskAnchorEvidence {
+            cloud_sync_configured: false,
+            ..foreign_replica()
+        }));
+    }
+
+    /// ACCEPTED BY DESIGN — do not "fix" this into a fifth veto.
+    ///
+    /// A standalone task in a cloud-synced project with no epic, no
+    /// dependency edge, no assignee and no work target is indistinguishable
+    /// from a replica using local evidence alone, so it warns. This residual
+    /// was raised and explicitly accepted when the heuristic was reviewed:
+    /// the output is advisory, never blocks the lease, and names the one-line
+    /// remedy that silences it (`task action=update ... target_repo=`).
+    ///
+    /// The quieter alternative — warn only when the database already shows a
+    /// task anchored to a DIFFERENT repository — was DECLINED because it
+    /// couples this guard to the foreign-row detector in cas-fc6fa (GH #133),
+    /// which has not landed. If that detector ships and this residual annoys
+    /// a real user, tighten it there; do not add a veto here without
+    /// revisiting that decision.
+    #[test]
+    fn unassigned_standalone_task_warns_and_that_is_accepted_cas_156b() {
+        assert!(
+            task_has_no_local_anchor(&TaskAnchorEvidence {
+                assignee_is_local_agent: false,
+                ..foreign_replica()
+            }),
+            "documented false positive: see this test's doc comment before changing"
+        );
+    }
+
+    // ── The warning text itself ──
+
+    #[test]
+    fn warning_names_task_project_and_both_remedies_cas_156b() {
+        let warning = unanchored_task_start_warning(
+            "cas-9999",
+            Path::new("/home/dev/gabber-studio"),
+            Some("gabber-studio"),
+        );
+        assert!(
+            warning.contains("cas-9999"),
+            "must name the task: {warning}"
+        );
+        assert!(
+            warning.contains("/home/dev/gabber-studio"),
+            "must name the current project root: {warning}"
+        );
+        assert!(
+            warning.contains("gabber-studio"),
+            "must name the cloud project: {warning}"
+        );
+        assert!(
+            warning.contains("target_repo="),
+            "must give the anchor-it remedy: {warning}"
+        );
+        assert!(
+            warning.contains("cas cloud purge-foreign"),
+            "must give the contamination remedy: {warning}"
+        );
+        assert!(
+            warning.contains("advisory, not a block"),
+            "must state that the lease still proceeded: {warning}"
+        );
+    }
+
+    #[test]
+    fn warning_without_canonical_id_still_names_the_root_cas_156b() {
+        let warning = unanchored_task_start_warning("cas-9999", Path::new("/tmp/proj"), None);
+        assert!(warning.contains("/tmp/proj"), "{warning}");
+        assert!(
+            !warning.contains("cloud project"),
+            "must not invent a cloud project name it does not have: {warning}"
         );
     }
 }

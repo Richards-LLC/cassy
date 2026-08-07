@@ -269,7 +269,20 @@ pub fn resolve_owning_supervisor(
     if candidates.is_empty() {
         return None;
     }
-    // Prefer Active/Idle over stale; then stable name order.
+    // Prefer Active/Idle over stale; then the SUCCESSOR identity; then stable
+    // name order.
+    //
+    // cas-7787 (GH #160): the recency tiebreak is load-bearing, not cosmetic.
+    // A supervisor whose Claude session restarts mid-factory-session
+    // re-registers under the same pane name with a NEW agent id (in the
+    // reported session, `smooth-octopus-84` ended up with four rows —
+    // d3556091 from before the restart, then 3f2b69fa and ad32fcde registered
+    // 157ms apart at 18:45:07). The old ordering broke that tie on `name` then
+    // `id`, i.e. lexicographically on a UUID — an arbitrary coin flip that can
+    // hand every subsequent relay to the identity the operator has already
+    // walked away from. Ordering by registration recency makes the successor
+    // session win deterministically, so a relay emitted after a restart is
+    // addressed to the supervisor that actually exists.
     candidates.sort_by(|a, b| {
         use cas_types::AgentStatus;
         let rank = |s: &AgentStatus| match s {
@@ -279,6 +292,8 @@ pub fn resolve_owning_supervisor(
         };
         rank(&a.status)
             .cmp(&rank(&b.status))
+            .then_with(|| b.registered_at.cmp(&a.registered_at))
+            .then_with(|| b.last_heartbeat.cmp(&a.last_heartbeat))
             .then_with(|| a.name.cmp(&b.name))
             .then_with(|| a.id.cmp(&b.id))
     });
@@ -1358,6 +1373,77 @@ mod tests {
         a.status = AgentStatus::Active;
         a.factory_session = Some(session.to_string());
         a
+    }
+
+    /// cas-7787 (GH #160), acceptance criterion 2: a supervisor whose harness
+    /// session id changes mid-factory-session must still receive
+    /// `awaiting_merge` relays — they have to land at the SUCCESSOR session.
+    ///
+    /// Reproduces the identity shape from the reported incident: the pane
+    /// `smooth-octopus-84` restarts and re-registers under the same name with
+    /// a new agent id, leaving two live rows in one factory session. Ids are
+    /// chosen so the pre-restart identity sorts FIRST lexicographically —
+    /// which is exactly how the old `name`-then-`id` tiebreak used to pick a
+    /// winner, and would have addressed every later relay to the session the
+    /// operator had already left.
+    #[test]
+    fn relays_follow_the_supervisor_across_a_mid_session_restart() {
+        let temp = TempDir::new().unwrap();
+        let agents = SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+
+        let mut before_restart = agent_in_session(
+            "a-pre-restart-session",
+            "smooth-octopus-84",
+            AgentRole::Supervisor,
+            "cas-src-fast-pelican-83",
+        );
+        before_restart.registered_at = chrono::Utc::now() - chrono::Duration::minutes(30);
+        agents.register(&before_restart).unwrap();
+
+        let mut after_restart = agent_in_session(
+            "z-post-restart-session",
+            "smooth-octopus-84",
+            AgentRole::Supervisor,
+            "cas-src-fast-pelican-83",
+        );
+        after_restart.registered_at = chrono::Utc::now();
+        agents.register(&after_restart).unwrap();
+
+        let resolved =
+            resolve_owning_supervisor(&agents, Some("cas-src-fast-pelican-83")).unwrap();
+        assert_eq!(
+            resolved.agent_id, "z-post-restart-session",
+            "an awaiting_merge relay emitted after the restart must be addressed to the \
+             session that exists, not to the identity the supervisor left behind"
+        );
+        assert_eq!(resolved.name, "smooth-octopus-84");
+    }
+
+    /// The recency tiebreak must never outrank liveness: a freshly registered
+    /// but dead identity must not steal relays from a live supervisor.
+    #[test]
+    fn a_newer_but_shutdown_supervisor_row_does_not_capture_relays() {
+        let temp = TempDir::new().unwrap();
+        let agents = SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+
+        let mut live = agent_in_session("live-id", "sup", AgentRole::Supervisor, "sess");
+        live.registered_at = chrono::Utc::now() - chrono::Duration::minutes(10);
+        live.status = AgentStatus::Active;
+        agents.register(&live).unwrap();
+
+        let mut newer_dead =
+            agent_in_session("newer-dead-id", "sup", AgentRole::Supervisor, "sess");
+        newer_dead.registered_at = chrono::Utc::now();
+        newer_dead.status = AgentStatus::Shutdown;
+        agents.register(&newer_dead).unwrap();
+
+        let resolved = resolve_owning_supervisor(&agents, Some("sess")).unwrap();
+        assert_eq!(
+            resolved.agent_id, "live-id",
+            "liveness still outranks recency — a shut-down successor must not swallow relays"
+        );
     }
 
     #[test]

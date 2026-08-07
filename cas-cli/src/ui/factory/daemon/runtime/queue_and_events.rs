@@ -2114,16 +2114,31 @@ impl FactoryDaemon {
                 crate::prompt_revalidation::parse_lifecycle_envelope(&queued.prompt)
                 && let Ok(store) = crate::store::open_task_store_local(self.app.cas_dir())
             {
-                let stale = match store.get(&envelope.task_id) {
-                    Ok(task) => matches!(
-                        crate::prompt_revalidation::revalidate_lifecycle_prompt(
-                            &queued.prompt,
-                            task.status,
-                            task.updated_at,
-                        ),
-                        crate::prompt_revalidation::LifecyclePromptDecision::SuppressStale { .. }
+                use crate::prompt_revalidation::{
+                    LifecyclePromptDecision, LifecycleStaleOutcome, lifecycle_stale_outcome,
+                };
+                // cas-7787: what counts as "the recipient got it" for a row
+                // that is still in the queue. A row the daemon transported is
+                // stamped `transport_delivered_at` + `processed_at` by
+                // `mark_transport_delivered`, so it is no longer selectable
+                // and cannot reach this check at all — every row that does is
+                // by construction untransported. The one exception worth
+                // honouring is an explicit `message_ack`: the recipient told
+                // us it read the notification even though the delivery loop
+                // never got to consume the row, and reporting that as a lost
+                // relay would be a false alarm.
+                let queued_row_was_transported = queued.acked_at.is_some();
+                let decision = match store.get(&envelope.task_id) {
+                    Ok(task) => crate::prompt_revalidation::revalidate_lifecycle_prompt(
+                        &queued.prompt,
+                        task.status,
+                        task.updated_at,
                     ),
-                    Err(cas_store::StoreError::TaskNotFound(_)) => true,
+                    Err(cas_store::StoreError::TaskNotFound(_)) => {
+                        LifecyclePromptDecision::SuppressStale {
+                            task_id: envelope.task_id.clone(),
+                        }
+                    }
                     Err(error) => {
                         tracing::warn!(
                             prompt_id = queued.id,
@@ -2131,21 +2146,59 @@ impl FactoryDaemon {
                             error = %error,
                             "cas-bc8c: lifecycle state unavailable; retaining prompt for delivery"
                         );
-                        false
+                        LifecyclePromptDecision::Deliver
                     }
                 };
-                if stale {
-                    let _ = queue.mark_suppressed(
-                        queued.id,
-                        Some("task lifecycle occurrence no longer matches current task state"),
-                    );
-                    tracing::debug!(
-                        prompt_id = queued.id,
-                        task_id = %envelope.task_id,
-                        "cas-bc8c: suppressed stale task lifecycle prompt before transport"
-                    );
-                    self.forget_row_delivery_state(queued.id);
-                    continue;
+                // cas-7787 (GH #160): staleness decides the PAYLOAD's fate;
+                // it must not also decide whether a failed delivery is worth
+                // mentioning. A wake-eligible relay that expires having never
+                // reached the supervisor is the exact silence this fixes.
+                match lifecycle_stale_outcome(
+                    &decision,
+                    Self::row_is_supervisor_wake(&queued.source, &queued.prompt),
+                    queued_row_was_transported,
+                ) {
+                    LifecycleStaleOutcome::Deliver => {}
+                    LifecycleStaleOutcome::SuppressDelivered { .. } => {
+                        let _ = queue.mark_suppressed(
+                            queued.id,
+                            Some("task lifecycle occurrence no longer matches current task state"),
+                        );
+                        tracing::debug!(
+                            prompt_id = queued.id,
+                            task_id = %envelope.task_id,
+                            "cas-bc8c: suppressed stale task lifecycle prompt before transport"
+                        );
+                        self.forget_row_delivery_state(queued.id);
+                        continue;
+                    }
+                    LifecycleStaleOutcome::UndeliveredRelayFailure { task_id } => {
+                        let notice = crate::prompt_revalidation::undelivered_relay_notice(
+                            &task_id,
+                            queued.summary.as_deref(),
+                        );
+                        // Terminate — re-writing an expired premise every
+                        // cadence tick is the GH #124 storm — but terminate as
+                        // a recorded FAILURE, so `worker_status` / `doctor`
+                        // can name it instead of the fleet reading silence as
+                        // success.
+                        let _ = queue
+                            .mark_undelivered_lifecycle_relay(queued.id, Some(notice.as_str()));
+                        tracing::error!(
+                            target: "cas::coordination",
+                            stage = "lifecycle_relay_undelivered",
+                            channel = "prompt_queue",
+                            message_id = queued.id,
+                            source = %queued.source,
+                            target_agent = %queued.target,
+                            task_id = %task_id,
+                            "cas-7787 (GH #160): a supervisor lifecycle relay expired without \
+                             ever being transported — the supervisor was never told this lane \
+                             was waiting on them"
+                        );
+                        self.forget_row_delivery_state(queued.id);
+                        continue;
+                    }
                 }
             }
 

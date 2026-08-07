@@ -6,7 +6,11 @@ cut this release.
 
 Covers **v2.48.0** (the knowledge-distillation feature set) and the follow-up patch
 **v2.48.1**, which closes a scoping hole found in v2.48.0's knowledge sync. Announce
-them together, and point people at 2.48.1 — nobody should install 2.48.0.
+them together, and point people at **2.48.2** — the install target — as nobody should
+install 2.48.0. There is nothing to announce about 2.48.2 itself: it is a test-only
+release that corrects an assertion which had been miscounting a correct product, and
+it ships no behaviour change over 2.48.1. It is the install target purely because it
+is the tip, and it is the first tag whose full validation run is green.
 
 Channel: #cas-internal (C0B44GUKDK2). Two top-level posts per the runtime rubric,
 each with one threaded reply.

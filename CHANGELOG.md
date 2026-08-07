@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.48.2] - 2026-08-07
+
+### Internal
+- **Nothing users run changed in this release: it corrects a test that was mismeasuring a correct product.** The wiring test for a sync run asserted that each pull endpoint is requested exactly once, and it had been failing — reporting that the personal pull happened twice. It did not. A sync makes two genuinely different pulls that happen to share one URL path and are told apart by their query string: the personal pull, and the knowledge pull that asks for distilled pages. The test recognised requests by path alone, so it counted the knowledge pull as a second copy of the personal one. The failure was therefore a description of two requests the product is supposed to make, not a duplicate to be removed — deleting one, which is what the reported diagnosis called for, would have broken knowledge sync outright to make a test pass. The assertion is now made per endpoint rather than per path: the personal-pull expectation requires the discriminating parameter to be absent, and the knowledge pull is asserted in its own right instead of being silently absorbed. "Each pull endpoint exactly once" now means what it says, and the knowledge tail is covered rather than invisible.
+
 ## [2.48.1] - 2026-08-07
 
 ### Fixed

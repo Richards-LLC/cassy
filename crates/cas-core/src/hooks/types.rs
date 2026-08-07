@@ -55,8 +55,20 @@ pub struct HookInput {
     #[serde(default, rename = "toolInputTruncated")]
     pub tool_input_truncated: Option<bool>,
 
-    /// User prompt text (UserPromptSubmit)
-    #[serde(default, alias = "userPrompt")]
+    /// User prompt text (UserPromptSubmit).
+    ///
+    /// cas-78d3 (GH #165): Claude Code sends the submitted text under the key
+    /// **`prompt`**, not `user_prompt`. Without that alias this field
+    /// deserialized to `None` on every real turn, and `prompt` was instead
+    /// swallowed by `subagent_prompt` — the only field that aliased it, and one
+    /// with no readers anywhere in the tree. The visible consequence was that
+    /// `handle_user_prompt_submit` returned empty before it could reach either
+    /// attribution capture or the cas-7a01 turn-start inbox surfacing, so
+    /// `acked_via = 'hook_surfaced'` was never written by a live session.
+    ///
+    /// Read this through [`HookInput::submitted_prompt`] rather than directly,
+    /// so blank-vs-absent is handled in one place.
+    #[serde(default, alias = "userPrompt", alias = "prompt")]
     pub user_prompt: Option<String>,
 
     /// Session start source (SessionStart)
@@ -82,8 +94,12 @@ pub struct HookInput {
     #[serde(default, alias = "agentType")]
     pub agent_type: Option<String>,
 
-    /// Subagent prompt (SubagentStart)
-    #[serde(default, alias = "subagentPrompt", alias = "prompt")]
+    /// Subagent prompt (SubagentStart).
+    ///
+    /// cas-78d3: the bare `prompt` alias moved to [`Self::user_prompt`], where
+    /// Claude Code actually sends it. Nothing reads this field today, so the
+    /// move costs no behaviour; leaving the alias here cost every turn's mail.
+    #[serde(default, alias = "subagentPrompt")]
     pub subagent_prompt: Option<String>,
 
     /// CAS agent role for this hook invocation ("supervisor" / "worker") —
@@ -109,6 +125,24 @@ pub struct HookInput {
     /// payloads unchanged.
     #[serde(default)]
     pub message: Option<String>,
+}
+
+impl HookInput {
+    /// The submitted prompt text for `UserPromptSubmit`, trimmed, `None` when
+    /// absent or blank.
+    ///
+    /// cas-78d3 (GH #165): the single place that decides "is there a prompt".
+    /// It exists because the previous inline `match &input.user_prompt` in
+    /// `handle_user_prompt_submit` conflated "no prompt" with "nothing to do",
+    /// and a field-name mismatch made "no prompt" the answer on every real
+    /// turn. Callers that need to *do work regardless* of the prompt must not
+    /// gate on this.
+    pub fn submitted_prompt(&self) -> Option<&str> {
+        self.user_prompt
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+    }
 }
 
 /// Output sent back to Claude Code via stdout (JSON)
@@ -658,6 +692,67 @@ mod tests {
             json.contains("\"reason\":\"Continue working"),
             "Expected reason but got: {json}"
         );
+    }
+
+    /// cas-78d3 (GH #165): Claude Code names this key `prompt`. CAS aliased
+    /// `prompt` onto `subagent_prompt` instead, so `user_prompt` was `None` on
+    /// every real turn — and every consumer downstream of it (attribution
+    /// capture, turn-start inbox surfacing, `acked_via = 'hook_surfaced'`) was
+    /// dead code in production for a full release while its unit tests, which
+    /// all constructed `HookInput` by hand, stayed green.
+    ///
+    /// The lesson this pins: a struct-literal test cannot catch a
+    /// deserialization-contract bug. Parse the real wire shape.
+    #[test]
+    fn userpromptsubmit_payload_deserializes_the_prompt_key() {
+        let input: HookInput = serde_json::from_str(
+            r#"{"session_id":"s","transcript_path":"/tmp/t","cwd":"/tmp",
+                "hook_event_name":"UserPromptSubmit","prompt":"do the thing"}"#,
+        )
+        .expect("Claude's real payload must deserialize");
+
+        assert_eq!(
+            input.user_prompt.as_deref(),
+            Some("do the thing"),
+            "`prompt` must land in user_prompt, not be swallowed elsewhere"
+        );
+        assert_eq!(input.submitted_prompt(), Some("do the thing"));
+        assert_eq!(
+            input.subagent_prompt, None,
+            "`prompt` must no longer be captured by subagent_prompt"
+        );
+    }
+
+    /// The legacy/explicit spellings keep working, so nothing that was already
+    /// reaching the handler stops doing so.
+    #[test]
+    fn userpromptsubmit_payload_still_accepts_legacy_spellings() {
+        for body in [
+            r#"{"hook_event_name":"UserPromptSubmit","user_prompt":"hi there"}"#,
+            r#"{"hook_event_name":"UserPromptSubmit","userPrompt":"hi there"}"#,
+        ] {
+            let input: HookInput = serde_json::from_str(body).expect("must deserialize");
+            assert_eq!(input.submitted_prompt(), Some("hi there"), "{body}");
+        }
+    }
+
+    /// `submitted_prompt` is the single place blank-vs-absent is decided, so
+    /// callers cannot re-derive the conflation that caused GH #165.
+    #[test]
+    fn submitted_prompt_treats_blank_and_absent_alike() {
+        let blank: HookInput =
+            serde_json::from_str(r#"{"hook_event_name":"UserPromptSubmit","prompt":"  \t "}"#)
+                .unwrap();
+        assert_eq!(blank.submitted_prompt(), None);
+
+        let absent: HookInput =
+            serde_json::from_str(r#"{"hook_event_name":"UserPromptSubmit"}"#).unwrap();
+        assert_eq!(absent.submitted_prompt(), None);
+
+        let padded: HookInput =
+            serde_json::from_str(r#"{"hook_event_name":"UserPromptSubmit","prompt":"  hi  "}"#)
+                .unwrap();
+        assert_eq!(padded.submitted_prompt(), Some("hi"));
     }
 
     #[test]

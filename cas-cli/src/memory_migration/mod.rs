@@ -96,8 +96,12 @@ pub struct MigrationOutcome {
     pub applied: usize,
     /// Page-producing rows a previous run already completed.
     pub skipped_already_applied: usize,
-    /// Stranded `sync_queue` entry rows found across all sources.
+    /// Stranded `sync_queue` entry rows still outstanding when the run ended.
+    /// Zero once `invalidate_sync_queue` has consumed them, so the operator is
+    /// never told to resolve a queue this run already ledgered and drained.
     pub sync_queue_pending: i64,
+    /// Rows whose full payloads were written to the ledger and then deleted.
+    pub sync_queue_invalidated: i64,
     pub ledger_dir: PathBuf,
     /// Populated when `apply` stopped early because `stop_after` was reached.
     pub stopped_early: bool,
@@ -161,6 +165,7 @@ pub fn run(config: &MigrationConfig) -> Result<MigrationOutcome> {
     }
 
     // ── Phase B — §5.3: the queue must be empty before extraction ───────
+    let mut sync_queue_invalidated = 0i64;
     if config.apply && sync_queue_pending > 0 {
         if !config.invalidate_sync_queue {
             bail!(
@@ -176,6 +181,17 @@ pub fn run(config: &MigrationConfig) -> Result<MigrationOutcome> {
         for db in &config.sources {
             invalidate_sync_queue(db, &ledger)?;
         }
+        // Re-count rather than assume the delete matched the pre-count: the
+        // remainder is what an operator would still have to resolve, and
+        // claiming zero without looking is how a silent drop gets reported as
+        // a success.
+        sync_queue_invalidated = sync_queue_pending;
+        sync_queue_pending = 0;
+        for db in &config.sources {
+            let conn = source::open_read_only(&db.db_path)?;
+            sync_queue_pending += preconditions::sync_queue_entry_count(&conn)?;
+        }
+        sync_queue_invalidated -= sync_queue_pending;
     }
 
     // ── Phase C — extraction (read-only, keyset-paginated) ──────────────
@@ -240,6 +256,7 @@ pub fn run(config: &MigrationConfig) -> Result<MigrationOutcome> {
         applied: 0,
         skipped_already_applied: 0,
         sync_queue_pending,
+        sync_queue_invalidated,
         ledger_dir: config.ledger_dir.clone(),
         stopped_early: false,
         index_reports: Vec::new(),

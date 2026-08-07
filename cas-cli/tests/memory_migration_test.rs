@@ -942,6 +942,13 @@ fn stranded_sync_queue_rows_block_apply_but_not_the_dry_run() {
         )
         .unwrap();
     assert_eq!(remaining, 0);
+
+    // The run that drained the queue must not then tell the operator to drain
+    // it: `sync_queue_pending` is what is *still* outstanding, re-counted from
+    // the database rather than assumed, and the drained rows are reported
+    // separately so the ledger file can be found.
+    assert_eq!(out.sync_queue_invalidated, 1);
+    assert_eq!(out.sync_queue_pending, 0);
 }
 
 // ── §11 assert 6 — extraction is not capped at Store::list()'s LIMIT 10000 ──

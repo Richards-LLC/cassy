@@ -59,26 +59,55 @@ pub struct MemoryMigrateArgs {
     pub page_size: usize,
 }
 
-pub fn execute(args: &MemoryMigrateArgs, cas_root: &Path) -> anyhow::Result<()> {
+/// Resolve which databases this invocation reads and writes.
+///
+/// Split out of [`execute`] so the rehearsal safety rail below is testable
+/// without running a migration.
+///
+/// The rail: `--project-root` means "do not touch the detected root", which is
+/// only ever passed when rehearsing against a copy. Defaulting the *global*
+/// side to `~/.cas` in that state would read the live global database and write
+/// pages back into it — the exact live-data mutation the flag exists to
+/// prevent. So a redirected project root requires the global side to be stated
+/// too, or excluded with `--scope project`.
+fn resolve_sources(
+    args: &MemoryMigrateArgs,
+    cas_root: &Path,
+    home_dir: Option<PathBuf>,
+) -> anyhow::Result<(Vec<SourceDb>, Vec<String>)> {
     let project_root = args
         .project_root
         .clone()
         .unwrap_or_else(|| cas_root.to_path_buf());
     let mut sources = Vec::new();
+    let mut notes = Vec::new();
+
     if args.scope != "global" {
         sources.push(SourceDb {
             label: DbLabel::Project,
             db_path: project_root.join("cas.db"),
-            cas_root: project_root,
+            cas_root: project_root.clone(),
         });
     }
+
     if args.scope != "project" {
+        if args.project_root.is_some() && args.global_root.is_none() {
+            anyhow::bail!(
+                "--project-root redirects the project side to {}, but the global side would \
+                 still default to ~/.cas — the LIVE global database, which --apply would write \
+                 pages into. Pass --global-root <copy> as well, or --scope project.",
+                project_root.display()
+            );
+        }
         let global_root = args
             .global_root
             .clone()
-            .or_else(|| dirs::home_dir().map(|home| home.join(".cas")));
+            .or_else(|| home_dir.map(|home| home.join(".cas")));
         match global_root {
-            Some(root) if root.join("cas.db").exists() && root != cas_root => {
+            // Compared against `project_root`, not the detected root: when the
+            // project root *is* ~/.cas the same database must not be migrated
+            // twice under two labels.
+            Some(root) if root.join("cas.db").exists() && root != project_root => {
                 sources.push(SourceDb {
                     label: DbLabel::Global,
                     db_path: root.join("cas.db"),
@@ -86,21 +115,36 @@ pub fn execute(args: &MemoryMigrateArgs, cas_root: &Path) -> anyhow::Result<()> 
                 });
             }
             Some(root) => {
-                println!(
-                    "(no global legacy database at {} — skipping)",
+                notes.push(format!(
+                    "(no separate global legacy database at {} — skipping)",
                     root.display()
-                );
+                ));
             }
-            None => println!("(cannot resolve a home directory — skipping the global database)"),
+            None => notes
+                .push("(cannot resolve a home directory — skipping the global database)".into()),
         }
+    }
+
+    Ok((sources, notes))
+}
+
+pub fn execute(args: &MemoryMigrateArgs, cas_root: &Path) -> anyhow::Result<()> {
+    let (sources, notes) = resolve_sources(args, cas_root, dirs::home_dir())?;
+    for note in &notes {
+        println!("{note}");
     }
 
     let config = MigrationConfig {
         sources,
-        ledger_dir: args
-            .ledger
-            .clone()
-            .unwrap_or_else(|| cas_root.join(DEFAULT_LEDGER_SUBDIR)),
+        // Defaults under the *resolved* project root, not the detected one: a
+        // rehearsal against a copy must not leave its ledger in the live tree,
+        // where a later real run would read it as "already migrated".
+        ledger_dir: args.ledger.clone().unwrap_or_else(|| {
+            args.project_root
+                .clone()
+                .unwrap_or_else(|| cas_root.to_path_buf())
+                .join(DEFAULT_LEDGER_SUBDIR)
+        }),
         apply: args.apply,
         invalidate_sync_queue: args.invalidate_sync_queue,
         page_size: args.page_size,
@@ -137,6 +181,15 @@ pub fn execute(args: &MemoryMigrateArgs, cas_root: &Path) -> anyhow::Result<()> 
     for report in &outcome.index_reports {
         print!("{}", report.render());
     }
+    if outcome.sync_queue_invalidated > 0 {
+        println!(
+            "sync_queue: {} stranded entry row(s) ledgered in full, then deleted (spec §5.3) \
+             — payloads are in {}/{}",
+            outcome.sync_queue_invalidated,
+            outcome.ledger_dir.display(),
+            memory_migration::ledger::SYNC_QUEUE_FILE
+        );
+    }
     if outcome.sync_queue_pending > 0 {
         println!(
             "sync_queue: {} stranded entry row(s) — drain with `cas cloud sync` or pass \
@@ -171,4 +224,102 @@ pub fn execute(args: &MemoryMigrateArgs, cas_root: &Path) -> anyhow::Result<()> 
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(scope: &str) -> MemoryMigrateArgs {
+        MemoryMigrateArgs {
+            apply: false,
+            scope: scope.to_string(),
+            project_root: None,
+            global_root: None,
+            ledger: None,
+            invalidate_sync_queue: false,
+            reindex: false,
+            page_size: 500,
+        }
+    }
+
+    fn root_with_db(dir: &Path, name: &str) -> PathBuf {
+        let root = dir.join(name);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("cas.db"), b"").unwrap();
+        root
+    }
+
+    #[test]
+    fn a_redirected_project_root_refuses_to_default_the_global_side_to_live() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let copy = root_with_db(temp.path(), "copy");
+        let home = temp.path().join("home");
+        let mut a = args("both");
+        a.project_root = Some(copy);
+
+        let err = resolve_sources(&a, temp.path(), Some(home))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--global-root"), "{err}");
+        assert!(err.contains("--scope project"), "{err}");
+    }
+
+    #[test]
+    fn a_redirected_project_root_is_fine_once_the_global_side_is_stated() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let project = root_with_db(temp.path(), "copy-project");
+        let global = root_with_db(temp.path(), "copy-global");
+        let mut a = args("both");
+        a.project_root = Some(project.clone());
+        a.global_root = Some(global.clone());
+
+        let (sources, _) =
+            resolve_sources(&a, temp.path(), Some(temp.path().join("home"))).unwrap();
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0].cas_root, project);
+        assert_eq!(sources[1].cas_root, global);
+        // Every source points inside the copies; the detected root is untouched.
+        assert!(sources.iter().all(|s| s.db_path.starts_with(temp.path())));
+    }
+
+    #[test]
+    fn a_redirected_project_root_alone_is_allowed_when_global_is_out_of_scope() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let project = root_with_db(temp.path(), "copy-project");
+        let mut a = args("project");
+        a.project_root = Some(project.clone());
+
+        let (sources, _) =
+            resolve_sources(&a, temp.path(), Some(temp.path().join("home"))).unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].cas_root, project);
+    }
+
+    #[test]
+    fn the_same_root_is_never_migrated_twice_under_two_labels() {
+        // Running inside ~/.cas itself: project detection and the global
+        // default resolve to one database. Migrating it twice would double
+        // every count in the loss audit.
+        let temp = tempfile::TempDir::new().unwrap();
+        let home = temp.path().join("home");
+        let shared = root_with_db(&home, ".cas");
+
+        let (sources, notes) = resolve_sources(&args("both"), &shared, Some(home)).unwrap();
+        assert_eq!(sources.len(), 1, "{sources:?}");
+        assert_eq!(sources[0].label.as_str(), "project");
+        assert!(notes.iter().any(|n| n.contains("skipping")), "{notes:?}");
+    }
+
+    #[test]
+    fn a_missing_global_database_is_skipped_not_invented() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let project = root_with_db(temp.path(), "project");
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let (sources, notes) = resolve_sources(&args("both"), &project, Some(home)).unwrap();
+        assert_eq!(sources.len(), 1);
+        assert!(notes.iter().any(|n| n.contains("skipping")), "{notes:?}");
+    }
 }

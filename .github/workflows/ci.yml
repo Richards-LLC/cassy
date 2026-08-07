@@ -57,7 +57,10 @@ jobs:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo build -p cas --no-default-features
 
-      - name: Test
+      # This is the ONLY step in the entire workflow that executes the test
+      # suite. If you want to know whether the tests pass on a commit, read
+      # this job — no other job's green answers that question (GH #138).
+      - name: Test (full suite — the only job that executes it)
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo test -p cas
@@ -120,8 +123,29 @@ jobs:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo check -p cas --no-default-features
 
-  full-matrix:
-    name: Full Matrix
+  # ┌───────────────────────────────────────────────────────────────────────┐
+  # │ THIS JOB RUNS NO TEST SUITE. Its green means "everything compiles and │
+  # │ the release profiles still isolate panics" — nothing more.            │
+  # └───────────────────────────────────────────────────────────────────────┘
+  #
+  # It executes exactly two things, and neither is the suite:
+  #   - `cargo test -p cas --no-run` — COMPILES the test binaries, runs none.
+  #   - `make -C cas-cli test-release-panic` — four targeted invocations only
+  #     (--lib panic_regression and --test search_utf8_regression_test, each
+  #     under --release and --profile release-fast). See cas-cli/Makefile.
+  #
+  # `Fast Validation` is the ONLY job that executes the test suite (its "Test"
+  # step runs bare `cargo test -p cas`). If you are asking "did the tests
+  # pass?", that is the job to read — a green here cannot answer it.
+  #
+  # Why this warning exists (GH #138): a green here was read as suite coverage
+  # while Fast Validation was red on the same commit, which turned a 100%
+  # deterministic failure (GH #136) into a day-long "flaky test" hunt. The two
+  # results never actually disagreed — one job simply never ran the tests.
+  #
+  # If you add a step here that DOES execute tests, rename this job to match.
+  release-profile-and-build-guard:
+    name: Release-Profile & Build Guard (compile-only, no test suite)
     if: github.event_name == 'schedule' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
@@ -151,7 +175,9 @@ jobs:
         with:
           cache-on-failure: true
 
-      - name: Test compile
+      # --no-run COMPILES the test binaries and executes nothing. A green here
+      # says the tests still build; it says nothing about whether they pass.
+      - name: Compile tests only (--no-run, executes nothing)
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo test -p cas --no-run

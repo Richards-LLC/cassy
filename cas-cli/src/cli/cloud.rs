@@ -3355,20 +3355,42 @@ fn evaluate_purge_safety(
 }
 
 /// Queued-but-unpushed local changes for the entity kinds a purge deletes.
-fn pending_content_pushes(conn: &rusqlite::Connection) -> Vec<(String, String)> {
+///
+/// Fails CLOSED. Only an absent `sync_queue` table is "no pending pushes";
+/// every other read failure (schema drift, corruption, a row that will not
+/// decode) is propagated so the purge refuses loudly. Silently returning zero
+/// here would disable the unpushed-rows guard in a destructive path — the one
+/// place a reassuring wrong answer is most expensive.
+fn pending_content_pushes(conn: &rusqlite::Connection) -> anyhow::Result<Vec<(String, String)>> {
     let mut stmt = match conn.prepare(
         "SELECT entity_type, entity_id FROM sync_queue
          WHERE lower(entity_type) IN ('entry', 'task', 'rule', 'skill')
          ORDER BY id",
     ) {
         Ok(s) => s,
-        Err(_) => return Vec::new(),
+        // Table absent (older database) — there is genuinely nothing queued.
+        Err(e) if e.to_string().contains("no such table") => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "cannot read the sync queue to check for unpushed local changes: {e}"
+            ));
+        }
     };
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)));
-    match rows {
-        Ok(rows) => rows.flatten().collect(),
-        Err(_) => Vec::new(),
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| {
+            anyhow::anyhow!("cannot read the sync queue to check for unpushed local changes: {e}")
+        })?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        // No .flatten(): a row that fails to decode must not vanish into a
+        // shorter "pending" list that reads as safe.
+        out.push(row.map_err(|e| {
+            anyhow::anyhow!("unreadable row in the sync queue while checking unpushed changes: {e}")
+        })?);
     }
+    Ok(out)
 }
 
 /// Crash-safe backup of a live WAL database.
@@ -3452,7 +3474,7 @@ fn execute_purge_foreign(
                 |r| r.get(0),
             )
             .ok();
-        let pending = pending_content_pushes(&conn);
+        let pending = pending_content_pushes(&conn)?;
         let refusals = evaluate_purge_safety(
             last_pull_at.as_deref(),
             &pending,
@@ -4388,7 +4410,7 @@ mod purge_foreign_safety_tests {
         )
         .unwrap();
 
-        let pending = pending_content_pushes(&conn);
+        let pending = pending_content_pushes(&conn).unwrap();
 
         // Content kinds only (case-insensitively); events survive a purge and
         // must not trip the guard.
@@ -4404,7 +4426,55 @@ mod purge_foreign_safety_tests {
     #[test]
     fn pending_pushes_is_empty_when_the_queue_table_is_absent() {
         let conn = Connection::open_in_memory().unwrap();
-        assert!(pending_content_pushes(&conn).is_empty());
+        assert!(pending_content_pushes(&conn).unwrap().is_empty());
+    }
+
+    /// The guard must fail CLOSED. An unreadable sync_queue previously reported
+    /// "zero pending pushes", which silently disabled the unpushed-rows refusal
+    /// in a destructive path — a reassuring wrong answer at the worst moment.
+    #[test]
+    fn unreadable_sync_queue_surfaces_an_error_instead_of_a_silent_zero() {
+        // Schema drift: the table exists but not the columns the guard reads.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE sync_queue (id INTEGER PRIMARY KEY, junk TEXT);")
+            .unwrap();
+
+        let err = pending_content_pushes(&conn).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot read the sync queue"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn undecodable_sync_queue_row_surfaces_an_error_instead_of_being_skipped() {
+        // A row whose entity_type cannot decode as text must not simply vanish
+        // from the pending list — that would shorten it toward a false "safe".
+        let conn = Connection::open_in_memory().unwrap();
+        seed_db(&conn);
+        conn.execute(
+            "INSERT INTO sync_queue (entity_type, entity_id, operation)
+             VALUES ('entry', X'FF', 'create')",
+            [],
+        )
+        .unwrap();
+
+        let err = pending_content_pushes(&conn).unwrap_err();
+        assert!(err.to_string().contains("unreadable row"), "{err}");
+    }
+
+    #[test]
+    fn a_readable_but_empty_sync_queue_is_still_a_pass() {
+        // Fail-closed must not become fail-always: a healthy empty queue is
+        // exactly the state a safe purge runs in.
+        let conn = Connection::open_in_memory().unwrap();
+        seed_db(&conn);
+
+        assert!(pending_content_pushes(&conn).unwrap().is_empty());
+        assert!(
+            evaluate_purge_safety(Some("2026-08-06T12:00:00Z"), &[], now(), 7).is_empty(),
+            "healthy state must still pass"
+        );
     }
 
     // ── AC3: the backup is crash-safe, not an fs::copy of a live WAL DB ────────

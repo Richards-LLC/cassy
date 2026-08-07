@@ -738,7 +738,20 @@ pub(crate) fn resolve_repo_context(
         {
             matches.push((repo_root, git_common_dir));
         }
-        observed.extend(identities.iter().map(|identity| canonical_selector(identity)));
+        // cas-1a1c: report each checkout's identities as one GROUP rather than
+        // flattening them. When the mismatch is the pin-vs-remote shape, seeing
+        // `project:<pin> + remote:<origin>` together is what makes it obvious
+        // that the pin was considered and the remote still did not match.
+        // Deliberately path-free: these errors do not disclose host paths.
+        if !identities.is_empty() {
+            observed.push(
+                identities
+                    .iter()
+                    .map(|identity| canonical_selector(identity))
+                    .collect::<Vec<_>>()
+                    .join(" + "),
+            );
+        }
     }
     observed.sort();
     observed.dedup();
@@ -758,9 +771,9 @@ pub(crate) fn resolve_repo_context(
             "⚠️ WORK TARGET REPOSITORY MISMATCH\n\n\
              Task targets `{}` (normalized `{}`), but no current-host known \
              repository or verified path hint resolves to that selector. \
-             Normalized identities seen on this host: {}. Register/open the \
-             target repo with CAS, then retry. No git merge/reachability check \
-             was run.",
+             Each known checkout's full normalized identity set was compared: \
+             {}. Register/open the target repo with CAS, then retry. No git \
+             merge/reachability check was run.",
             target.repo_selector,
             canonical_selector(&target.repo_selector),
             if observed.is_empty() {
@@ -1473,13 +1486,17 @@ mod tests {
                 error.contains("normalized `remote:github.com/pippenz/cas`"),
                 "target side missing from: {error}"
             );
+            // The checkout's identities are reported as one SET, so a reader
+            // sees immediately that the pin was considered and the remote
+            // still did not match — not two unrelated-looking lines.
             assert!(
-                error.contains("remote:github.com/someone/other"),
-                "observed side missing from: {error}"
+                error.contains("project:other-project + remote:github.com/someone/other"),
+                "grouped identity set missing from: {error}"
             );
+            // Path-free by convention for these errors.
             assert!(
-                error.contains("project:other-project"),
-                "pin identity missing from: {error}"
+                !error.contains(home.to_string_lossy().as_ref()),
+                "host paths must not be disclosed: {error}"
             );
         });
     }

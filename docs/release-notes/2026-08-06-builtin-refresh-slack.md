@@ -1,10 +1,11 @@
 # Release notes — builtin refresh (main, v2.44.0)
 
 **Channel:** `#cas-internal` (`C0B44GUKDK2`)
-**Status:** DRAFT — not yet posted. Slack transport unavailable on 2026-08-06
-(claude.ai Slack connector unauthorized on the posting profile; codex_apps path
-blocked until the Codex quota reset on 2026-08-08 10:07am). Post as soon as a
-transport is available.
+**Status:** POSTED 2026-08-06 20:51:35 EDT to `#cas-internal` (`C0B44GUKDK2`).
+- User top-level: https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786063895782799
+- User reply: https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786063901473939
+- Dev top-level: https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786063904406179
+- Dev reply: https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786063916908609
 
 Post order: user top-level → capture `ts` → user reply → dev top-level → capture `ts` → dev reply.
 

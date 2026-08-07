@@ -1,10 +1,11 @@
 # Release notes — SessionStart size budget (main, cbb0f403)
 
 **Channel:** `#cas-internal` (`C0B44GUKDK2`)
-**Status:** DRAFT — not yet posted. Both Slack transports unavailable on 2026-08-06
-(claude.ai Slack connector unauthorized on the posting profile; codex_apps path
-blocked until the Codex quota reset on 2026-08-08 10:07am). Post as soon as a
-transport is available.
+**Status:** POSTED 2026-08-06 20:52:00 EDT to `#cas-internal` (`C0B44GUKDK2`).
+- User top-level: https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786063920575319
+- User reply: https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786063925920379
+- Dev top-level: https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786063929037139
+- Dev reply: https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786063935118609
 
 Post order: user top-level → capture `ts` → user reply → dev top-level → capture `ts` → dev reply.
 

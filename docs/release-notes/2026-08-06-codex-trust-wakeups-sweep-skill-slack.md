@@ -2,6 +2,12 @@
 
 Channel: #cas-internal (C0B44GUKDK2). Two top-level posts per runtime rubric.
 
+**Status:** POSTED 2026-08-06 20:50:18 EDT to `#cas-internal` (`C0B44GUKDK2`).
+- User top-level: https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786063818043499
+- User reply: https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786063826224449
+- Dev top-level: https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786063829935809
+- Dev reply: https://petra-stella.slack.com/archives/C0B44GUKDK2/p1786063841059909
+
 ## Post 1 — User
 
 Live on main — **User**

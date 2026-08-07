@@ -354,7 +354,8 @@ mod tests {
     fn assembled_worst_case_payload_stays_under_the_inline_cap() {
         use crate::hooks::handlers::handlers_events::codemap::CodemapStaleness;
         use crate::hooks::handlers::session_hygiene::{
-            PorcelainEntry, WipSummary, render_wip_banner,
+            PorcelainEntry, WipSummary, render_issues_target_banner, render_unfiled_reports_banner,
+            render_wip_banner,
         };
 
         // Base: CAS header + real supervisor guidance (protected) followed by
@@ -436,6 +437,17 @@ mod tests {
                 .to_string(),
         );
 
+        // cas-20f27 issue-filing detectors: a long unfiled-report backlog (the
+        // real case that motivated them was 13 staged files) plus the fixed
+        // unset-issues-target line.
+        let staged: Vec<String> = (0..30)
+            .map(|i| format!("BUG-a-fairly-long-descriptive-report-slug-{i:02}.md"))
+            .collect();
+        let unfiled_banner = render_unfiled_reports_banner(&staged);
+        assembler.append_degradable(unfiled_banner.full, unfiled_banner.compact);
+        let issues_target = render_issues_target_banner();
+        assembler.append_degradable(issues_target.full, issues_target.compact);
+
         let payload = assembler.render();
         assert!(
             payload.len() <= SESSION_START_BUDGET_BYTES,
@@ -456,6 +468,25 @@ mod tests {
         );
         assert!(payload.contains("/codemap"));
         assert!(payload.contains("gc_report"));
+        // cas-20f27: both filing detectors must survive degradation carrying
+        // their remediation, and neither may be cut mid-sentence.
+        assert!(
+            payload.contains("30 staged bug/feature report(s)")
+                && payload.contains("cas-github-issues"),
+            "the unfiled-reports detector must survive as a count + its remediation skill"
+        );
+        assert!(
+            payload.contains("cas config set issues.repo owner/repo"),
+            "the unset-issues-target detector must survive with its exact command"
+        );
+        for line in payload.lines() {
+            if line.contains("staged bug/feature report(s)") || line.contains("`[issues] repo`") {
+                assert!(
+                    line.trim_end().ends_with('.') || line.trim_end().ends_with(':'),
+                    "degraded detector line must end as a complete sentence, got: {line}"
+                );
+            }
+        }
     }
 
     #[test]

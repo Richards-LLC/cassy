@@ -45,6 +45,25 @@ cas config get issues.repo
 
 7. Capture and report the issue URL. Remove the local staging file only after `gh issue create` succeeds and the URL is known. If the command fails for any reason, preserve the file and use the fallback.
 
+## Detectors that surface a missed filing
+
+Two SessionStart banners make the two silent failure modes of this flow
+deterministic instead of recall-based, following the same detector pattern as
+the codemap and project-overview freshness gates:
+
+- **Unfiled staged reports** — any `BUG-*.md` / `FEATURE-*.md` sitting at the
+  `docs/requests/` root (the archive in `completed/` never counts) is reported
+  with its count and file names. A single report gets the direct
+  `gh issue create` command; several get the `cas-github-issues` sweep skill.
+  Clear it by filing the reports and removing the staged files.
+- **Unset issue target** — if `[issues] repo` is unset while `docs/requests/`
+  exists, the banner names `cas config set issues.repo owner/repo`. It never
+  proposes a value, because the correct target is the one the receiving team
+  gave you, not this repository's `origin`.
+
+Both go quiet the moment their condition clears. Seeing either one means the
+work below was started and never finished — not that a new report is needed.
+
 ## Durable fallback
 
 Unset configuration, `gh` not installed, `gh` not authenticated, and GitHub command failures all take the same safe path: preserve `docs/requests/BUG-<slug>.md` in the current repository and make it visible to collaborators.

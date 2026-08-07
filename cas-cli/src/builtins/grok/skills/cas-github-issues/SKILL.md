@@ -15,6 +15,21 @@ Run all six steps in order. **If no step changed anything, end the turn without
 a report** — a silent sweep is the success case, and a "nothing to do" summary
 every hour is noise.
 
+## Why you may be here: the unfiled-reports banner
+
+CAS emits a SessionStart banner when `BUG-*.md` / `FEATURE-*.md` files are
+staged at the `docs/requests/` root — reports the write-first flow wrote but
+never pushed, so nobody outside that checkout can see them. Sweeping those
+staged files into GitHub is part of this skill's job: read each one, search for
+an existing issue (step 6's dedupe check applies), file it with `gh issue
+create --body-file docs/requests/<file>`, and delete the staged file only after
+the issue URL is known. The banner clears when the directory root is empty.
+
+A companion banner fires when `[issues] repo` is unset while `docs/requests/`
+exists. It names `cas config set issues.repo owner/repo` and deliberately
+suggests no value — use the tracker the receiving team specified, never one
+derived from the `origin` remote.
+
 ## Before you start
 
 ```bash

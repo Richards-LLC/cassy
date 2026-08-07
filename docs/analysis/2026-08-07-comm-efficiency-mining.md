@@ -359,11 +359,14 @@ query, and it is out of scope for a defect sweep.
   only — no overlap with that task's fix.
 - **GH #147** (wake false-positive) — F3 is the message-loss form of the same idle-gate
   misjudgement: 356 messages dropped, all since 2026-08-04.
-- **GH #155** (fixed in v2.49.0) — pre/post-fix data is consistent with the symptom class
-  clearing: the undelivered rate fell from 33.5% (08-06) to 19.3% (08-07), and daily log volume
-  from 464 MB to 4.9 MB. It has **not** returned to the ~1% baseline, so #155 was a real but
-  partial fix; F2/F3 are the unfixed remainder. This needs one more day of post-release data
-  before the claim is firm.
+- **GH #155** — **RETRACTED CLAIM.** An earlier revision of this report read the drop in
+  undelivered rate from 33.5% (08-06) to 19.3% (08-07) as evidence that v2.49.0's fix was
+  working. That inference is invalid and is withdrawn. Per the running-binary analysis below,
+  the v2.49.0 binary was installed at 21:02 UTC and **no daemon has restarted since** — every
+  daemon process serving the factory today started at or before 20:59 UTC and is therefore
+  executing pre-v2.49.0 code. No observation in this corpus can speak to v2.49.0's fix in either
+  direction. The 08-06 → 08-07 improvement has some other cause and remains unexplained.
+  Classification: **FIXED-UNVERIFIED**. See "Temporal classification" below.
 
 ## Corpus coverage
 
@@ -377,3 +380,122 @@ query, and it is out of scope for a defect sweep.
 Transcripts were deliberately not mined: all 13 findings resolved from structured sources, and
 per the task's own instruction ("structured first"), transcript mining is the escalation path for
 the semantic questions deferred with the vector-store decision above.
+
+---
+
+# AC7 — Temporal classification against running-binary epochs
+
+Six releases (v2.44 → v2.49.0) shipped inside the mining window, so raw historical counts would
+report ghosts. Findings are classified against the **running-binary timeline**, not tag dates.
+
+## The running-binary epoch (the trap, measured)
+
+| Event | Local (EDT) | UTC | Source |
+|---|---|---|---|
+| v2.47.0 tagged | 08-06 22:53:38 | 08-07 02:53 | `git tag --sort=-creatordate` |
+| v2.48.0 → v2.48.3 tagged | 08-07 09:01 → 10:07 | 13:01 → 14:07 | same |
+| **v2.49.0 tagged** | **08-07 16:31:24** | **20:31** | same |
+| Last daemon restarts | 08-07 16:51 / 16:54 | **20:51 / 20:54** | `daemon_instances`, log init lines |
+| **v2.49.0 binary installed** | **08-07 17:02** | **21:02** | `ls -la $(which cas)`, `cas --version` → 2.49.0 (3d58332) |
+| Snapshot taken | 08-07 17:05 | 21:05 | this run |
+
+**The binary was installed 8 minutes after the last daemon started.** Every `cas serve` process
+serving the factory (PIDs 910163, 1541273, 1543040, 1548852, 1549075) began at or before
+20:59 UTC; `daemon_instances` confirms all six live rows started ≤ 20:59:29 UTC. Therefore:
+
+> **No data in this corpus observes v2.49.0 behaviour.** Every v2.49.0 fix — #155 turn-start
+> surfacing, m220 wake observability, #145 clear_context, #152 review-ownership — is
+> **FIXED-UNVERIFIED**. Absence of improvement today is *expected*, not a regression, and must
+> not be filed as one.
+
+Epoch boundaries usable for classification (daemon restarts, UTC): 08-06 16:41, 18:53, 19:43,
+22:16; 08-07 12:25, 15:32, 16:36–16:37, 20:51–20:54. Historical binary-install times are not
+recoverable (only the current binary's mtime survives), so pre-08-07 epochs are bounded by
+restart times alone — stated here rather than papered over.
+
+## Headline: the amendment incident — GH #155's class, reproduced on this task
+
+While attempting to close this task, the MERGE-REQUIRED remediation forced an `inbox_poll`,
+which returned **7 unread messages** — including **five binding amendments to this very task**
+(AC7 temporal stratification, AC8 issue filing, the Phase-1 checkpoint gate, and the
+vector-store pre-approval) that had never reached the session. Their DB rows:
+
+    SELECT id,source,transport_delivered_at IS NULL undel,acked_at IS NULL unacked,highest_stage
+    FROM prompt_queue WHERE target='cosmic-eagle-24';
+    -- 7869 cas        | 0 | 1 | delivered
+    -- 7871 director   | 0 | 1 | delivered
+    -- 7877 supervisor | 0 | 1 | delivered   <- kickoff, never surfaced
+    -- 7879 supervisor | 0 | 1 | delivered   <- AC7 amendment, never surfaced
+    -- 7880 supervisor | 0 | 1 | delivered   <- AC8 amendment, never surfaced
+    -- 7881 supervisor | 0 | 1 | delivered   <- phase-gate amendment, never surfaced
+
+All six stamped `transport_delivered_at`, `highest_stage=delivered`, and every one re-issued by
+the poll marked `[redelivery] — already delivered`. Four of them never entered the session's
+context; the work proceeded for over an hour against a spec that had been amended four times.
+This is precisely GH #155 — *"a message could be marked delivered to a session that never saw
+it"* — **behaviourally confirmed on the pre-2.49.0 binary at 21:01–21:09 UTC today**, and it is
+the single most expensive defect in this report: it silently invalidated the task's own
+requirements.
+
+**Classification: STILL-LIVE on the running binary; FIXED-UNVERIFIED against v2.49.0.** The
+v2.49.0 turn-start drain is designed to fix exactly this and has never executed here. The
+actionable ask is therefore *restart the daemon on the new binary and re-measure*, not a new fix.
+
+**Screening signature (with its honest limit).** The pattern is
+`transport_delivered_at IS NOT NULL AND acked_at IS NULL`:
+
+| Date | Msgs | Stamped-delivered-never-acked | % |
+|---|---|---|---|
+| 2026-08-07 | 591 | 422 | 71.4 |
+| 2026-08-06 | 553 | 179 | 32.4 |
+| 2026-08-05 | 92 | 30 | 32.6 |
+| 2026-08-04 | 184 | 58 | 31.5 |
+| 2026-07-29 | 475 | 383 | 80.6 |
+| 2026-07-22 | 310 | 307 | 99.0 |
+
+**This is a screening metric, not a defect count.** Ack is not mandatory for every message type,
+so unacked ≠ unseen, and the rate swings too wildly (99% → 25% → 71%) to carry a cost claim on
+its own. What it is good for is ranking days for inspection. The only *behaviourally confirmed*
+instances are the four amendments above — those, I can stand behind, because I am the recipient
+that never saw them.
+
+## Classification of the 13 findings
+
+Actionable = STILL-LIVE + REGRESSED only.
+
+| # | Finding | Last occurrence (UTC) | Class | Actionable |
+|---|---|---|---|---|
+| — | **Amendment incident** (stamped-delivered, never surfaced) | 08-07 21:09 | **STILL-LIVE** | **yes** |
+| 1 | Redelivery hot-loop / log amplification | 08-06 18:52 | **STILL-LIVE** (unfixed; no release targets it) | yes |
+| 2 | Undelivered-rate regression (~1% → 19–37%) | 08-07 20:59 | **STILL-LIVE** | yes |
+| 3 | Idle-gate drops instead of defers (`suppressed_idle`) | **08-07 20:59:38** | **STILL-LIVE** | yes |
+| 4 | `worker_died` never PTY-delivered | 08-07 19:37 | **STILL-LIVE** (code-verified, no fix exists) | yes |
+| 5 | Death-notice duplication (1,452 for one agent) | 08-07 | **STILL-LIVE** | yes |
+| 6 | Ack latency p90 22.7 min | 08-07 | STILL-LIVE | yes |
+| 7 | Transport latency tail (p99 258 s) | 08-07 | STILL-LIVE | yes |
+| 8 | `abandoned_unknown_target` spawn race | 08-07 13:58 | **STILL-LIVE** | yes |
+| 9 | `delivery_attempts` dead instrumentation | 08-07 (all rows) | **STILL-LIVE** | yes |
+| 10 | Lease churn (cas-edee, 4 agents/2 h) | 08-07 19:18 | STILL-LIVE | yes |
+| 11 | Urgent-interrupt escalation (117 in 4 days) | 08-07 20:xx | STILL-LIVE (symptom of 2/3) | secondary |
+| 12 | Reminders expire without firing | — | STILL-LIVE | yes |
+| 13 | Worker cold-start idle (150 min) | 08-06 | **symptom of F1**, not independent | no |
+
+### Confirmed-resolved appendix (validation evidence, NOT actionable)
+
+- **`dead-lettered` — FIXED-VERIFIED.** 513 occurrences spanning 2026-03-20 → **2026-07-27
+  17:30:44**, then zero across 11 subsequent active days carrying 2,800+ messages. A clean stop
+  at a boundary with substantial post-boundary traffic is real extinction, not absence of data.
+  This is the largest single symptom class in the corpus and it is genuinely gone.
+- **Wake fix (v2.47.0, "an ordinary message wakes an idle worker again")** — partial support:
+  worker cold-start times fell to <3 min for all 2026-08-07 spawns versus 150 min on 08-06.
+  Sample size is 5 workers, so this is suggestive, not proof. **FIXED-UNVERIFIED.**
+
+### Corrections this classification forced
+
+1. The GH #155 improvement claim is **retracted** (above) — the fix was never live.
+2. Finding 13 is **demoted** from a defect to a symptom of Finding 1.
+3. `reminder_fired`'s 100%-undelivered figure was ruled **benign** by code read before it could
+   become a false finding (`fire_reminder` dual-writes to `prompt_queue`; `emit_worker_died_signals`
+   does not).
+
+Three of thirteen findings changed status under temporal analysis — the amendment was worth it.

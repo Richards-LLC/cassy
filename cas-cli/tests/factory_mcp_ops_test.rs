@@ -5068,7 +5068,20 @@ async fn test_062d_lifecycle_reopen_pushes_ready() {
     assert_eq!(after.status, TaskStatus::Open);
 
     let queue = cas::store::open_supervisor_queue_store(&env.cas_root).expect("queue");
-    let pending = queue.peek(&sup_id, 20).expect("peek");
+    // cas-7787 (GH #160) changed `resolve_owning_supervisor` to break ties on
+    // registration recency after liveness, so that a supervisor whose harness
+    // session restarts mid-factory-session keeps receiving relays at its
+    // SUCCESSOR identity instead of at whichever duplicate row happened to
+    // sort first on a UUID. This test registers two Supervisor rows in one
+    // session — `sup_id` first, then the calling agent below — so the relay
+    // now lands at the caller, which is what the fixture always meant by
+    // "register calling supervisor". Assert against the caller, not against
+    // the row the old lexicographic coin flip used to pick.
+    assert!(
+        queue.peek(&sup_id, 20).expect("peek").is_empty(),
+        "the superseded identity must not capture the relay"
+    );
+    let pending = queue.peek("sup-reopen-agent", 20).expect("peek");
     assert!(
         pending.iter().any(|n| {
             n.event_type == "task_lifecycle"
@@ -5127,7 +5140,20 @@ async fn test_062d_lifecycle_close_pushes_closed() {
     assert_eq!(after.status, TaskStatus::Closed, "notes={}", after.notes);
 
     let queue = cas::store::open_supervisor_queue_store(&env.cas_root).expect("queue");
-    let pending = queue.peek(&sup_id, 20).expect("peek");
+    // cas-7787 (GH #160) changed `resolve_owning_supervisor` to break ties on
+    // registration recency after liveness, so that a supervisor whose harness
+    // session restarts mid-factory-session keeps receiving relays at its
+    // SUCCESSOR identity instead of at whichever duplicate row happened to
+    // sort first on a UUID. This test registers two Supervisor rows in one
+    // session — `sup_id` first, then the calling agent below — so the relay
+    // now lands at the caller, which is what the fixture always meant by
+    // "register calling supervisor". Assert against the caller, not against
+    // the row the old lexicographic coin flip used to pick.
+    assert!(
+        queue.peek(&sup_id, 20).expect("peek").is_empty(),
+        "the superseded identity must not capture the relay"
+    );
+    let pending = queue.peek("sup-close-agent", 20).expect("peek");
     assert!(
         pending.iter().any(|n| {
             n.event_type == "task_lifecycle"

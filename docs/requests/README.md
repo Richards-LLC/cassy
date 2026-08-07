@@ -61,5 +61,7 @@ If a commit is not authorized or cannot be created, report the exact uncommitted
 ## Historical Archive
 
 - `completed/` is the historical record for completed file-based requests. Keep it intact.
-- The 11 reports migrated to GitHub Issues #55–#65 remain in this directory with backlinks and must not be deleted or moved.
+- The 11 reports migrated to GitHub Issues #55–#65 keep their issue backlinks and must not be deleted. They were moved to `completed/` on 2026-08-07 once every one of those issues closed as completed and each fix was verified against a commit on `main`; each carries a disposition note naming that evidence.
 - For any committed file-only fallback that completes before migration to an issue, append its existing completion note, move it to `completed/`, and commit the move.
+- A staged report leaves this directory's root only with a disposition note at its head: the GitHub issue it was filed as, or the issue/commit that already covers it. Verify a "covered" claim against the actual fix — a matching title is not evidence.
+- `RESPONSE-*.md` files are replies, not reports. Archive them in `completed/` alongside the request they answer.

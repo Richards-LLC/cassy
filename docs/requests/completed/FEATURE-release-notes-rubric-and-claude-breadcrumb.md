@@ -4,6 +4,8 @@ date: 2026-06-25
 priority: P2
 ---
 
+> **Disposition (2026-08-07, cas-ab75):** DELIVERED — filed as [#65](https://github.com/pippenz/cas/issues/65) (closed completed). Verified on `main`: `dd4487aa` — `cas-cli/src/builtins/skills/release-notes/` ships, and the CAS-managed `docs/release-notes/RUBRIC.md` breadcrumb is injected from `cas-cli/src/builtins.rs` + `cas-cli/src/cli/init/docs_and_skill.rs`. Archived.
+
 > Migrated to GitHub Issues: [#65](https://github.com/pippenz/cas/issues/65)
 
 # Feature Request: ship a release-notes / Slack-announcement rubric + a CAS-managed CLAUDE.md breadcrumb to it

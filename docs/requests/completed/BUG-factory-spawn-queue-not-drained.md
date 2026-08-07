@@ -1,3 +1,5 @@
+> **Disposition (2026-08-07, cas-ab75):** RESOLVED — filed as [#58](https://github.com/pippenz/cas/issues/58) (closed completed). Fix verified on `main`: `0da3fbff` "fix(cas-2702): keep the factory spawn queue draining" — worktree provisioning is bounded, a timed-out generation is abandoned/released/audited as FAILED with a reason, and poll failures now log a dequeue/failed audit record instead of being swallowed. Archived.
+
 > Migrated to GitHub Issues: [#58](https://github.com/pippenz/cas/issues/58)
 
 # BUG: factory daemon enqueues spawn requests but never drains the queue

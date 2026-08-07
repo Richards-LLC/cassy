@@ -6,6 +6,8 @@ cas_version: 2.38.2
 session: Woodworking-jolly-octopus-76
 ---
 
+> **Disposition (2026-08-07, cas-ab75):** RESOLVED — filed as [#57](https://github.com/pippenz/cas/issues/57) (closed completed). Fix verified on `main`: epic cas-7e66 merge `3b77f8eb` (task cas-fdc9, `close_ops.rs` receipt resolution) — `commit_receipt` now accepts unambiguous hexadecimal abbreviations and resolves them to the full immutable ID; only genuinely ambiguous prefixes are rejected, and the rejection text says so. Archived.
+
 > Migrated to GitHub Issues: [#57](https://github.com/pippenz/cas/issues/57)
 
 # BUG: close receipt silently requires a full SHA; the rejection does not say so

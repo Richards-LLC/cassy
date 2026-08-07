@@ -1,3 +1,5 @@
+> **Disposition (2026-08-07, cas-ab75):** RESOLVED — filed as [#60](https://github.com/pippenz/cas/issues/60) (closed completed). Fix verified on `main`: task cas-8b84, merge `137dbcc7` / commit `c2109a67` — migration `m217_spawn_queue_add_lifecycle_state` persists `spawn_state`/`spawn_worker`/`spawn_detail`/`spawn_state_at`, state advances monotonically in SQL, and the worker name is pinned on first sighting, so the enqueue receipt is no longer indistinguishable from a spawn that never registered. Archived.
+
 > Migrated to GitHub Issues: [#60](https://github.com/pippenz/cas/issues/60)
 
 # BUG: `spawn_workers` receipt does not confirm worker liveness

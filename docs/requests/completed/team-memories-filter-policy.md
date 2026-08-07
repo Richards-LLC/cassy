@@ -9,6 +9,8 @@ related:
   - completed/FEATURE-REQUEST-TEAM-PROJECT-MEMORIES.md
 ---
 
+> **Disposition (2026-08-07, cas-ab75):** Decision record, not a request — no GitHub issue. Documents the team-memories filter policy and opt-out design for task cas-fda7 (epic cas-cf44, 2026-04-16); the reports it references (`BUG-team-memories-never-populate.md`, `FEATURE-cloud-sync-pull-team-memories.md`) are already in `completed/`. Archived alongside them.
+
 # Team-memories filter policy & opt-out design
 
 ## Summary

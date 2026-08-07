@@ -6,6 +6,8 @@ cas_version: 2.38.2
 session: Woodworking-jolly-octopus-76
 ---
 
+> **Disposition (2026-08-07, cas-ab75):** RESOLVED — filed as [#61](https://github.com/pippenz/cas/issues/61) (closed completed). Fix verified on `main`: `cdf8452c` "fix(cas-6eab): re-validate coordination signals against live state at delivery" (merge `c3034b97`, epic cas-7e66) — merge-request signals are re-checked against live branch state at delivery time instead of being emitted from a stale snapshot. Archived.
+
 > Migrated to GitHub Issues: [#61](https://github.com/pippenz/cas/issues/61)
 
 # BUG: worker merge-request messages arrive after the merge, on nearly every task

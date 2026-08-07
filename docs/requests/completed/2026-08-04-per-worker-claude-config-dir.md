@@ -1,3 +1,5 @@
+> **Disposition (2026-08-07, cas-ab75):** DELIVERED — filed as [#72](https://github.com/pippenz/cas/issues/72) (closed completed; duplicate filing [#77](https://github.com/pippenz/cas/issues/77) closed as duplicate). Verified on `main`: epic cas-adae merged as `d27aa3ec` — `3c2c7ac5` "feat(cas-740c): support per-spawn Claude config dirs" plus migration `m216_spawn_queue_add_requester_config_dir`; `spawn_workers` accepts `config_dir`, explicit value wins over the supervisor's inherited `CLAUDE_CONFIG_DIR`, and an inherited `ANTHROPIC_API_KEY` is stripped so the selected OAuth account is used. Archived.
+
 # Request: per-worker auth isolation via CLAUDE_CONFIG_DIR on spawn_workers
 
 **Date:** 2026-08-04

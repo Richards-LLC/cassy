@@ -888,6 +888,25 @@ pub trait PromptQueueStore: Send + Sync {
         factory_session: Option<&str>,
     ) -> Result<usize>;
 
+    /// The rows behind [`count_unseen_for_recipient`], without consuming them.
+    ///
+    /// cas-f08d (GH #147): a count alone cannot tell a work message from a
+    /// fired-reminder delivery, and those two mean opposite things about a
+    /// quiet worker — unconsumed work is a stall signal, an already-acted-on
+    /// reminder is not. `worker_status` needs the prompt text and timestamps to
+    /// classify them, so it reads the same rows the count is derived from.
+    ///
+    /// Read-only by construction, exactly like the count: a supervisor
+    /// inspecting an inbox must never mark that inbox seen.
+    ///
+    /// [`count_unseen_for_recipient`]: PromptQueueStore::count_unseen_for_recipient
+    fn peek_unseen_for_recipient(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<QueuedPrompt>>;
+
     /// Age in seconds of the oldest message `recipient` has not seen.
     ///
     /// `None` when the recipient's inbox is empty. cas-e728 uses this to tell
@@ -1531,15 +1550,15 @@ impl<'a> AtomicStampOpts<'a> {
 /// stale/terminal-stage exclusion, `all_workers` fan-out) so status can never
 /// disagree with what the recipient's own next poll would hand it.
 impl SqlitePromptQueueStore {
-    fn unseen_for_recipient_summary(
-        &self,
+    /// The FROM + WHERE half of the unseen-inbox predicate, plus its bound
+    /// parameters in order. Shared verbatim by the count/age summary and the
+    /// row-level peek so the two can never drift apart — a peek that returned
+    /// rows the summary did not count (or vice versa) would put `worker_status`
+    /// at odds with itself.
+    fn unseen_for_recipient_predicate(
         recipient: &str,
         factory_session: Option<&str>,
-    ) -> Result<(usize, Option<i64>)> {
-        if recipient.trim().is_empty() {
-            return Ok((0, None));
-        }
-        let conn = self.conn.lock().unwrap();
+    ) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
         let stale_cutoff =
             (Utc::now() - chrono::Duration::seconds(PROMPT_QUEUE_STALE_TTL_SECS)).to_rfc3339();
         let deliverable_sql = format!(
@@ -1553,8 +1572,7 @@ impl SqlitePromptQueueStore {
             "AND q.factory_session IS NULL"
         };
         let sql = format!(
-            "SELECT COUNT(*), MIN(q.created_at)
-             FROM prompt_queue q
+            "FROM prompt_queue q
              LEFT JOIN prompt_queue_recipient_seen seen
                ON seen.prompt_id = q.id AND seen.recipient = ?
              WHERE seen.prompt_id IS NULL
@@ -1571,6 +1589,20 @@ impl SqlitePromptQueueStore {
         if let Some(session) = factory_session {
             params.push(Box::new(session.to_string()));
         }
+        (sql, params)
+    }
+
+    fn unseen_for_recipient_summary(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+    ) -> Result<(usize, Option<i64>)> {
+        if recipient.trim().is_empty() {
+            return Ok((0, None));
+        }
+        let conn = self.conn.lock().unwrap();
+        let (predicate, params) = Self::unseen_for_recipient_predicate(recipient, factory_session);
+        let sql = format!("SELECT COUNT(*), MIN(q.created_at) {predicate}");
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
         let (count, oldest): (i64, Option<String>) = conn.query_row(
             &sql,
@@ -2021,6 +2053,36 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         Ok(self
             .unseen_for_recipient_summary(recipient, factory_session)?
             .1)
+    }
+
+    fn peek_unseen_for_recipient(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<QueuedPrompt>> {
+        if recipient.trim().is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().unwrap();
+        let (predicate, mut params) =
+            Self::unseen_for_recipient_predicate(recipient, factory_session);
+        let sql = format!(
+            "SELECT q.id, q.source, q.target, q.prompt, q.created_at, q.processed_at, q.summary, q.priority, q.acked_at, q.urgent, q.factory_session
+             {predicate}
+             ORDER BY q.id ASC
+             LIMIT ?"
+        );
+        params.push(Box::new(limit as i64));
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let prompts = stmt
+            .query_map(
+                rusqlite::params_from_iter(param_refs),
+                Self::prompt_from_row,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(prompts)
     }
 
     fn poll_all(&self, limit: usize) -> Result<Vec<QueuedPrompt>> {
@@ -3984,6 +4046,92 @@ mod tests {
         assert_eq!(
             store.count_unseen_for_recipient("worker-b", None).unwrap(),
             1
+        );
+    }
+
+    /// cas-f08d (GH #147): the peek must return exactly the rows the count
+    /// counts — worker_status classifies those rows (work message vs fired
+    /// reminder) and subtracts from the count, so any drift between the two
+    /// would corrupt the arithmetic. And like the count, it must not consume.
+    #[test]
+    fn peek_unseen_matches_the_count_and_never_consumes() {
+        let (_temp, store) = create_test_store();
+        store
+            .enqueue("supervisor", "worker-a", "Reminder #44: check CI")
+            .unwrap();
+        store
+            .enqueue("supervisor", "all_workers", "everyone report")
+            .unwrap();
+        store
+            .enqueue("supervisor", "worker-b", "not yours")
+            .unwrap();
+
+        let peeked = store
+            .peek_unseen_for_recipient("worker-a", None, 10)
+            .unwrap();
+        assert_eq!(
+            peeked.len(),
+            store.count_unseen_for_recipient("worker-a", None).unwrap(),
+            "peek and count must agree"
+        );
+        assert_eq!(peeked.len(), 2, "own row + broadcast, never worker-b's");
+        assert!(peeked[0].prompt.starts_with("Reminder #44:"));
+        assert_eq!(peeked[1].target, "all_workers");
+
+        // Reading it twice returns the same rows: a supervisor inspecting an
+        // inbox must never mark that inbox seen.
+        assert_eq!(
+            store
+                .peek_unseen_for_recipient("worker-a", None, 10)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            store.count_unseen_for_recipient("worker-a", None).unwrap(),
+            2
+        );
+
+        // The recipient's own poll is what consumes.
+        store
+            .poll_unseen_for_recipient("worker-a", None, 10)
+            .unwrap();
+        assert!(
+            store
+                .peek_unseen_for_recipient("worker-a", None, 10)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// The limit bounds the read without touching the count, so a deep backlog
+    /// truncates the sample rather than the total.
+    #[test]
+    fn peek_unseen_respects_its_limit() {
+        let (_temp, store) = create_test_store();
+        for n in 0..5 {
+            store
+                .enqueue("supervisor", "worker-a", &format!("msg {n}"))
+                .unwrap();
+        }
+
+        assert_eq!(
+            store
+                .peek_unseen_for_recipient("worker-a", None, 2)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            store
+                .peek_unseen_for_recipient("worker-a", None, 0)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store.count_unseen_for_recipient("worker-a", None).unwrap(),
+            5,
+            "the count is unaffected by how much of it was sampled"
         );
     }
 

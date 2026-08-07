@@ -1538,7 +1538,17 @@ impl CasService {
         //
         // Read-only by construction: a supervisor polling status must never
         // mark a worker's mail seen.
-        let inbox_state: std::collections::HashMap<String, (usize, Option<i64>)> = {
+        //
+        // cas-f08d (GH #147): the count alone was not enough. A fired reminder
+        // is delivered through this same queue, and the wait pattern workers
+        // are REQUIRED to follow (act once, arm a reminder, end the turn) never
+        // calls `inbox_poll` — so a reminder the worker demonstrably acted on
+        // stayed "unread" forever and read as a wedged harness. The rows are
+        // therefore also read (never consumed) and joined against pending
+        // reminders so the two can be told apart.
+        let now = chrono::Utc::now();
+        let pending_reminder_waits = pending_reminder_waits(&self.inner.cas_root, now);
+        let inbox_state: std::collections::HashMap<String, WorkerInbox> = {
             use crate::store::open_prompt_queue_store;
             open_prompt_queue_store(&self.inner.cas_root)
                 .ok()
@@ -1555,7 +1565,24 @@ impl CasService {
                                     factory_session.as_deref(),
                                 )
                                 .unwrap_or(None);
-                            (agent.name.clone(), (count, oldest))
+                            let rows: Vec<UnseenDelivery> = queue
+                                .peek_unseen_for_recipient(
+                                    &agent.name,
+                                    factory_session.as_deref(),
+                                    WORKER_INBOX_PEEK_LIMIT,
+                                )
+                                .unwrap_or_default()
+                                .iter()
+                                .map(UnseenDelivery::from_queued)
+                                .collect();
+                            let inbox = classify_worker_inbox(
+                                count,
+                                oldest,
+                                &rows,
+                                pending_reminder_waits.get(agent.id.as_str()).copied(),
+                                now,
+                            );
+                            (agent.name.clone(), inbox)
                         })
                         .collect()
                 })
@@ -1841,12 +1868,12 @@ impl CasService {
                 let worker_inbox = inbox_state
                     .get(agent.name.as_str())
                     .copied()
-                    .unwrap_or((0, None));
-                let inbox_info = match worker_inbox {
-                    (0, _) => String::new(),
-                    (count, oldest) => {
+                    .unwrap_or_default();
+                let inbox_info = match worker_inbox.unread {
+                    0 => String::new(),
+                    count => {
                         let plural = if count == 1 { "" } else { "s" };
-                        match oldest {
+                        match worker_inbox.oldest_unread_secs {
                             Some(age) => format!(
                                 "\n    inbox: {count} unread message{plural} (oldest {age}s)"
                             ),
@@ -4170,6 +4197,204 @@ fn harness_publishes_turn_start(cli: cas_mux::SupervisorCli) -> bool {
     cli != cas_mux::SupervisorCli::Claude
 }
 
+/// How many unseen inbox rows `worker_status` reads per worker in order to
+/// classify them. Status is a human-facing summary, not a mailbox dump; past
+/// this depth the exact composition of the backlog changes no verdict (a
+/// worker with 200 unread rows is in trouble either way), and the authoritative
+/// unread COUNT still comes from the store, so nothing is silently lost.
+const WORKER_INBOX_PEEK_LIMIT: usize = 200;
+
+/// cas-f08d (GH #147): a live, not-yet-due reminder the worker is waiting on.
+///
+/// This is the receipt for the wait pattern every worker is told to follow —
+/// act once, arm a reminder, end the turn — and it is the only evidence CAS
+/// has that a silent Claude worker went quiet ON PURPOSE.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingReminderWait {
+    /// Reminder ID, as the supervisor sees it in `remind_list`.
+    id: i64,
+    /// Seconds until it fires (always > 0; due/overdue reminders are excluded).
+    due_in_secs: i64,
+    /// When the reminder was armed. A reminder armed AFTER an unread reminder
+    /// delivery is proof the worker woke, acted on that delivery, and re-armed:
+    /// the row is stale bookkeeping, not unheard mail.
+    armed_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// A single unseen prompt-queue row, reduced to what classification needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UnseenDelivery {
+    /// Whether this row is a fired-reminder delivery rather than a message
+    /// somebody sent the worker.
+    is_reminder_delivery: bool,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl UnseenDelivery {
+    fn from_queued(prompt: &cas_store::QueuedPrompt) -> Self {
+        Self {
+            is_reminder_delivery: is_reminder_delivery(&prompt.prompt),
+            created_at: prompt.created_at,
+        }
+    }
+}
+
+/// A worker's inbox as `worker_status` reasons about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct WorkerInbox {
+    /// Unread rows that still mean something — reminder deliveries the worker
+    /// has demonstrably consumed are excluded (cas-f08d).
+    unread: usize,
+    /// Age of the oldest such row.
+    oldest_unread_secs: Option<i64>,
+    /// Set only when the worker is holding a live reminder and has nothing
+    /// genuinely unread: the sanctioned wait, not a stall.
+    reminder_wait: Option<PendingReminderWait>,
+}
+
+/// Whether a queued prompt is the factory daemon delivering a fired reminder.
+///
+/// `fire_reminder` (ui/factory/daemon/runtime/queue_and_events.rs) is the sole
+/// producer of this shape and formats it as `Reminder #<id>: <message>`; the
+/// prompt queue has no message-type column, so the prefix is the discriminator.
+/// Requiring the digits keeps a worker-authored message that merely opens with
+/// the word "Reminder" from being mistaken for one.
+fn is_reminder_delivery(prompt: &str) -> bool {
+    let Some(rest) = prompt.trim_start().strip_prefix("Reminder #") else {
+        return false;
+    };
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    !digits.is_empty() && rest[digits.len()..].starts_with(':')
+}
+
+/// cas-f08d (GH #147): decide what a worker's unseen rows actually mean.
+///
+/// The rule that keeps the wedge alarm honest: presence of a pending reminder
+/// NEVER suppresses anything on its own. A reminder delivery is discounted only
+/// when the worker armed a NEW reminder after that delivery arrived — that
+/// ordering is the proof of wake. Anything else (a work message, a reminder
+/// delivery with no later re-arm) stays unread and keeps its alarm.
+///
+/// `total_unread` and `store_oldest` are the store's authoritative figures;
+/// `rows` is a bounded peek of the same set, so a backlog deeper than
+/// [`WORKER_INBOX_PEEK_LIMIT`] can only ever under-discount — never invent
+/// silence that is not there.
+fn classify_worker_inbox(
+    total_unread: usize,
+    store_oldest: Option<i64>,
+    rows: &[UnseenDelivery],
+    pending: Option<PendingReminderWait>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> WorkerInbox {
+    let consumed = |row: &UnseenDelivery| {
+        row.is_reminder_delivery && pending.is_some_and(|wait| wait.armed_at > row.created_at)
+    };
+    let discounted = rows.iter().filter(|row| consumed(row)).count();
+    let unread = total_unread.saturating_sub(discounted);
+    let oldest_unread_secs = if unread == 0 {
+        None
+    } else {
+        rows.iter()
+            .find(|row| !consumed(row))
+            .map(|row| (now - row.created_at).num_seconds().max(0))
+            // Every peeked row was discounted yet the store still counts
+            // unread rows beyond the peek window: keep the store's age rather
+            // than reporting none.
+            .or(store_oldest)
+    };
+    WorkerInbox {
+        unread,
+        oldest_unread_secs,
+        reminder_wait: if unread == 0 { pending } else { None },
+    }
+}
+
+/// Live, not-yet-due time-based reminders per target agent ID.
+///
+/// Only TIME-based reminders qualify. An event-based reminder may never fire at
+/// all, so holding one proves nothing about whether the worker is awake — using
+/// it to suppress the wedge alarm would mask a genuinely dead worker forever.
+/// Where a worker holds several, the soonest-due one is reported: that is the
+/// one that decides how long the quiet is expected to last.
+fn pending_reminder_waits(
+    cas_root: &std::path::Path,
+    now: chrono::DateTime<chrono::Utc>,
+) -> std::collections::HashMap<String, PendingReminderWait> {
+    use crate::store::open_reminder_store;
+
+    let Ok(store) = open_reminder_store(cas_root) else {
+        return std::collections::HashMap::new();
+    };
+    let Ok(pending) = store.list_all_pending() else {
+        return std::collections::HashMap::new();
+    };
+    let mut waits: std::collections::HashMap<String, PendingReminderWait> =
+        std::collections::HashMap::new();
+    for reminder in pending {
+        if reminder.trigger_type != cas_store::ReminderTriggerType::Time {
+            continue;
+        }
+        let Some(trigger_at) = reminder.trigger_at else {
+            continue;
+        };
+        let due_in_secs = (trigger_at - now).num_seconds();
+        if due_in_secs <= 0 {
+            continue;
+        }
+        let wait = PendingReminderWait {
+            id: reminder.id,
+            due_in_secs,
+            armed_at: reminder.created_at,
+        };
+        waits
+            .entry(reminder.target_id)
+            .and_modify(|existing| {
+                if wait.due_in_secs < existing.due_in_secs {
+                    *existing = wait;
+                }
+            })
+            .or_insert(wait);
+    }
+    waits
+}
+
+/// cas-f08d (GH #147): the state a healthy worker following the mandated wait
+/// pattern is actually in.
+///
+/// Worker guidance forbids polling: check once, arm a reminder, end the turn.
+/// That discipline is indistinguishable from a wedged pane by silence alone, so
+/// before this line existed it was reported as `⚠ NOT WAKING` and answered with
+/// a turn-breaking interrupt — punishing exactly the behaviour the factory asks
+/// for. The banner must therefore say who will wake the worker and when, and
+/// say plainly that interrupting is the wrong move.
+fn format_reminder_wait_status(
+    last_activity: Option<(i64, &'static str)>,
+    wait: PendingReminderWait,
+) -> String {
+    let quiet = match last_activity {
+        Some((secs, phase)) => format!("quiet since {secs}s ago (last: {phase})"),
+        None => "quiet with no activity in the last 10m".to_string(),
+    };
+    let due = format_due_in(wait.due_in_secs);
+    format!(
+        "\n    waiting on reminder #{} due in {due} — {quiet}, nothing unread. This is the sanctioned wait pattern (act once, arm a reminder, end the turn); the reminder will wake it, so do NOT interrupt or respawn",
+        wait.id
+    )
+}
+
+/// Human-readable "due in" for a reminder countdown.
+fn format_due_in(secs: i64) -> String {
+    let minutes = secs / 60;
+    let seconds = secs % 60;
+    if minutes > 0 && seconds > 0 {
+        format!("{minutes}m {seconds}s")
+    } else if minutes > 0 {
+        format!("{minutes}m")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
 /// cas-e728 (GH #105): the honest replacement for `⚠ STALLED` on a
 /// turn-unobservable worker that is still heartbeating.
 ///
@@ -4244,9 +4469,13 @@ fn format_priority_worker_status_alert(
     assigned_unstarted: Option<(&str, i64, i64)>,
     turn_start_observable: bool,
     heartbeat_elapsed_secs: i64,
-    inbox: (usize, Option<i64>),
+    inbox: WorkerInbox,
 ) -> Option<String> {
-    let (unread_inbox, oldest_unread_secs) = inbox;
+    let WorkerInbox {
+        unread: unread_inbox,
+        oldest_unread_secs,
+        reminder_wait,
+    } = inbox;
     if stalled {
         let heartbeat_lapsed = heartbeat_elapsed_secs >= WORKER_STALE_SECS;
         if !turn_start_observable && !heartbeat_lapsed {
@@ -4269,6 +4498,12 @@ fn format_priority_worker_status_alert(
                 return Some(format_assigned_unstarted_status(
                     task_id, elapsed, threshold,
                 ));
+            }
+            // cas-f08d (GH #147): quiet WITH a live reminder and nothing
+            // unread is the mandated wait, not an absence of news — name the
+            // reminder that will end it instead of hedging.
+            if let Some(wait) = reminder_wait {
+                return Some(format_reminder_wait_status(last_activity, wait));
             }
             return Some(format_between_turns_status(last_activity, unread_inbox));
         }
@@ -6597,7 +6832,7 @@ effort = "high"
             // (cas-e728 only replaces it for turn-unobservable workers).
             true,
             0,
-            (0, None),
+            inbox(0, None),
         )
         .expect("coexisting stalled and assigned-unstarted states must render an alert");
 
@@ -6606,6 +6841,15 @@ effort = "high"
     }
 
     // --- cas-e728 (GH #105): STALLED is only honest when silence is evidence.
+
+    /// An inbox with nothing but plain unread mail — no reminder in play.
+    fn inbox(unread: usize, oldest_unread_secs: Option<i64>) -> WorkerInbox {
+        WorkerInbox {
+            unread,
+            oldest_unread_secs,
+            reminder_wait: None,
+        }
+    }
 
     /// A Claude worker publishes no turn-start artifact, so quiet is the
     /// NORMAL state between turns. While it is still heartbeating, the row
@@ -6619,7 +6863,7 @@ effort = "high"
             None,
             harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
             0,
-            (0, None),
+            inbox(0, None),
         )
         .expect("a stalled-by-threshold worker must still render a line");
 
@@ -6647,7 +6891,7 @@ effort = "high"
             None,
             harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
             0, // heartbeat fresh — the wedged-but-alive shape
-            (2, Some(900)),
+            inbox(2, Some(900)),
         )
         .expect("alert");
 
@@ -6674,7 +6918,7 @@ effort = "high"
             None,
             harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
             0,
-            (1, Some(5)),
+            inbox(1, Some(5)),
         )
         .expect("alert");
 
@@ -6696,7 +6940,7 @@ effort = "high"
             Some(("cas-unstarted", 600, 300)),
             harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
             0,
-            (0, None),
+            inbox(0, None),
         )
         .expect("alert");
 
@@ -6761,7 +7005,7 @@ effort = "high"
             None,
             harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
             WORKER_STALE_SECS,
-            (0, None),
+            inbox(0, None),
         )
         .expect("a lapsed-heartbeat worker must render an alert");
 
@@ -6785,11 +7029,278 @@ effort = "high"
                 None,
                 harness_publishes_turn_start(cli),
                 0,
-                (5, Some(9_000)),
+                inbox(5, Some(9_000)),
             )
             .expect("alert");
             assert!(rendered.contains("⚠ STALLED"), "{cli:?}: {rendered}");
         }
+    }
+
+    // --- cas-f08d (GH #147): the mandated wait pattern is not a wedge.
+
+    fn at(offset_secs: i64) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339("2026-08-07T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+            + chrono::Duration::seconds(offset_secs)
+    }
+
+    fn reminder_row(created_offset: i64) -> UnseenDelivery {
+        UnseenDelivery {
+            is_reminder_delivery: true,
+            created_at: at(created_offset),
+        }
+    }
+
+    fn work_row(created_offset: i64) -> UnseenDelivery {
+        UnseenDelivery {
+            is_reminder_delivery: false,
+            created_at: at(created_offset),
+        }
+    }
+
+    /// Only the daemon's `Reminder #<id>: ` delivery shape counts. A human (or
+    /// supervisor) message that merely talks about reminders is real mail and
+    /// must never be discounted.
+    #[test]
+    fn only_the_daemon_reminder_delivery_shape_is_treated_as_a_reminder() {
+        assert!(is_reminder_delivery("Reminder #44: check CI again"));
+        assert!(is_reminder_delivery(
+            "  Reminder #7: (triggered by: task completed)"
+        ));
+        assert!(!is_reminder_delivery(
+            "Reminder: stop polling and close the task"
+        ));
+        assert!(!is_reminder_delivery("Reminder #abc: malformed"));
+        assert!(!is_reminder_delivery("Reminder #12 without a colon"));
+        assert!(!is_reminder_delivery(
+            "Please set a Reminder #44: for the CI run"
+        ));
+    }
+
+    /// AC-2. The reported shape: reminders #44/#45 were delivered, acted on,
+    /// and re-armed as #46 — but nothing ever marked them seen, so they sat in
+    /// the unread count for 517s and read as undelivered work.
+    #[test]
+    fn acted_on_reminder_deliveries_leave_the_unread_count() {
+        let wait = PendingReminderWait {
+            id: 46,
+            due_in_secs: 300,
+            armed_at: at(-100),
+        };
+        let rows = [reminder_row(-517), reminder_row(-400)];
+
+        let classified = classify_worker_inbox(2, Some(517), &rows, Some(wait), at(0));
+
+        assert_eq!(classified.unread, 0, "both were consumed: {classified:?}");
+        assert_eq!(classified.oldest_unread_secs, None, "{classified:?}");
+        assert_eq!(classified.reminder_wait, Some(wait), "{classified:?}");
+    }
+
+    /// AC-1. That worker must read as waiting, and the line must name the
+    /// reminder and when it fires — the two facts that tell a supervisor the
+    /// silence has an owner and an end.
+    #[test]
+    fn reminder_wait_is_not_flagged_not_waking_and_names_the_reminder() {
+        let rendered = format_priority_worker_status_alert(
+            true,
+            Some((517, "checkpoint")),
+            300,
+            None,
+            harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
+            0,
+            WorkerInbox {
+                unread: 0,
+                oldest_unread_secs: None,
+                reminder_wait: Some(PendingReminderWait {
+                    id: 46,
+                    due_in_secs: 185,
+                    armed_at: at(-100),
+                }),
+            },
+        )
+        .expect("a reminder-waiting worker still renders a line");
+
+        assert!(!rendered.contains("NOT WAKING"), "{rendered}");
+        assert!(!rendered.contains("STALLED"), "{rendered}");
+        assert!(rendered.contains("reminder #46"), "{rendered}");
+        assert!(rendered.contains("due in 3m 5s"), "{rendered}");
+    }
+
+    /// AC-4. The banner exists to stop the reflex it caused: a turn-breaking
+    /// urgent interrupt aimed at a healthy worker.
+    #[test]
+    fn reminder_wait_banner_steers_the_supervisor_away_from_interrupting() {
+        let rendered = format_reminder_wait_status(
+            Some((517, "checkpoint")),
+            PendingReminderWait {
+                id: 46,
+                due_in_secs: 185,
+                armed_at: at(-100),
+            },
+        );
+
+        assert!(rendered.contains("do NOT interrupt"), "{rendered}");
+        assert!(rendered.contains("sanctioned wait pattern"), "{rendered}");
+        assert!(rendered.contains("nothing unread"), "{rendered}");
+    }
+
+    /// AC-3, half one: an unread WORK message is not discounted by a pending
+    /// reminder. Suppressing on "a reminder exists" would mask a real wedge in
+    /// any worker that happens to hold one.
+    #[test]
+    fn a_pending_reminder_does_not_discount_an_unread_work_message() {
+        let wait = PendingReminderWait {
+            id: 46,
+            due_in_secs: 300,
+            armed_at: at(-100),
+        };
+        let rows = [reminder_row(-900), work_row(-800)];
+
+        let classified = classify_worker_inbox(2, Some(900), &rows, Some(wait), at(0));
+
+        assert_eq!(
+            classified.unread, 1,
+            "the work row survives: {classified:?}"
+        );
+        assert_eq!(classified.oldest_unread_secs, Some(800), "{classified:?}");
+        assert_eq!(
+            classified.reminder_wait, None,
+            "unread mail outranks the wait line: {classified:?}"
+        );
+    }
+
+    /// AC-3, half two: end to end — that same worker still trips the alarm.
+    #[test]
+    fn genuine_wedge_still_flags_not_waking_while_a_reminder_is_pending() {
+        let wait = PendingReminderWait {
+            id: 46,
+            due_in_secs: 300,
+            armed_at: at(-100),
+        };
+        let classified = classify_worker_inbox(1, Some(900), &[work_row(-900)], Some(wait), at(0));
+
+        let rendered = format_priority_worker_status_alert(
+            true,
+            Some((900, "checkpoint")),
+            300,
+            None,
+            harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
+            0,
+            classified,
+        )
+        .expect("alert");
+
+        assert!(rendered.contains("⚠ NOT WAKING"), "{rendered}");
+        assert!(rendered.contains("1 message unread for 900s"), "{rendered}");
+        assert!(rendered.contains("wedged harness"), "{rendered}");
+    }
+
+    /// A reminder delivery that arrived AFTER the worker last armed anything is
+    /// mail it has not reacted to. Only the re-arm ordering proves wake, so
+    /// this one keeps its alarm.
+    #[test]
+    fn a_reminder_delivered_after_the_last_re_arm_is_still_unread() {
+        let wait = PendingReminderWait {
+            id: 46,
+            due_in_secs: 300,
+            armed_at: at(-900),
+        };
+        let classified =
+            classify_worker_inbox(1, Some(600), &[reminder_row(-600)], Some(wait), at(0));
+
+        assert_eq!(classified.unread, 1, "{classified:?}");
+        assert_eq!(classified.oldest_unread_secs, Some(600), "{classified:?}");
+    }
+
+    /// With no pending reminder at all, nothing is discounted — a worker that
+    /// was woken and never re-armed has produced no evidence of life.
+    #[test]
+    fn without_a_pending_reminder_nothing_is_discounted() {
+        let classified = classify_worker_inbox(
+            2,
+            Some(900),
+            &[reminder_row(-900), reminder_row(-600)],
+            None,
+            at(0),
+        );
+
+        assert_eq!(classified.unread, 2, "{classified:?}");
+        assert_eq!(classified.reminder_wait, None, "{classified:?}");
+    }
+
+    /// A backlog deeper than the peek window may only UNDER-discount: the
+    /// store's count stays authoritative and the oldest-age fallback keeps the
+    /// alarm's evidence intact.
+    #[test]
+    fn a_backlog_deeper_than_the_peek_window_cannot_manufacture_silence() {
+        let wait = PendingReminderWait {
+            id: 46,
+            due_in_secs: 300,
+            armed_at: at(-100),
+        };
+        let classified =
+            classify_worker_inbox(5, Some(900), &[reminder_row(-900)], Some(wait), at(0));
+
+        assert_eq!(classified.unread, 4, "{classified:?}");
+        assert_eq!(
+            classified.oldest_unread_secs,
+            Some(900),
+            "store age is kept when every peeked row was discounted: {classified:?}"
+        );
+        assert_eq!(classified.reminder_wait, None, "{classified:?}");
+    }
+
+    /// An empty inbox with a live reminder is the steady state of the wait
+    /// pattern, so the wait line replaces the between-turns hedge there too.
+    #[test]
+    fn an_empty_inbox_with_a_live_reminder_reports_the_wait() {
+        let wait = PendingReminderWait {
+            id: 51,
+            due_in_secs: 60,
+            armed_at: at(-30),
+        };
+        let classified = classify_worker_inbox(0, None, &[], Some(wait), at(0));
+
+        assert_eq!(classified.reminder_wait, Some(wait), "{classified:?}");
+        let rendered = format_priority_worker_status_alert(
+            true,
+            None,
+            300,
+            None,
+            harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
+            0,
+            classified,
+        )
+        .expect("alert");
+        assert!(rendered.contains("waiting on reminder #51"), "{rendered}");
+        assert!(!rendered.contains("between turns"), "{rendered}");
+    }
+
+    /// The assigned-but-unstarted alarm is about an untouched assignment, not
+    /// about silence — a pending reminder must not swallow it.
+    #[test]
+    fn reminder_wait_does_not_swallow_the_assigned_unstarted_alarm() {
+        let rendered = format_priority_worker_status_alert(
+            true,
+            Some((900, "checkpoint")),
+            300,
+            Some(("cas-unstarted", 600, 300)),
+            harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
+            0,
+            WorkerInbox {
+                unread: 0,
+                oldest_unread_secs: None,
+                reminder_wait: Some(PendingReminderWait {
+                    id: 46,
+                    due_in_secs: 185,
+                    armed_at: at(-100),
+                }),
+            },
+        )
+        .expect("alert");
+
+        assert!(rendered.contains("ASSIGNED BUT UNSTARTED"), "{rendered}");
     }
 
     /// cas-e728: finished-awaiting-merge is named, and says who is blocking.

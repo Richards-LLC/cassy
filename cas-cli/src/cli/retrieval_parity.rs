@@ -61,14 +61,13 @@ pub fn default_baseline_path(machine: &str) -> PathBuf {
     Path::new(DEFAULT_BASELINE_DIR).join(format!("baseline-{machine}.json"))
 }
 
-pub fn execute(
-    cmd: &RetrievalParityCommands,
-    cas_root: Option<&Path>,
-) -> anyhow::Result<()> {
+pub fn execute(cmd: &RetrievalParityCommands, cas_root: Option<&Path>) -> anyhow::Result<()> {
     let cas_root = cas_root.ok_or_else(|| {
         anyhow::anyhow!("no .cas directory found — run this from inside an initialized project")
     })?;
-    let ctx = ParityContext::new(cas_root);
+    // The SessionStart merge reads project-then-global, so the merge channel
+    // needs the global store to reproduce the dedup faithfully.
+    let ctx = ParityContext::new(cas_root).with_global(crate::config::global_cas_dir());
 
     match cmd {
         RetrievalParityCommands::Capture(args) => run_capture(&ctx, args),

@@ -34,6 +34,15 @@ pub enum Channel {
     ByTier,
     /// Tag-filtered retrieval. `query` is the tag.
     ByTag,
+    /// The SessionStart context merge: `store.list()` on the project store
+    /// then the global store, de-duplicated on the `p-`/`g-`-stripped id with
+    /// project winning (`crates/cas-core/src/hooks/context/mod.rs:520`,
+    /// backed by `store_list`: `archived = 0`, `LIMIT 10000`, **no tier
+    /// filter** — archive-tier rows are live and still injected).
+    ///
+    /// This is the highest-volume reader of legacy entries, so it gets a
+    /// channel of its own rather than being approximated by `list`.
+    SessionMerge,
 }
 
 impl Channel {
@@ -47,6 +56,7 @@ impl Channel {
             Channel::ByType => "by_type",
             Channel::ByTier => "by_tier",
             Channel::ByTag => "by_tag",
+            Channel::SessionMerge => "session_merge",
         }
     }
 }
@@ -87,6 +97,21 @@ pub struct QuerySet {
     pub default_limit: usize,
     #[serde(default = "default_tolerance")]
     pub default_rank_tolerance: usize,
+    /// Content strings to drop from every result, before ranking is recorded.
+    ///
+    /// The live databases contain integration-test fixtures written by the
+    /// test suite: five literal strings account for 994 of 1696 rows (58.6%)
+    /// — see `docs/migration/cas-b129-mapping-spec.md` §3. Without this,
+    /// untargeted channels (`recent`, `list`, `by_type`, `session_merge`)
+    /// would baseline mostly test detritus and the harness would be asserting
+    /// that the migration preserves fixtures rather than knowledge.
+    ///
+    /// Matching is by the same normalized fingerprint used for hits, so
+    /// whitespace and case variants of a fixture string are also excluded.
+    /// Excluding a row means the harness deliberately makes **no** claim about
+    /// whether it survives migration.
+    #[serde(default)]
+    pub exclude_contents: Vec<String>,
     /// `[[query]]` tables.
     #[serde(default)]
     pub query: Vec<QueryCase>,
@@ -156,6 +181,14 @@ impl QuerySet {
 
     pub fn limit_for(&self, case: &QueryCase) -> usize {
         case.limit.unwrap_or(self.default_limit)
+    }
+
+    /// Fingerprints of the excluded fixture strings, computed once per run.
+    pub fn excluded_fingerprints(&self) -> std::collections::HashSet<String> {
+        self.exclude_contents
+            .iter()
+            .map(|c| super::fingerprint(c))
+            .collect()
     }
 
     pub fn tolerance_for(&self, case: &QueryCase, cli_override: Option<usize>) -> usize {
@@ -241,11 +274,10 @@ query = "learning"
 
     #[test]
     fn rejects_zero_limit() {
-        let err = QuerySet::parse(
-            "version = 1\n[[query]]\nid=\"a\"\nchannel=\"recent\"\nlimit=0\n",
-        )
-        .unwrap_err()
-        .to_string();
+        let err =
+            QuerySet::parse("version = 1\n[[query]]\nid=\"a\"\nchannel=\"recent\"\nlimit=0\n")
+                .unwrap_err()
+                .to_string();
         assert!(err.contains("limit 0"), "got: {err}");
     }
 

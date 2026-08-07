@@ -83,10 +83,18 @@ channel = "by_tag"
 query = "rust"
 
 [[query]]
+id = "session-merge"
+channel = "session_merge"
+limit = 50
+
+[[query]]
 id = "search-anything"
 channel = "search"
 query = "sqlite migration"
 "#;
+
+/// The fixture string this suite plants in the store and then excludes.
+const FIXTURE_CONTENT: &str = "Test memory from MCP protocol test";
 
 fn entry(id: &str, content: &str, ty: EntryType, tier: MemoryTier, tags: &[&str]) -> Entry {
     let mut e = Entry::with_scope(id.to_string(), content.to_string(), Scope::Project);
@@ -357,7 +365,10 @@ fn capture_refuses_a_query_set_with_coverage_gaps() {
     let msg = err.to_string();
     assert!(msg.contains("observation"), "got: {msg}");
     assert!(msg.contains("tier"), "got: {msg}");
-    assert!(msg.contains("--allow-uncovered"), "error must say the way out: {msg}");
+    assert!(
+        msg.contains("--allow-uncovered"),
+        "error must say the way out: {msg}"
+    );
 
     retrieval_parity::capture(&h.ctx, &partial, "t".into(), true)
         .expect("--allow-uncovered must permit a knowingly partial baseline");
@@ -391,7 +402,9 @@ fn the_committed_query_set_parses_and_covers_all_types_and_tiers() {
     let gaps = set.coverage_gaps(&corpus);
     assert!(gaps.is_empty(), "committed query set has gaps: {gaps:?}");
     assert!(
-        set.query.iter().any(|c| c.channel == cas::retrieval_parity::Channel::Search),
+        set.query
+            .iter()
+            .any(|c| c.channel == cas::retrieval_parity::Channel::Search),
         "the committed set must exercise the BM25 search channel"
     );
 }
@@ -479,12 +492,274 @@ fn a_missing_search_index_is_never_created_by_a_run() {
     );
 
     retrieval_parity::replay(&h.ctx, &h.set, &baseline, 3).expect("replay");
-    assert!(!h.ctx.index_dir.exists(), "replay must not create it either");
+    assert!(
+        !h.ctx.index_dir.exists(),
+        "replay must not create it either"
+    );
 }
 
 // --------------------------------------------------------------------------
 // Baseline round-tripping.
 // --------------------------------------------------------------------------
+
+// --------------------------------------------------------------------------
+// Fixture exclusion (mapping-spec §3: 994/1696 rows are five test strings).
+// --------------------------------------------------------------------------
+
+/// Seed a store that also contains fixture rows, as the live databases do.
+fn seed_with_fixtures(dir: &Path) {
+    seed_store(dir);
+    let store = SqliteStore::open(dir).expect("open");
+    for i in 0..4 {
+        let e = entry(
+            &format!("p-2026-02-0{i}-900"),
+            FIXTURE_CONTENT,
+            EntryType::Learning,
+            MemoryTier::Working,
+            &[],
+        );
+        store.add(&e).expect("add fixture");
+    }
+}
+
+fn set_excluding_fixtures() -> QuerySet {
+    // Prepended, not appended: in TOML a bare key after an array-of-tables
+    // would bind to the last [[query]] rather than to the document.
+    QuerySet::parse(&format!(
+        "exclude_contents = [\"{FIXTURE_CONTENT}\"]\n{QUERY_SET}"
+    ))
+    .expect("query set with exclusions parses")
+}
+
+#[test]
+fn excluded_fixture_content_never_reaches_a_baseline() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_with_fixtures(dir.path());
+    let ctx = ParityContext::new(dir.path());
+
+    let with_fixtures = retrieval_parity::capture(
+        &ctx,
+        &QuerySet::parse(QUERY_SET).unwrap(),
+        "t".into(),
+        false,
+    )
+    .expect("capture");
+    assert!(
+        with_fixtures
+            .results
+            .iter()
+            .flat_map(|r| &r.hits)
+            .any(|h| h.label.contains("900")),
+        "test precondition: fixtures are visible when not excluded"
+    );
+
+    let excluded = retrieval_parity::capture(&ctx, &set_excluding_fixtures(), "t".into(), false)
+        .expect("capture");
+    let fixture_fp = cas::retrieval_parity::fingerprint(FIXTURE_CONTENT);
+    assert!(
+        excluded
+            .results
+            .iter()
+            .flat_map(|r| &r.hits)
+            .all(|h| h.fp != fixture_fp),
+        "excluded content must not appear in any channel's hits"
+    );
+}
+
+#[test]
+fn exclusion_is_fingerprint_based_not_literal() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_store(dir.path());
+    let store = SqliteStore::open(dir.path()).unwrap();
+    // Same content, different formatting — normalization must still catch it.
+    store
+        .add(&entry(
+            "p-2026-03-01-001",
+            "  TEST memory   from MCP\nprotocol test ",
+            EntryType::Learning,
+            MemoryTier::Working,
+            &[],
+        ))
+        .unwrap();
+    drop(store);
+
+    let baseline = retrieval_parity::capture(
+        &ParityContext::new(dir.path()),
+        &set_excluding_fixtures(),
+        "t".into(),
+        false,
+    )
+    .expect("capture");
+    let fixture_fp = cas::retrieval_parity::fingerprint(FIXTURE_CONTENT);
+    assert!(
+        baseline
+            .results
+            .iter()
+            .flat_map(|r| &r.hits)
+            .all(|h| h.fp != fixture_fp),
+        "a whitespace/case variant of an excluded string must also be excluded"
+    );
+}
+
+#[test]
+fn excluded_rows_do_not_shift_the_ranks_of_real_rows() {
+    // If fixtures kept their slots, removing them during migration would read
+    // as a mass rank improvement and adding them as a mass regression.
+    let clean = tempfile::tempdir().unwrap();
+    seed_store(clean.path());
+    let polluted = tempfile::tempdir().unwrap();
+    seed_with_fixtures(polluted.path());
+
+    let set = set_excluding_fixtures();
+    let a = retrieval_parity::capture(&ParityContext::new(clean.path()), &set, "t".into(), false)
+        .unwrap();
+    let b = retrieval_parity::capture(
+        &ParityContext::new(polluted.path()),
+        &set,
+        "t".into(),
+        false,
+    )
+    .unwrap();
+
+    let ranks = |base: &Baseline, case: &str| -> Vec<(String, usize)> {
+        base.results
+            .iter()
+            .find(|r| r.id == case)
+            .unwrap()
+            .hits
+            .iter()
+            .map(|h| (h.fp.clone(), h.rank))
+            .collect()
+    };
+    for case in ["list", "recent", "type-learning", "session-merge"] {
+        assert_eq!(
+            ranks(&a, case),
+            ranks(&b, case),
+            "case '{case}': fixture rows must not perturb real rows' ranks"
+        );
+    }
+}
+
+// --------------------------------------------------------------------------
+// SessionStart merge path (inventory §3.1).
+// --------------------------------------------------------------------------
+
+#[test]
+fn session_merge_prefers_project_over_global_on_the_stripped_id() {
+    let project = tempfile::tempdir().unwrap();
+    let global = tempfile::tempdir().unwrap();
+    seed_store(project.path());
+
+    let gstore = SqliteStore::open(global.path()).unwrap();
+    gstore.init().unwrap();
+    // g-2026-01-01-001 collides with the project's p-2026-01-01-001 once the
+    // scope prefix is stripped, so the project row must win and the global
+    // one must not appear.
+    gstore
+        .add(&entry(
+            "g-2026-01-01-001",
+            "GLOBAL duplicate that must lose to the project row",
+            EntryType::Learning,
+            MemoryTier::Working,
+            &[],
+        ))
+        .unwrap();
+    gstore
+        .add(&entry(
+            "g-2026-01-01-777",
+            "global-only memory that must be merged in",
+            EntryType::Learning,
+            MemoryTier::Working,
+            &[],
+        ))
+        .unwrap();
+    drop(gstore);
+
+    let ctx = ParityContext::new(project.path()).with_global(Some(global.path().to_path_buf()));
+    let baseline = retrieval_parity::capture(
+        &ctx,
+        &QuerySet::parse(QUERY_SET).unwrap(),
+        "t".into(),
+        false,
+    )
+    .expect("capture");
+
+    let merged = baseline
+        .results
+        .iter()
+        .find(|r| r.id == "session-merge")
+        .expect("session-merge case");
+
+    assert!(
+        merged.hits.iter().any(|h| h.label.contains("777")),
+        "global-only rows must be merged in: {:?}",
+        merged.hits.iter().map(|h| &h.label).collect::<Vec<_>>()
+    );
+    assert!(
+        merged
+            .hits
+            .iter()
+            .all(|h| !h.fp.eq(&cas::retrieval_parity::fingerprint(
+                "GLOBAL duplicate that must lose to the project row"
+            ))),
+        "the global row whose stripped id collides with a project row must lose"
+    );
+    assert!(
+        merged.hits.iter().any(|h| h.id == "p-2026-01-01-001"),
+        "the winning project row must be the one recorded"
+    );
+}
+
+#[test]
+fn session_merge_includes_archive_tier_rows() {
+    // store_list applies no tier filter: archive-tier rows are live and are
+    // still injected into every session. A harness that filtered them would
+    // bless their loss.
+    let h = harness();
+    let baseline = capture(&h);
+    let merged = baseline
+        .results
+        .iter()
+        .find(|r| r.id == "session-merge")
+        .expect("session-merge case");
+    assert!(
+        merged.hits.iter().any(|h| h.tier == "archive"),
+        "archive-tier rows must appear in the merge: {:?}",
+        merged.hits.iter().map(|h| &h.tier).collect::<Vec<_>>()
+    );
+    assert!(
+        merged.hits.iter().any(|h| h.tier == "in-context"),
+        "and so must in-context rows"
+    );
+}
+
+#[test]
+fn session_merge_without_a_global_store_is_project_only() {
+    let h = harness();
+    assert!(h.ctx.global_cas_dir.is_none(), "precondition");
+    let baseline = capture(&h);
+    let merged = baseline
+        .results
+        .iter()
+        .find(|r| r.id == "session-merge")
+        .unwrap();
+    assert_eq!(
+        merged.hits.len(),
+        5,
+        "all five seeded project rows, no more"
+    );
+}
+
+#[test]
+fn a_nonexistent_global_store_is_dropped_rather_than_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ParityContext::new(dir.path())
+        .with_global(Some(Path::new("/nonexistent/cas").to_path_buf()));
+    assert!(
+        ctx.global_cas_dir.is_none(),
+        "a global path with no cas.db must not be claimed as merged"
+    );
+}
 
 #[test]
 fn baseline_round_trips_through_disk() {

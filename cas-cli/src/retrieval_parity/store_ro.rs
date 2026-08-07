@@ -239,9 +239,8 @@ impl ReadOnlyMemoryDb {
     fn distinct_column(&self, column: &str) -> Result<Vec<String>, ParityError> {
         // `column` is never caller-controlled — the only two call sites pass
         // hardcoded literals — so the format! here cannot carry injection.
-        let sql = format!(
-            "SELECT DISTINCT lower({column}) FROM entries WHERE archived = 0 ORDER BY 1"
-        );
+        let sql =
+            format!("SELECT DISTINCT lower({column}) FROM entries WHERE archived = 0 ORDER BY 1");
         let mut stmt = self
             .conn
             .prepare(&sql)

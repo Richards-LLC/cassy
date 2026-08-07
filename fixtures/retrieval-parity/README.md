@@ -30,10 +30,43 @@ Coverage below).
 | A baseline hit fell more than the rank tolerance | **regression** (`rank_drop`) |
 | A channel that worked at capture is unavailable now | **regression** (`channel_lost`) |
 | A baseline case is missing from the query set | **regression** (`case_missing`) |
+| An excluded fixture string appears or disappears | not measured at all |
 | A hit moved *up*, or new hits appeared | fine — reported, not failed |
 
 The asymmetry is the point: the migration may surface more or rank better; it
 may not make previously reachable knowledge unreachable.
+
+## The baseline is BM25-only, on purpose
+
+The only channel that has ever indexed legacy entries is Tantivy BM25. The
+semantic/vector channel is defined over `KnowledgePage`, not `Entry`, and every
+legacy row still has `pending_embedding = 1` — legacy memories have never had
+semantic retrieval (inventory §3.2). Baselining a "legacy semantic" channel
+would measure something that never existed, so the harness has none, and one
+should not be added. Post-migration semantic hits are a retrieval *upgrade* to
+be reported, not a parity target — they show up as `new_hits`, which never fail.
+
+## Fixture rows are excluded
+
+Five literal strings written by the integration-test suite account for 994 of
+1696 rows (58.6%) in the live databases (mapping-spec §3). They are listed in
+`exclude_contents` and dropped from every result before ranks are recorded,
+so the baseline reflects the ~702 real rows. Ranks are assigned after
+exclusion, so fixture churn cannot masquerade as a mass rank change.
+
+Excluding a row means the harness makes **no claim** about whether it survives
+migration. That is the intent for test detritus; do not add real content there.
+
+## Query provenance
+
+There is no mined relevance history to seed from — `retrieval_queries` and
+`retrieval_outcomes` are empty in both databases. The search cases are instead
+derived from the actual vocabulary of the real rows (highest-frequency content
+terms, grouped by topic), and the `by_type`/`by_tier` cases enumerate the
+type × tier cross-tabs. The `search-cross-project-contamination` case
+deliberately baselines the Accounting-domain rows that leaked in via cloud
+sync: they are retrievable today, so a migration that re-routes them should
+say so out loud.
 
 ## Hits are matched on content, not on id
 
@@ -51,6 +84,22 @@ entry type and a `by_tier` case for every tier present in the store. A gap
 means the migration could drop everything of that type or tier while the
 harness still reported parity. The fix is to widen `queryset.toml`;
 `--allow-uncovered` exists for deliberate exceptions and is recorded as such.
+
+## Channels
+
+| Channel | Production path mirrored |
+|---|---|
+| `search` | Tantivy BM25, `doc_type = entry` (`mcp__cas__search action=search`) |
+| `session_merge` | SessionStart context merge — `store_list` project then global (`archived = 0`, `LIMIT 10000`, no tier filter), dedup on the `p-`/`g-`-stripped id, project wins |
+| `pinned` | SessionStart "Pinned Memories (Always Active)" — in-context tier |
+| `recent` / `list` | `mcp__cas__memory action=recent` / `action=list` |
+| `helpful` | feedback-ranked retrieval (`list_helpful`) |
+| `by_type` / `by_tier` / `by_tag` | type, tier and tag cross-tabs |
+
+`session_merge` is the highest-volume reader of legacy entries (inventory
+§3.1) and gets its own channel rather than being approximated by `list`,
+because the project-over-global dedup is exactly the behaviour a migration is
+liable to change.
 
 ## Read-only
 

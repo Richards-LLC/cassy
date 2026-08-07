@@ -50,7 +50,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub use channels::{ChannelStatus, IndexHandle, run_case};
+pub use channels::{ChannelStatus, IndexHandle, RunEnv, SESSION_MERGE_LIMIT, run_case};
 pub use diff::{Regression, RegressionKind, Report, diff_baseline};
 pub use queryset::{Channel, QueryCase, QuerySet};
 
@@ -138,14 +138,28 @@ pub struct ParityContext {
     pub cas_dir: PathBuf,
     /// Tantivy index directory; defaults to `<cas_dir>/index/tantivy`.
     pub index_dir: PathBuf,
+    /// Global memory store directory (`~/.config/cas`), when present. Only
+    /// the `session_merge` channel reads it, mirroring `merge_entries`.
+    pub global_cas_dir: Option<PathBuf>,
 }
 
 impl ParityContext {
+    /// Project-only context. Use [`ParityContext::with_global`] to include the
+    /// global store in the SessionStart merge channel.
     pub fn new(cas_dir: &Path) -> Self {
         Self {
             cas_dir: cas_dir.to_path_buf(),
             index_dir: cas_dir.join("index").join("tantivy"),
+            global_cas_dir: None,
         }
+    }
+
+    /// Attach a global store, if it actually holds a database. A path that
+    /// does not exist is dropped rather than recorded, so a baseline never
+    /// claims to have merged a store it could not read.
+    pub fn with_global(mut self, global_cas_dir: Option<PathBuf>) -> Self {
+        self.global_cas_dir = global_cas_dir.filter(|p| p.join("cas.db").exists());
+        self
     }
 }
 
@@ -211,10 +225,20 @@ pub fn machine_id() -> String {
 /// Run every case in `set` against the current system.
 pub fn run_query_set(ctx: &ParityContext, set: &QuerySet) -> Result<Vec<QueryResult>, ParityError> {
     let db = store_ro::ReadOnlyMemoryDb::open(&ctx.cas_dir)?;
+    let global = match &ctx.global_cas_dir {
+        Some(dir) => Some(store_ro::ReadOnlyMemoryDb::open(dir)?),
+        None => None,
+    };
     let index = channels::open_index_if_compatible(&ctx.index_dir);
+    let env = channels::RunEnv {
+        project: &db,
+        global: global.as_ref(),
+        index: &index,
+        excluded: set.excluded_fingerprints(),
+    };
     let mut out = Vec::with_capacity(set.query.len());
     for case in &set.query {
-        out.push(run_case(&db, &index, case, set)?);
+        out.push(run_case(&env, case, set)?);
     }
     Ok(out)
 }

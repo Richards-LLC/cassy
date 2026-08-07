@@ -14,6 +14,53 @@ use crate::types::{
     CommitLink, Entry, Event, FileChange, Prompt, Rule, Session, Skill, Spec, Task, TaskStatus,
 };
 
+/// Path of the cloud sync pull endpoint.
+///
+/// Single source of truth: this is the only place in shipped source where the
+/// pull path literal is written. Every production caller must build its URL
+/// through [`build_scoped_pull_url`], which is what keeps the pull scoped to
+/// the current project (cas-2eb3 / cas-ed15).
+pub(crate) const PULL_PATH: &str = "/api/sync/pull";
+
+/// Build a project-scoped `/api/sync/pull` URL, **failing closed** when the
+/// project scope cannot be resolved.
+///
+/// `extra_params` are appended verbatim (already `key=value` encoded); the
+/// `project_id=` parameter is always appended by this function. If
+/// `get_project_canonical_id()` returns `None` — i.e. the caller is not inside
+/// a CAS project directory, which is the realistic daemon / cwd-independent
+/// case — no URL is produced at all and the pull aborts. Omitting the scope
+/// would ask the server for *every* project's rows, which is exactly the
+/// cross-project contamination this path exists to prevent.
+///
+/// Returns `(url, resolved_project_id)`; callers that also filter the response
+/// client-side reuse the resolved id rather than resolving it a second time.
+pub(crate) fn build_scoped_pull_url(
+    endpoint: &str,
+    extra_params: &[String],
+) -> Result<(String, String), CasError> {
+    build_scoped_pull_url_with(endpoint, extra_params, get_project_canonical_id)
+}
+
+/// [`build_scoped_pull_url`] with an injectable project-scope resolver.
+///
+/// The resolver is a parameter purely so tests can exercise the unresolvable
+/// (`None`) branch without depending on the process-wide cache inside
+/// `get_project_canonical_id` or on the test's working directory.
+pub(crate) fn build_scoped_pull_url_with(
+    endpoint: &str,
+    extra_params: &[String],
+    resolve_project_id: impl FnOnce() -> Option<String>,
+) -> Result<(String, String), CasError> {
+    let project_id = resolve_project_id().ok_or_else(|| {
+        CasError::Other("Cannot pull: not inside a CAS project directory".to_string())
+    })?;
+    let mut params: Vec<String> = extra_params.to_vec();
+    params.push(format!("project_id={}", project_id.replace('/', "%2F")));
+    let url = format!("{endpoint}{PULL_PATH}?{}", params.join("&"));
+    Ok((url, project_id))
+}
+
 /// Check whether a raw JSON entity belongs to the current project.
 ///
 /// Returns `true` if the entity should be accepted, `false` if it should be skipped.
@@ -178,17 +225,11 @@ impl CloudSyncer {
         // Get last pull timestamp
         let since = self.queue.get_metadata("last_pull_at")?;
 
-        let mut pull_url = format!("{}/api/sync/pull", self.cloud_config.endpoint);
         let mut params = Vec::new();
         if let Some(since) = &since {
             params.push(format!("since={since}"));
         }
-        let project_id = get_project_canonical_id()
-            .ok_or_else(|| CasError::Other("Cannot pull: not inside a CAS project directory".to_string()))?;
-        params.push(format!("project_id={}", project_id.replace('/', "%2F")));
-        if !params.is_empty() {
-            pull_url = format!("{pull_url}?{}", params.join("&"));
-        }
+        let (pull_url, project_id) = build_scoped_pull_url(&self.cloud_config.endpoint, &params)?;
 
         let response = ureq::get(&pull_url)
             .timeout(self.config.timeout)
@@ -1030,8 +1071,40 @@ impl CloudSyncer {
 
 #[cfg(test)]
 mod tests {
-    use super::entity_matches_project;
+    use super::{PULL_PATH, build_scoped_pull_url_with, entity_matches_project};
     use serde_json::json;
+
+    // cas-0be9: the pull URL builder must FAIL CLOSED when the project scope
+    // cannot be resolved. An unscoped `/api/sync/pull` asks the server for
+    // every project's rows — the cas-2eb3 contamination vector.
+    #[test]
+    fn pull_url_aborts_when_project_scope_is_unresolvable() {
+        let err = build_scoped_pull_url_with("https://cloud.example", &[], || None)
+            .expect_err("an unresolvable project scope must abort the pull, not drop the scope");
+        let message = err.to_string();
+        assert!(
+            message.contains("not inside a CAS project directory"),
+            "unexpected error message: {message}"
+        );
+    }
+
+    #[test]
+    fn pull_url_is_scoped_and_carries_extra_params() {
+        let (url, project_id) = build_scoped_pull_url_with(
+            "https://cloud.example",
+            &["since=2026-01-01T00:00:00Z".to_string()],
+            || Some("github.com/owner/repo".to_string()),
+        )
+        .expect("a resolvable project scope builds a URL");
+        assert_eq!(project_id, "github.com/owner/repo");
+        assert_eq!(
+            url,
+            format!(
+                "https://cloud.example{PULL_PATH}?since=2026-01-01T00:00:00Z\
+                 &project_id=github.com%2Fowner%2Frepo"
+            )
+        );
+    }
 
     #[test]
     fn test_entity_matches_project_no_field() {

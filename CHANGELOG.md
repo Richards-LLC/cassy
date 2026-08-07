@@ -7,6 +7,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+- **`cas cloud purge-foreign` can no longer quietly destroy the work it is meant to protect.** Its `--dry-run` reported only how many rows existed, never which ones, so the one preview available before an irreversible delete told you nothing about what you were about to lose; the dry run now lists the concrete delete set (id + title for every entry, task, rule and skill, plus the dependency-edge count) and, with `--json`, the whole set. A real run now refuses — naming the reason — when the last successful cloud pull is missing, unreadable or older than the threshold (`--stale-days`, default 7), or when local changes are still queued and have never reached the cloud; on a long-idle machine the old behaviour deleted everything local and re-pulled a months-old snapshot over it. `--force` is the explicit override. The pre-purge backup is taken with `VACUUM INTO` instead of copying a live WAL database file, which silently omitted every committed transaction still sitting in the `-wal` sidecar — the backup was unreliable exactly when it mattered.
+
 ## [2.46.0] - 2026-08-06
 
 ### Fixed

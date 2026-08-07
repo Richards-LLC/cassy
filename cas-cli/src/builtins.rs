@@ -2594,6 +2594,84 @@ This is the body content."#;
         }
     }
 
+    /// cas-3627 (GH #159): the worker builtin must teach the difference
+    /// between the INNER test loop and the FINAL proof.
+    ///
+    /// Observed live before this rule existed: a worker fixing several test
+    /// entry points ran the full ~3,700-test lib sweep (~5 min) after each
+    /// individual micro-fix, foreground-`sleep`ing between checks — 47+
+    /// minutes of wall-clock for a few minutes of edits. cas-b4921 already
+    /// mandated backgrounding, so the gap was not "don't block"; it was that
+    /// nothing distinguished the seconds-long targeted loop you iterate in
+    /// from the minutes-long full sweep you are allowed to run twice.
+    ///
+    /// Same two-layer shape as the backgrounding mandate above: terse rules on
+    /// the always-loaded SKILL.md body (12 KB ceiling — see
+    /// `test_worker_guidance_under_12kb`), the worked recipe in
+    /// references/discipline.md. All three flavors, because the builtin skills
+    /// have a documented drift history (GH #116, cas-703a).
+    #[test]
+    fn test_worker_skills_teach_test_loop_discipline_cas_3627() {
+        for (label, skill_content, ref_content) in [
+            (
+                "claude",
+                include_str!("builtins/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker/references/discipline.md"),
+            ),
+            (
+                "codex",
+                include_str!("builtins/codex/skills/cas-worker.md"),
+                include_str!("builtins/codex/skills/cas-worker/references/discipline.md"),
+            ),
+            (
+                "grok",
+                include_str!("builtins/grok/skills/cas-worker.md"),
+                include_str!("builtins/grok/skills/cas-worker/references/discipline.md"),
+            ),
+        ] {
+            // Always-loaded body: batch-first, the two named loops, the
+            // two-sweep ceiling, nextest, and the no-foreground-sleep rule.
+            for required in [
+                "Batch the fixes",
+                "Inner loop",
+                "Final proof",
+                "at most twice",
+                "cargo nextest run",
+                "sleep",
+            ] {
+                assert!(
+                    skill_content.contains(required),
+                    "{label} cas-worker SKILL.md missing test-loop marker: {required:?}"
+                );
+            }
+            // The recipe: both loops named, the batching rule, the banked-receipt
+            // allowance, nextest with a fallback, and the ban on sleeping in the
+            // foreground while a background run cooks.
+            for required in [
+                "inner loop",
+                "Final proof",
+                "Batch before you verify",
+                "banked receipt",
+                "cargo nextest run",
+                "foreground-`sleep`",
+            ] {
+                assert!(
+                    ref_content.contains(required),
+                    "{label} cas-worker discipline.md missing test-loop recipe: {required:?}"
+                );
+            }
+            // The targeted-filter forms are the whole point of the inner loop:
+            // a rule that says "be targeted" without naming the flags is not
+            // actionable at 2am.
+            for required in ["--lib <module>", "--test <name>"] {
+                assert!(
+                    ref_content.contains(required),
+                    "{label} cas-worker discipline.md missing targeted-filter form: {required:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_cas_worker_skill_documents_code_review_gate() {
         // Phase 1 Subsystem A Unit 10 (EPIC cas-0750): the cas-worker

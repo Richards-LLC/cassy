@@ -1,0 +1,29 @@
+# cargo-nextest configuration.
+#
+# Why nextest is used at all: `cargo test` runs the 66 integration test binaries
+# ONE BINARY AT A TIME (parallel only within a binary). nextest schedules every
+# test across all binaries into one global pool, which is the shape this repo
+# needs. See GH #142.
+
+[profile.default]
+# NO RETRIES, deliberately. A retry policy turns a deterministic failure into an
+# intermittent one and buys back exactly the "is it flaky or is it broken?"
+# confusion that GH #136 cost a day to untangle. If a test is flaky, fix it.
+retries = 0
+
+# Report anything that has been running this long so a hang is visible as a hang
+# rather than as a job timeout with no attribution.
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+# Print the full output of failures at the end of the run instead of only the
+# last one, so a CI log answers "what broke?" without a re-run.
+failure-output = "immediate-final"
+fail-fast = false
+
+[profile.ci]
+retries = 0
+slow-timeout = { period = "60s", terminate-after = 10 }
+failure-output = "immediate-final"
+fail-fast = false
+status-level = "fail"
+final-status-level = "slow"

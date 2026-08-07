@@ -1,5 +1,16 @@
 name: CI
 
+# ┌───────────────────────────────────────────────────────────────────────────┐
+# │ WHAT EXECUTES THE TEST SUITE: exactly one job — `Fast Validation`.        │
+# │ Every other job in this file COMPILES things or runs a narrow, named      │
+# │ subset. Read job names literally; they are kept honest on purpose (#138). │
+# └───────────────────────────────────────────────────────────────────────────┘
+#
+# Wall-clock shape (GH #142): total run time is max(job), not sum(job), so the
+# jobs below are deliberately fanned out rather than chained inside one job.
+# The four release/benchmark workloads used to run in series in a single job
+# and cost ~51m; they are independent and now run concurrently.
+
 on:
   pull_request:
   push:
@@ -25,27 +36,12 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          # Keep this aligned with .cargo/config.toml's gcc + mold toolchain.
-          sudo apt-get install -y gcc mold
-          gcc --version
-          mold --version
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Zig
-        run: ./scripts/bootstrap-zig.sh
-
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.5
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-rust-linux
         with:
-          cache-on-failure: true
+          cache-key: fast-validation
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
 
       - name: Check
         env:
@@ -57,13 +53,40 @@ jobs:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo build -p cas --no-default-features
 
-      # This is the ONLY step in the entire workflow that executes the test
-      # suite. If you want to know whether the tests pass on a commit, read
-      # this job — no other job's green answers that question (GH #138).
+      # These two steps together execute exactly what bare `cargo test -p cas`
+      # executed before: nextest runs the lib + every integration test binary,
+      # and `--doc` runs the doctests, which nextest does not support. Dropping
+      # the doctest step would silently shrink executed coverage.
       - name: Test (full suite — the only job that executes it)
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: cargo test -p cas
+        run: cargo nextest run -p cas --no-fail-fast
+
+      # `!cancelled()` so a failure in the step above cannot hide this one's
+      # result. Letting it skip would re-create, one step later, exactly the
+      # under-reporting this job was changed to fix: `cargo test` used to abort
+      # after the first failing test BINARY, so main went red having executed
+      # 4401 of 4594 tests and never said so (GH #142).
+      - name: Test (doctests — the part nextest cannot run)
+        if: ${{ !cancelled() }}
+        env:
+          ZIG: ${{ github.workspace }}/.context/zig/zig
+        run: cargo test -p cas --doc
+
+  # Advisory lint, split out of Fast Validation so a lint pass never sits on the
+  # critical path of the job that answers "do the tests pass?" (GH #142).
+  # It compiles its own --all-targets artifacts; it executes no tests.
+  clippy:
+    name: Clippy (advisory, compiles only — no test suite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/setup-rust-linux
+        with:
+          cache-key: clippy
 
       - name: Clippy (report warnings)
         env:
@@ -124,56 +147,30 @@ jobs:
         run: cargo check -p cas --no-default-features
 
   # ┌───────────────────────────────────────────────────────────────────────┐
-  # │ THIS JOB RUNS NO TEST SUITE. Its green means "everything compiles and │
-  # │ the release profiles still isolate panics" — nothing more.            │
+  # │ THIS JOB RUNS NO TESTS. Its green means "the test binaries still      │
+  # │ compile" — nothing about whether they pass.                           │
   # └───────────────────────────────────────────────────────────────────────┘
   #
-  # It executes exactly two things, and neither is the suite:
-  #   - `cargo test -p cas --no-run` — COMPILES the test binaries, runs none.
-  #   - `make -C cas-cli test-release-panic` — four targeted invocations only
-  #     (--lib panic_regression and --test search_utf8_regression_test, each
-  #     under --release and --profile release-fast). See cas-cli/Makefile.
-  #
-  # `Fast Validation` is the ONLY job that executes the test suite (its "Test"
-  # step runs bare `cargo test -p cas`). If you are asking "did the tests
-  # pass?", that is the job to read — a green here cannot answer it.
-  #
-  # Why this warning exists (GH #138): a green here was read as suite coverage
-  # while Fast Validation was red on the same commit, which turned a 100%
-  # deterministic failure (GH #136) into a day-long "flaky test" hunt. The two
-  # results never actually disagreed — one job simply never ran the tests.
+  # Why the warning exists (GH #138): a green compile-only job was read as
+  # suite coverage while Fast Validation was red on the same commit, turning a
+  # 100% deterministic failure (GH #136) into a day-long "flaky test" hunt.
+  # `Fast Validation` is the ONLY job that executes the suite.
   #
   # If you add a step here that DOES execute tests, rename this job to match.
-  release-profile-and-build-guard:
-    name: Release-Profile & Build Guard (compile-only, no test suite)
-    if: github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+  test-compile-guard:
+    name: Test Compile Guard (compile-only, executes nothing)
+    if: >-
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          # Keep this aligned with .cargo/config.toml's gcc + mold toolchain.
-          sudo apt-get install -y gcc mold
-          gcc --version
-          mold --version
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Zig
-        run: ./scripts/bootstrap-zig.sh
-
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.5
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-rust-linux
         with:
-          cache-on-failure: true
+          cache-key: test-compile-guard
 
       # --no-run COMPILES the test binaries and executes nothing. A green here
       # says the tests still build; it says nothing about whether they pass.
@@ -182,14 +179,82 @@ jobs:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo test -p cas --no-run
 
-      # EPIC cas-c351 / cas-9e02: run A2/A3/B3 panic-isolation tests
-      # under --release and --profile release-fast to catch any future
-      # profile change that silently re-introduces panic=abort or any
-      # release-mode codegen that breaks the tokio::spawn panic catcher.
-      - name: Panic-isolation tests (release profiles)
+  # EPIC cas-c351 / cas-9e02: run the A2/A3/B3 panic-isolation tests under the
+  # release profiles to catch any future profile change that silently
+  # re-introduces panic=abort, or any release-mode codegen that breaks the
+  # tokio::spawn panic catcher.
+  #
+  # `--release` and `--profile release-fast` are two independent full LTO
+  # builds. They ran back-to-back inside one job (~30m in series); as two jobs
+  # they run concurrently and each keeps its own warm cargo cache. Between them
+  # they execute exactly the four invocations `make test-release-panic` always
+  # ran, and that Makefile target still runs both for local use.
+  #
+  # These execute a NAMED SUBSET (panic_regression + search_utf8_regression_test),
+  # not the suite. Green here is not suite coverage.
+  panic-isolation-release:
+    name: Panic Isolation — release profile (named subset, not the suite)
+    if: >-
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/setup-rust-linux
+        with:
+          cache-key: panic-isolation-release
+
+      - name: Panic-isolation tests (--release)
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: make -C cas-cli test-release-panic
+        run: make -C cas-cli test-release-panic-release
+
+  panic-isolation-release-fast:
+    name: Panic Isolation — release-fast profile (named subset, not the suite)
+    if: >-
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/setup-rust-linux
+        with:
+          cache-key: panic-isolation-release-fast
+
+      - name: Panic-isolation tests (--profile release-fast)
+        env:
+          ZIG: ${{ github.workspace }}/.context/zig/zig
+        run: make -C cas-cli test-release-panic-release-fast
+
+  # Build-time measurement only. This job executes no tests.
+  #
+  # save-cache: false is load-bearing. scripts/benchmark-build.sh starts with
+  # `cargo clean` — that is the point, it measures clean builds — so saving the
+  # cargo cache from this job would persist an empty target dir. While these
+  # steps lived in the same job as the release/compile work, that clean was
+  # wiping the cache those steps depended on and every run paid a near-cold
+  # build.
+  build-benchmark:
+    name: Build Benchmark & Timings (measurement only, no test suite)
+    if: >-
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/setup-rust-linux
+        with:
+          cache-key: build-benchmark
+          save-cache: "false"
 
       - name: Benchmark build
         env:

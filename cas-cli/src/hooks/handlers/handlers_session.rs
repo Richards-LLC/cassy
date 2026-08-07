@@ -271,6 +271,31 @@ pub fn handle_session_start(
         assembler.append_degradable(banner.full, banner.compact);
     }
 
+    // cas-20f27: issue-filing detectors. Both are surfaced to every role — a
+    // worker is as likely as a supervisor to be the one who staged the report,
+    // and the filing directive is a standing one for both. Appended below
+    // codemap/project-overview so those keep the preview top slot.
+    //
+    // (1) Staged BUG-*/FEATURE-* reports that were never pushed to GitHub.
+    if let Some(banner) =
+        crate::hooks::handlers::session_hygiene::build_session_start_unfiled_reports_banner_sized(
+            cas_root,
+        )
+    {
+        assembler.append_degradable(banner.full, banner.compact);
+    }
+
+    // (2) No issue target configured in a project that stages requests. Never
+    // suggests a value — guessing from `origin` routes CAS bugs into a
+    // consumer's own tracker (filing-cas-bugs.md).
+    if let Some(banner) =
+        crate::hooks::handlers::session_hygiene::build_session_start_issues_target_banner_sized(
+            cas_root, &config,
+        )
+    {
+        assembler.append_degradable(banner.full, banner.compact);
+    }
+
     // cas-b7dd (GH #88): leftovers from dead sessions — orphan processes still
     // running in worktrees and stale server registrations. Surfaced here
     // because a new session otherwise inherits them invisibly and meets them

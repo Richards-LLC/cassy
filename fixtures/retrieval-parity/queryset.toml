@@ -1,0 +1,181 @@
+# Retrieval-parity query set (cas-90fd, phase M4 of cas-b129).
+#
+# This file is the contract for "memory retrieval did not regress across the
+# memory -> knowledge migration". `cas retrieval-parity capture` runs every
+# case below against the current system and writes a baseline fixture;
+# `cas retrieval-parity replay` re-runs them afterwards and fails on any hit
+# that became unretrievable or fell more than the rank tolerance.
+#
+# EXTENDING THIS FILE
+# -------------------
+# It is TOML, not code, precisely so it can grow without a rebuild. M1
+# (cas-13aa) is inventorying legacy read paths in parallel; every read path it
+# turns up should become a case here.
+#
+#   id             required, unique, stable. It is the diff key: renaming a
+#                  case reads as "old case deleted, new case added".
+#   channel        search | recent | list | pinned | helpful
+#                  | by_type | by_tier | by_tag
+#   query          the channel's argument. Required for search / by_type /
+#                  by_tier / by_tag; ignored by the rest.
+#   limit          optional result depth (default: default_limit)
+#   rank_tolerance optional per-case override (default: default_rank_tolerance)
+#   note           optional; say why the case earns its place.
+#
+# COVERAGE RULE
+# -------------
+# `capture` refuses to run unless there is a by_type case for every entry type
+# and a by_tier case for every tier present in the store. A blind spot in the
+# query set is a blind spot in the migration's safety net, so widening the set
+# is the correct response to a coverage error -- not `--allow-uncovered`.
+
+version = 1
+default_limit = 10
+default_rank_tolerance = 3
+
+# --- Channel: whole-surface orderings -------------------------------------
+# These pin the shape of the untargeted read paths: what an agent gets when it
+# asks for "recent" or "list" with no query at all.
+
+[[query]]
+id = "recent-default"
+channel = "recent"
+limit = 25
+note = "mcp__cas__memory action=recent — the most-used untargeted read path."
+
+[[query]]
+id = "list-default"
+channel = "list"
+limit = 25
+note = "mcp__cas__memory action=list — created-desc ordering."
+
+[[query]]
+id = "pinned-always-active"
+channel = "pinned"
+limit = 25
+rank_tolerance = 0
+note = """
+The SessionStart "Pinned Memories (Always Active)" block. Zero tolerance: this
+set is injected verbatim into every session, ignores the token budget, and is
+small enough that any reordering is a real behavioural change.
+"""
+
+[[query]]
+id = "helpful-feedback-ranked"
+channel = "helpful"
+limit = 25
+note = "Feedback-ranked retrieval (helpful_count - harmful_count)."
+
+# --- Channel: by_type -----------------------------------------------------
+# One case per EntryType variant. Required by the coverage rule for every type
+# actually present in the store; the others are cheap and keep the set valid
+# if the corpus later grows a type it lacks today.
+
+[[query]]
+id = "type-learning"
+channel = "by_type"
+query = "learning"
+limit = 25
+
+[[query]]
+id = "type-context"
+channel = "by_type"
+query = "context"
+limit = 25
+
+[[query]]
+id = "type-preference"
+channel = "by_type"
+query = "preference"
+limit = 25
+
+[[query]]
+id = "type-observation"
+channel = "by_type"
+query = "observation"
+limit = 25
+
+# --- Channel: by_tier -----------------------------------------------------
+# One case per MemoryTier variant. Note that `memory_tier = 'archive'` is a
+# distinct thing from the `archived` flag: archive-tier entries are still live
+# rows and must still survive the migration.
+
+[[query]]
+id = "tier-in-context"
+channel = "by_tier"
+query = "in-context"
+limit = 25
+
+[[query]]
+id = "tier-working"
+channel = "by_tier"
+query = "working"
+limit = 25
+
+[[query]]
+id = "tier-cold"
+channel = "by_tier"
+query = "cold"
+limit = 25
+
+[[query]]
+id = "tier-archive"
+channel = "by_tier"
+query = "archive"
+limit = 50
+note = "Largest tier in the current corpus; deeper limit to widen the net."
+
+# --- Channel: search ------------------------------------------------------
+# BM25 over the memory index, i.e. mcp__cas__search action=search
+# doc_type=entry. Seeded from the kinds of questions this project's agents
+# actually ask: build/tooling gotchas, factory and supervisor operations,
+# release process, and known-bug lore. These are the queries whose answers we
+# would most notice losing.
+
+[[query]]
+id = "search-build-tooling"
+channel = "search"
+query = "cargo build test zig release profile"
+note = "Build-and-test lore: ZIG path, link tax, scoped test runs."
+
+[[query]]
+id = "search-factory-supervisor"
+channel = "search"
+query = "factory supervisor worker spawn epic"
+note = "Factory orchestration and worker lifecycle."
+
+[[query]]
+id = "search-worktree-merge"
+channel = "search"
+query = "worktree merge branch close task verification"
+note = "Task lifecycle / merge gate operations."
+
+[[query]]
+id = "search-release-process"
+channel = "search"
+query = "release version bump tag slack announcement"
+note = "Release cutting and the Slack rubric."
+
+[[query]]
+id = "search-memory-system"
+channel = "search"
+query = "memory tier importance decay embedding index"
+note = "The memory subsystem describing itself — most at risk in this migration."
+
+[[query]]
+id = "search-hooks-context"
+channel = "search"
+query = "session start hook context injection prompt"
+note = "SessionStart / hook behaviour."
+
+[[query]]
+id = "search-mcp-tools"
+channel = "search"
+query = "mcp tool dispatch panic serve daemon"
+note = "MCP server operations."
+
+[[query]]
+id = "search-known-bugs"
+channel = "search"
+query = "bug fix root cause regression crash"
+note = "Bug lore — high-value, and phrased vaguely on purpose to exercise ranking."

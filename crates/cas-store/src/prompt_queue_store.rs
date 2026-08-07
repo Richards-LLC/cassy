@@ -210,6 +210,21 @@ pub struct UndeliveredLifecycleRelay {
     pub processed_at: Option<DateTime<Utc>>,
 }
 
+/// A pending queue row that has spent real transport attempts (cas-94a1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetriedPrompt {
+    pub prompt_id: i64,
+    pub source: String,
+    pub target: String,
+    pub summary: Option<String>,
+    /// Transport attempts spent so far — the counter this type exists to read.
+    pub delivery_attempts: u32,
+    /// Reason stamped by the most recent failed attempt.
+    pub reason: Option<PendingReason>,
+    /// When the first attempt was spent.
+    pub first_attempt_at: Option<DateTime<Utc>>,
+}
+
 /// Schema for prompt queue table
 const PROMPT_QUEUE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS prompt_queue (
@@ -589,6 +604,49 @@ impl PendingReason {
             | Self::AwaitingDelivery
             | Self::SessionIneligible
             | Self::AwaitingAck => DeliveryStage::Selected,
+        }
+    }
+
+    /// Whether stamping this reason means a real transport attempt was spent
+    /// (cas-94a1, GH #169).
+    ///
+    /// `delivery_attempts` sat at 0 across all 8,017 rows of the live queue —
+    /// not because nothing incremented it, but because the only writer
+    /// ([`PromptQueueStore::record_retry`]) is wired to four rare error
+    /// branches this fleet has never taken, while the loop that actually
+    /// retries a message dozens of times counted in a daemon-local `HashMap`
+    /// that dies with the process. This classifier is what connects the
+    /// durable column to the routine path.
+    ///
+    /// The distinction is load-bearing, not cosmetic. cas-d732/cas-7787
+    /// established that a policy withhold "is withheld by policy, not a failed
+    /// attempt — it must not burn the row's retry budget", so a blanket
+    /// increment on every pending stamp would silently break an invariant
+    /// another lane depends on. An attempt is spent only when the daemon
+    /// handed the row to a transport and the transport did not take it.
+    pub fn counts_as_delivery_attempt(self) -> bool {
+        match self {
+            // Transport was engaged and refused/failed the handoff.
+            Self::AdapterRetryable | Self::TargetUnavailable => true,
+            // Withheld before any transport was engaged — policy, cadence,
+            // routing, or an audience that does not exist. No attempt spent.
+            Self::GatedNotReady
+            | Self::SessionIneligible
+            | Self::AwaitingDelivery
+            | Self::NoIntendedRecipients => false,
+            // cas-94a1 decided against the POST-cas-78d3 machine, not the
+            // pre-fix corpse data: now that hook surfacing really acks, a row
+            // sitting in AwaitingAck has already been transported once. The
+            // attempt that got it there is counted by whoever transported it;
+            // waiting for the reply is not a second attempt.
+            Self::AwaitingAck => false,
+            // Terminal outcomes. The attempt that failed was counted when it
+            // failed; the terminal stamp must not double-count it.
+            Self::DroppedDeadSource
+            | Self::SuppressedIdle
+            | Self::AbandonedUnknownTarget
+            | Self::UndeliveredLifecycleRelay
+            | Self::PartialBroadcast => false,
         }
     }
 }
@@ -1335,6 +1393,19 @@ pub trait PromptQueueStore: Send + Sync {
     /// can surface it and the factory stops mistaking silence for success.
     fn mark_undelivered_lifecycle_relay(&self, prompt_id: i64, detail: Option<&str>)
     -> Result<()>;
+
+    /// Pending rows that have burned at least `min_attempts` transport
+    /// attempts, worst first (cas-94a1, GH #169).
+    ///
+    /// The read side that makes `delivery_attempts` worth writing. A message
+    /// the factory has tried and failed to hand over repeatedly is the earliest
+    /// honest signal that a recipient is unreachable — available here before
+    /// the row exhausts its budget and dies.
+    fn list_most_retried_pending(
+        &self,
+        min_attempts: u32,
+        limit: usize,
+    ) -> Result<Vec<RetriedPrompt>>;
 
     /// Lifecycle wake relays that reached a terminal stage without ever being
     /// transported (cas-7787, GH #160).
@@ -3035,12 +3106,29 @@ impl PromptQueueStore for SqlitePromptQueueStore {
     ) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
             let conn = self.conn.lock().unwrap();
-            Self::atomic_stage_stamp(
-                &conn,
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            Self::atomic_stage_stamp_in_tx(
+                &tx,
                 prompt_id,
                 reason.implied_stage(),
                 AtomicStampOpts::reason(reason, detail),
-            )
+            )?;
+            // cas-94a1 (GH #169): the counter and the reason that earned it are
+            // stamped in ONE transaction, so the two can never disagree — the
+            // way they did for all 1,121 historical rows that carry a reason
+            // with a 0 counter. Only a spent transport attempt counts; see
+            // `PendingReason::counts_as_delivery_attempt`.
+            if reason.counts_as_delivery_attempt() {
+                tx.execute(
+                    "UPDATE prompt_queue
+                     SET delivery_attempts = delivery_attempts + 1,
+                         first_attempt_at = COALESCE(first_attempt_at, ?)
+                     WHERE id = ?",
+                    params![Utc::now().to_rfc3339(), prompt_id],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
         })
     }
 
@@ -3226,6 +3314,39 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 },
             )
         })
+    }
+
+    fn list_most_retried_pending(
+        &self,
+        min_attempts: u32,
+        limit: usize,
+    ) -> Result<Vec<RetriedPrompt>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, source, target, summary, delivery_attempts,
+                    last_pending_reason, first_attempt_at
+             FROM prompt_queue
+             WHERE processed_at IS NULL
+               AND delivery_attempts >= ?
+             ORDER BY delivery_attempts DESC, id ASC
+             LIMIT ?",
+        )?;
+        let rows = stmt.query_map(params![min_attempts, limit as i64], |row| {
+            let reason: Option<String> = row.get(5)?;
+            let first_attempt_at: Option<String> = row.get(6)?;
+            Ok(RetriedPrompt {
+                prompt_id: row.get(0)?,
+                source: row.get(1)?,
+                target: row.get(2)?,
+                summary: row.get(3)?,
+                delivery_attempts: row.get(4)?,
+                reason: reason.as_deref().and_then(PendingReason::parse),
+                first_attempt_at: first_attempt_at
+                    .as_deref()
+                    .and_then(Self::parse_datetime),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     fn list_undelivered_lifecycle_relays(
@@ -7671,5 +7792,224 @@ mod tests {
             .surface_unseen_for_recipient("worker-b", Some("session"), 10)
             .unwrap();
         assert_eq!(peer.len(), 1, "a peer must still receive the broadcast");
+    }
+}
+
+#[cfg(test)]
+mod cas_94a1_delivery_attempts_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn create_test_store() -> (TempDir, SqlitePromptQueueStore) {
+        let temp = TempDir::new().unwrap();
+        let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        (temp, store)
+    }
+
+    fn attempts_of(store: &SqlitePromptQueueStore, id: i64) -> u32 {
+        let conn = store.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT delivery_attempts FROM prompt_queue WHERE id = ?",
+            params![id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    fn first_attempt_at_of(store: &SqlitePromptQueueStore, id: i64) -> Option<String> {
+        let conn = store.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT first_attempt_at FROM prompt_queue WHERE id = ?",
+            params![id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    /// AC(1): N real transport attempts -> N. The reported defect was 0 after
+    /// thousands of attempts.
+    #[test]
+    fn n_real_attempts_increment_the_counter_n_times() {
+        let (_temp, store) = create_test_store();
+        let id = store.enqueue("supervisor", "worker-a", "do the thing").unwrap();
+        assert_eq!(attempts_of(&store, id), 0);
+
+        for expected in 1..=5 {
+            store
+                .record_pending_reason(
+                    id,
+                    PendingReason::AdapterRetryable,
+                    Some("inject failed"),
+                )
+                .unwrap();
+            assert_eq!(
+                attempts_of(&store, id),
+                expected,
+                "each spent transport attempt must increment exactly once"
+            );
+        }
+        assert!(
+            first_attempt_at_of(&store, id).is_some(),
+            "the first spent attempt must stamp first_attempt_at — it was NULL on all 8,017 \
+             live rows, which is how we knew the writer had never run"
+        );
+    }
+
+    /// The invariant a blanket increment would have broken: cas-d732/cas-7787
+    /// require that a policy withhold does not burn the row's retry budget.
+    #[test]
+    fn policy_withholds_do_not_burn_the_budget() {
+        let (_temp, store) = create_test_store();
+        let id = store.enqueue("supervisor", "worker-a", "held back").unwrap();
+
+        for reason in [
+            PendingReason::GatedNotReady,
+            PendingReason::AwaitingDelivery,
+            PendingReason::SessionIneligible,
+            PendingReason::NoIntendedRecipients,
+            PendingReason::AwaitingAck,
+        ] {
+            store.record_pending_reason(id, reason, Some("withheld")).unwrap();
+        }
+
+        assert_eq!(
+            attempts_of(&store, id),
+            0,
+            "a cooldown/gate/ack-wait is not a spent transport attempt"
+        );
+        assert!(
+            first_attempt_at_of(&store, id).is_none(),
+            "no attempt spent means no first_attempt_at"
+        );
+    }
+
+    /// Terminal stamps must not double-count the attempt that already failed.
+    #[test]
+    fn terminal_stamps_do_not_double_count() {
+        let (_temp, store) = create_test_store();
+        let id = store.enqueue("supervisor", "worker-a", "doomed").unwrap();
+
+        store
+            .record_pending_reason(id, PendingReason::AdapterRetryable, Some("failed"))
+            .unwrap();
+        assert_eq!(attempts_of(&store, id), 1);
+
+        // Stage transitions are monotonic, so each terminal reason needs its
+        // own row rather than two terminal stamps on one.
+        store
+            .record_pending_reason(id, PendingReason::SuppressedIdle, Some("terminal"))
+            .unwrap();
+        assert_eq!(
+            attempts_of(&store, id),
+            1,
+            "a terminal outcome records the death, not another attempt"
+        );
+
+        let other = store.enqueue("supervisor", "worker-b", "also doomed").unwrap();
+        store
+            .record_pending_reason(other, PendingReason::AdapterRetryable, Some("failed"))
+            .unwrap();
+        store
+            .record_pending_reason(other, PendingReason::AbandonedUnknownTarget, Some("terminal"))
+            .unwrap();
+        assert_eq!(attempts_of(&store, other), 1);
+    }
+
+    /// The counter and the reason that earned it are written in ONE
+    /// transaction, so they can never disagree — the exact disagreement that
+    /// left 1,121 live rows carrying a reason with a 0 counter.
+    #[test]
+    fn counter_and_reason_are_stamped_together() {
+        let (_temp, store) = create_test_store();
+        let id = store.enqueue("supervisor", "worker-a", "msg").unwrap();
+        store
+            .record_pending_reason(id, PendingReason::TargetUnavailable, Some("no pane"))
+            .unwrap();
+
+        let report = store.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(report.pending_reason, Some(PendingReason::TargetUnavailable));
+        assert_eq!(
+            attempts_of(&store, id),
+            1,
+            "a stamped retryable reason with a 0 counter is the bug this fixes"
+        );
+    }
+
+    /// AC(1) read side: a consumer can name the worst offenders.
+    #[test]
+    fn most_retried_pending_reports_worst_first() {
+        let (_temp, store) = create_test_store();
+        let quiet = store.enqueue("supervisor", "worker-a", "fine").unwrap();
+        let bad = store.enqueue("supervisor", "worker-b", "struggling").unwrap();
+        let worst = store.enqueue("supervisor", "worker-c", "unreachable").unwrap();
+
+        for _ in 0..3 {
+            store
+                .record_pending_reason(bad, PendingReason::AdapterRetryable, None)
+                .unwrap();
+        }
+        for _ in 0..7 {
+            store
+                .record_pending_reason(worst, PendingReason::TargetUnavailable, None)
+                .unwrap();
+        }
+
+        let rows = store.list_most_retried_pending(3, 10).unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.prompt_id).collect::<Vec<_>>(),
+            vec![worst, bad],
+            "worst first, and a row under the threshold is not reported"
+        );
+        assert_eq!(rows[0].delivery_attempts, 7);
+        assert_eq!(rows[0].target, "worker-c");
+        assert_eq!(rows[0].reason, Some(PendingReason::TargetUnavailable));
+        assert!(rows[0].first_attempt_at.is_some());
+        assert!(!rows.iter().any(|r| r.prompt_id == quiet));
+    }
+
+    /// A processed row is finished business, not a live retry problem.
+    #[test]
+    fn processed_rows_drop_out_of_the_retry_report() {
+        let (_temp, store) = create_test_store();
+        let id = store.enqueue("supervisor", "worker-a", "msg").unwrap();
+        for _ in 0..4 {
+            store
+                .record_pending_reason(id, PendingReason::AdapterRetryable, None)
+                .unwrap();
+        }
+        assert_eq!(store.list_most_retried_pending(3, 10).unwrap().len(), 1);
+
+        store.mark_transport_delivered(id).unwrap();
+        assert!(
+            store.list_most_retried_pending(3, 10).unwrap().is_empty(),
+            "a delivered row is not a pending retry problem"
+        );
+    }
+
+    /// Pins the classifier itself so a new PendingReason variant cannot be
+    /// added without someone deciding whether it spends an attempt.
+    #[test]
+    fn classifier_names_exactly_the_transport_spending_reasons() {
+        for reason in [PendingReason::AdapterRetryable, PendingReason::TargetUnavailable] {
+            assert!(reason.counts_as_delivery_attempt(), "{reason} spends an attempt");
+        }
+        for reason in [
+            PendingReason::GatedNotReady,
+            PendingReason::SessionIneligible,
+            PendingReason::AwaitingDelivery,
+            PendingReason::AwaitingAck,
+            PendingReason::NoIntendedRecipients,
+            PendingReason::DroppedDeadSource,
+            PendingReason::SuppressedIdle,
+            PendingReason::AbandonedUnknownTarget,
+            PendingReason::UndeliveredLifecycleRelay,
+            PendingReason::PartialBroadcast,
+        ] {
+            assert!(
+                !reason.counts_as_delivery_attempt(),
+                "{reason} must not spend a transport attempt"
+            );
+        }
     }
 }

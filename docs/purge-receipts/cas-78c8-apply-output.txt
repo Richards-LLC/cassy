@@ -1,0 +1,30 @@
+APPLY — matching 5 fixture string(s) by EXACT equality (never LIKE)
+
+project /home/pippenz/Petrastella/cas-src/.cas/cas.db
+  1255 entries total
+     160  Test memory from MCP protocol test
+     160  Rust programming language with ownership and borrowing
+     160  Context test memory entry
+     159  Consolidated memory test entry
+     143  Test entry for notification test
+     782  TOTAL fixture rows (62.3% of this database)
+
+global /home/pippenz/.cas/cas.db
+  450 entries total
+      46  Test memory from MCP protocol test
+      46  Rust programming language with ownership and borrowing
+      46  Context test memory entry
+      45  Consolidated memory test entry
+      29  Test entry for notification test
+     212  TOTAL fixture rows (47.1% of this database)
+
+994 fixture row(s) across 2 database(s)
+
+/home/pippenz/Petrastella/cas-src/.cas/cas.db: deleted 782 entries (1255 -> 473) and 0 sync_queue row(s)
+  backup: /home/pippenz/Petrastella/cas-src/.cas/cas.db.fixture-purge-backup
+  manifest: /home/pippenz/Petrastella/cas-src/.cas/cas.db.manifest.tsv
+/home/pippenz/.cas/cas.db: deleted 212 entries (450 -> 238) and 0 sync_queue row(s)
+  backup: /home/pippenz/.cas/cas.db.fixture-purge-backup
+  manifest: /home/pippenz/.cas/cas.db.manifest.tsv
+
+Backups are complete SQLite databases — restore one with `mv <backup> <cas.db>` if anything looks wrong.

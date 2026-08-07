@@ -49,6 +49,14 @@ pub struct PurgeFixturesArgs {
     /// database, as `cas.db.fixture-purge-backup`).
     #[arg(long)]
     pub backup_dir: Option<PathBuf>,
+
+    /// Print every row that would be deleted as `db<TAB>id<TAB>content`.
+    ///
+    /// The per-string counts say how many rows go; this says exactly which.
+    /// `--apply` writes the same list to a manifest beside the backup whether
+    /// or not this flag is set, so an applied purge always leaves a receipt.
+    #[arg(long)]
+    pub list_rows: bool,
 }
 
 /// One database's share of the work.
@@ -125,6 +133,36 @@ fn count_sync_queue(conn: &Connection) -> anyhow::Result<i64> {
     Ok(conn.query_row(&sql, params_from_iter(FIXTURE_CONTENTS.iter()), |row| {
         row.get(0)
     })?)
+}
+
+/// The exact rows a purge of `db_path` would delete, as
+/// `(id, content)` ordered by id.
+///
+/// Read-only, and computed from the same exact-equality predicate the delete
+/// uses, so the manifest cannot describe a different set than the one removed.
+pub fn delete_set(db_path: &Path) -> anyhow::Result<Vec<(String, String)>> {
+    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let placeholders = placeholders(FIXTURE_CONTENTS.len());
+    let sql = format!(
+        "SELECT id, content FROM entries WHERE content IN ({placeholders}) ORDER BY id"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(params_from_iter(FIXTURE_CONTENTS.iter()), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Render the delete set as TSV, one row per line, with a header.
+fn render_delete_set(plan: &DbPlan, rows: &[(String, String)]) -> String {
+    let mut out = String::from("db\tid\tcontent\n");
+    let db = plan.db_path.display().to_string();
+    for (id, content) in rows {
+        out.push_str(&format!("{db}\t{id}\t{content}\n"));
+    }
+    out
 }
 
 fn table_exists(conn: &Connection, name: &str) -> anyhow::Result<bool> {
@@ -291,6 +329,9 @@ fn backup_path_for(label: &str, db_path: &Path, backup_dir: Option<&Path>) -> Pa
     }
 }
 
+/// A database this invocation operates on: `(label, path)`.
+type Target = (&'static str, PathBuf);
+
 /// Resolve which databases this invocation reads.
 ///
 /// Mirrors `memory_migrate::resolve_sources`, including its rail: a redirected
@@ -300,12 +341,12 @@ fn resolve_targets(
     args: &PurgeFixturesArgs,
     cas_root: &Path,
     home_dir: Option<PathBuf>,
-) -> anyhow::Result<(Vec<(&'static str, PathBuf)>, Vec<String>)> {
+) -> anyhow::Result<(Vec<Target>, Vec<String>)> {
     let project_root = args
         .project_root
         .clone()
         .unwrap_or_else(|| cas_root.to_path_buf());
-    let mut targets: Vec<(&'static str, PathBuf)> = Vec::new();
+    let mut targets: Vec<Target> = Vec::new();
     let mut notes = Vec::new();
 
     if args.scope != "global" {
@@ -374,6 +415,13 @@ pub fn execute(args: &PurgeFixturesArgs, cas_root: &Path) -> anyhow::Result<()> 
         println!();
     }
 
+    if args.list_rows {
+        for plan in &plans {
+            print!("{}", render_delete_set(plan, &delete_set(&plan.db_path)?));
+        }
+        println!();
+    }
+
     let grand_total: i64 = plans.iter().map(DbPlan::fixture_total).sum();
     println!("{grand_total} fixture row(s) across {} database(s)", plans.len());
 
@@ -396,6 +444,20 @@ pub fn execute(args: &PurgeFixturesArgs, cas_root: &Path) -> anyhow::Result<()> 
             continue;
         }
         let backup = backup_path_for(plan.label, &plan.db_path, args.backup_dir.as_deref());
+
+        // Written before a single row is deleted: if the process dies mid-purge
+        // the manifest still names every row that was in scope, so the backup
+        // can be reconciled against it rather than trusted blindly.
+        let manifest_path = backup.with_extension("manifest.tsv");
+        if let Some(parent) = manifest_path.parent() {
+            // `--backup-dir` may name a directory that does not exist yet, and
+            // the manifest is written before `purge_db` creates it.
+            std::fs::create_dir_all(parent)?;
+        }
+        let rows = delete_set(&plan.db_path)?;
+        std::fs::write(&manifest_path, render_delete_set(plan, &rows))
+            .map_err(|e| anyhow::anyhow!("write manifest {}: {e}", manifest_path.display()))?;
+
         let outcome = purge_db(plan, &backup)?;
         println!(
             "{}: deleted {} entr{} ({} -> {}) and {} sync_queue row(s)\n  backup: {}",
@@ -411,6 +473,7 @@ pub fn execute(args: &PurgeFixturesArgs, cas_root: &Path) -> anyhow::Result<()> 
             outcome.sync_queue_deleted,
             outcome.backup_path.display()
         );
+        println!("  manifest: {}", manifest_path.display());
     }
 
     println!();
@@ -562,6 +625,41 @@ mod tests {
     }
 
     #[test]
+    fn the_delete_set_names_exactly_the_rows_the_purge_removes() {
+        let temp = TempDir::new().unwrap();
+        let db = temp.path().join("cas.db");
+        seed(&db, 3);
+
+        let rows = delete_set(&db).unwrap();
+        assert_eq!(rows.len(), FIXTURE_CONTENTS.len());
+        // The manifest is the receipt an operator reconciles the backup
+        // against, so it must not claim a row the delete leaves behind.
+        assert!(
+            rows.iter().all(|(id, _)| id.starts_with("fixture-")),
+            "delete set named a non-fixture row: {rows:?}"
+        );
+
+        let plan = plan_db("test", &db).unwrap();
+        purge_db(&plan, &temp.path().join("b")).unwrap();
+        assert!(delete_set(&db).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_rendered_delete_set_is_tsv_with_one_line_per_row() {
+        let temp = TempDir::new().unwrap();
+        let db = temp.path().join("cas.db");
+        seed(&db, 3);
+
+        let plan = plan_db("test", &db).unwrap();
+        let rendered = render_delete_set(&plan, &delete_set(&db).unwrap());
+        let lines: Vec<&str> = rendered.lines().collect();
+
+        assert_eq!(lines[0], "db\tid\tcontent");
+        assert_eq!(lines.len(), FIXTURE_CONTENTS.len() + 1);
+        assert!(lines[1..].iter().all(|line| line.matches('\t').count() == 2));
+    }
+
+    #[test]
     fn purge_is_idempotent() {
         let temp = TempDir::new().unwrap();
         let db = temp.path().join("cas.db");
@@ -612,6 +710,7 @@ mod tests {
             project_root: Some(copy_root),
             global_root: None,
             backup_dir: None,
+            list_rows: false,
         };
         let err = resolve_targets(&args, temp.path(), Some(temp.path().to_path_buf()))
             .unwrap_err()

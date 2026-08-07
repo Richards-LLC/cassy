@@ -415,6 +415,43 @@ fn format_assigned_task_info(
 ///
 /// Pure over its inputs so the interesting states are unit-testable without a
 /// daemon, a queue, or a clock.
+/// Render the undelivered-lifecycle-relay banner for `worker_status`
+/// (cas-7787, GH #160).
+///
+/// Each row is a moment CAS told the supervisor a lane was parked behind them
+/// and the message did not arrive. In the reported session four of these went
+/// completely unrecorded, so the supervisor's `worker_status` looked healthy
+/// while three finished lanes waited on a human to notice.
+///
+/// Empty input renders NOTHING — a banner that appears when there is no
+/// problem is a banner people learn to skip, and this one has to be believed
+/// the one time it fires.
+///
+/// Pure over its input so the wording and the empty case are unit-testable
+/// without a daemon, a queue, or a clock.
+fn format_undelivered_relay_section(rows: &[cas_store::UndeliveredLifecycleRelay]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    let mut out = format!(
+        "⚠ UNDELIVERED SUPERVISOR RELAY ({}) — these never reached you:\n",
+        rows.len()
+    );
+    for row in rows {
+        let what = row.summary.as_deref().unwrap_or("task lifecycle transition");
+        out.push_str(&format!(
+            "  • {what} (queued {}, source {})\n",
+            row.created_at.to_rfc3339(),
+            row.source
+        ));
+    }
+    out.push_str(
+        "  These lanes may still be waiting on you. Open each task directly \
+         (`task action=show id=<id>`) — a missing relay is not evidence the work was handled.\n\n",
+    );
+    out
+}
+
 fn format_spawn_lifecycle_section(
     rows: &[cas_store::SpawnLifecycle],
     now: chrono::DateTime<chrono::Utc>,
@@ -1387,10 +1424,23 @@ impl CasService {
             .map(|rows| format_spawn_lifecycle_section(&rows, chrono::Utc::now()))
             .unwrap_or_default();
 
+        // cas-7787 (GH #160): lifecycle relays that expired without ever
+        // reaching the supervisor. This goes FIRST, above the roster, and is
+        // rendered even when no agents are registered — the whole failure mode
+        // being fixed is that a lost relay left no trace anywhere, so the
+        // fleet read silence as "nothing is waiting on me".
+        let undelivered_section = format_undelivered_relay_section(
+            &crate::store::open_prompt_queue_store(&self.inner.cas_root)
+                .ok()
+                .and_then(|queue| queue.list_undelivered_lifecycle_relays(10).ok())
+                .unwrap_or_default(),
+        );
+
         if agents.is_empty() {
             let mut msg = String::from(
                 "No active agents registered.\n\nNote: Factory TUI must be running for agents to be registered.",
             );
+            msg.push_str(&undelivered_section);
             msg.push_str(&spawn_section);
             msg.push_str(&died_section);
             if stale_pruned > 0 {
@@ -1403,6 +1453,7 @@ impl CasService {
 
         let owned = supervisor_owned_workers();
         let mut output = String::from("Worker Status\n=============\n\n");
+        output.push_str(&undelivered_section);
 
         // cas-d165 (Finding 2): assignees of currently InProgress tasks,
         // resolved ONCE for the whole roster. `has_in_progress_task` below
@@ -6022,6 +6073,52 @@ mod spawn_lifecycle_tests {
 
     fn render(rows: &[SpawnLifecycle]) -> String {
         format_spawn_lifecycle_section(rows, chrono::Utc::now())
+    }
+
+    fn lost_relay(task_summary: &str) -> cas_store::UndeliveredLifecycleRelay {
+        cas_store::UndeliveredLifecycleRelay {
+            prompt_id: 7783,
+            source: "lifecycle-wake:3386".to_string(),
+            target: "supervisor".to_string(),
+            summary: Some(task_summary.to_string()),
+            stage: "abandoned".to_string(),
+            reason: Some(cas_store::PendingReason::UndeliveredLifecycleRelay),
+            detail: Some("task closed before delivery".to_string()),
+            factory_session: Some("cas-src-fast-pelican-83".to_string()),
+            created_at: chrono::Utc::now(),
+            processed_at: Some(chrono::Utc::now()),
+        }
+    }
+
+    /// cas-7787 (GH #160), acceptance criterion 3: a lost relay must be LOUD
+    /// in `worker_status`, naming the task, and must never let the supervisor
+    /// read the absence of a message as "nothing needs me".
+    #[test]
+    fn an_undelivered_relay_is_named_in_worker_status() {
+        let out = format_undelivered_relay_section(&[lost_relay(
+            "task_awaiting_merge: cas-fe23 (2026-08-07T18:51:51Z)",
+        )]);
+        assert!(
+            out.contains("UNDELIVERED SUPERVISOR RELAY"),
+            "the banner must state the failure outright: {out}"
+        );
+        assert!(out.contains("cas-fe23"), "must name the task: {out}");
+        assert!(
+            out.contains("still be waiting on you"),
+            "must say the lane may still need the supervisor: {out}"
+        );
+        assert!(
+            out.contains("not evidence the work was handled"),
+            "must refuse to let silence read as success: {out}"
+        );
+    }
+
+    /// The banner must be absent when there is nothing lost — a heading that
+    /// renders on every healthy poll is one people stop reading, and this one
+    /// has to be believed the single time it fires.
+    #[test]
+    fn no_undelivered_relays_renders_nothing() {
+        assert!(format_undelivered_relay_section(&[]).is_empty());
     }
 
     /// No spawn history → no section. `worker_status` must not grow a stub

@@ -686,3 +686,64 @@ issue, per AC7.
 - The clean-post epoch is 17 rows over ~45 minutes. It is decisive for the unreconciled pair
   (100%, and one case proven by direct experience) but too small to certify anything as *resolved*.
   Absence of `suppressed_idle` in that window is **not** evidence the idle gate is fixed.
+
+---
+
+## PHASE 2 ADDENDUM — self-correction after reading the v2.49.0 changelog
+
+The supervisor brief required checking each filed issue against the v2.49.0 changelog and cas-7787
+close notes before filing. Doing that check *after* filing caught a real error in my own analysis.
+Recording it in full, because the corrected finding is more actionable than the original.
+
+### Two claims withdrawn
+
+**1. "No code path reconciles `transport_delivered_at` and `acked_at`."** False. v2.49.0 ships
+exactly that reconciliation: `crates/cas-store/src/prompt_queue_store.rs:3561` stamps
+`acked_at` / `acked_via='hook_surfaced'` when a turn-start hook surfaces a row, inside the same
+transaction as the receipt insert. The design is sound and my claim that it was missing was wrong.
+
+**2. "Rows 7924/7926 were consumed yet remain unacked, therefore the ack is broken."** Invalid
+inference. Those rows were consumed via `inbox_poll`, and the code comment at that call site is
+explicit that the poll path *deliberately* does not ack — it is the recipient's own `message_ack`
+decision. An unacked row after a poll is documented intended behaviour, not evidence. This was the
+single most-quoted data point in my Phase-2 write-up and it does not support what I used it for.
+
+Both errors share a shape worth naming: I inferred a missing mechanism from missing *data*, without
+reading the code that would have told me the mechanism exists and is gated. That is the same class
+of error as the Phase-1 `#155` misread, which inferred a working fix from a moving number without
+checking which binary produced it.
+
+### What replaces them — measured, and stronger
+
+The reconciliation path exists and **has never executed once in production**:
+
+| `acked_via` | rows | first | last |
+|---|---|---|---|
+| (null) | 7,690 | 2026-03-20 | 2026-08-07T21:54:06 |
+| `inferred_from_reply` | 212 | 2026-08-06 | 2026-08-07T21:17:52 |
+| `explicit_ack` | 12 | 2026-07-09 | 2026-07-09 |
+| **`hook_surfaced`** | **0** | — | — |
+
+Confirmed independently against the receipt table, which records a surfacing regardless of ack:
+`prompt_queue_recipient_seen` holds 555 legacy-blank and 22 `inbox_poll` rows and **zero
+`hook_surfaced` rows**. The turn-start drain is not failing to ack — it appears never to run.
+
+Post-restart this is worse, not better: in the clean-post epoch **0 of 21 rows are acked by any
+means**, and `inferred_from_reply` — the fallback carrying acks before the restart — stops dead at
+21:17:52 with zero occurrences afterwards. Nothing is currently acking anything.
+
+Both installed config dirs *do* wire `UserPromptSubmit` to `cas hook`, so this is not the
+missing-hooks-block class. The gap sits between the hook firing and `SurfacingSource::HookSurfaced`
+reaching the store.
+
+### Effect on the filed issues
+
+- **#165** — retitled and corrected in-thread: *the v2.49.0 turn-start surfacing hook is inert*,
+  rather than *the reconciliation design is missing*. Severity unchanged; actionability improved,
+  since it now names a specific code seam instead of a design gap.
+- **#166, #167, #168, #169** — unaffected. Each rests on its own direct measurement or code read
+  (log counts, `transport_delivered_at IS NULL` on all 361 rows, the `orphan_recovery.rs` grep,
+  the `delivery_attempts` counter), none of which depended on the withdrawn inferences.
+- The silent-loss / duplicate-delivery pairing still stands on evidence that never relied on the
+  ack column: 47 duplicate transcript injections (worst 9×) and the #155 amendment incident.
+  Only the mechanism attribution changed.

@@ -61,13 +61,43 @@ pub fn default_baseline_path(machine: &str) -> PathBuf {
     Path::new(DEFAULT_BASELINE_DIR).join(format!("baseline-{machine}.json"))
 }
 
+/// Resolve the global memory store a parity run should merge.
+///
+/// Prefers the host root `~/.cas` — which is where the live global CAS state
+/// actually lives — and only falls back to [`crate::config::global_cas_dir`]
+/// (`~/.config/cas` on Linux, `Application Support` on macOS) when the host
+/// root holds no database. See the rationale comment on
+/// [`crate::store::known_repos`] for the history of that split.
+///
+/// Using `global_cas_dir()` alone is what made every parity run on this host
+/// silently project-only: the config dir has no `cas.db`, so the global tier
+/// was filtered out before it was ever measured (cas-96ae).
+pub fn resolve_global_cas_dir() -> Option<PathBuf> {
+    let host = crate::store::known_repos::host_cas_dir();
+    if host.join("cas.db").exists() {
+        return Some(host);
+    }
+    crate::config::global_cas_dir()
+}
+
 pub fn execute(cmd: &RetrievalParityCommands, cas_root: Option<&Path>) -> anyhow::Result<()> {
     let cas_root = cas_root.ok_or_else(|| {
         anyhow::anyhow!("no .cas directory found — run this from inside an initialized project")
     })?;
     // The SessionStart merge reads project-then-global, so the merge channel
     // needs the global store to reproduce the dedup faithfully.
-    let ctx = ParityContext::new(cas_root).with_global(crate::config::global_cas_dir());
+    let ctx = ParityContext::new(cas_root).with_global(resolve_global_cas_dir());
+
+    match &ctx.global_cas_dir {
+        Some(dir) => println!("global store: {}", dir.display()),
+        None => match &ctx.global_unavailable {
+            // Loud on stderr as well as in the per-case status: a run that
+            // could not reach the global store measures strictly less than it
+            // appears to.
+            Some(reason) => eprintln!("WARNING: {reason}"),
+            None => println!("global store: none configured (project-only run)"),
+        },
+    }
 
     match cmd {
         RetrievalParityCommands::Capture(args) => run_capture(&ctx, args),

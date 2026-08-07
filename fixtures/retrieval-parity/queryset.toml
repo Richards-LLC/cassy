@@ -15,7 +15,7 @@
 #   id             required, unique, stable. It is the diff key: renaming a
 #                  case reads as "old case deleted, new case added".
 #   channel        search | recent | list | pinned | helpful
-#                  | by_type | by_tier | by_tag
+#                  | by_type | by_tier | by_tag | session_merge | global_list
 #   query          the channel's argument. Required for search / by_type /
 #                  by_tier / by_tag; ignored by the rest.
 #   limit          optional result depth (default: default_limit)
@@ -91,6 +91,22 @@ The SessionStart context merge -- the highest-volume reader of legacy entries
 then the global store (archived = 0, LIMIT 10000, NO tier filter, so archive-tier
 rows are live and still injected), de-duplicated on the p-/g--stripped id with
 project winning. Deep limit because this path feeds every session.
+
+NOTE: this case alone does NOT measure the global store. The merge puts project
+rows first and this limit truncates long before the global tail on any host with
+more than 60 project rows -- see global-list-default below.
+"""
+
+[[query]]
+id = "global-list-default"
+channel = "global_list"
+limit = 25
+note = """
+store_list against the GLOBAL store (~/.cas) on its own. Exists because
+session-merge structurally cannot see global content on a host with a large
+project store, which is how the global tier went unmeasured through every
+earlier green run (cas-96ae). Reports UNAVAILABLE rather than zero hits when no
+global store is reachable, so the blind spot cannot silently return.
 """
 
 [[query]]

@@ -138,9 +138,20 @@ pub struct ParityContext {
     pub cas_dir: PathBuf,
     /// Tantivy index directory; defaults to `<cas_dir>/index/tantivy`.
     pub index_dir: PathBuf,
-    /// Global memory store directory (`~/.config/cas`), when present. Only
-    /// the `session_merge` channel reads it, mirroring `merge_entries`.
+    /// Global memory store directory (the host's `~/.cas`, see
+    /// [`crate::cli::retrieval_parity::resolve_global_cas_dir`]), when it holds
+    /// a readable database. Only the `session_merge` channel reads it,
+    /// mirroring `merge_entries`.
     pub global_cas_dir: Option<PathBuf>,
+    /// Why a *requested* global store could not be used. `None` means either
+    /// "no global store was asked for" (project-only run) or "the one asked for
+    /// is usable" — the two are distinguished by `global_cas_dir`.
+    ///
+    /// A requested-but-unusable global store must never degrade into a silent
+    /// project-only run: it is carried here and surfaced as
+    /// [`ChannelStatus::Unavailable`] on `session_merge`, for the same reason a
+    /// missing search index is (see [`channels::ChannelStatus`]).
+    pub global_unavailable: Option<String>,
 }
 
 impl ParityContext {
@@ -151,14 +162,39 @@ impl ParityContext {
             cas_dir: cas_dir.to_path_buf(),
             index_dir: cas_dir.join("index").join("tantivy"),
             global_cas_dir: None,
+            global_unavailable: None,
         }
     }
 
-    /// Attach a global store, if it actually holds a database. A path that
-    /// does not exist is dropped rather than recorded, so a baseline never
-    /// claims to have merged a store it could not read.
+    /// Attach a global store.
+    ///
+    /// A path that holds no `cas.db` is **not** silently dropped — dropping it
+    /// is what let every parity run on this host measure the project store
+    /// alone while reporting green (cas-96ae). It is recorded as an
+    /// unavailability reason instead, which makes `session_merge` report
+    /// [`ChannelStatus::Unavailable`] rather than an empty-but-healthy merge.
+    ///
+    /// `None` is an explicit project-only run and stays quiet.
     pub fn with_global(mut self, global_cas_dir: Option<PathBuf>) -> Self {
-        self.global_cas_dir = global_cas_dir.filter(|p| p.join("cas.db").exists());
+        match global_cas_dir {
+            Some(dir) if dir.join("cas.db").exists() => {
+                self.global_cas_dir = Some(dir);
+                self.global_unavailable = None;
+            }
+            Some(dir) => {
+                self.global_cas_dir = None;
+                self.global_unavailable = Some(format!(
+                    "global store requested at {} but there is no cas.db there; \
+                     the SessionStart merge cannot be reproduced and this run \
+                     measures the project store only",
+                    dir.display()
+                ));
+            }
+            None => {
+                self.global_cas_dir = None;
+                self.global_unavailable = None;
+            }
+        }
         self
     }
 }
@@ -233,6 +269,7 @@ pub fn run_query_set(ctx: &ParityContext, set: &QuerySet) -> Result<Vec<QueryRes
     let env = channels::RunEnv {
         project: &db,
         global: global.as_ref(),
+        global_unavailable: ctx.global_unavailable.as_deref(),
         index: &index,
         excluded: set.excluded_fingerprints(),
     };

@@ -108,8 +108,16 @@ pub struct QuerySet {
     ///
     /// Matching is by the same normalized fingerprint used for hits, so
     /// whitespace and case variants of a fixture string are also excluded.
+    ///
     /// Excluding a row means the harness deliberately makes **no** claim about
-    /// whether it survives migration.
+    /// whether it survives migration. For fixtures that is the point: M3 does
+    /// not drop them (rule R1 is *deliberately-leave* — not carried to pages,
+    /// rows left untouched in `entries`), and their deletion is owned by a
+    /// separate exact-match purge (cas-78c8 / GH #156) that may run long after
+    /// cutover. Under exclusion, both their presence at replay time and their
+    /// later absence after that purge are non-regressions — otherwise a
+    /// routine cleanup unrelated to retrieval quality would turn the harness
+    /// red.
     #[serde(default)]
     pub exclude_contents: Vec<String>,
     /// `[[query]]` tables.

@@ -37,8 +37,15 @@ default_rank_tolerance = 3
 # These five literal strings are 994 of 1696 rows (58.6%) -- see
 # docs/migration/cas-b129-mapping-spec.md section 3. They are dropped from every
 # result before ranks are recorded, so the baseline measures the 702 real rows
-# rather than test detritus. Excluding a row means the harness makes NO claim
-# about whether it survives the migration; that is intentional for fixtures.
+# rather than test detritus.
+#
+# Excluding a row means the harness makes NO claim about whether it survives the
+# migration -- which is exactly right for fixtures, because their lifecycle is
+# deliberately outside parity's scope. M3 does NOT drop them (rule R1 disposition
+# is deliberately-leave: not carried to pages, rows left untouched in `entries`);
+# their deletion is owned by the separate exact-match purge cas-78c8 / GH #156.
+# Under exclusion both their presence at replay time and their later absence
+# after that purge are non-regressions.
 exclude_contents = [
   "Test memory from MCP protocol test",
   "Rust programming language with ownership and borrowing",

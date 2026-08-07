@@ -55,7 +55,19 @@ so the baseline reflects the ~702 real rows. Ranks are assigned after
 exclusion, so fixture churn cannot masquerade as a mass rank change.
 
 Excluding a row means the harness makes **no claim** about whether it survives
-migration. That is the intent for test detritus; do not add real content there.
+migration — and for fixtures that is precisely right, because their lifecycle
+is deliberately outside parity's scope. M3 does **not** drop them: rule R1's
+disposition is *deliberately-leave*, i.e. not carried to knowledge pages, with
+the rows remaining untouched in the `entries` store after migration. Their
+actual deletion is owned by a separate exact-match purge (cas-78c8 / GH #156,
+dry-run first) which may run well after cutover.
+
+So under exclusion, both their **presence** at replay time and their **later
+absence** after the purge are non-regressions. That is the desired behaviour: a
+harness that tracked them would go red on a scheduled cleanup that has nothing
+to do with retrieval quality.
+
+Do not put real content in `exclude_contents`.
 
 ## Query provenance
 

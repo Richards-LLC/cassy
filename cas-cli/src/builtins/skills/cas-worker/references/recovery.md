@@ -20,11 +20,7 @@ The most common close rejection: your `factory/<name>` branch has commits not ye
 
 ## Close requires task-scoped verification
 
-1. **Forward ONCE** to supervisor — include task ID, brief summary of completion state, and exact error text.
-   - **Claude workers**: `mcp__cas__coordination action=message target=supervisor summary="..." message="..."`
-   - **Codex workers**: `mcp__cs__coordination action=message target=supervisor summary="..." message="..."`
-
-   The close response names the affected task, dispatch owner, deadline, and recovery path. Copy that guidance directly.
+1. **Forward ONCE** to supervisor via `mcp__cas__coordination action=message` — include task ID, brief summary of completion state, and exact error text. The close response names the affected task, dispatch owner, deadline, and recovery path; copy that guidance directly.
 2. **Do not re-report.** The supervisor will verify and close asynchronously. Re-sending the same message does not speed this up.
 3. **Continue unrelated work.** Verification gates only the named task's transition to closed; unrelated MCP and other-task work remain available. When idle, re-check `mcp__cas__task action=show id=<your-task-id>`. If `Status: Closed`, trust the DB over messages.
 4. **If still InProgress after 5 minutes of idle**, send ONE follow-up to the supervisor with note_type=blocker. Then continue to re-poll DB only.

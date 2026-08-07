@@ -41,8 +41,16 @@ impl CasService {
         &self,
         req: WorktreeRequest,
     ) -> Result<CallToolResult, McpError> {
+        // cas-f102 (GH #140): `id` is now honoured. Absent, this stays the
+        // System-A orphan sweep it always was; present, it targets one
+        // worktree and resolves it System A first, System B second — the same
+        // order `worktree_merge` uses.
         self.inner
-            .worktree_cleanup(req.dry_run.unwrap_or(false), req.force.unwrap_or(false))
+            .worktree_cleanup(
+                req.id.as_deref(),
+                req.dry_run.unwrap_or(false),
+                req.force.unwrap_or(false),
+            )
             .await
     }
 

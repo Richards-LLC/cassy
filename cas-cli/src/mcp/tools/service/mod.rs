@@ -579,9 +579,32 @@ impl CasService {
                     // this gate never masks a genuine absence, only the false
                     // "disabled" refusal for worktrees that demonstrably exist.
                     //
-                    // create / show / cleanup still genuinely require System A —
-                    // they're pure WorktreeStore CRUD with no System-B analogue.
-                    if wt_action != "status" && wt_action != "list" && wt_action != "merge" {
+                    // `cleanup` is exempt for the same reason (cas-f102,
+                    // GH #140). cas-1d11 kept it gated on the premise that
+                    // cleanup is "pure WorktreeStore CRUD with no System-B
+                    // analogue". That premise is false for RETIRED workers: a
+                    // System-B worktree outlives its worker unless `cleanup=true`
+                    // was passed at merge time, and merge is the only action that
+                    // ever removes one — so a worker that finished without it
+                    // leaves a worktree with no CAS-tracked removal path at all,
+                    // and the reported workaround was a manual `git worktree
+                    // remove` that bypasses tracking exactly like the manual merge
+                    // cas-1d11 fixed. `worktree_cleanup`'s own handler resolves
+                    // System A first, then the System-B
+                    // `<cas_root>/worktrees/<assignee>` convention, and returns an
+                    // accurate "not found" for neither — so removing this gate
+                    // never masks a genuine absence, only the false "disabled"
+                    // refusal for worktrees that demonstrably exist on disk.
+                    //
+                    // create / show still genuinely require System A — they are
+                    // pure WorktreeStore CRUD with no System-B analogue (nothing
+                    // creates a System-B row to show, and `create` is the System-A
+                    // constructor itself).
+                    if wt_action != "status"
+                        && wt_action != "list"
+                        && wt_action != "merge"
+                        && wt_action != "cleanup"
+                    {
                         let config = crate::config::Config::load(&this.inner.cas_root)
                             .map_err(|e| {
                                 Self::error(

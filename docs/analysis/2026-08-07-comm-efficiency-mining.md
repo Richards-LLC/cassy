@@ -573,3 +573,116 @@ Stated, not silent, per the coverage-honesty requirement:
   drift and wasted-turn accounting remain unmeasured. This is the one corpus that would quantify
   the *human* cost of the delivery defect above — how many turns were spent re-deriving context
   that had already been sent.
+
+---
+
+# PHASE 2 — post-restart verification, transcript mining, issues filed
+
+Worker `true-lark-30`, 2026-08-07 ~21:50–22:20Z. Phase 1 established the quantification base;
+Phase 2 was gated on the operator restarting the daemon onto 2.49.0. That precondition is now met,
+so every Phase-1 verdict of FIXED-UNVERIFIED could finally be tested rather than assumed.
+
+## 1. The epoch boundary, measured (AC7)
+
+Phase 1's central warning was that tag dates lie and only the running binary counts. Applying that
+discipline a second time caught a second trap:
+
+- Binary `/home/pippenz/.local/bin/cas` — mtime **2026-08-07T21:02:26Z**, reports `cas 2.49.0`.
+- All 9 live `cas serve` processes started **≥ 21:04:53Z**, and none holds a `(deleted)` exe link,
+  so all of them exec'd the new inode.
+- **But** pre-install daemons kept heartbeating until **21:36:37Z**.
+
+So `21:02:26 – 21:36:35` is a **MIXED** epoch in which old and new binaries were both serving.
+Reading it as post-fix would repeat exactly the error Phase 1 retracted. Conservative clean-post
+boundary: **2026-08-07T21:36:35Z**.
+
+| epoch | rows | undelivered | `suppressed_idle` | **unreconciled** | acked |
+|---|---|---|---|---|---|
+| PRE (< 21:02:26Z) | 588 | 111 | 108 | 417 | 60 |
+| MIXED | 39 | 5 | 5 | 27 | 7 |
+| **CLEAN-POST (≥ 21:36:35Z)** | 17 | 0 | 0 | **17 (100%)** | **0** |
+
+## 2. The falsifiable test — the ruling's fold decision was wrong, and its own escape clause fires
+
+The Phase-1 polish commit committed in advance to a test: *the undelivered-rate regression folds into
+the redelivery hot-loop only if `suppressed_idle` rows drop AFTER transport.* Result:
+
+- **All 361** `suppressed_idle` rows have `transport_delivered_at IS NULL` — they drop **before**
+  transport, so they cannot share the hot-loop's post-transport poll-tick signature.
+- Of today's 116 undelivered rows, **113 (97.4%)** are `suppressed_idle`.
+- `suppressed_idle` first appears **2026-08-04T17:58:37Z** — the same day the undelivered rate jumps
+  from 1–3% to 34.8%.
+
+**The undelivered-rate regression is a symptom of the idle gate, not of the hot-loop.** It was folded
+into the idle-gate issue (#167), not the hot-loop issue (#166). Recording this because the supervisor
+ruling directed the opposite fold — conditioned on "unless the mechanism provably differs". It does.
+
+## 3. Root cause: confirmed still live on 2.49.0
+
+Phase 1 hypothesised that silent loss and duplicate delivery are one unreconciled state pair
+(`transport_delivered_at` = channel handoff, `acked_at` = recipient confirms, never reconciled).
+The clean-post epoch tests it directly: **17 of 17 rows unreconciled, 0 acked.**
+
+The sharpest single data point is self-referential again. Rows **7924** and **7926** are this worker's
+own spawn brief and task assignment. They were consumed via `inbox_poll`, acted upon, and this report
+exists because of them — yet ~20 minutes later they still read
+`transport_delivered_at NOT NULL, acked_at NULL, highest_stage=delivered, last_pending_reason=awaiting_ack`.
+The ack is not slow. For these rows it is never written at all.
+
+All 17 clean-post rows also carry `wake_attempt='nudge_not_attempted'`.
+
+**Verdict change:** the root cause moves from *hypothesis* to **STILL-LIVE (verified on 2.49.0)**.
+The v2.49.0 fixes addressed symptoms; the state machine underneath is still unsound.
+
+## 4. Transcript corpus — Phase 1's coverage gap, now closed
+
+53 transcript files, **43,023 lines**, 50 sessions, both harness config dirs. Fully scripted
+(`scripts/mine_transcripts.py`, `scripts/mine_relay_dupes.py`); no bulk log text entered model context.
+
+| metric | value |
+|---|---|
+| `<teammate-message>` injections | 890 (843 distinct) |
+| **duplicate injections** | **47 extra copies — 5.3%** |
+| repeated user-turn instructions | 117 extra copies of 1,293 (9.0%, includes deliberate `/loop` patrols) |
+| interrupted turns | 13 |
+| error tool-results | 184 |
+| output tokens across corpus | 15.57 M (3.83 B cache-read) |
+
+The duplicates concentrate in **exactly the relay class #160 reports going silent**:
+`task_awaiting_merge: cas-7ffe` injected **9×** in 5.5 minutes; `cas-c9be` **7×**; `cas-d9a9` **4×**.
+One channel, both failure modes — independent corroboration of §3 from a corpus that shares no code
+path with `prompt_queue` bookkeeping.
+
+## 5. Vector store — decision re-confirmed: **not built**
+
+Now decided against actual Phase-2 need rather than against budget. The transcript questions were
+answered by exact-hash duplicate detection and summary-prefix bucketing; no query class required
+semantic clustering, so an index would have cost embedding time to reproduce answers already obtained.
+Live knowledge stores untouched, as required.
+
+## 6. Issues filed (AC8)
+
+Deduped against all open issues before filing.
+
+| finding | action | issue |
+|---|---|---|
+| Unreconciled `transport_delivered_at` / `acked_at` (root cause) | **NEW** | **#165** |
+| Redelivery hot-loop — 704,901 lines / 464 MB, one message 55,868× | **NEW** | **#166** |
+| Idle gate drops before transport (361, 100% lost) + undelivered regression folded in | **NEW** | **#167** |
+| `worker_died` written only to `supervisor_queue` (2,044, 100% uninjected) + unbounded re-emission | **NEW** | **#168** |
+| `delivery_attempts` never incremented (0 of 7,902) | **NEW** | **#169** |
+| Amendment incident + "restart and re-measure" answer + Phase-1 retraction | COMMENT | #155 |
+| `worker_died` quantification + duplicate-relay evidence | COMMENT | #160 |
+| Death-notice duplication (1,452 for one agent) | COMMENT (not double-filed) | #161 |
+
+FIXED-VERIFIED classes (`dead-lettered`, hard stop 2026-07-27 with 2,800+ clean rows after) got no
+issue, per AC7.
+
+## 7. What Phase 2 did not do
+
+- The hot-loop's post-2.49.0 status is **not** cleanly determined. Its last observed burst
+  (`message_id=7883`, 596 lines, 561 within one minute at 21:10) lands in the MIXED epoch and cannot
+  be attributed to either binary. #166 says so and asks for re-measurement after a full turnover.
+- The clean-post epoch is 17 rows over ~45 minutes. It is decisive for the unreconciled pair
+  (100%, and one case proven by direct experience) but too small to certify anything as *resolved*.
+  Absence of `suppressed_idle` in that window is **not** evidence the idle gate is fixed.

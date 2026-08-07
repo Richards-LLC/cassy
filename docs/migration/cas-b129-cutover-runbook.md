@@ -422,15 +422,24 @@ never regressions.
 **Read the result correctly — see §8.** Two coverage limits apply, and both are
 properties of the harness, not of the migration:
 
-- **The replay covers the PROJECT store only.** `cas retrieval-parity` resolves
-  its global side via `config::global_cas_dir()` = `~/.config/cas`
-  (`cli/retrieval_parity.rs:70`, `config/access/global.rs:3-5`), which has no
-  `cas.db` on this machine, and `ParityContext::with_global` drops a path without
-  one (`retrieval_parity/mod.rs:161`). The migration's global side is `~/.cas`
-  (`cli/memory_migrate.rs:114`). The committed baseline confirms it: `cas_dir` is
-  the project `.cas` and the corpus is 1246 active entries — the project count.
-  **A green replay says nothing about the 450-row global store or the 39 pages
-  written into it.** Hence V6.
+- **The replay now reaches the global store — check that it says so.** Until
+  cas-96ae it did not: the global side resolved to `config::global_cas_dir()` =
+  `~/.config/cas`, which has no `cas.db` on this machine, and
+  `ParityContext::with_global` dropped that path *silently*, so every green
+  replay covered the project store alone. It now resolves `~/.cas` (the
+  migration's global side, `cli/memory_migrate.rs:114`), prints
+  `global store: /home/pippenz/.cas` at the top of the run, and the
+  `global-list-default` case records real global hits. Two things to verify
+  before trusting a green:
+  - the run printed the resolved global path, **not** a `WARNING:` — an
+    unreachable global store is now reported as `unavailable`, never as a
+    zero-hit pass; and
+  - `global-list-default` PASSED with a non-zero hit count.
+
+  Note that `session-merge` still cannot stand in for this: it lists project
+  rows first and truncates at its limit, so with 1250+ project rows the global
+  tail never reaches the baseline. V6 remains the hand-check for the pages
+  written into the global store.
 - 🔴 **The corpus MUST be frozen between capture and replay — re-capture the
   baseline INSIDE the quiesce window, immediately before the apply.** An earlier
   revision of this runbook said that entries added after the capture "appear as
@@ -685,8 +694,9 @@ channel reads `entries`. So:
 > It does **not** prove that knowledge retrieval is as good as, or equivalent to,
 > memory retrieval. **Nothing on this epic measures that.**
 
-Add the coverage limits from V5: the replay is project-only and blind to the
-global store, and post-baseline entries appear as upgrades. And add §6.2: most
+Add the coverage limits from V5: the global store is measured only by
+`global-list-default` (`session_merge` truncates it away), and post-baseline
+entries appear as upgrades. And add §6.2: most
 migrated pages are not even visible in SessionStart under the current 600-token
 index budget.
 
@@ -782,7 +792,7 @@ cas memory-migrate                                     # 1. dry run — read the
 cas retrieval-parity capture                           # 1b. re-baseline INSIDE the frozen window
 cas memory-migrate --apply --invalidate-sync-queue     # 2. apply (factory quiesced)
 cas memory-migrate --reindex                           # 3. FTS rebuild + retrievability check
-cas retrieval-parity replay                            # 4. parity (project-only — also do V6)
+cas retrieval-parity replay                            # 4. parity (confirm the global store line — also do V6)
 ```
 
 **Two things that are easy to get wrong**

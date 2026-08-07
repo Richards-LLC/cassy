@@ -176,6 +176,23 @@ Predicate: `content` or `title` matches any of `QBO`, `TNTAP`, `FONCE`,
 `FAE 183`, `1040`, `1065`, `Journal Entr` (case-sensitive; these are proper
 nouns and form numbers, so false positives on cas-src prose are implausible).
 
+**Widened after the M5 run-1 cutover** with nine property/loan/settlement proper
+nouns — `Roark`, `Realty`, `JRPW`, `Renovo`, `Leake`, `Moultrie`, `Radnor`,
+`Old Hickory`, `HUD-1`. The original list is accounting/tax vocabulary only, so
+29 of the 181 pages run 1 produced were the same project's *real-estate* records,
+two of which won the SessionStart index budget and were injected into every
+cas-src session. The widening raises the quarantine from 84 to 123 rows and is
+monotone (39 newly quarantined, none released).
+
+The tokens are **proper nouns only, never generic English** — measured against
+the real 1700-row corpus, `Property` matches `Object.getOwnPropertyNames(...)`,
+`Lease` matches the `LeaseNotFound` error type, and `Richards` matches the
+`Richards-LLC` GitHub org and Vercel team used throughout genuine cas-src
+infrastructure memories. All three are excluded for that reason. Sixteen further
+candidates (`Escrow`, `Mortgage`, `Loan`, `Settlement Statement`, `1098`, `K-1`,
+`CSL`, `Ingram`, `Rearden`, …) were measured and add zero rows beyond the proper
+nouns, so none was adopted. See the M5 runbook §8.2.
+
 Quarantined rows are **`stay-entry` in place** — they are *not* deleted and *not*
 paged. M3 writes them to a `quarantine.jsonl` in the migration ledger with their
 full row and matched token. Deleting another project's records on a

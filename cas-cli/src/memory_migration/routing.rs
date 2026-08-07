@@ -64,7 +64,42 @@ pub const FIXTURE_CONTENTS: [&str; 5] = [
 
 /// R6 tokens matched as case-sensitive **substrings** — proper nouns and a form
 /// name, implausible inside cas-src prose.
-const SUBSTRING_TOKENS: [&str; 5] = ["QBO", "TNTAP", "FONCE", "FAE 183", "Journal Entr"];
+///
+/// The first five are the original E1 list (accounting/tax vocabulary). The
+/// remainder are the **property/loan/settlement widening** added after the M5
+/// cutover rehearsal, where 29 of the 181 migrated pages turned out to be
+/// another project's real-estate records — and two of them (a HUD-1 and a
+/// settlement statement) won the SessionStart knowledge-index budget and were
+/// injected into the top of every cas-src session. Those rows carry none of the
+/// original five tokens, so R6 let them through.
+///
+/// Every added token is a **proper noun** — an entity, lender or property name.
+/// Generic English words were deliberately rejected: measured against the real
+/// 1700-row corpus, `Property` matches `Object.getOwnPropertyNames(...)`,
+/// `Lease` matches the `LeaseNotFound` error type, and `Richards` matches the
+/// `Richards-LLC` GitHub org and Vercel team that appear throughout genuine
+/// cas-src infrastructure memories. None of those three are here. Each of
+/// `Escrow`, `Mortgage`, `Loan`, `Settlement Statement`, `Warranty Deed`,
+/// `1098`, `K-1`, `CSL`, `Ingram` and `Rearden` was also measured and adds
+/// **zero** rows beyond the proper nouns below, so none earns a place.
+const SUBSTRING_TOKENS: [&str; 14] = [
+    // E1 original list — accounting/tax vocabulary.
+    "QBO",
+    "TNTAP",
+    "FONCE",
+    "FAE 183",
+    "Journal Entr",
+    // Property/loan/settlement widening — entity, lender and property names.
+    "Roark",
+    "Realty",
+    "JRPW",
+    "Renovo",
+    "Leake",
+    "Moultrie",
+    "Radnor",
+    "Old Hickory",
+    "HUD-1",
+];
 
 /// R6 tokens matched only as **standalone words**.
 ///
@@ -243,6 +278,64 @@ mod tests {
     fn substring_tokens_are_case_sensitive() {
         assert_eq!(contamination_token("", "QBO ledger"), Some("QBO".into()));
         assert_eq!(contamination_token("", "qbo ledger"), None);
+    }
+
+    /// The rows that made the widening necessary: real page titles from the M5
+    /// rehearsal that the original five-token predicate let through.
+    #[test]
+    fn the_property_widening_catches_the_rows_that_reached_sessionstart() {
+        for (title, expected) in [
+            (
+                "105 Leake Ave #44 — Original Purchase Settlement (08/31/2022)",
+                "Leake",
+            ),
+            (
+                "202 Moultrie Park — Original Purchase HUD-1 (08/18/2022) — CSL Loan $1.33M",
+                "Moultrie",
+            ),
+            (
+                "Bargain Sale PSA — Friends of Radnor Lake, $1,825,000 for both OH properties",
+                "Radnor",
+            ),
+            ("Roark Property Basis and Assessor Splits", "Roark"),
+            (
+                "JRPW GP Note Details — Confirmed from Forbearance Agreement + Payoff Docs",
+                "JRPW",
+            ),
+            ("Renovo Loans Confirmed Interest-Only — Ben", "Renovo"),
+            ("CSL 806 Old Hickory 1098 Data (2023-2025)", "Old Hickory"),
+        ] {
+            assert_eq!(
+                contamination_token(title, ""),
+                Some(expected.into()),
+                "{title} must quarantine on {expected}"
+            );
+        }
+    }
+
+    /// Generic English words were rejected because the REAL corpus contains
+    /// these exact cas-src strings. A regression here would quarantine genuine
+    /// engineering memories — the mirror-image failure of the one being fixed.
+    #[test]
+    fn genuine_cas_src_prose_is_never_quarantined() {
+        for legitimate in [
+            // `Property` would match this — an actual cas-src jest/SWC memory.
+            "Check via Object.getOwnPropertyNames(ItemsService.prototype).length",
+            // `Lease` would match this typed error from task cas-6cb0.
+            "cas-6cb0 (P3, typed LeaseNotFound) — follow-up",
+            // `Richards` would match the GitHub org and the Vercel team; both
+            // appear across live cas-src infrastructure memories.
+            "**Repo:** Richards-LLC/petra-stella-cloud (private)",
+            "Richards-LLC Vercel team ID is `team_oYRRKRaKgk6MHCVv`",
+            // `Loan`/`Deed`/`Settlement` as generic words would match these.
+            "download the artifact and check indeed the settlement of the queue",
+        ] {
+            assert_eq!(
+                contamination_token("", legitimate),
+                None,
+                "{legitimate} is genuine cas-src content and must NOT quarantine"
+            );
+        }
     }
 
     #[test]

@@ -175,16 +175,18 @@ pub struct TaskCloseRequest {
     /// blob keeps the schema surface narrow. When this field is
     /// `None` and the task has reviewable code changes (and no
     /// supervisor override), the gate returns `CODE_REVIEW_REQUIRED`.
-    #[schemars(
-        description = "LEGACY `[code_review] owner = \"worker\"` MODE ONLY. \
+    #[schemars(description = "LEGACY `[code_review] owner = \"worker\"` MODE ONLY. \
                        Serialized ReviewOutcome JSON envelope from a \
                        cas-code-review run. Under the DEFAULT \
                        owner = \"supervisor\" configuration a factory worker \
-                       must NOT run cas-code-review and must NOT pass this \
+                       must NOT run cas-code-review (skill, workflow, or \
+                       hand-spawned personas) and must NOT pass this \
                        field — attempt the close without it; the close \
                        transitions the task to PendingSupervisorReview and \
                        the supervisor runs the review on their own schedule \
-                       (cas-4fef). Under owner = \"worker\" it is \
+                       (cas-4fef). Check with \
+                       `cas config get code_review.owner`. \
+                       Under owner = \"worker\" it is \
                        required whenever the task has reviewable code \
                        changes unless bypass_code_review=true or the \
                        task is additive-only. Shape: \

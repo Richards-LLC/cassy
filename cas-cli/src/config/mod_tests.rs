@@ -471,14 +471,18 @@ fn code_review_owner_rejects_values_the_runtime_cannot_honour() {
     // time rather than quietly reinstate the ~500k-token inline pipeline.
     let err = config.set("code_review.owner", "supervisors").unwrap_err();
     assert!(
-        err.to_string().contains("supervisor")
-            && err.to_string().contains("worker"),
+        err.to_string().contains("supervisor") && err.to_string().contains("worker"),
         "rejection must name both accepted owners, got: {err}"
     );
-    assert!(config.code_review.is_none(), "a rejected set must not mutate");
+    assert!(
+        config.code_review.is_none(),
+        "a rejected set must not mutate"
+    );
 
     assert!(
-        meta::registry().validate("code_review.owner", "worker").is_ok(),
+        meta::registry()
+            .validate("code_review.owner", "worker")
+            .is_ok(),
         "registry must recognize the key for `cas config set` validation"
     );
     assert!(

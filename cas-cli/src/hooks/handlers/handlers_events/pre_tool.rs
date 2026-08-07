@@ -57,33 +57,39 @@ pub fn handle_pre_tool_use(
     }
 
     // ========================================================================
-    // `Agent` CONTAINMENT (cas-62b0) — new matcher entry, one new effect
+    // `Agent` CONTAINMENT (cas-62b0) — new matcher entry, ONE new effect
     //
     // `Agent` is the current Claude Code spelling of the subagent tool, and
     // before this commit it appeared in NO PreToolUse matcher CAS generates:
     // `default_pre_tool_use_matcher` (config/hooks.rs) and
     // `factory_pre_tool_intercept_list` (daemon/runtime/teams.rs) both listed
     // `Task` only, from an older harness generation. Adding it is what makes
-    // the gate above reachable for a hand-spawned persona.
+    // the review gate above reachable for a hand-spawned persona.
     //
-    // But several branches further down are keyed on `Task | "Agent"` and
-    // have therefore never fired for the `Agent` spelling: the supervisor
-    // isolation deny, and — the dangerous one — the sealed task-verifier
-    // handoff, whose binding half (`SubagentStart`) is wired in the config
-    // dir rather than in the factory settings file. A handoff minted here
-    // that never binds denies the parent's NEXT verifier spawn with "already
-    // awaiting SubagentStart". Switching those on is a real change to
-    // verification authority with its own failure modes; it is not a
-    // side effect a review-cost fix gets to smuggle in.
+    // Adding a tool to a matcher exposes it to EVERY branch of this handler,
+    // so the question is which `Task | "Agent"` branches that newly switches
+    // on. There is exactly one that must not switch on here, and it is the
+    // sealed task-verifier handoff far below: its binding half
+    // (`SubagentStart`) is installed by `cli/hook/config_gen.rs` but NOT by
+    // the factory settings file, so in factory mode a handoff minted here can
+    // never bind, and `issue_hook_verifier_handoff` then denies the parent's
+    // NEXT verifier spawn with "already awaiting SubagentStart" until it
+    // expires — wedging verification. Switching that on is a change to
+    // verification authority with its own failure modes; a review-cost fix
+    // does not get to smuggle it in. The containment for it lives AT that
+    // block (search cas-62b0 there), not here.
     //
-    // So a factory agent's `Agent` call gets exactly one new behaviour — the
-    // refusal above — and otherwise returns no decision, exactly as when the
-    // matcher never fired. Activating the other `Agent` branches deliberately
-    // is tracked separately.
+    // It deliberately does NOT live here as a blanket early return. An
+    // earlier draft of this fix returned `HookOutput::empty()` for every
+    // factory-agent `Agent` call at this point, which also silently disabled
+    // the supervisor `Agent(isolation="worktree")` deny immediately below —
+    // a live, tested worktree-leak guard (EPIC cas-7c88 / cas-483b), whose
+    // four tests in `handlers_tests::agent_worktree_block` went red and
+    // caught it. That guard is a deny, not a handoff: routing `Agent` to it
+    // can only refuse a spawn supervisors were already forbidden to make, so
+    // it is safe — and correct — to let the new matcher entry finally reach
+    // it. Only the minting path needs containing.
     // ========================================================================
-    if tool_name == "Agent" && is_factory_agent {
-        return Ok(HookOutput::empty());
-    }
 
     // ========================================================================
     // SUPERVISOR DISCIPLINE: Block Agent(isolation="worktree") for supervisors
@@ -622,7 +628,26 @@ pub fn handle_pre_tool_use(
     // spawn path. Authority stays entirely server-side: this hook leaves the
     // model-visible prompt/input byte-for-byte unchanged, while SubagentStart
     // binds the sole sealed handoff to the official distinct child agent_id.
+    //
+    // cas-62b0 CONTAINMENT: `Agent` in factory mode is excluded. cas-62b0 put
+    // `Agent` into both generated matchers so the review dispatch gate at the
+    // top of this function can see a hand-spawned persona fan-out. That newly
+    // routes `Agent` here too — and the factory settings file
+    // (`teams.rs::factory_hooks_block`) installs PreToolUse WITHOUT the
+    // `SubagentStart` binding half, so a handoff minted for a factory agent's
+    // `Agent` spawn could never bind and would deny that parent's next
+    // verifier spawn with "already awaiting SubagentStart" until expiry.
+    // (The generated settings from `cli/hook/config_gen.rs` DO install
+    // SubagentStart in the same atomic unit per cas-fda1, which is why the
+    // solo path is not excluded, and why the factory `Task` spelling — routed
+    // only by those generated settings — is not either.)
+    //
+    // Preserving the exact pre-cas-62b0 behaviour is the point: before it,
+    // `Agent` reached no matcher at all, so a factory agent's `Agent` spawn
+    // never minted. Activating it is a deliberate change to verification
+    // authority and belongs in its own task, not as a side effect here.
     if matches!(tool_name, "Task" | "Agent")
+        && !(tool_name == "Agent" && is_factory_agent)
         && input
             .tool_input
             .as_ref()

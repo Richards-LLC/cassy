@@ -206,8 +206,7 @@ pub struct TaskRequest {
     /// cas-code-review skill run (cas-b39f option (a)). Forwarded to
     /// the close handler, where it is parsed and validated before the
     /// P0 gate decision.
-    #[schemars(
-        description = "LEGACY `[code_review] owner = \"worker\"` MODE ONLY. \
+    #[schemars(description = "LEGACY `[code_review] owner = \"worker\"` MODE ONLY. \
                        Serialized ReviewOutcome JSON envelope from a \
                        cas-code-review run. Under the DEFAULT \
                        owner = \"supervisor\" configuration a factory worker \

@@ -398,7 +398,9 @@ mod tests {
         ));
         assert!(!tool_call_enters_review(
             "Agent",
-            Some(&serde_json::json!({"subagent_type": "general-purpose", "prompt": "Fix the flaky test."}))
+            Some(
+                &serde_json::json!({"subagent_type": "general-purpose", "prompt": "Fix the flaky test."})
+            )
         ));
         // Tools outside the entry list are never inspected, even if their
         // payload happens to mention the skill (e.g. a Bash grep for it).

@@ -8574,8 +8574,7 @@ fn format_code_review_required(supervisor_owned: bool) -> String {
     // supervisor to defer to — that caller IS the review owner and keeps the
     // original instructions. Only a factory worker is redirected.
     if supervisor_owned && crate::code_review_dispatch::is_factory_worker_from_env() {
-        return format!(
-            "⚠️ SUPERVISOR-OWNED REVIEW — DO NOT RUN cas-code-review\n\n\
+        return "⚠️ SUPERVISOR-OWNED REVIEW — DO NOT RUN cas-code-review\n\n\
              task close rejected: this task has reviewable code changes and no \
              review has been recorded for them.\n\n\
              You are a factory worker and this project sets \
@@ -8595,7 +8594,7 @@ fn format_code_review_required(supervisor_owned: bool) -> String {
                 bypass_code_review=true, which is supervisor-only).\n\n\
              To opt this project back into worker-run review, set \
              `cas config set code_review.owner worker`."
-        );
+            .to_string();
     }
     let step1 = if supervisor_owned {
         "1. Invoke the cas-code-review skill via the Skill or Task tool with \
@@ -12015,6 +12014,14 @@ mod code_review_gate_tests {
     #[test]
     fn code_change_without_findings_is_rejected_as_required() {
         let _g = env_lock();
+        // cas-62b0: this test asserts the SOLO-caller guidance (mode=interactive
+        // / mode=headless), which since cas-62b0 is only one of two shapes
+        // `format_code_review_required` can produce — a factory worker now gets
+        // the "do not run it, go to your supervisor" redirect instead. The role
+        // must therefore be pinned rather than inherited: this suite is run by
+        // CAS factory workers, whose sessions export CAS_AGENT_ROLE=worker, and
+        // left ambient this test passes on CI and fails inside the factory.
+        let _role = CallerRoleEnv::solo();
         let dir = repo_with_staged(&[("src/foo.rs", "fn new() {}\n")]);
         let t = base_task();
         let req = base_req(&t.id);
@@ -12204,16 +12211,67 @@ mod code_review_gate_tests {
         }
     }
 
-    /// Restore two env vars a factory-worker fixture had to set.
-    fn restore_worker_env(prev_role: Option<String>, prev_mode: Option<String>) {
-        unsafe {
-            match prev_role {
-                Some(v) => std::env::set_var("CAS_AGENT_ROLE", v),
-                None => std::env::remove_var("CAS_AGENT_ROLE"),
+    /// Pins the caller-role env `format_code_review_required` keys on
+    /// (`code_review_dispatch::is_factory_worker_from_env`) and restores it on
+    /// drop — including on panic, which a plain restore-at-the-end helper does
+    /// not do. A leaked `CAS_AGENT_ROLE` would silently change the branch every
+    /// later test in this module takes.
+    ///
+    /// Every test that asserts on this gate's TEXT must hold one. cas-62b0 made
+    /// the guidance caller-aware, so the ambient environment now decides which
+    /// message is produced — and this suite is routinely run by a CAS factory
+    /// worker, whose own session exports `CAS_AGENT_ROLE=worker` and
+    /// `CAS_FACTORY_MODE=1`. Left implicit, these tests pass on CI and fail on
+    /// the machine of anyone who runs them from inside the factory (which is
+    /// exactly how the first cut of this change was caught).
+    struct CallerRoleEnv {
+        prev_role: Option<String>,
+        prev_mode: Option<String>,
+    }
+
+    impl CallerRoleEnv {
+        /// A registered factory worker: the caller the supervisor-owned
+        /// redirect is FOR.
+        fn factory_worker() -> Self {
+            Self::set(Some("worker"), Some("1"))
+        }
+
+        /// A solo `claude`/CLI session with no factory around it: owns its own
+        /// review even under the supervisor-owned default.
+        fn solo() -> Self {
+            Self::set(None, None)
+        }
+
+        fn set(role: Option<&str>, mode: Option<&str>) -> Self {
+            let guard = Self {
+                prev_role: std::env::var("CAS_AGENT_ROLE").ok(),
+                prev_mode: std::env::var("CAS_FACTORY_MODE").ok(),
+            };
+            unsafe {
+                match role {
+                    Some(v) => std::env::set_var("CAS_AGENT_ROLE", v),
+                    None => std::env::remove_var("CAS_AGENT_ROLE"),
+                }
+                match mode {
+                    Some(v) => std::env::set_var("CAS_FACTORY_MODE", v),
+                    None => std::env::remove_var("CAS_FACTORY_MODE"),
+                }
             }
-            match prev_mode {
-                Some(v) => std::env::set_var("CAS_FACTORY_MODE", v),
-                None => std::env::remove_var("CAS_FACTORY_MODE"),
+            guard
+        }
+    }
+
+    impl Drop for CallerRoleEnv {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.prev_role {
+                    Some(v) => std::env::set_var("CAS_AGENT_ROLE", v),
+                    None => std::env::remove_var("CAS_AGENT_ROLE"),
+                }
+                match &self.prev_mode {
+                    Some(v) => std::env::set_var("CAS_FACTORY_MODE", v),
+                    None => std::env::remove_var("CAS_FACTORY_MODE"),
+                }
             }
         }
     }
@@ -12232,19 +12290,12 @@ mod code_review_gate_tests {
     fn supervisor_owned_close_never_tells_a_worker_to_run_the_review_cas_62b0() {
         let _g = env_lock();
         let dir = repo_with_staged(&[("src/foo.rs", "fn shipped() {}\n")]);
-        let prev_role = std::env::var("CAS_AGENT_ROLE").ok();
-        let prev_mode = std::env::var("CAS_FACTORY_MODE").ok();
-        unsafe {
-            std::env::set_var("CAS_AGENT_ROLE", "worker");
-            std::env::set_var("CAS_FACTORY_MODE", "1");
-        }
+        let _role = CallerRoleEnv::factory_worker();
 
         let t = base_task();
         let req = base_req(&t.id);
         // No envelope — the worker is forbidden from producing one here.
         let out = run_code_review_gate(&t, &req, dir.path(), true);
-
-        restore_worker_env(prev_role, prev_mode);
 
         match out {
             CodeReviewGateOutcome::Reject(msg) => {
@@ -12298,18 +12349,11 @@ mod code_review_gate_tests {
     fn worker_owned_review_still_instructs_the_worker_cas_62b0() {
         let _g = env_lock();
         let dir = repo_with_staged(&[("src/foo.rs", "fn shipped() {}\n")]);
-        let prev_role = std::env::var("CAS_AGENT_ROLE").ok();
-        let prev_mode = std::env::var("CAS_FACTORY_MODE").ok();
-        unsafe {
-            std::env::set_var("CAS_AGENT_ROLE", "worker");
-            std::env::set_var("CAS_FACTORY_MODE", "1");
-        }
+        let _role = CallerRoleEnv::factory_worker();
 
         let t = base_task();
         let req = base_req(&t.id);
         let out = run_code_review_gate(&t, &req, dir.path(), false);
-
-        restore_worker_env(prev_role, prev_mode);
 
         match out {
             CodeReviewGateOutcome::Reject(msg) => {
@@ -12338,18 +12382,11 @@ mod code_review_gate_tests {
     fn solo_close_under_the_supervisor_owned_default_is_not_redirected_cas_62b0() {
         let _g = env_lock();
         let dir = repo_with_staged(&[("src/foo.rs", "fn shipped() {}\n")]);
-        let prev_role = std::env::var("CAS_AGENT_ROLE").ok();
-        let prev_mode = std::env::var("CAS_FACTORY_MODE").ok();
-        unsafe {
-            std::env::remove_var("CAS_AGENT_ROLE");
-            std::env::remove_var("CAS_FACTORY_MODE");
-        }
+        let _role = CallerRoleEnv::solo();
 
         let t = base_task();
         let req = base_req(&t.id);
         let out = run_code_review_gate(&t, &req, dir.path(), true);
-
-        restore_worker_env(prev_role, prev_mode);
 
         match out {
             CodeReviewGateOutcome::Reject(msg) => {

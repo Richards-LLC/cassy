@@ -249,8 +249,8 @@ pub(crate) fn default_pre_tool_use_matcher() -> Vec<String> {
         "Skill".into(), // cas-bcfb: cas-code-review ownership gate (GH #125) — harness-native path
         "Workflow".into(), // cas-bcfb: same gate for direct cas-code-review workflow invocation
         "Agent".into(), // cas-62b0 (GH #152): current spelling of the subagent tool — the review
-        // gate's cost is the persona fan-out, which reaches the pipeline
-        // without `Skill`/`Workflow`. `Task` above covers the legacy spelling.
+                        // gate's cost is the persona fan-out, which reaches the pipeline
+                        // without `Skill`/`Workflow`. `Task` above covers the legacy spelling.
     ]
 }
 

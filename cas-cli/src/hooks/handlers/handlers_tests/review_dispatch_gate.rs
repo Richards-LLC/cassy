@@ -358,7 +358,10 @@ fn the_refusal_names_the_config_and_how_to_verify_it_cas_62b0() {
     let tmp = tempfile::tempdir().expect("tempdir");
 
     let out = handle_pre_tool_use(
-        &hook_input("Agent", serde_json::json!({"prompt": "cas-code-review personas"})),
+        &hook_input(
+            "Agent",
+            serde_json::json!({"prompt": "cas-code-review personas"}),
+        ),
         Some(tmp.path()),
     )
     .expect("handler ok");
@@ -501,4 +504,83 @@ fn every_review_entry_tool_is_routed_to_the_hook_cas_62b0() {
             "generated settings must route {tool} to PreToolUse"
         );
     }
+}
+
+/// cas-62b0 CONTAINMENT — routing `Agent` must add exactly ONE new effect.
+///
+/// Putting a tool into a PreToolUse matcher exposes it to every branch of
+/// `handle_pre_tool_use`, so "add `Agent` so the review gate can see the
+/// persona fan-out" is only safe if the branches it *also* switches on are
+/// accounted for. Two of them matter, and they pull in opposite directions:
+///
+/// - The supervisor `Agent(isolation="worktree")` deny (EPIC cas-7c88) is a
+///   REFUSAL of something supervisors were already forbidden to do, so
+///   letting `Agent` finally reach it is a fix, not a risk — asserted by the
+///   sibling test below.
+/// - The sealed task-verifier handoff MUST NOT switch on in factory mode: the
+///   factory settings file installs PreToolUse without the `SubagentStart`
+///   binding half, so a handoff minted for a factory `Agent` spawn could
+///   never bind and would deny that parent's NEXT verifier spawn with
+///   "already awaiting SubagentStart" until expiry.
+#[test]
+fn factory_agent_spawns_never_reach_the_verifier_handoff_minting_path_cas_62b0() {
+    let _env = worker_env();
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    // A factory `Agent(task-verifier)` spawn must behave exactly as it did
+    // before `Agent` was routed at all: no decision. Reaching the minting
+    // block would instead produce one of its authority denies (unavailable
+    // registry / anonymous parent / no owned dispatch), which is precisely
+    // the wedge this containment exists to prevent.
+    let out = handle_pre_tool_use(
+        &hook_input(
+            "Agent",
+            serde_json::json!({
+                "subagent_type": "task-verifier",
+                "prompt": "Verify task cas-1234."
+            }),
+        ),
+        Some(tmp.path()),
+    )
+    .expect("handler ok");
+    assert!(
+        deny_reason(&out).is_none(),
+        "a factory Agent(task-verifier) spawn must not reach the handoff minting path: {:?}",
+        deny_reason(&out)
+    );
+}
+
+/// The other half of the same invariant: the branch that SHOULD switch on.
+///
+/// The supervisor `Agent(isolation="worktree")` deny (EPIC cas-7c88 /
+/// cas-483b) refuses something supervisors were already forbidden to do, so
+/// letting the new matcher entry finally reach it is a fix, not a risk. The
+/// first cut of cas-62b0 contained `Agent` with a blanket early return at the
+/// top of the handler and silently disabled this guard;
+/// `handlers_tests::agent_worktree_block` caught it. Pinned here so the two
+/// containment decisions are asserted side by side and neither can be
+/// "simplified" into the other later.
+#[test]
+fn the_supervisor_worktree_leak_deny_survives_agent_containment_cas_62b0() {
+    let _env = TestEnvGuard::with_optional_vars(&[
+        ("CAS_AGENT_ROLE", Some("supervisor")),
+        ("CAS_FACTORY_MODE", Some("1")),
+    ]);
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    let mut input = hook_input(
+        "Agent",
+        serde_json::json!({
+            "subagent_type": "general-purpose",
+            "prompt": "do work",
+            "isolation": "worktree"
+        }),
+    );
+    input.agent_role = Some("supervisor".into());
+    let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
+    let reason = deny_reason(&out).expect("supervisor worktree-isolation spawn must be denied");
+    assert!(
+        reason.contains("spawn_workers"),
+        "the cas-7c88 worktree-leak deny must survive Agent containment: {reason}"
+    );
 }

@@ -4254,17 +4254,12 @@ struct WorkerInbox {
 
 /// Whether a queued prompt is the factory daemon delivering a fired reminder.
 ///
-/// `fire_reminder` (ui/factory/daemon/runtime/queue_and_events.rs) is the sole
-/// producer of this shape and formats it as `Reminder #<id>: <message>`; the
-/// prompt queue has no message-type column, so the prefix is the discriminator.
-/// Requiring the digits keeps a worker-authored message that merely opens with
-/// the word "Reminder" from being mistaken for one.
+/// The wire format is owned by `cas_store`, which also writes it in
+/// `fire_reminder` — producer and classifier share one definition on purpose,
+/// so a future wording change fails to compile instead of silently reviving
+/// this false positive.
 fn is_reminder_delivery(prompt: &str) -> bool {
-    let Some(rest) = prompt.trim_start().strip_prefix("Reminder #") else {
-        return false;
-    };
-    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-    !digits.is_empty() && rest[digits.len()..].starts_with(':')
+    cas_store::parse_reminder_delivery_id(prompt).is_some()
 }
 
 /// cas-f08d (GH #147): decide what a worker's unseen rows actually mean.
@@ -7211,6 +7206,54 @@ effort = "high"
 
         assert_eq!(classified.unread, 1, "{classified:?}");
         assert_eq!(classified.oldest_unread_secs, Some(600), "{classified:?}");
+    }
+
+    /// THE KNOWN RESIDUAL (documented deliberately rather than papered over).
+    ///
+    /// A worker that woke, acted, and chose NOT to re-arm — the final check of
+    /// its lane — leaves reminder rows that are consumed in fact but unproven
+    /// by the re-arm rule, so they keep counting as unread. Widening the rule
+    /// to cover them would mean suppressing on the mere existence of a past
+    /// reminder, which is exactly the hole that lets a real wedge hide.
+    ///
+    /// It is survivable because the alarm needs TWO conditions, not one:
+    /// `is_worker_stalled` requires an IN-PROGRESS task before
+    /// `format_priority_worker_status_alert` even consults the inbox. The
+    /// worker in this state has normally just closed or parked its task, so
+    /// `stalled` is false and no alarm fires however the rows are counted —
+    /// asserted below.
+    ///
+    /// The residual therefore narrows to one shape: a worker that acted on its
+    /// last reminder, did not re-arm, and left a task IN PROGRESS while going
+    /// quiet past the stall threshold. That worker gets `NOT WAKING` with a
+    /// misleading unread count — but it is also genuinely idle on live work and
+    /// waiting for nothing scheduled, so a supervisor looking at it is not
+    /// looking at the wrong thing. Reported to the supervisor rather than
+    /// silently widened.
+    #[test]
+    fn a_consumed_reminder_without_a_re_arm_cannot_alarm_once_the_task_is_done() {
+        let classified =
+            classify_worker_inbox(1, Some(900), &[reminder_row(-900)], None, at(0));
+        assert_eq!(
+            classified.unread, 1,
+            "unproven by the re-arm rule, so it stays counted: {classified:?}"
+        );
+
+        // No in-progress task -> not stalled -> the inbox is never consulted.
+        assert!(!is_worker_stalled(false, Some(900), 300, false));
+        assert_eq!(
+            format_priority_worker_status_alert(
+                false,
+                Some((900, "checkpoint")),
+                300,
+                None,
+                harness_publishes_turn_start(cas_mux::SupervisorCli::Claude),
+                0,
+                classified,
+            ),
+            None,
+            "a worker with no live task cannot be accused of not waking"
+        );
     }
 
     /// With no pending reminder at all, nothing is discounted — a worker that

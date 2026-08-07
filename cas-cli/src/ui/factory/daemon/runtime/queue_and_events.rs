@@ -4269,16 +4269,17 @@ fn fire_reminder(
             .map(|s| s.as_str())
             .unwrap_or("supervisor");
 
-        // Include triggering event context for event-based reminders
-        let prompt = match triggering_event {
-            Some(event) => format!(
-                "Reminder #{}: {} (triggered by: {})",
-                reminder.id,
-                reminder.message,
-                event.description()
-            ),
-            None => format!("Reminder #{}: {}", reminder.id, reminder.message),
-        };
+        // Include triggering event context for event-based reminders.
+        //
+        // cas-f08d (GH #147): the wire format is owned by cas_store so that
+        // `worker_status`, which must tell a reminder delivery apart from real
+        // mail to avoid accusing a healthy waiting worker of being wedged,
+        // parses exactly what is written here.
+        let prompt = cas_store::format_reminder_delivery(
+            reminder.id,
+            &reminder.message,
+            triggering_event.map(|event| event.description()).as_deref(),
+        );
 
         if let Err(e) =
             queue.enqueue_with_session(&reminder.owner_id, target, &prompt, session_name)

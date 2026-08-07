@@ -134,6 +134,45 @@ pub struct Reminder {
     pub session_id: Option<String>,
 }
 
+/// Wire prefix that marks a prompt-queue row as a fired-reminder delivery.
+///
+/// The prompt queue has no message-type column, so this prefix IS the
+/// discriminator between "the daemon delivered a reminder" and "somebody sent
+/// this worker a message" — and those two mean opposite things about a silent
+/// worker (cas-f08d / GH #147). It lives here, beside the pair of functions
+/// that write and read it, so the producer and every consumer share one
+/// definition: changing the wording breaks compilation, not behaviour.
+///
+/// The durable fix is a message-type column on `prompt_queue`; that is a schema
+/// migration and is deliberately out of scope for cas-f08d.
+const REMINDER_DELIVERY_PREFIX: &str = "Reminder #";
+
+/// Render a fired reminder as the prompt injected into the target's session.
+///
+/// `event_context` is the description of the DirectorEvent that fired an
+/// event-based reminder; time-based reminders pass `None`.
+pub fn format_reminder_delivery(id: i64, message: &str, event_context: Option<&str>) -> String {
+    match event_context {
+        Some(event) => format!("{REMINDER_DELIVERY_PREFIX}{id}: {message} (triggered by: {event})"),
+        None => format!("{REMINDER_DELIVERY_PREFIX}{id}: {message}"),
+    }
+}
+
+/// The reminder ID behind a delivery produced by [`format_reminder_delivery`],
+/// or `None` when the prompt is ordinary mail.
+///
+/// The digits and the colon are both required: a message that merely opens with
+/// the word "Reminder" is real mail, and treating it as a delivery would revive
+/// exactly the false positive this pair exists to kill.
+pub fn parse_reminder_delivery_id(prompt: &str) -> Option<i64> {
+    let rest = prompt.trim_start().strip_prefix(REMINDER_DELIVERY_PREFIX)?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    if digits.is_empty() || !rest[digits.len()..].starts_with(':') {
+        return None;
+    }
+    digits.parse().ok()
+}
+
 /// Schema for reminders table
 const REMINDER_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS reminders (
@@ -625,6 +664,44 @@ mod tests {
         // Self-reminder: target defaults to owner
         assert_eq!(pending[0].owner_id, "supervisor-1");
         assert_eq!(pending[0].target_id, "supervisor-1");
+    }
+
+    /// cas-f08d (GH #147): the delivery wire format is a contract between the
+    /// daemon that writes it and `worker_status`, which reads it to tell a
+    /// reminder a worker already acted on from mail it never woke for. Writing
+    /// and parsing must agree for every shape the daemon can produce.
+    #[test]
+    fn reminder_delivery_format_and_parse_round_trip() {
+        let timed = format_reminder_delivery(44, "check CI again", None);
+        assert_eq!(timed, "Reminder #44: check CI again");
+        assert_eq!(parse_reminder_delivery_id(&timed), Some(44));
+
+        let evented = format_reminder_delivery(7, "review the merge", Some("task cas-1 completed"));
+        assert_eq!(
+            evented,
+            "Reminder #7: review the merge (triggered by: task cas-1 completed)"
+        );
+        assert_eq!(parse_reminder_delivery_id(&evented), Some(7));
+    }
+
+    /// Ordinary mail must never parse as a delivery: mistaking a supervisor's
+    /// message for a reminder the worker already handled would discount real
+    /// unread work and silence a genuine wedge.
+    #[test]
+    fn ordinary_mail_is_not_parsed_as_a_reminder_delivery() {
+        assert_eq!(
+            parse_reminder_delivery_id("Reminder: stop polling and close the task"),
+            None
+        );
+        assert_eq!(parse_reminder_delivery_id("Reminder #abc: malformed"), None);
+        assert_eq!(
+            parse_reminder_delivery_id("Reminder #12 without a colon"),
+            None
+        );
+        assert_eq!(
+            parse_reminder_delivery_id("Please set a Reminder #44: for the CI run"),
+            None
+        );
     }
 
     #[test]

@@ -40,6 +40,7 @@ mod mcp_cmd;
 pub mod memory;
 mod open;
 mod queue;
+pub mod retrieval_parity;
 mod status;
 mod statusline;
 mod update;
@@ -255,6 +256,10 @@ pub enum Commands {
     /// Shortcut for `cas worktree sweep --all-repos`
     #[command(name = "sweep-all")]
     SweepAll(sweep::SweepBaseArgs),
+
+    /// Capture and replay memory-retrieval baselines (migration parity harness)
+    #[command(name = "retrieval-parity", subcommand)]
+    RetrievalParity(retrieval_parity::RetrievalParityCommands),
 }
 
 /// Authentication requirement for a command.
@@ -307,7 +312,8 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::Memory(_)
         | Commands::KnownRepos(_)
         | Commands::Worktree(_)
-        | Commands::SweepAll(_) => AuthRequirement::NotRequired,
+        | Commands::SweepAll(_)
+        | Commands::RetrievalParity(_) => AuthRequirement::NotRequired,
 
         Commands::Serve => AuthRequirement::NotRequired,
 
@@ -486,6 +492,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::KnownRepos(_) => "known-repos".to_string(),
         Commands::Worktree(_) => "worktree".to_string(),
         Commands::SweepAll(_) => "sweep-all".to_string(),
+        Commands::RetrievalParity(_) => "retrieval-parity".to_string(),
     }
 }
 
@@ -558,6 +565,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::KnownRepos(cmd) => known_repos::execute(cmd),
         Commands::Worktree(cmd) => worktree::execute(cmd),
         Commands::SweepAll(args) => sweep::execute_sweep_all(args),
+        Commands::RetrievalParity(cmd) => retrieval_parity::execute(cmd, cas_root),
     }
 }
 

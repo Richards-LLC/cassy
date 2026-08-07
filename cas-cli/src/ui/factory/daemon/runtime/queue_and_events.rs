@@ -796,10 +796,21 @@ pub(super) enum DeferredInboxOutcome {
     /// message is not lost, so this poll must not manufacture another copy;
     /// the row stays pending and the write is content-deduped as before.
     StillPending,
-    /// The copy we wrote is GONE from the inbox: the harness drained it into
-    /// the recipient's context. On this transport an inbox write that the
-    /// harness has taken *is* delivery — consume the row.
+    /// The copy we wrote is GONE from the inbox AND the recipient's pane
+    /// produced output afterwards: the harness drained it *and* took a turn.
+    /// Consume the row.
     HarnessConsumed,
+    /// cas-ef14 (GH #139): the copy is gone but the pane has not yet said
+    /// anything, and the observation window has not elapsed. Hold the row —
+    /// re-writing now would append a fresh copy (the GH #124 storm) and
+    /// consuming now would repeat the GH #139 silent stall.
+    DrainedProbing,
+    /// cas-ef14 (GH #139): the copy is gone, the observation window elapsed and
+    /// the pane never produced a byte — the harness ingested the message into
+    /// its own pending-message store without surfacing it as a turn. Do NOT
+    /// re-write the inbox (no storm) and do NOT consume the row; attempt a
+    /// PTY-nudge-only wake instead, on the existing re-nudge cadence.
+    DrainedAwaitingWake,
 }
 
 /// cas-ceae (GH #124): decide the fate of a wake-deferred Agent-Teams inbox row.
@@ -814,26 +825,74 @@ pub(super) enum DeferredInboxOutcome {
 /// check misses and the next ~100ms poll appends a brand-new copy: one fresh
 /// injected copy per harness drain, forever.
 ///
-/// The missing signal is exactly the one the drain provides. `copy_still_unread
-/// == false` after we wrote it means the recipient HAS the message — which is
-/// stronger evidence of receipt than a pane nudge ever was — so the row is
-/// consumed instead of rewritten. A read/unreadable/unparseable inbox also
-/// yields `false`, and that is the safe direction: the worst case is consuming
-/// a row whose copy is already in the recipient's inbox.
+/// The drain is the right signal for the WRITE half — once our copy is gone,
+/// writing again manufactures a duplicate, so the write must stop. cas-ceae
+/// also used it for the CONSUME half, and that is the cas-ef14 (GH #139) bug:
+/// Claude Code's teammate layer drains the inbox FILE into its own
+/// pending-message store within ~a second of the write, on a file watcher,
+/// independently of any turn. Draining therefore proves the harness INGESTED
+/// the message, never that the recipient SURFACED it. Every row that reaches
+/// here is by construction one whose wake was deferred (`inbox_deferred_writes`
+/// is populated only on the `wake_deferred` arm), so consuming on the drain
+/// cancelled the cas-f02b/cas-45c4 retry-until-woken contract for exactly the
+/// rows that depend on it — the four overnight incidents where a message sat
+/// unread for hours and only an urgent interrupt woke the recipient.
+///
+/// So the two facts are now decided by two different signals:
+/// - `copy_still_unread` governs whether to write again (never, once drained);
+/// - `pane_turn` — pane output observed after our write, the same corroboration
+///   cas-ac7e's urgent probe uses — governs whether to consume.
+///
+/// `pane_turn` is [`UrgentWakeOutcome`] so both wake probes share one
+/// classifier: `Observed` = the pane spoke after our write (a turn happened),
+/// `Pending` = silent but still inside the observation window, `Unobserved` =
+/// silent past the window (ingested, never surfaced).
 ///
 /// Pure so the storm shape is testable without a daemon, a harness or a clock.
 pub(super) fn deferred_inbox_outcome(
     written_earlier: bool,
     copy_still_unread: bool,
+    pane_turn: UrgentWakeOutcome,
 ) -> DeferredInboxOutcome {
     if !written_earlier {
         return DeferredInboxOutcome::Deliver;
     }
     if copy_still_unread {
-        DeferredInboxOutcome::StillPending
-    } else {
-        DeferredInboxOutcome::HarnessConsumed
+        return DeferredInboxOutcome::StillPending;
     }
+    match pane_turn {
+        UrgentWakeOutcome::Observed => DeferredInboxOutcome::HarnessConsumed,
+        UrgentWakeOutcome::Pending => DeferredInboxOutcome::DrainedProbing,
+        UrgentWakeOutcome::Unobserved => DeferredInboxOutcome::DrainedAwaitingWake,
+    }
+}
+
+/// cas-ef14 (GH #139): how long the daemon waits for a recipient's pane to show
+/// ANY output after its inbox copy was drained before concluding the harness
+/// ingested the message without surfacing it as a turn.
+///
+/// Deliberately longer than [`URGENT_WAKE_OBSERVE_WINDOW`]: an urgent inject
+/// breaks the turn itself and must render immediately, whereas a teammate inbox
+/// drain may legitimately be followed by the harness finishing a render it had
+/// already started. 15s is still far below the 60s re-nudge cadence, so a
+/// wrongly-silent pane loses at most one cadence tick.
+const INBOX_DRAIN_TURN_WINDOW: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// cas-ef14 (GH #139): a queue row whose payload was written into the
+/// recipient's Agent-Teams inbox and left pending because the wake was
+/// deferred.
+///
+/// Carries the pane's output byte count at write time so a later poll can ask
+/// the only question that distinguishes "the recipient read it" from "the
+/// harness filed it": did the pane say anything afterwards?
+#[derive(Debug, Clone)]
+pub(crate) struct InboxDeferredWrite {
+    /// Pane the copy was written for (already name-normalised).
+    pub(crate) pane: String,
+    /// `Mux::pane_bytes_received` at the moment the copy was written.
+    pub(crate) bytes_at_write: u64,
+    /// When the copy was written, for the observation window.
+    pub(crate) written_at: std::time::Instant,
 }
 
 impl FactoryDaemon {
@@ -960,9 +1019,9 @@ impl FactoryDaemon {
         from: &str,
         text: &str,
     ) -> DeferredInboxOutcome {
-        if !self.inbox_deferred_writes.contains(&row_id) {
+        let Some(written) = self.inbox_deferred_writes.get(&row_id) else {
             return DeferredInboxOutcome::Deliver;
-        }
+        };
         let Some(teams) = self.teams.as_ref() else {
             return DeferredInboxOutcome::Deliver;
         };
@@ -983,7 +1042,20 @@ impl FactoryDaemon {
         } else {
             pane_target
         };
-        deferred_inbox_outcome(true, teams.inbox_has_unread_copy(inbox_target, from, text))
+        // cas-ef14 (GH #139): the consume decision needs pane-output evidence,
+        // not the drain. Same classifier as the cas-ac7e urgent probe so the
+        // two wake proofs cannot drift.
+        let pane_turn = classify_urgent_wake(
+            written.bytes_at_write,
+            self.app.mux.pane_bytes_received(&written.pane),
+            written.written_at.elapsed(),
+            INBOX_DRAIN_TURN_WINDOW,
+        );
+        deferred_inbox_outcome(
+            true,
+            teams.inbox_has_unread_copy(inbox_target, from, text),
+            pane_turn,
+        )
     }
 
     pub(super) async fn handle_mux_event(&mut self, event: cas_mux::MuxEvent) {
@@ -2029,13 +2101,17 @@ impl FactoryDaemon {
             let inbox_source =
                 self.inbox_source_name(&queued.source, &worker_names, &supervisor_name);
 
-            // cas-ceae (GH #124 + #123): an inbox write the harness has taken IS
-            // delivery. Before doing anything else with a row we already wrote
-            // and left pending, ask whether our copy is still there. If the
-            // harness drained it, consume the row — otherwise the next ~100ms
-            // poll appends a brand-new copy (the 385x worker flood; the same
-            // defect, throttled to 60s, is the supervisor's duplicated
-            // lifecycle pair in one injected batch).
+            // cas-ceae (GH #124 + #123): before doing anything else with a row
+            // we already wrote and left pending, ask whether our copy is still
+            // there — if the harness drained it, writing again appends a
+            // brand-new copy (the 385x worker flood; the same defect, throttled
+            // to 60s, is the supervisor's duplicated lifecycle pair).
+            //
+            // cas-ef14 (GH #139): the drain stops the WRITE, but only pane
+            // output proves the recipient took a TURN. A drained-but-silent row
+            // is neither re-written nor consumed: it stays pending and retries a
+            // PTY-nudge-only wake on the cadence below.
+            let mut nudge_only = false;
             match self.deferred_inbox_outcome_for(
                 queued.id,
                 target,
@@ -2058,8 +2134,8 @@ impl FactoryDaemon {
                             message_id = queued.id,
                             source = %queued.source,
                             target_agent = %target,
-                            "cas-ceae: recipient's harness took the inbox copy — row consumed \
-                             instead of re-written"
+                            "cas-ceae/cas-ef14: harness took the inbox copy and the pane then \
+                             spoke — row consumed instead of re-written"
                         );
                     }
                     continue;
@@ -2077,6 +2153,46 @@ impl FactoryDaemon {
                         prompt_id = queued.id,
                         target_agent = %target,
                         "cas-ceae: written copy is still unread — retry is dedup-guarded"
+                    );
+                }
+                DeferredInboxOutcome::DrainedProbing => {
+                    // cas-ef14: the harness filed our copy but the pane has not
+                    // spoken yet and the window is still open. Writing again
+                    // would duplicate; consuming would repeat the silent stall.
+                    let _ = queue.record_pending_reason(
+                        queued.id,
+                        cas_store::PendingReason::GatedNotReady,
+                        Some(
+                            "inbox copy drained by the harness; awaiting evidence the recipient \
+                             surfaced it as a turn",
+                        ),
+                    );
+                    tracing::debug!(
+                        target: "cas::coordination",
+                        stage = "inbox_drain_probing",
+                        prompt_id = queued.id,
+                        target_agent = %target,
+                        "cas-ef14: drained copy, pane still silent inside the observation window"
+                    );
+                    continue;
+                }
+                DeferredInboxOutcome::DrainedAwaitingWake => {
+                    // cas-ef14 (GH #139): the harness ingested the message into
+                    // its own queue and never surfaced it. This is the reported
+                    // bug's exact state. Suppress the re-write (no storm) and
+                    // fall through so the cadence gate and the wake decision can
+                    // try a PTY nudge — the only channel that creates a turn for
+                    // a Claude teammate parked at its prompt.
+                    nudge_only = true;
+                    tracing::info!(
+                        target: "cas::coordination",
+                        stage = "inbox_drain_unsurfaced",
+                        channel = "prompt_queue",
+                        message_id = queued.id,
+                        source = %queued.source,
+                        target_agent = %target,
+                        "cas-ef14: harness filed the inbox copy without taking a turn — retrying \
+                         as a pane nudge"
                     );
                 }
                 DeferredInboxOutcome::Deliver => {}
@@ -2097,7 +2213,7 @@ impl FactoryDaemon {
             // consume terminal.
             if row_needs_renudge_cadence(
                 Self::row_is_supervisor_wake(&queued.source, &queued.prompt),
-                self.inbox_deferred_writes.contains(&queued.id),
+                self.inbox_deferred_writes.contains_key(&queued.id),
                 urgent_wake_is_unresolved(
                     queued.urgent,
                     self.lifecycle_redelivery_attempts.contains_key(&queued.id),
@@ -2590,16 +2706,29 @@ impl FactoryDaemon {
                     // already retracts the director's MERGE REQUIRED alerts,
                     // so it withdraws itself once the merge lands instead of
                     // being read later as an outstanding ask.
-                    self.deliver_to_worker_with_idle_nudge(
-                        target,
-                        &inbox_source,
-                        &prompt_with_instructions,
-                        queued.summary.as_deref(),
-                        None,
-                        worker_is_idle,
-                        merge_request_task.as_deref(),
-                    )
-                    .await
+                    if nudge_only {
+                        // cas-ef14 (GH #139): the recipient's harness already
+                        // holds this payload — re-writing the inbox is the
+                        // GH #124 storm. Only the pane nudge is left to try.
+                        self.nudge_pane_only(
+                            target,
+                            &inbox_source,
+                            &prompt_with_instructions,
+                            worker_is_idle,
+                        )
+                        .await
+                    } else {
+                        self.deliver_to_worker_with_idle_nudge(
+                            target,
+                            &inbox_source,
+                            &prompt_with_instructions,
+                            queued.summary.as_deref(),
+                            None,
+                            worker_is_idle,
+                            merge_request_task.as_deref(),
+                        )
+                        .await
+                    }
                 };
                 match inject_result {
                     Ok(cas_mux::InjectOutcome::Delivered) => {
@@ -2844,7 +2973,30 @@ impl FactoryDaemon {
                 // whether the harness took it (consume) instead of blindly
                 // appending another copy, and the cadence gate above starts
                 // ticking from this delivery rather than from the poll after it.
-                self.inbox_deferred_writes.insert(queued.id);
+                //
+                // cas-ef14 (GH #139): record the pane's output byte count NOW,
+                // so a later poll can tell "the recipient surfaced it" (pane
+                // spoke) from "the harness merely filed it" (pane silent). The
+                // entry is only created once per row — a re-observed write must
+                // not restart the observation window, or a pane that never
+                // speaks would look freshly-probed forever.
+                let deferred_pane = if target == "supervisor" {
+                    self.app.supervisor_name().to_string()
+                } else {
+                    target.to_string()
+                };
+                let bytes_at_write = self
+                    .app
+                    .mux
+                    .pane_bytes_received(&deferred_pane)
+                    .unwrap_or(0);
+                self.inbox_deferred_writes
+                    .entry(queued.id)
+                    .or_insert_with(|| InboxDeferredWrite {
+                        pane: deferred_pane,
+                        bytes_at_write,
+                        written_at: std::time::Instant::now(),
+                    });
                 self.lifecycle_redelivery_attempts
                     .entry(queued.id)
                     .or_insert_with(std::time::Instant::now);
@@ -5109,7 +5261,10 @@ mod tests {
     // cas-ceae (GH #124 + #123): an inbox write the harness took IS delivery
     // -----------------------------------------------------------------------
 
-    use super::{DeferredInboxOutcome, deferred_inbox_outcome, row_needs_renudge_cadence};
+    use super::{
+        DeferredInboxOutcome, INBOX_DRAIN_TURN_WINDOW, UrgentWakeOutcome, deferred_inbox_outcome,
+        row_needs_renudge_cadence,
+    };
 
     /// Outcome of replaying one pending queue row across a window of daemon
     /// polls while the recipient's harness drains its inbox on its own cadence.
@@ -5133,12 +5288,20 @@ mod tests {
     /// - the write is content-deduped only while OUR copy is still in the file;
     /// - the harness DRAINS the file every `drain_every_ms`, removing our copy —
     ///   which silently re-arms the append.
+    ///
+    /// cas-ef14 (GH #139) adds `pane_speaks_after_drain`: whether the
+    /// recipient's pane produces output once the harness has taken the copy.
+    /// `true` models a recipient that actually surfaced the message as a turn
+    /// (the busy worker of the original incident); `false` models the GH #139
+    /// shape where the harness filed the message into its own pending-message
+    /// store and the recipient stayed parked at its prompt.
     fn replay_pending_inbox_row(
         poll_ms: u64,
         window_ms: u64,
         drain_every_ms: u64,
         is_supervisor_wake: bool,
         cas_ceae_guards: bool,
+        pane_speaks_after_drain: bool,
     ) -> InboxStorm {
         let start = std::time::Instant::now();
         let mut copies = 0usize;
@@ -5156,13 +5319,33 @@ mod tests {
                 copy_in_inbox = false;
             }
 
-            // Guard 1: an inbox write the harness has taken is delivery.
-            if cas_ceae_guards
-                && deferred_inbox_outcome(written_earlier, copy_in_inbox)
-                    == DeferredInboxOutcome::HarnessConsumed
-            {
-                consumed_after_ms = Some(elapsed);
-                break;
+            // Guard 1: an inbox write the harness took AND then surfaced as a
+            // turn is delivery (cas-ceae + cas-ef14). Drain alone is not.
+            let pane_turn = if copy_in_inbox {
+                UrgentWakeOutcome::Pending
+            } else if pane_speaks_after_drain {
+                UrgentWakeOutcome::Observed
+            } else if std::time::Duration::from_millis(elapsed) >= INBOX_DRAIN_TURN_WINDOW {
+                UrgentWakeOutcome::Unobserved
+            } else {
+                UrgentWakeOutcome::Pending
+            };
+            let guard_outcome = deferred_inbox_outcome(written_earlier, copy_in_inbox, pane_turn);
+            if cas_ceae_guards {
+                match guard_outcome {
+                    DeferredInboxOutcome::HarnessConsumed => {
+                        consumed_after_ms = Some(elapsed);
+                        break;
+                    }
+                    // cas-ef14: drained but never surfaced — never re-write the
+                    // inbox, never consume; wait for the pane nudge.
+                    DeferredInboxOutcome::DrainedProbing
+                    | DeferredInboxOutcome::DrainedAwaitingWake => {
+                        elapsed += poll_ms;
+                        continue;
+                    }
+                    DeferredInboxOutcome::StillPending | DeferredInboxOutcome::Deliver => {}
+                }
             }
 
             // Guard 2: the cas-d732 cadence, generalized past supervisor rows.
@@ -5213,7 +5396,7 @@ mod tests {
     #[test]
     fn a_pending_worker_inbox_row_is_injected_exactly_once_cas_ceae() {
         let thirteen_minutes_ms = 13 * 60 * 1000;
-        let before = replay_pending_inbox_row(100, thirteen_minutes_ms, 2_000, false, false);
+        let before = replay_pending_inbox_row(100, thirteen_minutes_ms, 2_000, false, false, true);
         assert!(
             before.copies > 300,
             "the simulation must reproduce the reported flood before asserting the fix; \
@@ -5225,7 +5408,7 @@ mod tests {
             "pre-fix the row was never consumed — that is why it stormed forever"
         );
 
-        let after = replay_pending_inbox_row(100, thirteen_minutes_ms, 2_000, false, true);
+        let after = replay_pending_inbox_row(100, thirteen_minutes_ms, 2_000, false, true, true);
         assert_eq!(
             after.copies, 1,
             "a worker may never receive more injected copies of one message than the \
@@ -5247,14 +5430,14 @@ mod tests {
     #[test]
     fn a_pending_supervisor_lifecycle_row_stops_duplicating_per_batch_cas_ceae() {
         let eleven_minutes_ms = 11 * 60 * 1000 + 18_000;
-        let before = replay_pending_inbox_row(100, eleven_minutes_ms, 2_000, true, false);
+        let before = replay_pending_inbox_row(100, eleven_minutes_ms, 2_000, true, false, true);
         assert!(
             before.copies > 1,
             "pre-fix the supervisor batch carried repeat copies of one transition; got {}",
             before.copies
         );
 
-        let after = replay_pending_inbox_row(100, eleven_minutes_ms, 2_000, true, true);
+        let after = replay_pending_inbox_row(100, eleven_minutes_ms, 2_000, true, true, true);
         assert_eq!(
             after.copies, 1,
             "one transition, one injected copy — no duplicate notification id in a batch"
@@ -5271,12 +5454,12 @@ mod tests {
     #[test]
     fn the_first_delivery_of_a_worker_row_is_never_delayed_cas_ceae() {
         assert_eq!(
-            deferred_inbox_outcome(false, false),
+            deferred_inbox_outcome(false, false, UrgentWakeOutcome::Unobserved),
             DeferredInboxOutcome::Deliver,
             "a row this daemon has not written is plain first-time delivery"
         );
         assert_eq!(
-            deferred_inbox_outcome(false, true),
+            deferred_inbox_outcome(false, true, UrgentWakeOutcome::Observed),
             DeferredInboxOutcome::Deliver,
             "inbox contents cannot gate a row we never wrote"
         );
@@ -5292,18 +5475,69 @@ mod tests {
     #[test]
     fn an_unread_inbox_copy_keeps_its_row_pending_cas_ceae() {
         assert_eq!(
-            deferred_inbox_outcome(true, true),
+            deferred_inbox_outcome(true, true, UrgentWakeOutcome::Unobserved),
             DeferredInboxOutcome::StillPending,
             "our copy is unread — consuming here would be the silent stall cas-f02b fixed"
         );
         assert_eq!(
-            deferred_inbox_outcome(true, false),
+            deferred_inbox_outcome(true, false, UrgentWakeOutcome::Observed),
             DeferredInboxOutcome::HarnessConsumed,
-            "our copy is gone — the harness took it, which is delivery on this transport"
+            "our copy is gone AND the pane spoke — the recipient surfaced it as a turn"
         );
         assert!(
             row_needs_renudge_cadence(false, true, false),
             "a worker row already written to an inbox is under the cadence contract"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // cas-ef14 (GH #139): the drain is not a turn
+    // -----------------------------------------------------------------------
+
+    /// The load-bearing regression. Four overnight incidents had this exact
+    /// shape: the daemon wrote the inbox copy, deferred the wake, saw the copy
+    /// disappear ~0.5s later (Claude Code's teammate watcher filing it into its
+    /// own pending-message store) and consumed the row on that alone. The
+    /// recipient stayed parked and the message was never surfaced — worst case
+    /// 2.5 hours, cleared only by an urgent interrupt.
+    #[test]
+    fn a_drained_but_unsurfaced_copy_must_not_consume_its_row_cas_ef14() {
+        assert_eq!(
+            deferred_inbox_outcome(true, false, UrgentWakeOutcome::Unobserved),
+            DeferredInboxOutcome::DrainedAwaitingWake,
+            "the harness filing our copy is not evidence the recipient took a turn — consuming \
+             here is GH #139"
+        );
+        assert_eq!(
+            deferred_inbox_outcome(true, false, UrgentWakeOutcome::Pending),
+            DeferredInboxOutcome::DrainedProbing,
+            "inside the observation window the row is held: neither re-written (GH #124 storm) \
+             nor consumed (GH #139 stall)"
+        );
+        assert!(
+            row_needs_renudge_cadence(false, true, false),
+            "the drained-awaiting-wake retry must stay on the 60s cadence, not the 100ms poll"
+        );
+    }
+
+    /// AC3 counterpart to the storm replay: with the recipient's pane silent
+    /// after the drain — the GH #139 shape — the fix must still emit exactly
+    /// ONE inbox copy (GH #124 stays fixed) while refusing to terminalize the
+    /// row (GH #139 is fixed). Silent limbo is what the pane nudge, retried on
+    /// the cadence, then resolves.
+    #[test]
+    fn a_silent_recipient_gets_one_copy_and_keeps_its_row_pending_cas_ef14() {
+        let ten_minutes_ms = 10 * 60 * 1_000;
+        let stalled = replay_pending_inbox_row(100, ten_minutes_ms, 2_000, false, true, false);
+        assert_eq!(
+            stalled.copies, 1,
+            "a recipient that never surfaces the message must still receive exactly one copy — \
+             re-writing is the GH #124 385x flood"
+        );
+        assert!(
+            stalled.consumed_after_ms.is_none(),
+            "the row must stay pending so the wake is still owed and `message_status` keeps \
+             telling the sender the truth"
         );
     }
 

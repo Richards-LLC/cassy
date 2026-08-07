@@ -483,6 +483,45 @@ impl FactoryDaemon {
             return Ok(primary_outcome);
         }
 
+        self.pty_nudge(target, source, text).await
+    }
+
+    /// cas-ef14 (GH #139): the pane-nudge half of
+    /// [`Self::deliver_to_worker_with_idle_nudge`], WITHOUT the inbox write.
+    ///
+    /// Used when the recipient's harness has already drained our inbox copy
+    /// into its own pending-message store but never surfaced it as a turn. The
+    /// message is not lost and must not be written again (that is the GH #124
+    /// storm) — the only thing still owed is the turn, and on this transport a
+    /// PTY inject is the only way to create one for a Claude teammate parked at
+    /// its prompt.
+    ///
+    /// `worker_is_idle == false` means the wake decision vetoed this pass: the
+    /// row stays pending (the caller's `wake_deferred` bookkeeping is unchanged)
+    /// and a later poll retries on the re-nudge cadence.
+    pub(crate) async fn nudge_pane_only(
+        &self,
+        target: &str,
+        source: &str,
+        text: &str,
+        worker_is_idle: bool,
+    ) -> anyhow::Result<InjectOutcome> {
+        if !worker_is_idle {
+            return Ok(InjectOutcome::Delivered);
+        }
+        self.pty_nudge(target, source, text).await
+    }
+
+    /// Shared PTY-nudge tail: frame the payload for the recipient's harness and
+    /// type it into the pane. Best-effort — every failure mode is logged and
+    /// reported as `Delivered`, because by construction the recipient already
+    /// holds an inbox copy by the time this runs.
+    async fn pty_nudge(
+        &self,
+        target: &str,
+        source: &str,
+        text: &str,
+    ) -> anyhow::Result<InjectOutcome> {
         let pane_target = if target == "supervisor" {
             self.app.supervisor_name()
         } else {

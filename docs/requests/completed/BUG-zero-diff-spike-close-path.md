@@ -1,3 +1,5 @@
+> **Disposition (2026-08-07, cas-ab75):** RESOLVED — filed as [#62](https://github.com/pippenz/cas/issues/62) (closed completed). Fix verified on `main`: `a0cf45c5` "fix(cas-e74c): scope close merge guard to the task's own delivery" (symptoms 3–4) and `e18e18cb` "fix(cas-1932): unblock the zero-diff spike close path" (symptoms 1–2 plus the approved-verification lookup miss). Archived.
+
 > Migrated to GitHub Issues: [#62](https://github.com/pippenz/cas/issues/62)
 
 # BUG: close path for a zero-diff spike in supervisor-review mode is a two-stage trap

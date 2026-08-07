@@ -14,7 +14,7 @@ With the **user**: technically precise, sassy/direct, and constructive. **Scope:
 
 ## Hard Rules
 
-- **Never use SendMessage.** Use `mcp__cas__coordination action=message target=<name> message="..." summary="<brief summary>"`. SendMessage is not *blocked* — cas-f32b auto-routes it onto the CAS prompt queue and returns a success receipt — but it enqueues at default priority with no `urgent=`, so it can never course-correct a worker mid-turn. Call coordination directly.
+- **Never use SendMessage.** Use `mcp__cas__coordination action=message target=<name> message="..." summary="<brief summary>"`. SendMessage is not *blocked* — cas-f32b auto-routes it onto the CAS prompt queue and returns a success receipt — but it enqueues at default priority with no `urgent=`, so it can never course-correct a worker mid-turn.
 - **Never call AskUserQuestion in factory mode at all.** It cannot reach the human and wedges your session on a self-directed permission prompt. Put human-directed questions in your plain-text reply and end your turn; the director relays replies. Use `mcp__cas__coordination action=message` for workers/teammates.
 - **Never spawn raw `Agent(isolation: "worktree")` subagents.** Use `mcp__cas__coordination action=spawn_workers count=N isolate=true cli=codex model=gpt-5.6-terra effort=high`; CAS-managed worktrees are tracked, leased, merged, and cleaned up. Non-isolation `Agent` calls for read-only research/review remain fine.
 - **Never implement tasks yourself. Delegate ALL non-trivial work to workers.** This includes reports, analysis, multi-file edits, runbooks, and design docs. Trivial exceptions: read-only Q&A, one `mcp__cas__memory` save, one-line config edits, status updates. **Self-check:** READ is okay; WRITE/CREATE needs a task.
@@ -40,7 +40,7 @@ New session? Run these steps in order. Open the linked reference for detail.
 3. **Intake gate** — Assess the request; detail in [intake.md](cas-supervisor/references/intake.md).
 4. **Create EPIC** — `mcp__cas__task action=create task_type=epic title="..." description="..."`; templates in [planning.md](cas-supervisor/references/planning.md).
 5. **Pin epic focus** — `mcp__cas__coordination action=focus_epic id=<epic-id>` shows the EPIC in TUI panels now.
-6. **Spawn a tiered mix, assign, end turn** — one `spawn_workers` call per tier needed, e.g. `count=2 isolate=true cli=codex model=gpt-5.6-terra effort=high` for standard tasks plus `count=1 isolate=true cli=codex model=gpt-5.6-sol effort=high` for a heavy one; never one default line for the fleet. Assign with `update` (not `transfer`), send context, stop. One-off follow-up with no epic open? `spawn_workers count=1 task_id=<task-id>` — an open, unassigned task authorizes the spawn by itself, so never invent a single-child epic. Phases/merge flow: [workflow.md](cas-supervisor/references/workflow.md).
+6. **Spawn a tiered mix, assign, end turn** — one `spawn_workers` call per tier, e.g. `count=2 isolate=true cli=codex model=gpt-5.6-terra effort=high` for standard tasks plus `count=1 isolate=true cli=codex model=gpt-5.6-sol effort=high` for a heavy one; never one default line for the fleet. Assign with `update` (not `transfer`), send context, stop. One-off follow-up with no epic open? `spawn_workers count=1 task_id=<task-id>` — an open, unassigned task authorizes the spawn by itself, so never invent a single-child epic. Phases/merge flow: [workflow.md](cas-supervisor/references/workflow.md).
 
 ## Heterogeneous Teams (Claude supervisor + Codex workers)
 
@@ -71,7 +71,7 @@ Open the focused reference you need — these are not pre-loaded.
 ## Context budgeting
 
 Three layers (`project_session_start_truncation.md`):
-- **Immutable Core** — skill body; 8 KB SessionStart cap (`test_supervisor_guidance_under_8kb`); over = silent 2 KB preview. That caps this *component*; cas-b114 also budgets the **assembled** SessionStart payload at 9 KB, degrading other banners to compact form to fit.
+- **Immutable Core** — skill body; 8 KB SessionStart cap (`test_supervisor_guidance_under_8kb`); over = silent 2 KB preview. That caps this *component*; cas-b114 also budgets the **assembled** payload at 9 KB, degrading other banners to compact form to fit.
 - **Task Context** — EPIC/task/memories, on demand.
 - **Ephemeral** — outputs, transcript; expendable.
 

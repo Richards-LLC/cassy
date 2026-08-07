@@ -1,3 +1,5 @@
+> **Disposition (2026-08-07, cas-ab75):** DELIVERED — filed as [#63](https://github.com/pippenz/cas/issues/63) (closed completed). Verified on `main`: `d693212d` "feat(cas-6146): route review personas through Codex shim" (merge `374edc41`) — `gpt-5.6-sol` routing is present in `cas-cli/src/builtins.rs` and the generated `cas-code-review` skill/workflow builtins, with the Claude security-diversity lane retained. Archived.
+
 > Migrated to GitHub Issues: [#63](https://github.com/pippenz/cas/issues/63)
 
 # FEATURE: route cas-code-review personas to `gpt-5.6-sol` medium (they are stranded on a Claude-only model enum)

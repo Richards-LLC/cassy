@@ -1,3 +1,5 @@
+> **Disposition (2026-08-07, cas-ab75):** RESOLVED — filed as [#59](https://github.com/pippenz/cas/issues/59) (closed completed). Fix verified on `main`: `0da3fbff` (cas-2702, queue keeps draining past a wedged provision) plus `c2109a67` "feat(factory): make spawn lifecycle and worker assignment queryable" — spawn state now advances queued → provisioning → launched → registered/failed, so a spawn that provisions a worktree but never launches a CLI surfaces as FAILED instead of silence. Archived.
+
 > Migrated to GitHub Issues: [#59](https://github.com/pippenz/cas/issues/59)
 
 # BUG: spawn_workers creates worktree but never launches worker CLI after shutdown_workers count=0

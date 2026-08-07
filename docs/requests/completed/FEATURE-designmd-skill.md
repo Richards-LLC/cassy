@@ -4,6 +4,8 @@ date: 2026-06-22
 priority: P2
 ---
 
+> **Disposition (2026-08-07, cas-ab75):** DELIVERED — filed as [#64](https://github.com/pippenz/cas/issues/64) (closed completed). Verified on `main`: `dd4487aa` "feat(skills): design-spec (DESIGN.md) builtin + release-notes rubric and CLAUDE.md breadcrumb" — the skill ships at `cas-cli/src/builtins/skills/design-spec/`. Archived.
+
 > Migrated to GitHub Issues: [#64](https://github.com/pippenz/cas/issues/64)
 
 # Feature Request: `design-spec` skill — generate/maintain a `DESIGN.md` (UI/UX source of truth)

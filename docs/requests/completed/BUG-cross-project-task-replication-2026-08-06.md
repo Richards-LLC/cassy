@@ -1,3 +1,12 @@
+> **Disposition (2026-08-07, cas-ab75):** COVERED — every live ask in this report was filed and fixed as separate issues, all closed completed and verified on `main`:
+>
+> - §3.1 residual contamination is undetectable → [#133](https://github.com/pippenz/cas/issues/133), task cas-fc6fa: `6b827a5e` adds `cas-cli/src/cli/foreign_rows.rs` and a doctor report of cross-project task rows keyed on `(id, title)` (never id alone). Shipped in v2.47.0.
+> - §3.2 `canonical_id` folder-name collision → [#134](https://github.com/pippenz/cas/issues/134), task cas-f699: `94aa955d` "resolve canonical_id from the git remote before the folder name (Fixes #134)", plus `72935ec6` for the known-repos registry read path.
+> - §3.3 lifecycle run against the wrong project DB → [#135](https://github.com/pippenz/cas/issues/135), task cas-156b: `81c9b5ca` adds the nativity check in `repo_context.rs`; `task start` now warns before leasing a task with no anchor in the current project. Shipped in v2.47.0.
+> - §3.4 status drift of frozen replicas is a consequence of §3.1 residual rows and is addressed by the same foreign-row report; the destructive-cleanup half is [#132](https://github.com/pippenz/cas/issues/132), task cas-a034: `1a9b3499` "make cas cloud purge-foreign previewable, guarded and backed up (Fixes #132)".
+>
+> The original pull-scoping leak (§2) was already fixed by cas-ed15 in v2.15.0. No new issue filed. Archived.
+
 # BUG — Cross-project task replication: residual contamination + two live re-entry paths
 
 **Filed:** 2026-08-06

@@ -1,7 +1,16 @@
 # Reproduction attempt: "Edit reports REJECTED but the write lands on disk"
 
 - **Task:** cas-40c9 · **Issue:** GH #143 · **Date:** 2026-08-07
-- **Outcome: NOT REPRODUCED in 28 attempts.** No fix was made to the harness layer.
+- **Outcome: not reproduced in 28 attempts across two denial paths — and the
+  incident-matching condition was never covered.** No fix was made to the harness layer.
+
+Read the caveat before the number. The original incident was interrupt-adjacent: the
+edit raced a supervisor interrupt / merge window. That exact condition — an interactive
+interrupt landing mid-edit — could not be driven from a headless run and **remains
+untested**. What was tested is the two *denial* paths.
+
+A negative result that never covered the incident shape is not a negative result about
+the incident. This is not grounds to close GH #143.
 
 ## The report
 
@@ -65,9 +74,11 @@ sha256sum target.txt   # must be unchanged
 ## Conclusion
 
 28/28 denied edits left the file byte-identical across both denial paths, including
-a deliberately widened race window. The cas-f102 shape did not reproduce, so the
-harness layer was **not** changed — fixing a race on a single unreproduced occurrence
-would be guessing.
+a deliberately widened race window. But the interrupt-adjacent condition that the
+cas-f102 incident actually exhibited was never exercised, so this says the *denial*
+paths are clean — not that the incident shape is. The harness layer was **not**
+changed: fixing a race on a single unreproduced occurrence would be guessing, and
+so would closing GH #143 on a negative that never covered it.
 
 What did change is the detection layer, where the cost is bounded and the benefit
 does not depend on the theory being right: `close_ops.rs` now produces a clean-tree

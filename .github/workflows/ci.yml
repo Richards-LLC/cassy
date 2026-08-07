@@ -67,6 +67,69 @@ jobs:
           ZIG: ${{ github.workspace }}/.context/zig/zig
         run: cargo test -p cas --doc
 
+  # TEMPORARY (cas-096e, AC-2). Proves on ONE commit that switching the runner
+  # did not change WHICH tests execute, by listing both sets without running
+  # them. Deliberately its own job so it cannot inflate Fast Validation's
+  # wall-clock, which is the number under measurement. Delete once the receipt
+  # is recorded in the task notes.
+  coverage-parity-receipt:
+    name: Coverage Parity Receipt (lists tests, executes none)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/setup-rust-linux
+        with:
+          cache-key: coverage-parity
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: List what cargo test would execute
+        env:
+          ZIG: ${{ github.workspace }}/.context/zig/zig
+        run: |
+          set -o pipefail
+          # `-- --list` builds the harnesses and enumerates them; runs nothing.
+          cargo test -p cas -- --list 2>/dev/null | tee /tmp/cargo-list.txt >/dev/null
+          echo "cargo_test_tests=$(grep -cE ': test$' /tmp/cargo-list.txt)"
+          cargo test -p cas --doc -- --list 2>/dev/null | tee /tmp/cargo-doc-list.txt >/dev/null
+          echo "cargo_doctests=$(grep -cE ': test$' /tmp/cargo-doc-list.txt)"
+
+      - name: List what nextest would execute
+        env:
+          ZIG: ${{ github.workspace }}/.context/zig/zig
+        run: |
+          set -o pipefail
+          cargo nextest list -p cas --message-format json 2>/dev/null > /tmp/nextest-list.json
+          python3 - <<'PY'
+          import json
+          d = json.load(open("/tmp/nextest-list.json"))
+          n = sum(len(s["testcases"]) for s in d["rust-suites"].values())
+          print(f"nextest_tests={n}")
+          PY
+
+      - name: Compare the two sets
+        run: |
+          set -o pipefail
+          # cargo's list is "binary: test" lines; nextest's is binary-id + name.
+          # Compare bare test names as sets so an ordering or prefix difference
+          # cannot masquerade as parity.
+          grep -E ': test$' /tmp/cargo-list.txt | sed 's/: test$//' | sort > /tmp/a.txt
+          python3 - <<'PY'
+          import json
+          d = json.load(open("/tmp/nextest-list.json"))
+          names = [t for s in d["rust-suites"].values() for t in s["testcases"]]
+          open("/tmp/b.txt","w").write("\n".join(sorted(names))+"\n")
+          PY
+          echo "cargo_test_count=$(wc -l < /tmp/a.txt)  nextest_count=$(wc -l < /tmp/b.txt)"
+          echo "--- in cargo test but NOT in nextest (expect: empty) ---"
+          comm -23 /tmp/a.txt /tmp/b.txt | head -50
+          echo "--- in nextest but NOT in cargo test (expect: empty) ---"
+          comm -13 /tmp/a.txt /tmp/b.txt | head -50
+
   # Advisory lint, split out of Fast Validation so a lint pass never sits on the
   # critical path of the job that answers "do the tests pass?" (GH #142).
   # It compiles its own --all-targets artifacts; it executes no tests.

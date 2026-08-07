@@ -7,7 +7,7 @@ cas doctor
 [OK] cas directory: Found at [TEMP_PATH]
 [OK] database: SQLite database found
 [OK] schema: v219 (up to date)
-[OK] tables: [N] tables, 576 columns, 178 rows total
+[OK] tables: [N] tables, 579 columns, 179 rows total
 [OK] entry store: [N] entries accessible
 [WARN] search index: Index not found. Will be created on first search.
 [OK] configuration: Loaded (sync: enabled)
@@ -18,5 +18,7 @@ cas doctor
 [OK] embeddings: No local vector embeddings (semantic search uses cloud).
 [OK] mcp config: MCP configured in .mcp.json
 [OK] integrations: no integrations configured
+[OK] canonical id: Cloud bucket `[BUCKET]` (from folder name)
+[OK] cross-project rows: [N] project DB(s) compared (0 local task row(s), 0 DB(s) unreadable) — nothing was checked for contamination
 
 [WARN] All critical checks passed with some warnings.

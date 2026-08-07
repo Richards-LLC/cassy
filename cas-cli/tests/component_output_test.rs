@@ -325,6 +325,15 @@ fn redact_dynamic_values(s: &str) -> String {
     let ver_re = regex::Regex::new(r"\d+\.\d+\.\d+").unwrap();
     result = ver_re.replace_all(&result, "[VERSION]").to_string();
 
+    // Redact the cloud canonical-id bucket name. When a project has no git
+    // remote, `cas doctor` derives the bucket from the folder name — under test
+    // that is the randomly-generated TempDir basename, so it must be redacted or
+    // the snapshot is flaky (cas-f699 / GH #134 added this row).
+    let bucket_re = regex::Regex::new(r"Cloud bucket `[^`]*`").unwrap();
+    result = bucket_re
+        .replace_all(&result, "Cloud bucket `[BUCKET]`")
+        .to_string();
+
     // Redact counts that follow "entries:", "tasks:", etc.
     let count_re = regex::Regex::new(r":\s+\d+\b").unwrap();
     result = count_re.replace_all(&result, ": [N]").to_string();

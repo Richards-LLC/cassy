@@ -545,7 +545,119 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         });
     }
 
+    // Check 14: cloud canonical id — which bucket this project syncs into,
+    // and whether any other known local project lands in the same bucket
+    // (cas-f699 / GH #134).
+    checks.extend(canonical_id_checks(
+        &cas_root,
+        collect_local_root_identities(),
+    ));
+
     output_checks(&checks, cli)
+}
+
+/// Resolve every known local CAS root to its canonical id + repository
+/// identity, for the collision check.
+///
+/// Returns `Err` when the host known-repos registry cannot be read. It is
+/// deliberately NOT mapped to an empty list: an empty list is indistinguishable
+/// from "checked everything, found no collisions", and a silently-skipped
+/// collision check on the one surface a contamination-suspicious user consults
+/// is the same reassuring-zero failure mode this epic exists to kill. The check
+/// stays advisory — the caller reports the skip as a warning rather than
+/// failing `cas doctor`.
+fn collect_local_root_identities() -> Result<Vec<crate::cloud::LocalRootIdentity>, String> {
+    let repos = crate::worktree::discovery::list_tracked_repos().map_err(|e| e.to_string())?;
+    Ok(repos
+        .into_iter()
+        .filter(|repo| repo.healthy)
+        .filter_map(|repo| {
+            let project_root = repo.path.canonicalize().unwrap_or(repo.path);
+            let cas_root = project_root.join(".cas");
+            let canonical_id = crate::cloud::resolve_canonical_id(&cas_root)?;
+            Some(crate::cloud::LocalRootIdentity {
+                git_remote: crate::cloud::derive_canonical_id_from_git_remote(&cas_root),
+                project_root,
+                canonical_id,
+            })
+        })
+        .collect())
+}
+
+/// Build the canonical-id doctor rows. Pure given the resolved root list, so
+/// the collision warning is testable without touching the host registry.
+///
+/// `known_roots` carries the registry read outcome, not just its rows: an
+/// `Err` becomes a Warning row naming the failure, so a skipped collision
+/// check can never masquerade as a clean one.
+fn canonical_id_checks(
+    cas_root: &Path,
+    known_roots: Result<Vec<crate::cloud::LocalRootIdentity>, String>,
+) -> Vec<Check> {
+    let mut checks = Vec::new();
+
+    let Some((canonical_id, source)) = crate::cloud::resolve_canonical_id_with_source(cas_root)
+    else {
+        return checks;
+    };
+
+    let mut message = format!("Cloud bucket `{canonical_id}` (from {})", source.label());
+    // The read chain consults the git remote ahead of the folder name
+    // (cas-f699). On a project that predates that change and was never
+    // pinned, the bucket moves — say so, and name the exact command that
+    // restores the old one, rather than letting sync quietly re-home.
+    if source == crate::cloud::CanonicalIdSource::GitRemote
+        && let Some(folder) = crate::cloud::canonical_id_from_cas_root(cas_root)
+        && folder != canonical_id
+    {
+        message.push_str(&format!(
+            ". Earlier releases used the folder name `{folder}`; if that is where \
+             your synced data lives, pin it with `cas cloud project set {folder}`"
+        ));
+    }
+    checks.push(Check {
+        name: "canonical id".to_string(),
+        status: CheckStatus::Ok,
+        message,
+    });
+
+    let known_roots = match known_roots {
+        Ok(roots) => roots,
+        Err(e) => {
+            checks.push(Check {
+                name: "canonical id collision".to_string(),
+                status: CheckStatus::Warning,
+                message: format!(
+                    "Could not read the known-repos registry: {e} — canonical-id collision \
+                     check SKIPPED. This is not a clean result: other local projects may share \
+                     bucket `{canonical_id}` and go unreported. Run `cas known-repos list` to \
+                     confirm the registry is readable."
+                ),
+            });
+            return checks;
+        }
+    };
+
+    for collision in crate::cloud::detect_canonical_id_collisions(&known_roots) {
+        let roots = collision
+            .roots
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        checks.push(Check {
+            name: "canonical id collision".to_string(),
+            status: CheckStatus::Warning,
+            message: format!(
+                "DIFFERENT repositories share cloud bucket `{}`: {roots}. Every sync merges \
+                 them into each other. Give each one its own id with `cas cloud project set \
+                 <unique-id>` (run it inside each project).",
+                collision.canonical_id
+            ),
+        });
+    }
+
+    checks
 }
 
 /// Helper around `cli::integrate::doctor::collect_reports` +
@@ -561,6 +673,137 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    // ── cas-f699 / GH #134: canonical-id doctor rows ─────────────────────
+
+    fn messages(checks: &[Check], name: &str) -> Vec<String> {
+        checks
+            .iter()
+            .filter(|c| c.name == name)
+            .map(|c| c.message.clone())
+            .collect()
+    }
+
+    #[test]
+    fn canonical_id_check_reports_the_resolved_bucket_and_its_source() {
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join("gabber-studio/.cas");
+        fs::create_dir_all(&cas_root).unwrap();
+
+        let checks = canonical_id_checks(&cas_root, Ok(Vec::new()));
+        let msg = messages(&checks, "canonical id").join("");
+        assert!(msg.contains("gabber-studio"), "got: {msg}");
+        assert!(msg.contains("folder name"), "got: {msg}");
+        // No collision row when only one root is known.
+        assert!(messages(&checks, "canonical id collision").is_empty());
+    }
+
+    #[test]
+    fn canonical_id_check_warns_loudly_on_a_shared_bucket() {
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join("accounting/.cas");
+        fs::create_dir_all(&cas_root).unwrap();
+
+        let known = vec![
+            crate::cloud::LocalRootIdentity {
+                project_root: "/home/u/client-one/accounting".into(),
+                canonical_id: "accounting".to_string(),
+                git_remote: Some("github.com/client-one/accounting".to_string()),
+            },
+            crate::cloud::LocalRootIdentity {
+                project_root: "/home/u/client-two/accounting".into(),
+                canonical_id: "accounting".to_string(),
+                git_remote: Some("gitlab.com/client-two/accounting".to_string()),
+            },
+        ];
+        let checks = canonical_id_checks(&cas_root, Ok(known));
+        let collision = checks
+            .iter()
+            .find(|c| c.name == "canonical id collision")
+            .expect("collision row must be present");
+        assert!(matches!(collision.status, CheckStatus::Warning));
+        assert!(collision.message.contains("client-one/accounting"));
+        assert!(collision.message.contains("client-two/accounting"));
+        assert!(collision.message.contains("cas cloud project set"));
+    }
+
+    #[test]
+    fn unreadable_registry_is_named_as_a_skipped_check_never_silence() {
+        // The reassuring-zero failure mode: if the known-repos registry can
+        // not be read, the collision check does not run — and an absent
+        // warning would read as "no collisions" on the exact surface a
+        // contamination-suspicious user consults. It must say so out loud.
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join("some-project/.cas");
+        fs::create_dir_all(&cas_root).unwrap();
+
+        let checks = canonical_id_checks(&cas_root, Err("disk I/O error".to_string()));
+        let row = checks
+            .iter()
+            .find(|c| c.name == "canonical id collision")
+            .expect("an unreadable registry must still emit a collision row");
+        assert!(matches!(row.status, CheckStatus::Warning));
+        assert!(row.message.contains("disk I/O error"), "{}", row.message);
+        assert!(row.message.contains("SKIPPED"), "{}", row.message);
+        // The bucket row is still reported — the skip is scoped to the
+        // collision check, not the whole diagnostic.
+        assert_eq!(messages(&checks, "canonical id").len(), 1);
+    }
+
+    #[test]
+    fn collect_local_root_identities_propagates_a_corrupt_registry() {
+        // End-to-end companion to the seam test above: a real `~/.cas/cas.db`
+        // that is not a database must surface as Err, not as an empty list.
+        crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
+            let host_cas = home.join(".cas");
+            fs::create_dir_all(&host_cas).unwrap();
+            fs::write(host_cas.join("cas.db"), b"this is not a sqlite database").unwrap();
+
+            let result = collect_local_root_identities();
+            assert!(
+                result.is_err(),
+                "a corrupt host registry must not read as an empty (=no collisions) list, got {:?}",
+                result
+            );
+
+            // Fail-closed must not become fail-always: a healthy registry with
+            // no rows still reads Ok(empty), which is a genuine "no collisions".
+            fs::remove_file(host_cas.join("cas.db")).unwrap();
+            crate::store::known_repos::ensure_host_schema().unwrap();
+            assert_eq!(collect_local_root_identities().unwrap(), Vec::new());
+        });
+    }
+
+    #[test]
+    fn canonical_id_check_names_the_legacy_folder_bucket_when_the_remote_wins() {
+        // Migration safety: an unpinned repo whose bucket moves from the
+        // folder name to the git remote must be told where its old data is.
+        let temp = TempDir::new().unwrap();
+        let project = temp.path().join("legacy-folder");
+        let cas_root = project.join(".cas");
+        fs::create_dir_all(&cas_root).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["remote", "add", "origin", "git@github.com:acme/renamed.git"],
+        ] {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&project)
+                .args(&args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+        }
+
+        let checks = canonical_id_checks(&cas_root, Ok(Vec::new()));
+        let msg = messages(&checks, "canonical id").join("");
+        assert!(msg.contains("github.com/acme/renamed"), "got: {msg}");
+        assert!(
+            msg.contains("cas cloud project set legacy-folder"),
+            "must name the pin command for the pre-cas-f699 bucket, got: {msg}"
+        );
+    }
 
     /// `cas-3efe`: doctor's integrations check on a project with no SKILL.md
     /// files anywhere collapses to a single Ok row stating "no integrations

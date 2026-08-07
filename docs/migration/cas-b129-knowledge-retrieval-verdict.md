@@ -2,7 +2,11 @@
 
 **Task:** cas-d075 (EPIC cas-b129, carried from cas-edee/M5, filed by the cas-7909/M6 survey §5.3)
 **Measured:** 2026-08-07, host `soundwave`, post-cutover
-**Verdict: WORSE THAN LEGACY — legacy read paths are GATED CLOSED.**
+**Original verdict: WORSE THAN LEGACY — legacy read paths GATED CLOSED.**
+**Superseded 2026-08-07 by the addendum at the end of this document (cas-461a):
+the conjunction defect is fixed and re-measured at parity-or-better. The gate in
+§"The gate" is SATISFIED.** The body below is preserved unedited as the
+pre-fix record.
 
 ## Why this document exists
 
@@ -167,3 +171,80 @@ Owed (follow-up, does not change the verdict): promoting the reproduction recipe
 from documented commands to a single committed `cas` subcommand that prints both
 sides and a summary line. The verdict above is what gates removals; the
 subcommand is ergonomics.
+
+---
+
+# Addendum — 2026-08-07: conjunction fixed, re-measured at parity-or-better
+
+**Task:** cas-461a. **Measured:** 2026-08-07, host `soundwave`.
+**Revised verdict: AT PARITY OR BETTER on the cas-d075 query set. The removal
+gate stated above is SATISFIED.**
+
+## What changed
+
+`SqliteKnowledgeStore::fts_query` now joins terms with `OR` instead of a space,
+so multi-term knowledge search is disjunctive and ranked by `bm25()` — matching
+the boolean semantics of the legacy Tantivy surface it replaces. Explicit
+double-quoted runs are preserved as FTS5 phrases, which the pre-fix tokenizer
+did not support at all (it split on every non-alphanumeric character, so user
+quotes were discarded).
+
+No separate "AND-preference" pass was needed: `search` already orders by
+`bm25()`, and BM25 over a disjunctive match set inherently ranks pages carrying
+more of the query's terms above pages carrying fewer. That is the behaviour the
+pre-fix section above anticipated, obtained for free.
+
+## Re-measurement
+
+Same ten `search` cases from `fixtures/retrieval-parity/queryset.toml`, same
+legacy baseline (`fixtures/retrieval-parity/baseline-soundwave.json`), same
+corpus. Both binaries were run against an **identical byte-for-byte copy** of the
+live project store (`sqlite3 .backup` of `.cas/cas.db` plus the knowledge
+directory, in a scratch dir with `CAS_ROOT`/`CAS_DIR` unset) so the two columns
+differ only by the code under test. All counts come from the shipped command at
+its default depth:
+
+    cas knowledge search "<query>" --limit 10
+
+| Query | knowledge BEFORE (AND) | knowledge AFTER (OR) | legacy BM25 |
+|---|---|---|---|
+| factory worker supervisor spawn | 7 | 10 | 5 |
+| task close verification merge branch | 0 | 10 | 6 |
+| worktree commit cas-src crates | 0 | 10 | 9 |
+| cargo build tests check | 0 | 10 | 10 |
+| session claude codex agent message | 0 | 10 | 10 |
+| cloud sync config server local | 0 | 10 | 4 |
+| release staging shipped status | 1 | 10 | 10 |
+| root cause fixed stale pattern | 0 | 10 | 5 |
+| review skill files project | 1 | 10 | 4 |
+| roark richards account | 0 | 10 | 10 |
+
+**Regressions: none. Queries returning zero: 7 → 0. At parity or better: 10/10.**
+
+The BEFORE column was re-derived, not copied from the table above: the shipped
+pre-fix binary (`cas 2.50.0`, `4132e03`) was run against the same scratch copy
+and reproduced 7 / 0 / 0 / 0 on the spot-checked rows, confirming the harness is
+measuring the same thing the original verdict measured.
+
+## What this measurement does and does not claim
+
+It claims **findability is restored**: every query that silently returned nothing
+now returns results, and none returns fewer than legacy.
+
+It does **not** claim ranking quality. Every post-fix row reads `10` because the
+match sets are larger than the requested depth and saturate `--limit 10`; the
+uncapped disjunctive match sets are the 18–107 figures in the pre-fix table,
+which are the same OR semantics now shipping. So these numbers prove the recall
+cliff is gone, not that the *best* page ranks first. Ordering is BM25's job and
+is unchanged in kind from the legacy surface, but a rank-quality comparison is a
+different measurement than this one and is not asserted here.
+
+## Coverage
+
+Unit tests on the constructed expression (`fts_query_is_disjunctive_and_
+preserves_explicit_phrases`) and on store behaviour
+(`search_returns_partial_term_matches_and_ranks_full_matches_first`), plus a CLI
+integration test (`test_knowledge_multi_term_search_is_disjunctive`) that pins
+the disjunctive win, the phrase-adjacency guarantee, and the negative case — a
+query sharing no term with the corpus still reports no matches, so "disjunctive"
+has not become "matches anything".

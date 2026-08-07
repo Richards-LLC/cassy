@@ -986,6 +986,81 @@ fn test_knowledge_search_and_read_round_trip() {
         ));
 }
 
+/// cas-461a, through the shipped command rather than the store API.
+///
+/// `fts_query` joined tokens with a space, which FTS5 reads as an implicit
+/// AND, so a multi-term search only matched pages containing *every* term.
+/// The cas-d075 measurement
+/// (`docs/migration/cas-b129-knowledge-retrieval-verdict.md`) recorded 7 of 10
+/// real-vocabulary queries returning zero pages where legacy returned 4–10.
+///
+/// The regression is asserted at the CLI boundary because that is where it was
+/// observed and because the failure was silent: `cas knowledge search` printed
+/// a clean "No distilled pages match", not an error, so nothing upstream could
+/// notice it.
+#[test]
+fn test_knowledge_multi_term_search_is_disjunctive() {
+    let temp = TempDir::new().unwrap();
+
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["init", "--yes"])
+        .assert()
+        .success();
+
+    seed_knowledge_page(&temp.path().join(".cas"));
+
+    // Every term present: worked before this fix, must keep working.
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["knowledge", "search", "worktrees factory branch"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("subsystem/worktree-manager.md"));
+
+    // The actual regression: a query where only some terms occur on the page.
+    // Under the implicit-AND conjunction this printed "No distilled pages
+    // match" and the page was unreachable.
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args([
+            "knowledge",
+            "search",
+            "worktrees deployment kubernetes rollback",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("subsystem/worktree-manager.md"))
+        .stdout(predicate::str::contains("No distilled pages match").not());
+
+    // Disjunctive must not mean "matches anything": a query sharing no term
+    // with the corpus still reports no matches.
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["knowledge", "search", "kubernetes rollback helm"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No distilled pages match"));
+
+    // An explicitly quoted phrase keeps adjacency: these two words both appear
+    // on the page but never next to each other in this order.
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["knowledge", "search", "\"branch worktrees\""])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No distilled pages match"));
+
+    // ...while the phrase that does appear verbatim is found, proving the
+    // result above is adjacency rather than a tokenisation accident.
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["knowledge", "search", "\"isolated branch\""])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("subsystem/worktree-manager.md"));
+}
+
 #[test]
 fn test_knowledge_search_with_no_match_is_not_an_error() {
     let temp = TempDir::new().unwrap();

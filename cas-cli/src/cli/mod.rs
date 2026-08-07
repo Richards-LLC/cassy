@@ -10,6 +10,7 @@ mod claude_md;
 mod codemap_cmd;
 mod knowledge_cmd;
 mod memory_migrate;
+mod purge_fixtures;
 
 // EPIC cas-7d31: the daemon's auto-distill path needs the same complete symbol
 // load the CLI does — a narrower source set would cascade-delete module pages.
@@ -238,6 +239,10 @@ pub enum Commands {
     #[command(name = "memory-migrate")]
     MemoryMigrate(memory_migrate::MemoryMigrateArgs),
 
+    /// Delete integration-test fixture memories that leaked into real stores
+    #[command(name = "purge-test-fixtures")]
+    PurgeTestFixtures(purge_fixtures::PurgeFixturesArgs),
+
     /// PRODUCT_OVERVIEW.md staleness info and pending changes
     #[command(subcommand, name = "project-overview")]
     ProjectOverview(project_overview_cmd::ProjectOverviewCommands),
@@ -313,6 +318,7 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::Codemap(_)
         | Commands::Knowledge(_)
         | Commands::MemoryMigrate(_)
+        | Commands::PurgeTestFixtures(_)
         | Commands::ProjectOverview(_)
         | Commands::Integrate(_)
         | Commands::Memory(_)
@@ -493,6 +499,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::Codemap(_) => "codemap".to_string(),
         Commands::Knowledge(_) => "knowledge".to_string(),
         Commands::MemoryMigrate(_) => "memory-migrate".to_string(),
+        Commands::PurgeTestFixtures(_) => "purge-test-fixtures".to_string(),
         Commands::ProjectOverview(_) => "project-overview".to_string(),
         Commands::Integrate(_) => "integrate".to_string(),
         Commands::Memory(_) => "memory".to_string(),
@@ -565,6 +572,9 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Codemap(cmd) => codemap_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::Knowledge(cmd) => knowledge_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::MemoryMigrate(args) => memory_migrate::execute(args, require_cas_root(cas_root)?),
+        Commands::PurgeTestFixtures(args) => {
+            purge_fixtures::execute(args, require_cas_root(cas_root)?)
+        }
         Commands::ProjectOverview(cmd) => {
             project_overview_cmd::execute(cmd, cli, require_cas_root(cas_root)?)
         }

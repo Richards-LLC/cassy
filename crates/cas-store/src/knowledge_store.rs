@@ -731,17 +731,72 @@ impl SqliteKnowledgeStore {
         "file_path, blake3, size, status, ingest_error, created_at, updated_at";
 
     /// Turn a free-text query into an FTS5 expression that cannot be a syntax
-    /// error: every token is quoted, tokens are ANDed.
+    /// error: every token is quoted, and terms are **ORed**.
+    ///
+    /// WHY OR AND NOT AND (cas-461a): this used to join the quoted tokens with
+    /// a space, which FTS5 reads as an implicit `AND` — every term had to occur
+    /// in the same page. The surface this replaces (Tantivy BM25 over `entries`)
+    /// is disjunctive, so the two sides differed in boolean semantics and the
+    /// knowledge side was the strict one: recall fell as the query got longer,
+    /// and past ~3 terms a user got nothing. The cas-d075 measurement
+    /// (`docs/migration/cas-b129-knowledge-retrieval-verdict.md`) found 7 of 10
+    /// real-vocabulary queries returning **zero** pages where legacy returned
+    /// 4–10, with the same queries matching 18–107 pages under `OR` — proving
+    /// the content was present and indexed and the defect was query
+    /// construction alone. The failure was silent (a clean "no matches", not an
+    /// error), which is why it survived.
+    ///
+    /// Ranking is unaffected and needs no extra machinery: `search` already
+    /// orders by `bm25()`, and BM25 over a disjunctive match set inherently
+    /// prefers pages containing more of the query's terms. So an OR match with
+    /// BM25 ordering *is* the "AND-preference" behaviour, without the recall
+    /// cliff.
+    ///
+    /// Double-quoted runs in the user's query are preserved as FTS5 phrases:
+    /// `verifier "quality gates"` becomes `"verifier" OR "quality gates"`.
+    /// An unterminated quote is treated as a phrase running to end of input
+    /// rather than an error.
+    ///
+    /// Injection safety is unchanged and structural: only `[a-z0-9]` tokens
+    /// ever reach the output, so no user input can close a quote or introduce
+    /// an FTS5 operator. Punctuation-only input yields `None`, which `search`
+    /// turns into an empty result set instead of a syntax error.
     fn fts_query(query: &str) -> Option<String> {
-        let tokens: Vec<String> = query
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|t| !t.is_empty())
-            .map(|t| format!("\"{}\"", t.to_lowercase()))
-            .collect();
-        if tokens.is_empty() {
+        fn flush(raw: &str, is_phrase: bool, terms: &mut Vec<String>) {
+            let tokens: Vec<String> = raw
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|t| !t.is_empty())
+                .map(|t| t.to_lowercase())
+                .collect();
+            if tokens.is_empty() {
+                return;
+            }
+            if is_phrase {
+                // One FTS5 phrase: the tokens must appear adjacently, in order.
+                terms.push(format!("\"{}\"", tokens.join(" ")));
+            } else {
+                terms.extend(tokens.into_iter().map(|t| format!("\"{t}\"")));
+            }
+        }
+
+        let mut terms: Vec<String> = Vec::new();
+        let mut segment = String::new();
+        let mut in_phrase = false;
+        for ch in query.chars() {
+            if ch == '"' {
+                flush(&segment, in_phrase, &mut terms);
+                segment.clear();
+                in_phrase = !in_phrase;
+            } else {
+                segment.push(ch);
+            }
+        }
+        flush(&segment, in_phrase, &mut terms);
+
+        if terms.is_empty() {
             None
         } else {
-            Some(tokens.join(" "))
+            Some(terms.join(" OR "))
         }
     }
 
@@ -1597,6 +1652,114 @@ mod tests {
         // Punctuation-only / empty queries are safe, not syntax errors.
         assert!(store.search("", 10).unwrap().is_empty());
         assert!(store.search("\"( AND ) OR *", 10).unwrap().is_empty());
+    }
+
+    /// cas-461a. `fts_query` joined tokens with a space, which FTS5 reads as an
+    /// implicit AND, so a multi-term query only matched pages containing
+    /// *every* term. The cas-d075 measurement found 7 of 10 real queries
+    /// returning zero pages where the legacy disjunctive surface returned 4–10.
+    ///
+    /// These assertions are on the constructed expression rather than only on
+    /// results, because the defect was invisible in results — it produced a
+    /// clean empty set, not an error.
+    #[test]
+    fn fts_query_is_disjunctive_and_preserves_explicit_phrases() {
+        let q = |s: &str| SqliteKnowledgeStore::fts_query(s);
+
+        // The regression itself: terms are ORed, never space-joined (AND).
+        assert_eq!(q("cargo build tests check").unwrap(), "\"cargo\" OR \"build\" OR \"tests\" OR \"check\"");
+
+        // Single term is unchanged.
+        assert_eq!(q("widget").unwrap(), "\"widget\"");
+
+        // An explicitly quoted run stays one adjacency-constrained phrase and
+        // is not shattered into ORed words.
+        assert_eq!(q("\"quality gates\"").unwrap(), "\"quality gates\"");
+        assert_eq!(
+            q("verifier \"quality gates\"").unwrap(),
+            "\"verifier\" OR \"quality gates\""
+        );
+
+        // Case folding and punctuation splitting still apply inside phrases.
+        assert_eq!(q("\"Quality-Gates\"").unwrap(), "\"quality gates\"");
+
+        // An unterminated quote is a phrase to end of input, not an error.
+        assert_eq!(q("open \"quality gates").unwrap(), "\"open\" OR \"quality gates\"");
+
+        // Nothing but punctuation yields no expression at all, which `search`
+        // maps to an empty result set rather than an FTS5 syntax error.
+        assert!(q("").is_none());
+        assert!(q("  -- ** ").is_none());
+
+        // Injection safety is structural: only [a-z0-9] tokens reach the
+        // output, so FTS5 operators typed by the user are inert data. Bare
+        // operators become quoted literal terms...
+        assert_eq!(
+            q("( AND ) OR *").unwrap(),
+            "\"and\" OR \"or\"",
+            "operators must be quoted as literal terms, never emitted as syntax"
+        );
+        // ...and the same input behind an unterminated quote collapses into a
+        // single literal phrase — still inert, no syntax escapes.
+        assert_eq!(q("\"( AND ) OR *").unwrap(), "\"and or\"");
+    }
+
+    /// The behavioural half of cas-461a, through the store API: a query whose
+    /// terms are spread across different pages must return those pages instead
+    /// of the silent empty set the conjunction produced.
+    #[test]
+    fn search_returns_partial_term_matches_and_ranks_full_matches_first() {
+        let (_temp, store) = store();
+        let both = page(&store, "subsystem", "Both", &["both.rs"]);
+        let only_cargo = page(&store, "subsystem", "OnlyCargo", &["cargo.rs"]);
+        let only_verify = page(&store, "subsystem", "OnlyVerify", &["verify.rs"]);
+        store
+            .commit_ingest(&IngestBatch {
+                pages: vec![
+                    PageWrite {
+                        page: both.clone(),
+                        body: "cargo builds it and verification gates the close".to_string(),
+                    },
+                    PageWrite {
+                        page: only_cargo.clone(),
+                        body: "cargo is the build tool".to_string(),
+                    },
+                    PageWrite {
+                        page: only_verify.clone(),
+                        body: "verification runs before merge".to_string(),
+                    },
+                ],
+                ..Default::default()
+            })
+            .unwrap();
+
+        // Under the old implicit-AND this returned exactly one page (or zero);
+        // every page carrying *either* term must now be found.
+        let hits = store.search("cargo verification", 10).unwrap();
+        let ids: Vec<&str> = hits.iter().map(|h| h.page.id.as_str()).collect();
+        assert!(
+            ids.contains(&only_cargo.id.as_str()) && ids.contains(&only_verify.id.as_str()),
+            "disjunctive search must return single-term matches too; got {ids:?}"
+        );
+
+        // BM25 over a disjunctive match set still prefers the page carrying
+        // both terms — this is why no separate AND-preference pass is needed.
+        assert_eq!(
+            hits[0].page.id, both.id,
+            "the page matching both terms must rank first; got {ids:?}"
+        );
+
+        // A phrase the user quoted keeps adjacency: no page says "verification
+        // cargo", so the phrase must match nothing even though both words are
+        // individually present.
+        assert!(
+            store.search("\"verification cargo\"", 10).unwrap().is_empty(),
+            "explicitly quoted phrases must not degrade into an OR of their words"
+        );
+
+        // ...while the same words unquoted do match, proving the phrase result
+        // above is adjacency and not a tokenisation accident.
+        assert!(!store.search("verification cargo", 10).unwrap().is_empty());
     }
 
     #[test]

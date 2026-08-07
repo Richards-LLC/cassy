@@ -18,18 +18,94 @@ use crate::SQLITE_BUSY_TIMEOUT;
 /// Uses `Weak` references so connections are cleaned up when all stores are dropped.
 static POOL: Mutex<Option<HashMap<PathBuf, Weak<Mutex<Connection>>>>> = Mutex::new(None);
 
+/// Environment variable naming databases a test run must never open.
+///
+/// Colon-separated list of absolute paths. Each entry is either a `cas.db`
+/// file or a `.cas` directory (in which case `<dir>/cas.db` is protected).
+/// Set by the test harness — see `scripts/check-real-store-untouched.sh` —
+/// and honoured by every production store open, because [`shared_connection`]
+/// is the single choke point they all funnel through.
+///
+/// This exists because the integration suite silently wrote 994 fixture
+/// memories into the developer's real `~/.cas/cas.db` and the cas-src project
+/// database over several months (cas-78c8 / GH #156). A test that escapes its
+/// sandbox now aborts loudly at the moment of the escape instead of quietly
+/// corrupting a real corpus.
+pub const PROTECTED_DBS_ENV: &str = "CAS_TEST_PROTECTED_DBS";
+
+/// Normalize a database path the same way the pool keys it: canonicalize the
+/// parent (which always exists) and rejoin the file name, because the file
+/// itself may not exist yet and macOS symlinks (`/var` → `/private/var`)
+/// otherwise produce key mismatches.
+fn canonical_db_path(db_path: &Path) -> PathBuf {
+    match db_path.parent().and_then(|p| p.canonicalize().ok()) {
+        Some(parent) => parent.join(db_path.file_name().unwrap_or_default()),
+        None => db_path.to_path_buf(),
+    }
+}
+
+/// Expand one `CAS_TEST_PROTECTED_DBS` entry to the database file it protects.
+///
+/// A `.cas` directory protects `<dir>/cas.db`; anything else is taken as the
+/// database path itself.
+fn protected_entry_to_db(entry: &str) -> Option<PathBuf> {
+    let entry = entry.trim();
+    if entry.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(entry);
+    let db = if path.is_dir() {
+        path.join("cas.db")
+    } else {
+        path
+    };
+    Some(canonical_db_path(&db))
+}
+
+/// Decide whether `db_path` is one of the databases listed in `protected`.
+///
+/// Split out from the env lookup so the comparison is unit-testable without
+/// mutating process-global environment.
+fn is_protected_db(db_path: &Path, protected: &str) -> bool {
+    let canonical = canonical_db_path(db_path);
+    protected
+        .split(':')
+        .filter_map(protected_entry_to_db)
+        .any(|candidate| candidate == canonical)
+}
+
+/// Abort if this process is about to open a database the test harness declared
+/// off-limits.
+///
+/// Deliberately a panic, not an error: a test that reaches a real store has
+/// already proven its isolation is broken, and returning `Err` would let a
+/// tolerant caller swallow the evidence. The env var is read per connection
+/// open (not cached) because opens are rare and in-process tests set the
+/// variable after start.
+fn assert_not_protected(db_path: &Path) {
+    let Some(protected) = std::env::var_os(PROTECTED_DBS_ENV) else {
+        return;
+    };
+    let protected = protected.to_string_lossy();
+    if is_protected_db(db_path, &protected) {
+        panic!(
+            "refusing to open protected database {}: this process is running under \
+             {PROTECTED_DBS_ENV} and must use an isolated CAS store. Anchor the test (and \
+             every `cas` subprocess it spawns) to a temp directory — see \
+             cas-cli/tests/support/mod.rs::CasSandbox.",
+            db_path.display()
+        );
+    }
+}
+
 /// Get or create a shared SQLite connection for the given database path.
 ///
 /// All callers with the same canonical path share one underlying `Connection`.
 /// PRAGMAs (WAL, busy_timeout, etc.) are configured exactly once per connection.
 pub fn shared_connection(db_path: &Path) -> crate::Result<Arc<Mutex<Connection>>> {
-    // Canonicalize the parent directory (which always exists) and join the filename.
-    // We can't canonicalize db_path directly because the file may not exist yet on
-    // first open, and macOS symlinks (/var → /private/var) cause key mismatches.
-    let canonical = match db_path.parent().and_then(|p| p.canonicalize().ok()) {
-        Some(parent) => parent.join(db_path.file_name().unwrap_or_default()),
-        None => db_path.to_path_buf(),
-    };
+    assert_not_protected(db_path);
+
+    let canonical = canonical_db_path(db_path);
 
     let mut guard = POOL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let map = guard.get_or_insert_with(HashMap::new);
@@ -283,6 +359,64 @@ mod tests {
     use std::panic;
     use std::sync::Barrier;
     use tempfile::TempDir;
+
+    // ── Protected-database tripwire (cas-78c8) ──────────────────────
+
+    #[test]
+    fn protected_list_matches_the_exact_database_file() {
+        let temp = TempDir::new().unwrap();
+        let db = temp.path().join("cas.db");
+        let other = temp.path().join("other.db");
+
+        let protected = db.display().to_string();
+        assert!(is_protected_db(&db, &protected));
+        assert!(!is_protected_db(&other, &protected));
+    }
+
+    #[test]
+    fn protected_list_accepts_a_cas_directory_and_protects_its_db() {
+        let temp = TempDir::new().unwrap();
+        let cas_dir = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+
+        let protected = cas_dir.display().to_string();
+        assert!(is_protected_db(&cas_dir.join("cas.db"), &protected));
+        // A sibling database inside the same directory is a different file and
+        // must not be swept up by the directory form.
+        assert!(!is_protected_db(&cas_dir.join("factory.db"), &protected));
+    }
+
+    #[test]
+    fn protected_list_handles_multiple_entries_and_empty_segments() {
+        let temp = TempDir::new().unwrap();
+        let global = temp.path().join("global.db");
+        let project = temp.path().join("project.db");
+        let innocent = temp.path().join("temp.db");
+
+        let protected = format!("{}::{}:", global.display(), project.display());
+        assert!(is_protected_db(&global, &protected));
+        assert!(is_protected_db(&project, &protected));
+        assert!(!is_protected_db(&innocent, &protected));
+    }
+
+    #[test]
+    fn protected_matching_is_not_a_prefix_match() {
+        let temp = TempDir::new().unwrap();
+        let db = temp.path().join("cas.db");
+        // A path that merely *starts with* a protected path must not match —
+        // the earlier fixture leak was diagnosed with substring reasoning and
+        // the guard must not repeat it.
+        let decoy = temp.path().join("cas.db.backup");
+
+        let protected = db.display().to_string();
+        assert!(!is_protected_db(&decoy, &protected));
+    }
+
+    #[test]
+    fn empty_protected_list_protects_nothing() {
+        let temp = TempDir::new().unwrap();
+        assert!(!is_protected_db(&temp.path().join("cas.db"), ""));
+    }
 
     // ── Connection pool basics ──────────────────────────────────────
 

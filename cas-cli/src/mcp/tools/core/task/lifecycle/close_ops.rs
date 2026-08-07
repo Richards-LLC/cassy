@@ -2616,9 +2616,22 @@ impl CasCore {
         // Graceful degradation: if the worktree path is not a git repo
         // or git fails, the check silently no-ops. The gate is advisory
         // when git state is unknowable.
+        //
+        // cas-40c9 (GH #143): the gate now takes a full clean-tree receipt
+        // rather than a bare "is the dirty list empty" answer. An empty list
+        // used to mean *either* "the tree is clean" or "git could not be
+        // consulted", and the close path treated both as a pass. The
+        // cas-f102 incident is what that hides: a worker's `Edit` reported
+        // REJECTED, the write landed on disk anyway, and the divergence
+        // between the reviewed tip and the worker's tree surfaced only
+        // because that worker volunteered a `git status`. Dirty still hard-
+        // rejects exactly as before; the difference is that an unavailable
+        // check, stray untracked paths, and a HEAD that is not the claimed
+        // commit are now NAMED on the task instead of silently passed.
         if !bypass_close_gates {
             if let Some(worker_wt) = worker_worktree_path.as_ref() {
-                let uncommitted = check_uncommitted_work(worker_wt);
+                let receipt = clean_tree_receipt(worker_wt);
+                let uncommitted = &receipt.tracked_dirty;
                 if !uncommitted.is_empty() {
                     let file_list = uncommitted
                         .iter()
@@ -2642,6 +2655,14 @@ impl CasCore {
                         worker_wt.display(),
                         req.id
                     )));
+                }
+                // Tree is not dirty — but "not dirty" is not automatically
+                // "clean and matching". Name whatever the receipt could not
+                // vouch for. Non-blocking by design: these are audit facts,
+                // not fabrication claims, and turning them into rejections
+                // would break every close in a non-git checkout.
+                if let Some(note) = receipt.discrepancy_note(req.commit_receipt.as_deref()) {
+                    append_close_decision_note(task_store.as_ref(), &mut task, &note);
                 }
             }
         }
@@ -4484,20 +4505,170 @@ pub(crate) struct UncommittedEntry {
 ///     `git add` first, which promotes them to the `A ` status and the
 ///     gate catches them.
 pub(crate) fn check_uncommitted_work(project_root: &std::path::Path) -> Vec<UncommittedEntry> {
+    clean_tree_receipt(project_root).tracked_dirty
+}
+
+/// cas-40c9 (GH #143): the observable result of the close-time clean-tree
+/// check, with "clean" and "could not be determined" kept as *distinct*
+/// states.
+///
+/// [`check_uncommitted_work`] returns `Vec<UncommittedEntry>`, so an empty
+/// vec means either "the tree is clean" or "git failed / this is not a repo
+/// / the binary is missing". Those are opposite facts wearing the same
+/// value: the first is evidence, the second is the absence of evidence. The
+/// cas-f102 incident is exactly the failure mode that ambiguity hides — a
+/// worker's tree diverged from the reviewed tip (an `Edit` reported REJECTED
+/// but the write landed on disk) and nothing at close said so. Same anti-
+/// pattern CAS already fixed for review envelopes in cas-acf83: an empty
+/// findings list must not be indistinguishable from a review that never ran.
+///
+/// So the receipt carries all four facts and the close path NAMES whichever
+/// one it got. `unavailable` is `Some(reason)` only when the check could not
+/// be performed at all — in that case `tracked_dirty` and `untracked` are
+/// empty and mean nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct CleanTreeReceipt {
+    /// Tracked paths that are modified/staged/deleted/renamed vs HEAD.
+    pub tracked_dirty: Vec<UncommittedEntry>,
+    /// Untracked (`??`) paths. Never blocks close — but no longer silent.
+    pub untracked: Vec<String>,
+    /// Resolved `HEAD` commit id, when git could report one.
+    pub head: Option<String>,
+    /// Why the check could not run, when it could not run.
+    pub unavailable: Option<String>,
+}
+
+impl CleanTreeReceipt {
+    /// True only when git actually answered and reported no tracked changes.
+    /// An unavailable receipt is NOT clean — it is unknown.
+    pub(crate) fn is_clean(&self) -> bool {
+        self.unavailable.is_none() && self.tracked_dirty.is_empty()
+    }
+
+    /// A one-paragraph discrepancy note for the close audit trail, or `None`
+    /// when the receipt is fully clean, HEAD matches `claimed_commit`, and
+    /// there is nothing worth naming.
+    ///
+    /// Deliberately does NOT cover `tracked_dirty` — that path is a hard
+    /// close rejection with its own message, so a note would be redundant.
+    /// This is the "everything the old code passed over in silence" path:
+    /// an unavailable check, stray untracked files, and a HEAD that is not
+    /// the commit the worker claims to have delivered.
+    pub(crate) fn discrepancy_note(&self, claimed_commit: Option<&str>) -> Option<String> {
+        const MAX_LISTED: usize = 10;
+
+        if let Some(reason) = self.unavailable.as_deref() {
+            return Some(format!(
+                "CLEAN-TREE RECEIPT UNAVAILABLE (cas-40c9): the close path could not \
+                 verify that this worker's tree matches what was reviewed — {reason}. \
+                 This close carries no clean-tree evidence; treat the delivered diff \
+                 as unconfirmed against the working tree."
+            ));
+        }
+
+        let mut parts: Vec<String> = Vec::new();
+
+        if !self.untracked.is_empty() {
+            let shown = self
+                .untracked
+                .iter()
+                .take(MAX_LISTED)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            let overflow = self.untracked.len().saturating_sub(MAX_LISTED);
+            let suffix = if overflow > 0 {
+                format!(" (+{overflow} more)")
+            } else {
+                String::new()
+            };
+            parts.push(format!(
+                "{} untracked path(s) left in the tree: {shown}{suffix}",
+                self.untracked.len()
+            ));
+        }
+
+        if let Some(claimed) = claimed_commit.map(str::trim).filter(|c| !c.is_empty()) {
+            match self.head.as_deref() {
+                Some(head) if !commit_ids_match(head, claimed) => {
+                    parts.push(format!(
+                        "worktree HEAD is {head} but the close claims commit {claimed}"
+                    ));
+                }
+                None => parts.push(format!(
+                    "worktree HEAD could not be resolved, so the claimed commit \
+                     {claimed} was not matched against it"
+                )),
+                Some(_) => {}
+            }
+        }
+
+        if parts.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "CLEAN-TREE RECEIPT DISCREPANCY (cas-40c9): {}. Not a close blocker, \
+             but recorded so the divergence is named rather than discovered later \
+             as a misattributed diff.",
+            parts.join("; ")
+        ))
+    }
+}
+
+/// Two commit ids refer to the same commit when one is a prefix of the
+/// other — `commit_receipt` accepts unambiguous abbreviations, so a literal
+/// `==` would report a false discrepancy for `abc1234` vs its full SHA.
+fn commit_ids_match(a: &str, b: &str) -> bool {
+    let (a, b) = (a.trim(), b.trim());
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    let (long, short) = if a.len() >= b.len() { (a, b) } else { (b, a) };
+    long.starts_with(short)
+}
+
+/// Collect the close-time clean-tree receipt for the git repo at
+/// `project_root`: `git status --porcelain` split into tracked-dirty and
+/// untracked, plus the resolved HEAD.
+///
+/// The tracked/untracked split is unchanged from cas-895d: untracked files
+/// (`??`) do not block close because they're safe to delete if the task is
+/// disposable, they're usually scratch output (`*.log`, `target/`), and a
+/// worker who meant to keep them would have `git add`ed them into `A `.
+/// What changed in cas-40c9 is that they are now *reported* instead of
+/// dropped on the floor, and that a check which could not run says so.
+pub(crate) fn clean_tree_receipt(project_root: &std::path::Path) -> CleanTreeReceipt {
     use std::process::Command;
 
-    let Ok(output) = Command::new("git")
+    let output = match Command::new("git")
         .args(["status", "--porcelain"])
         .current_dir(project_root)
         .output()
-    else {
-        return Vec::new();
+    {
+        Ok(output) => output,
+        Err(err) => {
+            return CleanTreeReceipt {
+                unavailable: Some(format!(
+                    "`git status --porcelain` could not be run in {}: {err}",
+                    project_root.display()
+                )),
+                ..CleanTreeReceipt::default()
+            };
+        }
     };
     if !output.status.success() {
-        return Vec::new();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.lines().next().unwrap_or("no stderr").trim();
+        return CleanTreeReceipt {
+            unavailable: Some(format!(
+                "`git status --porcelain` failed in {} ({detail})",
+                project_root.display()
+            )),
+            ..CleanTreeReceipt::default()
+        };
     }
 
-    let mut entries = Vec::new();
+    let mut receipt = CleanTreeReceipt::default();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         // Porcelain format: "XY path" where XY is a 2-char status.
         // Short lines, empty lines → skip.
@@ -4505,23 +4676,32 @@ pub(crate) fn check_uncommitted_work(project_root: &std::path::Path) -> Vec<Unco
             continue;
         }
         let (status, rest) = line.split_at(2);
-        // Skip untracked entries (`??`). They're additive by nature
-        // and never represent a lost commit.
-        if status == "??" {
-            continue;
-        }
         // Rename format: "R  old -> new". Record the new path.
         let path = if let Some((_, new)) = rest.trim_start().split_once(" -> ") {
             new.to_string()
         } else {
             rest.trim_start().to_string()
         };
-        entries.push(UncommittedEntry {
+        if status == "??" {
+            receipt.untracked.push(path);
+            continue;
+        }
+        receipt.tracked_dirty.push(UncommittedEntry {
             status: status.to_string(),
             path,
         });
     }
-    entries
+
+    receipt.head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(project_root)
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .filter(|head| !head.is_empty());
+
+    receipt
 }
 
 /// cas-bc1b: check additive-only violations by comparing the worker
@@ -8978,6 +9158,125 @@ mod additive_only_tests {
         // Porcelain prints "R  old -> new"; check_uncommitted_work
         // records the new path.
         assert_eq!(v[0].path, "renamed.txt");
+    }
+
+    // --- cas-40c9 (GH #143): clean-tree receipt ---------------------------
+
+    /// The whole point of the receipt: "clean" and "could not be checked"
+    /// must not be the same value. `check_uncommitted_work` returns an empty
+    /// vec for both, which is what let the cas-f102 divergence pass silently.
+    #[test]
+    fn clean_tree_receipt_separates_clean_from_unknowable() {
+        let non_git = tempdir().unwrap();
+        let unknown = clean_tree_receipt(non_git.path());
+        assert!(
+            unknown.unavailable.is_some(),
+            "a non-git dir must report WHY the check could not run"
+        );
+        assert!(
+            !unknown.is_clean(),
+            "an unavailable check is unknown, never clean"
+        );
+
+        let repo = init_repo();
+        let clean = clean_tree_receipt(repo.path());
+        assert_eq!(clean.unavailable, None);
+        assert!(clean.is_clean());
+        assert!(clean.head.is_some(), "a clean repo must resolve HEAD");
+        assert_eq!(
+            clean.discrepancy_note(None),
+            None,
+            "a clean receipt with nothing claimed has nothing to name"
+        );
+    }
+
+    /// An unavailable receipt must say so loudly rather than pass as clean.
+    #[test]
+    fn clean_tree_receipt_names_an_unavailable_check() {
+        let non_git = tempdir().unwrap();
+        let note = clean_tree_receipt(non_git.path())
+            .discrepancy_note(Some("deadbeef"))
+            .expect("an unavailable check must produce a note");
+        assert!(note.contains("CLEAN-TREE RECEIPT UNAVAILABLE"), "{note}");
+        assert!(note.contains("cas-40c9"), "{note}");
+    }
+
+    /// Untracked files still do not block close (cas-895d contract), but
+    /// they are no longer dropped on the floor.
+    #[test]
+    fn clean_tree_receipt_reports_untracked_without_blocking() {
+        let repo = init_repo();
+        std::fs::write(repo.path().join("scratch.log"), "noise\n").unwrap();
+
+        let receipt = clean_tree_receipt(repo.path());
+        assert!(
+            receipt.tracked_dirty.is_empty(),
+            "untracked must never become a close blocker"
+        );
+        assert_eq!(receipt.untracked, vec!["scratch.log".to_string()]);
+        assert!(
+            receipt.is_clean(),
+            "untracked-only is still a clean tracked tree"
+        );
+
+        let note = receipt
+            .discrepancy_note(None)
+            .expect("untracked leftovers must be named");
+        assert!(note.contains("scratch.log"), "{note}");
+        assert!(note.contains("untracked"), "{note}");
+    }
+
+    /// HEAD not matching the commit the close claims is the second half of
+    /// the receipt — the cas-f102 shape where the tree and the reviewed tip
+    /// diverge.
+    #[test]
+    fn clean_tree_receipt_names_head_claim_mismatch() {
+        let repo = init_repo();
+        let receipt = clean_tree_receipt(repo.path());
+        let head = receipt.head.clone().expect("HEAD must resolve");
+
+        // A full-length SHA that is not HEAD.
+        let bogus = "0".repeat(head.len());
+        let note = receipt
+            .discrepancy_note(Some(&bogus))
+            .expect("a HEAD/claim mismatch must be named");
+        assert!(note.contains(&head), "note must name the real HEAD: {note}");
+        assert!(note.contains(&bogus), "note must name the claim: {note}");
+
+        // The exact SHA, and an abbreviation of it, both match.
+        assert_eq!(receipt.discrepancy_note(Some(&head)), None);
+        assert_eq!(receipt.discrepancy_note(Some(&head[..8])), None);
+    }
+
+    /// `commit_receipt` accepts unambiguous abbreviations, so prefix
+    /// equality — not string equality — is the right comparison.
+    #[test]
+    fn commit_ids_match_handles_abbreviations_and_empties() {
+        let full = "1234567890abcdef1234567890abcdef12345678";
+        assert!(commit_ids_match(full, full));
+        assert!(commit_ids_match(full, "1234567"));
+        assert!(commit_ids_match("1234567", full));
+        assert!(!commit_ids_match(full, "1234568"));
+        assert!(!commit_ids_match(full, ""));
+        assert!(!commit_ids_match("", ""));
+    }
+
+    /// A dirty tracked tree keeps its own hard-reject path, so the note
+    /// must not duplicate it.
+    #[test]
+    fn clean_tree_receipt_leaves_dirty_reporting_to_the_blocking_gate() {
+        let repo = init_repo();
+        std::fs::write(repo.path().join("existing.txt"), "changed\n").unwrap();
+
+        let receipt = clean_tree_receipt(repo.path());
+        assert_eq!(receipt.tracked_dirty.len(), 1);
+        assert!(!receipt.is_clean());
+        assert_eq!(
+            receipt.discrepancy_note(None),
+            None,
+            "dirty tracked work is reported by the UNCOMMITTED WORK rejection, \
+             not by a second advisory note"
+        );
     }
 
     // --- cas-bc1b: check_additive_only_branch_violations ------------------

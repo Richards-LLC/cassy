@@ -136,6 +136,24 @@ during M1, 1246 at the M4 capture, 1248 during the M3 rehearsal, and **1249**
 when this runbook was written. Stop the factory (or at least ensure no worker is
 storing memories) before the apply, or expect to retry.
 
+> **The quiesce is not total, and `assert_stable_count` cannot see the part that
+> leaks.** During the first live cutover, with every agent held, three project
+> rows (`2026-07-21-1`, `2026-07-21-5`, `2026-07-30-1`) still changed between the
+> pre-apply backup and the post-rollback comparison — in exactly two fields each,
+> `updated_at` and `stability`, with `stability` moving *down* (0.6376→0.6323,
+> 0.3933→0.3800). That is the background **stability-decay sweep**, not the
+> migration and not the rollback: the migration opens its sources
+> `SQLITE_OPEN_READ_ONLY` and the rollback only deletes pages and re-inserts
+> `sync_queue` rows, so neither code path can produce it. `assert_stable_count`
+> compares `COUNT(*)` only, so a decay sweep passes straight through the gate.
+>
+> Consequence for verification: **do not expect a whole-table digest of `entries`
+> to match a backup taken minutes earlier**, and do not read a mismatch as damage
+> until you have diffed it row by row. A digest built from
+> `id|content|tier|type|helpful|created` — the fields the migration would touch if
+> it touched anything — *is* stable, and is the digest to compare. Reserve the
+> `updated_at`/`stability` columns for a row-level diff.
+
 **G9 — Structural asserts will pass.** The dry run checks them, so G2 covers
 this, but know what they are (`preconditions.rs:68-107`, spec §11): populated
 `code_memory_links` / `entities` / `entity_mentions` / `relationships`;
@@ -281,6 +299,18 @@ store. Expected tail: `DRY RUN — nothing was written to the knowledge store.`
 
 Record the audit table and the quarantine list in the task notes. Gate on G2/G3.
 
+### Step 1b — re-capture the M4 baseline, INSIDE the frozen window
+
+```
+cas retrieval-parity capture
+```
+
+Do this **after** the factory is quiesced (G8) and **immediately before** the
+apply — not hours earlier. This is the only writing step before Step 2, and it
+writes exactly one fixture file. Run 1 skipped it and V5 failed with 159
+regressions caused entirely by four entries written after the old baseline; see
+V5 and §8.1. Note the capture timestamp: §8.1's triage needs it.
+
 ### Step 2 — apply
 
 ```
@@ -332,15 +362,21 @@ the index directory on a field-count mismatch (`search_index_impl.rs:78`).
 From the apply output (and `audit.json`): `unaccounted 0`, `balance: OK — zero
 loss`, `merged-into 0`.
 
-**Expected shape, from the M3 rehearsal on copies of both live databases**
-(1698 legacy rows: project 1248 + global 450). The live project DB has grown
-since, so treat these as *shape*, not as exact expected values — the invariant is
-the balance, not the constants:
+**Expected shape, from the run-2 rehearsal on fresh copies of both live databases
+with the widened R6 predicate** (1700 legacy rows: project 1250 + global 450).
+The live project DB is still growing, so treat these as *shape*, not as exact
+expected values — the invariant is the balance, not the constants:
 
 ```
-migrate-to-page 160 | carry-verbatim 21 | stay-entry 439 | deliberately-left 1078 (R6 84) | merged-into 0
-by rule: R1 994 (fixtures) · R3 21 · R4 1 · R5 11 · R6 84 · R7 156 · R8 4 · R9 427
+migrate-to-page 125 | carry-verbatim 21 | stay-entry 437 | deliberately-left 1117 (R6 123) | merged-into 0
+by rule: R1 994 (fixtures) · R3 21 · R4 1 · R5 11 · R6 123 · R7 121 · R8 4 · R9 425
 ```
+
+For comparison, the **run-1** shape (original five-token R6, the run that was
+applied and then rolled back) was `migrate-to-page 160 | carry-verbatim 21 |
+stay-entry 441 | deliberately-left 1078 (R6 84)`. The widening moved 39 rows from
+page-bound to quarantined; see §8.2. If you see the run-1 numbers, **you are
+running a binary built before the widening** — stop and rebuild.
 
 ### V2 — Pages written where they belong
 
@@ -352,8 +388,9 @@ sqlite3 "file:$PWD/.cas/cas.db?mode=ro"  "select count(*), sum(locked) from know
 sqlite3 "file:$HOME/.cas/cas.db?mode=ro" "select count(*), sum(locked) from knowledge_pages"
 ```
 
-Rehearsal produced 126 project + 55 global = 181 pages, of which **21 locked** —
-exactly the carry-verbatim count. Locked pages are the pins and preferences whose
+The run-2 rehearsal (widened R6) produced **107 project + 39 global = 146 pages**,
+of which **21 locked** — exactly the carry-verbatim count. (Run 1, before the
+widening, produced 126 + 55 = 181.) Locked pages are the pins and preferences whose
 bodies are byte-identical to the legacy `content`; distillation may never rewrite
 them.
 
@@ -392,10 +429,28 @@ properties of the harness, not of the migration:
   one (`retrieval_parity/mod.rs:161`). The migration's global side is `~/.cas`
   (`cli/memory_migrate.rs:114`). The committed baseline confirms it: `cas_dir` is
   the project `.cas` and the corpus is 1246 active entries — the project count.
-  **A green replay says nothing about the 450-row global store or the 55 pages
+  **A green replay says nothing about the 450-row global store or the 39 pages
   written into it.** Hence V6.
-- Entries added since the baseline was captured (1246 → 1249 and counting) appear
-  as `new_hits`, which are reported as upgrades and never fail.
+- 🔴 **The corpus MUST be frozen between capture and replay — re-capture the
+  baseline INSIDE the quiesce window, immediately before the apply.** An earlier
+  revision of this runbook said that entries added after the capture "appear as
+  `new_hits`, which are reported as upgrades and never fail". That is true of the
+  gained rows and **false of everything else**, and the first live cutover failed
+  on exactly this: 23 cases, 16 passed, **159 regressions**, exit 1 — with the
+  migration provably innocent. Only four entries had been written after the
+  baseline, but the orderings are `created DESC` / recency, so four new rows take
+  the head and shift **every** baseline hit down four positions. Against a rank
+  tolerance of 3 that is a uniform "fell 4 positions" failure, and it evicts
+  ranks 21–24 out of the fixed 25-row window, where the harness correctly reports
+  them as `missing_hit`. New rows do not merely add hits; they **shift ranks and
+  push tail hits off the end**. Three of the four drift rows were written by this
+  epic's own workers.
+
+  So: `cas retrieval-parity capture` goes inside the frozen window, after the
+  quiesce gate G8 and before Step 2, and the replay diffs against *that* baseline
+  — not against a baseline captured hours earlier. If you must replay against an
+  older baseline, a regression is uninterpretable until you have re-run the
+  three-way triage of §8.1.
 
 ### V6 — Global store, verified by hand
 
@@ -408,7 +463,7 @@ sqlite3 "file:$HOME/.cas/cas.db?mode=ro" \
           (select count(*) from sync_queue where entity_type='entry') stranded"
 ```
 
-Expect entries 450 (unchanged), pages 55 (rehearsal shape), stranded 0 if you
+Expect entries 450 (unchanged), pages 39 (run-2 rehearsal shape; run 1 gave 55), stranded 0 if you
 invalidated or drained. Confirm `sync-queue-invalidated.jsonl` has one line per
 invalidated row and that every line carries a `cas_migration_db` stamp.
 
@@ -418,6 +473,19 @@ Start a fresh session and inspect the injected SessionStart context. Expected,
 per §6: the memory blocks still appear (Pinned Memories, Helpful Memories) **and**
 a `## 📚 Project Knowledge (N/M pages)` block appears. Record the actual `N/M`
 from the header — the block is capped at 600 tokens and truncates (§6.2).
+
+🔴 **V7 is the gate run 1 failed, and it is not satisfied by the block merely
+rendering.** Read the page titles the block actually contains and confirm every
+one of them belongs to this project. In run 1 the header read
+`(3/126 pages indexed)` — far more aggressive truncation than §6.2's "about a
+dozen" estimate — and two of those three pages were another project's HUD-1 and
+settlement statement (§8.2). Because the index sorts by `(page_type, title, id)`,
+the pages that win the budget are the alphabetically-first `context` pages, so
+**contamination surfaces here first and most visibly.** Also record the payload
+size against the 9216-byte budget: run 1 grew it 13,632 → 14,700 B.
+
+If any injected title is not cas-src's, **stop and report** — that is a
+quarantine-predicate gap, not something to accept in the window.
 
 ---
 
@@ -459,8 +527,9 @@ emits lines until the 600-token budget is exhausted, then stops
 (`build_start.rs:42-104`, `KNOWLEDGE_SECTION_TOKEN_BUDGET = 600`,
 `KNOWLEDGE_SNIPPET_CHARS = 120`, `estimate_tokens` = `len/4`). A typical line —
 id, type, title and a 120-char snippet — costs roughly 50 tokens, so **on the
-order of a dozen pages** fit. With 126 project pages the header will read
-`(N/126 pages indexed)` with N far below 126.
+order of a dozen pages** fit. With 107 project pages the header will read
+`(N/107 pages indexed)` with N far below 107. **Measured in run 1 the real
+number was 3 of 126** — the estimate below is optimistic by a factor of four.
 
 This is not a migration defect; it is the existing index-inject budget meeting a
 much larger page set for the first time. But it means **most migrated pages are
@@ -623,8 +692,78 @@ index budget.
 
 Carry all of this to M6 / cas-7909 as the input to the read-path decision. The
 honest post-cutover position is: *the legacy system still works exactly as it
-did, and a parallel copy of 181 memories now exists as knowledge pages that
+did, and a parallel copy of 146 memories now exists as knowledge pages that
 nothing but `mcp__cas__knowledge` and a truncated index block can reach.*
+
+### 8.1 Triaging a RED parity replay — prove the cause, do not argue it
+
+A V5 failure is not self-explaining. Before reporting it as migration damage,
+run all three of these; run 1 failed V5 with **159 regressions** and all three
+proved the migration innocent:
+
+1. **Are the "missing" entries still in the database?** Query each reported
+   fingerprint's entry back by id from the live store. If it answers, the row was
+   never lost and the failure is about *ranking*, not existence.
+2. **Did the corpus move after the baseline was captured?**
+   `select count(*) from entries where created > '<baseline capture time>'`. Any
+   non-zero answer can shift every hit down that many positions (see V5). Compare
+   the count to the reported rank drops — run 1 had exactly 4 new rows and a
+   uniform "fell 4 positions".
+3. **DECISIVE — is the `entries` table byte-identical to the pre-apply backup?**
+   Digest `id|content|tier|type|helpful|created` over all rows, ordered, in both
+   the backup and the live DB, for **both** stores. Every parity channel reads
+   `entries`, so if the digests match, the migration changed nothing any channel
+   can see and cannot be the cause. Exclude `updated_at`/`stability` — the decay
+   sweep moves those without the migration's involvement (G8).
+
+If 1–3 all hold, the correct disposition is *baseline drift, accepted in writing*
+— which is what AC3 permits — **not** a rollback.
+
+### 8.2 Contamination — why R6 was widened after run 1
+
+Run 1 applied cleanly and passed V1–V4 and V6, then failed at the surface nobody
+had measured: the SessionStart knowledge index. Sorted by `(page_type, title, id)`,
+the three pages that won the 600-token budget were the alphabetically-first
+`context` pages — and **positions 1 and 2 were another project's real-estate
+closing documents**, "105 Leake Ave #44 — Original Purchase Settlement" and
+"202 Moultrie Park — Original Purchase HUD-1 — CSL Loan $1.33M". Every cas-src
+session would have opened with two HUD-1 settlement statements injected.
+
+Nothing was lost and nothing leaked outside the machine — but 29 of the 181 pages
+were another project's records, and the migration had *promoted* them from an
+inert archive-tier row that no read path surfaced to the top of an always-on
+context surface. That is a retrieval-quality regression, and precisely the class
+of thing R6 exists to prevent. The operator's decision was to roll back rather
+than accept it.
+
+**The fix, and the rule it teaches.** R6's token list was widened with nine
+property/loan/settlement proper nouns — `Roark`, `Realty`, `JRPW`, `Renovo`,
+`Leake`, `Moultrie`, `Radnor`, `Old Hickory`, `HUD-1` — raising the quarantine
+from 84 to 123 rows and the page count from 181 down to 146. The widening is
+**monotone**: 39 rows newly quarantined, none un-quarantined.
+
+The rule worth carrying: **quarantine tokens must be proper nouns, never generic
+English.** Measured against the real 1700-row corpus, three candidates that
+looked obvious were rejected because they match genuine cas-src prose —
+`Property` matches `Object.getOwnPropertyNames(...)`, `Lease` matches the
+`LeaseNotFound` error type, and `Richards` matches the `Richards-LLC` GitHub org
+and Vercel team that appear throughout live infrastructure memories (its marginal
+contribution was 10 rows, all of them legitimate). A further sixteen candidates
+(`Escrow`, `Mortgage`, `Loan`, `Settlement Statement`, `Warranty Deed`, `1098`,
+`K-1`, `CSL`, `Ingram`, `Rearden`, …) were measured and add **zero** rows beyond
+the proper nouns, so none was added. Both directions are locked by unit tests in
+`memory_migration/routing.rs`.
+
+Three of the 39 are genuine cas-src memories caught because they *mention* the
+other project's paths in their bodies (`Local CAS project layout`, `CAS Cloud
+auth env vars`, and Ben Richards' Slack profile). Quarantine is
+stay-entry-in-place, so they are not lost — only not promoted. That is the
+accepted cost of matching content as well as title.
+
+**Before any re-apply, re-read the printed quarantine list.** Per the E1 ruling
+the dry run prints every quarantined row with id, title and matched token, and a
+supervisor must review both the token list and that list before the apply is
+authorized.
 
 ---
 
@@ -640,10 +779,20 @@ sqlite3 "file:$HOME/.cas/cas.db?mode=ro" "VACUUM INTO '$B/global-cas.db'"    #  
 sha256sum $B/*.db | tee $B/SHA256SUMS
 
 cas memory-migrate                                     # 1. dry run — read the audit + quarantine
+cas retrieval-parity capture                           # 1b. re-baseline INSIDE the frozen window
 cas memory-migrate --apply --invalidate-sync-queue     # 2. apply (factory quiesced)
 cas memory-migrate --reindex                           # 3. FTS rebuild + retrievability check
 cas retrieval-parity replay                            # 4. parity (project-only — also do V6)
 ```
+
+**Two things that are easy to get wrong**
+
+- The released `cas` binary has **no `memory-migrate` subcommand** — it exists
+  only on the epic branch. Build from the worktree (`cargo build -p cas --bin
+  cas`) and invoke `./target/debug/cas`, or every step above fails with "unknown
+  subcommand".
+- Expected run-2 shape is **146 pages / R6 123**. If you see **181 / 84** you are
+  running a pre-widening binary (§8.2).
 
 **Undo**
 

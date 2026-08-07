@@ -53,7 +53,8 @@ pub struct ListArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct SearchArgs {
-    /// Free-text query (all terms must match)
+    /// Free-text query. Any term may match, ranked by relevance; wrap words in
+    /// double quotes to require them adjacent as a phrase.
     pub query: Vec<String>,
 
     /// Maximum hits to show

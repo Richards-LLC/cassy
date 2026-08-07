@@ -233,7 +233,7 @@ fn default_pre_tool_use_timeout() -> u32 {
     2000
 }
 
-fn default_pre_tool_use_matcher() -> Vec<String> {
+pub(crate) fn default_pre_tool_use_matcher() -> Vec<String> {
     vec![
         "Read".into(),
         "Glob".into(),
@@ -248,6 +248,9 @@ fn default_pre_tool_use_matcher() -> Vec<String> {
         "AskUserQuestion".into(), // Blocked in factory mode → ask in plain text / coordination
         "Skill".into(), // cas-bcfb: cas-code-review ownership gate (GH #125) — harness-native path
         "Workflow".into(), // cas-bcfb: same gate for direct cas-code-review workflow invocation
+        "Agent".into(), // cas-62b0 (GH #152): current spelling of the subagent tool — the review
+                        // gate's cost is the persona fan-out, which reaches the pipeline
+                        // without `Skill`/`Workflow`. `Task` above covers the legacy spelling.
     ]
 }
 
@@ -669,7 +672,16 @@ mod tests {
         // `Skill`/`Workflow` (cas-bcfb, GH #125): the cas-code-review
         // ownership gate is unreachable unless PreToolUse fires for the
         // harness-native tools that enter the pipeline.
-        for tool in ["SendMessage", "AskUserQuestion", "Skill", "Workflow"] {
+        // cas-62b0 (GH #152): `Agent` is the current spelling of the subagent
+        // tool. `Skill`/`Workflow` only cover the orchestrator; the persona
+        // fan-out — the part that costs ~500k tokens — arrives as `Agent`.
+        for tool in [
+            "SendMessage",
+            "AskUserQuestion",
+            "Skill",
+            "Workflow",
+            "Agent",
+        ] {
             assert!(
                 matcher.iter().any(|entry| entry == tool),
                 "PreToolUse matcher must include factory intercept tool {tool}: {matcher:?}"

@@ -116,6 +116,41 @@ fn first_task_id_token(text: &str) -> Option<String> {
         .map(|token| format!("cas-{}", &token[4..]))
 }
 
+/// cas-7a01 (GH #155): render the wake evidence pair as a sentence.
+///
+/// The two fields answer different questions and the failure the issue reported
+/// lives precisely in their disagreement, so an operator must not have to
+/// derive it. `wake_attempt` is what CAS did; `wake` is whether a turn
+/// demonstrably carried the content. `nudge_fired` + `unobserved` is the
+/// GH #155 signature and is called out by name — that combination used to be
+/// completely invisible.
+pub(crate) fn wake_attempt_narrative(
+    attempt: cas_store::WakeAttempt,
+    wake: cas_store::ObservationStatus,
+) -> String {
+    use cas_store::{ObservationStatus, WakeAttempt};
+    let line = match (attempt, wake) {
+        (_, ObservationStatus::Observed) => {
+            "wake evidence: this message was injected into a turn on the recipient's side \
+             (hook surfacing receipt)."
+        }
+        (WakeAttempt::Fired, ObservationStatus::Unobserved) => {
+            "wake evidence: CAS DID nudge this recipient's pane, and no turn is recorded as \
+             having carried this message — the nudge landed but the harness surfaced nothing \
+             (GH #155 signature)."
+        }
+        (WakeAttempt::Failed, ObservationStatus::Unobserved) => {
+            "wake evidence: CAS ATTEMPTED a wake and it FAILED (see wake_attempt_detail); the \
+             recipient was never nudged for this message."
+        }
+        (WakeAttempt::NotAttempted, ObservationStatus::Unobserved) => {
+            "wake evidence: CAS never attempted a wake for this message — the idle gate \
+             declined it, or the recipient's channel needs no nudge."
+        }
+    };
+    format!("{line}\n")
+}
+
 /// cas-ac7e (GH #130): the operator-facing warning for a row that claims
 /// `stage=delivered` with no recipient-side transport stamp.
 ///
@@ -1270,14 +1305,29 @@ impl CasService {
                     r.recipient_transport_at.is_some(),
                 )
                 .unwrap_or("");
+                // cas-7a01 (GH #155): `wake: unobserved` used to be a
+                // hardcoded constant with no backing column — three incidents
+                // read it and learned nothing, because it could not tell "CAS
+                // never nudged this recipient" from "CAS nudged it and the
+                // harness started a turn without surfacing the message".
+                // `wake_attempt` is the daemon's own record of which of those
+                // happened; `wake` remains recipient-side evidence.
+                let wake_attempt_line = wake_attempt_narrative(r.wake_attempt, r.wake);
                 Ok(Self::success(format!(
                     "Message {notification_id} status: {}\n\
-                     stage: {}  pending_reason: {}  wake: {}  reaction: {}  \
-                     confirmation_source: {}\n\
+                     stage: {}  pending_reason: {}  wake: {}  wake_attempt: {}  \
+                     reaction: {}  confirmation_source: {}\n\
+                     {wake_attempt_line}\
                      {transport_line}\
                      {undelivered_line}\
                      {json}",
-                    r.legacy_status, r.stage, reason, r.wake, r.reaction, r.confirmation_source
+                    r.legacy_status,
+                    r.stage,
+                    reason,
+                    r.wake,
+                    r.wake_attempt,
+                    r.reaction,
+                    r.confirmation_source
                 )))
             }
             None => Ok(Self::success(format!(
@@ -1349,6 +1399,54 @@ mod inbox_poll_identity_tests {
         enrich_report_from_harness_artifact, recipient_transport_warning, resolve_inbox_recipient,
     };
     use cas_store::DeliveryStage;
+
+    /// cas-7a01 (GH #155): the combination that used to be completely
+    /// invisible — CAS nudged the pane and no turn ever carried the message —
+    /// must be named, not left for an operator to infer from two fields.
+    #[test]
+    fn a_fired_nudge_with_no_surfacing_is_called_out() {
+        let line = super::wake_attempt_narrative(
+            cas_store::WakeAttempt::Fired,
+            cas_store::ObservationStatus::Unobserved,
+        );
+        assert!(line.contains("DID nudge"), "{line}");
+        assert!(line.contains("#155"), "{line}");
+    }
+
+    /// The three wake-attempt states must read differently. If two of them
+    /// render the same sentence, the split this task exists to create is
+    /// cosmetic.
+    #[test]
+    fn every_wake_attempt_state_reads_differently() {
+        use cas_store::{ObservationStatus, WakeAttempt};
+        let lines: Vec<String> = [
+            WakeAttempt::Fired,
+            WakeAttempt::Failed,
+            WakeAttempt::NotAttempted,
+        ]
+        .into_iter()
+        .map(|a| super::wake_attempt_narrative(a, ObservationStatus::Unobserved))
+        .collect();
+        let mut unique = lines.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), 3, "wake states collapse to the same text: {lines:?}");
+    }
+
+    /// A confirmed surfacing outranks whatever the nudge did: the message
+    /// demonstrably reached a turn.
+    #[test]
+    fn an_observed_wake_reports_the_surfacing_regardless_of_the_nudge() {
+        use cas_store::{ObservationStatus, WakeAttempt};
+        for attempt in [
+            WakeAttempt::Fired,
+            WakeAttempt::Failed,
+            WakeAttempt::NotAttempted,
+        ] {
+            let line = super::wake_attempt_narrative(attempt, ObservationStatus::Observed);
+            assert!(line.contains("injected into a turn"), "{attempt}: {line}");
+        }
+    }
 
     /// cas-ac7e (GH #130): the 7183 shape — delivered per the writer, with
     /// nothing on the recipient's side to corroborate it — must be called out.

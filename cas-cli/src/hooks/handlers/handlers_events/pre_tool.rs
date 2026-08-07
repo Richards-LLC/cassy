@@ -23,6 +23,75 @@ pub fn handle_pre_tool_use(
     let is_factory_agent = crate::harness_policy::is_factory_agent(input);
 
     // ========================================================================
+    // REVIEW DISPATCH GATE — hoisted to the top (cas-62b0, GH #152)
+    //
+    // cas-bcfb put this gate below, above the `cas_root` check. That was
+    // enough while the recognized entry tools were `Skill` and `Workflow`.
+    // cas-62b0 adds `Task`/`Agent`, because the pipeline's cost is not the
+    // orchestrator — it is the persona fan-out, and a worker that spawns the
+    // personas itself never touches `Skill` or `Workflow`. That is what
+    // happened in factory session rocketship-template-ready-stork-75: eight
+    // personas ran to completion under `owner = "supervisor"` on a binary
+    // containing this gate, with a settings file that matched `Skill|Workflow`.
+    //
+    // It runs first so the refusal is decided before any other branch can
+    // return, and so the containment block immediately below cannot skip it.
+    // Role comes from the hook's own snapshot, and a dispatch that cannot
+    // resolve a CAS root must still refuse (`supervisor_owned_at(None)`
+    // returns the cas-865b default).
+    // ========================================================================
+    if crate::harness_policy::is_worker(input)
+        && crate::code_review_dispatch::tool_call_enters_review(
+            tool_name,
+            input.tool_input.as_ref(),
+        )
+    {
+        if let crate::code_review_dispatch::ReviewDispatchDecision::Refused { message } =
+            crate::code_review_dispatch::review_dispatch_decision(
+                true,
+                crate::code_review_dispatch::supervisor_owned_at(cas_root),
+            )
+        {
+            return Ok(HookOutput::with_pre_tool_permission("deny", &message));
+        }
+    }
+
+    // ========================================================================
+    // `Agent` CONTAINMENT (cas-62b0) — new matcher entry, ONE new effect
+    //
+    // `Agent` is the current Claude Code spelling of the subagent tool, and
+    // before this commit it appeared in NO PreToolUse matcher CAS generates:
+    // `default_pre_tool_use_matcher` (config/hooks.rs) and
+    // `factory_pre_tool_intercept_list` (daemon/runtime/teams.rs) both listed
+    // `Task` only, from an older harness generation. Adding it is what makes
+    // the review gate above reachable for a hand-spawned persona.
+    //
+    // Adding a tool to a matcher exposes it to EVERY branch of this handler,
+    // so the question is which `Task | "Agent"` branches that newly switches
+    // on. There is exactly one that must not switch on here, and it is the
+    // sealed task-verifier handoff far below: its binding half
+    // (`SubagentStart`) is installed by `cli/hook/config_gen.rs` but NOT by
+    // the factory settings file, so in factory mode a handoff minted here can
+    // never bind, and `issue_hook_verifier_handoff` then denies the parent's
+    // NEXT verifier spawn with "already awaiting SubagentStart" until it
+    // expires — wedging verification. Switching that on is a change to
+    // verification authority with its own failure modes; a review-cost fix
+    // does not get to smuggle it in. The containment for it lives AT that
+    // block (search cas-62b0 there), not here.
+    //
+    // It deliberately does NOT live here as a blanket early return. An
+    // earlier draft of this fix returned `HookOutput::empty()` for every
+    // factory-agent `Agent` call at this point, which also silently disabled
+    // the supervisor `Agent(isolation="worktree")` deny immediately below —
+    // a live, tested worktree-leak guard (EPIC cas-7c88 / cas-483b), whose
+    // four tests in `handlers_tests::agent_worktree_block` went red and
+    // caught it. That guard is a deny, not a handoff: routing `Agent` to it
+    // can only refuse a spawn supervisors were already forbidden to make, so
+    // it is safe — and correct — to let the new matcher entry finally reach
+    // it. Only the minting path needs containing.
+    // ========================================================================
+
+    // ========================================================================
     // SUPERVISOR DISCIPLINE: Block Agent(isolation="worktree") for supervisors
     //
     // Supervisors must spawn workers via `mcp__cas__coordination spawn_workers`
@@ -91,45 +160,14 @@ pub fn handle_pre_tool_use(
     }
 
     // ========================================================================
-    // REVIEW DISPATCH GATE — every harness entry path (cas-bcfb, GH #125)
-    //
-    // cas-4fef put the ownership gate on `cas_skill_use`, i.e. only on
-    // `mcp__cas__skill action=use id=cas-code-review`. No agent takes that
-    // path: the skill is installed on disk as a Claude Code skill and is
-    // invoked with the native `Skill` tool, and the Phase C workflow
-    // (`.claude/workflows/cas-code-review.js`) is callable straight from the
-    // `Workflow` tool. Both bypass the MCP server entirely, which is how a
-    // worker ran the full persona fan-out under `owner = "supervisor"` on a
-    // binary that provably contained the gate (GH #125: same refusal string
-    // compiled into both binary generations alive that day).
-    //
-    // PreToolUse is the only seam CAS owns for harness-native tool calls, so
-    // the gate is re-stated here — same pure `review_dispatch_decision`, same
-    // refusal text, so the MCP site and this one cannot drift. The matcher
-    // lists that make this hook fire for `Skill`/`Workflow` live in
-    // `ui/factory/daemon/runtime/teams.rs` (factory settings) and
-    // `config/hooks.rs` (generated settings); both must keep these tools.
-    //
-    // Hoisted above the cas_root check for the same reason the
-    // AskUserQuestion gate is: role comes from the hook's own snapshot, and a
-    // hook dispatch that cannot resolve a CAS root must still refuse (with
-    // cas_root=None `supervisor_owned_at` returns the cas-865b default).
+    // (The review dispatch gate — cas-4fef / cas-bcfb / cas-62b0 — used to sit
+    // here. It now runs at the very top of this function so no earlier branch
+    // can return before it; see the comment there for why `Skill`/`Workflow`
+    // alone never enforced anything. The matcher lists that make this hook
+    // fire for those tools live in `ui/factory/daemon/runtime/teams.rs`
+    // (factory settings) and `config/hooks.rs` (generated settings); both
+    // must keep every entry in `REVIEW_ENTRY_TOOLS` reachable.)
     // ========================================================================
-    if crate::harness_policy::is_worker(input)
-        && crate::code_review_dispatch::tool_call_enters_review(
-            tool_name,
-            input.tool_input.as_ref(),
-        )
-    {
-        if let crate::code_review_dispatch::ReviewDispatchDecision::Refused { message } =
-            crate::code_review_dispatch::review_dispatch_decision(
-                true,
-                crate::code_review_dispatch::supervisor_owned_at(cas_root),
-            )
-        {
-            return Ok(HookOutput::with_pre_tool_permission("deny", &message));
-        }
-    }
 
     // ========================================================================
     // WORKER COMMIT GUARD — HOISTED ABOVE cas_root check (cas-bea2, LAYER 1)
@@ -590,7 +628,26 @@ pub fn handle_pre_tool_use(
     // spawn path. Authority stays entirely server-side: this hook leaves the
     // model-visible prompt/input byte-for-byte unchanged, while SubagentStart
     // binds the sole sealed handoff to the official distinct child agent_id.
+    //
+    // cas-62b0 CONTAINMENT: `Agent` in factory mode is excluded. cas-62b0 put
+    // `Agent` into both generated matchers so the review dispatch gate at the
+    // top of this function can see a hand-spawned persona fan-out. That newly
+    // routes `Agent` here too — and the factory settings file
+    // (`teams.rs::factory_hooks_block`) installs PreToolUse WITHOUT the
+    // `SubagentStart` binding half, so a handoff minted for a factory agent's
+    // `Agent` spawn could never bind and would deny that parent's next
+    // verifier spawn with "already awaiting SubagentStart" until expiry.
+    // (The generated settings from `cli/hook/config_gen.rs` DO install
+    // SubagentStart in the same atomic unit per cas-fda1, which is why the
+    // solo path is not excluded, and why the factory `Task` spelling — routed
+    // only by those generated settings — is not either.)
+    //
+    // Preserving the exact pre-cas-62b0 behaviour is the point: before it,
+    // `Agent` reached no matcher at all, so a factory agent's `Agent` spawn
+    // never minted. Activating it is a deliberate change to verification
+    // authority and belongs in its own task, not as a side effect here.
     if matches!(tool_name, "Task" | "Agent")
+        && !(tool_name == "Agent" && is_factory_agent)
         && input
             .tool_input
             .as_ref()

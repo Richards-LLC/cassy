@@ -283,6 +283,25 @@ impl HookOutput {
         }
     }
 
+    /// The `additionalContext` this output injects at `UserPromptSubmit`, if
+    /// any (cas-7a01).
+    ///
+    /// A `UserPromptSubmit` handler that wants to add context to whatever an
+    /// inner step already produced has to be able to read it back — otherwise
+    /// the only way to combine two pieces of turn-start context is for one to
+    /// overwrite the other, which is how the factory supervisor's early-return
+    /// reminder silently suppressed everything downstream of it.
+    ///
+    /// `None` for every other event shape.
+    pub fn user_prompt_context(&self) -> Option<&str> {
+        match &self.hook_specific_output {
+            Some(HookSpecificOutput::UserPromptSubmit { additional_context }) => {
+                Some(additional_context.as_str())
+            }
+            _ => None,
+        }
+    }
+
     /// PostToolUse hookSpecificOutput — `additionalContext` is optional.
     pub fn with_post_tool_context(context: String) -> Self {
         Self {

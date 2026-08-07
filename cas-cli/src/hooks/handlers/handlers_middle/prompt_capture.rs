@@ -28,6 +28,20 @@ pub(crate) fn build_supervisor_reminder() -> String {
     )
 }
 
+/// Combine the factory turn-start context with whatever the normal capture
+/// path produced (cas-7a01).
+///
+/// The factory block goes first: it is the only part of the output that can
+/// carry an instruction the agent has not seen yet.
+fn merge_prompt_context(factory_context: String, base: HookOutput) -> HookOutput {
+    match base.user_prompt_context() {
+        Some(existing) if !existing.trim().is_empty() => {
+            HookOutput::with_user_prompt_context(format!("{factory_context}\n\n{existing}"))
+        }
+        _ => HookOutput::with_user_prompt_context(factory_context),
+    }
+}
+
 pub fn handle_user_prompt_submit(
     input: &HookInput,
     cas_root: Option<&Path>,
@@ -38,17 +52,53 @@ pub fn handle_user_prompt_submit(
         _ => return Ok(HookOutput::empty()),
     };
 
-    // === SUPERVISOR REMINDER (cas-55ac) ===
-    // Emit a per-turn Hard Rules reminder for factory supervisors.
-    // Runs BEFORE the cas_root check (no store needed) and returns early,
-    // skipping attribution capture (supervisors don't write code).
-    if crate::harness_policy::is_factory_agent(input)
-        && crate::harness_policy::is_supervisor(input)
-    {
-        let reminder = build_supervisor_reminder();
-        return Ok(HookOutput::with_user_prompt_context(reminder));
+    // === FACTORY TURN-START CONTEXT (cas-55ac reminder + cas-7a01 surfacing) ===
+    //
+    // cas-7a01 (GH #155): this is the *only* place in CAS that reads the
+    // prompt queue back and puts it in front of a recipient. Before it existed
+    // the daemon's delivery had no counterpart, so a non-urgent message to an
+    // idle Claude worker was written to an inbox file and never surfaced —
+    // across turns the worker took.
+    //
+    // The supervisor reminder now APPENDS rather than returning early. Its
+    // early return was a second, quieter half of the same bug: it made the
+    // supervisor the one factory role whose mail could never be surfaced here,
+    // because the handler returned before any queue read could happen.
+    let is_factory = crate::harness_policy::is_factory_agent(input);
+    let is_supervisor = is_factory && crate::harness_policy::is_supervisor(input);
+    let mut factory_context = String::new();
+    if is_supervisor {
+        factory_context.push_str(&build_supervisor_reminder());
+    }
+    if is_factory {
+        if let Some(mail) = super::factory_inbox::surface_factory_inbox(cas_root, input) {
+            if !factory_context.is_empty() {
+                factory_context.push_str("\n\n");
+            }
+            factory_context.push_str(&mail);
+        }
+    }
+    if is_supervisor {
+        // Supervisors still skip attribution capture — they don't write code.
+        return Ok(HookOutput::with_user_prompt_context(factory_context));
     }
 
+    let base = handle_user_prompt_submit_capture(input, cas_root, prompt_text)?;
+    if factory_context.is_empty() {
+        return Ok(base);
+    }
+    Ok(merge_prompt_context(factory_context, base))
+}
+
+/// Attribution capture + context/preference extraction: the historical body of
+/// [`handle_user_prompt_submit`], unchanged. Split out (cas-7a01) so the
+/// factory turn-start context can be merged into whatever it returns instead
+/// of every early `HookOutput::empty()` silently discarding surfaced mail.
+fn handle_user_prompt_submit_capture(
+    input: &HookInput,
+    cas_root: Option<&Path>,
+    prompt_text: &str,
+) -> Result<HookOutput, MemError> {
     // Check if CAS is initialized (needed for all operations)
     let cas_root = match cas_root {
         Some(root) => root,

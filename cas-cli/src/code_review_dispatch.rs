@@ -49,8 +49,11 @@ impl ReviewDispatchDecision {
 /// original prohibition got rationalized away.
 pub fn supervisor_owned_review_refusal() -> String {
     "⛔ cas-code-review is supervisor-owned in this project \
-     (`[code_review] owner = \"supervisor\"`, the default since cas-865b).\n\n\
-     A factory worker must NOT run the persona pipeline. Do this instead:\n\
+     (`[code_review] owner = \"supervisor\"`, the default since cas-865b; \
+     read it back with `cas config get code_review.owner`).\n\n\
+     A factory worker must NOT run the persona pipeline — that includes \
+     spawning the personas yourself with Task/Agent instead of the skill. \
+     Do this instead:\n\
      1. Attempt the close normally — do NOT pass `code_review_findings`. \
      Under supervisor-owned review the close transitions the task to \
      PendingSupervisorReview; you are not expected to produce a review envelope.\n\
@@ -119,7 +122,25 @@ pub fn supervisor_owned_at(cas_root: Option<&std::path::Path>) -> bool {
 /// tool (which runs `.claude/workflows/cas-code-review.js` directly — the
 /// Phase C cas-b667 workflow the skill is a thin wrapper around). Neither ever
 /// calls into the MCP server, so neither could ever be refused.
-pub const REVIEW_ENTRY_TOOLS: &[&str] = &["Skill", "Workflow"];
+///
+/// cas-62b0 (GH #152) adds `Task`/`Agent`. The cas-bcfb list covered the two
+/// ways to enter the *orchestrator* but not the way the pipeline actually
+/// spends money: the orchestrator's whole job is to fan out one subagent per
+/// persona, and a worker that reads the skill body and spawns those personas
+/// itself never touches `Skill` or `Workflow` at all. That is not
+/// hypothetical — factory session rocketship-template-ready-stork-75 ran
+/// 8 personas to completion under `owner = "supervisor"` on a binary whose
+/// worker settings file demonstrably matched `Skill|Workflow`. Refusing the
+/// front door while the fan-out has its own door is not enforcement.
+pub const REVIEW_ENTRY_TOOLS: &[&str] = &["Skill", "Workflow", "Task", "Agent"];
+
+/// Subagent types that must never be read as a review dispatch.
+///
+/// `task-verifier` spawns are a different, sanctioned mechanism whose prompt
+/// legitimately quotes review findings and envelope text. They also carry the
+/// sealed verifier handoff minted in `pre_tool.rs`; refusing one here would
+/// break close verification while pretending to protect review cost.
+const REVIEW_EXEMPT_SUBAGENT_TYPES: &[&str] = &["task-verifier"];
 
 /// Tool-input fields that carry the identity of what is being dispatched.
 ///
@@ -129,12 +150,31 @@ pub const REVIEW_ENTRY_TOOLS: &[&str] = &["Skill", "Workflow"];
 /// deliberately over-inclusive: a worker whose workflow merely mentions
 /// `cas-code-review` is refused, and the refusal tells it the legal next move
 /// — the failure direction we want under supervisor-owned review.
+///
+/// `Task`/`Agent` are matched on `subagent_type`, `description` and `prompt`:
+/// a persona spawn names the skill in at least one of them (the close gate's
+/// own remediation text tells workers to invoke it "via the Skill or Task
+/// tool"), and a spawn that names it nowhere is indistinguishable from
+/// ordinary subagent work.
 fn review_entry_identity_fields(tool_name: &str) -> &'static [&'static str] {
     match tool_name {
         "Skill" => &["skill", "name", "id"],
         "Workflow" => &["name", "scriptPath", "script"],
+        "Task" | "Agent" => &["subagent_type", "description", "prompt"],
         _ => &[],
     }
+}
+
+/// Is this `Task`/`Agent` payload one of the sanctioned exempt subagents?
+fn subagent_type_is_exempt(tool_input: &serde_json::Value) -> bool {
+    tool_input
+        .get("subagent_type")
+        .and_then(|v| v.as_str())
+        .map(|st| {
+            let st = st.trim().to_ascii_lowercase();
+            REVIEW_EXEMPT_SUBAGENT_TYPES.contains(&st.as_str())
+        })
+        .unwrap_or(false)
 }
 
 /// Does this string name the multi-persona review orchestrator?
@@ -160,6 +200,9 @@ pub fn tool_call_enters_review(tool_name: &str, tool_input: Option<&serde_json::
     let Some(input) = tool_input else {
         return false;
     };
+    if matches!(tool_name, "Task" | "Agent") && subagent_type_is_exempt(input) {
+        return false;
+    }
     review_entry_identity_fields(tool_name)
         .iter()
         .filter_map(|field| input.get(field).and_then(|v| v.as_str()))
@@ -266,6 +309,71 @@ mod tests {
         ));
     }
 
+    /// cas-62b0 / GH #152: the persona FAN-OUT is an entry path of its own.
+    ///
+    /// Every shape below reproduces what a worker actually did under
+    /// `owner = "supervisor"` while the cas-bcfb gate was compiled into the
+    /// running binary and its settings file matched `Skill|Workflow`: it
+    /// spawned the personas directly. The cost of the pipeline is the
+    /// fan-out, so a gate that only sees the orchestrator refuses the cheap
+    /// part and permits the expensive one.
+    #[test]
+    fn worker_spawned_personas_are_review_entries_cas_62b0() {
+        // 1. The route the close gate's own remediation text names:
+        //    "invoke the cas-code-review skill via the Skill or Task tool".
+        assert!(tool_call_enters_review(
+            "Task",
+            Some(&serde_json::json!({
+                "subagent_type": "general-purpose",
+                "description": "run cas-code-review",
+                "prompt": "Run the cas-code-review pipeline over the current diff."
+            }))
+        ));
+        // 2. Current Claude Code spelling of the same tool.
+        assert!(tool_call_enters_review(
+            "Agent",
+            Some(&serde_json::json!({
+                "subagent_type": "cas-code-review",
+                "prompt": "correctness persona"
+            }))
+        ));
+        // 3. Identity carried only by the description.
+        assert!(tool_call_enters_review(
+            "Agent",
+            Some(&serde_json::json!({"description": "cas-code-review: security persona"}))
+        ));
+        // 4. Identity carried only by the prompt body.
+        assert!(tool_call_enters_review(
+            "Task",
+            Some(&serde_json::json!({
+                "prompt": "You are the fallow persona of cas_code_review. Report findings."
+            }))
+        ));
+    }
+
+    /// The sealed verifier handoff must be untouched.
+    ///
+    /// `task-verifier` spawns are a different sanctioned mechanism whose
+    /// prompt legitimately quotes review findings, and `pre_tool.rs` mints
+    /// server-side authority on exactly this shape. Refusing one here would
+    /// break close verification under the banner of saving review tokens —
+    /// so the exemption is asserted, not left to the matcher's mood.
+    #[test]
+    fn task_verifier_spawns_are_never_read_as_review_dispatch_cas_62b0() {
+        for tool in ["Task", "Agent"] {
+            assert!(
+                !tool_call_enters_review(
+                    tool,
+                    Some(&serde_json::json!({
+                        "subagent_type": "task-verifier",
+                        "prompt": "Verify task cas-1234. Prior cas-code-review envelope: {...}"
+                    }))
+                ),
+                "{tool}(task-verifier) must not be refused as a review dispatch"
+            );
+        }
+    }
+
     /// The gate must not swallow unrelated harness traffic.
     #[test]
     fn unrelated_tool_calls_are_not_treated_as_review_entries_cas_bcfb() {
@@ -278,6 +386,22 @@ mod tests {
             Some(&serde_json::json!({"name": "find-flaky-tests"}))
         ));
         assert!(!tool_call_enters_review("Skill", None));
+        // cas-62b0: ordinary subagent work stays untouched — the fan-out
+        // matcher keys on the skill's name, not on "this is a subagent".
+        assert!(!tool_call_enters_review(
+            "Task",
+            Some(&serde_json::json!({
+                "subagent_type": "Explore",
+                "description": "find the close gate",
+                "prompt": "Locate where the close gate rejects a missing envelope."
+            }))
+        ));
+        assert!(!tool_call_enters_review(
+            "Agent",
+            Some(
+                &serde_json::json!({"subagent_type": "general-purpose", "prompt": "Fix the flaky test."})
+            )
+        ));
         // Tools outside the entry list are never inspected, even if their
         // payload happens to mention the skill (e.g. a Bash grep for it).
         assert!(!tool_call_enters_review(

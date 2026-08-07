@@ -114,6 +114,15 @@ Each **Finding** requires: `title`, `severity`, `file`, `line`, `why_it_matters`
 | `supervisor` **(default)** | Lightweight structural lint only; task → `pending_supervisor_review` | Run `/cas-code-review mode=interactive` at cherry-pick + EPIC→base merge |
 | `worker` (opt-in legacy) | Full `autofix` pipeline inline; close blocks until done | None |
 
+Read the effective setting back with `cas config get code_review.owner` (or set it with `cas config set code_review.owner supervisor`). Before cas-62b0 the runtime honoured this key but the CLI reported it as an unknown key, so a project could not confirm which mode it was actually in.
+
+Under `owner = "supervisor"` this is enforced mechanically, not by instruction (cas-4fef / cas-bcfb / cas-62b0):
+
+- **Dispatch layer** — a factory worker reaching for this pipeline is refused in `PreToolUse` (`cas-cli/src/code_review_dispatch.rs`, `REVIEW_ENTRY_TOOLS`). That covers the `Skill` and `Workflow` entries *and* `Agent`/`Task` subagent spawns, so hand-spawning the personas yourself instead of invoking this skill is refused too — the fan-out is where the tokens actually go. `task-verifier` spawns are exempt.
+- **Close path** — `task.close` no longer asks a factory worker for a review envelope under supervisor ownership; it routes the worker to the supervisor instead of printing instructions to run this pipeline.
+
+Known limit, stated rather than glossed: the dispatch refusal is a `PreToolUse` hook, so it can only fire for tools the session's settings route to `cas hook PreToolUse`. Sessions spawned by a current CAS binary are routed; a session running on hand-edited or pre-cas-62b0 settings is not, and there the rule is advisory again. A **solo (non-factory)** caller is never redirected — with no supervisor to defer to, that caller owns the review itself.
+
 ## Mode reference
 
 | Mode | Edits files? | Creates tasks? | Gates close? | Fix loop |

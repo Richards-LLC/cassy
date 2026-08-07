@@ -19,6 +19,14 @@ pub struct DoctorArgs {
     /// Attempt safe automatic fixes (initialize CAS and apply pending schema migrations)
     #[arg(long)]
     pub fix: bool,
+
+    /// Report cross-project ("foreign") task rows in this project's database
+    /// in full detail, instead of running the other diagnostics (cas-fc6fa /
+    /// GH #133). Read-only: every database is opened read-only and nothing is
+    /// deleted. Rows are matched on `(id, title)` — never on id alone, because
+    /// 4-hex task ids collide across projects.
+    #[arg(long)]
+    pub foreign_rows: bool,
 }
 
 struct Check {
@@ -553,7 +561,193 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         collect_local_root_identities(),
     ));
 
+    // Check 15: residual cross-project contamination from the cas-ed15 pull
+    // leak (cas-fc6fa / GH #133). Read-only comparison of this project's task
+    // rows against every other known project database on the host, keyed on
+    // `(id, title)`.
+    if cas_root.join("cas.db").is_file() {
+        let report = crate::cli::foreign_rows::scan(&cas_root);
+        if args.foreign_rows {
+            return output_foreign_rows_detail(report, cli);
+        }
+        checks.push(foreign_rows_check(report.as_ref()));
+    } else if args.foreign_rows {
+        anyhow::bail!(
+            "`cas doctor --foreign-rows` needs a SQLite database at {}; this project uses legacy \
+             markdown storage. Migrate with `cas migrate` first.",
+            cas_root.join("cas.db").display()
+        );
+    }
+
     output_checks(&checks, cli)
+}
+
+/// Turn a contamination scan into a single `cas doctor` row.
+///
+/// A failed scan is reported as a **named skip**, never as silence: an absent
+/// warning on this surface reads as "no contamination", which is the exact
+/// wrong answer for the user consulting doctor because they suspect it.
+fn foreign_rows_check(
+    report: Result<&crate::cli::foreign_rows::ForeignRowReport, &anyhow::Error>,
+) -> Check {
+    let report = match report {
+        Ok(report) => report,
+        Err(e) => {
+            return Check {
+                name: "cross-project rows".to_string(),
+                status: CheckStatus::Warning,
+                message: format!(
+                    "Could not scan for cross-project task rows: {e} — contamination check \
+                     SKIPPED. This is not a clean result: rows belonging to other projects may \
+                     be resident here and go unreported."
+                ),
+            };
+        }
+    };
+
+    let mut message = report.summary();
+    if !report.peers_unreadable.is_empty() {
+        let named = report
+            .peers_unreadable
+            .iter()
+            .map(|p| format!("{} ({})", p.project, p.error))
+            .collect::<Vec<_>>()
+            .join(", ");
+        message.push_str(&format!(
+            ". {} project DB(s) could NOT be read and were not compared: {named}",
+            report.peers_unreadable.len()
+        ));
+    }
+
+    let status = if report.is_clean() && report.peers_unreadable.is_empty() {
+        CheckStatus::Ok
+    } else {
+        CheckStatus::Warning
+    };
+    if !report.is_clean() {
+        message.push_str(&format!(". {}", report.remediation()));
+    }
+
+    Check {
+        name: "cross-project rows".to_string(),
+        status,
+        message,
+    }
+}
+
+/// `cas doctor --foreign-rows`: the full read-only contamination listing.
+fn output_foreign_rows_detail(
+    report: anyhow::Result<crate::cli::foreign_rows::ForeignRowReport>,
+    cli: &Cli,
+) -> anyhow::Result<()> {
+    let report = report?;
+
+    if cli.json {
+        println!("{}", serde_json::to_string_pretty(&report.to_json())?);
+        return Ok(());
+    }
+
+    let theme = ActiveTheme::default();
+    let mut out = std::io::stdout();
+    let mut fmt = Formatter::stdout(&mut out, theme);
+
+    fmt.subheading("cross-project task rows")?;
+    fmt.write_muted(&"─".repeat(50))?;
+    fmt.newline()?;
+    fmt.write_muted(&format!(
+        "project `{}` — {} local task row(s) compared against {} other project DB(s) on (id, title)",
+        report.local_project,
+        report.local_task_count,
+        report.peers_compared.len()
+    ))?;
+    fmt.newline()?;
+
+    for peer in &report.peers_unreadable {
+        fmt.warning(&format!(
+            "NOT COMPARED: {} ({}) — {}",
+            peer.project,
+            peer.db_path.display(),
+            peer.error
+        ))?;
+    }
+
+    if report.foreign.is_empty() {
+        fmt.success("no rows attributable to another project")?;
+    } else {
+        fmt.newline()?;
+        fmt.warning(&format!(
+            "{} foreign row(s) — {} not closed, {} closed",
+            report.foreign.len(),
+            report.foreign_open(),
+            report.foreign_closed()
+        ))?;
+        for row in &report.foreign {
+            fmt.write_raw(&format!(
+                "    [{}] {} {} → {}",
+                row.id,
+                if row.closed { "closed  " } else { "NOT CLOSED" },
+                truncate(&row.title, 60),
+                row.home_project
+            ))?;
+            fmt.newline()?;
+        }
+    }
+
+    if !report.unattributed.is_empty() {
+        fmt.newline()?;
+        fmt.warning(&format!(
+            "{} replicated row(s) with no activity evidence in any project — home unknown, \
+             {} not closed",
+            report.unattributed.len(),
+            report.unattributed_open()
+        ))?;
+        for row in &report.unattributed {
+            fmt.write_raw(&format!(
+                "    [{}] {} {} (also in: {})",
+                row.id,
+                if row.closed { "closed  " } else { "NOT CLOSED" },
+                truncate(&row.title, 60),
+                row.present_in.join(", ")
+            ))?;
+            fmt.newline()?;
+        }
+    }
+
+    if !report.collisions.is_empty() {
+        fmt.newline()?;
+        fmt.warning(&format!(
+            "{} id collision(s) — same id, DIFFERENT task. Deleting by id alone destroys real work:",
+            report.collisions.len()
+        ))?;
+        for c in &report.collisions {
+            fmt.write_raw(&format!(
+                "    [{}] here: {} | {}: {}",
+                c.id,
+                truncate(&c.local_title, 45),
+                c.other_project,
+                truncate(&c.other_title, 45)
+            ))?;
+            fmt.newline()?;
+        }
+    }
+
+    fmt.newline()?;
+    if report.is_clean() {
+        fmt.success("no cross-project contamination detected")?;
+    } else {
+        fmt.warning(&report.remediation())?;
+    }
+
+    Ok(())
+}
+
+fn truncate(text: &str, max: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(max.saturating_sub(1)).collect();
+    format!("{head}…")
 }
 
 /// Resolve every known local CAS root to its canonical id + repository
@@ -675,6 +869,150 @@ mod tests {
     use tempfile::TempDir;
 
     // ── cas-f699 / GH #134: canonical-id doctor rows ─────────────────────
+
+    // ── cas-fc6fa / GH #133: cross-project contamination doctor row ──────
+
+    #[test]
+    fn foreign_rows_check_reports_counts_and_a_safe_remediation_path_cas_fc6fa() {
+        use crate::cli::foreign_rows::{DbSnapshot, ForeignRow, ForeignRowReport, IdCollision};
+
+        let report = ForeignRowReport {
+            local_project: "cas-src".to_string(),
+            local_task_count: 1484,
+            peers_compared: vec!["accounting".to_string()],
+            foreign: vec![
+                ForeignRow {
+                    id: "cas-0001".to_string(),
+                    title: "Reconcile Q3 payroll".to_string(),
+                    closed: false,
+                    home_project: "accounting".to_string(),
+                    also_present_in: Vec::new(),
+                },
+                ForeignRow {
+                    id: "cas-0002".to_string(),
+                    title: "Finished months ago".to_string(),
+                    closed: true,
+                    home_project: "accounting".to_string(),
+                    also_present_in: Vec::new(),
+                },
+            ],
+            collisions: vec![IdCollision {
+                id: "cas-0003".to_string(),
+                local_title: "Real local work".to_string(),
+                other_project: "accounting".to_string(),
+                other_title: "A different real task".to_string(),
+            }],
+            ..Default::default()
+        };
+        let _ = DbSnapshot::default(); // keep the public snapshot type exercised
+
+        let check = foreign_rows_check(Ok(&report));
+
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(
+            check.message.contains("2 foreign task row(s)"),
+            "{}",
+            check.message
+        );
+        // AC3: the non-closed count is what lies in ready queues.
+        assert!(
+            check.message.contains("1 of them not closed"),
+            "{}",
+            check.message
+        );
+        assert!(check.message.contains("accounting"), "{}", check.message);
+        // AC1: a remediation path is named.
+        assert!(
+            check.message.contains("cas cloud purge-foreign"),
+            "{}",
+            check.message
+        );
+        // AC2: the identity constraint is stated where a human would act on it.
+        assert!(check.message.contains("(id, title)"), "{}", check.message);
+    }
+
+    #[test]
+    fn foreign_rows_check_zero_states_its_coverage_never_a_bare_clean_cas_fc6fa() {
+        use crate::cli::foreign_rows::ForeignRowReport;
+
+        let report = ForeignRowReport {
+            local_project: "cas-src".to_string(),
+            local_task_count: 1485,
+            peers_compared: vec!["accounting".to_string(), "ozer".to_string()],
+            ..Default::default()
+        };
+
+        let check = foreign_rows_check(Ok(&report));
+
+        assert!(matches!(check.status, CheckStatus::Ok));
+        // An Ok row that just said "clean" would be indistinguishable from a
+        // scan that compared nothing at all.
+        assert!(
+            check.message.contains("0 foreign task row(s)"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("1485 local row(s)"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("2 project DB(s)"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("0 DB(s) unreadable"),
+            "{}",
+            check.message
+        );
+    }
+
+    #[test]
+    fn foreign_rows_check_names_a_failed_scan_instead_of_reading_clean_cas_fc6fa() {
+        // Same reassuring-zero failure mode as the canonical-id registry row:
+        // a scan that could not run must not render as "no contamination".
+        let err = anyhow::anyhow!("disk I/O error");
+        let check = foreign_rows_check(Err(&err));
+
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("SKIPPED"), "{}", check.message);
+        assert!(
+            check.message.contains("disk I/O error"),
+            "{}",
+            check.message
+        );
+    }
+
+    #[test]
+    fn foreign_rows_check_warns_when_a_peer_db_could_not_be_read_cas_fc6fa() {
+        use crate::cli::foreign_rows::{ForeignRowReport, UnreadablePeer};
+
+        let report = ForeignRowReport {
+            local_project: "cas-src".to_string(),
+            local_task_count: 10,
+            peers_compared: vec!["accounting".to_string()],
+            peers_unreadable: vec![UnreadablePeer {
+                project: "ozer".to_string(),
+                db_path: std::path::PathBuf::from("/home/u/ozer/.cas/cas.db"),
+                error: "file is not a database".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        let check = foreign_rows_check(Ok(&report));
+
+        // Clean against what could be read, but partial coverage is not a
+        // clean bill of health.
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("ozer"), "{}", check.message);
+        assert!(
+            check.message.contains("could NOT be read"),
+            "{}",
+            check.message
+        );
+    }
 
     fn messages(checks: &[Check], name: &str) -> Vec<String> {
         checks

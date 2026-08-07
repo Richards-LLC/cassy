@@ -193,6 +193,16 @@ is empty in both DBs, so M3 starts from a clean target.
   scope) and only the older one has ever been written. M2 must decide which is
   authoritative before M3 maps either; naively carrying `share` forward would
   migrate 1695 NULLs and silently drop the 626 real `team_id` associations.
+- **Root cause (cas-0955, resolved).** This is not data loss and not a
+  half-migrated column: the visibility half of the sharing model was written
+  but never wired up. Thirteen migration files (`m035`/`m036`/`m037`,
+  `m061`-`m063`, `m082`-`m084`, `m125`-`m128`) adding `visibility`, `owner_id`,
+  `collaborators` and duplicate `team_id` indexes had no `mod` declaration and
+  no `MIGRATIONS` entry, so they never compiled and never ran — `entries` has
+  no `visibility` and no `owner_id` column in any database, and no Rust code
+  has ever read one. `share` (`ShareScope`, `m195`-`m198`) is the design that
+  actually shipped; it is simply unused. The orphan files were deleted and a
+  guard test now fails if any migration file is unregistered.
 - **Read paths**: `Scope`/`ScopeFilter` filtering in `crates/cas-store/src/sqlite/store_entry_crud.rs:285` (`store_list_by_scope_and_tag`); cloud sync queue (see §2.15).
 - **Disposition (M2)**: `team_id`: `carry-verbatim` as `cas_legacy_team_id`, **authoritative**. `share`: `deliberately-leave` — dead column, 0 rows, never written. M3 must not synthesize `share` from `team_id`. Team scoping is unenforced in the destination — escalated as E3. See [mapping spec §8.2](./cas-b129-mapping-spec.md).
 
@@ -334,6 +344,13 @@ read surface; `syncing_entry` additionally drives the cloud `sync_queue` (§2.15
    derive scope from provenance, not the column.
 6. **`share` vs `team_id` split-brain** (§1.6): 626 rows carry `team_id`, 0 rows
    carry `share`. Mapping only `share` silently drops all team associations.
+   *Cause, resolved in cas-0955:* the capability was never built rather than
+   built and lost. Thirteen migration files adding the `visibility` / `owner_id`
+   / `collaborators` half of the sharing model were never declared in
+   `migration/migrations/mod.rs` and never ran, so those columns exist in no
+   database and are read by no code. They have been deleted and a guard test
+   now fails on any unregistered migration file. `team_id` remains
+   authoritative; `share` remains a dead column.
 7. **`Store::list()` caps at 10 000 rows** (§1.2). Safe today (1245), unsafe as a
    general extraction primitive. M3 should read with explicit paginated SQL.
 8. **11 entry rows are stuck in the global `sync_queue`** (§2.15) — decide

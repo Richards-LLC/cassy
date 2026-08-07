@@ -55,9 +55,13 @@ CREATE TABLE IF NOT EXISTS tasks (
     deliverables TEXT NOT NULL DEFAULT '{}',
     demo_statement TEXT NOT NULL DEFAULT '',
     execution_note TEXT,
-    owner_id TEXT,
-    visibility TEXT NOT NULL DEFAULT 'private',
-    collaborators TEXT NOT NULL DEFAULT '[]',
+    -- cas-0955: `owner_id` / `visibility` / `collaborators` used to be declared
+    -- here. Their migrations (m125-m127) were never registered, so no migrated
+    -- database ever grew those columns and no Rust code has ever read or
+    -- written them — sharing shipped as `share` (ShareScope, m198) instead.
+    -- Declaring them here only made freshly-created DBs diverge from every
+    -- existing one, so they are gone. Old DBs that happen to carry them are
+    -- unaffected: nothing selects them and they all have defaults.
     share TEXT,
     depth TEXT
 );

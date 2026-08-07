@@ -6,8 +6,8 @@ cas doctor
 ──────────────────────────────────────────────────
 [OK] cas directory: Found at [TEMP_PATH]
 [OK] database: SQLite database found
-[OK] schema: v219 (up to date)
-[OK] tables: [N] tables, 579 columns, 179 rows total
+[OK] schema: v220 (up to date)
+[OK] tables: [N] tables, 580 columns, 180 rows total
 [OK] entry store: [N] entries accessible
 [WARN] search index: Index not found. Will be created on first search.
 [OK] configuration: Loaded (sync: enabled)

@@ -5141,23 +5141,52 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
     let stranded = attributable.unwrap_or(stranded);
 
     // cas-c631: `epic/<slug>` branches are created locally by the supervisor
-    // (see cas-supervisor EPIC workflow) and are, by convention, never pushed
-    // to origin — the epic ships to `main` as a single PR once complete, not
-    // per-worker. Telling a worker to "open a PR targeting {parent_branch}"
-    // when `parent_branch` is one of these local-only epic branches sends
-    // them straight at a `gh pr create --base epic/<slug>` call that fails
-    // (no such ref on origin), which is exactly the recurring close-time
-    // friction this task exists to fix. Detect that case by the naming
-    // convention (cheap, deterministic, matches the same `starts_with(
-    // "epic/")` check used elsewhere for epic branches, e.g.
-    // `mcp/tools/mod.rs` and `worktree/manager/epic_ops.rs`) and hand the
-    // worker a supervisor-merge-request handoff instead of PR instructions.
-    let parent_is_local_epic_branch = parent_branch.starts_with("epic/");
+    // (see cas-supervisor EPIC workflow) and the epic ships to `main` as a
+    // single PR once complete, not per-worker. Telling a worker to "open a PR
+    // targeting {parent_branch}" when `parent_branch` is an epic branch sends
+    // them at a `gh pr create --base epic/<slug>` call that is wrong even when
+    // it would succeed. Detect that case by the naming convention (cheap,
+    // deterministic, matches the same `starts_with("epic/")` check used
+    // elsewhere for epic branches, e.g. `mcp/tools/mod.rs` and
+    // `worktree/manager/epic_ops.rs`) and hand the worker a
+    // supervisor-merge-request handoff instead of PR instructions.
+    //
+    // cas-355d (GH #141): the *naming* convention selects the handoff STYLE,
+    // but it must not stand in for a *push-state* claim. The original wording
+    // asserted "{parent_branch} is a local-only epic branch (not pushed to
+    // origin) ... the PR will fail" unconditionally — and this factory does
+    // push epic branches, so workers were told to fix a push that had already
+    // happened while the real gap (their branch not merged into the epic tip)
+    // went unnamed. State only what was verified: resolve
+    // `origin/<parent_branch>` (already fetched and computed above at
+    // `origin_parent_branch`) and emit the local-only sentence only when that
+    // ref genuinely does not exist. Text-honesty only — the gate DECISION is
+    // unchanged either way.
+    let parent_is_epic_branch = parent_branch.starts_with("epic/");
+    let parent_published_on_origin = git_ref_exists(repo_path, &origin_parent_branch);
     let branch_tip = resolve_branch_sha(repo_path, &factory_branch)
         .unwrap_or_else(|| "unresolved at close rejection".to_string());
     let coord = worker_coordination_tool();
 
-    let remediation = if parent_is_local_epic_branch {
+    let epic_push_state_step = if parent_published_on_origin {
+        format!(
+            "2. {parent_branch} IS published on origin ({origin_parent_branch} \
+             resolves), so pushing it is not the gap — {factory_branch} is simply \
+             not merged into the epic tip yet. Do NOT run \
+             `gh pr create --base {parent_branch}` anyway: epic branches integrate \
+             via a supervisor merge (step 4), and the epic ships to main as one PR \
+             once complete.\n"
+        )
+    } else {
+        format!(
+            "2. {parent_branch} has no matching ref on origin \
+             ({origin_parent_branch} does not resolve), so it is a local-only epic \
+             branch — do NOT run `gh pr create --base {parent_branch}`, the PR will \
+             fail for want of a base ref.\n"
+        )
+    };
+
+    let remediation = if parent_is_epic_branch {
         format!(
             "Remediation:\n\
              1. Before escalating, repeatedly run `{coord} action=inbox_poll` \
@@ -5169,9 +5198,7 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
              messages in your conversation. If one says this branch was merged or \
              requests more changes, follow it and do not send a stale merge \
              request.\n\
-             2. {parent_branch} is a local-only epic branch (not pushed to origin) \
-             — do NOT run `gh pr create --base {parent_branch}`, it has no \
-             matching ref on origin and the PR will fail.\n\
+             {epic_push_state_step}\
              3. Push {factory_branch} to origin so your commit is durable: \
              `git push origin {factory_branch}`\n\
              4. If a merge is still needed, message your supervisor to merge \
@@ -12067,6 +12094,87 @@ mod merge_state_gate_tests {
                 }
                 other => panic!("expected Reject for stranded factory branch, got {other:?}"),
             }
+        }
+    }
+
+    /// cas-355d (GH #141): when the `epic/<slug>` parent branch IS pushed to
+    /// origin, the rejection must not assert the opposite. The old wording
+    /// hardcoded "is a local-only epic branch (not pushed to origin) ... the
+    /// PR will fail" off the *name* alone, sending workers to re-push a branch
+    /// that was already published while the real gap — their branch not merged
+    /// into the epic tip — went unnamed.
+    #[test]
+    fn pushed_epic_branch_rejection_names_the_merge_gap_not_a_missing_push_cas_355d() {
+        let bare = tempfile::tempdir().unwrap();
+        let bare_status = std::process::Command::new("git")
+            .args(["init", "-q", "--bare"])
+            .current_dir(bare.path())
+            .status()
+            .expect("git init --bare");
+        assert!(bare_status.success());
+
+        let parent = "epic/x";
+        let dir = init_factory_repo_with_parent("worker", parent);
+        let p = dir.path();
+        git(
+            p,
+            &["remote", "add", "origin", bare.path().to_str().unwrap()],
+        );
+        // Publish the epic branch: origin/epic/x exists AND matches local.
+        git(p, &["push", "-q", "origin", parent]);
+        assert!(
+            git_ref_exists(p, "origin/epic/x"),
+            "precondition: origin/epic/x must resolve"
+        );
+        assert_eq!(
+            resolve_branch_sha(p, parent),
+            resolve_branch_sha(p, "origin/epic/x"),
+            "precondition: local and origin epic tips must match"
+        );
+
+        // Unmerged worker commit → the gate rejects.
+        std::fs::write(p.join("a.rs"), "// a\n").unwrap();
+        git(p, &["add", "a.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: a"]);
+
+        let task = worker_task("worker");
+        let req = base_req(&task.id);
+        let out = run_factory_branch_merge_gate(&task, &req, parent, p);
+
+        match out {
+            MergeStateGateOutcome::Reject(msg) => {
+                assert!(
+                    !msg.contains("local-only"),
+                    "must not call a published epic branch local-only: {msg}"
+                );
+                assert!(
+                    !msg.contains("not pushed to origin"),
+                    "must not claim an unverified missing push: {msg}"
+                );
+                assert!(
+                    msg.contains("IS published on origin"),
+                    "must state the verified push state: {msg}"
+                );
+                assert!(
+                    msg.contains("not merged into the epic tip"),
+                    "must name the real gap (unmerged worker branch): {msg}"
+                );
+                // The epic handoff STYLE is unchanged: still no PR instruction,
+                // still a supervisor-merge request.
+                assert!(
+                    !msg.contains("Open a PR targeting"),
+                    "epic parents never get PR instructions: {msg}"
+                );
+                assert!(
+                    msg.contains("NOT run `gh pr create --base epic/x`"),
+                    "must still steer away from gh pr create: {msg}"
+                );
+                assert!(
+                    msg.contains("supervisor to merge"),
+                    "must still hand off a supervisor merge: {msg}"
+                );
+            }
+            other => panic!("expected Reject for stranded factory branch, got {other:?}"),
         }
     }
 

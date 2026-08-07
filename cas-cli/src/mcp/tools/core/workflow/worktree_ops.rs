@@ -1252,11 +1252,41 @@ impl CasCore {
     }
 
     /// Cleanup orphaned worktrees
+    /// Remove worktrees.
+    ///
+    /// `id = None` is the historical System-A orphan sweep: every
+    /// `WorktreeStore` row whose path is gone, whose epic closed, or whose
+    /// creating agent went Stale/Shutdown.
+    ///
+    /// `id = Some(..)` (cas-f102, GH #140) targets ONE worktree and resolves it
+    /// the way [`Self::worktree_merge`] does — System A (`WorktreeStore` by id,
+    /// then by branch) first, then the System-B `spawn_workers isolate=true`
+    /// convention at `worktree_path_for_worker(assignee)`. cas-1d11 exempted
+    /// merge/list/status from the `worktrees.enabled` gate but left cleanup
+    /// behind on the premise that it had "no System-B analogue"; a retired
+    /// worker's worktree outlives its worker unless `cleanup=true` was passed at
+    /// merge time, which is precisely that analogue, and without this path the
+    /// only remaining option was a manual `git worktree remove` that bypasses
+    /// factory tracking.
+    ///
+    /// Refusals, in the order they are checked and always before anything is
+    /// destroyed:
+    /// - the assignee is a live agent (Active/Idle) — `force` does NOT override
+    ///   this, exactly as `force` does not stand in for `allow_trunk` in merge;
+    /// - the branch's commits exist on no other local branch — removal would
+    ///   delete them, since `abandon` deletes the branch with `-D`;
+    /// - the worktree is dirty (`abandon`'s own gate).
+    ///
+    /// Only the dirty and unmerged refusals are bypassable with `force`.
     pub async fn worktree_cleanup(
         &self,
+        id: Option<&str>,
         dry_run: bool,
         force: bool,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(id) = id {
+            return self.worktree_cleanup_target(id, dry_run, force).await;
+        }
         use crate::config::Config;
         use crate::store::{open_agent_store, open_task_store, open_worktree_store};
         use crate::types::{AgentStatus, TaskStatus};
@@ -1382,6 +1412,187 @@ impl CasCore {
                 errors.join(", ")
             )))
         }
+    }
+
+    /// cas-f102 (GH #140): remove ONE worktree, resolved System A then System B.
+    async fn worktree_cleanup_target(
+        &self,
+        id: &str,
+        dry_run: bool,
+        force: bool,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::config::Config;
+        use crate::store::{open_agent_store, open_worktree_store};
+        use crate::worktree::{WorktreeConfig, WorktreeManager};
+
+        let cas_root = self.cas_root.clone();
+        let config = Config::load(&cas_root).map_err(|e| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Failed to load config: {e}")),
+            data: None,
+        })?;
+        let wt_config = config.worktrees();
+
+        let worktree_store = open_worktree_store(&cas_root).map_err(|e| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Failed to open worktree store: {e}")),
+            data: None,
+        })?;
+        let agent_store = open_agent_store(&cas_root).map_err(|e| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Failed to open agent store: {e}")),
+            data: None,
+        })?;
+
+        let cwd = cas_root.parent().unwrap_or(&cas_root).to_path_buf();
+        let manager_config = WorktreeConfig {
+            enabled: wt_config.enabled,
+            base_path: wt_config.base_path.clone(),
+            branch_prefix: wt_config.branch_prefix.clone(),
+            auto_merge: wt_config.auto_merge,
+            cleanup_on_close: wt_config.cleanup_on_close,
+            promote_entries_on_merge: wt_config.promote_entries_on_merge,
+        };
+        let manager = WorktreeManager::new(&cwd, manager_config).map_err(|e| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Failed to create worktree manager: {e}")),
+            data: None,
+        })?;
+
+        // Same resolution order as worktree_merge: System A by id, then by
+        // branch, then the System-B convention.
+        let system_a = match worktree_store.get(id) {
+            Ok(wt) => Some(wt),
+            Err(_) => worktree_store.get_by_branch(id).map_err(|e| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Failed to get worktree: {e}")),
+                data: None,
+            })?,
+        };
+
+        let (mut worktree, is_system_b) = match system_a {
+            Some(wt) => (wt, false),
+            None => {
+                let assignee = id.strip_prefix("factory/").unwrap_or(id);
+                let path = manager.worktree_path_for_worker(assignee);
+                if !is_git_worktree(&path) {
+                    // Accurate not-found, never the "disabled" text (AC2).
+                    return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(format!(
+                            "Worktree not found: {id} (checked System A worktree store and \
+                             the System B path {})",
+                            path.display()
+                        )),
+                        data: None,
+                    });
+                }
+                (
+                    crate::types::Worktree::new(
+                        format!("system-b-{assignee}"),
+                        format!("factory/{assignee}"),
+                        String::new(),
+                        path,
+                    ),
+                    true,
+                )
+            }
+        };
+
+        let worker_name = worktree
+            .created_by_agent
+            .as_deref()
+            .and_then(|agent_id| agent_store.get(agent_id).ok())
+            .map(|agent| agent.name)
+            .or_else(|| worktree.branch.strip_prefix("factory/").map(str::to_string));
+
+        // Refusal 1: the assignee is still alive. `force` deliberately does not
+        // override this — it would yank the working directory out from under a
+        // running worker mid-turn. force stays a dirty-tree bypass only.
+        if let Some(name) = worker_name.as_deref()
+            && let Ok(agents) = agent_store.list(None)
+            && let Some(agent) = agents.iter().find(|a| a.name == name)
+            && matches!(
+                agent.status,
+                cas_types::AgentStatus::Active | cas_types::AgentStatus::Idle
+            )
+        {
+            return Ok(Self::success(format!(
+                "Refused: {name} is still a live agent (status {:?}), and {} is its working \
+                 directory.\n\nShut the worker down first (`coordination action=shutdown_workers \
+                 worker_names={name}`), then retry. `force=true` does NOT override this — it only \
+                 bypasses the dirty-worktree check.",
+                agent.status,
+                worktree.path.display()
+            )));
+        }
+
+        // Refusal 2: the branch's commits live nowhere else. `abandon` deletes
+        // the branch with `-D`, so removing this worktree would destroy them.
+        let containers = manager.git().branches_containing(&worktree.branch);
+        let branch_is_reachable = !containers.is_empty();
+        if !branch_is_reachable && !force {
+            return Ok(Self::success(format!(
+                "Refused: {} has commits that exist on no other branch, and cleanup deletes the \
+                 branch.\n\nMerge it first (`coordination action=worktree_merge id={id}`), or pass \
+                 force=true to discard the commits.\n\nWorktree: {}",
+                worktree.branch,
+                worktree.path.display()
+            )));
+        }
+
+        let system = if is_system_b { "System B" } else { "System A" };
+        let reachable_via = if branch_is_reachable {
+            format!("merged — reachable from {}", containers.join(", "))
+        } else {
+            "UNMERGED (force=true supplied)".to_string()
+        };
+
+        if dry_run {
+            return Ok(Self::success(format!(
+                "Would remove {system} worktree:\n\n  path:   {}\n  branch: {} ({reachable_via})\n\
+                 \nRun with dry_run=false to actually remove it.",
+                worktree.path.display(),
+                worktree.branch
+            )));
+        }
+
+        // Reap any surviving process group before pulling the directory out
+        // from under it — same guard the sweep uses.
+        if let Err(error) =
+            reap_worker_group_before_worktree_cleanup(&cas_root, &worktree, agent_store.as_ref())
+                .await
+        {
+            return Ok(Self::success(format!(
+                "Refused: {error}\n\nWorktree {} was left in place.",
+                worktree.path.display()
+            )));
+        }
+
+        // Refusal 3 (dirty without force) is `abandon`'s own gate.
+        if let Err(error) = manager.abandon(&mut worktree, force) {
+            return Ok(Self::success(format!(
+                "Could not remove {system} worktree {}: {error}\n\nNothing was changed. Pass \
+                 force=true to remove a dirty worktree.",
+                worktree.path.display()
+            )));
+        }
+
+        if !is_system_b {
+            let _ = worktree_store.update(&worktree);
+        }
+
+        Ok(Self::success(format!(
+            "Removed {system} worktree.\n\n  path:   {}\n  branch: {} (deleted; was {reachable_via})\n\
+             {}",
+            worktree.path.display(),
+            worktree.branch,
+            if is_system_b {
+                "\nSystem-B worktrees carry no store row, so nothing further was updated."
+            } else {
+                "\nStore row marked abandoned + removed."
+            }
+        )))
     }
 
     /// Merge worktree back to parent

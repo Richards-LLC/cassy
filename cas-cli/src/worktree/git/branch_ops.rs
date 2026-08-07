@@ -527,6 +527,40 @@ impl GitOperations {
             .collect()
     }
 
+    /// Local branches whose tip has `rev` in its history, EXCLUDING `rev`'s own
+    /// branch name (cas-f102, GH #140).
+    ///
+    /// This is the "are these commits reachable from anywhere else?" question,
+    /// and it is the only safe pre-check before removing a factory worktree:
+    /// `WorktreeManager::abandon` deletes the branch with `-D`, so a branch
+    /// nothing else contains would take its commits with it.
+    ///
+    /// Deliberately NOT "is it merged into trunk": factory branches land on
+    /// epic branches, so an ancestry test against the default branch
+    /// false-negatives every correctly-merged worker.
+    ///
+    /// A git failure answers "empty" — the caller treats that as "not proven
+    /// merged" and refuses without `force`, so an environment problem fails
+    /// closed rather than authorising a delete.
+    pub fn branches_containing(&self, rev: &str) -> Vec<String> {
+        let Ok(output) = Command::new("git")
+            .args(["branch", "--format=%(refname:short)", "--contains", rev])
+            .current_dir(&self.repo_root)
+            .output()
+        else {
+            return Vec::new();
+        };
+        if !output.status.success() {
+            return Vec::new();
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|line| line.trim().trim_start_matches("* ").trim())
+            .filter(|name| !name.is_empty() && !name.starts_with('(') && *name != rev)
+            .map(str::to_string)
+            .collect()
+    }
+
     /// True when `ancestor` is reachable from `descendant`.
     ///
     /// A git failure answers `false`: callers use this to decide whether to

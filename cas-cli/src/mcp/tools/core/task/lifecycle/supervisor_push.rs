@@ -1401,23 +1401,112 @@ mod tests {
         before_restart.registered_at = chrono::Utc::now() - chrono::Duration::minutes(30);
         agents.register(&before_restart).unwrap();
 
+        // The restart registered TWO rows 157ms apart under the same pane
+        // name (3f2b69fa then ad32fcde in the real store). Reproduce that
+        // duplicate exactly — a registry cleaned of the dups would not be the
+        // failure shape, and tolerating them is half of what makes this pass.
+        let restart_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+        let mut restart_first = agent_in_session(
+            "m-restart-row-one",
+            "smooth-octopus-84",
+            AgentRole::Supervisor,
+            "cas-src-fast-pelican-83",
+        );
+        restart_first.registered_at = restart_at;
+        agents.register(&restart_first).unwrap();
+
         let mut after_restart = agent_in_session(
             "z-post-restart-session",
             "smooth-octopus-84",
             AgentRole::Supervisor,
             "cas-src-fast-pelican-83",
         );
-        after_restart.registered_at = chrono::Utc::now();
+        after_restart.registered_at = restart_at + chrono::Duration::milliseconds(157);
         agents.register(&after_restart).unwrap();
+
+        // Three live rows share the name, exactly as the incident store did.
+        assert_eq!(
+            agents
+                .list(None)
+                .unwrap()
+                .iter()
+                .filter(|a| a.name == "smooth-octopus-84")
+                .count(),
+            3,
+            "the duplicate same-name rows must be present — that IS the failure shape"
+        );
 
         let resolved =
             resolve_owning_supervisor(&agents, Some("cas-src-fast-pelican-83")).unwrap();
         assert_eq!(
             resolved.agent_id, "z-post-restart-session",
             "an awaiting_merge relay emitted after the restart must be addressed to the \
-             session that exists, not to the identity the supervisor left behind"
+             successor session — not to the identity the supervisor left behind, and not \
+             to whichever duplicate row happens to sort first"
         );
         assert_eq!(resolved.name, "smooth-octopus-84");
+
+        // End-to-end: emitting a real awaiting_merge transition must put the
+        // durable row and its prompt on the SUCCESSOR, not merely avoid
+        // suppressing it.
+        let temp_q = TempDir::new().unwrap();
+        let sq = SqliteSupervisorQueueStore::open(temp_q.path()).unwrap();
+        sq.init().unwrap();
+        let pq = SqlitePromptQueueStore::open(temp_q.path()).unwrap();
+        pq.init().unwrap();
+
+        unsafe { std::env::set_var("CAS_FACTORY_SESSION", "cas-src-fast-pelican-83") };
+        let result = emit_task_lifecycle_transition(
+            &sq,
+            Some(&pq),
+            &agents,
+            "cas-fe23",
+            "a parked lane",
+            TaskStatus::InProgress,
+            TaskStatus::AwaitingMerge,
+            "happy-spider-96",
+            Some("ready to merge"),
+            LifecycleTransition::AwaitingMerge,
+            "2026-08-07T18:51:51+00:00",
+        )
+        .unwrap();
+        unsafe { std::env::remove_var("CAS_FACTORY_SESSION") };
+
+        let notification_id = match result {
+            LifecyclePushResult::Enqueued { notification_id } => notification_id,
+            other => panic!("expected a fresh enqueue, got {other:?}"),
+        };
+        let successor_queue = sq.list_pending("z-post-restart-session").unwrap();
+        assert!(
+            successor_queue
+                .iter()
+                .any(|row| row.id == notification_id),
+            "the durable relay must be addressed to the supervisor that exists after the \
+             restart, got {successor_queue:?}"
+        );
+        assert!(
+            sq.list_pending("a-pre-restart-session").unwrap().is_empty(),
+            "nothing may be queued at the identity the supervisor abandoned"
+        );
+        let stored = sq.get_by_transition_key(&transition_key(
+            "cas-fe23",
+            TaskStatus::InProgress,
+            TaskStatus::AwaitingMerge,
+            Some("cas-src-fast-pelican-83"),
+            LifecycleTransition::AwaitingMerge,
+            "2026-08-07T18:51:51+00:00",
+        ))
+        .unwrap()
+        .expect("durable row exists for this occurrence");
+        assert!(
+            stored.prompt_delivered_at.is_some(),
+            "the prompt half must have been handed to the queue, not left pending"
+        );
+        assert_eq!(
+            pq.pending_count().unwrap(),
+            1,
+            "exactly one wake-eligible prompt row must be queued for the supervisor pane"
+        );
     }
 
     /// The recency tiebreak must never outrank liveness: a freshly registered

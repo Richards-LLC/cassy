@@ -246,6 +246,11 @@ pub struct FactoryDaemon {
     /// reported storm: one transition, ~50 byte-identical injections per turn.
     /// Entries are dropped when the row is finally consumed or suppressed.
     lifecycle_redelivery_attempts: HashMap<i64, std::time::Instant>,
+    /// cas-7787 (GH #160): how many times each lifecycle row has actually
+    /// been (re)delivered without arriving. Bounds the retry budget so an
+    /// undelivered relay reaches a terminal failure instead of retrying
+    /// forever at a recipient that is never coming back.
+    lifecycle_redelivery_counts: HashMap<i64, u32>,
     /// cas-ceae (GH #124/#123): queue rows whose payload this daemon has
     /// already written into the recipient's Agent-Teams inbox and then left
     /// pending because the wake was deferred. Keyed by `prompt_queue.id`.

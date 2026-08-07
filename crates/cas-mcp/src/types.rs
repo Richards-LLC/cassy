@@ -206,12 +206,19 @@ pub struct TaskRequest {
     /// cas-code-review skill run (cas-b39f option (a)). Forwarded to
     /// the close handler, where it is parsed and validated before the
     /// P0 gate decision.
-    #[schemars(
-        description = "Serialized ReviewOutcome JSON envelope produced \
-                       by the worker's cas-code-review skill run. \
-                       Required for tasks with reviewable code changes \
-                       unless bypass_code_review is set or the task is \
-                       additive-only. Shape: \
+    #[schemars(description = "LEGACY `[code_review] owner = \"worker\"` MODE ONLY. \
+                       Serialized ReviewOutcome JSON envelope from a \
+                       cas-code-review run. Under the DEFAULT \
+                       owner = \"supervisor\" configuration a factory worker \
+                       must NOT run cas-code-review (skill, workflow, or \
+                       hand-spawned personas) and must NOT pass this field — \
+                       attempt the close without it; the close transitions \
+                       the task to PendingSupervisorReview and the supervisor \
+                       runs the review on their own schedule (cas-4fef). \
+                       Check with `cas config get code_review.owner`. \
+                       Under owner = \"worker\" it is required for tasks with \
+                       reviewable code changes unless bypass_code_review is \
+                       set or the task is additive-only. Shape: \
                        {residual: Finding[], pre_existing: Finding[], mode: string, \
                        execution: {personas_run: int, personas_failed: string[], \
                        required_personas_missing: string[], skipped_reason: string|null}}. \

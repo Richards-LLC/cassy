@@ -11,7 +11,7 @@ use crate::error::MemError;
 use crate::ui::theme::ThemeConfig;
 use serde::{Deserialize, Serialize};
 
-mod hooks;
+pub(crate) mod hooks;
 mod runtime;
 mod settings;
 

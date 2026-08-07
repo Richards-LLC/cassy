@@ -2324,13 +2324,23 @@ This is the body content."#;
     /// instead of inlining.
     #[test]
     fn test_worker_guidance_under_12kb() {
+        const HARD_CEILING: usize = 12_288; // Claude Code harness truncation point.
+        const SOFT_CAP: usize = 11_488; // early-warning margin (800B) below the ceiling.
         let guide = worker_guidance();
         assert!(
-            guide.len() < 12_288,
+            guide.len() < HARD_CEILING,
             "worker_guidance is {} bytes — over the 12KB ceiling. \
              Move content into cas-worker/references/ instead of \
              inlining it in cas-worker.md.",
             guide.len()
+        );
+        assert!(
+            guide.len() <= SOFT_CAP,
+            "worker_guidance is {} bytes — over the {SOFT_CAP}B soft cap (only \
+             {}B from the {HARD_CEILING}B hard ceiling). Trim body prose or move it \
+             into cas-worker/references/ to keep CI headroom.",
+            guide.len(),
+            HARD_CEILING - guide.len()
         );
     }
 

@@ -7,6 +7,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed
+- **The factory supervisor can be steered remotely again, and it stays patched.** Every agent the factory launched was started with non-essential network traffic switched off and its updater pinned. That is the right posture for a worker — a worker must not swap its own binary partway through a piece of work — but it also silently removed two things from the one session an operator actually sits with. Remote Control depends on feature-flag evaluation, which the traffic switch disables outright, so `claude doctor` inside a supervisor reported the feature as unavailable and its rollout unverifiable. The same switch bundles the updater kill switch, so a long-running supervisor never picked up a security fix. Both settings are now applied to workers only; the supervisor gets Remote Control and auto-updates, and worker behaviour is byte-for-byte unchanged. A machine that has been running with the traffic switch set for a long time may hold frozen feature-flag evaluations in `~/.claude/statsig` (or the equivalent path for an alternate config directory); deleting that cache clears them. One trade-off worth watching: with the updater live, a supervisor can update the shared CLI binary mid-run, so workers started either side of that update may differ in version.
+
 ## [2.48.0] - 2026-08-07
 
 ### Internal

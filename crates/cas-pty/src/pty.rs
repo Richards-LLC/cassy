@@ -498,12 +498,8 @@ impl PtyConfig {
                 "CAS_CLONE_PATH".to_string(),
                 cwd.to_string_lossy().to_string(),
             ),
-            // Suppress interactive prompts, telemetry, and updates for factory agents
-            (
-                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_string(),
-                "1".to_string(),
-            ),
-            ("DISABLE_AUTOUPDATER".to_string(), "1".to_string()),
+            // Suppress interactive prompts and cost/UX chrome for factory agents.
+            // The network-quieting vars are role-gated below (cas-7d8e).
             ("DISABLE_COST_WARNINGS".to_string(), "1".to_string()),
             (
                 "CLAUDE_CODE_DISABLE_TERMINAL_TITLE".to_string(),
@@ -529,6 +525,10 @@ impl PtyConfig {
         // (cas-4513 Claude Code JS crash-screen symptom). Emitted only
         // for role="worker"; supervisor stays uncapped.
         push_worker_cargo_env(&mut env, role);
+        // cas-7d8e: silence non-essential traffic and pin the binary for
+        // workers only. The supervisor keeps feature-flag evaluation (Remote
+        // Control) and the auto-updater (security patches).
+        push_worker_quiet_network_env(&mut env, role);
         // Point factory workers at the repo's bootstrapped Zig toolchain so the
         // ghostty_vt_sys build script finds Zig on the first `cargo build` in a
         // fresh worker worktree instead of failing and forcing a manual
@@ -1162,6 +1162,41 @@ fn push_worker_cargo_env(env: &mut Vec<(String, String)>, role: &str) {
     if let Some(cargo_jobs) = cargo_build_jobs_for_worker(None) {
         env.push(("CARGO_BUILD_JOBS".to_string(), cargo_jobs));
     }
+}
+
+/// Quiet a factory *worker's* outbound traffic and pin its binary (cas-7d8e).
+///
+/// `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` and `DISABLE_AUTOUPDATER` are
+/// right for workers: a worker is a short-lived, headless lane that must not
+/// swap its CLI binary mid-EPIC, and nobody drives it from a phone.
+///
+/// They are wrong for the supervisor, for two confirmed reasons:
+/// - Remote Control requires feature-flag evaluation, which the traffic var
+///   disables outright (`claude doctor` says so explicitly). The supervisor is
+///   the one long-running session an operator plausibly wants to steer
+///   remotely.
+/// - The traffic var *bundles* the auto-updater kill switch, so a factory
+///   supervisor never receives security/CVE patches (anthropics/claude-code#53899).
+///
+/// Follows the same worker-only shape as `push_worker_cargo_env`. The quiet-UX
+/// vars (`DISABLE_COST_WARNINGS`, `CLAUDE_CODE_DISABLE_TERMINAL_TITLE`,
+/// `IS_DEMO`) are unrelated to flag evaluation and stay unconditional.
+///
+/// Known trade-off, deliberately accepted: with the updater live, a supervisor
+/// can update the shared binary under `~/.local/share/claude/versions/`
+/// mid-run, so workers spawned before and after an update may differ in
+/// version. If that bites in practice, the narrower fix is to keep
+/// `DISABLE_AUTOUPDATER` unconditional and exempt only the traffic var — at
+/// the cost of the security-patch half of this change.
+fn push_worker_quiet_network_env(env: &mut Vec<(String, String)>, role: &str) {
+    if role != "worker" {
+        return;
+    }
+    env.push((
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_string(),
+        "1".to_string(),
+    ));
+    env.push(("DISABLE_AUTOUPDATER".to_string(), "1".to_string()));
 }
 
 /// Export `ZIG` into a worker's env pointing at the repo's bootstrapped Zig
@@ -3304,6 +3339,131 @@ mod tests {
                 !config.env.iter().any(|(k, _)| k == "CARGO_BUILD_JOBS"),
                 "supervisor must NOT get CARGO_BUILD_JOBS cap — only workers do"
             );
+        }
+
+        // cas-7d8e: the quiet-network vars are worker-only so the supervisor
+        // keeps feature-flag evaluation (Remote Control) and the auto-updater
+        // (security/CVE patches). Workers stay pinned and silent.
+        #[test]
+        fn claude_worker_gets_quiet_network_env() {
+            let _e = ScopedEnv::new();
+            let config = PtyConfig::claude(
+                "w1",
+                "worker",
+                PathBuf::from("/tmp"),
+                None,
+                None,
+                None,
+                None,
+                None, // effort
+                None,
+            );
+            assert!(
+                config
+                    .env
+                    .iter()
+                    .any(|(k, v)| k == "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" && v == "1"),
+                "worker PtyConfig must keep CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"
+            );
+            assert!(
+                config
+                    .env
+                    .iter()
+                    .any(|(k, v)| k == "DISABLE_AUTOUPDATER" && v == "1"),
+                "worker PtyConfig must keep DISABLE_AUTOUPDATER=1 — a worker must not \
+                 swap its binary mid-EPIC"
+            );
+        }
+
+        #[test]
+        fn claude_supervisor_does_not_get_quiet_network_env() {
+            let _e = ScopedEnv::new();
+            let config = PtyConfig::claude(
+                "s1",
+                "supervisor",
+                PathBuf::from("/tmp"),
+                None,
+                None,
+                None,
+                None,
+                None, // effort
+                None,
+            );
+            assert!(
+                !config
+                    .env
+                    .iter()
+                    .any(|(k, _)| k == "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"),
+                "supervisor must NOT get CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC — it \
+                 disables the feature-flag evaluation Remote Control depends on"
+            );
+            assert!(
+                !config.env.iter().any(|(k, _)| k == "DISABLE_AUTOUPDATER"),
+                "supervisor must NOT get DISABLE_AUTOUPDATER — it would never receive \
+                 security patches"
+            );
+        }
+
+        // The unrelated quiet-UX vars are not part of the role gate: both roles
+        // keep them, and the codex harness is untouched by cas-7d8e.
+        #[test]
+        fn claude_both_roles_keep_quiet_ux_env() {
+            let _e = ScopedEnv::new();
+            for role in ["worker", "supervisor"] {
+                let config = PtyConfig::claude(
+                    "a1",
+                    role,
+                    PathBuf::from("/tmp"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None, // effort
+                    None,
+                );
+                for (key, want) in [
+                    ("DISABLE_COST_WARNINGS", "1"),
+                    ("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1"),
+                    ("IS_DEMO", "true"),
+                ] {
+                    assert!(
+                        config.env.iter().any(|(k, v)| k == key && v == want),
+                        "{role} must keep {key}={want}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn codex_keeps_quiet_network_env_for_both_roles() {
+            let _e = ScopedEnv::new();
+            for role in ["worker", "supervisor"] {
+                let config = PtyConfig::codex(
+                    "c1",
+                    role,
+                    PathBuf::from("/tmp"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None, // effort
+                    None,
+                );
+                assert!(
+                    config
+                        .env
+                        .iter()
+                        .any(|(k, v)| k == "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" && v == "1"),
+                    "codex {role} env is out of scope for cas-7d8e and must be unchanged"
+                );
+                assert!(
+                    config
+                        .env
+                        .iter()
+                        .any(|(k, v)| k == "DISABLE_AUTOUPDATER" && v == "1"),
+                    "codex {role} env is out of scope for cas-7d8e and must be unchanged"
+                );
+            }
         }
 
         #[test]

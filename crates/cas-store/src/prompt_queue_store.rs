@@ -181,6 +181,35 @@ pub struct QueuedPrompt {
     pub urgent: bool,
 }
 
+/// A supervisor lifecycle wake relay that reached a terminal stage without
+/// ever being transported (cas-7787, GH #160).
+///
+/// One of these is always a factory-level failure: a worker was parked behind
+/// supervisor action, CAS said so, and the message did not arrive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UndeliveredLifecycleRelay {
+    /// `prompt_queue.id` of the relay that never landed.
+    pub prompt_id: i64,
+    /// `lifecycle-wake:{notification_id}` source marker.
+    pub source: String,
+    /// Intended recipient (`supervisor`).
+    pub target: String,
+    /// Row summary — `{transition}: {task_id} ({occurrence})`.
+    pub summary: Option<String>,
+    /// Terminal stage the row died at (suppressed / dropped / abandoned).
+    pub stage: String,
+    /// Recorded reason, when one was stamped.
+    pub reason: Option<PendingReason>,
+    /// Forensic detail explaining the termination.
+    pub detail: Option<String>,
+    /// Owning factory session, when the row carried one.
+    pub factory_session: Option<String>,
+    /// When the relay was enqueued.
+    pub created_at: DateTime<Utc>,
+    /// When it was terminated.
+    pub processed_at: Option<DateTime<Utc>>,
+}
+
 /// Schema for prompt queue table
 const PROMPT_QUEUE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS prompt_queue (
@@ -490,6 +519,19 @@ pub enum PendingReason {
     SuppressedIdle,
     /// Terminal non-delivery: unknown/stale target abandoned.
     AbandonedUnknownTarget,
+    /// Terminal non-delivery of a supervisor lifecycle WAKE relay that was
+    /// never transported (cas-7787, GH #160).
+    ///
+    /// Distinct from [`Self::SuppressedIdle`] on purpose. `SuppressedIdle`
+    /// means "we withheld a copy the recipient did not need" — benign, and
+    /// correctly quiet. This means "the factory told the supervisor a lane was
+    /// parked behind them, and the supervisor never got it." In the reported
+    /// session that difference was invisible: four `task_awaiting_merge`
+    /// relays were stamped `suppressed_idle` with `transport_delivered_at`
+    /// NULL, and nothing anywhere said a delivery had failed, so a human
+    /// became the transport for three finished lanes. A relay that dies
+    /// undelivered is a failure and must read as one.
+    UndeliveredLifecycleRelay,
     /// Broadcast reached a subset of intended recipients.
     PartialBroadcast,
     /// Broadcast had zero intended recipients (e.g. no non-native workers).
@@ -508,6 +550,7 @@ impl PendingReason {
             Self::DroppedDeadSource => "dropped_dead_source",
             Self::SuppressedIdle => "suppressed_idle",
             Self::AbandonedUnknownTarget => "abandoned_unknown_target",
+            Self::UndeliveredLifecycleRelay => "undelivered_lifecycle_relay",
             Self::PartialBroadcast => "partial_broadcast",
             Self::NoIntendedRecipients => "no_intended_recipients",
         }
@@ -524,6 +567,7 @@ impl PendingReason {
             "dropped_dead_source" => Some(Self::DroppedDeadSource),
             "suppressed_idle" => Some(Self::SuppressedIdle),
             "abandoned_unknown_target" => Some(Self::AbandonedUnknownTarget),
+            "undelivered_lifecycle_relay" => Some(Self::UndeliveredLifecycleRelay),
             "partial_broadcast" => Some(Self::PartialBroadcast),
             "no_intended_recipients" => Some(Self::NoIntendedRecipients),
             "behind_queue_head" => Some(Self::AwaitingDelivery),
@@ -536,7 +580,9 @@ impl PendingReason {
             Self::GatedNotReady | Self::TargetUnavailable => DeliveryStage::Gated,
             Self::DroppedDeadSource => DeliveryStage::Dropped,
             Self::SuppressedIdle => DeliveryStage::Suppressed,
-            Self::AbandonedUnknownTarget => DeliveryStage::Abandoned,
+            Self::AbandonedUnknownTarget | Self::UndeliveredLifecycleRelay => {
+                DeliveryStage::Abandoned
+            }
             Self::PartialBroadcast => DeliveryStage::PartiallyDelivered,
             Self::NoIntendedRecipients => DeliveryStage::Selected,
             Self::AdapterRetryable
@@ -1277,6 +1323,32 @@ pub trait PromptQueueStore: Send + Sync {
 
     /// Unknown-target abandon: processed without transport success.
     fn mark_abandoned(&self, prompt_id: i64, detail: Option<&str>) -> Result<()>;
+
+    /// Terminate a supervisor lifecycle WAKE relay that was never transported
+    /// (cas-7787, GH #160): processed, stage `Abandoned`, reason
+    /// [`PendingReason::UndeliveredLifecycleRelay`].
+    ///
+    /// The row still terminates — leaving it pending would re-write a payload
+    /// whose premise has expired every re-nudge tick (the GH #124 storm). What
+    /// changes is that it terminates as a recorded FAILURE instead of a benign
+    /// suppression, so [`PromptQueueStore::list_undelivered_lifecycle_relays`]
+    /// can surface it and the factory stops mistaking silence for success.
+    fn mark_undelivered_lifecycle_relay(&self, prompt_id: i64, detail: Option<&str>)
+    -> Result<()>;
+
+    /// Lifecycle wake relays that reached a terminal stage without ever being
+    /// transported (cas-7787, GH #160).
+    ///
+    /// This is the failure-honesty read side: every row here is a moment the
+    /// factory told the supervisor a lane was parked behind them and the
+    /// supervisor never received it. Derived entirely from columns the queue
+    /// already writes (`transport_delivered_at IS NULL` + a terminal
+    /// `highest_stage` + a `lifecycle-wake:` source), so it reports historical
+    /// incidents too, not only ones recorded after this code shipped.
+    fn list_undelivered_lifecycle_relays(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<UndeliveredLifecycleRelay>>;
 
     /// Get count of pending prompts
     fn pending_count(&self) -> Result<usize>;
@@ -3133,6 +3205,80 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         })
     }
 
+    fn mark_undelivered_lifecycle_relay(
+        &self,
+        prompt_id: i64,
+        detail: Option<&str>,
+    ) -> Result<()> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = self.conn.lock().unwrap();
+            Self::atomic_stage_stamp(
+                &conn,
+                prompt_id,
+                DeliveryStage::Abandoned,
+                AtomicStampOpts {
+                    reason: Some(PendingReason::UndeliveredLifecycleRelay),
+                    detail,
+                    set_processed: true,
+                    broadcast_attempted: None,
+                    broadcast_succeeded: None,
+                    broadcast_failed: None,
+                },
+            )
+        })
+    }
+
+    fn list_undelivered_lifecycle_relays(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<UndeliveredLifecycleRelay>> {
+        let conn = self.conn.lock().unwrap();
+        // `transport_delivered_at IS NULL` is the whole test for "never
+        // arrived" — it is stamped only by `mark_transport_delivered` /
+        // a fully successful broadcast. Terminal stage means the row will
+        // never be retried, so the failure is final rather than in progress.
+        let mut stmt = conn.prepare(
+            "SELECT id, source, target, summary, highest_stage, last_pending_reason,
+                    last_pending_detail, factory_session, created_at, processed_at
+             FROM prompt_queue
+             WHERE transport_delivered_at IS NULL
+               AND source LIKE 'lifecycle-wake:%'
+               AND highest_stage IN ('suppressed', 'dropped', 'abandoned')
+             ORDER BY id DESC
+             LIMIT ?",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            let created_at: String = row.get(8)?;
+            let processed_at: Option<String> = row.get(9)?;
+            let reason: Option<String> = row.get(5)?;
+            Ok(UndeliveredLifecycleRelay {
+                prompt_id: row.get(0)?,
+                source: row.get(1)?,
+                target: row.get(2)?,
+                summary: row.get(3)?,
+                stage: row
+                    .get::<_, Option<String>>(4)?
+                    .unwrap_or_else(|| DeliveryStage::Abandoned.as_str().to_string()),
+                reason: reason.as_deref().and_then(PendingReason::parse),
+                detail: row.get(6)?,
+                factory_session: row.get(7)?,
+                created_at: DateTime::parse_from_rfc3339(&created_at)
+                    .map(|ts| ts.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+                processed_at: processed_at.and_then(|ts| {
+                    DateTime::parse_from_rfc3339(&ts)
+                        .ok()
+                        .map(|ts| ts.with_timezone(&Utc))
+                }),
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     fn pending_count(&self) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
 
@@ -3479,6 +3625,99 @@ mod tests {
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         (temp, store)
+    }
+
+    /// cas-7787 (GH #160): a lifecycle wake relay that dies without transport
+    /// must be reportable, and must read as a FAILURE rather than as the
+    /// benign idle-dedup it was indistinguishable from.
+    ///
+    /// Reproduces the reported queue shape directly: one relay delivered
+    /// (cas-dffe at 18:35, which the supervisor did receive), one wake relay
+    /// terminated undelivered (cas-fe23 at 18:51, which it did not), and one
+    /// ordinary idle suppression that must stay out of the report.
+    #[test]
+    fn an_undelivered_lifecycle_wake_relay_is_reportable_and_a_delivered_one_is_not() {
+        let (_temp, store) = create_test_store();
+
+        let delivered = store
+            .enqueue_full(
+                "lifecycle-wake:3375",
+                "supervisor",
+                "<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"cas-dffe\">",
+                Some("sess"),
+                Some("task_awaiting_merge: cas-dffe"),
+                Some(NotificationPriority::High),
+            )
+            .unwrap();
+        store.mark_transport_delivered(delivered).unwrap();
+
+        let lost = store
+            .enqueue_full(
+                "lifecycle-wake:3386",
+                "supervisor",
+                "<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"cas-fe23\">",
+                Some("sess"),
+                Some("task_awaiting_merge: cas-fe23"),
+                Some(NotificationPriority::High),
+            )
+            .unwrap();
+        store
+            .mark_undelivered_lifecycle_relay(lost, Some("task closed before delivery"))
+            .unwrap();
+
+        // Ordinary chatter suppression — not a lifecycle wake, not a failure.
+        let chatter = store
+            .enqueue_full("worker-a", "supervisor", "standing by", Some("sess"), None, None)
+            .unwrap();
+        store.mark_suppressed(chatter, Some("duplicate idle")).unwrap();
+
+        let reported = store.list_undelivered_lifecycle_relays(10).unwrap();
+        assert_eq!(
+            reported.len(),
+            1,
+            "exactly the relay that never arrived should be reported, got {reported:?}"
+        );
+        assert_eq!(reported[0].prompt_id, lost);
+        assert_eq!(
+            reported[0].reason,
+            Some(PendingReason::UndeliveredLifecycleRelay),
+            "the reason must distinguish a lost relay from `suppressed_idle` — conflating \
+             the two is what made the GH #160 incident invisible"
+        );
+        assert_eq!(reported[0].stage, DeliveryStage::Abandoned.as_str());
+    }
+
+    /// The historical incident must be visible retroactively: rows written
+    /// BEFORE this fix shipped were stamped `suppressed_idle` with a NULL
+    /// `transport_delivered_at`, and those are still lost relays.
+    #[test]
+    fn a_legacy_suppressed_idle_wake_relay_is_still_reported_as_undelivered() {
+        let (_temp, store) = create_test_store();
+        let legacy = store
+            .enqueue_full(
+                "lifecycle-wake:3402",
+                "supervisor",
+                "<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"cas-edee\">",
+                Some("cas-src-fast-pelican-83"),
+                Some("task_awaiting_merge: cas-edee"),
+                Some(NotificationPriority::High),
+            )
+            .unwrap();
+        // Exactly what the daemon wrote on 2026-08-07 at 19:36:18.
+        store
+            .mark_suppressed(
+                legacy,
+                Some("task lifecycle occurrence no longer matches current task state"),
+            )
+            .unwrap();
+
+        let reported = store.list_undelivered_lifecycle_relays(10).unwrap();
+        assert_eq!(reported.len(), 1);
+        assert_eq!(reported[0].prompt_id, legacy);
+        assert!(
+            reported[0].processed_at.is_some(),
+            "the row is terminal, not in flight"
+        );
     }
 
     /// cas-ac7e (GH #130): stamp the legacy/inferred ack shape directly.

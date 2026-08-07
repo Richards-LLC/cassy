@@ -197,6 +197,58 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         }
     }
 
+    // Check 3a: Undelivered supervisor lifecycle relays (cas-7787, GH #160).
+    //
+    // A relay that dies without transport is a factory failure that used to
+    // leave no trace at all: the durable event looked healthy (stamped
+    // `prompt_delivered_at`), the queue row read `suppressed_idle` like any
+    // benign dedup, and nothing told anyone the supervisor had not been
+    // reached. Surfacing it here — as a WARNING, not an Ok line — is what
+    // makes "the relay is silent" distinguishable from "there was nothing to
+    // relay".
+    {
+        match crate::store::open_prompt_queue_store(&cas_root)
+            .map_err(|e| e.to_string())
+            .and_then(|queue| {
+                queue
+                    .list_undelivered_lifecycle_relays(50)
+                    .map_err(|e| e.to_string())
+            }) {
+            Ok(relays) if relays.is_empty() => checks.push(Check {
+                name: "supervisor relay".to_string(),
+                status: CheckStatus::Ok,
+                message: "no undelivered lifecycle relays".to_string(),
+            }),
+            Ok(relays) => {
+                let sample = relays
+                    .iter()
+                    .take(3)
+                    .filter_map(|relay| relay.summary.as_deref())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                checks.push(Check {
+                    name: "supervisor relay".to_string(),
+                    status: CheckStatus::Warning,
+                    message: format!(
+                        "{} lifecycle relay(s) expired without ever reaching the supervisor{}{}. \
+                         Those lanes may still be waiting — open each task directly.",
+                        relays.len(),
+                        if sample.is_empty() { "" } else { ": " },
+                        sample
+                    ),
+                });
+            }
+            // Fail loud rather than silently reporting health: this check
+            // exists precisely because an unreadable failure signal reads as
+            // success.
+            Err(e) => checks.push(Check {
+                name: "supervisor relay".to_string(),
+                status: CheckStatus::Warning,
+                message: format!("cannot check undelivered lifecycle relays: {e}"),
+            }),
+        }
+    }
+
     // Check 3b: Schema details (tables and columns)
     if let Ok(summary) = get_schema_summary(&cas_root) {
         let table_count = summary.tables.len();

@@ -709,11 +709,27 @@ pub(crate) fn resolve_worker(
         .flat_map(|s| store.list(Some(*s)).unwrap_or_default())
         .filter(|a| a.name == worker_name)
         .collect();
-    // Same name could be registered Stale + Active — prefer Active.
-    matches.sort_by_key(|a| match a.status {
-        AgentStatus::Active => 0,
-        AgentStatus::Stale => 1,
-        _ => 2,
+    // Same name could be registered Stale + Active — prefer Active, then the
+    // most recently registered identity.
+    //
+    // cas-7787 (GH #160): a harness session restart re-registers the same pane
+    // name under a new agent id, so "Active" alone does not pick one row. The
+    // sort used to stop there, leaving the winner to `sort_by_key`'s
+    // stability — i.e. to whatever `ORDER BY registered_at DESC` happened to
+    // yield across two separate `list()` calls. Whoever loses that toss is a
+    // superseded session whose transcript is frozen, and a frozen transcript
+    // reads as "tool call still in flight" forever, which permanently vetoes
+    // the supervisor wake gate. Break the tie on registration recency so the
+    // live session is the one whose transcript is treated as evidence.
+    matches.sort_by(|a, b| {
+        let rank = |s: AgentStatus| match s {
+            AgentStatus::Active => 0,
+            AgentStatus::Stale => 1,
+            _ => 2,
+        };
+        rank(a.status)
+            .cmp(&rank(b.status))
+            .then_with(|| b.registered_at.cmp(&a.registered_at))
     });
     let agent = matches
         .into_iter()

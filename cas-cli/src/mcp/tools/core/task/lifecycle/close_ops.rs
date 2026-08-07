@@ -9911,6 +9911,183 @@ pub(crate) fn run_lightweight_structural_lint_with_scope(
     run_lightweight_structural_lint_at_tip(project_root, committed_range_parent, "HEAD")
 }
 
+/// Parse the new-file start line out of a unified-diff hunk header.
+///
+/// `@@ -12,3 +40,7 @@ optional section heading` → `Some(40)`. The count is
+/// optional (`+40` means a single line), and the trailing section heading git
+/// appends is ignored. Returns `None` for anything that does not match, so the
+/// caller can decide how to degrade.
+fn parse_hunk_new_start(header: &str) -> Option<usize> {
+    // Take the token beginning with '+' from the "@@ ... @@" span. Bounding
+    // the search at the closing "@@" keeps a section heading that happens to
+    // contain a '+' (e.g. `fn add(a: u32) -> u32 { a + 1 }`) from being read
+    // as the hunk range.
+    let body = header.strip_prefix("@@ ")?;
+    let end = body.find("@@")?;
+    let plus_token = body[..end]
+        .split_whitespace()
+        .find(|t| t.starts_with('+'))?;
+    let digits = &plus_token[1..];
+    let number = digits.split(',').next()?;
+    number.parse::<usize>().ok()
+}
+
+/// Resolve the ref the lint should measure the task branch against.
+///
+/// The close path had two disagreeing notions of "parent" (cas-d0c0): the
+/// merge gate measures against the remote-tracking ref, while this lint
+/// measured against the bare local branch name. A local `main` that nobody
+/// fast-forwarded is arbitrarily stale, and because worktrees share a git
+/// directory the staleness is repo-wide — every worker inherits it at once.
+/// The result is that commits authored by other lanes get billed to whichever
+/// task happens to close next (observed on cas-7d8e: 22 foreign commits, and
+/// a finding in a file the task never opened).
+///
+/// Rather than pick one ref and hope, consider both the local branch and its
+/// remote-tracking counterpart and keep whichever produces the *narrowest*
+/// range — the merge-base furthest along the history. That is correct in both
+/// directions: it defeats a stale local ref (the usual case) and equally
+/// defeats a stale remote ref when a supervisor has merged locally without
+/// pushing. Ties and unrelated histories fall back to the first candidate.
+///
+/// Returns the merge-base SHA to diff from, or `None` when no candidate ref
+/// resolves — the caller fails closed on that.
+fn narrowest_parent_merge_base(
+    project_root: &std::path::Path,
+    task_tip: &str,
+    parent: &str,
+) -> Option<String> {
+    use std::process::Command;
+
+    let merge_base = |candidate: &str| -> Option<String> {
+        if !git_ref_exists(project_root, candidate) {
+            return None;
+        }
+        let out = Command::new("git")
+            .args(["merge-base", task_tip, candidate])
+            .current_dir(project_root)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!sha.is_empty()).then_some(sha)
+    };
+
+    // Only synthesise a remote candidate for a bare branch name. A parent that
+    // already names a remote ("origin/main") or a path ("release/2.x") is used
+    // as given — "origin/origin/main" resolves to nothing and "origin/release/2.x"
+    // would be a different branch, not a more current view of this one.
+    let mut candidates = vec![parent.to_string()];
+    if !parent.contains('/') {
+        candidates.push(format!("origin/{parent}"));
+    }
+
+    let mut best: Option<String> = None;
+    for candidate in &candidates {
+        let Some(base) = merge_base(candidate) else {
+            continue;
+        };
+        best = match best {
+            None => Some(base),
+            // Keep the newer merge-base: if the incumbent is an ancestor of
+            // the challenger, the challenger sits further along history and
+            // therefore excludes strictly more foreign commits.
+            Some(current) => {
+                if git_commit_is_ancestor(project_root, &current, &base) {
+                    Some(base)
+                } else {
+                    Some(current)
+                }
+            }
+        };
+    }
+    best
+}
+
+/// Decide whether a run of `//` comment lines is commented-out code or prose.
+///
+/// Check 3 exists to catch a worker who commented out a block of code instead
+/// of deleting it. It is not meant to police documentation, but its only test
+/// was "starts with `//` and is not `///`" — so any long-enough explanatory
+/// comment tripped it, including section banners of the
+/// `// =====` + title + prose + `// =====` shape. Those are legitimate and
+/// permanent, so the check would flag them on every close forever (cas-d0c0).
+///
+/// Heuristic: strip the marker, ignore lines that carry no signal (blank
+/// comments and rule lines like `// -----`), then ask whether a *majority* of
+/// the remaining lines look like source code. Real commented-out code is
+/// overwhelmingly code-shaped; prose almost never is. A run with no
+/// signal-bearing lines at all (a pure box-drawing banner) is prose by
+/// definition.
+///
+/// This is a heuristic on raw diff text with no parser, consistent with the
+/// rest of this lint: it will let through a commented-out block written
+/// mostly in prose-like DSL, and it errs that way deliberately — a false
+/// negative costs a reviewer a comment, a false positive blocks a close.
+fn comment_run_is_commented_out_code(comment_lines: &[String]) -> bool {
+    fn is_rule_line(body: &str) -> bool {
+        // `-----`, `=====`, `#####`, `~~~~~`, `*****`, mixed box drawing.
+        body.len() >= 4 && body.chars().all(|c| "=-*#~_/+ ".contains(c))
+    }
+
+    fn looks_like_code(body: &str) -> bool {
+        // Structural punctuation that prose does not end sentences with.
+        if body.ends_with(';')
+            || body.ends_with('{')
+            || body.ends_with('}')
+            || body.ends_with("=> {")
+            || body.ends_with(',')
+        {
+            return true;
+        }
+        // Operators and path/call syntax.
+        for token in ["=>", "->", "::", "()", "&&", "||", "==", "!=", "+=", "let "] {
+            if body.contains(token) {
+                return true;
+            }
+        }
+        // Assignment, but not prose containing "=" inside words.
+        if body.contains(" = ") {
+            return true;
+        }
+        // Statement keywords in leading position.
+        let first = body.split_whitespace().next().unwrap_or("");
+        #[rustfmt::skip]
+        const KEYWORDS: &[&str] = &[
+            "fn", "let", "if", "else", "for", "while", "loop", "match", "return", "use", "impl",
+            "struct", "enum", "trait", "mod", "pub", "const", "static", "async", "await", "import",
+            "export", "function", "var", "class", "def", "print", "println!", "console.log",
+            "assert!", "assert_eq!", "self.", "this.",
+        ];
+        KEYWORDS.contains(&first.trim_end_matches(['(', '!', ';', ':']))
+    }
+
+    let mut code = 0usize;
+    let mut prose = 0usize;
+    for line in comment_lines {
+        let body = line
+            .trim_start()
+            .trim_start_matches('/')
+            .trim_start_matches('!')
+            .trim();
+        if body.is_empty() || is_rule_line(body) {
+            continue;
+        }
+        if looks_like_code(body) {
+            code += 1;
+        } else {
+            prose += 1;
+        }
+    }
+    // No signal at all → banner/box art → prose.
+    if code == 0 {
+        return false;
+    }
+    code > prose
+}
+
 fn run_lightweight_structural_lint_at_tip(
     project_root: &std::path::Path,
     committed_range_parent: Option<&str>,
@@ -9937,11 +10114,21 @@ fn run_lightweight_structural_lint_at_tip(
                  ref (empty or starts with '-'). Fix the task's parent epic branch and retry."
             ));
         }
-        if !git_ref_exists(project_root, parent) {
+        // cas-d0c0: accept the parent if EITHER the local branch or its
+        // remote-tracking counterpart resolves. Requiring the local ref made a
+        // worktree that only ever fetched (never checked main out) fail closed
+        // on a ref it had no reason to hold.
+        let remote_parent = (!parent.contains('/')).then(|| format!("origin/{parent}"));
+        let parent_resolves = git_ref_exists(project_root, parent)
+            || remote_parent
+                .as_deref()
+                .is_some_and(|r| git_ref_exists(project_root, r));
+        if !parent_resolves {
             return LightweightLintOutcome::Fail(format!(
                 "Cannot scope structural lint: parent branch `{parent}` does not resolve in the \
-                 worker worktree. Ensure the epic/integration branch is available locally \
-                 (fetch or merge base) and retry close."
+                 worker worktree, and neither does its remote-tracking ref. Ensure the \
+                 epic/integration branch is available locally (fetch or merge base) and retry \
+                 close."
             ));
         }
         if !git_ref_exists(project_root, task_tip) {
@@ -9950,28 +10137,12 @@ fn run_lightweight_structural_lint_at_tip(
                  selected task repository."
             ));
         }
-        let merge_base_out = Command::new("git")
-            .args(["merge-base", task_tip, parent])
-            .current_dir(project_root)
-            .output();
-        let merge_base = match merge_base_out {
-            Ok(o) if o.status.success() => {
-                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                if s.is_empty() {
-                    return LightweightLintOutcome::Fail(format!(
-                        "Cannot scope structural lint: empty merge-base between task tip and \
-                         `{parent}`. Check that the worker branch shares history with the \
-                         integration branch."
-                    ));
-                }
-                s
-            }
-            _ => {
-                return LightweightLintOutcome::Fail(format!(
-                    "Cannot scope structural lint: failed to compute merge-base(task tip, `{parent}`). \
-                     Ensure both refs exist in the worker worktree and share history."
-                ));
-            }
+        let Some(merge_base) = narrowest_parent_merge_base(project_root, task_tip, parent) else {
+            return LightweightLintOutcome::Fail(format!(
+                "Cannot scope structural lint: no merge-base between task tip `{task_tip}` and \
+                 `{parent}` (or its remote-tracking ref). Check that the worker branch shares \
+                 history with the integration branch."
+            ));
         };
         match Command::new("git")
             .args(["diff", "--unified=0", &format!("{merge_base}..{task_tip}")])
@@ -10054,6 +10225,23 @@ fn run_lightweight_structural_lint_at_tip(
                 current_is_rust = path.ends_with(".rs");
                 current_file_line = 0;
             } else if line.starts_with("@@ ") {
+                // cas-d0c0: seed the counter from the hunk header so findings
+                // cite real file lines. Previously the counter only ever
+                // counted added lines within a file, so a finding at file line
+                // 255 was reported as "+2" — numbers that resolve to unrelated
+                // code and send the reader to the wrong place entirely. That
+                // misdirection is what made cas-a337's findings look like
+                // doc-comment false positives (they were not; see the task
+                // notes) and it hid the real cause of cas-7d8e's rejection.
+                //
+                // `parse_hunk_new_start` yields the 1-based first line of the
+                // hunk's new-file side; we store `start - 1` because the
+                // per-line arm pre-increments. An unparseable header leaves
+                // the counter untouched rather than silently restarting at 0 —
+                // a stale-but-monotonic number beats a confidently wrong one.
+                if let Some(new_start) = parse_hunk_new_start(line) {
+                    current_file_line = new_start.saturating_sub(1);
+                }
                 result.push(DiffEntry::HunkBoundary);
             } else if line.starts_with('+') && !line.starts_with("+++") {
                 current_file_line += 1;
@@ -10115,8 +10303,11 @@ fn run_lightweight_structural_lint_at_tip(
     }
 
     // Check 3: commented-out code blocks > 5 consecutive comment lines.
-    // Heuristic: 6 or more consecutive lines that (a) start with '//'
-    // and (b) are not doc comments ('///') or copyright headers.
+    // Heuristic: 6 or more consecutive lines that (a) start with '//',
+    // (b) are not doc comments ('///' / '//!') or copyright headers, and
+    // (c) look like code rather than prose (cas-d0c0 — see
+    // `comment_run_is_commented_out_code`; a long explanatory comment or a
+    // `// =====` section banner is documentation, not a leftover block).
     // Applied across all languages (// comments exist in Rust, TS, JS, etc.).
     {
         fn flush_comment_run(
@@ -10124,25 +10315,32 @@ fn run_lightweight_structural_lint_at_tip(
             run_path: &str,
             run_start: usize,
             run_end: usize,
-            run: usize,
+            run_lines: &mut Vec<String>,
         ) {
-            if run > 5 {
+            let run = run_lines.len();
+            if run > 5 && comment_run_is_commented_out_code(run_lines) {
                 violations.push(format!(
                     "{} lines +{}–+{}: {} consecutive commented-out lines — \
                      remove or restore the code before review (>5-line threshold)",
                     run_path, run_start, run_end, run
                 ));
             }
+            run_lines.clear();
         }
 
-        let mut run = 0usize;
+        let mut run_lines: Vec<String> = Vec::new();
         let mut run_start = 0usize;
         let mut run_end = 0usize;
         let mut run_path = String::new();
         for entry in &diff_entries {
             let DiffEntry::Added(added) = entry else {
-                flush_comment_run(&mut violations, &run_path, run_start, run_end, run);
-                run = 0;
+                flush_comment_run(
+                    &mut violations,
+                    &run_path,
+                    run_start,
+                    run_end,
+                    &mut run_lines,
+                );
                 run_path.clear();
                 continue;
             };
@@ -10151,21 +10349,37 @@ fn run_lightweight_structural_lint_at_tip(
                 && !trimmed.starts_with("///")
                 && !trimmed.starts_with("//!");
             if is_code_comment {
-                if run == 0 || run_path != added.path {
-                    flush_comment_run(&mut violations, &run_path, run_start, run_end, run);
+                if run_lines.is_empty() || run_path != added.path {
+                    flush_comment_run(
+                        &mut violations,
+                        &run_path,
+                        run_start,
+                        run_end,
+                        &mut run_lines,
+                    );
                     run_start = added.file_line;
                     run_path = added.path.clone();
-                    run = 0;
                 }
-                run += 1;
+                run_lines.push(trimmed.to_string());
                 run_end = added.file_line;
             } else {
-                flush_comment_run(&mut violations, &run_path, run_start, run_end, run);
-                run = 0;
+                flush_comment_run(
+                    &mut violations,
+                    &run_path,
+                    run_start,
+                    run_end,
+                    &mut run_lines,
+                );
                 run_path.clear();
             }
         }
-        flush_comment_run(&mut violations, &run_path, run_start, run_end, run);
+        flush_comment_run(
+            &mut violations,
+            &run_path,
+            run_start,
+            run_end,
+            &mut run_lines,
+        );
     }
 
     if violations.is_empty() {
@@ -10193,6 +10407,29 @@ mod lightweight_lint_tests {
     use super::*;
     use std::process::Command;
     use tempfile::TempDir;
+
+    /// Six lines of genuinely commented-out *executable* code — the shape
+    /// Check 3 exists to catch.
+    ///
+    /// cas-d0c0: these fixtures used to be placeholder prose (`// line 1`,
+    /// `// b1`, `// disabled line 1`). That was fine when the check flagged
+    /// any run of `//`, but it meant the suite never actually distinguished
+    /// dead code from documentation — the two cases it now has to tell apart.
+    /// Placeholder prose is, correctly, no longer a violation, so every
+    /// fixture asserting a violation was rewritten to contain real code.
+    const COMMENTED_OUT_CODE_6: &str = "// let mut total = 0;\n\
+         // for item in items {\n\
+         //     total += item.weight();\n\
+         // }\n\
+         // tracing::debug!(\"total={}\", total);\n\
+         // return Ok(total);\n";
+
+    /// Five lines of the same, for the below-threshold case.
+    const COMMENTED_OUT_CODE_5: &str = "// let mut total = 0;\n\
+         // for item in items {\n\
+         //     total += item.weight();\n\
+         // }\n\
+         // return Ok(total);\n";
 
     fn init_repo_with_diff(added_lines: &str) -> TempDir {
         init_repo_with_diff_for_file("changed.rs", added_lines)
@@ -10409,7 +10646,7 @@ mod lightweight_lint_tests {
 
     #[test]
     fn lint_catches_large_commented_block() {
-        let code = "// line 1\n// line 2\n// line 3\n// line 4\n// line 5\n// line 6\n";
+        let code = COMMENTED_OUT_CODE_6;
         let dir = init_repo_with_diff(code);
         let outcome = run_lightweight_structural_lint(dir.path());
         assert!(
@@ -10420,7 +10657,7 @@ mod lightweight_lint_tests {
 
     #[test]
     fn lint_comment_block_finding_names_file() {
-        let code = "// line 1\n// line 2\n// line 3\n// line 4\n// line 5\n// line 6\n";
+        let code = COMMENTED_OUT_CODE_6;
         let dir = init_repo_with_diff_for_file("src/legacy.rs", code);
         let outcome = run_lightweight_structural_lint(dir.path());
         match outcome {
@@ -10449,7 +10686,8 @@ mod lightweight_lint_tests {
     #[test]
     fn lint_reports_real_multifile_comment_run_with_file_local_lines() {
         let a = "// a1\n// a2\n// a3\n";
-        let b = "pub fn before() {}\n// b1\n// b2\n// b3\n// b4\n// b5\n// b6\n";
+        let b = format!("pub fn before() {{}}\n{COMMENTED_OUT_CODE_6}");
+        let b = b.as_str();
         let dir = init_repo_with_diffs(&[("src/a.rs", a), ("src/b.rs", b)]);
         let outcome = run_lightweight_structural_lint(dir.path());
         match outcome {
@@ -10501,7 +10739,7 @@ mod lightweight_lint_tests {
 
     #[test]
     fn lint_allows_five_line_comment_block() {
-        let code = "// line 1\n// line 2\n// line 3\n// line 4\n// line 5\n";
+        let code = COMMENTED_OUT_CODE_5;
         let dir = init_repo_with_diff(code);
         let outcome = run_lightweight_structural_lint(dir.path());
         assert!(
@@ -10679,13 +10917,13 @@ mod lightweight_lint_tests {
         git_dc5d(p, &["add", "wip.rs"]);
         git_dc5d(p, &["commit", "-q", "-m", "track wip placeholder"]);
         let dirty_comments = "\
-// line 1 of unrelated WIP comment block
-// line 2 of unrelated WIP comment block
-// line 3 of unrelated WIP comment block
-// line 4 of unrelated WIP comment block
-// line 5 of unrelated WIP comment block
-// line 6 of unrelated WIP comment block
-// line 7 of unrelated WIP comment block
+// let mut leftover_total = 0;
+// for row in rows {
+//     leftover_total += row.len();
+// }
+// tracing::debug!(\"leftover={}\", leftover_total);
+// return Ok(leftover_total);
+// unreachable!();
 fn leftover() {}\n";
         std::fs::write(p.join("wip.rs"), dirty_comments).unwrap();
 
@@ -10777,12 +11015,12 @@ fn leftover() {}\n";
             ],
         );
         let bad = "\
-// disabled line 1
-// disabled line 2
-// disabled line 3
-// disabled line 4
-// disabled line 5
-// disabled line 6
+// let mut disabled = 0;
+// for row in rows {
+//     disabled += row.len();
+// }
+// tracing::debug!(\"disabled={}\", disabled);
+// return Ok(disabled);
 pub fn feature() -> u32 { 1 }
 ";
         std::fs::write(worker.join("feature.rs"), bad).unwrap();
@@ -10817,13 +11055,13 @@ pub fn feature() -> u32 { 1 }
         // lint if incorrectly included in the worker's range vs main).
         git_dc5d(p, &["checkout", "-q", "-b", "epic/x"]);
         let epic_comments = "\
-// epic line 1
-// epic line 2
-// epic line 3
-// epic line 4
-// epic line 5
-// epic line 6
-// epic line 7
+// let mut epic_total = 0;
+// for row in rows {
+//     epic_total += row.len();
+// }
+// tracing::debug!(\"epic={}\", epic_total);
+// return Ok(epic_total);
+// unreachable!();
 pub fn epic_only() {}\n";
         std::fs::write(p.join("epic.rs"), epic_comments).unwrap();
         git_dc5d(p, &["add", "epic.rs"]);
@@ -10863,6 +11101,348 @@ pub fn epic_only() {}\n";
             matches!(vs_epic, LightweightLintOutcome::Pass),
             "parent=epic/x must Pass for clean worker feature, got {vs_epic:?}"
         );
+    }
+
+    // ========================================================================
+    // cas-d0c0 (GH #144): three false-rejection mechanisms in this gate.
+    // ========================================================================
+
+    #[test]
+    fn hunk_header_new_start_is_parsed() {
+        assert_eq!(parse_hunk_new_start("@@ -1,3 +40,7 @@"), Some(40));
+        // Single-line hunk: the count is omitted.
+        assert_eq!(parse_hunk_new_start("@@ -0,0 +255 @@"), Some(255));
+        // git appends the enclosing section; a '+' inside it must not be read
+        // as the range.
+        assert_eq!(
+            parse_hunk_new_start("@@ -12,0 +13,4 @@ fn add(a: u32) -> u32 { a + 1 }"),
+            Some(13)
+        );
+        assert_eq!(parse_hunk_new_start("not a hunk header"), None);
+    }
+
+    /// Mechanism (1), real root cause: findings cited "nth added line in the
+    /// file" instead of the file line, so readers resolved them against
+    /// unrelated code. cas-a337's "doc comments flagged" report was this bug —
+    /// the numbers pointed at a doc-comment region that was never flagged.
+    #[test]
+    fn lint_finding_cites_real_file_line_not_added_line_ordinal() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path();
+        git_dc5d(p, &["init", "-q", "-b", "main"]);
+        // 200 lines of ordinary code, then the offending block far down the
+        // file. The old counter would call the first added line "+1".
+        let base: String = (1..=200)
+            .map(|i| format!("pub fn line_{i}() -> u32 {{ {i} }}\n"))
+            .collect();
+        std::fs::write(p.join("deep.rs"), &base).unwrap();
+        git_dc5d(p, &["add", "deep.rs"]);
+        git_dc5d(p, &["commit", "-q", "-m", "init"]);
+
+        std::fs::write(p.join("deep.rs"), format!("{base}{COMMENTED_OUT_CODE_6}")).unwrap();
+        git_dc5d(p, &["add", "deep.rs"]);
+
+        match run_lightweight_structural_lint(p) {
+            LightweightLintOutcome::Fail(msg) => {
+                assert!(
+                    msg.contains("deep.rs lines +201–+206"),
+                    "finding must cite true file lines 201-206, not added-line \
+                     ordinals 1-6: {msg}"
+                );
+            }
+            other => panic!("commented-out code block should fail lint, got {other:?}"),
+        }
+    }
+
+    /// AC3: `///` and `//!` runs are never counted, at any length. This has
+    /// always been true (close_ops.rs `is_code_comment`); pinned here so the
+    /// cas-a337 misdiagnosis cannot be "fixed" by someone deleting the guard.
+    #[test]
+    fn lint_never_flags_doc_comment_runs() {
+        let doc = "\
+/// Computes the weighted total for a batch.
+///
+/// The weighting is deliberately non-linear so that a single outlier cannot
+/// dominate the result; see the design note for the derivation and the
+/// rationale for the clamping behaviour at the tails.
+///
+/// # Panics
+/// Never — the clamp guarantees a finite result.
+pub fn total() -> u32 { 0 }
+";
+        let dir = init_repo_with_diff_for_file("src/doc.rs", doc);
+        assert!(
+            matches!(
+                run_lightweight_structural_lint(dir.path()),
+                LightweightLintOutcome::Pass
+            ),
+            "/// doc-comment runs must never be flagged"
+        );
+
+        let inner = "\
+//! Module-level documentation for the batching layer.
+//!
+//! This module owns the batch envelope and its watermarks. It deliberately
+//! does not own transport concerns; those live one layer up so that the
+//! retry policy can be swapped without touching serialization.
+//!
+//! See ARCHITECTURE.md for the boundary statement.
+pub fn batch() {}
+";
+        let dir = init_repo_with_diff_for_file("src/inner.rs", inner);
+        assert!(
+            matches!(
+                run_lightweight_structural_lint(dir.path()),
+                LightweightLintOutcome::Pass
+            ),
+            "//! doc-comment runs must never be flagged"
+        );
+    }
+
+    /// Mechanism (3): a `// =====` section banner is documentation and will
+    /// live in the tree forever — flagging it means it can never be closed
+    /// past. This is the exact shape from cas-86b2 that rejected cas-7d8e.
+    #[test]
+    fn lint_does_not_flag_section_banner_comment() {
+        let banner = "\
+// ============================================================================
+// Distilled-knowledge index injection (EPIC cas-7d31 / cas-86b2)
+//
+// SessionStart injects the knowledge *index* and toolizes the body: page
+// titles + snippets + ids go into the prompt, prose does not. These tests pin
+// the three properties that make that shape safe — no bodies, bounded size,
+// and byte-stability for prompt caching.
+// ============================================================================
+pub fn tests_go_here() {}
+";
+        let dir = init_repo_with_diff_for_file("src/banner.rs", banner);
+        assert!(
+            matches!(
+                run_lightweight_structural_lint(dir.path()),
+                LightweightLintOutcome::Pass
+            ),
+            "a section banner is documentation, not commented-out code"
+        );
+    }
+
+    /// Mechanism (3), prose without any banner rules — a long explanatory
+    /// comment is still not dead code.
+    #[test]
+    fn lint_does_not_flag_long_prose_comment() {
+        let prose = "\
+// The retry budget is deliberately generous here. Upstream returns a 503 for
+// the first few seconds after a deploy, and callers of this path are batch
+// jobs with no user waiting on them, so trading latency for a much lower
+// failure rate is the right call. If that assumption ever stops holding,
+// the budget should shrink rather than the backoff growing, because a long
+// backoff interacts badly with the outer scheduler's own timeout.
+pub fn retry() {}
+";
+        let dir = init_repo_with_diff_for_file("src/prose.rs", prose);
+        assert!(
+            matches!(
+                run_lightweight_structural_lint(dir.path()),
+                LightweightLintOutcome::Pass
+            ),
+            "long explanatory prose must not be flagged as commented-out code"
+        );
+    }
+
+    /// AC2: genuine commented-out executable code still trips the gate. The
+    /// prose exemption must not become a blanket amnesty.
+    #[test]
+    fn lint_still_catches_genuine_commented_out_code() {
+        let dir = init_repo_with_diff_for_file("src/dead.rs", COMMENTED_OUT_CODE_6);
+        assert!(
+            matches!(
+                run_lightweight_structural_lint(dir.path()),
+                LightweightLintOutcome::Fail(_)
+            ),
+            "a real commented-out code block must still fail lint"
+        );
+    }
+
+    #[test]
+    fn comment_run_classifier_separates_code_from_prose() {
+        let code: Vec<String> = COMMENTED_OUT_CODE_6
+            .lines()
+            .map(|l| l.trim().to_string())
+            .collect();
+        assert!(
+            comment_run_is_commented_out_code(&code),
+            "executable statements must classify as code"
+        );
+
+        let banner: Vec<String> = vec![
+            "// =========================".to_string(),
+            "// Section: batching".to_string(),
+            "//".to_string(),
+            "// Explains why the batch envelope owns watermarks and the".to_string(),
+            "// transport layer does not.".to_string(),
+            "// =========================".to_string(),
+        ];
+        assert!(
+            !comment_run_is_commented_out_code(&banner),
+            "a banner must classify as prose"
+        );
+
+        // Pure box art carries no signal at all → prose by definition.
+        let rules: Vec<String> = vec!["// -----".to_string(); 6];
+        assert!(
+            !comment_run_is_commented_out_code(&rules),
+            "rule lines alone must classify as prose"
+        );
+    }
+
+    /// AC1 + mechanism (2): merging released main into the branch must not
+    /// bill main's history to this task. Local `main` is left stale on
+    /// purpose — that is the repo-wide condition that rejected cas-7d8e.
+    #[test]
+    fn lint_merge_of_released_main_passes_when_authored_delta_is_clean() {
+        let origin_dir = TempDir::new().unwrap();
+        let origin = origin_dir.path();
+        git_dc5d(origin, &["init", "-q", "-b", "main"]);
+        std::fs::write(origin.join("base.rs"), "fn main() {}\n").unwrap();
+        git_dc5d(origin, &["add", "base.rs"]);
+        git_dc5d(origin, &["commit", "-q", "-m", "init"]);
+
+        let clone_dir = TempDir::new().unwrap();
+        let repo = clone_dir.path().join("repo");
+        git_dc5d(
+            clone_dir.path(),
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                repo.to_str().unwrap(),
+            ],
+        );
+        git_dc5d(&repo, &["config", "user.email", "t@t.com"]);
+        git_dc5d(&repo, &["config", "user.name", "T"]);
+
+        // Another lane lands a commented-out block on main upstream. This is
+        // released history: it is emphatically not this task's work.
+        std::fs::write(origin.join("other_lane.rs"), COMMENTED_OUT_CODE_6).unwrap();
+        git_dc5d(origin, &["add", "other_lane.rs"]);
+        git_dc5d(origin, &["commit", "-q", "-m", "other lane"]);
+
+        // Worker branches from the clone's original base and does clean work.
+        git_dc5d(&repo, &["checkout", "-q", "-b", "factory/worker"]);
+        std::fs::write(repo.join("feature.rs"), "pub fn feature() -> u32 { 1 }\n").unwrap();
+        git_dc5d(&repo, &["add", "feature.rs"]);
+        git_dc5d(&repo, &["commit", "-q", "-m", "feat: clean work"]);
+
+        // Fetch moves origin/main; local `main` stays where it was. This is
+        // exactly the repo state that produced cas-7d8e's false rejection.
+        git_dc5d(&repo, &["fetch", "-q", "origin"]);
+        git_dc5d(&repo, &["merge", "-q", "--no-edit", "origin/main"]);
+
+        assert!(
+            matches!(
+                run_lightweight_structural_lint_with_scope(&repo, Some("main")),
+                LightweightLintOutcome::Pass
+            ),
+            "merging released main must not bill another lane's commented-out \
+             code to this task"
+        );
+    }
+
+    /// The remote-tracking preference must not blind the lint to work that
+    /// only exists locally: if local `main` is AHEAD of `origin/main`, the
+    /// local ref is the better parent and must win.
+    #[test]
+    fn lint_uses_local_parent_when_it_is_ahead_of_remote() {
+        let origin_dir = TempDir::new().unwrap();
+        let origin = origin_dir.path();
+        git_dc5d(origin, &["init", "-q", "-b", "main"]);
+        std::fs::write(origin.join("base.rs"), "fn main() {}\n").unwrap();
+        git_dc5d(origin, &["add", "base.rs"]);
+        git_dc5d(origin, &["commit", "-q", "-m", "init"]);
+
+        let clone_dir = TempDir::new().unwrap();
+        let repo = clone_dir.path().join("repo");
+        git_dc5d(
+            clone_dir.path(),
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                repo.to_str().unwrap(),
+            ],
+        );
+        git_dc5d(&repo, &["config", "user.email", "t@t.com"]);
+        git_dc5d(&repo, &["config", "user.name", "T"]);
+
+        // Local main advances past origin/main (merged but not yet pushed).
+        std::fs::write(repo.join("landed.rs"), "pub fn landed() {}\n").unwrap();
+        git_dc5d(&repo, &["add", "landed.rs"]);
+        git_dc5d(&repo, &["commit", "-q", "-m", "landed locally"]);
+
+        // Worker branches off that local tip and commits dead code.
+        git_dc5d(&repo, &["checkout", "-q", "-b", "factory/worker"]);
+        std::fs::write(repo.join("dead.rs"), COMMENTED_OUT_CODE_6).unwrap();
+        git_dc5d(&repo, &["add", "dead.rs"]);
+        git_dc5d(&repo, &["commit", "-q", "-m", "feat: with dead code"]);
+
+        assert!(
+            matches!(
+                run_lightweight_structural_lint_with_scope(&repo, Some("main")),
+                LightweightLintOutcome::Fail(_)
+            ),
+            "local main ahead of origin/main must still be used as the parent, \
+             so the worker's own dead code is caught"
+        );
+    }
+
+    /// A worktree that only ever fetched has no local `main`; the lint must
+    /// scope against `origin/main` rather than failing closed on a ref the
+    /// worktree had no reason to hold.
+    #[test]
+    fn lint_scopes_against_remote_parent_when_local_branch_is_absent() {
+        let origin_dir = TempDir::new().unwrap();
+        let origin = origin_dir.path();
+        git_dc5d(origin, &["init", "-q", "-b", "main"]);
+        std::fs::write(origin.join("base.rs"), "fn main() {}\n").unwrap();
+        git_dc5d(origin, &["add", "base.rs"]);
+        git_dc5d(origin, &["commit", "-q", "-m", "init"]);
+
+        let clone_dir = TempDir::new().unwrap();
+        let repo = clone_dir.path().join("repo");
+        git_dc5d(
+            clone_dir.path(),
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                repo.to_str().unwrap(),
+            ],
+        );
+        git_dc5d(&repo, &["config", "user.email", "t@t.com"]);
+        git_dc5d(&repo, &["config", "user.name", "T"]);
+        // Move off main and delete the local branch, leaving only origin/main.
+        git_dc5d(&repo, &["checkout", "-q", "-b", "factory/worker"]);
+        git_dc5d(&repo, &["branch", "-q", "-D", "main"]);
+        std::fs::write(repo.join("dead.rs"), COMMENTED_OUT_CODE_6).unwrap();
+        git_dc5d(&repo, &["add", "dead.rs"]);
+        git_dc5d(&repo, &["commit", "-q", "-m", "feat: with dead code"]);
+
+        // Must fail on the DEAD CODE, not on an inability to scope — the old
+        // behaviour bailed out with "parent does not resolve", which is a
+        // different (and unactionable) rejection.
+        match run_lightweight_structural_lint_with_scope(&repo, Some("main")) {
+            LightweightLintOutcome::Fail(msg) => {
+                assert!(
+                    msg.contains("dead.rs") && msg.contains("commented-out"),
+                    "absent local main must fall back to origin/main and lint the \
+                     real diff, not fail closed on scoping: {msg}"
+                );
+                assert!(
+                    !msg.contains("Cannot scope"),
+                    "must not be a scoping failure: {msg}"
+                );
+            }
+            other => panic!("dead code must still be caught, got {other:?}"),
+        }
     }
 
     /// cas-dc5d P2: missing parent ref must Fail with actionable text.

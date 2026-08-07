@@ -137,6 +137,9 @@ impl CasCore {
             // MCP process dispatch).
             agent_role: requested_role.map(|r| r.to_string()),
             message: None,
+            message_is_final: None,
+            index: None,
+            stop_hook_active: None,
         };
 
         // Use hook handler for session start side effects
@@ -311,6 +314,9 @@ impl CasCore {
             subagent_prompt: None,
             agent_role: std::env::var("CAS_AGENT_ROLE").ok(),
             message: None,
+            message_is_final: None,
+            index: None,
+            stop_hook_active: None,
         };
 
         handle_session_end(&input, Some(&self.cas_root)).map_err(|e| McpError {

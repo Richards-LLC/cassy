@@ -10,6 +10,7 @@ mod reload_skills;
 mod review_dispatch_gate;
 mod reviews;
 mod session_title;
+mod stop_hook_active;
 mod ripple_path_scope;
 mod send_message_autoroute;
 mod supervisor_reminder;

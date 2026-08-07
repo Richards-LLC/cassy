@@ -32,8 +32,17 @@ Databases inventoried:
 | `created` range | 2026-03-16 → 2026-04-24 | 2026-03-16 → 2026-08-07 |
 | `knowledge_pages` (destination system) | 0 | 0 |
 
-**Total legacy rows to migrate on this machine: 1695.** The destination
-(`knowledge_pages`) is empty in both DBs, so M3 starts from a clean target.
+**Total legacy rows on this machine: 1695.** The destination (`knowledge_pages`)
+is empty in both DBs, so M3 starts from a clean target.
+
+> **Revised by M2 (cas-e311).** Row count is not corpus size. M2 found that
+> **994 of these rows (58.6%) are integration-test fixtures** — exactly five
+> literal content strings duplicated 143–160× each — leaving a genuine migration
+> corpus of **702 rows**. M2 also found cross-project contamination concentrated
+> in the high-importance band. Read
+> [`cas-b129-mapping-spec.md` §3](./cas-b129-mapping-spec.md) before using any
+> count in this document to size the migration. The per-surface counts below are
+> unchanged and correct as raw column statistics.
 
 ---
 
@@ -57,7 +66,7 @@ Databases inventoried:
   - Basic scorer type weight: `crates/cas-core/src/hooks/context/mod.rs:~160-184` (`BasicContextScorer::calculate_score`).
   - MCP `memory action=list` / `recent`: `cas-cli/src/mcp/tools/core/memory.rs:786`, `:705`.
   - Learning-review hook (type = `learning` only): `crates/cas-store/src/sqlite/store_entry_queries.rs:95` → `cas-cli/src/hooks/handlers/handlers_middle/session_stop/mod.rs:176`.
-- **Disposition (M2)**: _TBD_
+- **Disposition (M2)**: `merge-into` page_type + `carry-verbatim` as `cas_legacy_type`. Drives row routing R3/R5/R7/R8/R9 in the M2 spec; original value preserved verbatim so the mapping is reversible. See [mapping spec §5.1](./cas-b129-mapping-spec.md).
 
 ### 1.2 Memory tiers — `entries.memory_tier`
 
@@ -81,7 +90,7 @@ Databases inventoried:
   - `store_list_decayable` (`.../store_entry_crud.rs:312`) — excludes `in_context` and `archive`.
   - `store_list_pinned` (`crates/cas-store/src/sqlite/store_entry_queries.rs:38`) — `in_context` only.
 - **Finding — `LIMIT 10000` ceiling**: `store_list` caps at 10 000 rows. PROJECT is at 1245, so no truncation today, but the cap is a silent data-loss edge for any migration that reads via `Store::list()` instead of raw SQL. **M3 must not use `Store::list()` as its extraction read.**
-- **Disposition (M2)**: _TBD_
+- **Disposition (M2)**: `carry-verbatim` as `cas_legacy_memory_tier`; **does not gate migration**. `memory_tier` is the authoritative cold signal (the `archived` flag is 0 everywhere); but since no read path filters tier, archive-tier rows are behaviourally live and are migrated like any other. Destination has no tier column. See [mapping spec §5.1a](./cas-b129-mapping-spec.md).
 
 ### 1.3 Importance / stability / decay state
 
@@ -111,7 +120,7 @@ Databases inventoried:
   - SessionStart scoring: `crates/cas-core/src/hooks/context/mod.rs:~160-184` multiplies `importance_boost * stability_boost * access_boost * age_decay`.
   - Hybrid blend: `cas-cli/src/hooks/scorer.rs:74-125` — 70% hybrid score, 30% normalized basic score (which carries the importance/stability signal).
   - MCP `memory action=set_tier`: `cas-cli/src/mcp/tools/service/core.rs:156` → `cas-cli/src/mcp/tools/core/system.rs:201`.
-- **Disposition (M2)**: _TBD_
+- **Disposition (M2)**: `carry-verbatim` as `cas_legacy_importance` / `_stability` / `_access_count` / `_last_accessed`. Provenance only — explicitly **not** a routing signal, because importance is 76% untouched default and its high band is contaminated by another project's rows. See [mapping spec §5.1, §3](./cas-b129-mapping-spec.md).
 
 ### 1.4 Opinions and reinforce / weaken / contradict history
 
@@ -146,7 +155,7 @@ Databases inventoried:
 - **Secondary finding**: with 0 opinions and 1 hypothesis across 1695 rows, this
   surface is effectively unused in production. Migration risk here is
   near-zero regardless of the disposition chosen.
-- **Disposition (M2)**: _TBD_
+- **Disposition (M2)**: Rows: `stay-entry` (routing rule R4) — pages cannot represent confidence decay. Scalars `belief_type`/`confidence`: `carry-verbatim`. Reinforce/weaken/contradict **evidence**: `deliberately-leave` — it was never persisted, so there is nothing to carry (loss is zero). Escalated as E2. See [mapping spec §5.1, §10](./cas-b129-mapping-spec.md).
 
 ### 1.5 Pins (in-context tier)
 
@@ -165,7 +174,7 @@ Databases inventoried:
   `pinned`/`core`/`in_context` (`crates/cas-types/src/entry.rs:198-206`). This is
   the likely cause of the 0/1695 pin count, and it means the highest-leverage
   read path in the whole legacy system has never carried data.
-- **Disposition (M2)**: _TBD_
+- **Disposition (M2)**: `carry-verbatim` → **locked** knowledge page (routing rule R2). Locked bit set via `set_locked` after `commit_ingest`; an unlocked carry-verbatim page fails the migration run. See [mapping spec §8.1](./cas-b129-mapping-spec.md).
 
 ### 1.6 Team-share flags
 
@@ -185,7 +194,7 @@ Databases inventoried:
   authoritative before M3 maps either; naively carrying `share` forward would
   migrate 1695 NULLs and silently drop the 626 real `team_id` associations.
 - **Read paths**: `Scope`/`ScopeFilter` filtering in `crates/cas-store/src/sqlite/store_entry_crud.rs:285` (`store_list_by_scope_and_tag`); cloud sync queue (see §2.15).
-- **Disposition (M2)**: _TBD_
+- **Disposition (M2)**: `team_id`: `carry-verbatim` as `cas_legacy_team_id`, **authoritative**. `share`: `deliberately-leave` — dead column, 0 rows, never written. M3 must not synthesize `share` from `team_id`. Team scoping is unenforced in the destination — escalated as E3. See [mapping spec §8.2](./cas-b129-mapping-spec.md).
 
 ### 1.7 Temporal validity windows — `valid_from` / `valid_until`
 
@@ -207,7 +216,7 @@ Databases inventoried:
   `build_start.rs:668-672` filters only on entry type. An expired entry would
   still be injected. With 1 row using the feature this is currently harmless, but
   M2 should not assume the legacy system honored these windows.
-- **Disposition (M2)**: _TBD_
+- **Disposition (M2)**: `carry-verbatim` as `cas_legacy_valid_from` / `_valid_until` / `_review_after`. Destination has no expiry enforcement — but neither did the legacy read path, so this is parity, not regression. See [mapping spec §5.1, §9](./cas-b129-mapping-spec.md).
 
 ---
 
@@ -218,26 +227,26 @@ enumerate. Flagged per acceptance criterion (4).
 
 | # | Surface | Schema / code | GLOBAL | PROJECT | Notes | Disposition (M2) |
 |---|---|---|---:|---:|---|---|
-| 2.1 | **NEW-FOUND** `belief_type` + `confidence` as general fields (beyond opinions) | `crates/cas-types/src/entry.rs:34`, `:346`, `:356` | 450 fact | 1244 fact / 1 hypothesis | Epic mentions opinions only; the enum also carries `Fact` and `Hypothesis` and every row has a `confidence` | _TBD_ |
-| 2.2 | **NEW-FOUND** `archived` flag, distinct from `memory_tier='archive'` | `entries.archived`; `crates/cas-store/src/sqlite/store_entry_crud.rs:384`, `:395`, `:403` | 0 | 0 | Two independent "archive" concepts. Every read path filters `archived = 0`; nothing filters tier. 1512/1695 rows are tier-archive but flag-live | _TBD_ |
-| 2.3 | **NEW-FOUND** `observation_type` | `crates/cas-types/src/entry.rs:73`; `entries.observation_type`; `idx_entries_obs_type` | 0 non-NULL | 1 (`general`) | Sub-classification of `observation` entries | _TBD_ |
-| 2.4 | **NEW-FOUND** feedback counters `helpful_count` / `harmful_count` | `entries.*`; MCP `cas-cli/src/mcp/tools/core/memory.rs:623`, `:653`; index `idx_entries_helpful_score` | 0 / 0 | 4 / 0 | Drives `feedback_score()` (`behavior.rs:304`) and `list_helpful` (`store_entry_queries.rs:56`) → `cas-cli/src/hooks/context.rs:399` | _TBD_ |
-| 2.5 | **NEW-FOUND** access telemetry `access_count` / `last_accessed` | `entries.*` | 32 / 32 | 91 / 91 | Feeds decay + scoring | _TBD_ |
-| 2.6 | **NEW-FOUND** `title` | `entries.title` | 212 | 429 | Only ~1/3 of rows have one; the rest fall back to `preview(60)` (`build_start.rs:293`) | _TBD_ |
-| 2.7 | **NEW-FOUND** `tags` (JSON/CSV text) | `entries.tags`; `store_list_by_scope_and_tag` at `store_entry_crud.rs:285` | 320 non-empty | 765 non-empty | Opinion/hypothesis constructors write literal `opinion` / `hypothesis` tags (`behavior.rs:59`, `:97`) | _TBD_ |
-| 2.8 | **NEW-FOUND** compression pair `raw_content` / `compressed` | `entries.*` | 0 / 0 | 0 / 0 | Feature wired, never used. Zero rows compressed | _TBD_ |
-| 2.9 | **NEW-FOUND** provenance `session_id` / `source_tool` | `entries.*`; `idx_entries_session`; `store_list_by_session` at `store_entry_queries.rs:76` | 0 / 449 (`mcp`) | 0 / 1242 (`mcp`) | `session_id` is **universally NULL** — the per-session read path `list_by_session` is dead. `source_tool` is uniformly `mcp` | _TBD_ |
-| 2.10 | **NEW-FOUND** `domain` | `crates/cas-types/src/entry.rs:338`; `idx_entries_domain` | 0 | 0 | Context-aware knowledge field, unused | _TBD_ |
-| 2.11 | **NEW-FOUND** `branch` (worktree scoping) | `crates/cas-types/src/entry.rs:362`; `store_list_by_branch` at `store_entry_crud.rs:421`; consumer `cas-cli/src/mcp/server/mod.rs:849` | 0 | 0 | Read path live, zero data | _TBD_ |
-| 2.12 | **NEW-FOUND** `scope` (global vs project) | `crates/cas-types/src/scope.rs:18`; `entries.scope`; `idx_entries_scope` | **450 = `project`** | 1245 = `project` | ⚠️ Every row in the *global* DB is labelled `scope='project'`. Scope is carried by which DB file the row lives in, not by the column — and by the `g-`/`p-` id prefix stripped in `merge_entries` (`crates/cas-core/src/hooks/context/mod.rs:520-549`). M3 must not trust `entries.scope` | _TBD_ |
-| 2.13 | **NEW-FOUND** learning-review state `last_reviewed` / `review_after` | `entries.*`; `idx_entries_unreviewed_learnings`; `store_entry_queries.rs:95`, `:115` | 0 / 0 | 4 / 0 | Consumed by the session-stop learning-review hook (`cas-cli/src/hooks/handlers/handlers_middle/session_stop/mod.rs:176`) | _TBD_ |
-| 2.14 | **NEW-FOUND** pipeline state `pending_extraction`, `pending_embedding`, `updated_at`, `indexed_at` | `entries.*`; `crates/cas-store/src/sqlite/store_entry_indexing.rs`; trait `crates/cas-store/src/lib.rs` (`list_pending_index`, `mark_indexed`) | 0 / **450** / 450 / 176 NULL | 0 / **1245** / 1245 / 1 NULL | ⚠️ `pending_embedding = 1` for **100% of rows in both DBs** — no entry has ever been embedded. Confirms §3.2: entries have no vector representation | _TBD_ |
-| 2.15 | **NEW-FOUND** cloud `sync_queue` rows for entries | `sync_queue` table | **11** (`entity_type='entry'`) | 0 | 11 undelivered entry syncs sitting in the global queue; PROJECT has no entry rows queued at all | _TBD_ |
-| 2.16 | **NEW-FOUND** `code_memory_links` table | `crates/cas-store/…`; migration `cas-cli/src/migration/migrations/m134_code_memory_links_create_table.rs` | 0 | 0 | Memory↔code-symbol association, no data | _TBD_ |
-| 2.17 | **NEW-FOUND** entity graph over memories (`entities`, `entity_mentions`, `relationships`) | `crates/cas-store/src/entity_store.rs`; search channel `cas-cli/src/hybrid_search/entity_search.rs:217`, graph expansion `cas-cli/src/hybrid_search/hybrid.rs:767-806` | 0 / 0 / 0 | 0 / 0 / 0 | Retrieval channel exists and is wired into hybrid search; the backing tables are empty in both DBs | _TBD_ |
-| 2.18 | **NEW-FOUND** legacy **MarkdownStore** backend (file-based entries, YAML frontmatter) | `cas-cli/src/store/markdown.rs:1-18` (`//! Legacy Markdown storage backend`), impls at `:288`, `:312`, `:340`; mirrored at `crates/cas-store/src/markdown.rs:307` | **no `entries/` or `archive/` dir on disk** | no dir | A second, entirely separate persistence format implementing the same `Store` trait. Zero data on this machine, but M2 must state whether the migration is defined for it | _TBD_ |
-| 2.19 | **NEW-FOUND** Tantivy BM25 index directory | `~/.cas/index/*.{idx,term,store,pos,fast,fieldnorm}`; `cas-cli/src/hybrid_search/search_index_query.rs:120` | present, many segments | — | Derived artifact over entries; not a source of truth but must be rebuilt/invalidated after migration | _TBD_ |
-| 2.20 | **NEW-FOUND** retrieval-feedback tables `retrieval_queries` / `retrieval_query_results` / `retrieval_outcomes` | `crates/cas-store/src/retrieval_store.rs` | 0 / 0 | 0 / 0 | The `search action=retrieval_feedback` surface. Empty — no baseline of "which memory was helpful for which query" exists to preserve or to measure parity against (relevant to M4, cas-90fd) | _TBD_ |
+| 2.1 | **NEW-FOUND** `belief_type` + `confidence` as general fields (beyond opinions) | `crates/cas-types/src/entry.rs:34`, `:346`, `:356` | 450 fact | 1244 fact / 1 hypothesis | Epic mentions opinions only; the enum also carries `Fact` and `Hypothesis` and every row has a `confidence` | `carry-verbatim` (`cas_legacy_belief_type`, `_confidence`); routing use is R4 only |
+| 2.2 | **NEW-FOUND** `archived` flag, distinct from `memory_tier='archive'` | `entries.archived`; `crates/cas-store/src/sqlite/store_entry_crud.rs:384`, `:395`, `:403` | 0 | 0 | Two independent "archive" concepts. Every read path filters `archived = 0`; nothing filters tier. 1512/1695 rows are tier-archive but flag-live | `carry-verbatim` (both); ambiguity resolved — tier is authoritative, flag selects nothing, neither gates migration (spec §5.1a) |
+| 2.3 | **NEW-FOUND** `observation_type` | `crates/cas-types/src/entry.rs:73`; `entries.observation_type`; `idx_entries_obs_type` | 0 non-NULL | 1 (`general`) | Sub-classification of `observation` entries | `carry-verbatim` as `cas_legacy_observation_type` |
+| 2.4 | **NEW-FOUND** feedback counters `helpful_count` / `harmful_count` | `entries.*`; MCP `cas-cli/src/mcp/tools/core/memory.rs:623`, `:653`; index `idx_entries_helpful_score` | 0 / 0 | 4 / 0 | Drives `feedback_score()` (`behavior.rs:304`) and `list_helpful` (`store_entry_queries.rs:56`) → `cas-cli/src/hooks/context.rs:399` | `carry-verbatim` **and routing signal** — rule R8 promotes `helpful>harmful` learnings to pages; the only human-confirmed durability signal in the corpus |
+| 2.5 | **NEW-FOUND** access telemetry `access_count` / `last_accessed` | `entries.*` | 32 / 32 | 91 / 91 | Feeds decay + scoring | `carry-verbatim` (`cas_legacy_access_count`, `_last_accessed`); no destination engine consumes it |
+| 2.6 | **NEW-FOUND** `title` | `entries.title` | 212 | 429 | Only ~1/3 of rows have one; the rest fall back to `preview(60)` (`build_start.rs:293`) | `merge-into` `knowledge_pages.title`, falling back to `preview(60)` for the ~2/3 of rows without one |
+| 2.7 | **NEW-FOUND** `tags` (JSON/CSV text) | `entries.tags`; `store_list_by_scope_and_tag` at `store_entry_crud.rs:285` | 320 non-empty | 765 non-empty | Opinion/hypothesis constructors write literal `opinion` / `hypothesis` tags (`behavior.rs:59`, `:97`) | `carry-verbatim` as a `cas_legacy_tags` YAML list block (parser-safe per spec rule C4) |
+| 2.8 | **NEW-FOUND** compression pair `raw_content` / `compressed` | `entries.*` | 0 / 0 | 0 / 0 | Feature wired, never used. Zero rows compressed | `deliberately-leave` — 0 rows, feature never exercised. **Hard assert**: a compressed row at run time aborts M3 |
+| 2.9 | **NEW-FOUND** provenance `session_id` / `source_tool` | `entries.*`; `idx_entries_session`; `store_list_by_session` at `store_entry_queries.rs:76` | 0 / 449 (`mcp`) | 0 / 1242 (`mcp`) | `session_id` is **universally NULL** — the per-session read path `list_by_session` is dead. `source_tool` is uniformly `mcp` | `carry-verbatim` (`cas_legacy_session_id`, `_source_tool`); `session_id` omitted universally under the omit-when-default rule |
+| 2.10 | **NEW-FOUND** `domain` | `crates/cas-types/src/entry.rs:338`; `idx_entries_domain` | 0 | 0 | Context-aware knowledge field, unused | `carry-verbatim`; key never emitted (0 rows) |
+| 2.11 | **NEW-FOUND** `branch` (worktree scoping) | `crates/cas-types/src/entry.rs:362`; `store_list_by_branch` at `store_entry_crud.rs:421`; consumer `cas-cli/src/mcp/server/mod.rs:849` | 0 | 0 | Read path live, zero data | `carry-verbatim`; key never emitted (0 rows) |
+| 2.12 | **NEW-FOUND** `scope` (global vs project) | `crates/cas-types/src/scope.rs:18`; `entries.scope`; `idx_entries_scope` | **450 = `project`** | 1245 = `project` | ⚠️ Every row in the *global* DB is labelled `scope='project'`. Scope is carried by which DB file the row lives in, not by the column — and by the `g-`/`p-` id prefix stripped in `merge_entries` (`crates/cas-core/src/hooks/context/mod.rs:520-549`). M3 must not trust `entries.scope` | `deliberately-leave` the column, **derive instead** — scope comes from the DB file plus the `g-`/`p-` id prefix, recorded as `cas_legacy_scope` + `cas_legacy_db`. Carrying a known-false value is refused |
+| 2.13 | **NEW-FOUND** learning-review state `last_reviewed` / `review_after` | `entries.*`; `idx_entries_unreviewed_learnings`; `store_entry_queries.rs:95`, `:115` | 0 / 0 | 4 / 0 | Consumed by the session-stop learning-review hook (`cas-cli/src/hooks/handlers/handlers_middle/session_stop/mod.rs:176`) | `carry-verbatim` (`cas_legacy_last_reviewed`, `_review_after`) |
+| 2.14 | **NEW-FOUND** pipeline state `pending_extraction`, `pending_embedding`, `updated_at`, `indexed_at` | `entries.*`; `crates/cas-store/src/sqlite/store_entry_indexing.rs`; trait `crates/cas-store/src/lib.rs` (`list_pending_index`, `mark_indexed`) | 0 / **450** / 450 / 176 NULL | 0 / **1245** / 1245 / 1 NULL | ⚠️ `pending_embedding = 1` for **100% of rows in both DBs** — no entry has ever been embedded. Confirms §3.2: entries have no vector representation | `updated_at` → `carry-verbatim`; `pending_extraction` / `pending_embedding` / `indexed_at` → `deliberately-leave` (pipeline state; destination re-arms its own flag) |
+| 2.15 | **NEW-FOUND** cloud `sync_queue` rows for entries | `sync_queue` table | **11** (`entity_type='entry'`) | 0 | 11 undelivered entry syncs sitting in the global queue; PROJECT has no entry rows queued at all | **drain → else invalidate**, ledgered. Never preserved across the migration; M3 asserts the count is 0 before extraction (spec §5.3) |
+| 2.16 | **NEW-FOUND** `code_memory_links` table | `crates/cas-store/…`; migration `cas-cli/src/migration/migrations/m134_code_memory_links_create_table.rs` | 0 | 0 | Memory↔code-symbol association, no data | `deliberately-leave` — 0 rows. **Hard assert**: a non-zero count aborts M3 rather than silently dropping a memory-to-code edge |
+| 2.17 | **NEW-FOUND** entity graph over memories (`entities`, `entity_mentions`, `relationships`) | `crates/cas-store/src/entity_store.rs`; search channel `cas-cli/src/hybrid_search/entity_search.rs:217`, graph expansion `cas-cli/src/hybrid_search/hybrid.rs:767-806` | 0 / 0 / 0 | 0 / 0 / 0 | Retrieval channel exists and is wired into hybrid search; the backing tables are empty in both DBs | `deliberately-leave` — 0 rows. Same hard assert as 2.16 |
+| 2.18 | **NEW-FOUND** legacy **MarkdownStore** backend (file-based entries, YAML frontmatter) | `cas-cli/src/store/markdown.rs:1-18` (`//! Legacy Markdown storage backend`), impls at `:288`, `:312`, `:340`; mirrored at `crates/cas-store/src/markdown.rs:307` | **no `entries/` or `archive/` dir on disk** | no dir | A second, entirely separate persistence format implementing the same `Store` trait. Zero data on this machine, but M2 must state whether the migration is defined for it | `deliberately-leave` — migration is scoped to the SQLite backend. **Hard assert**: an `entries/` or `archive/` directory aborts M3 |
+| 2.19 | **NEW-FOUND** Tantivy BM25 index directory | `~/.cas/index/*.{idx,term,store,pos,fast,fieldnorm}`; `cas-cli/src/hybrid_search/search_index_query.rs:120` | present, many segments | — | Derived artifact over entries; not a source of truth but must be rebuilt/invalidated after migration | `deliberately-leave` (rebuild) — derived artifact; M3 reindexes explicitly (spec §6) |
+| 2.20 | **NEW-FOUND** retrieval-feedback tables `retrieval_queries` / `retrieval_query_results` / `retrieval_outcomes` | `crates/cas-store/src/retrieval_store.rs` | 0 / 0 | 0 / 0 | The `search action=retrieval_feedback` surface. Empty — no baseline of "which memory was helpful for which query" exists to preserve or to measure parity against (relevant to M4, cas-90fd) | `deliberately-leave` — 0 rows; no relevance history exists to preserve. M4 must generate its query set |
 
 ---
 

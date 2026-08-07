@@ -1938,6 +1938,63 @@ impl FactoryDaemon {
         for queued in prompts {
             let target = &queued.target;
 
+            // cas-dffe (GH #145): a context-reset control command is not a
+            // message and must never enter message routing — that is precisely
+            // how `/clear` used to end up as inbox text a Claude worker read
+            // and ignored. Handle it first, in its own lane: type the harness's
+            // own reset command into the pane, or refuse and say why.
+            if crate::factory_context_reset::is_context_reset_control(&queued.prompt) {
+                let target = target.clone();
+                match self.deliver_context_reset(&target).await {
+                    super::delivery::ContextResetDelivery::Injected => {
+                        if let Err(e) = queue.mark_transport_delivered(queued.id) {
+                            tracing::warn!(
+                                prompt_id = queued.id,
+                                error = %e,
+                                "cas-dffe: failed to stamp a delivered context-reset command"
+                            );
+                        }
+                        tracing::info!(
+                            target: "cas::coordination",
+                            stage = "context_reset_delivered",
+                            message_id = queued.id,
+                            target_agent = %target,
+                            "cas-dffe: context-reset command typed into the pane; the requester \
+                             confirms the reset from the recipient's new session transcript"
+                        );
+                    }
+                    super::delivery::ContextResetDelivery::NotReady => {
+                        let _ = queue.record_pending_reason(
+                            queued.id,
+                            cas_store::PendingReason::GatedNotReady,
+                            Some("pane not ready for injection — context reset retries next tick"),
+                        );
+                    }
+                    super::delivery::ContextResetDelivery::Unsupported { detail } => {
+                        // Terminal: retrying cannot make an unsupported harness
+                        // resettable, and leaving the row pending would wedge
+                        // the queue behind an impossible command.
+                        let _ = queue.mark_dropped(queued.id, Some(&detail));
+                        tracing::warn!(
+                            target: "cas::coordination",
+                            stage = "context_reset_unsupported",
+                            message_id = queued.id,
+                            target_agent = %target,
+                            detail = %detail,
+                            "cas-dffe: refused a context reset instead of pretending it happened"
+                        );
+                    }
+                    super::delivery::ContextResetDelivery::Failed { detail } => {
+                        let _ = queue.record_retry(
+                            queued.id,
+                            cas_store::PendingReason::AdapterRetryable,
+                            Some(&detail),
+                        );
+                    }
+                }
+                continue;
+            }
+
             // cas-bc8c: structured transition prompts are only actionable
             // while the state they describe is still current. Revalidate at
             // the last shared point before inbox/PTY transport, after any

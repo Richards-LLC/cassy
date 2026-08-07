@@ -50,7 +50,13 @@ pub(crate) fn register_agent_with_conn(conn: &Connection, agent: &Agent) -> Resu
             status = excluded.status,
             pid = excluded.pid,
             ppid = excluded.ppid,
-            cc_session_id = excluded.cc_session_id,
+            -- cas-dffe: a registration that does not know its harness session
+            -- id must not ERASE one that is already recorded. `clear_context`
+            -- writes the post-reset Claude session id here so transcript
+            -- resolution follows the live conversation; the MCP server
+            -- re-registers with cc_session_id = NULL, which used to silently
+            -- undo that. Mirrors the factory_session rule below.
+            cc_session_id = COALESCE(excluded.cc_session_id, agents.cc_session_id),
             parent_id = excluded.parent_id,
             machine_id = excluded.machine_id,
             last_heartbeat = excluded.last_heartbeat,

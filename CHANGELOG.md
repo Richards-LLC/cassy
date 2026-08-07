@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.48.1] - 2026-08-07
+
+### Fixed
+- **Syncing team knowledge could ask the cloud for every project's pages, not just this one's.** The knowledge pull built its own request and, whenever it could not work out which project it was running in, simply left the project off the request instead of stopping — so in exactly the situation the rest of sync treats as fatal, this one path quietly asked the server for everything and could import another project's pages into your database. That is the cross-project contamination the previous release was cut to clean up, reopened for knowledge pages. Every pull now goes through a single builder that refuses to make the request at all when the project cannot be determined; there is no longer any code path that can produce an unscoped pull, and a test proves the unresolvable case aborts without building a URL.
+
 ## [2.48.0] - 2026-08-07
 
 ### Internal

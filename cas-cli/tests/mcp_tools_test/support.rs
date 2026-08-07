@@ -42,7 +42,41 @@ pub(crate) fn env_test_lock() -> MutexGuard<'static, ()> {
 /// happen in series and tests composing `setup_cas` with
 /// `ScopedSupervisorEnv` stay race-free relative to other tests that
 /// also call `setup_cas`.
+/// Repoint `HOME` at a throwaway directory for the whole test process.
+///
+/// Several production paths resolve the *host* store from `HOME` rather than
+/// from the core's `cas_root` — `hooks::context::build_host_constraints_section`
+/// reads `~/.cas/cas.db` on every `cas_context` call, which is correct in
+/// production and catastrophic in a test: `cas_context` with `scope = "all"`
+/// opened the developer's real global store (cas-78c8 / GH #156, caught by the
+/// `CAS_TEST_PROTECTED_DBS` tripwire). A temp `.cas` project directory does not
+/// protect against this, because the host lookup never consults it.
+///
+/// Set once per process and never changed, so parallel tests cannot observe a
+/// torn value. The directory is deliberately leaked: it must outlive every
+/// test, and the OS reclaims it with the rest of `/tmp`.
+fn pin_home_to_a_sandbox() {
+    static SANDBOX_HOME: OnceLock<PathBuf> = OnceLock::new();
+    SANDBOX_HOME.get_or_init(|| {
+        let _env_guard = env_test_lock();
+        let home = TempDir::new()
+            .expect("sandbox HOME should be created")
+            .keep();
+        let xdg = home.join(".config");
+        std::fs::create_dir_all(&xdg).expect("sandbox XDG_CONFIG_HOME should be created");
+        // SAFETY: performed once, under the process-wide env lock, before any
+        // store in this process resolves a host path from HOME.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("XDG_CONFIG_HOME", &xdg);
+        }
+        home
+    });
+}
+
 pub(crate) fn setup_cas() -> (TempDir, CasCore) {
+    pin_home_to_a_sandbox();
+
     // Clear factory env vars that leak from parent process (e.g., running
     // inside a factory supervisor session). Without this, is_supervisor_from_env()
     // returns true and the assignee_inactive bypass skips verification checks.

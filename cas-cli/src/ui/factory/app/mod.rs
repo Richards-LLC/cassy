@@ -103,7 +103,15 @@ pub struct PendingWorkerState {
 pub struct WorktreePrep {
     pub worktree_path: PathBuf,
     pub branch_name: String,
+    /// Logical parent of this worker's branch — always a *local* branch name,
+    /// because it doubles as the merge-back target.
     pub parent_branch: String,
+    /// cas-d897 (GH #146): the commit-ish the worktree is actually cut from,
+    /// when it must differ from `parent_branch`. Set when `origin/<parent>` is
+    /// strictly ahead of the stale local ref, so the worker starts on the
+    /// fetched tip instead of silently building on old history. `None` means
+    /// "cut from `parent_branch`", the ordinary case.
+    pub base_ref: Option<String>,
     pub repo_root: PathBuf,
     pub cas_dir: PathBuf,
 }
@@ -223,8 +231,14 @@ impl WorkerSpawnPrep {
                 std::fs::create_dir_all(parent)?;
             }
 
-            // Create git worktree (THE SLOW PART)
-            git.create_worktree(&wt.worktree_path, &wt.branch_name, Some(&wt.parent_branch))?;
+            // Create git worktree (THE SLOW PART).
+            // cas-d897 (GH #146): cut from `base_ref` when spawn resolution
+            // found a fresher commit than the local parent branch's ref.
+            let checkout_from = wt
+                .base_ref
+                .clone()
+                .unwrap_or_else(|| wt.parent_branch.clone());
+            git.create_worktree(&wt.worktree_path, &wt.branch_name, Some(&checkout_from))?;
 
             // STEP 1 (cas-5232): Log the resolved cwd immediately after worktree creation
             // so the daemon trace contains a clear record of which path each worker got.
@@ -233,6 +247,7 @@ impl WorkerSpawnPrep {
                 cwd = %wt.worktree_path.display(),
                 branch = %wt.branch_name,
                 parent = %wt.parent_branch,
+                cut_from = %checkout_from,
                 reused = false,
                 "spawn prep: new worktree created — cwd resolved"
             );
@@ -4904,6 +4919,7 @@ mod spawn_isolation_tests {
                     worktree_path: expected_wt_path.clone(),
                     branch_name: format!("factory/{worker_name}"),
                     parent_branch: "main".to_string(),
+                    base_ref: None,
                     repo_root: repo.clone(),
                     cas_dir: cas_dir.clone(),
                 }),
@@ -4961,6 +4977,7 @@ mod spawn_isolation_tests {
                 worktree_path: stale_path.clone(),
                 branch_name: "factory/stale".to_string(),
                 parent_branch: "main".to_string(),
+                base_ref: None,
                 repo_root: repo.clone(),
                 cas_dir,
             }),

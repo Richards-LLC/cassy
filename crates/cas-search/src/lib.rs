@@ -4,10 +4,7 @@
 //!
 //! - **BM25 full-text search** via Tantivy ([`Bm25Index`])
 //! - **Vector storage** via heed (LMDB wrapper) ([`LmdbVectorStore`])
-//!
-//! Multi-channel hybrid search lives in `cas-cli`'s `hybrid_search` module; the
-//! unused second implementation that once lived here was removed in cas-7909
-//! (EPIC cas-b129 M6). This crate provides the indexing primitives it builds on.
+//! - **Hybrid search** (currently BM25-only, semantic search via cloud)
 //!
 //! # Core Traits
 //!
@@ -45,6 +42,7 @@ pub mod code_search;
 pub mod document;
 pub mod error;
 pub mod grep;
+pub mod hybrid;
 pub mod lmdb_store;
 pub mod metrics;
 pub mod parallel;
@@ -72,6 +70,11 @@ pub use scorer::{
 
 // Re-export grep types
 pub use grep::{GrepMatch, GrepOptions, GrepSearch};
+
+// Re-export hybrid search types
+pub use hybrid::{
+    Embedder as HybridEmbedder, HybridSearch, HybridSearchOptions, HybridSearchResult,
+};
 
 // Re-export metrics types
 pub use metrics::{

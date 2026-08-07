@@ -247,7 +247,8 @@ Legend: **R** = remove-now, **L** = still load-bearing during transition,
 | 14 | `cas-cli/src/consolidation/` | Live: `daemon/decay.rs:82` calls `consolidate_all`, scheduled from `daemon/maintenance.rs`. Operates on legacy entries, which remain. | **L** |
 | 15 | `.claude/CODEMAP.md`, `docs/PRODUCT_OVERVIEW.md` and their four gates | §3 | **K** |
 
-Everything in **R** is removed by this task. Nothing in **L** is touched.
+Everything in **R** is *proposed* for removal and awaits an explicit supervisor
+ruling — see §6; nothing has been removed. Nothing in **L** is touched.
 Everything in **D** is written up as a follow-up rather than acted on, per the
 repo's "don't ship a fix on a plausible-but-unconfirmed theory" rule.
 
@@ -319,18 +320,30 @@ preconditions.
 
 ---
 
-## 6. What this task changed
+## 6. Proposed Stage B removal set — NOT YET EXECUTED
 
-Removed (all traceable to a row in §4):
+**Nothing has been removed.** Stage B is gated on an explicit supervisor
+remove-now ruling; this document is the Stage A deliverable that the ruling
+should be made against.
+
+Proposed remove-now set, each traceable to a row in §4:
 
 - `cas-cli/src/store/layered.rs` — §4 #1
 - `cas-cli/src/store/markdown.rs` — §4 #2
 - `crates/cas-search/src/hybrid.rs`, `crates/cas-search/tests/hybrid_integration.rs`,
   and the corresponding `crates/cas-search/src/lib.rs` re-export — §4 #3
 
-Nothing else. No flat file, no live read path, no config, no gate.
+Nothing else is proposed. No flat file, no live read path, no config, no gate.
 
-Follow-ups to file: §5.1 parity-harness global resolution; §5.3 knowledge
-retrieval-quality measurement; §4 #7–#11 deferred dead code, of which #11
-(unregistered `visibility`/`owner_id` migrations) also explains a standing
+The set was executed once against a scratch commit purely to establish that it
+compiles and tests clean, then reverted pending the ruling. Result on that
+scratch run: `cargo check -p cas-search --all-targets` exit 0,
+`cargo check -p cas --lib` exit 0 (4 pre-existing unrelated warnings),
+`cargo test -p cas-search` exit 0, `cargo test -p cas --lib hybrid_search::`
+exit 0 with 102 passed / 0 failed. So the removal is known-safe; only the
+authorization is outstanding.
+
+Follow-up task specs proposed: §5.1 parity-harness global resolution; §5.3
+knowledge retrieval-quality measurement; §4 #7–#11 deferred dead code, of which
+#11 (unregistered `visibility`/`owner_id` migrations) also explains a standing
 finding in the M1 inventory.

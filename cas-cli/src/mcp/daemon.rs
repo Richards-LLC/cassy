@@ -401,46 +401,29 @@ impl EmbeddedDaemon {
             let _ = store.register_daemon(&daemon_id, "mcp_embedded");
         }
 
-        // Create Unix socket for hook communication
-        let socket_listener = match socket::create_listener(&self.config.cas_root) {
-            Ok(listener) => {
-                eprintln!(
-                    "[CAS] Daemon socket listening at {:?}",
-                    socket::socket_path(&self.config.cas_root)
-                );
-                Some(listener)
-            }
-            Err(e) => {
-                eprintln!("[CAS] Warning: Could not create daemon socket: {e}");
-                None
-            }
-        };
-
-        // Spawn socket listener as a separate task so it's never blocked by
-        // maintenance/sync/indexing handlers in the select loop below
-        let _socket_task = if let Some(listener) = socket_listener {
+        // Unix socket for hook communication.
+        //
+        // cas-eabe (GH #163): this is an *election*, not a one-shot bind. If
+        // another `cas serve` already owns `daemon.sock` we stand by and retry,
+        // so when that owner dies a survivor takes the role over within a
+        // bounded interval instead of the project going daemonless. If our own
+        // binary is replaced on disk while we hold the role, we hand it back so
+        // a current-binary serve can pick it up. Spawned as its own task so the
+        // accept loop is never blocked by maintenance/sync/indexing below.
+        let election =
+            socket::ElectionConfig::new(self.config.cas_root.clone(), Arc::clone(&self.shutdown));
+        let owns_socket = Arc::clone(&election.owns_socket);
+        let socket_task = {
             let daemon = Arc::clone(&self);
-            Some(tokio::spawn(async move {
-                loop {
-                    match listener.accept().await {
-                        Ok((mut stream, _)) => {
-                            let daemon = Arc::clone(&daemon);
-                            tokio::spawn(async move {
-                                if let Some(event) = socket::read_event(&mut stream).await {
-                                    let response = daemon.handle_socket_event(event).await;
-                                    let _ = socket::send_response(&mut stream, &response).await;
-                                }
-                            });
-                        }
-                        Err(e) => {
-                            eprintln!("[CAS] Socket accept error: {e}");
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                        }
+            tokio::spawn(socket::run_socket_election(election, move |mut stream| {
+                let daemon = Arc::clone(&daemon);
+                async move {
+                    if let Some(event) = socket::read_event(&mut stream).await {
+                        let response = daemon.handle_socket_event(event).await;
+                        let _ = socket::send_response(&mut stream, &response).await;
                     }
                 }
             }))
-        } else {
-            None
         };
 
         // Create interval timers
@@ -609,9 +592,17 @@ impl EmbeddedDaemon {
             }
         }
 
-        // Abort socket listener task
-        if let Some(task) = _socket_task {
-            task.abort();
+        // Stop the socket election. It polls the shutdown flag (already set to
+        // get us here) and removes the socket file itself if it owns it, so
+        // give it a moment to exit cleanly before aborting.
+        {
+            let mut task = socket_task;
+            if tokio::time::timeout(Duration::from_secs(2), &mut task)
+                .await
+                .is_err()
+            {
+                task.abort();
+            }
         }
 
         // Mark as stopped and unregister daemon
@@ -625,8 +616,12 @@ impl EmbeddedDaemon {
             let _ = store.unregister_daemon(&daemon_id);
         }
 
-        // Cleanup socket
-        socket::cleanup_socket(&self.config.cas_root);
+        // Cleanup socket — ONLY if we are the owner. A deferring serve that
+        // removed this file would unlink the live owner's socket and leave the
+        // daemon listening but unreachable (cas-eabe).
+        if owns_socket.load(Ordering::SeqCst) {
+            socket::cleanup_socket(&self.config.cas_root);
+        }
 
         Ok(())
     }

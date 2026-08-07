@@ -25,7 +25,7 @@
 # - [ ] Status line updates correctly
 # - [ ] No visual artifacts or flickering
 
-.PHONY: test test-full test-clean-env coverage coverage-html clean build build-full release release-fast test-release-panic test-release-panic-release test-release-panic-release-fast check check-full lint dev-build dev-test timings benchmark-build check-build-regression
+.PHONY: test test-full test-clean-env test-real-store-untouched coverage coverage-html clean build build-full release release-fast test-release-panic test-release-panic-release test-release-panic-release-fast check check-full lint dev-build dev-test timings benchmark-build check-build-regression
 
 CARGO ?= cargo
 
@@ -161,6 +161,18 @@ test-release-panic-release:
 test-release-panic-release-fast:
 	$(CARGO) test -p cas --profile release-fast --lib panic_regression
 	$(CARGO) test -p cas --profile release-fast --test search_utf8_regression_test
+
+# Prove a test run writes nothing into a real CAS store (cas-78c8 / GH #156).
+#
+# Arms the CAS_TEST_PROTECTED_DBS tripwire and diffs every table's row count in
+# ~/.cas/cas.db and the project store before and after the run. Scope it like
+# any other test command; the default is the suite most likely to leak.
+#
+#   make test-real-store-untouched
+#   make test-real-store-untouched REAL_STORE_ARGS='--test mcp_protocol_test'
+REAL_STORE_ARGS ?= -p cas --test mcp_protocol_test --test mcp_tools_test --test cli_test
+test-real-store-untouched:
+	../scripts/check-real-store-untouched.sh $(REAL_STORE_ARGS)
 
 # Type check
 check:

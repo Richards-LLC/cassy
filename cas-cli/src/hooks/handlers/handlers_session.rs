@@ -399,6 +399,21 @@ mod large_artifact_staging_tests {
     use crate::test_support::TestEnvGuard;
     use super::*;
 
+    /// Role environment for a SessionStart test, rooted in a temporary HOME.
+    ///
+    /// `handle_session_start` builds the full session context, and the Host
+    /// Constraints section resolves `~/.cas` from `HOME` rather than from the
+    /// project root (`hooks::context::build_host_constraints_section`). Without
+    /// a temp HOME these tests opened the developer's real global store — one
+    /// of the paths behind the 994 leaked fixture rows in cas-78c8 / GH #156.
+    fn staging_env(role: &str) -> TestEnvGuard {
+        let mut guard = TestEnvGuard::temp_home();
+        guard.set("CAS_AGENT_ROLE", role);
+        guard.remove("CAS_CLONE_PATH");
+        guard.remove("CAS_AGENT_NAME");
+        guard
+    }
+
     fn session_input(cwd: &str) -> HookInput {
         HookInput {
             session_id: "staging-session".to_string(),
@@ -448,11 +463,7 @@ mod large_artifact_staging_tests {
             "[staging]\nlarge_artifact_dir = \"/mnt/datacube/staging\"\n",
         )
         .unwrap();
-        let _env = TestEnvGuard::with_optional_vars(&[
-            ("CAS_AGENT_ROLE", Some("supervisor")),
-            ("CAS_CLONE_PATH", None),
-            ("CAS_AGENT_NAME", None),
-        ]);
+        let _env = staging_env("supervisor");
 
         let input = session_input(tmp.path().to_str().unwrap());
         let context = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
@@ -470,11 +481,7 @@ mod large_artifact_staging_tests {
             "[staging]\nlarge_artifact_dir = \"/mnt/datacube/staging\"\n",
         )
         .unwrap();
-        let _env = TestEnvGuard::with_optional_vars(&[
-            ("CAS_AGENT_ROLE", Some("worker")),
-            ("CAS_CLONE_PATH", None),
-            ("CAS_AGENT_NAME", None),
-        ]);
+        let _env = staging_env("worker");
 
         let input = session_input(tmp.path().to_str().unwrap());
         let context = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());

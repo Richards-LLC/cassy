@@ -46,12 +46,6 @@ pub fn handle_user_prompt_submit(
     input: &HookInput,
     cas_root: Option<&Path>,
 ) -> Result<HookOutput, MemError> {
-    // Get the user prompt
-    let prompt_text = match &input.user_prompt {
-        Some(p) if !p.trim().is_empty() => p.trim(),
-        _ => return Ok(HookOutput::empty()),
-    };
-
     // === FACTORY TURN-START CONTEXT (cas-55ac reminder + cas-7a01 surfacing) ===
     //
     // cas-7a01 (GH #155): this is the *only* place in CAS that reads the
@@ -64,6 +58,17 @@ pub fn handle_user_prompt_submit(
     // early return was a second, quieter half of the same bug: it made the
     // supervisor the one factory role whose mail could never be surfaced here,
     // because the handler returned before any queue read could happen.
+    //
+    // cas-78d3 (GH #165): this block now runs BEFORE the empty-prompt early
+    // return, which used to sit at the top of this function. That ordering was
+    // the third and worst instance of the same mistake: an unrelated capture
+    // precondition ("is this prompt worth recording?") silently decided
+    // whether a factory agent's mail got delivered at all. Combined with the
+    // `prompt` vs `user_prompt` field-name mismatch it made the answer "no" on
+    // every real Claude turn, which is why `acked_via = 'hook_surfaced'` had
+    // never once been written by a live session. Surfacing must not depend on
+    // the prompt: a blank or absent prompt is still a turn the recipient is
+    // taking, and mail withheld from it is mail withheld indefinitely.
     let is_factory = crate::harness_policy::is_factory_agent(input);
     let is_supervisor = is_factory && crate::harness_policy::is_supervisor(input);
     let mut factory_context = String::new();
@@ -83,7 +88,13 @@ pub fn handle_user_prompt_submit(
         return Ok(HookOutput::with_user_prompt_context(factory_context));
     }
 
-    let base = handle_user_prompt_submit_capture(input, cas_root, prompt_text)?;
+    // Attribution capture genuinely needs prompt text; surfacing did not.
+    // Now that the two are ordered correctly, an absent prompt only skips the
+    // half that cannot work without one.
+    let base = match input.submitted_prompt() {
+        Some(prompt_text) => handle_user_prompt_submit_capture(input, cas_root, prompt_text)?,
+        None => HookOutput::empty(),
+    };
     if factory_context.is_empty() {
         return Ok(base);
     }

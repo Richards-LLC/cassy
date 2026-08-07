@@ -55,8 +55,20 @@ pub struct HookInput {
     #[serde(default, rename = "toolInputTruncated")]
     pub tool_input_truncated: Option<bool>,
 
-    /// User prompt text (UserPromptSubmit)
-    #[serde(default, alias = "userPrompt")]
+    /// User prompt text (UserPromptSubmit).
+    ///
+    /// cas-78d3 (GH #165): Claude Code sends the submitted text under the key
+    /// **`prompt`**, not `user_prompt`. Without that alias this field
+    /// deserialized to `None` on every real turn, and `prompt` was instead
+    /// swallowed by `subagent_prompt` — the only field that aliased it, and one
+    /// with no readers anywhere in the tree. The visible consequence was that
+    /// `handle_user_prompt_submit` returned empty before it could reach either
+    /// attribution capture or the cas-7a01 turn-start inbox surfacing, so
+    /// `acked_via = 'hook_surfaced'` was never written by a live session.
+    ///
+    /// Read this through [`HookInput::submitted_prompt`] rather than directly,
+    /// so blank-vs-absent is handled in one place.
+    #[serde(default, alias = "userPrompt", alias = "prompt")]
     pub user_prompt: Option<String>,
 
     /// Session start source (SessionStart)
@@ -67,9 +79,42 @@ pub struct HookInput {
     #[serde(default)]
     pub reason: Option<String>,
 
-    /// Subagent type (SubagentStart/SubagentStop)
+    /// Subagent type — **corresponds to no observed wire key** (cas-f3e3).
+    ///
+    /// A live capture of `SubagentStart` / `SubagentStop` from Claude Code
+    /// 2.1.224 shows the child's type arriving as [`Self::agent_type`]
+    /// (`agent_type`), alongside `agent_id`. Neither `subagent_type` nor
+    /// `subagentType` appears in either payload, so this field is `None` on
+    /// every real event and must not be used to decide anything.
+    ///
+    /// Kept (rather than deleted) only because removing it would churn a large
+    /// number of unrelated struct literals; the wire-shape test
+    /// `subagentstart_payload_uses_agent_type_not_subagent_type` pins the fact
+    /// so nobody re-derives a dependency on it. Read [`Self::agent_type`].
+    ///
+    /// NOTE: the `subagent_type` key that *does* exist on the wire is a member
+    /// of the **`tool_input` object** for the `Task`/`Agent` tool, which is a
+    /// different thing entirely and is read as JSON out of `tool_input`.
     #[serde(default, alias = "subagentType")]
     pub subagent_type: Option<String>,
+
+    /// Loop-prevention signal for `Stop` / `SubagentStop` (cas-f3e3).
+    ///
+    /// Claude Code sends `stop_hook_active: true` when the session is **already
+    /// continuing as the result of a stop hook** — i.e. a previous `Stop`
+    /// returned `decision: "block"` and the model was told to keep working. The
+    /// harness's documented contract is that a Stop hook must check this before
+    /// blocking again, otherwise a blocker the model cannot clear by continuing
+    /// loops forever.
+    ///
+    /// It was declared nowhere and read nowhere while CAS blocked `Stop` in
+    /// five places, so CAS had no brake at all. Read this through
+    /// [`HookInput::stop_hook_is_reentrant`] rather than directly.
+    ///
+    /// Confirmed on the wire (not just in docs) by a live capture: present on
+    /// both `Stop` and `SubagentStop`.
+    #[serde(default, alias = "stopHookActive")]
+    pub stop_hook_active: Option<bool>,
 
     /// Distinct child identifier supplied by SubagentStart/SubagentStop.
     ///
@@ -82,8 +127,12 @@ pub struct HookInput {
     #[serde(default, alias = "agentType")]
     pub agent_type: Option<String>,
 
-    /// Subagent prompt (SubagentStart)
-    #[serde(default, alias = "subagentPrompt", alias = "prompt")]
+    /// Subagent prompt (SubagentStart).
+    ///
+    /// cas-78d3: the bare `prompt` alias moved to [`Self::user_prompt`], where
+    /// Claude Code actually sends it. Nothing reads this field today, so the
+    /// move costs no behaviour; leaving the alias here cost every turn's mail.
+    #[serde(default, alias = "subagentPrompt")]
     pub subagent_prompt: Option<String>,
 
     /// CAS agent role for this hook invocation ("supervisor" / "worker") —
@@ -99,16 +148,94 @@ pub struct HookInput {
     #[serde(default)]
     pub agent_role: Option<String>,
 
-    /// Message text for the MessageDisplay hook event (CC 2.1.152+).
+    /// Assistant text for `MessageDisplay`, and the notification text for
+    /// `Notification`.
     ///
-    /// Claude Code sends the assistant message text here when the
-    /// MessageDisplay hook fires, giving the handler a chance to transform
-    /// or redact the content before it reaches the terminal renderer.
+    /// cas-f3e3: **`MessageDisplay` does not send a `message` key.** A live
+    /// capture from Claude Code 2.1.224 shows the payload as
+    /// `{session_id, transcript_path, cwd, prompt_id, hook_event_name,
+    /// turn_id, message_id, index, final, delta}` — the text arrives under
+    /// **`delta`**, as one chunk of a stream. Without the alias below this
+    /// field was `None` on every MessageDisplay event, so
+    /// `handle_message_display` returned at its first line and the entire
+    /// cas-97ba Ink-crash guard + secret redaction feature was unreachable —
+    /// the same failure shape as GH #165, and invisible for the same reason
+    /// (its tests build `HookInput` by struct literal).
     ///
-    /// Never sent for other events — `#[serde(default)]` keeps existing
-    /// payloads unchanged.
-    #[serde(default)]
+    /// `Notification` genuinely uses `message`, so both spellings must work;
+    /// the alias is additive.
+    ///
+    /// Read this through [`HookInput::display_text`], which also enforces the
+    /// chunk-boundary rule documented on [`Self::message_is_final`].
+    #[serde(default, alias = "delta")]
     pub message: Option<String>,
+
+    /// `MessageDisplay`: true on the last chunk of an assistant message
+    /// (cas-f3e3). Serialized as `final`, which is a Rust keyword.
+    ///
+    /// This matters because every transform in `handle_message_display`
+    /// (nested-fence rewriting, secret redaction) reasons over a *whole*
+    /// message: a fence opened in chunk N and closed in chunk N+2, or a token
+    /// split across a chunk boundary, cannot be judged from one chunk. So the
+    /// guard only acts on a chunk that is marked final.
+    ///
+    /// Absent for every other event, and treated as "final" when absent so a
+    /// harness that omits it is not silently skipped.
+    #[serde(default, rename = "final")]
+    pub message_is_final: Option<bool>,
+
+    /// `MessageDisplay`: zero-based index of this chunk within the assistant
+    /// message identified by `message_id` (cas-f3e3). Informational; declared
+    /// so the streaming shape is visible in the type rather than inferred.
+    #[serde(default)]
+    pub index: Option<u64>,
+}
+
+impl HookInput {
+    /// The submitted prompt text for `UserPromptSubmit`, trimmed, `None` when
+    /// absent or blank.
+    ///
+    /// cas-78d3 (GH #165): the single place that decides "is there a prompt".
+    /// It exists because the previous inline `match &input.user_prompt` in
+    /// `handle_user_prompt_submit` conflated "no prompt" with "nothing to do",
+    /// and a field-name mismatch made "no prompt" the answer on every real
+    /// turn. Callers that need to *do work regardless* of the prompt must not
+    /// gate on this.
+    pub fn submitted_prompt(&self) -> Option<&str> {
+        self.user_prompt
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+    }
+
+    /// True when this `Stop` / `SubagentStop` fired while the session was
+    /// **already continuing because a previous stop hook blocked it**
+    /// (cas-f3e3).
+    ///
+    /// A Stop handler that returns `decision: "block"` on a condition the model
+    /// cannot clear by continuing will otherwise loop forever; this is the
+    /// harness's only brake, and the single place its polarity is decided.
+    /// Absent is treated as "not re-entrant", which preserves the behaviour of
+    /// every harness that does not send the key.
+    pub fn stop_hook_is_reentrant(&self) -> bool {
+        self.stop_hook_active.unwrap_or(false)
+    }
+
+    /// The assistant text a `MessageDisplay` guard may safely transform, or
+    /// `None` when there is nothing to inspect (cas-f3e3).
+    ///
+    /// `None` when the chunk carries no text, or when it is a non-final chunk
+    /// of a streamed message — see [`Self::message_is_final`] for why a partial
+    /// chunk cannot be judged. Blank text is `None` too, so callers cannot
+    /// re-derive the blank-vs-absent conflation that caused GH #165.
+    pub fn display_text(&self) -> Option<&str> {
+        if self.message_is_final == Some(false) {
+            return None;
+        }
+        self.message
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+    }
 }
 
 /// Output sent back to Claude Code via stdout (JSON)
@@ -657,6 +784,284 @@ mod tests {
         assert!(
             json.contains("\"reason\":\"Continue working"),
             "Expected reason but got: {json}"
+        );
+    }
+
+    /// cas-78d3 (GH #165): Claude Code names this key `prompt`. CAS aliased
+    /// `prompt` onto `subagent_prompt` instead, so `user_prompt` was `None` on
+    /// every real turn — and every consumer downstream of it (attribution
+    /// capture, turn-start inbox surfacing, `acked_via = 'hook_surfaced'`) was
+    /// dead code in production for a full release while its unit tests, which
+    /// all constructed `HookInput` by hand, stayed green.
+    ///
+    /// The lesson this pins: a struct-literal test cannot catch a
+    /// deserialization-contract bug. Parse the real wire shape.
+    #[test]
+    fn userpromptsubmit_payload_deserializes_the_prompt_key() {
+        let input: HookInput = serde_json::from_str(
+            r#"{"session_id":"s","transcript_path":"/tmp/t","cwd":"/tmp",
+                "hook_event_name":"UserPromptSubmit","prompt":"do the thing"}"#,
+        )
+        .expect("Claude's real payload must deserialize");
+
+        assert_eq!(
+            input.user_prompt.as_deref(),
+            Some("do the thing"),
+            "`prompt` must land in user_prompt, not be swallowed elsewhere"
+        );
+        assert_eq!(input.submitted_prompt(), Some("do the thing"));
+        assert_eq!(
+            input.subagent_prompt, None,
+            "`prompt` must no longer be captured by subagent_prompt"
+        );
+    }
+
+    /// The legacy/explicit spellings keep working, so nothing that was already
+    /// reaching the handler stops doing so.
+    #[test]
+    fn userpromptsubmit_payload_still_accepts_legacy_spellings() {
+        for body in [
+            r#"{"hook_event_name":"UserPromptSubmit","user_prompt":"hi there"}"#,
+            r#"{"hook_event_name":"UserPromptSubmit","userPrompt":"hi there"}"#,
+        ] {
+            let input: HookInput = serde_json::from_str(body).expect("must deserialize");
+            assert_eq!(input.submitted_prompt(), Some("hi there"), "{body}");
+        }
+    }
+
+    /// `submitted_prompt` is the single place blank-vs-absent is decided, so
+    /// callers cannot re-derive the conflation that caused GH #165.
+    #[test]
+    fn submitted_prompt_treats_blank_and_absent_alike() {
+        let blank: HookInput =
+            serde_json::from_str(r#"{"hook_event_name":"UserPromptSubmit","prompt":"  \t "}"#)
+                .unwrap();
+        assert_eq!(blank.submitted_prompt(), None);
+
+        let absent: HookInput =
+            serde_json::from_str(r#"{"hook_event_name":"UserPromptSubmit"}"#).unwrap();
+        assert_eq!(absent.submitted_prompt(), None);
+
+        let padded: HookInput =
+            serde_json::from_str(r#"{"hook_event_name":"UserPromptSubmit","prompt":"  hi  "}"#)
+                .unwrap();
+        assert_eq!(padded.submitted_prompt(), Some("hi"));
+    }
+
+    // ── cas-f3e3: captured-wire regression tests ──────────────────────────
+    //
+    // Every payload below is a VERBATIM capture from Claude Code 2.1.224,
+    // taken by pointing a hook command at a script that appends stdin to a
+    // file and then taking a real turn. They are not transcribed from docs and
+    // not derived from these structs — that circularity is exactly what hid
+    // GH #165 (and, as `messagedisplay_payload_carries_text_under_delta`
+    // below shows, a second dead handler alongside it).
+
+    /// MessageDisplay sends the assistant text as `delta`, NOT `message`.
+    ///
+    /// Before cas-f3e3 this payload left `input.message == None`, so
+    /// `handle_message_display` returned on its first line for every real
+    /// event and the Ink-crash guard / secret redaction could never run.
+    #[test]
+    fn messagedisplay_payload_carries_text_under_delta() {
+        let input: HookInput = serde_json::from_str(
+            r#"{"session_id":"fc70e6f3-4e32-43cc-b2da-259c777cd9a6",
+                "transcript_path":"/tmp/wirecap/projects/x.jsonl",
+                "cwd":"/tmp/wirecap/proj",
+                "prompt_id":"d323a56b-73b1-4afc-8b3f-32605be51b91",
+                "hook_event_name":"MessageDisplay",
+                "turn_id":"83db6fbe-820e-4db4-8845-d5515e9158c3",
+                "message_id":"513a75fd-35f5-451b-a7ed-b925c5ecc4d9",
+                "index":0,"final":true,
+                "delta":"I'll run the bash command and spawn the agent."}"#,
+        )
+        .expect("the real MessageDisplay payload must deserialize");
+
+        assert_eq!(
+            input.message.as_deref(),
+            Some("I'll run the bash command and spawn the agent."),
+            "`delta` must reach the message field — this is the whole bug"
+        );
+        assert_eq!(input.message_is_final, Some(true));
+        assert_eq!(input.index, Some(0));
+        assert_eq!(
+            input.display_text(),
+            Some("I'll run the bash command and spawn the agent.")
+        );
+    }
+
+    /// A non-final chunk is not transformable: a fence or a secret split across
+    /// a streaming boundary cannot be judged from one chunk.
+    #[test]
+    fn display_text_declines_a_non_final_chunk() {
+        let partial: HookInput = serde_json::from_str(
+            r#"{"hook_event_name":"MessageDisplay","index":0,"final":false,
+                "delta":"here is a fenced bl"}"#,
+        )
+        .unwrap();
+        assert_eq!(partial.message.as_deref(), Some("here is a fenced bl"));
+        assert_eq!(
+            partial.display_text(),
+            None,
+            "a partial chunk must not be transformed"
+        );
+
+        // A harness that omits `final` is treated as final, not silently skipped.
+        let unmarked: HookInput =
+            serde_json::from_str(r#"{"hook_event_name":"MessageDisplay","delta":"whole text"}"#)
+                .unwrap();
+        assert_eq!(unmarked.display_text(), Some("whole text"));
+
+        // Blank is None, same rule as `submitted_prompt`.
+        let blank: HookInput =
+            serde_json::from_str(r#"{"hook_event_name":"MessageDisplay","delta":"  \n "}"#)
+                .unwrap();
+        assert_eq!(blank.display_text(), None);
+    }
+
+    /// `Notification` really does use `message`, so aliasing `delta` onto the
+    /// same field must not have broken it.
+    #[test]
+    fn notification_payload_still_uses_the_message_key() {
+        let input: HookInput = serde_json::from_str(
+            r#"{"hook_event_name":"Notification","session_id":"s",
+                "message":"Claude needs your permission to use Bash"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            input.message.as_deref(),
+            Some("Claude needs your permission to use Bash")
+        );
+    }
+
+    /// Stop carries `stop_hook_active`, the harness's loop-prevention signal.
+    /// It was declared nowhere while CAS blocked Stop in five places.
+    #[test]
+    fn stop_payload_carries_stop_hook_active() {
+        let quiet: HookInput = serde_json::from_str(
+            r#"{"session_id":"fc70e6f3","transcript_path":"/tmp/x.jsonl","cwd":"/tmp/wirecap/proj",
+                "prompt_id":"d323a56b","permission_mode":"default","hook_event_name":"Stop",
+                "stop_hook_active":false,"last_assistant_message":"DONE",
+                "background_tasks":[{"id":"a24c4ba99866d62e3","type":"subagent",
+                    "status":"running","description":"Reply with pong",
+                    "agent_type":"general-purpose"}],
+                "session_crons":[]}"#,
+        )
+        .expect("the real Stop payload must deserialize");
+        assert_eq!(quiet.stop_hook_active, Some(false));
+        assert!(!quiet.stop_hook_is_reentrant());
+
+        let reentrant: HookInput =
+            serde_json::from_str(r#"{"hook_event_name":"Stop","stop_hook_active":true}"#).unwrap();
+        assert!(
+            reentrant.stop_hook_is_reentrant(),
+            "true must mean `already continuing because a stop hook blocked`"
+        );
+
+        // Absent means not re-entrant, so harnesses that omit the key are
+        // unchanged.
+        let absent: HookInput = serde_json::from_str(r#"{"hook_event_name":"Stop"}"#).unwrap();
+        assert!(!absent.stop_hook_is_reentrant());
+    }
+
+    /// SubagentStop carries `stop_hook_active` too, plus the child identity
+    /// under `agent_id` / `agent_type`.
+    #[test]
+    fn subagentstop_payload_carries_stop_hook_active_and_agent_identity() {
+        let input: HookInput = serde_json::from_str(
+            r#"{"session_id":"fc70e6f3","transcript_path":"/tmp/x.jsonl","cwd":"/tmp/wirecap/proj",
+                "prompt_id":"d323a56b","permission_mode":"default",
+                "agent_id":"a24c4ba99866d62e3","agent_type":"general-purpose",
+                "hook_event_name":"SubagentStop","stop_hook_active":false,
+                "agent_transcript_path":"/tmp/x/subagents/agent-a24c4ba99866d62e3.jsonl",
+                "last_assistant_message":"pong","background_tasks":[],"session_crons":[]}"#,
+        )
+        .expect("the real SubagentStop payload must deserialize");
+        assert_eq!(input.stop_hook_active, Some(false));
+        assert_eq!(input.agent_id.as_deref(), Some("a24c4ba99866d62e3"));
+        assert_eq!(input.agent_type.as_deref(), Some("general-purpose"));
+    }
+
+    /// cas-f3e3 Finding 3, resolved against the wire: the child's type arrives
+    /// as `agent_type`. Nothing named `subagent_type` / `subagentType` is sent,
+    /// so that field is dead on arrival and must not gate behaviour. Same for
+    /// `subagent_prompt` — SubagentStart sends no prompt at all, which is the
+    /// independent confirmation that cas-78d3's alias move cost nothing.
+    #[test]
+    fn subagentstart_payload_uses_agent_type_not_subagent_type() {
+        let input: HookInput = serde_json::from_str(
+            r#"{"session_id":"fc70e6f3","transcript_path":"/tmp/x.jsonl","cwd":"/tmp/wirecap/proj",
+                "prompt_id":"d323a56b","agent_id":"a24c4ba99866d62e3",
+                "agent_type":"general-purpose","hook_event_name":"SubagentStart"}"#,
+        )
+        .expect("the real SubagentStart payload must deserialize");
+
+        assert_eq!(input.agent_type.as_deref(), Some("general-purpose"));
+        assert_eq!(input.agent_id.as_deref(), Some("a24c4ba99866d62e3"));
+        assert_eq!(
+            input.subagent_type, None,
+            "no wire key populates subagent_type — do not read it"
+        );
+        assert_eq!(
+            input.subagent_prompt, None,
+            "SubagentStart sends no prompt field"
+        );
+    }
+
+    /// The common envelope every event shares, captured rather than assumed —
+    /// including `prompt_id`, which CAS does not declare. Unknown keys must
+    /// stay ignorable so an added harness field can never make a hook fail.
+    #[test]
+    fn captured_envelopes_deserialize_with_undeclared_keys_ignored() {
+        let cases = [
+            // SessionStart
+            r#"{"session_id":"fc70e6f3","transcript_path":"/tmp/x.jsonl","cwd":"/tmp/wirecap/proj",
+                "hook_event_name":"SessionStart","source":"startup"}"#,
+            // SessionEnd
+            r#"{"session_id":"fc70e6f3","transcript_path":"/tmp/x.jsonl","cwd":"/tmp/wirecap/proj",
+                "prompt_id":"4084091b","hook_event_name":"SessionEnd","reason":"other"}"#,
+            // PostToolUseFailure (undeclared: error, is_interrupt, duration_ms)
+            r#"{"session_id":"e0dde9dc","transcript_path":"/tmp/x.jsonl","cwd":"/tmp/wirecap/proj",
+                "prompt_id":"cb998ec6","permission_mode":"default",
+                "hook_event_name":"PostToolUseFailure","tool_name":"Bash",
+                "tool_input":{"command":"exit 7","description":"Exit with code 7"},
+                "tool_use_id":"toolu_01EmGh","error":"Exit code 7",
+                "is_interrupt":false,"duration_ms":310}"#,
+        ];
+        for body in cases {
+            let input: HookInput =
+                serde_json::from_str(body).unwrap_or_else(|e| panic!("{body}\n->{e}"));
+            assert_eq!(input.session_id.is_empty(), false, "{body}");
+            assert!(!input.hook_event_name.is_empty(), "{body}");
+            assert_eq!(input.cwd, "/tmp/wirecap/proj", "{body}");
+        }
+    }
+
+    /// The captured PostToolUse payload, including the real `tool_response`
+    /// shape and the undeclared `duration_ms`.
+    #[test]
+    fn posttooluse_payload_lands_in_the_declared_fields() {
+        let input: HookInput = serde_json::from_str(
+            r#"{"session_id":"fc70e6f3","transcript_path":"/tmp/x.jsonl","cwd":"/tmp/wirecap/proj",
+                "prompt_id":"d323a56b","permission_mode":"default",
+                "hook_event_name":"PostToolUse","tool_name":"Bash",
+                "tool_input":{"command":"echo wirecap-one","description":"Echo wirecap-one"},
+                "tool_response":{"stdout":"wirecap-one","stderr":"","interrupted":false,
+                    "isImage":false,"noOutputExpected":false},
+                "tool_use_id":"toolu_019d9F7UQXCNd1ajCGTtJbbL","duration_ms":277}"#,
+        )
+        .expect("the real PostToolUse payload must deserialize");
+
+        assert_eq!(input.tool_name.as_deref(), Some("Bash"));
+        assert_eq!(input.tool_use_id.as_deref(), Some("toolu_019d9F7UQXCNd1ajCGTtJbbL"));
+        assert_eq!(input.permission_mode.as_deref(), Some("default"));
+        assert_eq!(
+            input
+                .tool_response
+                .as_ref()
+                .and_then(|v| v.get("stdout"))
+                .and_then(|v| v.as_str()),
+            Some("wirecap-one"),
         );
     }
 

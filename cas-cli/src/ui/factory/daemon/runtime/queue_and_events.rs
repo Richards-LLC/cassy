@@ -1579,8 +1579,12 @@ impl FactoryDaemon {
     /// row must NOT be consumed until it has actually woken the pane.
     fn row_is_supervisor_wake(source: &str, prompt: &str) -> bool {
         use crate::mcp::tools::core::task::lifecycle::supervisor_push::is_lifecycle_wake_source;
+        // cas-3dcb (GH #168): a worker-death relay is wake-eligible on the same
+        // terms as a lifecycle transition. Both mean "a lane is stuck until you
+        // act"; a death notice that only lands in `supervisor_queue` is the
+        // 2,044-alert silence this widening exists to end.
         is_lifecycle_wake_source(source)
-            && crate::prompt_revalidation::parse_lifecycle_envelope(prompt).is_some()
+            && crate::prompt_revalidation::is_supervisor_wake_envelope(prompt)
     }
 
     fn supervisor_wake_is_eligible(
@@ -1599,11 +1603,12 @@ impl FactoryDaemon {
         // /message), so on its own it would let any client hand arbitrary text
         // a PTY write into the supervisor pane and walk straight through
         // cas-dab2's guard. Corroborate with the payload: only a genuine
-        // `<task-lifecycle …>` envelope — which the lifecycle emitter is the
-        // only producer of — qualifies.
+        // `<task-lifecycle …>` or `<worker-died …>` envelope — which the
+        // lifecycle emitter and orphan recovery are the only producers of —
+        // qualifies (cas-3dcb).
         pane_target == supervisor_name
             && is_lifecycle_wake_source(source)
-            && crate::prompt_revalidation::parse_lifecycle_envelope(prompt).is_some()
+            && crate::prompt_revalidation::is_supervisor_wake_envelope(prompt)
             && pane.is_safe_to_type_into()
             && Self::agent_signals_look_quiet(data, pane_target, now)
     }
@@ -2420,12 +2425,26 @@ impl FactoryDaemon {
                         // — but terminate as a RECORDED FAILURE so the row
                         // becomes visible in worker_status/doctor rather than
                         // lingering as a zombie or vanishing into silence.
-                        let notice = crate::prompt_revalidation::undelivered_relay_notice(
-                            &crate::prompt_revalidation::parse_lifecycle_envelope(&queued.prompt)
+                        // cas-3dcb: a death relay has no task_id, and reporting
+                        // one as "(unknown task)" would bury the one fact the
+                        // supervisor needs — which worker is gone.
+                        let notice = match crate::prompt_revalidation::parse_worker_died_envelope(
+                            &queued.prompt,
+                        ) {
+                            Some(envelope) => {
+                                crate::prompt_revalidation::undelivered_worker_died_notice(
+                                    &envelope.worker_name,
+                                )
+                            }
+                            None => crate::prompt_revalidation::undelivered_relay_notice(
+                                &crate::prompt_revalidation::parse_lifecycle_envelope(
+                                    &queued.prompt,
+                                )
                                 .map(|envelope| envelope.task_id)
                                 .unwrap_or_else(|| "(unknown task)".to_string()),
-                            queued.summary.as_deref(),
-                        );
+                                queued.summary.as_deref(),
+                            ),
+                        };
                         let _ = queue
                             .mark_undelivered_lifecycle_relay(queued.id, Some(notice.as_str()));
                         self.forget_row_delivery_state(queued.id);

@@ -160,7 +160,9 @@ pub(crate) fn render_surfaced(rows: &[QueuedPrompt]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cas_store::{NotificationPriority, PromptQueueStore, SqlitePromptQueueStore};
+    use cas_store::{
+        ConfirmationSource, NotificationPriority, PromptQueueStore, SqlitePromptQueueStore,
+    };
     use chrono::Utc;
     use tempfile::TempDir;
 
@@ -195,6 +197,127 @@ mod tests {
         let mut urgent = row(1, "supervisor", "stop");
         urgent.urgent = true;
         assert!(render_surfaced(&[urgent]).contains("urgent"));
+    }
+
+    /// cas-78d3 (GH #165) — the regression this whole task exists for.
+    ///
+    /// The payload literal below is the CONTRACT: it is the shape Claude Code
+    /// actually sends on `UserPromptSubmit`, submitted text under the key
+    /// **`prompt`**. CAS's `HookInput` matched only `user_prompt`/`userPrompt`,
+    /// so on every real turn `user_prompt` deserialized to `None`,
+    /// `handle_user_prompt_submit` hit its empty-prompt early return, and the
+    /// surfacing block never ran — which is why `acked_via = 'hook_surfaced'`
+    /// had zero rows in production while the store-side code that writes it was
+    /// shipped, correct and fully unit-tested.
+    ///
+    /// This asserts the whole seam in one pass: raw JSON in the real shape →
+    /// handler → injected context → `acked_via` persisted. Do not rewrite the
+    /// literal to use `user_prompt`; that is precisely the assumption that made
+    /// the bug invisible for a full release.
+    #[test]
+    fn claude_real_payload_surfaces_mail_and_stamps_hook_surfaced() {
+        let _guard = crate::hooks::test_env_lock();
+        let temp = TempDir::new().unwrap();
+        let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        let id = store
+            .enqueue_with_session("supervisor", "worker-78d3", "ship cas-78d3", "sess-78d3")
+            .unwrap();
+
+        // SAFETY: guarded by the process-wide hook test env lock.
+        unsafe {
+            std::env::set_var("CAS_AGENT_NAME", "worker-78d3");
+            std::env::set_var("CAS_FACTORY_SESSION", "sess-78d3");
+        }
+
+        let mut input: HookInput = serde_json::from_str(
+            r#"{
+                 "session_id": "s-78d3",
+                 "transcript_path": "/tmp/transcript.jsonl",
+                 "cwd": "/tmp",
+                 "hook_event_name": "UserPromptSubmit",
+                 "prompt": "continue"
+               }"#,
+        )
+        .expect("Claude's real UserPromptSubmit payload must deserialize");
+        input.agent_role = Some("worker".to_string());
+
+        assert_eq!(
+            input.submitted_prompt(),
+            Some("continue"),
+            "Claude sends the submitted text as `prompt`; if this is None the \
+             handler bails before surfacing and GH #165 is back"
+        );
+
+        let out = super::super::prompt_capture::handle_user_prompt_submit(&input, Some(temp.path()))
+            .expect("handler must not error");
+        let context = out
+            .user_prompt_context()
+            .expect("mail must be injected into the turn");
+        assert!(
+            context.contains("ship cas-78d3"),
+            "surfaced context missing the message body: {context}"
+        );
+
+        // SAFETY: guarded by the process-wide hook test env lock.
+        unsafe {
+            std::env::remove_var("CAS_AGENT_NAME");
+            std::env::remove_var("CAS_FACTORY_SESSION");
+        }
+
+        let report = store
+            .message_delivery_report(id)
+            .unwrap()
+            .expect("row must exist");
+        assert_eq!(
+            report.confirmation_source,
+            ConfirmationSource::HookSurfaced,
+            "a row injected into a live turn must be acked hook_surfaced — an \
+             unacked row is the 100%-unreconciled steady state of GH #165"
+        );
+    }
+
+    /// The empty-prompt early return used to sit ABOVE the surfacing block, so
+    /// a blank prompt silently withheld a factory agent's mail. Surfacing must
+    /// not depend on a capture precondition it has nothing to do with.
+    #[test]
+    fn a_blank_prompt_still_surfaces_mail() {
+        let _guard = crate::hooks::test_env_lock();
+        let temp = TempDir::new().unwrap();
+        let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        store
+            .enqueue_with_session("supervisor", "worker-blank", "urgent context", "sess-blank")
+            .unwrap();
+
+        // SAFETY: guarded by the process-wide hook test env lock.
+        unsafe {
+            std::env::set_var("CAS_AGENT_NAME", "worker-blank");
+            std::env::set_var("CAS_FACTORY_SESSION", "sess-blank");
+        }
+
+        let mut input = HookInput {
+            hook_event_name: "UserPromptSubmit".to_string(),
+            user_prompt: Some("   ".to_string()),
+            ..Default::default()
+        };
+        input.agent_role = Some("worker".to_string());
+
+        let out = super::super::prompt_capture::handle_user_prompt_submit(&input, Some(temp.path()))
+            .expect("handler must not error");
+
+        // SAFETY: guarded by the process-wide hook test env lock.
+        unsafe {
+            std::env::remove_var("CAS_AGENT_NAME");
+            std::env::remove_var("CAS_FACTORY_SESSION");
+        }
+
+        assert!(
+            out.user_prompt_context()
+                .is_some_and(|c| c.contains("urgent context")),
+            "a blank prompt is still a turn the recipient is taking; mail \
+             withheld from it is mail withheld indefinitely"
+        );
     }
 
     /// AC2/AC3 core: a row surfaced once is receipted at injection time, so a

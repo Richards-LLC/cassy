@@ -19,6 +19,14 @@ pub struct DoctorArgs {
     /// Attempt safe automatic fixes (initialize CAS and apply pending schema migrations)
     #[arg(long)]
     pub fix: bool,
+
+    /// Report cross-project ("foreign") task rows in this project's database
+    /// in full detail, instead of running the other diagnostics (cas-fc6fa /
+    /// GH #133). Read-only: every database is opened read-only and nothing is
+    /// deleted. Rows are matched on `(id, title)` — never on id alone, because
+    /// 4-hex task ids collide across projects.
+    #[arg(long)]
+    pub foreign_rows: bool,
 }
 
 struct Check {
@@ -545,7 +553,305 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         });
     }
 
+    // Check 14: cloud canonical id — which bucket this project syncs into,
+    // and whether any other known local project lands in the same bucket
+    // (cas-f699 / GH #134).
+    checks.extend(canonical_id_checks(
+        &cas_root,
+        collect_local_root_identities(),
+    ));
+
+    // Check 15: residual cross-project contamination from the cas-ed15 pull
+    // leak (cas-fc6fa / GH #133). Read-only comparison of this project's task
+    // rows against every other known project database on the host, keyed on
+    // `(id, title)`.
+    if cas_root.join("cas.db").is_file() {
+        let report = crate::cli::foreign_rows::scan(&cas_root);
+        if args.foreign_rows {
+            return output_foreign_rows_detail(report, cli);
+        }
+        checks.push(foreign_rows_check(report.as_ref()));
+    } else if args.foreign_rows {
+        anyhow::bail!(
+            "`cas doctor --foreign-rows` needs a SQLite database at {}; this project uses legacy \
+             markdown storage. Migrate with `cas migrate` first.",
+            cas_root.join("cas.db").display()
+        );
+    }
+
     output_checks(&checks, cli)
+}
+
+/// Turn a contamination scan into a single `cas doctor` row.
+///
+/// A failed scan is reported as a **named skip**, never as silence: an absent
+/// warning on this surface reads as "no contamination", which is the exact
+/// wrong answer for the user consulting doctor because they suspect it.
+fn foreign_rows_check(
+    report: Result<&crate::cli::foreign_rows::ForeignRowReport, &anyhow::Error>,
+) -> Check {
+    let report = match report {
+        Ok(report) => report,
+        Err(e) => {
+            return Check {
+                name: "cross-project rows".to_string(),
+                status: CheckStatus::Warning,
+                message: format!(
+                    "Could not scan for cross-project task rows: {e} — contamination check \
+                     SKIPPED. This is not a clean result: rows belonging to other projects may \
+                     be resident here and go unreported."
+                ),
+            };
+        }
+    };
+
+    let mut message = report.summary();
+    if !report.peers_unreadable.is_empty() {
+        let named = report
+            .peers_unreadable
+            .iter()
+            .map(|p| format!("{} ({})", p.project, p.error))
+            .collect::<Vec<_>>()
+            .join(", ");
+        message.push_str(&format!(
+            ". {} project DB(s) could NOT be read and were not compared: {named}",
+            report.peers_unreadable.len()
+        ));
+    }
+
+    let status = if report.is_clean() && report.peers_unreadable.is_empty() {
+        CheckStatus::Ok
+    } else {
+        CheckStatus::Warning
+    };
+    if !report.is_clean() {
+        message.push_str(&format!(". {}", report.remediation()));
+    }
+
+    Check {
+        name: "cross-project rows".to_string(),
+        status,
+        message,
+    }
+}
+
+/// `cas doctor --foreign-rows`: the full read-only contamination listing.
+fn output_foreign_rows_detail(
+    report: anyhow::Result<crate::cli::foreign_rows::ForeignRowReport>,
+    cli: &Cli,
+) -> anyhow::Result<()> {
+    let report = report?;
+
+    if cli.json {
+        println!("{}", serde_json::to_string_pretty(&report.to_json())?);
+        return Ok(());
+    }
+
+    let theme = ActiveTheme::default();
+    let mut out = std::io::stdout();
+    let mut fmt = Formatter::stdout(&mut out, theme);
+
+    fmt.subheading("cross-project task rows")?;
+    fmt.write_muted(&"─".repeat(50))?;
+    fmt.newline()?;
+    fmt.write_muted(&format!(
+        "project `{}` — {} local task row(s) compared against {} other project DB(s) on (id, title)",
+        report.local_project,
+        report.local_task_count,
+        report.peers_compared.len()
+    ))?;
+    fmt.newline()?;
+
+    for peer in &report.peers_unreadable {
+        fmt.warning(&format!(
+            "NOT COMPARED: {} ({}) — {}",
+            peer.project,
+            peer.db_path.display(),
+            peer.error
+        ))?;
+    }
+
+    if report.foreign.is_empty() {
+        fmt.success("no rows attributable to another project")?;
+    } else {
+        fmt.newline()?;
+        fmt.warning(&format!(
+            "{} foreign row(s) — {} not closed, {} closed",
+            report.foreign.len(),
+            report.foreign_open(),
+            report.foreign_closed()
+        ))?;
+        for row in &report.foreign {
+            fmt.write_raw(&format!(
+                "    [{}] {} {} → {}",
+                row.id,
+                if row.closed { "closed  " } else { "NOT CLOSED" },
+                truncate(&row.title, 60),
+                row.home_project
+            ))?;
+            fmt.newline()?;
+        }
+    }
+
+    if !report.unattributed.is_empty() {
+        fmt.newline()?;
+        fmt.warning(&format!(
+            "{} replicated row(s) with no activity evidence in any project — home unknown, \
+             {} not closed",
+            report.unattributed.len(),
+            report.unattributed_open()
+        ))?;
+        for row in &report.unattributed {
+            fmt.write_raw(&format!(
+                "    [{}] {} {} (also in: {})",
+                row.id,
+                if row.closed { "closed  " } else { "NOT CLOSED" },
+                truncate(&row.title, 60),
+                row.present_in.join(", ")
+            ))?;
+            fmt.newline()?;
+        }
+    }
+
+    if !report.collisions.is_empty() {
+        fmt.newline()?;
+        fmt.warning(&format!(
+            "{} id collision(s) — same id, DIFFERENT task. Deleting by id alone destroys real work:",
+            report.collisions.len()
+        ))?;
+        for c in &report.collisions {
+            fmt.write_raw(&format!(
+                "    [{}] here: {} | {}: {}",
+                c.id,
+                truncate(&c.local_title, 45),
+                c.other_project,
+                truncate(&c.other_title, 45)
+            ))?;
+            fmt.newline()?;
+        }
+    }
+
+    fmt.newline()?;
+    if report.is_clean() {
+        fmt.success("no cross-project contamination detected")?;
+    } else {
+        fmt.warning(&report.remediation())?;
+    }
+
+    Ok(())
+}
+
+fn truncate(text: &str, max: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(max.saturating_sub(1)).collect();
+    format!("{head}…")
+}
+
+/// Resolve every known local CAS root to its canonical id + repository
+/// identity, for the collision check.
+///
+/// Returns `Err` when the host known-repos registry cannot be read. It is
+/// deliberately NOT mapped to an empty list: an empty list is indistinguishable
+/// from "checked everything, found no collisions", and a silently-skipped
+/// collision check on the one surface a contamination-suspicious user consults
+/// is the same reassuring-zero failure mode this epic exists to kill. The check
+/// stays advisory — the caller reports the skip as a warning rather than
+/// failing `cas doctor`.
+fn collect_local_root_identities() -> Result<Vec<crate::cloud::LocalRootIdentity>, String> {
+    let repos = crate::worktree::discovery::list_tracked_repos().map_err(|e| e.to_string())?;
+    Ok(repos
+        .into_iter()
+        .filter(|repo| repo.healthy)
+        .filter_map(|repo| {
+            let project_root = repo.path.canonicalize().unwrap_or(repo.path);
+            let cas_root = project_root.join(".cas");
+            let canonical_id = crate::cloud::resolve_canonical_id(&cas_root)?;
+            Some(crate::cloud::LocalRootIdentity {
+                git_remote: crate::cloud::derive_canonical_id_from_git_remote(&cas_root),
+                project_root,
+                canonical_id,
+            })
+        })
+        .collect())
+}
+
+/// Build the canonical-id doctor rows. Pure given the resolved root list, so
+/// the collision warning is testable without touching the host registry.
+///
+/// `known_roots` carries the registry read outcome, not just its rows: an
+/// `Err` becomes a Warning row naming the failure, so a skipped collision
+/// check can never masquerade as a clean one.
+fn canonical_id_checks(
+    cas_root: &Path,
+    known_roots: Result<Vec<crate::cloud::LocalRootIdentity>, String>,
+) -> Vec<Check> {
+    let mut checks = Vec::new();
+
+    let Some((canonical_id, source)) = crate::cloud::resolve_canonical_id_with_source(cas_root)
+    else {
+        return checks;
+    };
+
+    let mut message = format!("Cloud bucket `{canonical_id}` (from {})", source.label());
+    // The read chain consults the git remote ahead of the folder name
+    // (cas-f699). On a project that predates that change and was never
+    // pinned, the bucket moves — say so, and name the exact command that
+    // restores the old one, rather than letting sync quietly re-home.
+    if source == crate::cloud::CanonicalIdSource::GitRemote
+        && let Some(folder) = crate::cloud::canonical_id_from_cas_root(cas_root)
+        && folder != canonical_id
+    {
+        message.push_str(&format!(
+            ". Earlier releases used the folder name `{folder}`; if that is where \
+             your synced data lives, pin it with `cas cloud project set {folder}`"
+        ));
+    }
+    checks.push(Check {
+        name: "canonical id".to_string(),
+        status: CheckStatus::Ok,
+        message,
+    });
+
+    let known_roots = match known_roots {
+        Ok(roots) => roots,
+        Err(e) => {
+            checks.push(Check {
+                name: "canonical id collision".to_string(),
+                status: CheckStatus::Warning,
+                message: format!(
+                    "Could not read the known-repos registry: {e} — canonical-id collision \
+                     check SKIPPED. This is not a clean result: other local projects may share \
+                     bucket `{canonical_id}` and go unreported. Run `cas known-repos list` to \
+                     confirm the registry is readable."
+                ),
+            });
+            return checks;
+        }
+    };
+
+    for collision in crate::cloud::detect_canonical_id_collisions(&known_roots) {
+        let roots = collision
+            .roots
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        checks.push(Check {
+            name: "canonical id collision".to_string(),
+            status: CheckStatus::Warning,
+            message: format!(
+                "DIFFERENT repositories share cloud bucket `{}`: {roots}. Every sync merges \
+                 them into each other. Give each one its own id with `cas cloud project set \
+                 <unique-id>` (run it inside each project).",
+                collision.canonical_id
+            ),
+        });
+    }
+
+    checks
 }
 
 /// Helper around `cli::integrate::doctor::collect_reports` +
@@ -561,6 +867,281 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    // ── cas-f699 / GH #134: canonical-id doctor rows ─────────────────────
+
+    // ── cas-fc6fa / GH #133: cross-project contamination doctor row ──────
+
+    #[test]
+    fn foreign_rows_check_reports_counts_and_a_safe_remediation_path_cas_fc6fa() {
+        use crate::cli::foreign_rows::{DbSnapshot, ForeignRow, ForeignRowReport, IdCollision};
+
+        let report = ForeignRowReport {
+            local_project: "cas-src".to_string(),
+            local_task_count: 1484,
+            peers_compared: vec!["accounting".to_string()],
+            foreign: vec![
+                ForeignRow {
+                    id: "cas-0001".to_string(),
+                    title: "Reconcile Q3 payroll".to_string(),
+                    closed: false,
+                    home_project: "accounting".to_string(),
+                    also_present_in: Vec::new(),
+                },
+                ForeignRow {
+                    id: "cas-0002".to_string(),
+                    title: "Finished months ago".to_string(),
+                    closed: true,
+                    home_project: "accounting".to_string(),
+                    also_present_in: Vec::new(),
+                },
+            ],
+            collisions: vec![IdCollision {
+                id: "cas-0003".to_string(),
+                local_title: "Real local work".to_string(),
+                other_project: "accounting".to_string(),
+                other_title: "A different real task".to_string(),
+            }],
+            ..Default::default()
+        };
+        let _ = DbSnapshot::default(); // keep the public snapshot type exercised
+
+        let check = foreign_rows_check(Ok(&report));
+
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(
+            check.message.contains("2 foreign task row(s)"),
+            "{}",
+            check.message
+        );
+        // AC3: the non-closed count is what lies in ready queues.
+        assert!(
+            check.message.contains("1 of them not closed"),
+            "{}",
+            check.message
+        );
+        assert!(check.message.contains("accounting"), "{}", check.message);
+        // AC1: a remediation path is named.
+        assert!(
+            check.message.contains("cas cloud purge-foreign"),
+            "{}",
+            check.message
+        );
+        // AC2: the identity constraint is stated where a human would act on it.
+        assert!(check.message.contains("(id, title)"), "{}", check.message);
+    }
+
+    #[test]
+    fn foreign_rows_check_zero_states_its_coverage_never_a_bare_clean_cas_fc6fa() {
+        use crate::cli::foreign_rows::ForeignRowReport;
+
+        let report = ForeignRowReport {
+            local_project: "cas-src".to_string(),
+            local_task_count: 1485,
+            peers_compared: vec!["accounting".to_string(), "ozer".to_string()],
+            ..Default::default()
+        };
+
+        let check = foreign_rows_check(Ok(&report));
+
+        assert!(matches!(check.status, CheckStatus::Ok));
+        // An Ok row that just said "clean" would be indistinguishable from a
+        // scan that compared nothing at all.
+        assert!(
+            check.message.contains("0 foreign task row(s)"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("1485 local row(s)"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("2 project DB(s)"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("0 DB(s) unreadable"),
+            "{}",
+            check.message
+        );
+    }
+
+    #[test]
+    fn foreign_rows_check_names_a_failed_scan_instead_of_reading_clean_cas_fc6fa() {
+        // Same reassuring-zero failure mode as the canonical-id registry row:
+        // a scan that could not run must not render as "no contamination".
+        let err = anyhow::anyhow!("disk I/O error");
+        let check = foreign_rows_check(Err(&err));
+
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("SKIPPED"), "{}", check.message);
+        assert!(
+            check.message.contains("disk I/O error"),
+            "{}",
+            check.message
+        );
+    }
+
+    #[test]
+    fn foreign_rows_check_warns_when_a_peer_db_could_not_be_read_cas_fc6fa() {
+        use crate::cli::foreign_rows::{ForeignRowReport, UnreadablePeer};
+
+        let report = ForeignRowReport {
+            local_project: "cas-src".to_string(),
+            local_task_count: 10,
+            peers_compared: vec!["accounting".to_string()],
+            peers_unreadable: vec![UnreadablePeer {
+                project: "ozer".to_string(),
+                db_path: std::path::PathBuf::from("/home/u/ozer/.cas/cas.db"),
+                error: "file is not a database".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        let check = foreign_rows_check(Ok(&report));
+
+        // Clean against what could be read, but partial coverage is not a
+        // clean bill of health.
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("ozer"), "{}", check.message);
+        assert!(
+            check.message.contains("could NOT be read"),
+            "{}",
+            check.message
+        );
+    }
+
+    fn messages(checks: &[Check], name: &str) -> Vec<String> {
+        checks
+            .iter()
+            .filter(|c| c.name == name)
+            .map(|c| c.message.clone())
+            .collect()
+    }
+
+    #[test]
+    fn canonical_id_check_reports_the_resolved_bucket_and_its_source() {
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join("gabber-studio/.cas");
+        fs::create_dir_all(&cas_root).unwrap();
+
+        let checks = canonical_id_checks(&cas_root, Ok(Vec::new()));
+        let msg = messages(&checks, "canonical id").join("");
+        assert!(msg.contains("gabber-studio"), "got: {msg}");
+        assert!(msg.contains("folder name"), "got: {msg}");
+        // No collision row when only one root is known.
+        assert!(messages(&checks, "canonical id collision").is_empty());
+    }
+
+    #[test]
+    fn canonical_id_check_warns_loudly_on_a_shared_bucket() {
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join("accounting/.cas");
+        fs::create_dir_all(&cas_root).unwrap();
+
+        let known = vec![
+            crate::cloud::LocalRootIdentity {
+                project_root: "/home/u/client-one/accounting".into(),
+                canonical_id: "accounting".to_string(),
+                git_remote: Some("github.com/client-one/accounting".to_string()),
+            },
+            crate::cloud::LocalRootIdentity {
+                project_root: "/home/u/client-two/accounting".into(),
+                canonical_id: "accounting".to_string(),
+                git_remote: Some("gitlab.com/client-two/accounting".to_string()),
+            },
+        ];
+        let checks = canonical_id_checks(&cas_root, Ok(known));
+        let collision = checks
+            .iter()
+            .find(|c| c.name == "canonical id collision")
+            .expect("collision row must be present");
+        assert!(matches!(collision.status, CheckStatus::Warning));
+        assert!(collision.message.contains("client-one/accounting"));
+        assert!(collision.message.contains("client-two/accounting"));
+        assert!(collision.message.contains("cas cloud project set"));
+    }
+
+    #[test]
+    fn unreadable_registry_is_named_as_a_skipped_check_never_silence() {
+        // The reassuring-zero failure mode: if the known-repos registry can
+        // not be read, the collision check does not run — and an absent
+        // warning would read as "no collisions" on the exact surface a
+        // contamination-suspicious user consults. It must say so out loud.
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join("some-project/.cas");
+        fs::create_dir_all(&cas_root).unwrap();
+
+        let checks = canonical_id_checks(&cas_root, Err("disk I/O error".to_string()));
+        let row = checks
+            .iter()
+            .find(|c| c.name == "canonical id collision")
+            .expect("an unreadable registry must still emit a collision row");
+        assert!(matches!(row.status, CheckStatus::Warning));
+        assert!(row.message.contains("disk I/O error"), "{}", row.message);
+        assert!(row.message.contains("SKIPPED"), "{}", row.message);
+        // The bucket row is still reported — the skip is scoped to the
+        // collision check, not the whole diagnostic.
+        assert_eq!(messages(&checks, "canonical id").len(), 1);
+    }
+
+    #[test]
+    fn collect_local_root_identities_propagates_a_corrupt_registry() {
+        // End-to-end companion to the seam test above: a real `~/.cas/cas.db`
+        // that is not a database must surface as Err, not as an empty list.
+        crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
+            let host_cas = home.join(".cas");
+            fs::create_dir_all(&host_cas).unwrap();
+            fs::write(host_cas.join("cas.db"), b"this is not a sqlite database").unwrap();
+
+            let result = collect_local_root_identities();
+            assert!(
+                result.is_err(),
+                "a corrupt host registry must not read as an empty (=no collisions) list, got {:?}",
+                result
+            );
+
+            // Fail-closed must not become fail-always: a healthy registry with
+            // no rows still reads Ok(empty), which is a genuine "no collisions".
+            fs::remove_file(host_cas.join("cas.db")).unwrap();
+            crate::store::known_repos::ensure_host_schema().unwrap();
+            assert_eq!(collect_local_root_identities().unwrap(), Vec::new());
+        });
+    }
+
+    #[test]
+    fn canonical_id_check_names_the_legacy_folder_bucket_when_the_remote_wins() {
+        // Migration safety: an unpinned repo whose bucket moves from the
+        // folder name to the git remote must be told where its old data is.
+        let temp = TempDir::new().unwrap();
+        let project = temp.path().join("legacy-folder");
+        let cas_root = project.join(".cas");
+        fs::create_dir_all(&cas_root).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["remote", "add", "origin", "git@github.com:acme/renamed.git"],
+        ] {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&project)
+                .args(&args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+        }
+
+        let checks = canonical_id_checks(&cas_root, Ok(Vec::new()));
+        let msg = messages(&checks, "canonical id").join("");
+        assert!(msg.contains("github.com/acme/renamed"), "got: {msg}");
+        assert!(
+            msg.contains("cas cloud project set legacy-folder"),
+            "must name the pin command for the pre-cas-f699 bucket, got: {msg}"
+        );
+    }
 
     /// `cas-3efe`: doctor's integrations check on a project with no SKILL.md
     /// files anywhere collapses to a single Ok row stating "no integrations

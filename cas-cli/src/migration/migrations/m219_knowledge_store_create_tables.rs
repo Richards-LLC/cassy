@@ -7,7 +7,7 @@
 use crate::migration::{Migration, Subsystem};
 
 pub const MIGRATION: Migration = Migration {
-    id: 218,
+    id: 219,
     name: "knowledge_store_create_tables",
     subsystem: Subsystem::Knowledge,
     description: "Create knowledge page index, content-hash source ledger, and FTS5 index (cas-cbf1)",

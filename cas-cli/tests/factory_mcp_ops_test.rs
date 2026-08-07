@@ -3805,6 +3805,12 @@ async fn test_coordination_message_non_urgent_does_not_claim_delivery() {
 /// cas-6ad2: a worker's response proves it consumed the supervisor message
 /// that prompted the work. Factory prompts never issued explicit message_ack,
 /// so the response path must advance the prior delivered row to Confirmed.
+///
+/// cas-99d2 (GH #126) narrowed "proves": the reply must post-date the transport
+/// handoff AND a surfacing receipt must exist for the row, so this fixture now
+/// drains the worker's inbox — the receipt CAS actually records — before
+/// replying. The no-receipt variant is asserted NOT to confirm in
+/// `cas99d2_status_keeps_counting_when_a_reply_lacks_a_surfacing_receipt_gh126`.
 #[tokio::test]
 async fn test_worker_response_confirms_consumed_supervisor_message() {
     let _guard = EnvGuard::set(&[
@@ -3829,6 +3835,11 @@ async fn test_worker_response_confirms_consumed_supervisor_message() {
     env.prompt_queue()
         .mark_transport_delivered(instruction)
         .expect("deliver supervisor instruction");
+    // cas-99d2: the surfacing receipt — the worker pulled the row through its
+    // own inbox, so CAS observed the content reaching it.
+    env.prompt_queue()
+        .poll_unseen_for_recipient("swift-fox", None, 10)
+        .expect("worker inbox drain");
 
     let reply = coord_msg(
         "message",
@@ -5562,5 +5573,299 @@ async fn test_epic_status_omits_stack_lines_for_an_unstacked_epic_cas_aae6() {
     assert!(
         !text.contains("Stacked on"),
         "an epic cut straight from trunk must not claim a stack: {text}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// cas-99d2 (GH #126 / GH #127): message-confirmation truth and duplicate
+// assignment redelivery. Fixtures reproduce the real records from factory
+// session cas-src-noble-salmon-99 (2026-08-06).
+// ---------------------------------------------------------------------------
+
+/// cas-99d2 AC3 (GH #126): the false-confirm shape, asserted through the
+/// surface a supervisor actually reads.
+///
+/// Notification 7124's real shape: transport-delivered to a worker, no
+/// `prompt_queue_recipient_seen` row, then a reply from that worker to the
+/// supervisor 12s later. `message_status` used to answer
+/// "undelivered_after: n/a (confirmation_source: inferred_from_reply)",
+/// which is what suppressed the supervisor's escalation gate. It must now stay
+/// on the counting branch.
+#[tokio::test]
+async fn cas99d2_status_keeps_counting_when_a_reply_lacks_a_surfacing_receipt_gh126() {
+    // Pin BOTH supervisor-resolution sources (message.rs `resolve_supervisor_name`:
+    // CAS_SUPERVISOR_NAME first, then an Active/Idle Supervisor in the agent
+    // store). `FactoryTestEnv::new()` registers no supervisor and the fixture's
+    // cas_root is a fresh TempDir, so without this the worker's reply below can
+    // only resolve `target="supervisor"` from an ambient CAS_SUPERVISOR_NAME
+    // inherited from the surrounding shell — green inside a factory session,
+    // red in clean CI (GH #136).
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "worker"),
+        ("CAS_AGENT_NAME", "watchful-koala-20"),
+        ("CAS_SUPERVISOR_NAME", "cosmic-bear-43"),
+    ]);
+    let env = FactoryTestEnv::new();
+    env.register_worker("watchful-koala-20");
+    env.register_supervisor("cosmic-bear-43");
+
+    // Supervisor -> worker, handed to the transport (no inbox drain by the
+    // worker, exactly as in the incident).
+    let message_id = env
+        .prompt_queue()
+        .enqueue_urgent(
+            "supervisor",
+            "watchful-koala-20",
+            "factory/watchful-koala-20 is merged into the epic branch (merge commit 77fec76a). \
+             Re-run close now.",
+            None,
+            Some("merged — re-close now"),
+            None,
+            false,
+        )
+        .expect("enqueue supervisor message");
+    env.prompt_queue()
+        .mark_transport_delivered(message_id)
+        .expect("transport handoff");
+
+    // The worker replies to the supervisor. Under the old rule this reply
+    // confirmed the message above.
+    let reply = coord_msg("message", "supervisor", "closed, standing by", None);
+    env.service
+        .coordination(Parameters(reply))
+        .await
+        .expect("worker reply should succeed");
+
+    let report = env
+        .prompt_queue()
+        .message_delivery_report(message_id)
+        .expect("delivery report")
+        .expect("message exists");
+    assert_eq!(
+        report.confirmation_source,
+        cas_store::ConfirmationSource::Unconfirmed,
+        "a reply with no surfacing receipt must not confirm the message"
+    );
+    assert_eq!(report.stage, cas_store::DeliveryStage::Delivered);
+    assert_eq!(
+        report.pending_reason,
+        Some(cas_store::PendingReason::AwaitingAck)
+    );
+
+    let mut status_req = coord_msg("message_status", "watchful-koala-20", "unused", None);
+    status_req.notification_id = Some(message_id);
+    let text = get_text(
+        &env.service
+            .coordination(Parameters(status_req))
+            .await
+            .expect("message_status"),
+    );
+    assert!(
+        !text.contains("undelivered_after: n/a"),
+        "undelivered_after must keep counting, not read n/a: {text}"
+    );
+    assert!(
+        text.contains("undelivered_after:") && text.contains("not yet confirmed received"),
+        "status must still report the message as unconfirmed: {text}"
+    );
+    let json_start = text.find('{').expect("JSON body");
+    let json: serde_json::Value =
+        serde_json::from_str(&text[json_start..]).expect("status JSON must parse");
+    assert!(
+        json.get("undelivered_after_secs")
+            .expect("undelivered_after_secs")
+            .is_number(),
+        "undelivered_after_secs must be numeric, not null: {json}"
+    );
+}
+
+/// cas-99d2 (GH #126): the complementary positive case — a worker that DID
+/// drain its inbox before replying still gets its messages confirmed, so the
+/// evidence gates do not simply disable reply-inference.
+#[tokio::test]
+async fn cas99d2_reply_after_an_inbox_drain_still_confirms_gh126() {
+    // Same deterministic supervisor pinning as the negative case above: the
+    // reply at the end of this test resolves `target="supervisor"`, which
+    // otherwise depends on an ambient CAS_SUPERVISOR_NAME (GH #136).
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "worker"),
+        ("CAS_AGENT_NAME", "watchful-koala-20"),
+        ("CAS_SUPERVISOR_NAME", "cosmic-bear-43"),
+    ]);
+    let env = FactoryTestEnv::new();
+    env.register_worker("watchful-koala-20");
+    env.register_supervisor("cosmic-bear-43");
+
+    let message_id = env
+        .prompt_queue()
+        .enqueue_urgent(
+            "supervisor",
+            "watchful-koala-20",
+            "re-close cas-7587 with a commit receipt",
+            None,
+            Some("re-close"),
+            None,
+            false,
+        )
+        .expect("enqueue");
+    env.prompt_queue()
+        .mark_transport_delivered(message_id)
+        .expect("transport handoff");
+    // The surfacing receipt: the worker pulls the row through its inbox.
+    env.prompt_queue()
+        .poll_unseen_for_recipient("watchful-koala-20", None, 10)
+        .expect("inbox drain");
+
+    let reply = coord_msg("message", "supervisor", "on it", None);
+    env.service
+        .coordination(Parameters(reply))
+        .await
+        .expect("worker reply");
+
+    let report = env
+        .prompt_queue()
+        .message_delivery_report(message_id)
+        .expect("delivery report")
+        .expect("message exists");
+    assert_eq!(
+        report.confirmation_source,
+        cas_store::ConfirmationSource::InferredFromReply,
+        "a reply that post-dates a real drain receipt still confirms: {report:?}"
+    );
+}
+
+/// cas-99d2 AC4 (GH #127): notification 7112's shape.
+///
+/// An assignment was transport-delivered at 18:55:59; the worker started,
+/// implemented and parked the task; then at 19:10:42 its inbox drain returned
+/// the SAME assignment verbatim, reading as a fresh instruction. With the
+/// solicited task-start transition on record for this worker, the poll must
+/// withhold the row instead of re-rendering it.
+#[tokio::test]
+async fn cas99d2_inbox_poll_withholds_a_consumed_assignment_gh127() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "worker"),
+        ("CAS_AGENT_NAME", "watchful-koala-20"),
+    ]);
+    let env = FactoryTestEnv::with_agent_id_and_env("koala-agent-id", None);
+    env.register_worker_with_id("koala-agent-id", "watchful-koala-20", None);
+
+    // The task the assignment solicited a start for, already started by this
+    // worker — the consumption evidence.
+    let task_id = {
+        let store = env.task_store();
+        let id = store.generate_id().expect("generate_id");
+        let mut task = Task::new(id.clone(), "GH #122 spawn base resolution".to_string());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some("watchful-koala-20".to_string());
+        store.add(&task).expect("add started task");
+        id
+    };
+
+    let assignment = format!(
+        "You are assigned task {task_id} (P2 bug, epic cas-b0c7). Run \
+         `mcp__cas__task action=show id={task_id}` then \
+         `mcp__cas__task action=start id={task_id}`."
+    );
+    let assignment_id = env
+        .prompt_queue()
+        .enqueue_urgent(
+            "supervisor",
+            "watchful-koala-20",
+            &assignment,
+            None,
+            Some("assignment"),
+            None,
+            false,
+        )
+        .expect("enqueue assignment");
+    env.prompt_queue()
+        .mark_transport_delivered(assignment_id)
+        .expect("transport handoff");
+
+    let text = get_text(
+        &env.service
+            .coordination(Parameters(coord_req("inbox_poll")))
+            .await
+            .expect("inbox_poll"),
+    );
+    assert!(
+        !text.contains("You are assigned task"),
+        "an already-delivered assignment whose task this worker has started must not be \
+         re-rendered verbatim: {text}"
+    );
+    assert!(
+        text.contains(&format!("{assignment_id}")) && text.contains("already done"),
+        "the withheld row must be named, not silently dropped: {text}"
+    );
+}
+
+/// cas-99d2 AC4 (GH #127): a repeat delivery that IS handed over carries an
+/// explicit machine-checkable marker, so a recipient can discard duplicates
+/// without reasoning about timestamps. A row that was never transport-delivered
+/// carries no marker.
+#[tokio::test]
+async fn cas99d2_inbox_poll_marks_redelivered_rows_gh127() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "worker"),
+        ("CAS_AGENT_NAME", "watchful-koala-20"),
+    ]);
+    let env = FactoryTestEnv::with_agent_id_and_env("koala-agent-id", None);
+    env.register_worker_with_id("koala-agent-id", "watchful-koala-20", None);
+
+    let repeat_id = env
+        .prompt_queue()
+        .enqueue_urgent(
+            "supervisor",
+            "watchful-koala-20",
+            "the merge you are waiting on ALREADY HAPPENED",
+            None,
+            Some("merge landed"),
+            None,
+            false,
+        )
+        .expect("enqueue repeat");
+    env.prompt_queue()
+        .mark_transport_delivered(repeat_id)
+        .expect("transport handoff");
+    let fresh_id = env
+        .prompt_queue()
+        .enqueue_urgent(
+            "supervisor",
+            "watchful-koala-20",
+            "new follow-up instruction",
+            None,
+            Some("follow-up"),
+            None,
+            false,
+        )
+        .expect("enqueue fresh");
+
+    let text = get_text(
+        &env.service
+            .coordination(Parameters(coord_req("inbox_poll")))
+            .await
+            .expect("inbox_poll"),
+    );
+
+    assert!(
+        text.contains("ALREADY HAPPENED") && text.contains("new follow-up instruction"),
+        "both rows must still be delivered: {text}"
+    );
+    let repeat_header = text
+        .lines()
+        .find(|line| line.contains(&format!("[{repeat_id}]")))
+        .expect("repeat row header");
+    assert!(
+        repeat_header.contains("[redelivery]"),
+        "an already-transport-delivered row must be marked: {repeat_header}"
+    );
+    let fresh_header = text
+        .lines()
+        .find(|line| line.contains(&format!("[{fresh_id}]")))
+        .expect("fresh row header");
+    assert!(
+        !fresh_header.contains("[redelivery]"),
+        "a first delivery must not be marked as a repeat: {fresh_header}"
     );
 }

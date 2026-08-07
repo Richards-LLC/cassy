@@ -219,6 +219,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-worker/references/details.md",
         content: include_str!("builtins/skills/cas-worker/references/details.md"),
     },
+    BuiltinFile {
+        path: "skills/cas-worker/references/discipline.md",
+        content: include_str!("builtins/skills/cas-worker/references/discipline.md"),
+    },
     // verify-before-claim skill (cas-5b2a, EPIC cas-ebea third-brain borrow).
     // Pre-close agent-discipline layer that forces workers to name, run, and
     // capture a proof command before claiming done. Advisory in v1; the
@@ -507,6 +511,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-worker/references/details.md",
         content: include_str!("builtins/codex/skills/cas-worker/references/details.md"),
     },
+    BuiltinFile {
+        path: "skills/cas-worker/references/discipline.md",
+        content: include_str!("builtins/codex/skills/cas-worker/references/discipline.md"),
+    },
     // verify-before-claim skill (cas-5b2a) — codex mirror. See claude-side
     // entry above for context.
     BuiltinFile {
@@ -749,6 +757,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-worker/references/details.md",
         content: include_str!("builtins/grok/skills/cas-worker/references/details.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-worker/references/discipline.md",
+        content: include_str!("builtins/grok/skills/cas-worker/references/discipline.md"),
     },
     BuiltinFile {
         path: "skills/verify-before-claim/SKILL.md",
@@ -2482,6 +2494,104 @@ This is the body content."#;
                 .iter()
                 .any(|b| b.path == "skills/cas-ideate/SKILL.md")
         );
+    }
+
+    /// cas-b4921 / GH #121: the two ways a worker dies expensively, both
+    /// preventable and both guidance gaps.
+    ///
+    /// PART A — a worker that foreground-blocks on a long command is
+    /// unreachable: supervisor messages, stand-down orders and urgent stops are
+    /// only delivered between turns. One worker burned 40+ minutes
+    /// foreground-watching queued CI through a provider outage, ignoring nine
+    /// messages including two stand-down orders.
+    ///
+    /// PART B — both workers in that window ran into auto-compaction and were
+    /// killed mid-compaction, so the operator paid to re-summarize work a
+    /// `git push` would have preserved.
+    ///
+    /// All THREE harness flavors must carry both mandates: terse hard rules on
+    /// the always-loaded surface (the SKILL.md body is on the hot path and has
+    /// a 12 KB ceiling — see `test_worker_guidance_under_12kb`) with the
+    /// recipes in references/discipline.md. The flavor set is spelled out here
+    /// because this guidance has a documented drift history (GH #116).
+    #[test]
+    fn test_worker_skills_carry_backgrounding_mandate_cas_b4921() {
+        for (label, skill_content, ref_content) in [
+            (
+                "claude",
+                include_str!("builtins/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker/references/discipline.md"),
+            ),
+            (
+                "codex",
+                include_str!("builtins/codex/skills/cas-worker.md"),
+                include_str!("builtins/codex/skills/cas-worker/references/discipline.md"),
+            ),
+            (
+                "grok",
+                include_str!("builtins/grok/skills/cas-worker.md"),
+                include_str!("builtins/grok/skills/cas-worker/references/discipline.md"),
+            ),
+        ] {
+            // Always-loaded body: terse hard rules only (Rules of Engagement),
+            // each naming its threshold, plus the breadcrumb to the recipes.
+            for required in [
+                "Never block the pane",
+                "~2 minutes",
+                "gh run watch",
+                "action=remind",
+                "context headroom",
+                "Checkpoint, never compact",
+                "discipline.md",
+            ] {
+                assert!(
+                    skill_content.contains(required),
+                    "{label} cas-worker SKILL.md missing hard-rule marker: {required:?}"
+                );
+            }
+            // Scoped-test reminder lives with the test guidance (A-3).
+            for required in ["cargo test --lib", "cargo test --test <name>"] {
+                assert!(
+                    skill_content.contains(required),
+                    "{label} cas-worker SKILL.md missing scoped-test marker: {required:?}"
+                );
+            }
+            // Part A recipes: background builds, the server registry for
+            // anything listening, the sanctioned CI shape (queue rerun ->
+            // reminder -> end turn -> one-shot check), and inbox_poll first if
+            // you did come back from a blocked turn.
+            for required in [
+                "run_in_background",
+                "action=server_start",
+                "remind_delay_secs",
+                "gh run list",
+                "inbox_poll",
+            ] {
+                assert!(
+                    ref_content.contains(required),
+                    "{label} cas-worker discipline.md missing backgrounding recipe: {required:?}"
+                );
+            }
+            assert!(
+                ref_content.contains("BANNED") || ref_content.contains("banned"),
+                "{label} cas-worker discipline.md must explicitly ban foreground CI watching"
+            );
+            // Part B: headroom reporting, the four-step checkpoint protocol,
+            // and commit sizing.
+            for required in [
+                "note_type=progress",
+                "Context: ~",
+                "CHECKPOINT",
+                "git push",
+                "respawn",
+                "auto-compaction",
+            ] {
+                assert!(
+                    ref_content.contains(required),
+                    "{label} cas-worker discipline.md missing context-budget marker: {required:?}"
+                );
+            }
+        }
     }
 
     #[test]

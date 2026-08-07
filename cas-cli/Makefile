@@ -25,7 +25,7 @@
 # - [ ] Status line updates correctly
 # - [ ] No visual artifacts or flickering
 
-.PHONY: test test-full coverage coverage-html clean build build-full release release-fast test-release-panic check check-full lint dev-build dev-test timings benchmark-build check-build-regression
+.PHONY: test test-full test-clean-env coverage coverage-html clean build build-full release release-fast test-release-panic check check-full lint dev-build dev-test timings benchmark-build check-build-regression
 
 CARGO ?= cargo
 
@@ -40,6 +40,37 @@ test-full:
 # Run tests with output
 test-verbose:
 	$(CARGO) test -p cas -- --nocapture
+
+# Reproduce the clean-CI environment shape locally (cas-43ce / GH #136).
+#
+# Every factory worker shell exports CAS_* identity variables. A test that
+# accidentally reads one passes here and fails only on a clean CI runner —
+# that is exactly how the GH #136 tests shipped red, and this command
+# surfaced it in seconds. Run it before pushing when your diff touches
+# agent resolution, coordination, messaging or anything else that reads the
+# environment.
+#
+# The variable list is enumerated from the live environment rather than
+# hardcoded, because a hardcoded one drifts: the list in the worker guide
+# had gone stale in both directions (missing CAS_CLOUD_TOKEN among others,
+# stripping two variables that no longer exist).
+#
+# NOTE: this MUST stay an explicit rule — the `test-%` pattern rule below
+# would otherwise match `test-clean-env` and run `cargo test -p cas clean-env`.
+#
+# Scope it, as always. Default is one binary; override for another:
+#   make test-clean-env
+#   make test-clean-env CLEAN_ENV_ARGS='--lib cloud::config'
+CLEAN_ENV_ARGS ?= --test factory_mcp_ops_test
+test-clean-env:
+	@stripped=$$(env | sed -n 's/^\(CAS_[A-Za-z0-9_]*\)=.*/\1/p' | sort); \
+	if [ -n "$$stripped" ]; then \
+		echo "Stripping $$(echo "$$stripped" | wc -l) CAS_* variable(s): $$(echo $$stripped)"; \
+	else \
+		echo "No CAS_* variables set — already in the clean-CI shape."; \
+	fi; \
+	unset_args=$$(echo "$$stripped" | sed 's/^/-u /'); \
+	env $$unset_args $(CARGO) test -p cas $(CLEAN_ENV_ARGS)
 
 # Run specific test module
 test-%:

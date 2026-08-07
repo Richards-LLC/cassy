@@ -10,3 +10,7 @@ mod queue_and_events;
 pub(super) mod relay;
 pub(crate) mod teams;
 mod ws_client;
+
+/// cas-ac7e (GH #130): the daemon struct holds outstanding urgent wake probes,
+/// so their type has to be nameable one level up.
+pub(crate) use queue_and_events::{InboxDeferredWrite, UrgentWakeProbe};

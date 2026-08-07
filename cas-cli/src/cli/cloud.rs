@@ -204,6 +204,17 @@ pub struct CloudPurgeForeignArgs {
     /// Preview what would be purged without deleting
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Proceed even when the safety guard refuses (stale pull state, or local
+    /// rows that were never pushed to cloud). Destructive — the refusal reason
+    /// is still printed.
+    #[arg(long)]
+    pub force: bool,
+
+    /// Age in days beyond which the last successful cloud pull is considered
+    /// stale and the purge is refused without --force.
+    #[arg(long, default_value_t = PURGE_STALE_THRESHOLD_DAYS)]
+    pub stale_days: i64,
 }
 
 #[derive(Parser)]
@@ -3259,6 +3270,304 @@ fn execute_team_memories(
 // PURGE-FOREIGN - Remove foreign-project entities and re-pull
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// Default age (in days) beyond which `last_pull_at` is considered stale and a
+/// destructive purge is refused. A purge on a machine that has not pulled
+/// recently re-pulls an out-of-date snapshot over freshly deleted local rows.
+pub const PURGE_STALE_THRESHOLD_DAYS: i64 = 7;
+
+/// Maximum rows printed per entity kind in the human-readable dry-run listing.
+/// The full set is always available via `--json`.
+const PURGE_DRY_RUN_PRINT_LIMIT: usize = 50;
+
+/// One row that `cas cloud purge-foreign` would delete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PurgeEntity {
+    /// Entity kind: "entry" | "task" | "rule" | "skill".
+    pub kind: &'static str,
+    pub id: String,
+    /// Human label (title/name/first content line) — may be empty.
+    pub label: String,
+}
+
+/// The concrete set of rows a purge would delete.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PurgeDeleteSet {
+    pub entries: Vec<PurgeEntity>,
+    pub tasks: Vec<PurgeEntity>,
+    pub rules: Vec<PurgeEntity>,
+    pub skills: Vec<PurgeEntity>,
+    /// Dependency edges are deleted wholesale and have no user-facing title.
+    pub dependencies: usize,
+}
+
+impl PurgeDeleteSet {
+    pub fn total(&self) -> usize {
+        self.entries.len() + self.tasks.len() + self.rules.len() + self.skills.len()
+    }
+
+    fn groups(&self) -> [(&'static str, &Vec<PurgeEntity>); 4] {
+        [
+            ("entries", &self.entries),
+            ("tasks", &self.tasks),
+            ("rules", &self.rules),
+            ("skills", &self.skills),
+        ]
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        let render = |rows: &Vec<PurgeEntity>| {
+            rows.iter()
+                .map(|e| serde_json::json!({"id": e.id, "label": e.label}))
+                .collect::<Vec<_>>()
+        };
+        serde_json::json!({
+            "entries": render(&self.entries),
+            "tasks": render(&self.tasks),
+            "rules": render(&self.rules),
+            "skills": render(&self.skills),
+            "dependencies": self.dependencies,
+            "total": self.total(),
+        })
+    }
+}
+
+/// Read the ids + labels of every row a purge would delete.
+///
+/// Missing tables are treated as empty rather than fatal: a database that
+/// predates one of these stores must still be previewable.
+fn collect_purge_delete_set(conn: &rusqlite::Connection) -> anyhow::Result<PurgeDeleteSet> {
+    fn rows(
+        conn: &rusqlite::Connection,
+        kind: &'static str,
+        sql: &str,
+    ) -> anyhow::Result<Vec<PurgeEntity>> {
+        let mut stmt = match conn.prepare(sql) {
+            Ok(stmt) => stmt,
+            // Table absent (older database) — nothing of this kind to delete.
+            // Any other failure is real and must not be silently reported as
+            // "nothing would be deleted".
+            Err(e) if e.to_string().contains("no such table") => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        let mapped = stmt.query_map([], |row| {
+            Ok(PurgeEntity {
+                kind,
+                id: row.get::<_, String>(0)?,
+                label: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in mapped {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    let dependencies: usize = conn
+        .query_row("SELECT COUNT(*) FROM dependencies", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap_or(0) as usize;
+
+    Ok(PurgeDeleteSet {
+        entries: rows(
+            conn,
+            "entry",
+            "SELECT id, COALESCE(NULLIF(title, ''), substr(content, 1, 80)) FROM entries ORDER BY id",
+        )?,
+        tasks: rows(conn, "task", "SELECT id, title FROM tasks ORDER BY id")?,
+        rules: rows(
+            conn,
+            "rule",
+            "SELECT id, substr(content, 1, 80) FROM rules ORDER BY id",
+        )?,
+        skills: rows(conn, "skill", "SELECT id, name FROM skills ORDER BY id")?,
+        dependencies,
+    })
+}
+
+/// A named reason the purge refuses to run destructively.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PurgeRefusal {
+    /// No successful cloud pull is recorded at all.
+    NeverPulled,
+    /// The last successful pull is older than the configured threshold.
+    StalePull {
+        last_pull_at: String,
+        age_days: i64,
+        threshold_days: i64,
+    },
+    /// `last_pull_at` exists but cannot be parsed — treated as unknown, and
+    /// unknown is not safe.
+    UnreadablePullTimestamp { last_pull_at: String },
+    /// Local rows are still queued for push: deleting them loses work the
+    /// cloud has never seen, and the re-pull cannot restore it.
+    UnpushedRows { pending: usize, sample: Vec<String> },
+}
+
+impl PurgeRefusal {
+    /// Single-sentence, self-explaining reason (AC2: "the refusal names the reason").
+    pub fn reason(&self) -> String {
+        match self {
+            PurgeRefusal::NeverPulled => {
+                "no successful cloud pull recorded (last_pull_at is unset) \
+— a purge would delete local rows and re-pull from an unverified baseline"
+                    .to_string()
+            }
+            PurgeRefusal::StalePull {
+                last_pull_at,
+                age_days,
+                threshold_days,
+            } => format!(
+                "stale cloud sync: last successful pull was {age_days} days ago ({last_pull_at}), \
+threshold is {threshold_days} days — the re-pull would restore an out-of-date snapshot over \
+everything deleted since"
+            ),
+            PurgeRefusal::UnreadablePullTimestamp { last_pull_at } => format!(
+                "cannot read last_pull_at ({last_pull_at:?}); sync freshness is unknown and \
+unknown is not safe for a destructive purge"
+            ),
+            PurgeRefusal::UnpushedRows { pending, sample } => format!(
+                "{pending} local change(s) are still queued for push and have never reached the \
+cloud (e.g. {}) — the purge would delete them and the re-pull cannot bring them back",
+                sample.join(", ")
+            ),
+        }
+    }
+
+    /// Stable machine-readable code for --json consumers.
+    pub fn code(&self) -> &'static str {
+        match self {
+            PurgeRefusal::NeverPulled => "never_pulled",
+            PurgeRefusal::StalePull { .. } => "stale_pull",
+            PurgeRefusal::UnreadablePullTimestamp { .. } => "unreadable_pull_timestamp",
+            PurgeRefusal::UnpushedRows { .. } => "unpushed_rows",
+        }
+    }
+}
+
+/// Parse a `last_pull_at` value. Accepts RFC3339 (what the syncer writes) and
+/// the naive `%Y-%m-%d %H:%M:%S` shape older rows may carry.
+fn parse_sync_timestamp(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let raw = raw.trim();
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return Some(dt.with_timezone(&chrono::Utc));
+    }
+    for fmt in ["%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S%.f"] {
+        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(raw, fmt) {
+            return Some(naive.and_utc());
+        }
+    }
+    None
+}
+
+/// Decide whether a destructive purge is safe. Pure — takes the observed state,
+/// returns every reason to refuse (empty = safe).
+fn evaluate_purge_safety(
+    last_pull_at: Option<&str>,
+    pending_pushes: &[(String, String)],
+    now: chrono::DateTime<chrono::Utc>,
+    threshold_days: i64,
+) -> Vec<PurgeRefusal> {
+    let mut refusals = Vec::new();
+
+    match last_pull_at.map(str::trim).filter(|s| !s.is_empty()) {
+        None => refusals.push(PurgeRefusal::NeverPulled),
+        Some(raw) => match parse_sync_timestamp(raw) {
+            None => refusals.push(PurgeRefusal::UnreadablePullTimestamp {
+                last_pull_at: raw.to_string(),
+            }),
+            Some(ts) => {
+                let age_days = (now - ts).num_days();
+                if age_days > threshold_days {
+                    refusals.push(PurgeRefusal::StalePull {
+                        last_pull_at: raw.to_string(),
+                        age_days,
+                        threshold_days,
+                    });
+                }
+            }
+        },
+    }
+
+    if !pending_pushes.is_empty() {
+        refusals.push(PurgeRefusal::UnpushedRows {
+            pending: pending_pushes.len(),
+            sample: pending_pushes
+                .iter()
+                .take(5)
+                .map(|(kind, id)| format!("{kind}:{id}"))
+                .collect(),
+        });
+    }
+
+    refusals
+}
+
+/// Queued-but-unpushed local changes for the entity kinds a purge deletes.
+///
+/// Fails CLOSED. Only an absent `sync_queue` table is "no pending pushes";
+/// every other read failure (schema drift, corruption, a row that will not
+/// decode) is propagated so the purge refuses loudly. Silently returning zero
+/// here would disable the unpushed-rows guard in a destructive path — the one
+/// place a reassuring wrong answer is most expensive.
+fn pending_content_pushes(conn: &rusqlite::Connection) -> anyhow::Result<Vec<(String, String)>> {
+    let mut stmt = match conn.prepare(
+        "SELECT entity_type, entity_id FROM sync_queue
+         WHERE lower(entity_type) IN ('entry', 'task', 'rule', 'skill')
+         ORDER BY id",
+    ) {
+        Ok(s) => s,
+        // Table absent (older database) — there is genuinely nothing queued.
+        Err(e) if e.to_string().contains("no such table") => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "cannot read the sync queue to check for unpushed local changes: {e}"
+            ));
+        }
+    };
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| {
+            anyhow::anyhow!("cannot read the sync queue to check for unpushed local changes: {e}")
+        })?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        // No .flatten(): a row that fails to decode must not vanish into a
+        // shorter "pending" list that reads as safe.
+        out.push(row.map_err(|e| {
+            anyhow::anyhow!("unreadable row in the sync queue while checking unpushed changes: {e}")
+        })?);
+    }
+    Ok(out)
+}
+
+/// Crash-safe backup of a live WAL database.
+///
+/// `std::fs::copy` of `cas.db` silently omits `-wal`/`-shm`, so every committed
+/// transaction still sitting in the WAL is missing from the "backup" — the one
+/// artifact a destructive purge depends on. `VACUUM INTO` asks SQLite itself to
+/// materialise a consistent snapshot (WAL content included) into a new file.
+fn backup_database_crash_safe(db_path: &Path, backup_path: &Path) -> anyhow::Result<()> {
+    if backup_path.exists() {
+        anyhow::bail!(
+            "refusing to overwrite existing backup at {}",
+            backup_path.display()
+        );
+    }
+    let conn = rusqlite::Connection::open(db_path)?;
+    // VACUUM INTO requires the destination not to exist (checked above).
+    conn.execute("VACUUM INTO ?1", [backup_path.to_string_lossy().as_ref()])
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "failed to write crash-safe backup to {}: {e}",
+                backup_path.display()
+            )
+        })?;
+    Ok(())
+}
+
 fn execute_purge_foreign(
     args: &CloudPurgeForeignArgs,
     cli: &Cli,
@@ -3300,11 +3609,51 @@ fn execute_purge_foreign(
     let skills_before = skill_store.list(None).map(|v| v.len()).unwrap_or(0);
     let total_before = entries_before + tasks_before + rules_before + skills_before;
 
+    let db_path = cas_root.join("cas.db");
+
+    // cas-a034 / GH #132: resolve the concrete delete set and the safety state
+    // BEFORE anything destructive happens, so --dry-run can show exactly what
+    // would be lost and a real run can refuse when losing it is unrecoverable.
+    let (delete_set, refusals) = {
+        let conn = rusqlite::Connection::open(&db_path)?;
+        let delete_set = collect_purge_delete_set(&conn)?;
+        let last_pull_at: Option<String> = conn
+            .query_row(
+                "SELECT value FROM sync_metadata WHERE key = 'last_pull_at'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        let pending = pending_content_pushes(&conn)?;
+        let refusals = evaluate_purge_safety(
+            last_pull_at.as_deref(),
+            &pending,
+            chrono::Utc::now(),
+            args.stale_days,
+        );
+        (delete_set, refusals)
+    };
+
     if cli.json {
         if args.dry_run {
             println!(
-                r#"{{"dry_run":true,"project_id":"{}","entities_before":{{"entries":{},"tasks":{},"rules":{},"skills":{},"total":{}}}}}"#,
-                project_id, entries_before, tasks_before, rules_before, skills_before, total_before,
+                "{}",
+                serde_json::json!({
+                    "dry_run": true,
+                    "project_id": project_id,
+                    "entities_before": {
+                        "entries": entries_before,
+                        "tasks": tasks_before,
+                        "rules": rules_before,
+                        "skills": skills_before,
+                        "total": total_before,
+                    },
+                    "delete_set": delete_set.to_json(),
+                    "refusals": refusals.iter()
+                        .map(|r| serde_json::json!({"code": r.code(), "reason": r.reason()}))
+                        .collect::<Vec<_>>(),
+                    "would_refuse": !refusals.is_empty() && !args.force,
+                })
             );
             return Ok(());
         }
@@ -3327,6 +3676,42 @@ fn execute_purge_foreign(
         fmt.newline()?;
 
         if args.dry_run {
+            // AC1: show the concrete delete set, not just before-counts.
+            fmt.newline()?;
+            fmt.write_muted("  Would delete:")?;
+            fmt.newline()?;
+            for (label, rows) in delete_set.groups() {
+                fmt.write_raw(&format!("    {} {}", rows.len(), label))?;
+                fmt.newline()?;
+                for row in rows.iter().take(PURGE_DRY_RUN_PRINT_LIMIT) {
+                    fmt.write_muted("      - ")?;
+                    fmt.write_raw(&format!("{}  {}", row.id, row.label))?;
+                    fmt.newline()?;
+                }
+                if rows.len() > PURGE_DRY_RUN_PRINT_LIMIT {
+                    fmt.write_muted(&format!(
+                        "      … {} more (use --json for the full set)",
+                        rows.len() - PURGE_DRY_RUN_PRINT_LIMIT
+                    ))?;
+                    fmt.newline()?;
+                }
+            }
+            fmt.write_raw(&format!("    {} dependency edges", delete_set.dependencies))?;
+            fmt.newline()?;
+
+            if !refusals.is_empty() {
+                fmt.newline()?;
+                let warning_color = fmt.theme().palette.status_warning;
+                fmt.write_colored("  \u{26A0} ", warning_color)?;
+                fmt.write_raw("A real run would REFUSE:")?;
+                fmt.newline()?;
+                for refusal in &refusals {
+                    fmt.write_muted("    - ")?;
+                    fmt.write_raw(&refusal.reason())?;
+                    fmt.newline()?;
+                }
+            }
+
             fmt.newline()?;
             fmt.write_muted("  (dry run — no changes made)")?;
             fmt.newline()?;
@@ -3336,12 +3721,29 @@ fn execute_purge_foreign(
         }
     }
 
-    // Step 1: Back up the database
-    let db_path = cas_root.join("cas.db");
+    // AC2: refuse destructive runs whose loss would be unrecoverable, naming
+    // the reason. --force is the explicit, documented override.
+    if !refusals.is_empty() {
+        let reasons = refusals
+            .iter()
+            .map(|r| format!("  - {}", r.reason()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !args.force {
+            anyhow::bail!(
+                "Refusing to purge {} local rows:\n{reasons}\n\
+Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
+                delete_set.total()
+            );
+        }
+        eprintln!("warning: purging despite safety refusal (--force):\n{reasons}");
+    }
+
+    // Step 1: Back up the database (AC3: crash-safe — never fs::copy a live WAL DB)
     let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
     let backup_path = cas_root.join(format!("cas.db.pre-purge-{timestamp}"));
     if db_path.exists() {
-        std::fs::copy(&db_path, &backup_path)?;
+        backup_database_crash_safe(&db_path, &backup_path)?;
     }
 
     // Step 2: Delete all content entities via direct SQL
@@ -3949,3 +4351,373 @@ mod team_cmd_tests {
 // with wiremock. Extracted per the task-verifier feedback on cas-1f44:
 // tests are easier to find in the integration tree than buried in this
 // 2.4k-line CLI file.
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PURGE-FOREIGN safety tests (cas-a034 / GH #132)
+//
+// All three ACs are covered without a live cloud: the delete-set reader, the
+// staleness/unpushed-rows guard and the crash-safe backup are pure functions
+// over a local SQLite file.
+// ═══════════════════════════════════════════════════════════════════════════════
+#[cfg(test)]
+mod purge_foreign_safety_tests {
+    use super::*;
+    use rusqlite::Connection;
+    use tempfile::TempDir;
+
+    /// Minimal shape of the tables purge-foreign touches.
+    fn seed_db(conn: &Connection) {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE entries (id TEXT PRIMARY KEY, title TEXT, content TEXT NOT NULL);
+            CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT NOT NULL);
+            CREATE TABLE rules (id TEXT PRIMARY KEY, content TEXT NOT NULL);
+            CREATE TABLE skills (id TEXT PRIMARY KEY, name TEXT NOT NULL);
+            CREATE TABLE dependencies (from_id TEXT, to_id TEXT);
+            CREATE TABLE sync_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE sync_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                operation TEXT NOT NULL
+            );
+
+            INSERT INTO entries (id, title, content) VALUES
+                ('e1', 'Local learning', 'body one'),
+                ('e2', NULL, 'untitled body falls back to content');
+            INSERT INTO tasks (id, title) VALUES ('cas-0001', 'Fix the purge guard');
+            INSERT INTO rules (id, content) VALUES ('r1', 'always verify');
+            INSERT INTO skills (id, name) VALUES ('s1', 'release-notes');
+            INSERT INTO dependencies (from_id, to_id) VALUES ('cas-0001', 'cas-0002');
+            "#,
+        )
+        .unwrap();
+    }
+
+    fn now() -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339("2026-08-07T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    // ── AC1: the dry run has a concrete delete set to print ────────────────────
+
+    #[test]
+    fn delete_set_lists_ids_and_titles_for_every_kind() {
+        let conn = Connection::open_in_memory().unwrap();
+        seed_db(&conn);
+
+        let set = collect_purge_delete_set(&conn).unwrap();
+
+        assert_eq!(set.total(), 5, "2 entries + 1 task + 1 rule + 1 skill");
+        assert_eq!(set.dependencies, 1);
+
+        assert_eq!(set.entries[0].id, "e1");
+        assert_eq!(set.entries[0].label, "Local learning");
+        // Untitled entries still get a usable label from their content.
+        assert_eq!(set.entries[1].id, "e2");
+        assert_eq!(set.entries[1].label, "untitled body falls back to content");
+
+        assert_eq!(set.tasks[0].id, "cas-0001");
+        assert_eq!(set.tasks[0].label, "Fix the purge guard");
+        assert_eq!(set.rules[0].label, "always verify");
+        assert_eq!(set.skills[0].label, "release-notes");
+    }
+
+    #[test]
+    fn delete_set_json_carries_the_rows_not_just_counts() {
+        let conn = Connection::open_in_memory().unwrap();
+        seed_db(&conn);
+
+        let json = collect_purge_delete_set(&conn).unwrap().to_json();
+
+        assert_eq!(json["total"], 5);
+        assert_eq!(json["tasks"][0]["id"], "cas-0001");
+        assert_eq!(json["tasks"][0]["label"], "Fix the purge guard");
+        assert_eq!(json["entries"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn delete_set_tolerates_a_database_missing_a_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT NOT NULL);")
+            .unwrap();
+        conn.execute("INSERT INTO tasks VALUES ('cas-1', 'only table')", [])
+            .unwrap();
+
+        let set = collect_purge_delete_set(&conn).unwrap();
+
+        assert_eq!(set.tasks.len(), 1);
+        assert!(set.entries.is_empty());
+        assert_eq!(set.dependencies, 0);
+    }
+
+    // ── AC2: the guard refuses destructive runs and names the reason ───────────
+
+    #[test]
+    fn fresh_pull_with_empty_queue_is_safe() {
+        let refusals = evaluate_purge_safety(Some("2026-08-06T12:00:00Z"), &[], now(), 7);
+        assert!(refusals.is_empty(), "unexpected refusals: {refusals:?}");
+    }
+
+    #[test]
+    fn months_old_pull_is_refused_and_names_the_staleness() {
+        let refusals = evaluate_purge_safety(Some("2026-05-01T00:00:00Z"), &[], now(), 7);
+
+        assert_eq!(refusals.len(), 1);
+        assert!(matches!(
+            refusals[0],
+            PurgeRefusal::StalePull {
+                age_days: 98,
+                threshold_days: 7,
+                ..
+            }
+        ));
+        assert_eq!(refusals[0].code(), "stale_pull");
+        let reason = refusals[0].reason();
+        assert!(reason.contains("stale cloud sync"), "{reason}");
+        assert!(reason.contains("98 days ago"), "{reason}");
+        assert!(reason.contains("2026-05-01T00:00:00Z"), "{reason}");
+    }
+
+    #[test]
+    fn staleness_threshold_boundary_is_inclusive_of_the_threshold_day() {
+        // Exactly at the threshold is still allowed; one day past is not.
+        let at = evaluate_purge_safety(Some("2026-07-31T00:00:00Z"), &[], now(), 7);
+        assert!(
+            at.is_empty(),
+            "7 days old should pass a 7-day threshold: {at:?}"
+        );
+
+        let past = evaluate_purge_safety(Some("2026-07-30T00:00:00Z"), &[], now(), 7);
+        assert!(matches!(past.as_slice(), [PurgeRefusal::StalePull { .. }]));
+    }
+
+    #[test]
+    fn never_pulled_is_refused() {
+        for missing in [None, Some(""), Some("   ")] {
+            let refusals = evaluate_purge_safety(missing, &[], now(), 7);
+            assert_eq!(refusals.len(), 1, "for {missing:?}");
+            assert_eq!(refusals[0].code(), "never_pulled");
+            assert!(refusals[0].reason().contains("no successful cloud pull"));
+        }
+    }
+
+    #[test]
+    fn unparseable_pull_timestamp_is_refused_rather_than_assumed_fresh() {
+        let refusals = evaluate_purge_safety(Some("last tuesday"), &[], now(), 7);
+
+        assert_eq!(refusals.len(), 1);
+        assert_eq!(refusals[0].code(), "unreadable_pull_timestamp");
+        assert!(refusals[0].reason().contains("unknown is not safe"));
+    }
+
+    #[test]
+    fn naive_timestamp_format_is_understood() {
+        assert!(parse_sync_timestamp("2026-08-06 12:00:00").is_some());
+        assert!(parse_sync_timestamp("2026-08-06T12:00:00.123").is_some());
+        assert!(parse_sync_timestamp("2026-08-06T12:00:00Z").is_some());
+        assert!(parse_sync_timestamp("not a date").is_none());
+    }
+
+    #[test]
+    fn unpushed_local_rows_are_refused_and_sampled_in_the_reason() {
+        let pending = vec![
+            ("entry".to_string(), "e1".to_string()),
+            ("task".to_string(), "cas-0001".to_string()),
+        ];
+
+        let refusals = evaluate_purge_safety(Some("2026-08-06T12:00:00Z"), &pending, now(), 7);
+
+        assert_eq!(refusals.len(), 1, "pull is fresh, only the queue is dirty");
+        assert_eq!(refusals[0].code(), "unpushed_rows");
+        let reason = refusals[0].reason();
+        assert!(reason.contains("2 local change(s)"), "{reason}");
+        assert!(reason.contains("entry:e1"), "{reason}");
+        assert!(reason.contains("task:cas-0001"), "{reason}");
+    }
+
+    #[test]
+    fn stale_and_unpushed_are_reported_together() {
+        let pending = vec![("rule".to_string(), "r1".to_string())];
+        let refusals = evaluate_purge_safety(Some("2026-01-01T00:00:00Z"), &pending, now(), 7);
+
+        let codes: Vec<_> = refusals.iter().map(|r| r.code()).collect();
+        assert_eq!(codes, vec!["stale_pull", "unpushed_rows"]);
+    }
+
+    #[test]
+    fn pending_pushes_read_only_content_kinds_from_the_queue() {
+        let conn = Connection::open_in_memory().unwrap();
+        seed_db(&conn);
+        conn.execute_batch(
+            r#"
+            INSERT INTO sync_queue (entity_type, entity_id, operation) VALUES
+                ('entry', 'e1', 'create'),
+                ('Task', 'cas-0001', 'update'),
+                ('event', 'ev1', 'create');
+            "#,
+        )
+        .unwrap();
+
+        let pending = pending_content_pushes(&conn).unwrap();
+
+        // Content kinds only (case-insensitively); events survive a purge and
+        // must not trip the guard.
+        assert_eq!(
+            pending,
+            vec![
+                ("entry".to_string(), "e1".to_string()),
+                ("Task".to_string(), "cas-0001".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn pending_pushes_is_empty_when_the_queue_table_is_absent() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(pending_content_pushes(&conn).unwrap().is_empty());
+    }
+
+    /// The guard must fail CLOSED. An unreadable sync_queue previously reported
+    /// "zero pending pushes", which silently disabled the unpushed-rows refusal
+    /// in a destructive path — a reassuring wrong answer at the worst moment.
+    #[test]
+    fn unreadable_sync_queue_surfaces_an_error_instead_of_a_silent_zero() {
+        // Schema drift: the table exists but not the columns the guard reads.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE sync_queue (id INTEGER PRIMARY KEY, junk TEXT);")
+            .unwrap();
+
+        let err = pending_content_pushes(&conn).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot read the sync queue"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn undecodable_sync_queue_row_surfaces_an_error_instead_of_being_skipped() {
+        // A row whose entity_type cannot decode as text must not simply vanish
+        // from the pending list — that would shorten it toward a false "safe".
+        let conn = Connection::open_in_memory().unwrap();
+        seed_db(&conn);
+        conn.execute(
+            "INSERT INTO sync_queue (entity_type, entity_id, operation)
+             VALUES ('entry', X'FF', 'create')",
+            [],
+        )
+        .unwrap();
+
+        let err = pending_content_pushes(&conn).unwrap_err();
+        assert!(err.to_string().contains("unreadable row"), "{err}");
+    }
+
+    #[test]
+    fn a_readable_but_empty_sync_queue_is_still_a_pass() {
+        // Fail-closed must not become fail-always: a healthy empty queue is
+        // exactly the state a safe purge runs in.
+        let conn = Connection::open_in_memory().unwrap();
+        seed_db(&conn);
+
+        assert!(pending_content_pushes(&conn).unwrap().is_empty());
+        assert!(
+            evaluate_purge_safety(Some("2026-08-06T12:00:00Z"), &[], now(), 7).is_empty(),
+            "healthy state must still pass"
+        );
+    }
+
+    // ── AC3: the backup is crash-safe, not an fs::copy of a live WAL DB ────────
+
+    /// The regression that matters: with WAL enabled and un-checkpointed
+    /// commits, `fs::copy` of `cas.db` loses committed rows. `VACUUM INTO`
+    /// keeps them.
+    #[test]
+    fn crash_safe_backup_captures_wal_resident_rows_that_fs_copy_loses() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("cas.db");
+
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
+            .unwrap();
+        seed_db(&conn);
+        // Committed, but still living in -wal (no checkpoint).
+        conn.execute(
+            "INSERT INTO tasks (id, title) VALUES ('cas-wal', 'committed into the WAL')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            db_path.with_extension("db-wal").exists(),
+            "test precondition: a -wal sidecar must exist"
+        );
+
+        let good = dir.path().join("backup.vacuum.db");
+        backup_database_crash_safe(&db_path, &good).unwrap();
+
+        let naive = dir.path().join("backup.fscopy.db");
+        std::fs::copy(&db_path, &naive).unwrap();
+
+        // Tolerant read: a copy that lost the WAL may not even have the table,
+        // since an un-checkpointed database keeps its schema there too.
+        let wal_rows = |p: &Path| -> i64 {
+            let c = Connection::open(p).unwrap();
+            c.query_row("SELECT COUNT(*) FROM tasks WHERE id = 'cas-wal'", [], |r| {
+                r.get(0)
+            })
+            .unwrap_or(0)
+        };
+
+        assert_eq!(
+            wal_rows(&good),
+            1,
+            "VACUUM INTO must include the WAL-resident committed row"
+        );
+        assert_eq!(
+            wal_rows(&naive),
+            0,
+            "fs::copy of a live WAL DB drops WAL-resident commits — the bug this replaces"
+        );
+    }
+
+    #[test]
+    fn crash_safe_backup_is_a_complete_readable_snapshot() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("cas.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+        seed_db(&conn);
+
+        let backup = dir.path().join("backup.db");
+        backup_database_crash_safe(&db_path, &backup).unwrap();
+
+        let restored = Connection::open(&backup).unwrap();
+        let set = collect_purge_delete_set(&restored).unwrap();
+        assert_eq!(
+            set.total(),
+            5,
+            "every purged row is recoverable from backup"
+        );
+        assert_eq!(
+            restored
+                .query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+    }
+
+    #[test]
+    fn crash_safe_backup_refuses_to_clobber_an_existing_file() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("cas.db");
+        let conn = Connection::open(&db_path).unwrap();
+        seed_db(&conn);
+
+        let backup = dir.path().join("backup.db");
+        std::fs::write(&backup, b"earlier backup").unwrap();
+
+        let err = backup_database_crash_safe(&db_path, &backup).unwrap_err();
+        assert!(err.to_string().contains("refusing to overwrite"), "{err}");
+        assert_eq!(std::fs::read(&backup).unwrap(), b"earlier backup");
+    }
+}

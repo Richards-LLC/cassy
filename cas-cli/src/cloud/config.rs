@@ -28,16 +28,13 @@ static CACHED_PROJECT_ID: Mutex<Option<String>> = Mutex::new(None);
 
 /// Get the canonical project ID for the current CAS project.
 ///
-/// The canonical ID is the folder name of the project root directory (the directory
-/// containing `.cas/`). This is:
-/// - Stable across git remote changes (fork, transfer, rename)
-/// - Works for non-git projects
-/// - Human-readable in logs, UI, and team project lists
+/// See [`resolve_canonical_id`] for the full read chain: explicit
+/// `config.toml` pin, then the `origin` git remote, then the project folder
+/// name, then a path hash.
 ///
 /// Examples:
-/// - `/home/user/projects/petra-stella-cloud/.cas/` → `petra-stella-cloud`
-/// - `/home/user/cas-src/.cas/` → `cas-src`
-/// - `/home/user/gabber-studio/.cas/` → `gabber-studio`
+/// - a checkout of `git@github.com:acme/ledger.git` → `github.com/acme/ledger`
+/// - `/home/user/gabber-studio/.cas/` with no git remote → `gabber-studio`
 ///
 /// If the folder name cannot be derived (e.g. `.cas/` lives at the filesystem root
 /// and its parent has no file name), falls back to a deterministic `local:<sha256>`
@@ -74,6 +71,33 @@ pub fn invalidate_cached_project_id() {
     *cached = None;
 }
 
+/// Where a resolved canonical id came from. Reported by
+/// [`resolve_canonical_id_with_source`] so diagnostics (`cas doctor`) can
+/// explain *why* a project maps to the cloud bucket it does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanonicalIdSource {
+    /// `.cas/config.toml [project] canonical_id` — explicit pin.
+    ConfigToml,
+    /// Derived from `git remote get-url origin` (cas-f699).
+    GitRemote,
+    /// Parent-directory folder name.
+    FolderName,
+    /// `local:<sha256>` hash of the project path.
+    PathHash,
+}
+
+impl CanonicalIdSource {
+    /// Short human label used in diagnostics output.
+    pub fn label(self) -> &'static str {
+        match self {
+            CanonicalIdSource::ConfigToml => "config.toml pin",
+            CanonicalIdSource::GitRemote => "git remote origin",
+            CanonicalIdSource::FolderName => "folder name",
+            CanonicalIdSource::PathHash => "path hash",
+        }
+    }
+}
+
 /// Pure composition of the canonical-id resolution chain.
 /// Extracted from `get_project_canonical_id` so the chain is testable
 /// without the `OnceLock` static — callers should prefer the cached public API.
@@ -82,13 +106,30 @@ pub fn invalidate_cached_project_id() {
 ///  1. `.cas/config.toml [project] canonical_id` — explicit source of truth,
 ///     set eagerly by `cas cloud team set` or manually via
 ///     `cas cloud project set` (cas-1ced).
-///  2. Parent-directory folder name — legacy default that ships before
-///     team_set lands a config-toml entry.
-///  3. Path-hash fallback — for the `.cas/` at filesystem root edge case.
+///  2. `git remote get-url origin`, normalized to `<host>/<owner>/<repo>`
+///     (cas-f699). The remote identifies the *repository*, so two unrelated
+///     checkouts can never collide, and two clones of the same repo agree.
+///  3. Parent-directory folder name — for non-git projects and repos with no
+///     `origin` remote. This is the step that used to run second and merged
+///     two different repos that happened to share a parent-folder name into
+///     one cloud bucket (GH #134).
+///  4. Path-hash fallback — for the `.cas/` at filesystem root edge case.
 pub fn resolve_canonical_id(cas_root: &Path) -> Option<String> {
-    canonical_id_from_config_toml(cas_root)
-        .or_else(|| canonical_id_from_cas_root(cas_root))
-        .or_else(|| fallback_project_id_from_path(cas_root))
+    resolve_canonical_id_with_source(cas_root).map(|(id, _)| id)
+}
+
+/// [`resolve_canonical_id`] plus the step that produced the value.
+pub fn resolve_canonical_id_with_source(cas_root: &Path) -> Option<(String, CanonicalIdSource)> {
+    if let Some(id) = canonical_id_from_config_toml(cas_root) {
+        return Some((id, CanonicalIdSource::ConfigToml));
+    }
+    if let Some(id) = derive_canonical_id_from_git_remote(cas_root) {
+        return Some((id, CanonicalIdSource::GitRemote));
+    }
+    if let Some(id) = canonical_id_from_cas_root(cas_root) {
+        return Some((id, CanonicalIdSource::FolderName));
+    }
+    fallback_project_id_from_path(cas_root).map(|id| (id, CanonicalIdSource::PathHash))
 }
 
 /// Read `[project] canonical_id` from `<cas_root>/config.toml`. Returns
@@ -164,8 +205,14 @@ pub fn set_canonical_id_in_config_toml(
 ///  - the URL doesn't match a recognizable form
 ///
 /// Used by `cas cloud team set` (cas-1ced) as the second resolution step
-/// after `.cas/config.toml`. Never invoked by the cached production
-/// `get_project_canonical_id` chain — only by the eager `team set` flow.
+/// after `.cas/config.toml`, and — since cas-f699 / GH #134 — by the main
+/// [`resolve_canonical_id`] read chain in the same position, ahead of the
+/// folder-name fallback.
+///
+/// Cost note: this spawns `git`. It only runs when `.cas/config.toml` holds no
+/// pin, and the production entry point [`get_project_canonical_id`] caches the
+/// first `Some` for the process lifetime, so a hook or CLI invocation pays at
+/// most one `git` call.
 pub fn derive_canonical_id_from_git_remote(cas_root: &Path) -> Option<String> {
     use std::process::Command;
 
@@ -311,6 +358,86 @@ pub fn fallback_project_id_from_path(cas_root: &Path) -> Option<String> {
     let digest = hasher.finalize();
     let hex: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
     Some(format!("local:{hex}"))
+}
+
+/// One local CAS project as seen by the collision detector: where it lives,
+/// which cloud bucket it resolves to, and the repository identity (`origin`
+/// remote) that distinguishes it from an unrelated project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalRootIdentity {
+    /// Project root (the directory containing `.cas/`).
+    pub project_root: PathBuf,
+    /// Result of [`resolve_canonical_id`] for this root.
+    pub canonical_id: String,
+    /// Normalized `origin` remote, or `None` for a non-git project / a repo
+    /// with no `origin`.
+    pub git_remote: Option<String>,
+}
+
+/// Two or more local roots that resolve to the same cloud bucket while being
+/// different repositories — every `cas cloud sync` merges them into each other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalIdCollision {
+    /// The shared canonical id (the contaminated bucket).
+    pub canonical_id: String,
+    /// The colliding project roots, sorted, deduplicated.
+    pub roots: Vec<PathBuf>,
+}
+
+/// Find canonical-id collisions among known local roots (GH #134, AC2).
+///
+/// A group of roots sharing a canonical id is only reported when the roots are
+/// **different repositories**. Identity is the normalized `origin` remote; a
+/// root with no remote is its own identity (keyed on its path), because two
+/// unrelated remote-less checkouts that share a folder name are exactly the
+/// reported incident.
+///
+/// This deliberately stays quiet for the benign cases that would otherwise
+/// drown the signal: two clones of one repo, and git worktrees of one repo,
+/// share an `origin` and therefore *should* share a bucket.
+///
+/// Pure — the caller supplies the already-resolved roots.
+pub fn detect_canonical_id_collisions(roots: &[LocalRootIdentity]) -> Vec<CanonicalIdCollision> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut by_id: BTreeMap<&str, Vec<&LocalRootIdentity>> = BTreeMap::new();
+    let mut seen_roots: BTreeSet<&Path> = BTreeSet::new();
+    for root in roots {
+        // The registry can hold the same path twice (different spellings are
+        // canonicalized by the caller); count each root once.
+        if !seen_roots.insert(root.project_root.as_path()) {
+            continue;
+        }
+        by_id
+            .entry(root.canonical_id.as_str())
+            .or_default()
+            .push(root);
+    }
+
+    by_id
+        .into_iter()
+        .filter_map(|(canonical_id, group)| {
+            if group.len() < 2 {
+                return None;
+            }
+            let identities: BTreeSet<String> = group
+                .iter()
+                .map(|r| match &r.git_remote {
+                    Some(remote) => format!("remote:{remote}"),
+                    None => format!("path:{}", r.project_root.display()),
+                })
+                .collect();
+            if identities.len() < 2 {
+                return None; // same repository — sharing a bucket is correct
+            }
+            let mut paths: Vec<PathBuf> = group.iter().map(|r| r.project_root.clone()).collect();
+            paths.sort();
+            Some(CanonicalIdCollision {
+                canonical_id: canonical_id.to_string(),
+                roots: paths,
+            })
+        })
+        .collect()
 }
 
 /// A team membership entry returned by `/api/me` and cached in `cloud.json`.
@@ -928,6 +1055,7 @@ impl CloudConfig {
 mod tests {
     use crate::cloud::config::*;
     use crate::test_support::TestEnvGuard;
+    use std::path::{Path, PathBuf};
     use tempfile::TempDir;
 
     #[test]
@@ -1482,17 +1610,236 @@ mod tests {
 
     #[test]
     fn test_resolve_canonical_id_prefers_folder_name() {
-        // End-to-end coverage of the .or_else chain: when the folder name is
-        // available, resolve_canonical_id returns it unchanged — the fallback
-        // must not fire on the happy path.
+        // End-to-end coverage of the chain: with no config pin and no git
+        // remote, the folder name is returned unchanged — the path-hash
+        // fallback must not fire on the happy path.
         let temp = TempDir::new().unwrap();
         let project_dir = temp.path().join("my-project");
         let cas_dir = project_dir.join(".cas");
         std::fs::create_dir_all(&cas_dir).unwrap();
 
-        let id = resolve_canonical_id(&cas_dir).unwrap();
+        let (id, source) = resolve_canonical_id_with_source(&cas_dir).unwrap();
         assert_eq!(id, "my-project");
+        assert_eq!(source, CanonicalIdSource::FolderName);
         assert!(!id.starts_with("local:"));
+    }
+
+    // ── cas-f699 / GH #134: git remote ahead of the folder-name fallback ──
+
+    /// Make `<parent>/<name>` a git repo with `origin` pointing at `remote`,
+    /// containing a `.cas/` dir. Returns the `.cas` path.
+    fn git_project_with_remote(parent: &Path, name: &str, remote: &str) -> PathBuf {
+        let project_dir = parent.join(name);
+        let cas_dir = project_dir.join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&project_dir)
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("git must be available for this test");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&["init", "-q"]);
+        run(&["remote", "add", "origin", remote]);
+        cas_dir
+    }
+
+    #[test]
+    fn resolve_canonical_id_prefers_git_remote_over_folder_name() {
+        // The GH #134 defect: the folder name decided the cloud bucket even
+        // when the repository identity was available. Now the remote wins.
+        let temp = TempDir::new().unwrap();
+        let cas_dir = git_project_with_remote(
+            temp.path(),
+            "accounting",
+            "git@github.com:client-one/accounting.git",
+        );
+
+        let (id, source) = resolve_canonical_id_with_source(&cas_dir).unwrap();
+        assert_eq!(id, "github.com/client-one/accounting");
+        assert_eq!(source, CanonicalIdSource::GitRemote);
+    }
+
+    #[test]
+    fn same_folder_name_different_remotes_no_longer_share_a_bucket() {
+        // Two different clients' checkouts, both in a folder called
+        // `accounting`. Before the fix both resolved to `accounting` and
+        // merged into each other on every sync.
+        let temp = TempDir::new().unwrap();
+        let one = git_project_with_remote(
+            &temp.path().join("client-one"),
+            "accounting",
+            "https://github.com/client-one/accounting.git",
+        );
+        let two = git_project_with_remote(
+            &temp.path().join("client-two"),
+            "accounting",
+            "git@gitlab.com:client-two/accounting.git",
+        );
+
+        assert_eq!(
+            canonical_id_from_cas_root(&one),
+            canonical_id_from_cas_root(&two)
+        );
+        assert_ne!(
+            resolve_canonical_id(&one),
+            resolve_canonical_id(&two),
+            "two unrelated repos must not resolve to the same cloud bucket"
+        );
+    }
+
+    #[test]
+    fn config_toml_pin_still_beats_git_remote() {
+        // AC: existing pinned-config behaviour is unchanged — an explicit pin
+        // remains the source of truth even when a remote is derivable.
+        let temp = TempDir::new().unwrap();
+        let cas_dir =
+            git_project_with_remote(temp.path(), "ledger", "git@github.com:acme/ledger.git");
+        set_canonical_id_in_config_toml(&cas_dir, "pinned-id").unwrap();
+
+        let (id, source) = resolve_canonical_id_with_source(&cas_dir).unwrap();
+        assert_eq!(id, "pinned-id");
+        assert_eq!(source, CanonicalIdSource::ConfigToml);
+    }
+
+    #[test]
+    fn git_repo_without_origin_falls_through_to_folder_name() {
+        // A git repo with no `origin` must not become `local:<hash>` — the
+        // folder-name step still runs, so nobody's existing bucket moves.
+        let temp = TempDir::new().unwrap();
+        let project_dir = temp.path().join("no-remote-project");
+        let cas_dir = project_dir.join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&project_dir)
+            .args(["init", "-q"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+
+        let (id, source) = resolve_canonical_id_with_source(&cas_dir).unwrap();
+        assert_eq!(id, "no-remote-project");
+        assert_eq!(source, CanonicalIdSource::FolderName);
+    }
+
+    #[test]
+    fn unrecognized_remote_url_falls_through_to_folder_name() {
+        // A local-path remote (`/srv/git/x.git`) is not normalizable to
+        // host/owner/repo; the chain must fall through rather than persist a
+        // non-canonical value or skip straight to the path hash.
+        let temp = TempDir::new().unwrap();
+        let cas_dir = git_project_with_remote(temp.path(), "weird-remote", "/srv/git/mirror.git");
+
+        let (id, source) = resolve_canonical_id_with_source(&cas_dir).unwrap();
+        assert_eq!(id, "weird-remote");
+        assert_eq!(source, CanonicalIdSource::FolderName);
+    }
+
+    // ── cas-f699 AC2: same-slug collision detection ───────────────────────
+
+    fn identity(root: &str, id: &str, remote: Option<&str>) -> LocalRootIdentity {
+        LocalRootIdentity {
+            project_root: PathBuf::from(root),
+            canonical_id: id.to_string(),
+            git_remote: remote.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn collision_detected_for_different_repos_sharing_an_id() {
+        let collisions = detect_canonical_id_collisions(&[
+            identity(
+                "/home/u/client-one/accounting",
+                "accounting",
+                Some("github.com/client-one/accounting"),
+            ),
+            identity(
+                "/home/u/client-two/accounting",
+                "accounting",
+                Some("gitlab.com/client-two/accounting"),
+            ),
+        ]);
+        assert_eq!(collisions.len(), 1);
+        assert_eq!(collisions[0].canonical_id, "accounting");
+        assert_eq!(
+            collisions[0].roots,
+            vec![
+                PathBuf::from("/home/u/client-one/accounting"),
+                PathBuf::from("/home/u/client-two/accounting"),
+            ],
+        );
+    }
+
+    #[test]
+    fn two_remote_less_projects_sharing_a_folder_name_collide() {
+        // No remotes at all: each root is its own identity, so the shared
+        // folder-name id is still a genuine contamination risk.
+        let collisions = detect_canonical_id_collisions(&[
+            identity("/home/u/a/notes", "notes", None),
+            identity("/home/u/b/notes", "notes", None),
+        ]);
+        assert_eq!(collisions.len(), 1);
+        assert_eq!(collisions[0].roots.len(), 2);
+    }
+
+    #[test]
+    fn clones_and_worktrees_of_one_repo_do_not_warn() {
+        // Same `origin` → same project → sharing a bucket is correct. This is
+        // the false-positive that would otherwise fire on every machine with
+        // a second checkout or a git worktree.
+        let collisions = detect_canonical_id_collisions(&[
+            identity(
+                "/home/u/cas-src",
+                "github.com/acme/cas",
+                Some("github.com/acme/cas"),
+            ),
+            identity(
+                "/home/u/cas-src-review",
+                "github.com/acme/cas",
+                Some("github.com/acme/cas"),
+            ),
+        ]);
+        assert!(collisions.is_empty(), "got {collisions:?}");
+    }
+
+    #[test]
+    fn distinct_ids_and_single_roots_never_warn() {
+        let collisions = detect_canonical_id_collisions(&[
+            identity("/home/u/alpha", "alpha", None),
+            identity("/home/u/beta", "beta", None),
+        ]);
+        assert!(collisions.is_empty());
+        assert!(detect_canonical_id_collisions(&[]).is_empty());
+    }
+
+    #[test]
+    fn duplicate_registry_rows_for_one_root_do_not_warn() {
+        // The known-repo registry can list the same root twice; a root can
+        // never collide with itself.
+        let collisions = detect_canonical_id_collisions(&[
+            identity("/home/u/notes", "notes", None),
+            identity("/home/u/notes", "notes", None),
+        ]);
+        assert!(collisions.is_empty(), "got {collisions:?}");
+    }
+
+    #[test]
+    fn pinned_ids_colliding_across_repos_are_reported() {
+        // Two explicit pins that happen to be equal are just as contaminating
+        // as two folder names — the detector is source-agnostic.
+        let collisions = detect_canonical_id_collisions(&[
+            identity("/home/u/one", "shared-pin", Some("github.com/a/one")),
+            identity("/home/u/two", "shared-pin", Some("github.com/b/two")),
+            identity("/home/u/three", "unique", Some("github.com/c/three")),
+        ]);
+        assert_eq!(collisions.len(), 1);
+        assert_eq!(collisions[0].canonical_id, "shared-pin");
     }
 
     #[test]

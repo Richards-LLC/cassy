@@ -8,6 +8,29 @@ managed_by: cas
 
 Run all 6 self-verification checks before `mcp__cas__task action=close`. They apply to every task type — but a few types add a gate on top of them (see "Task-type extras" below), so the close path is not identical everywhere. Skip the checks and you eat a verifier rejection round-trip.
 
+## Clean-tree receipt — applies to EVERY close, including `depth=light`
+
+Before `mcp__cas__task action=close`, run these two commands in your own worktree and read the output:
+
+```bash
+git status --porcelain    # must print nothing
+git rev-parse HEAD        # must be the commit you are claiming as delivered
+```
+
+Empty porcelain + HEAD equal to your claimed commit is the receipt: it says the tree on disk is exactly the tree that was reviewed and merged. Anything else is a divergence and you name it before you close.
+
+This is not covered by the 6 checks and **`depth=light` does not skip it** — it is data safety, not quality. Close hard-rejects tracked dirt with `⚠️ UNCOMMITTED WORK`, but only when it can resolve your worktree and run git inside it. Everything else — a check that could not run, untracked leftovers, a HEAD that is not the commit you claimed — is recorded as a `CLEAN-TREE RECEIPT` note on the task and close proceeds. Close names the discrepancy; it does not resolve it. Reading it is your job.
+
+**Do not assume a rejected tool call left the disk untouched.** On 2026-08-06 (cas-f102) an `Edit` returned REJECTED and the write landed on disk anyway. Nothing unreviewed shipped only because that worker ran `git status` unprompted, saw the divergence, and reverted. A tool result reports what the harness intended; `git status` reports what is true. When they disagree, believe git.
+
+If the receipt is not clean:
+
+1. `git diff` and `git status` — establish what actually differs, do not guess.
+2. If it is your work → commit it. If it is a stray write you never authorized → revert to the reviewed tip (`git checkout -- <path>`) and confirm the tree is byte-identical again.
+3. Record what you found and what you did in a `note_type=discovery` note **before** closing.
+
+Never close over an unexplained diff. It does not disappear — it resurfaces later attributed to whoever touches that file next.
+
 ## Depth: `light` tasks skip this gate
 
 If the task you're closing is `depth=light` (check the `Depth:` line in `task show`), **skip the 6 pre-close self-checks below** and close once it runs on localhost. Light is speed mode: minimal diff, no gold-plating, the human is the evaluator — there is no DoD to chase. You must still not claim a proof you didn't run. For `depth=deep` or unset, run the full gate below.

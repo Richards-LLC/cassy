@@ -95,6 +95,77 @@ pub fn is_factory_worker_from_env() -> bool {
         && std::env::var("CAS_FACTORY_MODE").is_ok()
 }
 
+/// Resolve `[code_review] owner` for a `.cas` root, defaulting to
+/// supervisor-owned (cas-865b) when the config is absent or unreadable.
+///
+/// One function so every dispatch site answers "who owns review here?"
+/// identically; a site that rolled its own `Config::load` chain could drift
+/// into allowing what another site refuses.
+pub fn supervisor_owned_at(cas_root: Option<&std::path::Path>) -> bool {
+    cas_root
+        .and_then(|root| crate::config::Config::load(root).ok())
+        .and_then(|config| config.code_review)
+        .map(|cr| cr.supervisor_owned())
+        .unwrap_or_else(|| crate::config::CodeReviewConfig::default().supervisor_owned())
+}
+
+/// Harness-native tools that reach the review pipeline WITHOUT touching CAS
+/// MCP (cas-bcfb / GH #125).
+///
+/// This is the gap that made the cas-4fef gate a no-op in practice: it was
+/// installed only on `cas_skill_use`, i.e. `mcp__cas__skill action=use`. The
+/// paths an agent actually takes are Claude Code's own `Skill` tool (which
+/// reads `.claude/skills/cas-code-review/SKILL.md` off disk) and the `Workflow`
+/// tool (which runs `.claude/workflows/cas-code-review.js` directly — the
+/// Phase C cas-b667 workflow the skill is a thin wrapper around). Neither ever
+/// calls into the MCP server, so neither could ever be refused.
+pub const REVIEW_ENTRY_TOOLS: &[&str] = &["Skill", "Workflow"];
+
+/// Tool-input fields that carry the identity of what is being dispatched.
+///
+/// `Workflow` gets `script` as well as `name`/`scriptPath` because an inline
+/// script is a first-class way to invoke the pipeline (the skill body itself
+/// documents pasting the workflow inline). Matching the inline body is
+/// deliberately over-inclusive: a worker whose workflow merely mentions
+/// `cas-code-review` is refused, and the refusal tells it the legal next move
+/// — the failure direction we want under supervisor-owned review.
+fn review_entry_identity_fields(tool_name: &str) -> &'static [&'static str] {
+    match tool_name {
+        "Skill" => &["skill", "name", "id"],
+        "Workflow" => &["name", "scriptPath", "script"],
+        _ => &[],
+    }
+}
+
+/// Does this string name the multi-persona review orchestrator?
+///
+/// Superset of [`is_cas_code_review_skill`]: also true for values that merely
+/// *contain* the name, so `.claude/workflows/cas-code-review.js` and an inline
+/// `meta = { name: 'cas-code-review' }` are both recognized.
+pub fn value_names_cas_code_review(value: &str) -> bool {
+    if is_cas_code_review_skill(value) {
+        return true;
+    }
+    let normalized = value.to_ascii_lowercase();
+    normalized.contains(CAS_CODE_REVIEW_SKILL) || normalized.contains("cas_code_review")
+}
+
+/// Is this harness tool call an entry into the review pipeline?
+///
+/// Pure over the hook payload so every entry path shares one recognizer.
+pub fn tool_call_enters_review(tool_name: &str, tool_input: Option<&serde_json::Value>) -> bool {
+    if !REVIEW_ENTRY_TOOLS.contains(&tool_name) {
+        return false;
+    }
+    let Some(input) = tool_input else {
+        return false;
+    };
+    review_entry_identity_fields(tool_name)
+        .iter()
+        .filter_map(|field| input.get(field).and_then(|v| v.as_str()))
+        .any(value_names_cas_code_review)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +231,84 @@ mod tests {
                 "must not gate unrelated skill {id:?}"
             );
         }
+    }
+
+    /// cas-bcfb / GH #125: the harness-native entry paths the original gate
+    /// never saw. Each shape below is one way a worker actually reached the
+    /// persona fan-out on a binary that already contained the gate.
+    #[test]
+    fn every_harness_entry_path_into_the_review_is_recognized_cas_bcfb() {
+        // 1. Claude Code `Skill` tool — the path loyal-heron-7 had available.
+        assert!(tool_call_enters_review(
+            "Skill",
+            Some(&serde_json::json!({"skill": "cas-code-review", "args": "mode=interactive"}))
+        ));
+        assert!(tool_call_enters_review(
+            "Skill",
+            Some(&serde_json::json!({"skill": "/cas-code-review"}))
+        ));
+        // 2. Direct Workflow invocation by name.
+        assert!(tool_call_enters_review(
+            "Workflow",
+            Some(&serde_json::json!({"name": "cas-code-review"}))
+        ));
+        // 3. Direct Workflow invocation by script path (the Phase C workflow).
+        assert!(tool_call_enters_review(
+            "Workflow",
+            Some(&serde_json::json!({"scriptPath": ".claude/workflows/cas-code-review.js"}))
+        ));
+        // 4. Headless skill-to-skill — an inline script carrying the pipeline.
+        assert!(tool_call_enters_review(
+            "Workflow",
+            Some(&serde_json::json!({
+                "script": "export const meta = { name: 'cas-code-review', description: 'personas' }"
+            }))
+        ));
+    }
+
+    /// The gate must not swallow unrelated harness traffic.
+    #[test]
+    fn unrelated_tool_calls_are_not_treated_as_review_entries_cas_bcfb() {
+        assert!(!tool_call_enters_review(
+            "Skill",
+            Some(&serde_json::json!({"skill": "cas-worker"}))
+        ));
+        assert!(!tool_call_enters_review(
+            "Workflow",
+            Some(&serde_json::json!({"name": "find-flaky-tests"}))
+        ));
+        assert!(!tool_call_enters_review("Skill", None));
+        // Tools outside the entry list are never inspected, even if their
+        // payload happens to mention the skill (e.g. a Bash grep for it).
+        assert!(!tool_call_enters_review(
+            "Bash",
+            Some(&serde_json::json!({"command": "grep -r cas-code-review ."}))
+        ));
+    }
+
+    /// Absent/unreadable config must resolve to supervisor-owned (cas-865b
+    /// default), and an explicit `owner = "worker"` must still opt out.
+    #[test]
+    fn supervisor_ownership_defaults_on_and_respects_the_opt_out_cas_bcfb() {
+        assert!(
+            supervisor_owned_at(None),
+            "no cas root must fall back to the supervisor-owned default"
+        );
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(
+            supervisor_owned_at(Some(tmp.path())),
+            "missing config.toml must fall back to the supervisor-owned default"
+        );
+
+        std::fs::write(
+            tmp.path().join("config.toml"),
+            "[code_review]\nowner = \"worker\"\n",
+        )
+        .expect("write config");
+        assert!(
+            !supervisor_owned_at(Some(tmp.path())),
+            "`owner = \"worker\"` must opt the project out of the gate"
+        );
     }
 }

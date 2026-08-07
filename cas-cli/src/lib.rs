@@ -43,6 +43,7 @@ pub mod hooks;
 pub mod hybrid_search;
 pub mod knowledge;
 pub mod logging;
+pub mod memory_migration;
 pub mod migration;
 pub mod notifications;
 pub mod orchestration;

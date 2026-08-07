@@ -88,6 +88,10 @@ channel = "session_merge"
 limit = 50
 
 [[query]]
+id = "global-list"
+channel = "global_list"
+
+[[query]]
 id = "search-anything"
 channel = "search"
 query = "sqlite migration"
@@ -751,7 +755,7 @@ fn session_merge_without_a_global_store_is_project_only() {
 }
 
 #[test]
-fn a_nonexistent_global_store_is_dropped_rather_than_recorded() {
+fn a_nonexistent_global_store_is_never_claimed_as_merged() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = ParityContext::new(dir.path())
         .with_global(Some(Path::new("/nonexistent/cas").to_path_buf()));
@@ -759,6 +763,134 @@ fn a_nonexistent_global_store_is_dropped_rather_than_recorded() {
         ctx.global_cas_dir.is_none(),
         "a global path with no cas.db must not be claimed as merged"
     );
+    let reason = ctx
+        .global_unavailable
+        .as_deref()
+        .expect("and it must not be dropped silently either");
+    assert!(
+        reason.contains("/nonexistent/cas"),
+        "the reason must name the path that failed: {reason}"
+    );
+}
+
+#[test]
+fn a_requested_but_missing_global_store_makes_session_merge_unavailable() {
+    // The bug this guards (cas-96ae): with_global used to filter a cas.db-less
+    // path away silently, so session_merge reported Ok with project-only hits
+    // and every run went green while the global tier was never measured.
+    let h = harness();
+    let ctx = ParityContext::new(&h.ctx.cas_dir)
+        .with_global(Some(Path::new("/nonexistent/cas").to_path_buf()));
+    let baseline =
+        retrieval_parity::capture(&ctx, &h.set, "t".into(), false).expect("capture must still run");
+
+    let merged = baseline
+        .results
+        .iter()
+        .find(|r| r.id == "session-merge")
+        .expect("session-merge case");
+
+    assert!(
+        !merged.status.is_ok(),
+        "a merge missing its global half must be Unavailable, not Ok: {:?}",
+        merged.status
+    );
+    assert!(
+        merged.hits.is_empty(),
+        "an unavailable channel records no hits that could be mistaken for a healthy merge"
+    );
+}
+
+#[test]
+fn an_available_global_store_leaves_session_merge_ok() {
+    // The converse guard: the loud path must not fire when the store is real.
+    let project = tempfile::tempdir().unwrap();
+    let global = tempfile::tempdir().unwrap();
+    seed_store(project.path());
+    let gstore = SqliteStore::open(global.path()).unwrap();
+    gstore.init().unwrap();
+    drop(gstore);
+
+    let ctx = ParityContext::new(project.path()).with_global(Some(global.path().to_path_buf()));
+    assert!(ctx.global_unavailable.is_none(), "a real store is available");
+
+    let baseline = retrieval_parity::capture(
+        &ctx,
+        &QuerySet::parse(QUERY_SET).unwrap(),
+        "t".into(),
+        false,
+    )
+    .expect("capture");
+    let merged = baseline
+        .results
+        .iter()
+        .find(|r| r.id == "session-merge")
+        .unwrap();
+    assert!(merged.status.is_ok(), "{:?}", merged.status);
+}
+
+#[test]
+fn the_global_channel_measures_the_global_store_not_the_project_one() {
+    // session_merge lists project rows first and truncates, so on a real host
+    // it can never surface global content. This channel reads the global store
+    // directly — that is what makes the global tier measurable at all.
+    let project = tempfile::tempdir().unwrap();
+    let global = tempfile::tempdir().unwrap();
+    seed_store(project.path());
+
+    let gstore = SqliteStore::open(global.path()).unwrap();
+    gstore.init().unwrap();
+    gstore
+        .add(&entry(
+            "g-2026-01-01-777",
+            "global-only memory that the global channel must see",
+            EntryType::Learning,
+            MemoryTier::Working,
+            &[],
+        ))
+        .unwrap();
+    drop(gstore);
+
+    let ctx = ParityContext::new(project.path()).with_global(Some(global.path().to_path_buf()));
+    let baseline = retrieval_parity::capture(
+        &ctx,
+        &QuerySet::parse(QUERY_SET).unwrap(),
+        "t".into(),
+        false,
+    )
+    .expect("capture");
+
+    let g = baseline
+        .results
+        .iter()
+        .find(|r| r.id == "global-list")
+        .expect("global-list case");
+    assert!(g.status.is_ok(), "{:?}", g.status);
+    assert_eq!(g.hits.len(), 1, "exactly the one global row");
+    assert_eq!(g.hits[0].id, "g-2026-01-01-777");
+    assert!(
+        !g.hits.iter().any(|h| h.id.starts_with("p-")),
+        "the global channel must not be reading the project store"
+    );
+}
+
+#[test]
+fn the_global_channel_is_unavailable_rather_than_empty_without_a_store() {
+    // Zero hits would be indistinguishable from "the global store is empty",
+    // which is exactly the disguise the original bug wore.
+    let h = harness();
+    assert!(h.ctx.global_cas_dir.is_none(), "precondition");
+    let baseline = capture(&h);
+    let g = baseline
+        .results
+        .iter()
+        .find(|r| r.id == "global-list")
+        .unwrap();
+    assert!(
+        !g.status.is_ok(),
+        "no global store must read as UNAVAILABLE, not as an empty result"
+    );
+    assert!(g.hits.is_empty());
 }
 
 #[test]

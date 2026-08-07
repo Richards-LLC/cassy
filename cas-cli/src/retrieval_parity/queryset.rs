@@ -43,6 +43,19 @@ pub enum Channel {
     /// This is the highest-volume reader of legacy entries, so it gets a
     /// channel of its own rather than being approximated by `list`.
     SessionMerge,
+    /// `store.list()` against the **global** store alone.
+    ///
+    /// `session_merge` cannot stand in for this: it concatenates project rows
+    /// ahead of global rows and then truncates to the case limit, so on any
+    /// host whose project store is larger than that limit the global rows are
+    /// cut off and the global tier contributes nothing measurable (cas-96ae).
+    /// This channel reads the global store directly so global content has a
+    /// recorded, diffable baseline of its own.
+    ///
+    /// Reports [`super::ChannelStatus::Unavailable`] when no global store is
+    /// attached — a global case that silently returned zero hits would be the
+    /// same blind spot in a new place.
+    GlobalList,
 }
 
 impl Channel {
@@ -57,6 +70,7 @@ impl Channel {
             Channel::ByTier => "by_tier",
             Channel::ByTag => "by_tag",
             Channel::SessionMerge => "session_merge",
+            Channel::GlobalList => "global_list",
         }
     }
 }

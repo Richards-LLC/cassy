@@ -133,6 +133,10 @@ pub struct RunEnv<'a> {
     /// The global memory store, when one exists on this machine. Only the
     /// `session_merge` channel reads it, mirroring `merge_entries`.
     pub global: Option<&'a ReadOnlyMemoryDb>,
+    /// Set when a global store *was requested* but is unusable. `session_merge`
+    /// then reports [`ChannelStatus::Unavailable`]: a merge run without the
+    /// global half is not a healthy merge, it is an unmeasured one.
+    pub global_unavailable: Option<&'a str>,
     pub index: &'a IndexHandle,
     /// Fingerprints of excluded fixture content.
     pub excluded: HashSet<String>,
@@ -162,6 +166,27 @@ pub fn run_case(
         Channel::ByType => (ChannelStatus::Ok, to_hits(&db.by_type(arg, limit)?, ex)),
         Channel::ByTier => (ChannelStatus::Ok, to_hits(&db.by_tier(arg, limit)?, ex)),
         Channel::ByTag => (ChannelStatus::Ok, to_hits(&db.by_tag(arg, limit)?, ex)),
+        Channel::GlobalList => match (env.global, env.global_unavailable) {
+            (Some(g), _) => (ChannelStatus::Ok, to_hits(&g.list(limit)?, ex)),
+            (None, Some(reason)) => (
+                ChannelStatus::Unavailable {
+                    reason: reason.to_string(),
+                },
+                Vec::new(),
+            ),
+            (None, None) => (
+                ChannelStatus::Unavailable {
+                    reason: "no global store attached to this run".to_string(),
+                },
+                Vec::new(),
+            ),
+        },
+        Channel::SessionMerge if env.global_unavailable.is_some() => (
+            ChannelStatus::Unavailable {
+                reason: env.global_unavailable.unwrap_or_default().to_string(),
+            },
+            Vec::new(),
+        ),
         Channel::SessionMerge => {
             let project_rows = db.list(SESSION_MERGE_LIMIT)?;
             let global_rows = match env.global {

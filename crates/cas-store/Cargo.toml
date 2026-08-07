@@ -1,6 +1,6 @@
 [package]
 name = "cas-store"
-version = "2.47.0"
+version = "2.48.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Storage layer for CAS (Coding Agent System)"

@@ -180,6 +180,74 @@ pub(crate) fn resolve_worktree_merge_cleanup(
     }
 }
 
+/// Short SHA for receipt prose; passes anything shorter through unchanged.
+fn short_sha(sha: &str) -> &str {
+    sha.get(..12).unwrap_or(sha)
+}
+
+/// cas-5ee0 (GH #137): render the merge receipt's push-state line. Pure —
+/// unit-tested.
+///
+/// A `worktree_merge` that moves only the LOCAL target ref is invisible to the
+/// task-close merge-state guard, which measures ancestry against BOTH
+/// `<target>` and `origin/<target>`. When the local ref moved and origin did
+/// not, every close of a task delivered by that merge bounces with
+/// "N commit(s) from this task not on <target>" until someone pushes by hand.
+/// The receipt must therefore never claim a bare "Merged" without saying
+/// whether the merge is actually visible on the remote.
+pub(crate) fn describe_target_push_state(
+    target_branch: &str,
+    outcome: &crate::worktree::git::TargetPushOutcome,
+) -> String {
+    use crate::worktree::git::TargetPushOutcome;
+
+    match outcome {
+        // Local-only repository: there is no remote ref for anything
+        // downstream to disagree with, so the local ref IS authoritative.
+        // Stating it keeps the receipt unambiguous without crying wolf.
+        TargetPushOutcome::NoRemote => format!(
+            "\nPush state: no `origin` remote configured — local {target_branch} is authoritative."
+        ),
+        // A branch that was never published has no remote ref for the close
+        // guard to consult — it skips its `origin/<parent>` check when the ref
+        // is absent — so the local ref is authoritative and no push is owed.
+        TargetPushOutcome::RemoteBranchAbsent => format!(
+            "\nPush state: origin/{target_branch} does not exist — {target_branch} is a \
+             local-only branch; local ref is authoritative (no remote branch created)."
+        ),
+        TargetPushOutcome::AlreadyCurrent { sha } => format!(
+            "\nPush state: origin/{target_branch} already at {} (nothing to push).",
+            short_sha(sha)
+        ),
+        TargetPushOutcome::Pushed { sha } => format!(
+            "\nPush state: pushed {target_branch} -> origin/{target_branch} ({}).",
+            short_sha(sha)
+        ),
+        TargetPushOutcome::NotPushed {
+            sha,
+            remote_sha,
+            reason,
+        } => {
+            let local = sha.as_deref().map(short_sha).unwrap_or("unresolved");
+            let remote = remote_sha
+                .as_deref()
+                .map(short_sha)
+                .unwrap_or("(no origin ref)");
+            format!(
+                "\n\n⚠️  NOT PUSHED — THIS MERGE IS LOCAL ONLY.\n\
+                 Local {target_branch} is at {local}; origin/{target_branch} is at {remote} \
+                 and is BEHIND.\n\
+                 Task close measures merge evidence against BOTH {target_branch} and \
+                 origin/{target_branch}, and other checkouts only ever see origin. Until this \
+                 is published, closes for work delivered by this merge can be rejected with \
+                 \"commit(s) from this task not on {target_branch}\".\n\
+                 REQUIRED NEXT STEP: git push origin {target_branch}\n\
+                 Automatic push did not land: {reason}"
+            )
+        }
+    }
+}
+
 /// Translate worktree merge failures into supervisor-actionable MCP errors.
 ///
 /// The low-level merge layer owns cleanup and path discovery; this callable
@@ -1889,6 +1957,13 @@ impl CasCore {
             }
         };
 
+        // cas-5ee0 (GH #137): the merge receipt must tell the truth about push
+        // state. Filled in by the transactional branch below (which has to
+        // publish *before* its internal close runs, or that close measures a
+        // target the rest of the world cannot see); otherwise resolved once in
+        // the shared tail.
+        let mut target_push: Option<(String, crate::worktree::git::TargetPushOutcome)> = None;
+
         if let (Some((receipt, transaction)), Some(authority)) =
             (transactional_delivery.as_ref(), delivery_authority.as_ref())
         {
@@ -1980,6 +2055,21 @@ impl CasCore {
                     )));
                 }
             }
+            // cas-5ee0 (GH #137): publish the target ref HERE — after every
+            // drift/rollback check has cleared, and before the internal close
+            // below. The close merge-state guard measures ancestry against
+            // both `<target>` and `origin/<target>`; a merge that moved only
+            // the local ref is invisible to any other checkout and produced a
+            // guaranteed close-rejection loop that only a manual
+            // `git push origin <target>` could break. Publishing before the
+            // close is what makes the receipt and the guard agree.
+            target_push = Some((
+                receipt.target_branch.clone(),
+                manager
+                    .git()
+                    .publish_branch_to_origin(&receipt.target_branch),
+            ));
+
             if transaction.state != cas_types::WorkerDeliveryState::CloseReady {
                 cas_store::transition_worker_delivery(
                     &cas_root,
@@ -2101,6 +2191,17 @@ impl CasCore {
             " Worktree preserved (mid-session merge; pass cleanup=true to remove)."
         };
 
+        // cas-5ee0 (GH #137): resolve push state for the non-transactional
+        // path (the transactional one already published, before its close).
+        // Every success receipt below carries this line — "Merged" alone is
+        // not a truthful receipt when origin never saw the merge.
+        let (push_branch, push_outcome) = target_push.unwrap_or_else(|| {
+            let branch = worktree.parent_branch.clone();
+            let outcome = manager.git().publish_branch_to_origin(&branch);
+            (branch, outcome)
+        });
+        let push_note = describe_target_push_state(&push_branch, &push_outcome);
+
         if !reconciled_delivery {
             let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(
                 &self.cas_root,
@@ -2115,11 +2216,19 @@ impl CasCore {
             );
         }
 
-        if let Some(close_result) = delivery_close_result {
+        if let Some(mut close_result) = delivery_close_result {
             // Git and durable delivery state reached CloseReady, but the
             // internal close surfaced another exact gate. Preserve that
             // result verbatim so the caller receives the required next action
             // instead of a misleading generic merge success.
+            //
+            // cas-5ee0: if the target never reached origin, that is very
+            // likely *why* the close gate fired — append the diagnosis rather
+            // than letting the caller re-derive it. Appended as an extra
+            // content block so the gate's own text stays verbatim.
+            if !push_outcome.is_published() {
+                close_result.content.push(Content::text(push_note));
+            }
             return Ok(close_result);
         }
 
@@ -2128,12 +2237,13 @@ impl CasCore {
             if let Ok(count) = self.promote_branch_entries(&worktree.branch) {
                 if count > 0 {
                     return Ok(Self::success(format!(
-                        "Merged worktree {} to {}.{} Commit: {}{}\nPromoted {} entries from branch scope.",
+                        "Merged worktree {} to {}.{} Commit: {}{}{}\nPromoted {} entries from branch scope.",
                         worktree.id,
                         worktree.parent_branch,
                         target_suffix,
                         merge_commit.as_deref().unwrap_or("none"),
                         cleanup_note,
+                        push_note,
                         count
                     )));
                 }
@@ -2141,12 +2251,13 @@ impl CasCore {
         }
 
         Ok(Self::success(format!(
-            "Merged worktree {} to {}.{} Commit: {}{}",
+            "Merged worktree {} to {}.{} Commit: {}{}{}",
             worktree.id,
             worktree.parent_branch,
             target_suffix,
             merge_commit.as_deref().unwrap_or("none"),
-            cleanup_note
+            cleanup_note,
+            push_note
         )))
     }
 
@@ -2265,12 +2376,101 @@ mod tests {
     use super::{
         DeliveryMergePreflight, authorize_explicit_task_for_system_b_worker,
         classify_delivery_merge_preflight, derive_delivery_supervisor_authority,
-        is_cas_pattern_worktree, is_factory_style_worktree, is_git_worktree, path_is_under,
-        resolve_worktree_merge_cleanup, worktree_merge_mcp_error,
+        describe_target_push_state, is_cas_pattern_worktree, is_factory_style_worktree,
+        is_git_worktree, path_is_under, resolve_worktree_merge_cleanup, worktree_merge_mcp_error,
     };
+    use crate::worktree::git::TargetPushOutcome;
     use crate::worktree::{GitError, WorktreeError};
     use std::path::Path;
     use tempfile::TempDir;
+
+    // -----------------------------------------------------------------
+    // cas-5ee0 (GH #137): the merge receipt must state push state.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn merge_receipt_shouts_when_the_merge_is_local_only() {
+        let note = describe_target_push_state(
+            "main",
+            &TargetPushOutcome::NotPushed {
+                sha: Some("42d81bd9aaaabbbbccccddddeeeeffff00001111".to_string()),
+                remote_sha: Some("c2698df216cd9abe7db530ec1d035f6a378d1d06".to_string()),
+                reason: "Permission denied (publickey)".to_string(),
+            },
+        );
+
+        // The three things the supervisor could not learn from the old
+        // bare "Merged ..." receipt: that origin is behind, that closes
+        // will bounce because of it, and the exact command that fixes it.
+        assert!(note.contains("NOT PUSHED"), "{note}");
+        assert!(note.contains("origin/main"), "{note}");
+        assert!(note.contains("BEHIND"), "{note}");
+        assert!(note.contains("git push origin main"), "{note}");
+        assert!(
+            note.contains("Permission denied (publickey)"),
+            "the real git reason must survive: {note}"
+        );
+        // Short SHAs on both sides so the two tips are visibly different.
+        assert!(note.contains("42d81bd9aaaa"), "{note}");
+        assert!(note.contains("c2698df216cd"), "{note}");
+    }
+
+    #[test]
+    fn merge_receipt_states_push_state_without_crying_wolf() {
+        let pushed = describe_target_push_state(
+            "epic/thing",
+            &TargetPushOutcome::Pushed {
+                sha: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            },
+        );
+        assert!(
+            pushed.contains("pushed epic/thing -> origin/epic/thing"),
+            "{pushed}"
+        );
+        assert!(pushed.contains("0123456789ab"), "{pushed}");
+        assert!(!pushed.contains("NOT PUSHED"), "{pushed}");
+
+        // The three benign states must never render the loud warning: a
+        // receipt that warns on every local-only repo trains supervisors
+        // to ignore the one time it matters.
+        for outcome in [
+            TargetPushOutcome::NoRemote,
+            TargetPushOutcome::RemoteBranchAbsent,
+            TargetPushOutcome::AlreadyCurrent {
+                sha: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            },
+        ] {
+            let note = describe_target_push_state("main", &outcome);
+            assert!(!note.contains("NOT PUSHED"), "{outcome:?} -> {note}");
+            assert!(note.contains("Push state:"), "{outcome:?} -> {note}");
+            assert!(outcome.is_published());
+        }
+    }
+
+    #[test]
+    fn merge_receipt_push_state_survives_a_short_or_odd_sha() {
+        // Defensive: receipt prose must not panic on a sha shorter than the
+        // display width (or a non-ASCII boundary) — it is rendered on the
+        // failure path, where inputs are least trustworthy.
+        let note = describe_target_push_state(
+            "main",
+            &TargetPushOutcome::NotPushed {
+                sha: None,
+                remote_sha: None,
+                reason: "local ref `main` did not resolve to a commit".to_string(),
+            },
+        );
+        assert!(note.contains("unresolved"), "{note}");
+        assert!(note.contains("(no origin ref)"), "{note}");
+
+        let short = describe_target_push_state(
+            "main",
+            &TargetPushOutcome::Pushed {
+                sha: "abc".to_string(),
+            },
+        );
+        assert!(short.contains("abc"), "{short}");
+    }
 
     #[test]
     fn delivery_resume_authority_is_derived_only_from_live_registered_supervisor() {

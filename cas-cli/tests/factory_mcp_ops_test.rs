@@ -2814,6 +2814,152 @@ async fn test_2e81_orphan_recovery_skips_psr_tasks() {
     );
 }
 
+// cas-3dcb (GH #168): worker death reaches the supervisor's PROMPT path,
+// exactly once per death incident
+// =============================================================================
+
+/// All prompt-queue rows that are worker-death relays.
+fn worker_died_prompt_rows(cas_root: &std::path::Path) -> Vec<cas_store::QueuedPrompt> {
+    cas::store::open_prompt_queue_store(cas_root)
+        .expect("prompt queue")
+        .peek_all(200)
+        .expect("peek prompt queue")
+        .into_iter()
+        .filter(|row| row.prompt.starts_with("<worker-died "))
+        .collect()
+}
+
+/// The reported defect: 2,044 death notices, 100% never injected into any
+/// supervisor turn, because the emitter wrote to `supervisor_queue` only.
+/// A death must now land on the prompt path — the one the supervisor reads.
+#[tokio::test]
+async fn test_3dcb_worker_death_reaches_the_prompt_path() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    let sup_id = env.register_supervisor("sup-prompt-path");
+
+    let worker_id =
+        env.register_stale_worker_with_clone_path("died-loud", "/tmp/cas-worktrees/loud", 90);
+    let task_store = env.task_store();
+    let mut task = Task::new("cas-loud1".to_string(), "Held at death".to_string());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("died-loud".to_string());
+    task_store.add(&task).expect("add task");
+    env.agent_store()
+        .try_claim("cas-loud1", &worker_id, 600, None)
+        .expect("claim")
+        .is_success();
+
+    env.service
+        .factory(Parameters(factory_req("worker_status")))
+        .await
+        .expect("worker_status");
+
+    let rows = worker_died_prompt_rows(&env.cas_root);
+    assert_eq!(
+        rows.len(),
+        1,
+        "a worker death must enqueue exactly one prompt-path relay. rows={rows:?}"
+    );
+    let row = &rows[0];
+    assert_eq!(
+        row.target, "supervisor",
+        "the death relay must target the supervisor pane. row={row:?}"
+    );
+    assert!(
+        row.source.starts_with("lifecycle-wake:"),
+        "the relay needs a wake-eligible source or the daemon will neither wake an idle \
+         supervisor nor report it as a lost relay. source={}",
+        row.source
+    );
+    assert!(
+        !row.source.contains("died-loud"),
+        "the source must not be the dead worker's name — `is_dead_worker_source` drops those. \
+         source={}",
+        row.source
+    );
+    assert!(
+        row.prompt.contains("died-loud") && row.prompt.contains("cas-loud1"),
+        "the relay must name the dead worker and the work it held. prompt={}",
+        row.prompt
+    );
+
+    // The durable row survives for existing consumers, and is now stamped as
+    // handed off to the prompt path.
+    let queue = cas::store::open_supervisor_queue_store(&env.cas_root).expect("queue");
+    let pending = queue.peek(&sup_id, 20).expect("peek");
+    let died: Vec<_> = pending
+        .iter()
+        .filter(|n| n.event_type == "worker_died")
+        .collect();
+    assert_eq!(
+        died.len(),
+        1,
+        "supervisor_queue consumers must still see exactly one worker_died. pending={pending:?}"
+    );
+    assert!(
+        died[0].prompt_delivered_at.is_some(),
+        "the durable row must be stamped once its prompt was handed off. row={:?}",
+        died[0]
+    );
+}
+
+/// Dedup is keyed on the death INCIDENT, not on the agent — a worker that
+/// revives, heartbeats, and dies again is a new fact the supervisor must hear.
+#[tokio::test]
+async fn test_3dcb_a_second_genuine_death_is_reported_again() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    env.register_supervisor("sup-second-death");
+
+    let worker_id =
+        env.register_stale_worker_with_clone_path("twice-dead", "/tmp/cas-worktrees/twice", 90);
+    let task_store = env.task_store();
+    let mut task = Task::new("cas-twice1".to_string(), "First life".to_string());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("twice-dead".to_string());
+    task_store.add(&task).expect("add task");
+    env.agent_store()
+        .try_claim("cas-twice1", &worker_id, 600, None)
+        .expect("claim")
+        .is_success();
+
+    env.service
+        .factory(Parameters(factory_req("worker_status")))
+        .await
+        .expect("first death");
+    assert_eq!(worker_died_prompt_rows(&env.cas_root).len(), 1);
+
+    // Revive: a fresh heartbeat is what makes the next death a new incident.
+    let agent_store = env.agent_store();
+    agent_store.revive(&worker_id).expect("revive");
+    agent_store.heartbeat(&worker_id).expect("heartbeat");
+    let mut revived = agent_store.get(&worker_id).expect("get agent");
+    revived.last_heartbeat = chrono::Utc::now() - chrono::Duration::seconds(90);
+    agent_store.update(&revived).expect("backdate heartbeat");
+
+    let mut task = task_store.get("cas-twice1").expect("task");
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("twice-dead".to_string());
+    task_store.update(&task).expect("re-assign");
+    agent_store
+        .try_claim("cas-twice1", &worker_id, 600, None)
+        .expect("re-claim")
+        .is_success();
+
+    env.service
+        .factory(Parameters(factory_req("worker_status")))
+        .await
+        .expect("second death");
+
+    assert_eq!(
+        worker_died_prompt_rows(&env.cas_root).len(),
+        2,
+        "a genuinely separate death must be reported again — dedup keys the incident, \
+         not the agent"
+    );
+}
+
 // =============================================================================
 // worker_activity tests
 // =============================================================================

@@ -179,6 +179,97 @@ pub(crate) fn undelivered_relay_notice(task_id: &str, summary: Option<&str>) -> 
     )
 }
 
+/// Operator-facing description of one undelivered worker-death relay
+/// (cas-3dcb, GH #168).
+///
+/// A death notice cannot be "stale" the way a task transition can — the worker
+/// is still dead — so this says the opposite of the lifecycle notice: the fact
+/// is still true, nobody was told, go look.
+pub(crate) fn undelivered_worker_died_notice(worker_name: &str) -> String {
+    format!(
+        "UNDELIVERED: the factory tried to tell the supervisor that worker {worker_name} died \
+         and that message never arrived. The worker is still gone and any work it held is \
+         unattended. Run `coordination action=worker_status` and re-assign {worker_name}'s \
+         tasks — do not assume this was handled."
+    )
+}
+
+/// cas-3dcb (GH #168): the worker-death relay wire format.
+///
+/// Producer ([`format_worker_died_relay`], called by orphan recovery) and
+/// classifier ([`parse_worker_died_envelope`], called by the daemon's delivery
+/// loop) share one definition on purpose. The daemon corroborates a
+/// `lifecycle-wake:` source against a self-identifying envelope before it will
+/// type anything into the supervisor pane, so a death notice that does not
+/// parse here is silently demoted to ordinary chatter — the exact silence this
+/// fixes. Keep the two functions adjacent and change them together.
+const WORKER_DIED_ENVELOPE_OPEN: &str = "<worker-died ";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkerDiedEnvelope {
+    pub worker_id: String,
+    pub worker_name: String,
+    /// Death-incident identity — one incident yields one notice (cas-3dcb).
+    pub incident: String,
+}
+
+/// Render a worker-death relay for PTY injection into the supervisor's session.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn format_worker_died_relay(
+    worker_id: &str,
+    worker_name: &str,
+    incident: &str,
+    reason: &str,
+    held_tasks: &[String],
+    recovered_tasks: &[String],
+    notification_id: i64,
+) -> String {
+    let held = if held_tasks.is_empty() {
+        "none".to_string()
+    } else {
+        held_tasks.join(", ")
+    };
+    let recovered = if recovered_tasks.is_empty() {
+        "none".to_string()
+    } else {
+        recovered_tasks.join(", ")
+    };
+    format!(
+        "<worker-died worker_id=\"{worker_id}\" worker_name=\"{worker_name}\" \
+         incident=\"{incident}\" notification_id=\"{notification_id}\">\n\
+         Worker {worker_name} died — {reason}.\n\
+         Held at death: {held}\n\
+         Parked back to Open: {recovered}\n\
+         These tasks are unattended. Re-assign them or respawn a worker; \
+         `coordination action=worker_status` shows the current fleet.\n\
+         </worker-died>"
+    )
+}
+
+/// Parse a worker-death relay envelope, if this prompt is one.
+pub(crate) fn parse_worker_died_envelope(prompt: &str) -> Option<WorkerDiedEnvelope> {
+    let tag_end = prompt.find('>')?;
+    let tag = &prompt[..tag_end];
+    if !tag.starts_with(WORKER_DIED_ENVELOPE_OPEN) {
+        return None;
+    }
+    Some(WorkerDiedEnvelope {
+        worker_id: xml_attribute(tag, "worker_id")?.to_string(),
+        worker_name: xml_attribute(tag, "worker_name")?.to_string(),
+        incident: xml_attribute(tag, "incident")?.to_string(),
+    })
+}
+
+/// Whether a prompt carries an envelope that authorizes a supervisor wake.
+///
+/// The `lifecycle-wake:` source marker states intent, but `prompt_queue.source`
+/// is caller-settable, so the daemon corroborates it with the payload. Exactly
+/// two producers emit a qualifying envelope: the task lifecycle emitter and
+/// orphan recovery's death relay.
+pub(crate) fn is_supervisor_wake_envelope(prompt: &str) -> bool {
+    parse_lifecycle_envelope(prompt).is_some() || parse_worker_died_envelope(prompt).is_some()
+}
+
 pub(crate) fn select_unambiguous_merge_task<'a>(
     parked_tasks: &'a [Task],
     worker: &str,
@@ -744,5 +835,75 @@ mod tests {
                 .map(|task| task.id.as_str()),
             Some("cas-one")
         );
+    }
+}
+
+#[cfg(test)]
+mod cas_3dcb_worker_died_relay_tests {
+    use super::*;
+
+    fn relay() -> String {
+        format_worker_died_relay(
+            "6f1b-agent-id",
+            "mighty-kestrel-57",
+            "worker_died:6f1b-agent-id:1754600000000",
+            "daemon maintenance: heartbeat stale",
+            &["cas-aaaa".to_string(), "cas-bbbb".to_string()],
+            &["cas-aaaa".to_string()],
+            4211,
+        )
+    }
+
+    /// Producer and classifier must agree, or the daemon silently demotes the
+    /// death notice to ordinary chatter — the GH #168 silence.
+    #[test]
+    fn producer_output_round_trips_through_the_classifier() {
+        let envelope = parse_worker_died_envelope(&relay()).expect("relay must parse");
+        assert_eq!(envelope.worker_id, "6f1b-agent-id");
+        assert_eq!(envelope.worker_name, "mighty-kestrel-57");
+        assert_eq!(envelope.incident, "worker_died:6f1b-agent-id:1754600000000");
+    }
+
+    /// The body must carry the facts a supervisor acts on, not just the tag.
+    #[test]
+    fn relay_body_names_the_worker_and_its_unattended_work() {
+        let body = relay();
+        assert!(body.contains("mighty-kestrel-57"));
+        assert!(body.contains("heartbeat stale"));
+        assert!(body.contains("cas-aaaa") && body.contains("cas-bbbb"));
+    }
+
+    #[test]
+    fn a_death_with_no_held_work_still_renders() {
+        let body =
+            format_worker_died_relay("id", "idle-worker", "incident", "shutdown", &[], &[], 1);
+        assert!(parse_worker_died_envelope(&body).is_some());
+        assert!(body.contains("Held at death: none"));
+    }
+
+    /// Wake eligibility is corroborated by the payload, so both producers must
+    /// qualify and arbitrary text must not.
+    #[test]
+    fn wake_corroboration_accepts_both_envelopes_and_nothing_else() {
+        assert!(is_supervisor_wake_envelope(&relay()));
+        assert!(is_supervisor_wake_envelope(
+            "<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"cas-1\" old=\"in_progress\" \
+             new=\"awaiting_merge\" actor=\"w\" notification_id=\"1\" \
+             occurrence=\"2026-08-07T10:00:00+00:00\">\nbody</task-lifecycle>"
+        ));
+        assert!(!is_supervisor_wake_envelope("please merge my branch"));
+        // A lookalike that omits required attributes must not qualify.
+        assert!(!is_supervisor_wake_envelope("<worker-died >gotcha"));
+        assert!(!is_supervisor_wake_envelope(
+            "<worker-diedish worker_id=\"a\" worker_name=\"b\" incident=\"c\">x"
+        ));
+    }
+
+    #[test]
+    fn undelivered_notice_names_the_worker_not_a_task() {
+        let notice = undelivered_worker_died_notice("mighty-kestrel-57");
+        assert!(notice.contains("mighty-kestrel-57"));
+        assert!(notice.contains("UNDELIVERED"));
+        assert!(!notice.contains("(unknown task)"));
     }
 }

@@ -24,6 +24,8 @@ mod doctor;
 // cli::factory::wedged's transcript-mtime liveness primitives.
 pub(crate) mod factory;
 mod factory_tooling;
+// cas-fc6fa: read-only cross-project contamination scan used by `cas doctor`.
+pub mod foreign_rows;
 mod hook;
 mod init;
 pub mod integrate;

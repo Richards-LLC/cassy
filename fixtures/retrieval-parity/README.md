@@ -106,12 +106,34 @@ harness still reported parity. The fix is to widen `queryset.toml`;
 | `pinned` | SessionStart "Pinned Memories (Always Active)" — in-context tier |
 | `recent` / `list` | `mcp__cas__memory action=recent` / `action=list` |
 | `helpful` | feedback-ranked retrieval (`list_helpful`) |
+| `global_list` | `store_list` against the **global** store (`~/.cas`) alone |
 | `by_type` / `by_tier` / `by_tag` | type, tier and tag cross-tabs |
 
 `session_merge` is the highest-volume reader of legacy entries (inventory
 §3.1) and gets its own channel rather than being approximated by `list`,
 because the project-over-global dedup is exactly the behaviour a migration is
 liable to change.
+
+## The global tier
+
+`global_list` exists because `session_merge` cannot measure the global store:
+it lists project rows first and truncates at the case limit, so on any host
+whose project store is larger than that limit the global rows never reach the
+baseline. Combined with a resolver that pointed at `~/.config/cas` — which
+holds no `cas.db` — and a `with_global` that dropped unusable paths *silently*,
+the global tier went unmeasured through every green run up to cas-96ae.
+
+Two rules keep that from recurring:
+
+- the global store is resolved from `~/.cas` (the live host root) with
+  `~/.config/cas` only as a fallback, and
+- a global store that was requested but cannot be read is **never** a
+  zero-hit success. It reports `unavailable`, both on `global_list` and on
+  `session_merge`, for the same reason a missing search index does.
+
+Capture and replay should be run back to back. The live store is written
+continuously, so a pair taken hours apart reports tail churn — a row falling
+off the end of a limit window — as `missing_hit`.
 
 ## Read-only
 

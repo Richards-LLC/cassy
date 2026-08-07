@@ -12,6 +12,64 @@ use crate::worktree::git::{GitError, GitOperations, ResolvedBase, Result};
 /// http(s) and ssh transports, so this is enforced at the process level.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Wall-clock bound for [`GitOperations::publish_branch_to_origin`] (cas-5ee0).
+/// Same reasoning as [`FETCH_TIMEOUT`]: a synchronous MCP handler must never
+/// hang on a configured-but-unreachable remote. Slightly larger than the fetch
+/// bound because a push uploads objects.
+const PUSH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// What happened when a merge target ref was published to its remote
+/// (cas-5ee0 / GH #137).
+///
+/// The merge receipt and the task-close merge-state guard must agree on which
+/// ref is authoritative. The guard consults BOTH `<parent>` and
+/// `origin/<parent>`, so a merge that only moved the local ref is *invisible*
+/// to any checkout that reads origin — which is what produced a guaranteed
+/// close-rejection loop. This type is the honest answer to "did the merge
+/// actually become visible to everyone else?".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TargetPushOutcome {
+    /// No `origin` remote is configured. Nothing to publish, and nothing
+    /// downstream can consult a remote ref either — the local ref *is*
+    /// authoritative. Not a warning.
+    NoRemote,
+    /// An `origin` remote exists but `origin/<branch>` does not — the target
+    /// branch was never published (a local-only epic branch, for instance).
+    /// Nothing downstream consults a ref that does not exist: the close
+    /// merge-state guard skips its `origin/<parent>` check entirely when the
+    /// ref is absent, so the local ref is authoritative and creating a remote
+    /// branch as a side effect of a merge is not this tool's call.
+    RemoteBranchAbsent,
+    /// `origin/<branch>` already resolves to the local tip (typically a
+    /// resumed/reconciled merge that was published on an earlier attempt).
+    AlreadyCurrent { sha: String },
+    /// The push ran and succeeded; `origin/<branch>` now carries the tip.
+    Pushed { sha: String },
+    /// The merge is LOCAL ONLY. `reason` says why the push did not land.
+    NotPushed {
+        /// Local tip of the target branch, or `None` if it did not resolve.
+        sha: Option<String>,
+        /// Remote tip as last observed, or `None` if `origin/<branch>` does
+        /// not exist locally.
+        remote_sha: Option<String>,
+        reason: String,
+    },
+}
+
+impl TargetPushOutcome {
+    /// True when the target ref is known to be visible on its remote (or
+    /// there is no remote for it to be visible on).
+    pub fn is_published(&self) -> bool {
+        matches!(
+            self,
+            Self::NoRemote
+                | Self::RemoteBranchAbsent
+                | Self::AlreadyCurrent { .. }
+                | Self::Pushed { .. }
+        )
+    }
+}
+
 impl GitOperations {
     /// Run `cmd` to completion, killing it and returning
     /// `io::ErrorKind::TimedOut` if it hasn't finished within `timeout`.
@@ -534,6 +592,120 @@ impl GitOperations {
         }
 
         Ok(())
+    }
+
+    /// True when an `origin` remote is configured for this repository.
+    ///
+    /// Answers `false` on any git failure: callers use this to decide whether
+    /// a *missing* remote ref is expected, and an unknown must not be reported
+    /// as "you forgot to push".
+    pub fn has_origin_remote(&self) -> bool {
+        Command::new("git")
+            .args(["remote", "get-url", "origin"])
+            .current_dir(&self.repo_root)
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+    }
+
+    /// Publish `branch` to `origin` so the local ref and the remote-tracking
+    /// ref agree (cas-5ee0 / GH #137).
+    ///
+    /// Called after a successful `worktree_merge`. Never returns `Err`: the
+    /// point is to report push state truthfully, and a failed push must
+    /// surface as a loud [`TargetPushOutcome::NotPushed`] receipt line rather
+    /// than turning a completed merge into an error. The push is a plain
+    /// (non-force) push, so git itself refuses to clobber a diverged remote
+    /// and the divergence is reported instead.
+    pub fn publish_branch_to_origin(&self, branch: &str) -> TargetPushOutcome {
+        self.publish_branch_to_origin_bounded(branch, PUSH_TIMEOUT)
+    }
+
+    /// Same as [`Self::publish_branch_to_origin`] with an injectable timeout —
+    /// the test seam for proving the bound fires without waiting out 30s.
+    pub(crate) fn publish_branch_to_origin_bounded(
+        &self,
+        branch: &str,
+        timeout: Duration,
+    ) -> TargetPushOutcome {
+        let remote_ref = format!("origin/{branch}");
+        let local_sha = self.resolve_commit(branch);
+
+        if !self.has_origin_remote() {
+            return TargetPushOutcome::NoRemote;
+        }
+
+        let Some(local_sha) = local_sha else {
+            return TargetPushOutcome::NotPushed {
+                sha: None,
+                remote_sha: self.resolve_commit(&remote_ref),
+                reason: format!("local ref `{branch}` did not resolve to a commit"),
+            };
+        };
+
+        match self.resolve_commit(&remote_ref) {
+            Some(remote) if remote == local_sha => {
+                return TargetPushOutcome::AlreadyCurrent { sha: local_sha };
+            }
+            Some(_) => {}
+            // Never *create* a remote branch as a side effect of a merge.
+            None => return TargetPushOutcome::RemoteBranchAbsent,
+        }
+
+        let mut cmd = Command::new("git");
+        cmd.args([
+            "push",
+            "origin",
+            // Fully-qualified on both sides: a bare branch name lets git's
+            // push.default / refspec config decide the destination, which is
+            // exactly the kind of ambiguity this receipt is meant to remove.
+            &format!("refs/heads/{branch}:refs/heads/{branch}"),
+        ])
+        // Never block on an interactive credential prompt (mirrors fetch).
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .current_dir(&self.repo_root);
+
+        match Self::run_command_bounded(cmd, timeout) {
+            Ok(output) if output.status.success() => TargetPushOutcome::Pushed { sha: local_sha },
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let reason = stderr
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .unwrap_or("git push failed with no diagnostic output")
+                    .to_string();
+                tracing::warn!(
+                    branch = %branch,
+                    reason = %reason,
+                    "cas-5ee0: merge target was not published to origin"
+                );
+                TargetPushOutcome::NotPushed {
+                    sha: Some(local_sha),
+                    remote_sha: self.resolve_commit(&remote_ref),
+                    reason,
+                }
+            }
+            Err(e) => {
+                let reason = if e.kind() == std::io::ErrorKind::TimedOut {
+                    format!(
+                        "git push origin {branch} timed out after {timeout:?} — remote unreachable?"
+                    )
+                } else {
+                    format!("git push origin {branch} could not run: {e}")
+                };
+                tracing::warn!(
+                    branch = %branch,
+                    reason = %reason,
+                    "cas-5ee0: merge target was not published to origin"
+                );
+                TargetPushOutcome::NotPushed {
+                    sha: Some(local_sha),
+                    remote_sha: self.resolve_commit(&remote_ref),
+                    reason,
+                }
+            }
+        }
     }
 
     /// Mark .claude/, CLAUDE.md, and .mcp.json as skip-worktree in a worktree

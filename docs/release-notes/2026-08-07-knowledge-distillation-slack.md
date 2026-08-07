@@ -6,11 +6,15 @@ cut this release.
 
 Covers **v2.48.0** (the knowledge-distillation feature set) and the follow-up patch
 **v2.48.1**, which closes a scoping hole found in v2.48.0's knowledge sync. Announce
-them together, and point people at **2.48.2** — the install target — as nobody should
-install 2.48.0. There is nothing to announce about 2.48.2 itself: it is a test-only
-release that corrects an assertion which had been miscounting a correct product, and
-it ships no behaviour change over 2.48.1. It is the install target purely because it
-is the tip, and it is the first tag whose full validation run is green.
+them together, and point people at **2.48.3** — the install target — as nobody should
+install 2.48.0.
+
+Two patches sit between the feature set and the install target. **2.48.2** needs no
+announcement of its own: it is test-only, correcting an assertion that had been
+miscounting a correct product, with no behaviour change over 2.48.1. **2.48.3** carries
+one real change beyond that — the factory supervisor regains Claude Remote Control and
+security auto-updates — which is covered by a bullet in the dev thread below. It is not
+in the user thread because it changes nothing for anyone who is not running the factory.
 
 Channel: #cas-internal (C0B44GUKDK2). Two top-level posts per the runtime rubric,
 each with one threaded reply.
@@ -56,5 +60,6 @@ Repo context was re-derived from raw files on every session, at full token cost,
 - **Was → Now:** the codemap and project-overview skills were standalone generators → they query the store before regenerating and build after writing, making both docs views over it. Ported across harness flavors by prefix substitution with the drift guard green.
 - **Was → Now:** the pull instruction shipped naming an action the router rejects, so a perfect-looking index invited body fetches that all returned an error — and the test asserting it could not fail, because it matched a word that also appears in the section header → the constant is corrected and pinned verbatim, and a new test parses the action out of the instruction and drives it through the real service router rather than the handler, closing the gap that let the text and the router drift (cas-core authors the instruction but cannot see the router). Verified by reintroducing the bad action and watching the test fail with the router's own error.
 - **Was → Now:** cloud contributed nothing to knowledge → pages ride the existing sync push/pull incrementally, and an embedder produces vectors so semantic search is real (cloud query embedding → cosine kNN over a local cache). The capability gate is the constructor: logged out it is `None`, which means no HTTP and no vector-store environment created on disk at all. The cache is tagged with provider, model and dimensions so a model change wipes and re-arms it; zero vectors are refused at the boundary so a soft-failing provider leaves a page pending rather than poisoning ranking; and a process-wide registry stops the sync and search paths from double-opening the same environment. `has_semantic()` is now true only when a channel is attached *and* vectors are cached, so the capability-aware weights above never allocate mass to a channel that can only return nothing.
+- **Was → Now (v2.48.3):** every agent the factory launched was started with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` and the updater kill switch set — correct for a worker, which must not swap its own binary mid-task, but it was applied to the supervisor too. The traffic switch disables feature-flag evaluation, which Remote Control depends on, so `claude doctor` inside a supervisor reported the feature unavailable and its rollout unverifiable; the same switch meant a long-running supervisor never picked up a security update → both env settings are now role-gated to workers, so the supervisor keeps Remote Control and auto-updates while worker behaviour is byte-for-byte unchanged. Note two operational consequences: a machine that ran with the traffic switch set may hold frozen flag evaluations in `~/.claude/statsig` (delete to clear), and with the updater live a supervisor can update the shared CLI binary mid-run, so workers started either side of that update may differ in version.
 - **Was → Now (v2.48.1):** the knowledge pull built its own `/api/sync/pull` URL and appended `project_id=` only `if let Some(..)` — so an unresolvable canonical project id, which the canonical builder treats as fatal, silently produced an **unscoped** pull → both callers now go through one fail-closed builder that resolves the scope with `ok_or_else` and owns the only occurrence of the path literal in shipped source. The unscoped case is now unrepresentable rather than merely unlikely: a source guard asserts a single production builder, a unit test drives the `None` resolver and asserts no URL is built, and a second assertion pins the fail-closed error so a revert to `if let Some` is caught even if the literal stays put.
 - **Coverage:** 25 cloud tests in both logged-out and mocked-cloud modes, 39 store tests, 45 pipeline unit + 11 mock-LLM integration tests, 14 retrieval/scorer tests, 7 tool-handler and 3 CLI tests.

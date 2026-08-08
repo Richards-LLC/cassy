@@ -2768,9 +2768,39 @@ impl CasService {
         // other agents' working directories. Live WIP and in-flight tasks are
         // never collateral without explicit consent.
         let force = req.force.unwrap_or(false);
-        let in_progress_by_assignee = in_progress_tasks_by_assignee(&self.inner.cas_root);
+        let bindings = worker_task_bindings(&self.inner.cas_root);
+
+        // cas-5884: a fleet sweep must not rebase a worker onto a branch its
+        // task does not integrate into. `worker_names=` targeting is the
+        // documented override; `force=` deliberately is not.
+        let explicitly_targeted = req
+            .worker_names
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|names| !names.is_empty());
+        let default_branch = crate::worktree::GitOperations::detect_repo_root(&self.inner.cas_root)
+            .ok()
+            .map(crate::worktree::GitOperations::new)
+            .map(|git| git.detect_default_branch())
+            .unwrap_or_else(|| "main".to_string());
 
         for worker in workers {
+            let binding = bindings.get(&worker.name);
+
+            // cas-5884: branch affinity first — it is decided from task state
+            // alone and is the most decisive reason not to touch a worktree.
+            if let SyncGate::Refuse(reason) = sync_affinity_gate(
+                &worker.name,
+                binding.map(|b| b.label.as_str()),
+                binding.map_or(&BranchAffinity::Unknown, |b| &b.affinity),
+                &sync_ref,
+                &default_branch,
+                explicitly_targeted,
+            ) {
+                skipped.push(reason);
+                continue;
+            }
+
             // cas-f53c: same path resolution as worker_status — do not require
             // clone_path metadata when the convention worktree already exists
             // (common race right after isolate spawn).
@@ -2795,9 +2825,9 @@ impl CasService {
                     continue;
                 }
             };
-            let in_progress = in_progress_by_assignee
-                .get(&worker.name)
-                .map(String::as_str);
+            let in_progress = binding
+                .filter(|b| b.blocks_rebase)
+                .map(|b| b.label.as_str());
             if let SyncGate::Refuse(reason) = sync_gate_for_worker(
                 &worker.name,
                 dirty_files,
@@ -2829,11 +2859,18 @@ impl CasService {
         }
 
         let mut out = format!(
-            "Worker Sync Report\n==================\n\nSync target: {sync_ref}\nMode: {}\n",
+            "Worker Sync Report\n==================\n\nSync target: {sync_ref}\nTrunk: \
+             {default_branch}\nMode: {}\nBranch affinity: {}\n",
             if force {
                 "force=true (dirty worktrees stashed; mid-task workers rebased)"
             } else {
                 "safe (dirty or mid-task worktrees are skipped — pass force=true to include them)"
+            },
+            if explicitly_targeted {
+                "bypassed (workers named explicitly in worker_names=)"
+            } else {
+                "enforced (workers whose task integrates into a different branch are skipped; \
+                 name them in worker_names= to override — force= does not)"
             }
         );
         if !synced.is_empty() {
@@ -3959,16 +3996,101 @@ fn run_git(path: &std::path::Path, args: &[&str]) -> std::result::Result<String,
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Map worker display name -> the id of a task that makes its worktree unsafe
-/// to rebase (cas-0a6f / GH #103).
+/// The integration branch a worker's task will actually be merged into
+/// (cas-5884).
 ///
-/// `InProgress` is the obvious one. `PendingSupervisorReview` and
+/// Sync rebases a worker's worktree onto a ref. If that ref is not the branch
+/// the worker's task integrates into, the rebase grafts foreign commits onto
+/// the factory branch and rewrites the worker's own already-merged commits —
+/// which then read as "N commit(s) from this task not on <target>" at close
+/// time, a false count that forces the `commit_receipt` escape hatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BranchAffinity {
+    /// The task integrates into this named branch (parent epic branch, or an
+    /// explicit `work_target.target_branch`).
+    Branch(String),
+    /// Standalone task: it integrates into the repository's trunk.
+    Trunk,
+    /// The worker holds no task, so sync has no affinity evidence and does not
+    /// invent one.
+    Unknown,
+}
+
+/// A worker's current task binding as far as sync is concerned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkerTaskBinding {
+    /// Operator-facing task label (id, plus status for parked states).
+    pub label: String,
+    /// True for statuses whose commits must not be rewritten under the worker
+    /// (`InProgress`, `PendingSupervisorReview`, `AwaitingMerge`).
+    pub blocks_rebase: bool,
+    /// Branch this task's work integrates into.
+    pub affinity: BranchAffinity,
+}
+
+/// Normalize a ref for affinity comparison: `refs/heads/x`, `origin/x` and `x`
+/// all name the same integration branch from a worker worktree's point of view.
+pub(crate) fn normalize_branch_ref(reference: &str) -> String {
+    let reference = reference.trim();
+    let reference = reference
+        .strip_prefix("refs/heads/")
+        .or_else(|| reference.strip_prefix("refs/remotes/"))
+        .unwrap_or(reference);
+    reference
+        .strip_prefix("origin/")
+        .unwrap_or(reference)
+        .into()
+}
+
+/// Resolve which branch a task integrates into.
+///
+/// Order (cas-5884): parent epic branch (the lane's integration branch) wins,
+/// then an explicit `work_target.target_branch`, else the task is standalone
+/// and belongs on trunk. An epic task itself uses its own branch.
+fn task_branch_affinity(
+    store: &dyn crate::store::TaskStore,
+    task: &cas_types::Task,
+) -> BranchAffinity {
+    fn non_empty(value: Option<&String>) -> Option<String> {
+        value
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    }
+
+    if task.task_type == cas_types::TaskType::Epic
+        && let Some(branch) = non_empty(task.branch.as_ref())
+    {
+        return BranchAffinity::Branch(branch);
+    }
+    if let Ok(Some(epic)) = store.get_parent_epic(&task.id)
+        && let Some(branch) = non_empty(epic.branch.as_ref())
+    {
+        return BranchAffinity::Branch(branch);
+    }
+    if let Some(target) = task
+        .deliverables
+        .work_target
+        .as_ref()
+        .map(|wt| wt.target_branch.trim())
+        .filter(|b| !b.is_empty())
+    {
+        return BranchAffinity::Branch(target.to_string());
+    }
+    BranchAffinity::Trunk
+}
+
+/// Map worker display name -> the task binding sync must respect.
+///
+/// `InProgress` is the obvious rebase-blocker. `PendingSupervisorReview` and
 /// `AwaitingMerge` are included because their commits are already named by a
 /// delivery receipt: rebasing rewrites exactly the SHAs the supervisor is
-/// about to verify and merge.
-fn in_progress_tasks_by_assignee(
+/// about to verify and merge. `Open` rows are collected too — they carry no
+/// rebase block, but they do carry branch affinity for a parked worker
+/// (cas-5884).
+fn worker_task_bindings(
     cas_root: &std::path::Path,
-) -> std::collections::HashMap<String, String> {
+) -> std::collections::HashMap<String, WorkerTaskBinding> {
     use cas_types::TaskStatus;
 
     let mut map = std::collections::HashMap::new();
@@ -3979,12 +4101,13 @@ fn in_progress_tasks_by_assignee(
         TaskStatus::InProgress,
         TaskStatus::PendingSupervisorReview,
         TaskStatus::AwaitingMerge,
+        TaskStatus::Open,
     ] {
         let Ok(tasks) = store.list(Some(status)) else {
             continue;
         };
         for task in tasks {
-            let Some(assignee) = task.assignee.as_ref() else {
+            let Some(assignee) = task.assignee.clone() else {
                 continue;
             };
             let label = if status == TaskStatus::InProgress {
@@ -3992,7 +4115,12 @@ fn in_progress_tasks_by_assignee(
             } else {
                 format!("{} [{}]", task.id, status)
             };
-            map.entry(assignee.clone()).or_insert(label);
+            let affinity = task_branch_affinity(store.as_ref(), &task);
+            map.entry(assignee).or_insert(WorkerTaskBinding {
+                label,
+                blocks_rebase: status != TaskStatus::Open,
+                affinity,
+            });
         }
     }
     map
@@ -4047,6 +4175,65 @@ pub(crate) fn sync_gate_for_worker(
         ));
     }
     SyncGate::Proceed
+}
+
+/// Decide whether a worker worktree may be rebased onto `sync_ref` given the
+/// branch its task actually integrates into (cas-5884).
+///
+/// A fleet-wide `sync_all_workers branch=epic/…` used to rebase EVERY worker,
+/// including ones on standalone trunk-targeted tasks. That grafted the epic's
+/// unmerged commits onto their factory branch and rewrote their own merged
+/// commit, so the later close guard counted commits "not on main" that were in
+/// fact merged — the operator had to reach for `commit_receipt` to close
+/// correct work.
+///
+/// Override semantics (design choice, cas-5884): an explicit `worker_names=`
+/// targeting IS the override — naming a worker is a deliberate statement about
+/// that worktree. `force=` is NOT: it exists to consent to stashing WIP and
+/// rebasing under a live agent, neither of which says anything about the
+/// branch being correct, and a fleet sweep with `force=true` is exactly the
+/// call that caused this bug.
+pub(crate) fn sync_affinity_gate(
+    worker_name: &str,
+    task_label: Option<&str>,
+    affinity: &BranchAffinity,
+    sync_ref: &str,
+    default_branch: &str,
+    explicitly_targeted: bool,
+) -> SyncGate {
+    if explicitly_targeted {
+        return SyncGate::Proceed;
+    }
+    let sync = normalize_branch_ref(sync_ref);
+    let task = task_label.unwrap_or("its task");
+    match affinity {
+        BranchAffinity::Unknown => SyncGate::Proceed,
+        BranchAffinity::Branch(branch) => {
+            if normalize_branch_ref(branch) == sync {
+                SyncGate::Proceed
+            } else {
+                SyncGate::Refuse(format!(
+                    "{worker_name} (branch affinity mismatch — {task} integrates into `{branch}`, \
+                     not the requested sync target `{sync_ref}`; rebasing it would graft foreign \
+                     commits onto its factory branch and corrupt close accounting. Name it in \
+                     worker_names= to sync it anyway)"
+                ))
+            }
+        }
+        BranchAffinity::Trunk => {
+            if normalize_branch_ref(default_branch) == sync {
+                SyncGate::Proceed
+            } else {
+                SyncGate::Refuse(format!(
+                    "{worker_name} (branch affinity mismatch — {task} is standalone and \
+                     integrates into trunk `{default_branch}`, not the requested sync target \
+                     `{sync_ref}`; rebasing it would graft foreign commits onto its factory \
+                     branch and corrupt close accounting. Name it in worker_names= to sync it \
+                     anyway)"
+                ))
+            }
+        }
+    }
 }
 
 /// True when the worktree is sitting in an unfinished rebase.
@@ -10308,6 +10495,117 @@ mod sync_safety_tests {
             sync_gate_for_worker("w1", 0, false, None, false),
             SyncGate::Proceed
         );
+    }
+
+    // ---- branch affinity (cas-5884, pure) ---------------------------------
+
+    #[test]
+    fn standalone_worker_is_skipped_by_an_epic_wide_sweep() {
+        let SyncGate::Refuse(reason) = sync_affinity_gate(
+            "jolly-salmon-55",
+            Some("cas-0c0a"),
+            &BranchAffinity::Trunk,
+            "epic/cas-2627",
+            "main",
+            false,
+        ) else {
+            panic!("a trunk-targeted standalone worker must not be rebased onto an epic branch");
+        };
+        assert!(
+            reason.contains("branch affinity mismatch")
+                && reason.contains("cas-0c0a")
+                && reason.contains("main")
+                && reason.contains("epic/cas-2627")
+                && reason.contains("worker_names="),
+            "reason must name the task, both branches, and the override: {reason}"
+        );
+    }
+
+    #[test]
+    fn epic_lane_worker_still_syncs_to_its_own_epic_branch() {
+        assert_eq!(
+            sync_affinity_gate(
+                "w1",
+                Some("cas-1234"),
+                &BranchAffinity::Branch("epic/cas-2627".into()),
+                "epic/cas-2627",
+                "main",
+                false,
+            ),
+            SyncGate::Proceed
+        );
+    }
+
+    #[test]
+    fn worker_on_a_different_epic_is_skipped() {
+        let SyncGate::Refuse(reason) = sync_affinity_gate(
+            "w1",
+            Some("cas-1234"),
+            &BranchAffinity::Branch("epic/cas-9999".into()),
+            "epic/cas-2627",
+            "main",
+            false,
+        ) else {
+            panic!("a worker on another epic's lane must not be rebased onto this epic");
+        };
+        assert!(reason.contains("epic/cas-9999"), "{reason}");
+    }
+
+    #[test]
+    fn standalone_worker_syncs_when_the_target_is_trunk() {
+        for target in ["main", "origin/main", "refs/heads/main"] {
+            assert_eq!(
+                sync_affinity_gate(
+                    "w1",
+                    Some("cas-0c0a"),
+                    &BranchAffinity::Trunk,
+                    target,
+                    "main",
+                    false
+                ),
+                SyncGate::Proceed,
+                "trunk sweep must still reach standalone workers (target={target})"
+            );
+        }
+    }
+
+    #[test]
+    fn worker_without_a_task_has_no_affinity_constraint() {
+        assert_eq!(
+            sync_affinity_gate(
+                "w1",
+                None,
+                &BranchAffinity::Unknown,
+                "epic/cas-2627",
+                "main",
+                false
+            ),
+            SyncGate::Proceed
+        );
+    }
+
+    #[test]
+    fn explicit_worker_names_targeting_overrides_affinity() {
+        assert_eq!(
+            sync_affinity_gate(
+                "w1",
+                Some("cas-0c0a"),
+                &BranchAffinity::Trunk,
+                "epic/cas-2627",
+                "main",
+                true,
+            ),
+            SyncGate::Proceed,
+            "naming a worker explicitly is the documented override"
+        );
+    }
+
+    #[test]
+    fn branch_refs_normalize_across_remote_and_fully_qualified_forms() {
+        assert_eq!(normalize_branch_ref("refs/heads/epic/x"), "epic/x");
+        assert_eq!(normalize_branch_ref("origin/epic/x"), "epic/x");
+        assert_eq!(normalize_branch_ref("refs/remotes/origin/main"), "main");
+        assert_eq!(normalize_branch_ref("  main  "), "main");
     }
 
     // ---- git-level behaviour ----------------------------------------------

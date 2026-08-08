@@ -38,6 +38,24 @@ const LAST_PULL_KEY: &str = "last_knowledge_pull_at";
 /// Entity-type key used in the push payload and the pull response.
 pub const KNOWLEDGE_ENTITY: &str = "knowledge_pages";
 
+/// Percent-encode a query-string *value*.
+///
+/// Conservative allow-list: anything outside unreserved characters is escaped,
+/// so a team id containing `&`, `=`, `/` or a space cannot smuggle an extra
+/// query parameter into a scoped pull URL.
+pub(crate) fn encode_query_value(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 /// Wire shape for one knowledge page.
 ///
 /// The body travels inline. Pages are distilled summaries (a page is
@@ -221,6 +239,22 @@ impl CloudSyncer {
         let mut params = vec![format!("types={KNOWLEDGE_ENTITY}")];
         if let Some(since) = self.queue().get_metadata(LAST_PULL_KEY)? {
             params.push(format!("since={since}"));
+        }
+        // Send the active team so the server can narrow to it. Without this a
+        // user who belongs to two teams that share one project_canonical_id
+        // pulls the UNION of both teams' pages — cross-team knowledge bleed
+        // (cas-f177). Project scope alone does not partition teams.
+        //
+        // Absent team_id keeps the previous server behaviour, so a personal
+        // (teamless) install is unaffected.
+        if let Some(team_id) = self
+            .cloud_config
+            .team_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            params.push(format!("team_id={}", encode_query_value(team_id)));
         }
         // Fail closed on an unresolvable project scope, exactly like the
         // canonical builder: without `project_id=` this would ask the server
@@ -436,6 +470,98 @@ mod tests {
 
         assert_eq!(first, 1, "the seeded page must be pushed");
         assert_eq!(second, 0, "an unchanged page must not be re-pushed");
+    }
+
+    #[test]
+    fn query_values_are_percent_encoded() {
+        assert_eq!(encode_query_value("team-abc_123.x~y"), "team-abc_123.x~y");
+        // A value that could otherwise smuggle a second parameter.
+        assert_eq!(
+            encode_query_value("a&project_id=other"),
+            "a%26project_id%3Dother"
+        );
+        assert_eq!(encode_query_value("a b/c"), "a%20b%2Fc");
+    }
+
+    #[tokio::test]
+    async fn knowledge_pull_sends_the_active_team_id() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(super::super::pull::PULL_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "knowledge_pages": []
+            })))
+            .mount(&server)
+            .await;
+        let endpoint = server.uri();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        tokio::task::spawn_blocking(move || {
+            let store = seeded_store(&root);
+            let queue = Arc::new(SyncQueue::open(&root).unwrap());
+            queue.init().unwrap();
+            let config = CloudConfig {
+                endpoint: endpoint.clone(),
+                token: Some("test-token".to_string()),
+                team_id: Some("team-42".to_string()),
+                ..Default::default()
+            };
+            let syncer = CloudSyncer::new(queue, config, CloudSyncerConfig::default());
+            syncer.pull_knowledge_pages(&store).unwrap();
+        })
+        .await
+        .unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let query = requests[0].url.query().unwrap_or_default().to_string();
+        assert!(
+            query.contains("team_id=team-42"),
+            "cross-team bleed guard: the pull must name the active team — got {query}"
+        );
+        assert!(
+            query.contains("project_id="),
+            "project scoping must still be present — got {query}"
+        );
+    }
+
+    #[tokio::test]
+    async fn knowledge_pull_omits_team_id_for_a_personal_install() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(super::super::pull::PULL_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "knowledge_pages": []
+            })))
+            .mount(&server)
+            .await;
+        let endpoint = server.uri();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        tokio::task::spawn_blocking(move || {
+            let store = seeded_store(&root);
+            let syncer = syncer(Some(&endpoint), &root);
+            syncer.pull_knowledge_pages(&store).unwrap();
+        })
+        .await
+        .unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        let query = requests[0].url.query().unwrap_or_default().to_string();
+        assert!(
+            !query.contains("team_id"),
+            "a teamless install must not claim a team — got {query}"
+        );
     }
 
     #[tokio::test]

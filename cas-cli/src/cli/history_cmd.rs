@@ -24,8 +24,23 @@ pub enum HistoryCommands {
     Status(StatusArgs),
     /// Search indexed commits by text, path and time window
     Search(SearchArgs),
+    /// Embed everything still awaiting a vector — code history AND knowledge
+    /// pages — now, instead of waiting for the daemon tick that normally does it
+    Embed(EmbedArgs),
     /// Map commits to the symbols their changed lines touch (M3)
     Symbols(SymbolsArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct EmbedArgs {
+    /// Units to embed in this run (costs ceil(n / 32) requests). Defaults to
+    /// the daemon's per-tick budget.
+    #[arg(long)]
+    pub limit: Option<usize>,
+
+    /// Emit JSON instead of prose
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -125,8 +140,57 @@ pub fn execute(
         HistoryCommands::Docs(args) => execute_docs(args, cas_root),
         HistoryCommands::Status(args) => execute_status(args, cas_root),
         HistoryCommands::Search(args) => execute_search(args, cas_root),
+        HistoryCommands::Embed(args) => execute_embed(args, cas_root),
         HistoryCommands::Symbols(args) => execute_symbols(args, cas_root),
     }
+}
+
+/// Force the drain the daemon runs on a tick (EPIC cas-6212 / cas-db6e).
+///
+/// Exists for the same reason `cas index code` does: the automatic path is the
+/// normal one, and a human who wants the backlog gone *now* should not have to
+/// wait out an interval or — the defect M7 removes — reach for `cas cloud sync`
+/// and hope the embedding half comes along for the ride.
+fn execute_embed(args: &EmbedArgs, cas_root: &Path) -> anyhow::Result<()> {
+    let limit = args.limit.unwrap_or(crate::cloud::DRAIN_BATCH);
+    let report = crate::cloud::drain_all_pending(cas_root, limit)?;
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "capability_absent": report.capability_absent,
+                "embedded": report.embedded(),
+                "skipped": report.skipped(),
+                "requests": report.requests(),
+                "pending_after": report.pending_after(),
+                "problems": report.problems(),
+            })
+        );
+        return Ok(());
+    }
+
+    if report.capability_absent {
+        // A boundary of the installation, stated plainly — not an error, and
+        // not a silent no-op either.
+        println!(
+            "no cloud embedding capability configured; nothing was embedded and no vector \
+             store was created"
+        );
+        return Ok(());
+    }
+
+    println!(
+        "embedded {} unit(s) in {} request(s); {} skipped, {} still awaiting a vector",
+        report.embedded(),
+        report.requests(),
+        report.skipped(),
+        report.pending_after(),
+    );
+    for problem in report.problems() {
+        println!("  ! {problem}");
+    }
+    Ok(())
 }
 
 fn execute_search(args: &SearchArgs, cas_root: &Path) -> anyhow::Result<()> {

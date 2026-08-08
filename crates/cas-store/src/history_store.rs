@@ -289,6 +289,15 @@ pub const SOURCE_GITHUB: &str = "github";
 /// The `history_index_state.source` value for the CHANGELOG release parser.
 pub const SOURCE_CHANGELOG: &str = "changelog";
 
+/// The `history_index_state.source` value for the embedding drain (M7).
+///
+/// The drain writes no rows and moves no watermark, so it owns a ledger row for
+/// exactly one purpose: recording that it ran, and what went wrong when it did
+/// not. Without it a failing drain is only observable as "the pending count is
+/// not going down", which is the tracing::warn-only failure mode M7 exists to
+/// end.
+pub const SOURCE_EMBEDDINGS: &str = "embeddings";
+
 /// `history_docs.doc_kind` values. These are the id prefixes too
 /// (`gh:issue:116`, `gh:pr:57`, `gh:comment:<id>`, `changelog:v2.49.0`).
 pub const DOC_KIND_ISSUE: &str = "issue";
@@ -637,6 +646,45 @@ pub trait HistoryStore: Send + Sync {
     /// Read one doc by id.
     fn get_doc(&self, id: &str) -> Result<Option<HistoryDoc>>;
 
+    // === Embedding queue (M7, spec §4.4) ===
+    //
+    // Store-wide rather than per-repository on purpose: the drain is a
+    // background arm that must empty the whole queue this database carries, and
+    // a per-repository list would silently strand rows belonging to any
+    // repository the caller did not think to name.
+
+    /// Commits still awaiting a vector, oldest first, capped at `limit`.
+    fn list_pending_embedding_commits(&self, limit: usize) -> Result<Vec<HistoryCommit>>;
+
+    /// Docs still awaiting a vector, oldest first, capped at `limit`.
+    fn list_pending_embedding_docs(&self, limit: usize) -> Result<Vec<HistoryDoc>>;
+
+    /// Clear `pending_embedding` for a commit whose vector is now cached.
+    fn mark_commit_embedded(&self, sha: &str) -> Result<()>;
+
+    /// Clear `pending_embedding` for a doc whose vector is now cached.
+    fn mark_doc_embedded(&self, id: &str) -> Result<()>;
+
+    /// Clear `pending_embedding` for a commit that will **never** be embedded.
+    ///
+    /// Distinct from [`Self::mark_commit_embedded`] because the two facts are
+    /// different and the caller's report says so: a merge commit excluded per
+    /// spec §12 Q5 has no vector and never will, but it is also not *awaiting*
+    /// one. Leaving it armed would park 32% of this repo's commits permanently
+    /// at the head of the queue, and "pending drains to zero" — the property
+    /// M7 is judged on — could never hold.
+    fn skip_commit_embedding(&self, sha: &str) -> Result<()>;
+
+    /// `(commits, docs)` still awaiting a vector, store-wide.
+    fn count_pending_embedding(&self) -> Result<(i64, i64)>;
+
+    /// Re-arm every commit and doc for embedding.
+    ///
+    /// Called when the embedding model changes: vectors from two models are not
+    /// comparable, so the cache is dropped and the whole corpus must be
+    /// recomputed — not just the rows that happened to be pending.
+    fn mark_all_pending_embedding(&self) -> Result<()>;
+
     // ---- M3: symbol mapping (cas-0562, spec §4.1) ----
 
     /// Commits whose symbol mapping is still worth attempting, oldest first.
@@ -709,6 +757,17 @@ impl SqliteHistoryStore {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Shared body of "this commit is no longer awaiting a vector", whether
+    /// because it got one or because it never will (M7).
+    fn clear_commit_pending(&self, sha: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE history_commits SET pending_embedding = 0 WHERE sha = ?1",
+            params![sha],
+        )?;
+        Ok(())
     }
 
     /// Columns of `history_commits`, named explicitly so a `SELECT c.*` in a
@@ -1421,6 +1480,78 @@ impl HistoryStore for SqliteHistoryStore {
         Ok(doc)
     }
 
+    fn list_pending_embedding_commits(&self, limit: usize) -> Result<Vec<HistoryCommit>> {
+        let conn = self.lock();
+        // Oldest first: a backfill that is interrupted repeatedly still makes
+        // monotonic progress through history instead of re-attempting the same
+        // newest slice every tick.
+        let mut stmt = conn.prepare(
+            "SELECT * FROM history_commits
+              WHERE pending_embedding = 1
+              ORDER BY committed_at ASC, sha ASC
+              LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![limit as i64], Self::commit_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    fn list_pending_embedding_docs(&self, limit: usize) -> Result<Vec<HistoryDoc>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM history_docs
+              WHERE pending_embedding = 1
+              ORDER BY COALESCE(updated_at, created_at, ''), id
+              LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![limit as i64], Self::doc_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    fn mark_commit_embedded(&self, sha: &str) -> Result<()> {
+        self.clear_commit_pending(sha)
+    }
+
+    fn skip_commit_embedding(&self, sha: &str) -> Result<()> {
+        self.clear_commit_pending(sha)
+    }
+
+    fn mark_doc_embedded(&self, id: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE history_docs SET pending_embedding = 0 WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    fn count_pending_embedding(&self) -> Result<(i64, i64)> {
+        let conn = self.lock();
+        let commits: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM history_commits WHERE pending_embedding = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        let docs: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM history_docs WHERE pending_embedding = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok((commits, docs))
+    }
+
+    fn mark_all_pending_embedding(&self) -> Result<()> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        tx.execute("UPDATE history_commits SET pending_embedding = 1", [])?;
+        tx.execute("UPDATE history_docs SET pending_embedding = 1", [])?;
+        tx.commit()?;
+        Ok(())
+    }
+
     fn commits_awaiting_symbol_mapping(
         &self,
         repository: &str,
@@ -1942,6 +2073,81 @@ mod tests {
             .upsert_docs("/repo", SOURCE_GITHUB, &[edited], None, true)
             .unwrap();
         assert_eq!(store.docs_pending_embedding("/repo").unwrap(), 1);
+    }
+
+    /// The M7 queue: what comes out, what clearing it does, and the fact that
+    /// it is store-wide. A per-repository list would strand every row belonging
+    /// to a repository the drain did not think to name.
+    #[test]
+    fn the_embedding_queue_lists_marks_and_counts_across_repositories() {
+        let (_t, store) = store();
+        let mut elsewhere = commit(&"e".repeat(40));
+        elsewhere.repository = "/elsewhere".into();
+        store
+            .commit_batch(
+                "/repo",
+                &[commit(&"a".repeat(40))],
+                &[],
+                &"a".repeat(40),
+                true,
+            )
+            .unwrap();
+        store
+            .commit_batch("/elsewhere", &[elsewhere], &[], &"e".repeat(40), true)
+            .unwrap();
+        store
+            .upsert_docs(
+                "/repo",
+                SOURCE_GITHUB,
+                &[doc(
+                    "gh:issue:1",
+                    DOC_KIND_ISSUE,
+                    "t",
+                    "b",
+                    "2026-08-02T00:00:00Z",
+                )],
+                None,
+                true,
+            )
+            .unwrap();
+
+        assert_eq!(store.count_pending_embedding().unwrap(), (2, 1));
+        assert_eq!(store.list_pending_embedding_commits(10).unwrap().len(), 2);
+        assert_eq!(store.list_pending_embedding_docs(10).unwrap().len(), 1);
+        // The limit is honoured, or a backfill would pull the whole corpus into
+        // memory on the first tick.
+        assert_eq!(store.list_pending_embedding_commits(1).unwrap().len(), 1);
+
+        store.mark_commit_embedded(&"a".repeat(40)).unwrap();
+        // A skipped merge leaves the queue exactly as an embedded one does —
+        // it is excluded from having a vector, not awaiting one.
+        store.skip_commit_embedding(&"e".repeat(40)).unwrap();
+        store.mark_doc_embedded("gh:issue:1").unwrap();
+        assert_eq!(store.count_pending_embedding().unwrap(), (0, 0));
+        assert!(store.list_pending_embedding_commits(10).unwrap().is_empty());
+
+        // A model change re-arms everything, not just what happened to be
+        // pending: vectors from two models are not comparable.
+        store.mark_all_pending_embedding().unwrap();
+        assert_eq!(store.count_pending_embedding().unwrap(), (2, 1));
+    }
+
+    /// Re-indexing a commit must not re-enqueue it. Commit prose is immutable,
+    /// so a re-walk (branch switch, watermark reset) that re-armed the queue
+    /// would bill the whole history again for identical vectors.
+    #[test]
+    fn reindexing_a_commit_does_not_rearm_its_embedding() {
+        let (_t, store) = store();
+        let c = commit(&"a".repeat(40));
+        store
+            .commit_batch("/repo", &[c.clone()], &[], &c.sha, true)
+            .unwrap();
+        store.mark_commit_embedded(&c.sha).unwrap();
+
+        store
+            .commit_batch("/repo", &[c.clone()], &[], &c.sha, true)
+            .unwrap();
+        assert_eq!(store.count_pending_embedding().unwrap().0, 0);
     }
 
     #[test]

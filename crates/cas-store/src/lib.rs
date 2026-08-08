@@ -106,7 +106,8 @@ pub use history_store::{
     HISTORY_DOCS_SCHEMA, HISTORY_DOCS_SCHEMA_STATEMENTS, HISTORY_FTS_STATEMENTS, HISTORY_SCHEMA,
     HISTORY_SCHEMA_STATEMENTS, HistoryCommit, HistoryCommitFile, HistoryCommitHit,
     HistoryCommitSymbol, HistoryDoc, HistoryIndexState, HistoryQuery, HistoryStore,
-    ProvenanceCoverage, SOURCE_CHANGELOG, SOURCE_GIT, SOURCE_GITHUB, SqliteHistoryStore,
+    ProvenanceCoverage, SOURCE_CHANGELOG, SOURCE_EMBEDDINGS, SOURCE_GIT, SOURCE_GITHUB,
+    SqliteHistoryStore,
     SymbolMapping, SymbolRange,
 };
 

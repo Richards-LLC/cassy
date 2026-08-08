@@ -460,6 +460,10 @@ impl EmbeddedDaemon {
         let mut history_docs_interval = tokio::time::interval(Duration::from_secs(
             self.config.history_docs_interval_secs.max(1),
         ));
+        // Automagic embedding drain (EPIC cas-6212 / cas-db6e, spec §4.4, §7).
+        let mut embed_drain_interval = tokio::time::interval(Duration::from_secs(
+            self.config.embed_drain_interval_secs.max(1),
+        ));
         // cas-499c: the max-staleness half of the idle-preferred scheduler. Starts "now" so a
         // freshly-started daemon still waits out one full ceiling before overriding idleness.
         let mut last_code_index = tokio::time::Instant::now();
@@ -479,6 +483,7 @@ impl EmbeddedDaemon {
         code_index_interval.tick().await;
         history_index_interval.tick().await;
         history_docs_interval.tick().await;
+        embed_drain_interval.tick().await;
         proxy_config_interval.tick().await;
 
         // Check if agent was already registered directly (fallback path in SessionStart hook)
@@ -655,6 +660,33 @@ impl EmbeddedDaemon {
                     }
                 }
 
+                // Automagic embedding drain (EPIC cas-6212 / cas-db6e, spec §4.4).
+                //
+                // Vectors used to be computed only inside `cas cloud sync`, which
+                // made "is my corpus embedded?" a question about whether a human
+                // had recently typed a command — and a 107-page knowledge backlog
+                // duly sat un-embedded until someone ran sync by hand. That manual
+                // step is the defect this arm removes.
+                //
+                // Ungated on idleness, for the reason the history arms are: a
+                // daemon in a busy factory is never idle, and a gate that never
+                // opens is indistinguishable from a feature that was never built.
+                // The work is bounded instead — DRAIN_BATCH units per tick, chunked
+                // at the endpoint's 32-input cap and paced under its 120 req/60 s
+                // limit — so ungated does not mean unbounded.
+                //
+                // Logged out, or an endpoint with no `/api/embeddings`, is a
+                // declared boundary: the drain returns capability_absent, creates
+                // no LMDB environment and makes no request.
+                _ = embed_drain_interval.tick() => {
+                    if self.config.embed_drain {
+                        if let Err(e) = self.run_embedding_drain_cycle().await {
+                            let mut status = self.status.write().await;
+                            status.last_error = Some(format!("Embedding drain failed: {e}"));
+                        }
+                    }
+                }
+
                 // Proxy config hot-reload - check .cas/proxy.toml for changes
                 _ = proxy_config_interval.tick() => {
                     #[cfg(feature = "mcp-proxy")]
@@ -800,6 +832,51 @@ impl EmbeddedDaemon {
                 "[CAS] History docs: {} issue(s), {} PR(s), {} comment(s)",
                 fetch.issues, fetch.pull_requests, fetch.comments,
             );
+        }
+
+        Ok(())
+    }
+
+    /// Drain every pending vector — knowledge pages AND code history — without
+    /// anyone having to run `cas cloud sync` (EPIC cas-6212 / cas-db6e).
+    ///
+    /// Problems are put where a human will find them: the drain's own report
+    /// fields, the `history_index_state('embeddings')` ledger row that
+    /// `cas doctor` reads, and `status.last_error`. Deliberately not a
+    /// `tracing::warn!` and nothing else — that is the shape that let cas-a924's
+    /// permanent `400` read as a cheerful "0 embedded" for weeks.
+    async fn run_embedding_drain_cycle(&self) -> Result<(), CasError> {
+        let cas_root = self.config.cas_root.clone();
+
+        let report = tokio::task::spawn_blocking(move || {
+            crate::cloud::drain_all_pending(&cas_root, crate::cloud::DRAIN_BATCH)
+        })
+        .await
+        .map_err(|e| CasError::Other(format!("Task join error: {e}")))??;
+
+        // No capability is a state of the installation, not news. Say nothing.
+        if report.capability_absent {
+            return Ok(());
+        }
+
+        if report.did_work() {
+            eprintln!(
+                "[CAS] Embedding drain: {} embedded ({} request(s), {} skipped), {} still pending",
+                report.embedded(),
+                report.requests(),
+                report.skipped(),
+                report.pending_after(),
+            );
+        }
+
+        let problems = report.problems();
+        if !problems.is_empty() {
+            let mut status = self.status.write().await;
+            status.last_error = Some(format!(
+                "Embedding drain: {} ({} unit(s) still awaiting a vector)",
+                problems.join("; "),
+                report.pending_after()
+            ));
         }
 
         Ok(())

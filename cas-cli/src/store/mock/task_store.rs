@@ -414,3 +414,51 @@ impl TaskStore for MockTaskStore {
         Ok(None)
     }
 }
+
+#[cfg(test)]
+mod cas_ec74_store_owned_updated_at_parity {
+    use super::*;
+    use cas_store::SqliteTaskStore;
+
+    /// cas-ec74: the mock and the real store must agree that `updated_at` is
+    /// store-owned.
+    ///
+    /// `MockTaskStore::update` used to persist `task.updated_at` verbatim while
+    /// `SqliteTaskStore::update` re-stamped it from its own clock. That
+    /// divergence is why a four-day lifecycle-relay outage (cas-0147) was
+    /// invisible to the suite: every test written against the mock observed
+    /// caller-supplied semantics that production never provided. This test
+    /// runs the SAME assertions against both impls so the divergence cannot
+    /// silently return.
+    #[test]
+    fn mock_and_sqlite_agree_that_updated_at_is_store_owned() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let sqlite = SqliteTaskStore::open(temp.path()).unwrap();
+        sqlite.init().unwrap();
+        let mock = MockTaskStore::new();
+
+        let stores: Vec<(&str, &dyn TaskStore)> = vec![("mock", &mock), ("sqlite", &sqlite)];
+
+        for (label, store) in stores {
+            let id = store.generate_id().unwrap();
+            let mut task = Task::new(id.clone(), format!("parity {label}"));
+            store.add(&task).unwrap();
+
+            let sentinel = chrono::Utc::now() - chrono::Duration::days(365);
+            task.updated_at = sentinel;
+            task.status = TaskStatus::InProgress;
+
+            let returned = store.update(&task).unwrap();
+            let persisted = store.get(&id).unwrap().updated_at;
+
+            assert_ne!(
+                persisted, sentinel,
+                "{label}: updated_at must be store-owned, not caller-supplied"
+            );
+            assert_eq!(
+                persisted, returned,
+                "{label}: update() must return exactly the stamp it persisted"
+            );
+        }
+    }
+}

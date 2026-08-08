@@ -1015,3 +1015,102 @@ mod cas_3dcb_worker_died_relay_tests {
         assert!(!notice.contains("(unknown task)"));
     }
 }
+
+/// cas-ec74 — the producer half of cas-0147, proved end to end.
+///
+/// cas-0147 fixed the CONSUMER (this module's staleness gate) so a
+/// microsecond of clock drift no longer destroyed a notification. cas-ec74
+/// fixes the PRODUCER so the drift does not exist in the first place: the
+/// store returns the stamp it persisted, and the occurrence is derived from
+/// that return value instead of from a second `Utc::now()`.
+///
+/// These tests drive a real `SqliteTaskStore` rather than fabricated
+/// timestamps, so they fail if either half regresses — a store that stops
+/// returning its persisted stamp, or a gate that goes back to exact equality.
+#[cfg(test)]
+mod cas_ec74_producer_round_trip_tests {
+    use super::*;
+    use crate::mcp::tools::core::task::lifecycle::supervisor_push::occurrence_from_updated_at;
+    use crate::types::Task;
+    use cas_store::{SqliteTaskStore, TaskStore};
+
+    fn started_prompt(task_id: &str, occurrence: &str) -> String {
+        format!(
+            "<task-lifecycle transition=\"task_started\" task_id=\"{task_id}\" old=\"open\" \
+             new=\"in_progress\" actor=\"w\" notification_id=\"1\" occurrence=\"{occurrence}\">\n\
+             </task-lifecycle>"
+        )
+    }
+
+    /// The full producer -> consumer round trip: an occurrence derived from
+    /// `update()`'s RETURN value is accepted by the staleness gate, and the
+    /// occurrence is byte-identical to the persisted `updated_at` — the exact
+    /// match that was impossible for four days.
+    #[test]
+    fn an_occurrence_derived_from_the_returned_stamp_matches_the_stored_row() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = SqliteTaskStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+
+        let id = store.generate_id().unwrap();
+        let mut task = Task::new(id.clone(), "producer round trip".to_string());
+        store.add(&task).unwrap();
+
+        // Exactly what lifecycle.rs does on start: stamp, write, adopt the
+        // store's answer, derive the occurrence from it.
+        task.status = TaskStatus::InProgress;
+        task.updated_at = Utc::now();
+        task.updated_at = store.update(&task).unwrap();
+        let occurrence = occurrence_from_updated_at(task.updated_at);
+
+        let persisted = store.get(&id).unwrap().updated_at;
+        assert_eq!(
+            occurrence,
+            occurrence_from_updated_at(persisted),
+            "producer and consumer must share ONE clock read — if these differ, \
+             the second Utc::now() is back"
+        );
+
+        assert_eq!(
+            revalidate_lifecycle_prompt(
+                &started_prompt(&id, &occurrence),
+                TaskStatus::InProgress,
+                persisted,
+            ),
+            LifecyclePromptDecision::Deliver,
+            "the notification describing this very write must survive the gate"
+        );
+    }
+
+    /// AC4 restated as a guard: with the producer fixed, the rewound-occurrence
+    /// check cas-0147 kept (`current_updated_at < occurrence`) must still bite.
+    /// A correct producer must not make the gate toothless.
+    #[test]
+    fn a_rewound_occurrence_is_still_rejected_after_the_producer_fix() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = SqliteTaskStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+
+        let id = store.generate_id().unwrap();
+        let mut task = Task::new(id.clone(), "rewound".to_string());
+        store.add(&task).unwrap();
+        task.status = TaskStatus::InProgress;
+        let persisted = store.update(&task).unwrap();
+
+        // An occurrence from a write that is not in this task's history.
+        let from_the_future = occurrence_from_updated_at(persisted + chrono::Duration::seconds(30));
+
+        assert_eq!(
+            revalidate_lifecycle_prompt(
+                &started_prompt(&id, &from_the_future),
+                TaskStatus::InProgress,
+                persisted,
+            ),
+            LifecyclePromptDecision::SuppressStale {
+                task_id: id.clone()
+            },
+            "a task whose persisted state predates the announced occurrence \
+             cannot have produced it"
+        );
+    }
+}

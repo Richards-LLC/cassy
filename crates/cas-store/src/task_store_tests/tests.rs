@@ -338,3 +338,127 @@ fn test_delete_rolls_back_on_missing_task() {
     let task2_check = store.get(&task2.id).unwrap();
     assert_eq!(task2_check.title, "Task 2");
 }
+
+/// cas-ec74: `updated_at` is store-owned on the `update()` path, and the stamp
+/// the store actually wrote is returned to the caller.
+///
+/// Before this, `update()` returned `Result<()>` and re-read the clock inside
+/// the UPDATE, so the persisted stamp was invisible. Callers that needed it —
+/// every lifecycle-notification producer — took a second `Utc::now()` and
+/// derived an occurrence from it, which could never match the stored row. The
+/// producer side had no test at all; the existing CRUD tests just `unwrap()`
+/// the result and never look at the timestamp.
+#[test]
+fn update_owns_updated_at_and_returns_the_stamp_it_persisted() {
+    let (_temp, store) = create_test_store();
+
+    let id = store.generate_id().unwrap();
+    let mut task = Task::new(id.clone(), "Store-owned timestamp".to_string());
+    store.add(&task).unwrap();
+
+    // A caller-supplied sentinel, far enough in the past that it cannot be
+    // confused with a clock read taken during this test.
+    let sentinel = chrono::Utc::now() - chrono::Duration::days(365);
+    task.updated_at = sentinel;
+    task.status = TaskStatus::InProgress;
+
+    let returned = store.update(&task).unwrap();
+    let persisted = store.get(&id).unwrap().updated_at;
+
+    assert_ne!(
+        persisted, sentinel,
+        "updated_at is store-owned: a caller cannot dictate it through update()"
+    );
+    assert_eq!(
+        persisted, returned,
+        "the returned stamp must BE the persisted stamp — if these can differ, \
+         callers are back to guessing with a second clock read, which is the \
+         whole defect this contract removes"
+    );
+}
+
+/// cas-ec74: the returned stamp is authoritative across repeated writes, not
+/// merely "close enough". Two updates must return two distinct stamps, each
+/// matching what the row carried at that moment.
+#[test]
+fn each_update_returns_its_own_persisted_stamp() {
+    let (_temp, store) = create_test_store();
+
+    let id = store.generate_id().unwrap();
+    let mut task = Task::new(id.clone(), "Sequential writes".to_string());
+    store.add(&task).unwrap();
+
+    task.notes = "first".to_string();
+    let first = store.update(&task).unwrap();
+    assert_eq!(store.get(&id).unwrap().updated_at, first);
+
+    task.notes = "second".to_string();
+    let second = store.update(&task).unwrap();
+    assert_eq!(store.get(&id).unwrap().updated_at, second);
+
+    assert!(
+        second >= first,
+        "the store clock must not run backwards between writes"
+    );
+}
+
+/// cas-ec74: `reopen_exact_with_conn` is the ONE sanctioned exception to the
+/// store-owned rule — there `updated_at` is a compare-and-swap key, not a
+/// value the store gets to choose. Driven here through its public entry point
+/// `reopen_closed_task_atomic`. Pins that the lock still rejects a mismatched
+/// expectation, so documenting the exception cannot quietly become removing it.
+#[test]
+fn reopen_exact_rejects_a_mismatched_expected_updated_at() {
+    let temp = TempDir::new().unwrap();
+    let store = SqliteTaskStore::open(temp.path()).unwrap();
+    store.init().unwrap();
+
+    let id = store.generate_id().unwrap();
+    let mut task = Task::new(id.clone(), "Optimistic lock".to_string());
+    store.add(&task).unwrap();
+    task.status = TaskStatus::Closed;
+    task.closed_at = Some(chrono::Utc::now());
+    let closed_at = store.update(&task).unwrap();
+
+    let mut reopened = task.clone();
+    reopened.status = TaskStatus::Open;
+    reopened.closed_at = None;
+    reopened.updated_at = chrono::Utc::now();
+
+    // Wrong expectation: another write landed between read and reopen.
+    let stale = crate::reopen_closed_task_atomic(
+        temp.path(),
+        &reopened,
+        closed_at - chrono::Duration::seconds(1),
+        crate::ParentDependencyUpdate::Unchanged,
+        None,
+    );
+    assert!(
+        stale.is_err(),
+        "a mismatched expected_updated_at must be refused, not silently applied"
+    );
+    assert_eq!(
+        store.get(&id).unwrap().status,
+        TaskStatus::Closed,
+        "the refused reopen must leave the row untouched"
+    );
+
+    // Correct expectation: the CAS succeeds and writes the caller's value
+    // through verbatim — the documented exception to store-owned updated_at.
+    crate::reopen_closed_task_atomic(
+        temp.path(),
+        &reopened,
+        closed_at,
+        crate::ParentDependencyUpdate::Unchanged,
+        None,
+    )
+    .expect("matching expected_updated_at should succeed");
+
+    let after = store.get(&id).unwrap();
+    assert_eq!(after.status, TaskStatus::Open);
+    assert_eq!(
+        after.updated_at, reopened.updated_at,
+        "reopen_closed_task_atomic persists the caller's updated_at verbatim; \
+         it is an optimistic-concurrency key, not a general write path"
+    );
+}

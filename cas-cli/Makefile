@@ -174,6 +174,31 @@ REAL_STORE_ARGS ?= -p cas --test mcp_protocol_test --test mcp_tools_test --test 
 test-real-store-untouched:
 	../scripts/check-real-store-untouched.sh $(REAL_STORE_ARGS)
 
+# Run a scoped suite through the silent-success guard (cas-a967 / GH #173).
+#
+# Three test runs in this repo exited 0 while executing ZERO tests on
+# 2026-08-07: a wrong package name (`-p cas-cli` — the crate is `cas`), a
+# relative $ZIG path panicking ghostty_vt_sys's build script, and a stale
+# module filter printing "test result: ok. 0 passed; ... 3929 filtered out".
+# Exit code alone cannot tell any of those apart from success.
+#
+# This target runs the scoped suite and then checks the harness actually
+# reported and that the passed count is nonzero. Use it for the final-proof
+# run you intend to quote in a close note:
+#
+#   make -C cas-cli test-scoped SCOPED_ARGS='-p cas --lib my_module'
+#   make -C cas-cli test-scoped SCOPED_ARGS='-p cas --test cli_test'
+#
+# NOTE: like test-clean-env, this MUST stay an explicit rule — the `test-%`
+# pattern rule above would otherwise match it and run `cargo test -p cas scoped`.
+SCOPED_ARGS ?= -p cas --lib
+test-scoped:
+	../scripts/run-scoped-tests.sh $(SCOPED_ARGS)
+
+# Prove the GH #173 guard itself still fails every silent-success shape.
+test-scoped-selftest:
+	../scripts/test-run-scoped-tests.sh
+
 # Type check
 check:
 	$(CARGO) check -p cas

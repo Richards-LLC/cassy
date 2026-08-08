@@ -71,6 +71,58 @@ impl LmdbVectorStore {
         Self::open_with_config(path, dimension, DEFAULT_MAP_SIZE)
     }
 
+    /// Open an existing environment without creating databases or writing
+    /// dimension metadata. This is the query-time counterpart to [`Self::open`].
+    pub fn open_existing(path: impl AsRef<Path>, dimension: usize) -> Result<Option<Self>> {
+        let path = path.as_ref();
+        if !path.is_dir() {
+            return Ok(None);
+        }
+        let env = unsafe {
+            EnvOpenOptions::new()
+                .map_size(DEFAULT_MAP_SIZE)
+                .max_dbs(MAX_DBS)
+                .open(path)
+                .map_err(|e| SearchError::storage(format!("LMDB open existing: {e}")))?
+        };
+        let rtxn = env
+            .read_txn()
+            .map_err(|e| SearchError::storage(format!("LMDB read txn: {e}")))?;
+        let Some(vectors) = env
+            .open_database::<Str, Bytes>(&rtxn, Some("vectors"))
+            .map_err(|e| SearchError::storage(format!("LMDB open vectors db: {e}")))?
+        else {
+            return Ok(None);
+        };
+        let Some(metadata) = env
+            .open_database::<Str, Str>(&rtxn, Some("metadata"))
+            .map_err(|e| SearchError::storage(format!("LMDB open metadata db: {e}")))?
+        else {
+            return Ok(None);
+        };
+        let stored_dimension = metadata
+            .get(&rtxn, "dimension")
+            .map_err(|e| SearchError::storage(format!("LMDB read dimension: {e}")))?
+            .ok_or_else(|| SearchError::storage("LMDB dimension metadata is missing"))?
+            .parse::<usize>()
+            .map_err(|_| SearchError::storage("Invalid dimension in metadata"))?;
+        if stored_dimension != dimension {
+            return Err(SearchError::DimensionMismatch {
+                expected: stored_dimension,
+                actual: dimension,
+            });
+        }
+        rtxn.commit()
+            .map_err(|e| SearchError::storage(format!("LMDB read txn commit: {e}")))?;
+        Ok(Some(Self {
+            env,
+            vectors,
+            metadata,
+            dimension,
+            write_lock: RwLock::new(()),
+        }))
+    }
+
     /// Open with custom map size
     ///
     /// # Arguments

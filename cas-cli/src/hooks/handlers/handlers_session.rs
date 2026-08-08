@@ -213,6 +213,15 @@ pub fn handle_session_start(
     // (role guidance + CAS header + memories/tasks) is protected.
     let mut assembler = SessionContextAssembler::new(context);
 
+    // cas-cd54: ambient recall is a degradable, independently hard-bounded
+    // evidence segment. It stays below immutable role guidance and never
+    // competes with safety banners for protected SessionStart bytes.
+    if let Some(packet) =
+        crate::ambient_recall::build_ambient_recall_context(input, cas_root, None, true)
+    {
+        assembler.append_degradable(packet.full, packet.compact);
+    }
+
     if let Some(staleness) =
         crate::hooks::handlers::handlers_events::check_codemap_freshness(cas_root)
     {

@@ -472,6 +472,29 @@ impl KnowledgeVectorCache {
         Self::open_dir(Self::code_cache_dir(cas_root), meta)
     }
 
+    /// Open the already-existing knowledge/history cache without creating a
+    /// new embedding corpus. Query-time callers use this after capability
+    /// resolution so a configured provider with no indexed vectors does not
+    /// materialise an empty LMDB environment merely because a hook ran.
+    pub fn open_existing(cas_root: &Path) -> Result<Option<Self>, CasError> {
+        let dir = Self::cache_dir(cas_root);
+        let Some(meta) = Self::read_meta(&dir) else {
+            return Ok(None);
+        };
+        Self::open_existing_dir(dir, meta)
+    }
+
+    /// Query-only opener for the isolated source-code cache. Unlike
+    /// [`Self::open_existing_code`], this never needs write access because it
+    /// cannot be used by the structural indexer's retirement path.
+    pub fn open_existing_code_read_only(cas_root: &Path) -> Result<Option<Self>, CasError> {
+        let dir = Self::code_cache_dir(cas_root);
+        let Some(meta) = Self::read_meta(&dir) else {
+            return Ok(None);
+        };
+        Self::open_existing_dir(dir, meta)
+    }
+
     /// Open an already-existing code cache using its persisted embedding
     /// identity. Used only to retire deleted symbols while logged out; it
     /// never creates storage and never performs a cloud call.
@@ -525,6 +548,31 @@ impl KnowledgeVectorCache {
             root: dir,
             reindexed,
         })
+    }
+
+    fn open_existing_dir(dir: PathBuf, meta: EmbeddingMeta) -> Result<Option<Self>, CasError> {
+        let mut envs = open_envs().lock().unwrap_or_else(|p| p.into_inner());
+        let store = match envs.get(&dir) {
+            Some(store) if store.dimension() == meta.dims => Arc::clone(store),
+            Some(_) => return Ok(None),
+            None => {
+                let Some(store) = LmdbVectorStore::open_existing(&dir, meta.dims)
+                    .map_err(|e| CasError::Other(format!("Failed to open embedding cache: {e}")))?
+                else {
+                    return Ok(None);
+                };
+                let store = Arc::new(store);
+                envs.insert(dir.clone(), Arc::clone(&store));
+                store
+            }
+        };
+        drop(envs);
+        Ok(Some(Self {
+            store,
+            meta,
+            root: dir,
+            reindexed: false,
+        }))
     }
 
     fn read_meta(dir: &Path) -> Option<EmbeddingMeta> {

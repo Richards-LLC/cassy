@@ -71,6 +71,7 @@ BM25-only remains cheaper for exact lexical lookup or provider-absent operation:
 
 - Fixed fixtures: `cas-cli/src/ambient_recall.rs`, tests `labeled_fusion_evaluation_beats_bm25_only_without_harmful_injection` and `prompt_overhead_percentiles_stay_bounded_across_large_corpora`.
 - Live harness: `authenticated_isolated_live_provider_receipt` at commit `09b71cf3`; extraction window `2026-08-08T21:54:49Z–21:54:50Z`.
-- Fixed command: `env ZIG=/home/pippenz/Petrastella/cas-src/.context/zig/zig cargo test -p cas --lib ambient_recall::tests -- --nocapture --test-threads=1`.
-- Live command: `env ZIG=/home/pippenz/Petrastella/cas-src/.context/zig/zig CAS_AMBIENT_LIVE_CONFIG_DIR=/home/pippenz/Petrastella/cas-src/.cas cargo test -p cas --lib -- ambient_recall::tests::authenticated_isolated_live_provider_receipt --ignored --nocapture --test-threads=1`.
+- Run commands from the repository root.
+- Fixed command: `env ZIG=./.context/zig/zig cargo test -p cas --lib ambient_recall::tests -- --nocapture --test-threads=1`.
+- Live command: `env ZIG=./.context/zig/zig CAS_AMBIENT_LIVE_CONFIG_DIR=./.cas cargo test -p cas --lib -- ambient_recall::tests::authenticated_isolated_live_provider_receipt --ignored --nocapture --test-threads=1`.
 - Live result: exit 0; 1 passed, 0 failed, 4,220 filtered; test body 1.38 s. Fixed checkpoint result before the live harness: 15 passed, 0 failed, 4,205 filtered.

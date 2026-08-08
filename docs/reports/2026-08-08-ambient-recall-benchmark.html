@@ -56,9 +56,10 @@ run dollars = (T_drain / 1,000,000) * P + 3Q + 2 * one query-event dollars</code
 
   <section><h2>Threats to validity</h2><ul><li>Six labels establish deterministic behavior, not population quality; current SessionStart was not numerically replayed.</li><li>Live latency/freshness are single observations, not percentile distributions.</li><li>The four-unit live corpus isolates namespace, role, scope, and call counts; large-corpus prompt bounding is separate.</li><li>Prompt percentiles are byte overhead with a conservative four-bytes-per-token boundary.</li><li>Provider billing fields are absent. Requests, units, latency, and queue state are measured; dollars are formula-only.</li></ul></section>
 
-  <section><h2>Provenance</h2><p>Markdown source: <a href="2026-08-08-ambient-recall-benchmark.md">2026-08-08-ambient-recall-benchmark.md</a>. Live harness: <code>authenticated_isolated_live_provider_receipt</code> at <code>09b71cf3</code>; window 2026-08-08T21:54:49Z–21:54:50Z.</p><pre><code>env ZIG=/home/pippenz/Petrastella/cas-src/.context/zig/zig cargo test -p cas --lib ambient_recall::tests -- --nocapture --test-threads=1
+  <section><h2>Provenance</h2><p>Markdown source: <a href="2026-08-08-ambient-recall-benchmark.md">2026-08-08-ambient-recall-benchmark.md</a>. Live harness: <code>authenticated_isolated_live_provider_receipt</code> at <code>09b71cf3</code>; window 2026-08-08T21:54:49Z–21:54:50Z.</p><p>Run commands from the repository root.</p><pre><code>env ZIG=./.context/zig/zig cargo test -p cas --lib ambient_recall::tests -- --nocapture --test-threads=1
+env ZIG=./.context/zig/zig cargo test -p cas --lib ambient_recall::tests -- --nocapture --test-threads=1
 
-env ZIG=/home/pippenz/Petrastella/cas-src/.context/zig/zig CAS_AMBIENT_LIVE_CONFIG_DIR=/home/pippenz/Petrastella/cas-src/.cas cargo test -p cas --lib -- ambient_recall::tests::authenticated_isolated_live_provider_receipt --ignored --nocapture --test-threads=1</code></pre><p>Live: exit 0; 1 passed, 0 failed, 4,220 filtered; test body 1.38 s. Fixed checkpoint: 15 passed, 0 failed, 4,205 filtered.</p></section>
+env ZIG=./.context/zig/zig CAS_AMBIENT_LIVE_CONFIG_DIR=./.cas cargo test -p cas --lib -- ambient_recall::tests::authenticated_isolated_live_provider_receipt --ignored --nocapture --test-threads=1</code></pre><p>Live: exit 0; 1 passed, 0 failed, 4,220 filtered; test body 1.38 s. Fixed checkpoint: 15 passed, 0 failed, 4,205 filtered.</p></section>
 </main>
 <footer>Self-contained offline report · no external assets or runtime requests.</footer>
 </body>

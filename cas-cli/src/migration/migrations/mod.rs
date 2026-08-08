@@ -201,6 +201,7 @@ mod m222_history_docs_create_table;
 mod m223_history_commits_fts;
 mod m224_history_commit_symbols;
 mod m225_commit_links_link_method;
+mod m226_knowledge_pages_add_attribution;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -431,6 +432,7 @@ pub const MIGRATIONS: &[Migration] = &[
     // one, now that the history indexer is a second writer of commit_links.
     // Renumbered 224 → 225 after the M3 lane claimed 224.
     m225_commit_links_link_method::MIGRATION,
+    m226_knowledge_pages_add_attribution::MIGRATION,
 ];
 
 #[cfg(test)]

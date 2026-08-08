@@ -419,6 +419,26 @@ impl EmbeddedDaemon {
             let _ = store.register_daemon(&daemon_id, "mcp_embedded");
         }
 
+        // Record the binary epoch this process opens (EPIC cas-6212 / cas-8d2a,
+        // spec §9). Without it, "is symptom X fixed" can only be answered
+        // against tag dates — the mistake cas-9d92 had to retract, because a
+        // pre-install daemon kept serving the old binary for 34 minutes after
+        // the new one landed. Best-effort: a daemon must never fail to start
+        // because the history index is unavailable.
+        {
+            use cas_store::{HistoryStore, SqliteHistoryStore};
+            let started_at = Utc::now().to_rfc3339();
+            match SqliteHistoryStore::open(&self.config.cas_root) {
+                Ok(store) => {
+                    let epoch = crate::history::epochs::current_daemon_epoch(&started_at);
+                    if let Err(e) = store.record_epoch(&epoch) {
+                        tracing::debug!(error = %e, "history epoch not recorded");
+                    }
+                }
+                Err(e) => tracing::debug!(error = %e, "history epoch store unavailable"),
+            }
+        }
+
         // Unix socket for hook communication.
         //
         // cas-eabe (GH #163): this is an *election*, not a one-shot bind. If
@@ -581,6 +601,15 @@ impl EmbeddedDaemon {
 
                 // Agent heartbeat - keep agent alive
                 _ = heartbeat_interval.tick() => {
+                    // Binary epoch first, and deliberately NOT inside
+                    // `send_agent_heartbeat` (EPIC cas-6212 / cas-8d2a, spec §9):
+                    // that function returns early whenever the harness client
+                    // behind the agent is gone, and a daemon whose client died
+                    // is exactly the survivor still serving a superseded binary
+                    // — the one whose liveness tail defines the MIXED window.
+                    // Losing its stamp would silently shrink MIXED and let
+                    // both-binaries data read as post-fix.
+                    self.touch_binary_epoch();
                     self.send_agent_heartbeat().await;
                 }
 
@@ -1319,6 +1348,19 @@ impl EmbeddedDaemon {
     /// Retries up to 3 times with backoff on failure, since heartbeat
     /// failures under SQLite lock contention can cause workers to be
     /// incorrectly marked stale in multi-agent factory sessions.
+    /// Advance the `ended_at` of this process's binary epoch (spec §9).
+    ///
+    /// Best-effort and synchronous: one small UPDATE on the shared connection,
+    /// once every 30s. A failure here must never disturb the daemon loop — an
+    /// un-advanced epoch degrades a verdict to INSUFFICIENT, which is the safe
+    /// direction.
+    fn touch_binary_epoch(&self) {
+        use cas_store::{HistoryStore, SqliteHistoryStore};
+        if let Ok(history) = SqliteHistoryStore::open(&self.config.cas_root) {
+            let _ = history.touch_epoch_end(std::process::id() as i64, &Utc::now().to_rfc3339());
+        }
+    }
+
     async fn send_agent_heartbeat(&self) {
         if let Ok(store) = open_agent_store(&self.config.cas_root) {
             // If we don't have an agent_id yet, try to adopt one by PID.

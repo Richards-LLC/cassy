@@ -703,6 +703,22 @@ fn test_config_diff() {
         .success()
         .stdout(predicate::str::contains("No differences"));
 
+    // The default is enabled; an explicit opt-out must remain visible as an override.
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["config", "set", "code.enabled", "false"])
+        .assert()
+        .success();
+
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["config", "diff"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("code.enabled"))
+        .stdout(predicate::str::contains("false"))
+        .stdout(predicate::str::contains("default: true"));
+
     // Modify a value
     cas_cmd(temp.path())
         .current_dir(&temp)

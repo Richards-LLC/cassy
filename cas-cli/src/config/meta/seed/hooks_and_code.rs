@@ -684,7 +684,9 @@ pub(super) fn register_hooks_and_code(registry: &mut ConfigRegistry) {
             name: "Enable Code Indexing",
             description: "Enable background code indexing for semantic code search. Indexes source files and extracts symbols (functions, classes, etc.) for search.",
             value_type: ConfigType::Bool,
-            default: "false",
+            // Keep metadata in lockstep with `CodeConfig::default()`: code indexing is
+            // enabled for a fresh install, while an explicit false remains an override.
+            default: "true",
             constraint: Constraint::None,
             advanced: false,
             requires_feature: None,

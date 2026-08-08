@@ -845,6 +845,13 @@ const URGENT_WAKE_OBSERVE_WINDOW: std::time::Duration = std::time::Duration::fro
 pub(crate) struct UrgentWakeProbe {
     /// Pane the interrupt was aimed at (already name-normalised).
     pub(crate) pane: String,
+    /// cas-1a54: the ROW's `target`, which is not always [`Self::pane`] — a row
+    /// aimed at `supervisor` is injected into the generated supervisor pane
+    /// name. The receipt table is keyed by the name the recipient polls under
+    /// (`prompt_queue_recipient_seen.recipient`, matched against `q.target` in
+    /// `unseen_for_recipient_predicate`), so the consume arm must stamp the
+    /// target — a receipt written for the pane name would satisfy no reader.
+    pub(crate) target: String,
     /// The pane's cumulative PTY output byte count at inject time.
     pub(crate) bytes_at_inject: u64,
     /// When the inject completed.
@@ -1065,7 +1072,7 @@ impl FactoryDaemon {
             return;
         }
         let now = std::time::Instant::now();
-        let verdicts: Vec<(i64, UrgentWakeOutcome, String)> = self
+        let verdicts: Vec<(i64, UrgentWakeOutcome, String, String)> = self
             .urgent_wake_probes
             .iter()
             .map(|(row_id, probe)| {
@@ -1078,16 +1085,17 @@ impl FactoryDaemon {
                         URGENT_WAKE_OBSERVE_WINDOW,
                     ),
                     probe.pane.clone(),
+                    probe.target.clone(),
                 )
             })
             .collect();
 
-        for (row_id, outcome, pane) in verdicts {
+        for (row_id, outcome, pane, target) in verdicts {
             match urgent_probe_action(outcome) {
                 UrgentProbeAction::KeepProbing => {}
                 UrgentProbeAction::ConsumeRow => {
                     self.forget_row_delivery_state(row_id);
-                    if let Err(error) = queue.mark_transport_delivered(row_id) {
+                    if let Err(error) = Self::consume_urgent_wake_row(queue, row_id, &target) {
                         tracing::error!(
                             prompt_id = row_id,
                             %error,
@@ -1237,6 +1245,31 @@ impl FactoryDaemon {
                  the row may be re-served by the recipient's next inbox_poll"
             );
         }
+    }
+
+    /// cas-1a54: terminalize an urgent row whose wake the pane corroborated —
+    /// receipt first, then the transport stamp.
+    ///
+    /// This is the whole pairing the `ConsumeRow` arm of
+    /// [`Self::resolve_urgent_wake_probes`] performs, extracted so a test can
+    /// drive the ACTUAL code path instead of a hand-rolled copy of it. That
+    /// distinction matters here: the defect was a success arm that stamped
+    /// `mark_transport_delivered` and nothing else, and a test that re-writes
+    /// the intended pair itself cannot catch that — it would pass while the
+    /// arm stayed broken (exactly how this survived cas-b8ce).
+    ///
+    /// `recipient` must be the ROW's target, the name the recipient polls
+    /// under; see [`UrgentWakeProbe::target`]. The receipt is best-effort and
+    /// never propagates; only the stamp's failure is returned, preserving the
+    /// arm's original error behaviour.
+    fn consume_urgent_wake_row(
+        queue: &dyn cas_store::PromptQueueStore,
+        row_id: i64,
+        recipient: &str,
+    ) -> anyhow::Result<()> {
+        Self::record_transport_receipt(queue, row_id, recipient);
+        queue.mark_transport_delivered(row_id)?;
+        Ok(())
     }
 
     pub(super) async fn handle_mux_event(&mut self, event: cas_mux::MuxEvent) {
@@ -3134,6 +3167,7 @@ impl FactoryDaemon {
                             queued.id,
                             UrgentWakeProbe {
                                 pane: pane_target.clone(),
+                                target: queued.target.clone(),
                                 bytes_at_inject,
                                 injected_at: std::time::Instant::now(),
                             },
@@ -6143,6 +6177,120 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "the recipient's own inbox_poll must not re-serve it"
+        );
+    }
+
+    /// cas-1a54: the URGENT terminal arm was the one cas-b8ce missed.
+    ///
+    /// `resolve_urgent_wake_probes` → `UrgentProbeAction::ConsumeRow` stamped
+    /// `mark_transport_delivered` and stopped there, so an interrupt the
+    /// recipient demonstrably took (the pane produced output after the inject)
+    /// stayed `seen.prompt_id IS NULL` and remained redelivery-eligible by
+    /// `unseen_for_recipient_predicate`. Live specimen: notification 8480 — a
+    /// supervisor urgent interrupt to zen-merlin-47, delivered and acted on,
+    /// still eligible on the read-only replay.
+    ///
+    /// Drives `consume_urgent_wake_row`, which IS what that arm calls, so
+    /// deleting the receipt from the pairing fails here.
+    #[test]
+    fn an_urgent_row_consumed_on_an_observed_wake_leaves_the_unread_view_cas_1a54() {
+        use cas_store::PromptQueueStore;
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+
+        let consumed = store
+            .enqueue("supervisor", "zen-merlin-47", "urgent: drop what you are doing")
+            .unwrap();
+        // The vacuous-dedup guard (epic note 2026-08-07 23:19 item 2): a second
+        // row for the SAME recipient that is never consumed. Without it, a
+        // predicate that returned nothing for any reason — wrong recipient key,
+        // stale cutoff, session filter — would let the post-condition below
+        // pass while proving nothing. This row must still be eligible at the
+        // end, so the zero we assert is a real, targeted zero.
+        let untouched = store
+            .enqueue("supervisor", "zen-merlin-47", "a second, unconsumed urgent row")
+            .unwrap();
+
+        assert_eq!(
+            store.count_unseen_for_recipient("zen-merlin-47", None).unwrap(),
+            2,
+            "precondition: both urgent rows start genuinely unread"
+        );
+
+        // Exactly what the ConsumeRow arm runs when the pane corroborates.
+        FactoryDaemon::consume_urgent_wake_row(&store, consumed, "zen-merlin-47").unwrap();
+
+        // Counted BEFORE polling: `poll_unseen_for_recipient` records its own
+        // seen-receipts, so a count taken afterwards reads zero for reasons
+        // that have nothing to do with this fix.
+        assert_eq!(
+            store.count_unseen_for_recipient("zen-merlin-47", None).unwrap(),
+            1,
+            "exactly one row was retired, and the other is still owed"
+        );
+
+        let unseen_ids: Vec<i64> = store
+            .poll_unseen_for_recipient("zen-merlin-47", None, 20)
+            .unwrap()
+            .iter()
+            .map(|row| row.id)
+            .collect();
+        assert!(
+            !unseen_ids.contains(&consumed),
+            "an urgent row whose wake was observed must not be re-served — that \
+             contradiction IS the redelivery (notification 8480)"
+        );
+        assert_eq!(
+            unseen_ids,
+            vec![untouched],
+            "the unconsumed sibling must still be eligible: it proves the predicate \
+             is live and the assertion above is not vacuously satisfied"
+        );
+    }
+
+    /// cas-1a54: the receipt must be keyed by the ROW's target, not the pane
+    /// the interrupt was typed into.
+    ///
+    /// `resolve_urgent_wake_probes` only ever had the pane name to hand, and
+    /// for a row aimed at `supervisor` that is the generated supervisor pane
+    /// name. `unseen_for_recipient_predicate` joins
+    /// `prompt_queue_recipient_seen.recipient` against the polling name, so a
+    /// pane-keyed receipt would be silently inert — the row would look retired
+    /// in the receipt table and still be re-served. Hence
+    /// `UrgentWakeProbe::target`.
+    #[test]
+    fn the_urgent_receipt_is_keyed_by_row_target_not_pane_name_cas_1a54() {
+        use cas_store::PromptQueueStore;
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+
+        let pane_keyed = store
+            .enqueue("golden-badger-59", "supervisor", "urgent: merge request")
+            .unwrap();
+        FactoryDaemon::consume_urgent_wake_row(&store, pane_keyed, "bright-spider-29").unwrap();
+        assert_eq!(
+            store.count_unseen_for_recipient("supervisor", None).unwrap(),
+            1,
+            "a receipt written under the PANE name retires nothing — this is why the \
+             probe has to carry the row's target"
+        );
+
+        let target_keyed = store
+            .enqueue("golden-badger-59", "supervisor", "urgent: second merge request")
+            .unwrap();
+        FactoryDaemon::consume_urgent_wake_row(&store, target_keyed, "supervisor").unwrap();
+        let unseen: Vec<i64> = store
+            .poll_unseen_for_recipient("supervisor", None, 20)
+            .unwrap()
+            .iter()
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(
+            unseen,
+            vec![pane_keyed],
+            "only the target-keyed row is retired; the pane-keyed one stays eligible"
         );
     }
 

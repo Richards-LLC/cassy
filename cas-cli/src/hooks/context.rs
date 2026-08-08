@@ -722,7 +722,9 @@ fn parse_ai_selection(response: &str) -> Vec<String> {
 
 /// Call Claude to select context items
 fn call_claude_for_selection(prompt: &str, model: &str) -> Result<String, MemError> {
-    let output = Command::new("claude")
+    let mut command = Command::new("claude");
+    crate::internal_llm::isolate_command(&mut command);
+    let output = command
         .args([
             "-p",
             prompt,

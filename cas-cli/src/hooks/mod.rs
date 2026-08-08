@@ -108,6 +108,13 @@ pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
 /// This is the single entry point that resolves cas_root once and passes it
 /// to all handlers, eliminating redundant find_cas_root() calls.
 pub fn handle_hook(event_name: &str, input: HookInput) -> Result<HookOutput, MemError> {
+    // CAS-owned headless model calls are implementation details, not user
+    // sessions. Their prompts must never be captured as memory and their
+    // short-lived harnesses must never register as factory workers.
+    if crate::internal_llm::is_internal_invocation() {
+        return Ok(HookOutput::empty());
+    }
+
     // Resolve cas_root once at entry point using full discovery logic:
     // 1. CAS_ROOT env var (factory workers use this to share main repo's .cas)
     // 2. Git worktree detection (worktrees share main repo's .cas)
@@ -137,6 +144,88 @@ pub fn handle_hook(event_name: &str, input: HookInput) -> Result<HookOutput, Mem
             // Unknown hook, just pass through
             Ok(HookOutput::empty())
         }
+    }
+}
+
+#[cfg(test)]
+mod internal_llm_tests {
+    use super::*;
+    use crate::test_support::TestEnvGuard;
+
+    #[test]
+    fn internal_model_hooks_create_neither_agents_nor_prompt_memories() {
+        let project = tempfile::tempdir().expect("project");
+        let cas_root = crate::store::init_cas_dir(project.path()).expect("cas root");
+        let mut env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_ROOT", Some(cas_root.to_str().expect("utf8 cas root"))),
+            (crate::internal_llm::INTERNAL_LLM_ENV, Some("1")),
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_AGENT_NAME", Some("parent-worker")),
+            ("CAS_SESSION_ID", Some("parent-session")),
+            ("CAS_FACTORY_MODE", Some("1")),
+        ]);
+
+        let analyzer = "Analyze this user prompt and determine if it expresses a coding preference or rule that should be remembered.";
+        let internal_session = HookInput {
+            session_id: "nested-child-session".into(),
+            cwd: project.path().to_string_lossy().into_owned(),
+            hook_event_name: "SessionStart".into(),
+            source: Some("startup".into()),
+            ..HookInput::default()
+        };
+        handle_hook("SessionStart", internal_session).expect("internal session start");
+        handle_hook(
+            "UserPromptSubmit",
+            HookInput {
+                session_id: "nested-child-session".into(),
+                cwd: project.path().to_string_lossy().into_owned(),
+                hook_event_name: "UserPromptSubmit".into(),
+                user_prompt: Some(analyzer.into()),
+                ..HookInput::default()
+            },
+        )
+        .expect("internal prompt hook");
+
+        let agents = crate::store::open_agent_store(&cas_root).expect("agent store");
+        assert!(agents.list(None).expect("agents").is_empty());
+        let memories = crate::store::open_store(&cas_root).expect("memory store");
+        assert!(memories.list().expect("memories").is_empty());
+        let events = crate::store::open_event_store(&cas_root).expect("event store");
+        assert!(
+            events
+                .list_recent(20)
+                .expect("internal activity")
+                .is_empty(),
+            "nested SessionStart/UserPromptSubmit must emit neither registration nor memory activity"
+        );
+
+        // The marker is the boundary, not the prompt shape: a real user turn
+        // still follows the ordinary memory path.
+        env.remove(crate::internal_llm::INTERNAL_LLM_ENV);
+        handle_hook(
+            "UserPromptSubmit",
+            HookInput {
+                session_id: "real-user-session".into(),
+                cwd: project.path().to_string_lossy().into_owned(),
+                hook_event_name: "UserPromptSubmit".into(),
+                user_prompt: Some(
+                    "Please implement durable user memory capture for this project.".into(),
+                ),
+                ..HookInput::default()
+            },
+        )
+        .expect("real prompt hook");
+        let stored = memories.list().expect("stored memories");
+        assert_eq!(stored.len(), 1);
+        assert!(stored[0].content.contains("durable user memory capture"));
+        assert!(
+            events
+                .list_recent(20)
+                .expect("real activity")
+                .iter()
+                .any(|event| event.summary.contains("Memory stored")),
+            "a real user prompt must retain the ordinary memory/activity path"
+        );
     }
 }
 

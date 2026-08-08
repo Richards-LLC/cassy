@@ -985,7 +985,10 @@ impl FactoryDaemon {
             // to ensure we find all agents, including those registered after cache refresh
             if let Ok(all_agents) = agent_store.list(None) {
                 for name in &names_to_unregister {
-                    if let Some(agent) = all_agents.iter().find(|a| a.name == *name) {
+                    for agent in all_agents.iter().filter(|a| {
+                        a.name == *name
+                            && a.factory_session.as_deref() == Some(self.session_name.as_str())
+                    }) {
                         if let Err(e) = agent_store.unregister(&agent.id) {
                             tracing::warn!("Failed to unregister agent {}: {}", name, e);
                         }

@@ -7,7 +7,7 @@
 use crate::support::*;
 use cas::mcp::CasService;
 use cas_mcp::KnowledgeRequest;
-use cas_store::{KnowledgeStore, SqliteKnowledgeStore};
+use cas_store::{KnowledgePageOrigin, KnowledgeStore, SqliteKnowledgeStore};
 use rmcp::handler::server::wrapper::Parameters;
 
 /// A request with every optional field empty — tests fill in what they need.
@@ -136,6 +136,8 @@ async fn a_hand_written_page_is_locked_so_distillation_cannot_overwrite_it() {
         .expect("page exists");
     assert!(page.locked, "a hand-written page must be locked");
     assert_eq!(page.sources, vec!["manual://mcp".to_string()]);
+    assert_eq!(page.origin, KnowledgePageOrigin::Local);
+    assert_eq!(page.origin_project_id, None);
 }
 
 #[tokio::test]

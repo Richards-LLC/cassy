@@ -10,17 +10,16 @@ use std::time::Duration;
 use crate::cli::Cli;
 use crate::cloud::{
     BackfillOutcome, CloudConfig, FetchTeamsOutcome, PersonalScopeNotice, SyncQueue, TeamInfo,
-    fetch_and_cache_teams, get_project_canonical_id, maybe_apply_team_backfill,
-    maybe_mark_personal_scope_notice, teams_cache_stale, user_level_cloud_json_path,
+    fetch_and_cache_teams, maybe_apply_team_backfill, maybe_mark_personal_scope_notice,
+    teams_cache_stale, user_level_cloud_json_path,
 };
 use crate::ui::components::Formatter;
 use crate::ui::theme::ActiveTheme;
 
 use crate::store::{
-    SqliteStore, open_commit_link_store, open_event_store, open_file_change_store,
-    open_prompt_store, open_rule_store, open_rule_store_local, open_skill_store,
-    open_skill_store_local, open_spec_store, open_store, open_store_local, open_task_store,
-    open_task_store_local, open_worktree_store,
+    open_commit_link_store, open_event_store, open_file_change_store, open_prompt_store,
+    open_rule_store_local, open_skill_store_local, open_spec_store, open_store_local,
+    open_task_store_local,
 };
 
 #[derive(Subcommand)]
@@ -130,11 +129,11 @@ pub struct CloudProjectSetArgs {
 #[derive(Parser)]
 pub struct CloudPushArgs {
     /// Push only entries
-    #[arg(long)]
+    #[arg(long, conflicts_with = "tasks_only")]
     pub entries_only: bool,
 
     /// Push only tasks
-    #[arg(long)]
+    #[arg(long, conflicts_with = "entries_only")]
     pub tasks_only: bool,
 
     /// Dry run (don't actually push)
@@ -1224,6 +1223,12 @@ pub(crate) fn sync_project_knowledge(cli: &Cli, cas_root: &Path) -> anyhow::Resu
                     "pushed": pushed,
                     "pulled": pulled.applied,
                     "locked_preserved": pulled.locked_preserved,
+                    "tombstones_applied": pulled.tombstones_applied,
+                    "tombstones_locked_preserved": pulled.tombstones_locked_preserved,
+                    "tombstoned_pages_refused": pulled.tombstoned_pages_refused,
+                    "refused_foreign": pulled.refused_foreign,
+                    "refused_foreign_ids": pulled.refused_foreign_ids,
+                    "starvation_warning": pulled.starvation_warning,
                     "embedded": embedded,
                     "embed_requests": embed_requests,
                     "awaiting_embedding": awaiting,
@@ -1237,6 +1242,32 @@ pub(crate) fn sync_project_knowledge(cli: &Cli, cas_root: &Path) -> anyhow::Resu
             println!(
                 "  Knowledge: {pushed} pushed, {} pulled, {embedded} embedded",
                 pulled.applied
+            );
+        }
+        // The failure mode with no error attached — say it out loud or it is
+        // indistinguishable from a quiet, healthy project.
+        if let Some(warning) = &pulled.starvation_warning {
+            eprintln!("  Knowledge: POSSIBLE SYNC STARVATION — {warning}");
+        }
+        // A refusal is never a silent drop: it is a contamination attempt the
+        // operator needs to see, named, with the ids involved.
+        if pulled.refused_foreign > 0 {
+            eprintln!(
+                "  Knowledge: REFUSED {} foreign page(s) at ingest: {}",
+                pulled.refused_foreign,
+                pulled.refused_foreign_ids.join(", ")
+            );
+        }
+        if pulled.tombstones_locked_preserved > 0 {
+            eprintln!(
+                "  Knowledge: preserved {} locked page(s) against incoming tombstone(s)",
+                pulled.tombstones_locked_preserved
+            );
+        }
+        if pulled.tombstoned_pages_refused > 0 {
+            eprintln!(
+                "  Knowledge: refused {} stale page record(s) after a tombstone",
+                pulled.tombstoned_pages_refused
             );
         }
         // The loud half: never let a failed or partial embed pass as silence.
@@ -1619,116 +1650,64 @@ pub fn check_canonical_id_rehome(
     }
 }
 
-fn execute_push(args: &CloudPushArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
-    let config = CloudConfig::load()?;
-    let token = config
-        .token
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Not logged in. Run 'cas login' first"))?;
+fn push_result_counts(
+    result: &crate::cloud::SyncResult,
+    scope: crate::cloud::PushScope,
+) -> std::collections::BTreeMap<&'static str, usize> {
+    let all = [
+        ("entries", result.pushed_entries),
+        ("tasks", result.pushed_tasks),
+        ("rules", result.pushed_rules),
+        ("skills", result.pushed_skills),
+        ("sessions", result.pushed_sessions),
+        ("verifications", result.pushed_verifications),
+        ("events", result.pushed_events),
+        ("prompts", result.pushed_prompts),
+        ("file_changes", result.pushed_file_changes),
+        ("commit_links", result.pushed_commit_links),
+        ("agents", result.pushed_agents),
+        ("worktrees", result.pushed_worktrees),
+    ];
+    all.into_iter()
+        .filter(|(key, count)| {
+            *count > 0
+                || matches!(scope, crate::cloud::PushScope::EntriesOnly if *key == "entries")
+                || matches!(scope, crate::cloud::PushScope::TasksOnly if *key == "tasks")
+        })
+        .collect()
+}
 
-    let store = open_store(cas_root)?;
-    let task_store = open_task_store(cas_root)?;
-    let rule_store = open_rule_store(cas_root)?;
-    let skill_store = open_skill_store(cas_root)?;
-    let sqlite_store = SqliteStore::open(cas_root)?;
-    let spec_store = open_spec_store(cas_root)?;
-    let event_store = open_event_store(cas_root)?;
-    let prompt_store = open_prompt_store(cas_root)?;
-    let file_change_store = open_file_change_store(cas_root)?;
-    let commit_link_store = open_commit_link_store(cas_root)?;
+/// Queue-driven personal push, rooted explicitly at `cas_root`.
+#[doc(hidden)]
+pub fn execute_push(args: &CloudPushArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
+    use std::sync::Arc;
 
-    // Collect data to push
-    let mut entries_json = Vec::new();
-    let mut tasks_json = Vec::new();
-    let mut rules_json = Vec::new();
-    let mut skills_json = Vec::new();
-    let mut sessions_json = Vec::new();
-    let mut specs_json = Vec::new();
-    let mut events_json = Vec::new();
-    let mut prompts_json = Vec::new();
-    let mut file_changes_json = Vec::new();
-    let mut commit_links_json = Vec::new();
+    use crate::cloud::{CloudSyncer, CloudSyncerConfig, PushScope, resolve_canonical_id};
 
-    if !args.tasks_only {
-        let entries = store.list()?;
-        for entry in entries {
-            entries_json.push(serde_json::to_value(&entry)?);
-        }
+    let config = CloudConfig::load_from_cas_dir(cas_root)?;
+    if config.token.is_none() {
+        anyhow::bail!("Not logged in. Run 'cas login' first");
     }
+    let project_id = resolve_canonical_id(cas_root)
+        .ok_or_else(|| anyhow::anyhow!("Cannot sync: not inside a CAS project directory"))?;
+    let scope = if args.entries_only {
+        PushScope::EntriesOnly
+    } else if args.tasks_only {
+        PushScope::TasksOnly
+    } else {
+        PushScope::All
+    };
 
-    if !args.entries_only {
-        let tasks = task_store.list(None)?;
-        for task in tasks {
-            tasks_json.push(serde_json::to_value(&task)?);
-        }
-    }
-
-    // Always push rules and skills
-    let rules = rule_store.list()?;
-    for rule in rules {
-        rules_json.push(serde_json::to_value(&rule)?);
-    }
-
-    let skills = skill_store.list(None)?;
-    for skill in skills {
-        skills_json.push(serde_json::to_value(&skill)?);
-    }
-
-    // Always push sessions (they're lightweight)
-    let sessions = sqlite_store
-        .list_sessions_since(chrono::Utc::now() - chrono::Duration::days(90))
-        .unwrap_or_default();
-    for session in sessions {
-        sessions_json.push(serde_json::to_value(&session)?);
-    }
-
-    // Always push specs
-    let specs = spec_store.list(None)?;
-    for spec in specs {
-        specs_json.push(serde_json::to_value(&spec)?);
-    }
-
-    // Push events (last 90 days)
-    let events = event_store.list_recent(10000).unwrap_or_default();
-    for event in events {
-        events_json.push(serde_json::to_value(&event)?);
-    }
-
-    // Push prompts (last 90 days)
-    let prompts = prompt_store.list_recent(10000).unwrap_or_default();
-    for prompt in prompts {
-        prompts_json.push(serde_json::to_value(&prompt)?);
-    }
-
-    // Push file changes (last 90 days)
-    let file_changes = file_change_store.list_recent(10000).unwrap_or_default();
-    for fc in file_changes {
-        file_changes_json.push(serde_json::to_value(&fc)?);
-    }
-
-    // Push commit links (last 90 days)
-    let commit_links = commit_link_store.list_recent(10000).unwrap_or_default();
-    for cl in commit_links {
-        commit_links_json.push(serde_json::to_value(&cl)?);
-    }
-
-    // Push worktrees
-    let mut worktrees_json = Vec::new();
-    if let Ok(worktree_store) = open_worktree_store(cas_root) {
-        let worktrees = worktree_store.list().unwrap_or_default();
-        for wt in worktrees {
-            worktrees_json.push(serde_json::to_value(&wt)?);
-        }
-    }
-
-    // Push task dependencies
-    let mut task_deps_json = Vec::new();
-    if !args.entries_only {
-        let deps = task_store.list_dependencies(None).unwrap_or_default();
-        for dep in deps {
-            task_deps_json.push(serde_json::to_value(&dep)?);
-        }
-    }
+    let queue = Arc::new(SyncQueue::open(cas_root)?);
+    queue.init()?;
+    let syncer = CloudSyncer::new_for_project(
+        queue.clone(),
+        config,
+        CloudSyncerConfig::default(),
+        project_id.clone(),
+        cas_root,
+    );
+    let plan = syncer.plan_push(scope)?;
 
     if args.dry_run {
         if cli.json {
@@ -1736,369 +1715,91 @@ fn execute_push(args: &CloudPushArgs, cli: &Cli, cas_root: &Path) -> anyhow::Res
                 "{}",
                 serde_json::json!({
                     "dry_run": true,
-                    "entries": entries_json.len(),
-                    "tasks": tasks_json.len(),
-                    "rules": rules_json.len(),
-                    "skills": skills_json.len(),
-                    "sessions": sessions_json.len(),
-                    "specs": specs_json.len(),
-                    "events": events_json.len(),
-                    "prompts": prompts_json.len(),
-                    "file_changes": file_changes_json.len(),
-                    "commit_links": commit_links_json.len(),
-                    "task_dependencies": task_deps_json.len(),
-                    "worktrees": worktrees_json.len(),
+                    "root": cas_root,
+                    "project_canonical_id": project_id,
+                    "plan": plan,
                 })
             );
         } else {
-            let theme = ActiveTheme::default();
             let mut out = io::stdout();
-            let mut fmt = Formatter::stdout(&mut out, theme);
+            let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
             fmt.write_accent("  \u{2192} ")?;
-            fmt.write_raw("Dry run - would push:")?;
+            fmt.write_raw("Dry run - next queued push batch:")?;
             fmt.newline()?;
-            fmt.write_raw(&format!("    {} entries", entries_json.len()))?;
+            fmt.write_raw(&format!("    root: {}", cas_root.display()))?;
             fmt.newline()?;
-            fmt.write_raw(&format!("    {} tasks", tasks_json.len()))?;
+            fmt.write_raw(&format!("    project: {project_id}"))?;
             fmt.newline()?;
-            fmt.write_raw(&format!("    {} rules", rules_json.len()))?;
+            fmt.write_raw(&format!("    scope: {}", scope.label()))?;
             fmt.newline()?;
-            fmt.write_raw(&format!("    {} skills", skills_json.len()))?;
-            fmt.newline()?;
-            fmt.write_raw(&format!("    {} sessions", sessions_json.len()))?;
-            fmt.newline()?;
-            fmt.write_raw(&format!("    {} specs", specs_json.len()))?;
-            fmt.newline()?;
-            fmt.write_raw(&format!("    {} events", events_json.len()))?;
-            fmt.newline()?;
-            fmt.write_raw(&format!("    {} prompts", prompts_json.len()))?;
-            fmt.newline()?;
-            fmt.write_raw(&format!("    {} file changes", file_changes_json.len()))?;
-            fmt.newline()?;
-            fmt.write_raw(&format!("    {} commit links", commit_links_json.len()))?;
-            fmt.newline()?;
-            fmt.write_raw(&format!("    {} task dependencies", task_deps_json.len()))?;
-            fmt.newline()?;
-            fmt.write_raw(&format!("    {} worktrees", worktrees_json.len()))?;
+            for (key, count) in &plan.counts {
+                fmt.write_raw(&format!("    {count} {key}"))?;
+                fmt.newline()?;
+            }
+            if plan.batch_limit_reached {
+                fmt.write_raw(&format!(
+                    "    batch limit {} reached; the total matching backlog may be larger",
+                    plan.batch_limit
+                ))?;
+                fmt.newline()?;
+            }
+        }
+        return Ok(());
+    }
+
+    if let Err(msg) = check_canonical_id_rehome(&queue, &project_id, args.rehome) {
+        if cli.json {
+            println!("{}", serde_json::json!({"status": "error", "message": msg}));
+        } else {
+            let mut err = io::stderr();
+            let mut fmt = Formatter::stdout(&mut err, ActiveTheme::default());
+            let error_color = fmt.theme().palette.status_error;
+            fmt.write_colored("  \u{2717} ", error_color)?;
+            fmt.write_raw(&msg)?;
             fmt.newline()?;
         }
         return Ok(());
     }
 
-    {
-        use crate::ui::components::{
-            Component, ProgressBar, ProgressBarMsg, clear_inline, render_inline_view,
-            rerender_inline,
-        };
-
-        let push_url = format!("{}/api/sync/push", config.endpoint);
-
-        // Build batches: split large collections into chunks to avoid 413 errors
-        const BATCH_SIZE: usize = 50;
-
-        let resource_types: Vec<(&str, &[serde_json::Value])> = vec![
-            ("entries", &entries_json),
-            ("tasks", &tasks_json),
-            ("rules", &rules_json),
-            ("skills", &skills_json),
-            ("sessions", &sessions_json),
-            ("specs", &specs_json),
-            ("events", &events_json),
-            ("prompts", &prompts_json),
-            ("file_changes", &file_changes_json),
-            ("commit_links", &commit_links_json),
-            ("task_dependencies", &task_deps_json),
-            ("worktrees", &worktrees_json),
-        ];
-
-        // AC5: Track which resource types have actual items to push.
-        // Only entity types with a non-empty payload appear in the summary,
-        // preventing "fixed boilerplate" counts for types not touched this run
-        // and ensuring the Tasks line is never silently omitted when tasks moved.
-        let sent_types: std::collections::HashSet<&str> = resource_types
-            .iter()
-            .filter(|(_, items)| !items.is_empty())
-            .map(|(name, _)| *name)
-            .collect();
-
-        let project_id = get_project_canonical_id()
-            .ok_or_else(|| anyhow::anyhow!("Cannot sync: not inside a CAS project directory"))?;
-
-        // AC6: Rehome guard — refuse if the pinned project slug changed since
-        // the last successful push. A slug change silently re-homes ALL existing
-        // cloud entities into the new bucket (defect D, ozer bug report).
-        // The guard is best-effort: if the queue can't be opened we fail-open
-        // (push proceeds) and try again next run.
-        if let Ok(guard_queue) = SyncQueue::open(cas_root) {
-            let _ = guard_queue.init();
-            if let Err(msg) = check_canonical_id_rehome(&guard_queue, &project_id, args.rehome) {
-                if cli.json {
-                    println!("{}", serde_json::json!({"status": "error", "message": msg}));
-                } else {
-                    let mut err = io::stderr();
-                    let mut fmt = Formatter::stdout(&mut err, ActiveTheme::default());
-                    let error_color = fmt.theme().palette.status_error;
-                    fmt.write_colored("  \u{2717} ", error_color)?;
-                    fmt.write_raw(&msg)?;
-                    fmt.newline()?;
-                }
-                return Ok(());
-            }
+    let result = syncer.push_scoped(scope)?;
+    if result.errors.is_empty() {
+        if let Err(error) = queue.set_metadata("last_push_canonical_id", &project_id) {
+            tracing::warn!(%error, %project_id, "failed to record last push project scope");
         }
+    }
+    let counts = push_result_counts(&result, scope);
 
-        // Build list of batches: each batch is a JSON payload with chunked data
-        let mut batches: Vec<serde_json::Value> = Vec::new();
-
-        // Find the max number of chunks needed across all resource types
-        let max_chunks = resource_types
-            .iter()
-            .map(|(_, items)| (items.len() + BATCH_SIZE - 1) / BATCH_SIZE.max(1))
-            .max()
-            .unwrap_or(1)
-            .max(1);
-
-        for chunk_idx in 0..max_chunks {
-            let start = chunk_idx * BATCH_SIZE;
-            let mut payload = serde_json::Map::new();
-
-            for (name, items) in &resource_types {
-                let end = (start + BATCH_SIZE).min(items.len());
-                let chunk = if start < items.len() {
-                    &items[start..end]
-                } else {
-                    &[]
-                };
-                payload.insert(name.to_string(), serde_json::json!(chunk));
-            }
-
-            // Required by server for project scoping
-            payload.insert(
-                "project_canonical_id".to_string(),
-                serde_json::json!(project_id),
-            );
-            // Client version for server-side compatibility checks
-            payload.insert(
-                "client_version".to_string(),
-                serde_json::json!(env!("CARGO_PKG_VERSION")),
-            );
-            payload.insert(
-                "client_build".to_string(),
-                serde_json::json!(option_env!("CAS_GIT_HASH").unwrap_or("unknown")),
-            );
-            // Include team_id if configured
-            if let Some(team_id) = &config.team_id {
-                payload.insert("team_id".to_string(), serde_json::json!(team_id));
-            }
-
-            batches.push(serde_json::Value::Object(payload));
-        }
-
-        let total_items: usize = resource_types.iter().map(|(_, items)| items.len()).sum();
-        let num_batches = batches.len();
-
-        let theme = ActiveTheme::default();
-        let (mut progress_bar, mut prev_lines) = if !cli.json {
-            let bar = ProgressBar::new(total_items as u64).with_message("Pushing");
-            let lines = render_inline_view(&bar, &theme)?;
-            (Some(bar), lines)
-        } else {
-            (None, 0u16)
-        };
-
-        // Aggregate totals across batches
-        let resource_names = [
-            "entries",
-            "tasks",
-            "rules",
-            "skills",
-            "sessions",
-            "specs",
-            "events",
-            "prompts",
-            "file_changes",
-            "commit_links",
-            "task_dependencies",
-            "worktrees",
-        ];
-        let mut totals: std::collections::HashMap<String, (u64, u64)> = resource_names
-            .iter()
-            .map(|n| (n.to_string(), (0u64, 0u64)))
-            .collect();
-        let mut items_pushed = 0u64;
-
-        for (batch_idx, payload) in batches.iter().enumerate() {
-            // Count items in this batch
-            let batch_items: usize = resource_names
-                .iter()
-                .map(|name| {
-                    payload
-                        .get(name)
-                        .and_then(|v| v.as_array())
-                        .map_or(0, |a| a.len())
-                })
-                .sum();
-
-            if let Some(ref mut bar) = progress_bar {
-                if num_batches > 1 {
-                    bar.update(ProgressBarMsg::SetMessage(format!(
-                        "Pushing (batch {}/{})",
-                        batch_idx + 1,
-                        num_batches
-                    )));
-                }
-                bar.update(ProgressBarMsg::Tick);
-                prev_lines = rerender_inline(bar, prev_lines, &theme)?;
-            }
-
-            let response = ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs(120))
-                .build()
-                .post(&push_url)
-                .set("Authorization", &format!("Bearer {token}"))
-                .set("Content-Type", "application/json")
-                .send_json(payload);
-
-            match response {
-                Ok(resp) => {
-                    let body: serde_json::Value = resp.into_json()?;
-
-                    // Accumulate per-resource totals
-                    for name in &resource_names {
-                        if let Some(res) = body.get(name) {
-                            let ins = res.get("inserted").and_then(|v| v.as_u64()).unwrap_or(0);
-                            let upd = res.get("updated").and_then(|v| v.as_u64()).unwrap_or(0);
-                            let entry = totals.entry(name.to_string()).or_insert((0, 0));
-                            entry.0 += ins;
-                            entry.1 += upd;
-                        }
-                    }
-
-                    items_pushed += batch_items as u64;
-                    if let Some(ref mut bar) = progress_bar {
-                        bar.update(ProgressBarMsg::Set(items_pushed));
-                        bar.update(ProgressBarMsg::Tick);
-                        prev_lines = rerender_inline(bar, prev_lines, &theme)?;
-                    }
-                }
-                Err(ureq::Error::Status(402, resp)) => {
-                    if progress_bar.is_some() {
-                        clear_inline(prev_lines)?;
-                    }
-
-                    let body: serde_json::Value = resp.into_json().unwrap_or_default();
-
-                    if cli.json {
-                        println!("{}", serde_json::to_string(&body)?);
-                    } else {
-                        let mut out = io::stdout();
-                        let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
-                        let error_color = fmt.theme().palette.status_error;
-
-                        let message = body
-                            .get("message")
-                            .and_then(|m| m.as_str())
-                            .unwrap_or("Sync limit exceeded");
-                        fmt.newline()?;
-                        fmt.write_colored(&format!("  \u{2717} {message}"), error_color)?;
-                        fmt.newline()?;
-                        fmt.newline()?;
-                    }
-                    return Ok(());
-                }
-                Err(ureq::Error::Status(401, _)) => {
-                    if progress_bar.is_some() {
-                        clear_inline(prev_lines)?;
-                    }
-                    if cli.json {
-                        println!(r#"{{"status":"error","message":"Invalid or expired token"}}"#);
-                    } else {
-                        let mut err = io::stderr();
-                        let mut fmt = Formatter::stdout(&mut err, ActiveTheme::default());
-                        let error_color = fmt.theme().palette.status_error;
-                        fmt.write_colored("  \u{2717} ", error_color)?;
-                        fmt.write_raw("Session expired")?;
-                        fmt.newline()?;
-                        fmt.write_raw("  Run ")?;
-                        fmt.write_accent("cas login")?;
-                        fmt.write_raw(" to re-authenticate")?;
-                        fmt.newline()?;
-                    }
-                    return Ok(());
-                }
-                Err(e) => {
-                    if progress_bar.is_some() {
-                        clear_inline(prev_lines)?;
-                    }
-                    return Err(e.into());
-                }
-            }
-        }
-
-        if progress_bar.is_some() {
-            clear_inline(prev_lines)?;
-        }
-
-        // AC6: Push succeeded — record the canonical_id so the next push can
-        // detect a slug change. Best-effort: a metadata write failure is logged
-        // but does not fail the command (the push itself already succeeded).
-        if let Ok(state_queue) = SyncQueue::open(cas_root) {
-            let _ = state_queue.init();
-            if let Err(e) = state_queue.set_metadata("last_push_canonical_id", &project_id) {
-                tracing::warn!(
-                    error = %e,
-                    project_id = %project_id,
-                    "failed to record last_push_canonical_id in sync queue (non-fatal)"
-                );
-            }
-        }
-
-        if cli.json {
-            // AC5: only emit entries for entity types that were in the push
-            // payload (sent_types), preventing boilerplate counts for types
-            // not touched in this run.
-            let json_totals: serde_json::Map<String, serde_json::Value> = totals
-                .iter()
-                .filter(|(k, _)| sent_types.contains(k.as_str()))
-                .map(|(k, (ins, upd))| {
-                    (
-                        k.clone(),
-                        serde_json::json!({"inserted": ins, "updated": upd}),
-                    )
-                })
-                .collect();
-            println!(
-                "{}",
-                serde_json::to_string(&serde_json::Value::Object(json_totals))?
-            );
-        } else {
-            let mut out = io::stdout();
-            let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
+    if cli.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "status": if result.errors.is_empty() { "ok" } else { "partial" },
+                "source": "sync_queue",
+                "root": cas_root,
+                "project_canonical_id": project_id,
+                "scope": scope,
+                "pushed": counts,
+                "errors": result.errors,
+            })
+        );
+    } else {
+        let mut out = io::stdout();
+        let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
+        if result.errors.is_empty() {
             fmt.success("Push complete")?;
-            let display_order = [
-                ("entries", "Entries"),
-                ("tasks", "Tasks"),
-                ("rules", "Rules"),
-                ("skills", "Skills"),
-                ("sessions", "Sessions"),
-                ("specs", "Specs"),
-                ("events", "Events"),
-                ("prompts", "Prompts"),
-                ("file_changes", "File changes"),
-                ("commit_links", "Commit links"),
-                ("worktrees", "Worktrees"),
-            ];
-            // AC5: only show lines for entity types that were in the push
-            // payload. This prevents "fixed boilerplate" counts from types
-            // the user didn't intend to touch AND ensures the Tasks line is
-            // always shown when tasks were part of the push (even if the
-            // server reports 0 inserted, 0 updated — e.g., all already synced).
-            for (key, label) in &display_order {
-                if sent_types.contains(key) {
-                    let (ins, upd) = totals.get(*key).copied().unwrap_or((0, 0));
-                    fmt.write_raw(&format!("    {label}: {ins} inserted, {upd} updated"))?;
-                    fmt.newline()?;
-                }
-            }
+        } else {
+            let warning_color = fmt.theme().palette.status_warning;
+            fmt.write_colored("  ! ", warning_color)?;
+            fmt.write_raw("Push incomplete; failed rows remain queued")?;
+            fmt.newline()?;
+        }
+        for (key, count) in counts {
+            fmt.write_raw(&format!("    {key}: {count} pushed"))?;
+            fmt.newline()?;
+        }
+        for error in &result.errors {
+            fmt.write_raw(&format!("    error: {error}"))?;
+            fmt.newline()?;
         }
     }
 

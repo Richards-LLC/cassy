@@ -70,7 +70,14 @@ pub(crate) fn build_scoped_pull_url_with(
 /// field, null field, wrong project, or unexpected type — are rejected. The legacy
 /// "no field = accept" and "null = accept" paths have been removed now that the cloud
 /// always echoes `project_id` in every pull-response row (cas-6479).
-fn entity_matches_project(
+/// The per-row ingest guard. Shared with the knowledge pull (`knowledge.rs`)
+/// so both directions of the sync client apply *one* definition of "is this
+/// row mine", rather than a second implementation that can drift from this one.
+///
+/// The equality is deliberately byte-exact — see the protocol invariant in
+/// `docs/`/ARCHITECTURE and `canonical_id_equality_is_byte_exact_by_protocol`
+/// below. Normalizing here would silently merge two distinct projects.
+pub(crate) fn entity_matches_project(
     raw: &serde_json::Value,
     current_project_id: &str,
     entity_kind: &str,
@@ -1160,6 +1167,60 @@ mod tests {
         let entity = json!({ "id": "p-001", "project_canonical_id": "local:abcd1234ef567890" });
         assert!(entity_matches_project(&entity, "local:abcd1234ef567890", "entry"));
         assert!(!entity_matches_project(&entity, "local:0000000000000000", "entry"));
+    }
+
+    /// PROTOCOL INVARIANT — do not "fix" this test by making the comparison
+    /// case-insensitive or otherwise normalizing.
+    ///
+    /// Canonical-id equality is byte-exact on BOTH sides of the wire, by
+    /// agreement with the server. Two consequences the next reader needs:
+    ///
+    /// 1. **Normalizing here would be a data-merge, not a convenience.**
+    ///    `Accounting` and `accounting` are two distinct projects as far as
+    ///    every stored row is concerned; folding them together would
+    ///    cross-contaminate them permanently and unattributably.
+    /// 2. **This is the SECOND line of defence, not the first.** The server
+    ///    filters on the id the client SENDS and echoes the stored column, so
+    ///    an id divergence does not present here as a rejected row — the
+    ///    client receives an *empty envelope*, indefinitely, with no warning
+    ///    on either side. Silent starvation, not contamination. If you are
+    ///    debugging "sync returns nothing", suspect an id mismatch upstream of
+    ///    this function rather than assuming this check is dropping rows.
+    ///
+    /// The remedy for divergence is client-side pinning of the canonical id;
+    /// the server deliberately refused to normalize for exactly the reason in
+    /// (1).
+    #[test]
+    fn canonical_id_equality_is_byte_exact_by_protocol() {
+        let entity = json!({ "id": "t-1", "project_canonical_id": "github.com/Acme/Ledger" });
+
+        assert!(
+            entity_matches_project(&entity, "github.com/Acme/Ledger", "task"),
+            "exact match must be accepted"
+        );
+        // Case variants are DIFFERENT projects. Each of these must be refused.
+        for variant in [
+            "github.com/acme/ledger",
+            "github.com/ACME/LEDGER",
+            "github.com/Acme/ledger",
+        ] {
+            assert!(
+                !entity_matches_project(&entity, variant, "task"),
+                "case variant '{variant}' must not match — normalizing here would \
+                 silently merge two distinct projects"
+            );
+        }
+        // Whitespace and trailing-separator variants are likewise distinct.
+        for variant in [
+            "github.com/Acme/Ledger ",
+            " github.com/Acme/Ledger",
+            "github.com/Acme/Ledger/",
+        ] {
+            assert!(
+                !entity_matches_project(&entity, variant, "task"),
+                "variant '{variant:?}' must not match: equality is byte-exact"
+            );
+        }
     }
 }
 

@@ -183,9 +183,10 @@ pub struct Pane {
     /// clear/cancel. Panes that never receive attached-client input remain
     /// clean, preserving immediate worker-to-worker injection.
     composer_dirty: std::sync::atomic::AtomicBool,
-    /// When the current dirty-composer interval began. This lets the mux
-    /// enforce bounded deferral without retaining the payload itself.
-    composer_dirty_since: std::sync::Mutex<Option<std::time::Instant>>,
+    /// A CAS-injected payload has been written and its delayed submit CR has
+    /// not completed yet. A second injection during this window would merge
+    /// both payloads into one harness turn (cas-eacc).
+    inject_submit_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Pane {
@@ -235,7 +236,7 @@ impl Pane {
             harness,
             paste_tracker: std::sync::Mutex::new(crate::input_stream::BracketedPasteTracker::new()),
             composer_dirty: std::sync::atomic::AtomicBool::new(false),
-            composer_dirty_since: std::sync::Mutex::new(None),
+            inject_submit_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -1303,6 +1304,7 @@ impl Pane {
     pub fn ready_for_injection(&self) -> bool {
         self.total_bytes_received > 0
             && self.created_at.elapsed() >= std::time::Duration::from_secs(5)
+            && !self.inject_submit_pending()
     }
 
     /// Type `prompt` into the pane's harness and submit it as a fresh turn.
@@ -1342,18 +1344,27 @@ impl Pane {
                 // but the failure is now visible on the same
                 // `cas::coordination` lane the delivery telemetry uses.
                 let pane_id = self.id.clone();
+                self.inject_submit_pending
+                    .store(true, std::sync::atomic::Ordering::Release);
+                let submit_pending = std::sync::Arc::clone(&self.inject_submit_pending);
                 tokio::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(settle_ms)).await;
                     let mut guard = writer.lock().await;
-                    if let Err(e) = guard.write_all(b"\r").and_then(|()| guard.flush()) {
-                        tracing::warn!(
-                            target: "cas::coordination",
-                            stage = "inject_submit_failed",
-                            target_agent = %pane_id,
-                            error = %e,
-                            "injected payload was written but its submit CR failed — the text is \
-                             sitting unsubmitted in the pane composer and no turn started"
-                        );
+                    match guard.write_all(b"\r").and_then(|()| guard.flush()) {
+                        Ok(()) => {
+                            submit_pending.store(false, std::sync::atomic::Ordering::Release);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "cas::coordination",
+                                stage = "inject_submit_failed",
+                                target_agent = %pane_id,
+                                error = %e,
+                                "injected payload was written but its submit CR failed — the text is \
+                                 sitting unsubmitted in the pane composer and no turn started; later \
+                                 injections remain deferred until this pane is replaced"
+                            );
+                        }
                     }
                 });
                 self.clear_composer_dirty();
@@ -1412,35 +1423,34 @@ impl Pane {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
-    fn mark_composer_dirty(&self) {
-        if !self
-            .composer_dirty
-            .swap(true, std::sync::atomic::Ordering::AcqRel)
-        {
-            match self.composer_dirty_since.lock() {
-                Ok(mut since) => *since = Some(std::time::Instant::now()),
-                Err(poisoned) => {
-                    *poisoned.into_inner() = Some(std::time::Instant::now());
-                }
+    /// Whether a previous CAS injection is still awaiting its delayed submit.
+    pub(crate) fn inject_submit_pending(&self) -> bool {
+        self.inject_submit_pending
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn replace_pty_writer_for_test(
+        &self,
+        writer: Box<dyn std::io::Write + Send>,
+    ) -> Result<()> {
+        match &self.backend {
+            PaneBackend::Pty(pty) => {
+                *pty.writer_handle().lock().await = writer;
+                Ok(())
             }
+            PaneBackend::None => Err(Error::pty("Pane has no backend")),
         }
+    }
+
+    fn mark_composer_dirty(&self) {
+        self.composer_dirty
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     fn clear_composer_dirty(&self) {
         self.composer_dirty
             .store(false, std::sync::atomic::Ordering::Release);
-        match self.composer_dirty_since.lock() {
-            Ok(mut since) => *since = None,
-            Err(poisoned) => *poisoned.into_inner() = None,
-        }
-    }
-
-    pub(crate) fn composer_dirty_elapsed(&self) -> Option<std::time::Duration> {
-        let since = match self.composer_dirty_since.lock() {
-            Ok(since) => *since,
-            Err(poisoned) => *poisoned.into_inner(),
-        };
-        since.map(|started| started.elapsed())
     }
 
     /// Track the final composer state after one attached-client keystream

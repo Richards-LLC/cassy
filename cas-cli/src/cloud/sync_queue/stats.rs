@@ -15,6 +15,17 @@ impl SyncQueue {
         Ok(Self::group_pending_items(items))
     }
 
+    /// Get personal pending items for one entity type, grouped for the syncer.
+    pub fn pending_by_type_for_entity(
+        &self,
+        entity_type: EntityType,
+        limit: usize,
+        max_retries: i32,
+    ) -> Result<PendingByType, CasError> {
+        let items = self.pending_for_entity_type(Some(entity_type), limit, max_retries)?;
+        Ok(Self::group_pending_items(items))
+    }
+
     /// Get items grouped by entity type for a specific team.
     pub fn pending_by_type_for_team(
         &self,

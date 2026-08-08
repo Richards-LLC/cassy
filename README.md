@@ -262,7 +262,7 @@ cas cloud status      # what is pending, what is embedded
 cas cloud sync        # push then pull
 ```
 
-Sync is project-scoped: a pull that cannot determine which project it is running in refuses to make the request rather than asking for everything. `cas doctor` tells you which bucket a project resolves to; `cas cloud project set` pins it explicitly.
+Sync is project-scoped: a push or pull that cannot determine which project it is running in refuses to make the request rather than sending or asking for everything. Personal pushes are incremental: `cas cloud push` consumes the current project's pending `sync_queue` rows, removing successful rows while leaving failures retryable. `--dry-run` previews the next bounded queue batch; `--entries-only` and `--tasks-only` narrow both that plan and the real push. `cas doctor` tells you which bucket a project resolves to; `cas cloud project set` pins it explicitly.
 
 ### Teams
 

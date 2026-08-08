@@ -840,6 +840,64 @@ fn cat_pane(name: &str) -> Option<Pane> {
     Pane::shell(name, PathBuf::from("/tmp"), Some("cat"), 24, 80).ok()
 }
 
+/// Real PTY stand-in carrying the production Codex framing/submit delay.
+fn codex_cat_pane(name: &str) -> Option<Pane> {
+    let pty = crate::pty::Pty::spawn(
+        name,
+        crate::pty::PtyConfig {
+            command: "cat".to_string(),
+            args: vec![],
+            cwd: Some(PathBuf::from("/tmp")),
+            env: vec![],
+            rows: 24,
+            cols: 80,
+        },
+    )
+    .ok()?;
+    Pane::with_pty(
+        name,
+        PaneKind::Supervisor,
+        pty,
+        24,
+        80,
+        SupervisorCli::Codex,
+    )
+    .ok()
+}
+
+struct SubmitFailWriter {
+    writes: usize,
+}
+
+impl std::io::Write for SubmitFailWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.writes += 1;
+        if self.writes == 1 {
+            Ok(buf.len())
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "deterministic delayed submit failure",
+            ))
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+async fn settled_pane_snapshot(
+    mux: &mut Mux,
+    pane_id: &str,
+) -> cas_factory_protocol::TerminalSnapshot {
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    mux.poll_batch();
+    mux.get_pane_snapshot(pane_id)
+        .expect("pane snapshot")
+        .0
+}
+
 #[cfg(target_os = "linux")]
 fn proc_state_and_group(pid: u32) -> Option<(char, u32)> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
@@ -1065,6 +1123,64 @@ async fn interrupt_and_inject_breaks_then_injects_by_name() {
     );
 }
 
+#[tokio::test]
+async fn urgent_queue_inject_preserves_draft_then_interrupts_after_submit_cas_eacc() {
+    let mut mux = Mux::new(24, 80);
+    let Some(w1) = codex_cat_pane("urgent-safe") else {
+        return;
+    };
+    mux.add_pane(w1);
+
+    mux.deliver_user_input_to(
+        "urgent-safe",
+        b"unfinished human sentence",
+        UserInputKind::KeyStream,
+    )
+    .await
+    .expect("type operator draft");
+    let draft_before = settled_pane_snapshot(&mut mux, "urgent-safe").await;
+
+    let deferred = mux
+        .interrupt_and_inject_preserving_composer(
+            "urgent-safe",
+            "urgent lifecycle redirect",
+            std::time::Duration::ZERO,
+        )
+        .await
+        .expect("dirty composer is a durable deferral, not an error");
+    assert_eq!(deferred, InjectOutcome::DeferredComposerDirty);
+    assert!(
+        mux.get("urgent-safe").unwrap().is_composer_dirty(),
+        "urgent delivery must not send Esc and clear the human draft"
+    );
+    assert!(
+        !mux.get("urgent-safe").unwrap().is_turn_in_flight(),
+        "urgent delivery must not submit the human draft"
+    );
+    let draft_after = settled_pane_snapshot(&mut mux, "urgent-safe").await;
+    assert_eq!(
+        draft_after, draft_before,
+        "urgent deferral must preserve the Codex supervisor's visible draft byte-for-byte"
+    );
+
+    mux.deliver_user_input_to("urgent-safe", b"\r", UserInputKind::KeyStream)
+        .await
+        .expect("human submits at the safe boundary");
+    let delivered = mux
+        .interrupt_and_inject_preserving_composer(
+            "urgent-safe",
+            "urgent lifecycle redirect",
+            std::time::Duration::ZERO,
+        )
+        .await
+        .expect("urgent row delivers after the safe boundary");
+    assert_eq!(delivered, InjectOutcome::Delivered);
+    assert!(
+        mux.get("urgent-safe").unwrap().is_turn_in_flight(),
+        "urgent semantics remain interrupt-and-inject once the composer is clean"
+    );
+}
+
 // ── cas-1a4d: non-urgent injects defer around operator drafts ───────────────
 
 #[tokio::test]
@@ -1114,9 +1230,9 @@ async fn nonurgent_inject_defers_until_composer_clears_cas_1a4d() {
 }
 
 #[tokio::test]
-async fn nonurgent_inject_delivers_on_bounded_dirty_timeout_cas_1a4d() {
+async fn nonurgent_inject_never_expires_a_dirty_composer_cas_eacc() {
     let mut mux = Mux::new(24, 80);
-    let Some(pane) = cat_pane("timeout-pane") else {
+    let Some(pane) = codex_cat_pane("timeout-pane") else {
         return;
     };
     mux.add_pane(pane);
@@ -1124,27 +1240,107 @@ async fn nonurgent_inject_delivers_on_bounded_dirty_timeout_cas_1a4d() {
     mux.deliver_user_input_to("timeout-pane", b"draft", UserInputKind::KeyStream)
         .await
         .expect("type draft");
-    let outcome = mux
-        .inject_with_timeout("timeout-pane", "eventual report", std::time::Duration::ZERO)
+    let draft_before = settled_pane_snapshot(&mut mux, "timeout-pane").await;
+    let first = mux
+        .inject("timeout-pane", "director lifecycle event one")
         .await
-        .expect("bounded fallback performs a real write");
+        .expect("dirty inject defers");
+    let repeated = mux
+        .inject("timeout-pane", "director lifecycle event two")
+        .await
+        .expect("repeated dirty inject also defers");
 
-    assert_eq!(
-        outcome,
-        InjectOutcome::Delivered,
-        "bounded fallback reports delivery only after the real write"
+    assert_eq!(first, InjectOutcome::DeferredComposerDirty);
+    assert_eq!(repeated, InjectOutcome::DeferredComposerDirty);
+    assert!(
+        mux.get("timeout-pane").unwrap().is_composer_dirty(),
+        "elapsed time and repeated events must never make the draft writable"
     );
     assert!(
-        mux.panes
-            .get("timeout-pane")
-            .expect("pane exists")
-            .is_turn_in_flight(),
-        "timeout fallback delivers even while the pane remains dirty"
+        !mux.get("timeout-pane").unwrap().is_turn_in_flight(),
+        "neither event may append to or submit the unfinished human draft"
+    );
+    let draft_after = settled_pane_snapshot(&mut mux, "timeout-pane").await;
+    assert_eq!(
+        draft_after, draft_before,
+        "repeated director events must leave the Codex supervisor draft byte-for-byte intact"
+    );
+
+    mux.deliver_user_input_to("timeout-pane", b"\r", UserInputKind::KeyStream)
+        .await
+        .expect("human submits at the safe boundary");
+    assert_eq!(
+        mux.inject("timeout-pane", "director lifecycle event one")
+            .await
+            .unwrap(),
+        InjectOutcome::Delivered
+    );
+    assert_eq!(
+        mux.inject("timeout-pane", "director lifecycle event two")
+            .await
+            .unwrap(),
+        InjectOutcome::DeferredComposerDirty,
+        "a second event stays separate while the first awaits its Codex submit CR"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(550)).await;
+    assert_eq!(
+        mux.inject("timeout-pane", "director lifecycle event two")
+            .await
+            .unwrap(),
+        InjectOutcome::Delivered,
+        "the next FIFO event releases exactly once after the prior submit boundary"
     );
 }
 
 #[tokio::test]
-async fn expired_dirty_inject_surfaces_write_failure_cas_0b64() {
+async fn failed_submit_keeps_later_injections_deferred_cas_eacc() {
+    let mut mux = Mux::new(24, 80);
+    let Some(pane) = codex_cat_pane("submit-failure") else {
+        return;
+    };
+    pane.replace_pty_writer_for_test(Box::new(SubmitFailWriter { writes: 0 }))
+        .await
+        .expect("install deterministic writer");
+    mux.add_pane(pane);
+
+    assert_eq!(
+        mux.inject("submit-failure", "director lifecycle event one")
+            .await
+            .expect("payload write succeeds before delayed CR failure"),
+        InjectOutcome::Delivered
+    );
+    assert!(
+        mux.get("submit-failure").unwrap().inject_submit_pending(),
+        "the lane closes as soon as the payload is written"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(550)).await;
+    assert!(
+        mux.get("submit-failure").unwrap().inject_submit_pending(),
+        "a failed submit CR must keep the pane unsafe instead of reopening the lane"
+    );
+    assert_eq!(
+        mux.inject("submit-failure", "director lifecycle event two")
+            .await
+            .expect("unsafe pane causes durable deferral"),
+        InjectOutcome::DeferredComposerDirty,
+        "later non-urgent lifecycle payload must not coalesce with the unsubmitted first payload"
+    );
+    assert_eq!(
+        mux.interrupt_and_inject_preserving_composer(
+            "submit-failure",
+            "urgent lifecycle event",
+            std::time::Duration::ZERO,
+        )
+        .await
+        .expect("urgent row also stays durable"),
+        InjectOutcome::DeferredComposerDirty,
+        "urgent semantics must not override the hard unsafe state after submit failure"
+    );
+}
+
+#[tokio::test]
+async fn clean_inject_surfaces_write_failure_cas_0b64() {
     let mut mux = Mux::new(24, 80);
     mux.add_pane(Pane::director("no-backend", 24, 80).expect("director pane"));
 
@@ -1162,11 +1358,13 @@ async fn expired_dirty_inject_surfaces_write_failure_cas_0b64() {
             .expect("dirty target returns a deferred outcome"),
         InjectOutcome::DeferredComposerDirty
     );
+    mux.get("no-backend")
+        .unwrap()
+        .observe_raw_client_input(b"\x1b");
+    assert!(!mux.get("no-backend").unwrap().is_composer_dirty());
     assert!(
-        mux.inject_with_timeout("no-backend", "must stay durable", std::time::Duration::ZERO)
-            .await
-            .is_err(),
-        "an expired deferral must surface the failed real write so the durable queue retries"
+        mux.inject("no-backend", "must stay durable").await.is_err(),
+        "a clean target must surface the failed real write so the durable queue retries"
     );
 }
 

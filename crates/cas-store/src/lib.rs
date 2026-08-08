@@ -126,10 +126,11 @@ pub use history_provenance::{
 // markdown bodies on disk, index + content-hash source ledger in cas.db.
 pub use knowledge_store::{
     DiskSource, IngestBatch, IngestReason, IngestReport, KNOWLEDGE_DIR_NAME, KNOWLEDGE_SCHEMA,
-    KNOWLEDGE_SCHEMA_STATEMENTS, KnowledgeHit, KnowledgePage, KnowledgeSource, KnowledgeStore,
-    PageWrite, PendingSource, SourceClassification, SourceOutcome, SourceStatus,
-    SqliteKnowledgeStore, blake3_hex, canonical_rel_path, classify_sources, hash_source_file,
-    slugify,
+    KNOWLEDGE_PAGE_ATTRIBUTION_STATEMENTS, KNOWLEDGE_PAGE_TOMBSTONE_STATEMENTS,
+    KNOWLEDGE_SCHEMA_STATEMENTS, KnowledgeHit, KnowledgePage, KnowledgePageOrigin,
+    KnowledgePageTombstone, KnowledgeSource, KnowledgeStore, PageWrite, PendingSource,
+    SourceClassification, SourceOutcome, SourceStatus, SqliteKnowledgeStore, TombstoneApplyOutcome,
+    blake3_hex, canonical_rel_path, classify_sources, hash_source_file, slugify,
 };
 
 // Loop store for iteration loops

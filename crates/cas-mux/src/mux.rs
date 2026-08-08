@@ -13,8 +13,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 
-const COMPOSER_DEFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
 /// Result of a non-urgent PTY injection attempt.
 ///
 /// `Delivered` means the payload was written to the pane. A dirty-composer
@@ -24,7 +22,9 @@ const COMPOSER_DEFER_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 pub enum InjectOutcome {
     /// The payload was written to the pane.
     Delivered,
-    /// No write occurred because the attached operator has an active draft.
+    /// No write occurred because the composer is not at a safe turn boundary:
+    /// either the attached operator has an active draft or a prior CAS payload
+    /// is still awaiting its submit CR.
     DeferredComposerDirty,
 }
 
@@ -895,40 +895,27 @@ impl Mux {
 
     /// Inject a prompt into a specific pane
     pub async fn inject(&self, pane_id: &str, prompt: &str) -> Result<InjectOutcome> {
-        self.inject_with_timeout(pane_id, prompt, COMPOSER_DEFER_TIMEOUT)
-            .await
-    }
-
-    async fn inject_with_timeout(
-        &self,
-        pane_id: &str,
-        prompt: &str,
-        timeout: std::time::Duration,
-    ) -> Result<InjectOutcome> {
         let pane = self
             .panes
             .get(pane_id)
             .ok_or_else(|| Error::pane_not_found(pane_id))?;
         if pane.is_composer_dirty() {
-            let dirty_for = pane.composer_dirty_elapsed().unwrap_or_default();
-            if dirty_for < timeout {
-                tracing::info!(
-                    target: "cas::coordination",
-                    stage = "composer_inject_deferred",
-                    target_agent = %pane_id,
-                    dirty_ms = dirty_for.as_millis() as u64,
-                    "non-urgent PTY inject deferred to its durable owner while attached operator composer is dirty"
-                );
-                return Ok(InjectOutcome::DeferredComposerDirty);
-            }
-
-            tracing::warn!(
+            tracing::info!(
                 target: "cas::coordination",
-                stage = "composer_inject_timeout",
+                stage = "composer_inject_deferred",
                 target_agent = %pane_id,
-                dirty_ms = dirty_for.as_millis() as u64,
-                "operator composer stayed dirty through bounded deferral; attempting non-urgent inject"
+                "PTY inject deferred to its durable owner while attached operator composer is dirty"
             );
+            return Ok(InjectOutcome::DeferredComposerDirty);
+        }
+        if pane.inject_submit_pending() {
+            tracing::info!(
+                target: "cas::coordination",
+                stage = "composer_inject_deferred",
+                target_agent = %pane_id,
+                "PTY inject deferred until the prior injected payload reaches its submit boundary"
+            );
+            return Ok(InjectOutcome::DeferredComposerDirty);
         }
         pane.inject_prompt(prompt).await?;
         Ok(InjectOutcome::Delivered)
@@ -950,13 +937,11 @@ impl Mux {
     }
 
     /// Whether an attached operator currently has an unsubmitted draft in this
-    /// pane's composer (cas-f02b).
+    /// pane's composer (cas-f02b / cas-eacc).
     ///
-    /// `Mux::inject` already defers on a dirty composer, but only for a bounded
-    /// window — after `COMPOSER_DEFER_TIMEOUT` it writes anyway. Callers that
-    /// would rather skip entirely than ever type over a human (the supervisor
-    /// wake path) check this first. An unknown pane reports `false`: absence of
-    /// a pane is not evidence of a draft, and the caller's own liveness checks
+    /// `Mux::inject` defers for as long as this remains true. There is no
+    /// elapsed-time escape hatch: time does not make writing into a human draft
+    /// safe. An unknown pane reports `false`; the caller's own liveness checks
     /// decide whether to proceed.
     pub fn pane_composer_dirty(&self, pane_id: &str) -> bool {
         self.panes
@@ -1015,6 +1000,39 @@ impl Mux {
             .get(pane_id)
             .ok_or_else(|| Error::pane_not_found(pane_id))?;
         pane.inject_prompt(prompt).await
+    }
+
+    /// Urgent queue delivery that preserves an attached operator's draft.
+    ///
+    /// Urgent still means "interrupt the agent's current turn", but only after
+    /// the human has submitted or cleared their composer. A dirty composer
+    /// returns [`InjectOutcome::DeferredComposerDirty`] without sending Esc or
+    /// payload bytes, allowing the durable queue owner to retry the same urgent
+    /// row at the next safe boundary without losing its priority or attribution.
+    ///
+    /// Deliberately separate from [`Self::interrupt_and_inject`]: explicit
+    /// destructive controls such as context reset still need the raw primitive.
+    pub async fn interrupt_and_inject_preserving_composer(
+        &mut self,
+        pane_id: &str,
+        prompt: &str,
+        floor: std::time::Duration,
+    ) -> Result<InjectOutcome> {
+        let pane = self
+            .panes
+            .get(pane_id)
+            .ok_or_else(|| Error::pane_not_found(pane_id))?;
+        if pane.is_composer_dirty() || pane.inject_submit_pending() {
+            tracing::info!(
+                target: "cas::coordination",
+                stage = "urgent_composer_inject_deferred",
+                target_agent = %pane_id,
+                "urgent queue delivery retained until the composer reaches a safe boundary"
+            );
+            return Ok(InjectOutcome::DeferredComposerDirty);
+        }
+        self.interrupt_and_inject(pane_id, prompt, floor).await?;
+        Ok(InjectOutcome::Delivered)
     }
 
     /// Bounded post-break-turn settle used by [`Mux::interrupt_and_inject`]

@@ -37,6 +37,7 @@ pub mod shared_db;
 
 mod agent_store;
 mod code_store;
+mod code_vector_store;
 mod commit_link_store;
 mod delivery_store;
 mod entity_store;
@@ -88,6 +89,10 @@ pub use event_store::{EVENT_SCHEMA, EventStore, SqliteEventStore, record_event_w
 
 // Code store for indexed source code
 pub use code_store::CodeStore;
+pub use code_vector_store::{
+    CODE_VECTOR_SCHEMA, CODE_VECTOR_SCHEMA_STATEMENTS, CodeIndexState, CodeVectorStats,
+    CodeVectorWork, SqliteCodeVectorStore,
+};
 pub use delivery_store::{
     DELIVERY_SCHEMA, build_worker_completion_receipt, create_worker_delivery,
     create_worker_delivery_with_dispatch, create_worker_delivery_with_dispatch_for_lease,

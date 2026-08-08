@@ -1083,6 +1083,12 @@ impl FactoryDaemon {
             written.written_at.elapsed(),
             INBOX_DRAIN_TURN_WINDOW,
         );
+        // cas-c73d: the presence check must read the SAME tree the write went
+        // to. For a `config_dir`-spawned worker that is the recipient's own
+        // config dir; checking the daemon's tree there would report "no unread
+        // copy" for a row the recipient has not seen and consume it.
+        let recipient_view = self.recipient_teams_view(pane_target);
+        let teams = recipient_view.as_ref().unwrap_or(teams);
         deferred_inbox_outcome(
             true,
             teams.inbox_has_unread_copy(inbox_target, from, text),
@@ -3815,6 +3821,14 @@ impl FactoryDaemon {
                                     );
                                 }
                             }
+                            // cas-c73d: a worker spawned with its own
+                            // `config_dir` reads the roster and its inbox from
+                            // THAT config dir. Provision the mirrored tree now,
+                            // at spawn, so the harness has a real team config
+                            // from its first turn (with none it invents a
+                            // phantom `team-lead` mailbox) instead of only when
+                            // the first message happens to arrive.
+                            let _ = self.recipient_teams_view(&name);
                             if self.app.record_enabled() {
                                 if let Err(e) = self.app.start_recording_for_pane(&name).await {
                                     tracing::error!(

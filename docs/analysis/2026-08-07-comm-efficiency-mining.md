@@ -869,3 +869,98 @@ The rebuilt binary was fed Claude's real wire shape — `{"hook_event_name":"Use
 That is the acceptance condition for GH #165: a message consumed by a worker gains `acked_via`
 within one turn. The unreconciled pair is no longer the 100% steady state, which is the precondition
 #166 and #167 were blocked on.
+
+---
+
+## PHASE 4 ADDENDUM — 2026-08-08, the F2 hot loop re-measured (cas-5c50, GH #166)
+
+Phase 1's F2 finding was that a single pending row emitted a `delivered` + `wake_deferred` log pair
+on **every poll tick** without transitioning: message 7070 logged `stage="delivered"` 55,868 times
+in ~57 minutes while its row carried `transport_delivered_at = NULL` and ended `abandoned`. The
+label half was corrected by cas-7787. This addendum re-measures the **loop** half.
+
+### The epoch had to be established before any count meant anything
+
+The ticket flagged the last observed burst as falling in a mixed-binary epoch, and that caution was
+warranted — my first candidate for "the loop is still live" turned out to be pre-fix code.
+
+Marker used: cas-7787 introduced the stage string `inbox_write_pending_turn`. Its **first**
+appearance in `.cas/logs/cas-2026-08-07.log` is `22:58:06Z`, from the daemon that started
+`22:56:36Z`. Every line before that boundary came from a binary without cas-7787.
+
+| epoch start (daemon) | contains cas-7787 | notes |
+|---|---|---|
+| … 21:31:50Z | no | message 7953's burst lives here |
+| 22:56:36Z | yes | ~1h24m, 44,560 lines |
+| 00:23:57Z (v2.51.0, `b89288d`) | yes | current fleet |
+
+### Pre-fix epoch — the loop, characterised
+
+Full-day stage census of `cas-2026-08-07.log` (137,887 lines):
+
+| stage | lines |
+|---|---|
+| `inbox_drain_unsurfaced` | **17,195** |
+| `delivered` | 840 |
+| `wake_deferred` | 486 |
+| `inbox_drained` | 295 |
+| `inbox_write_pending_turn` | 85 |
+
+The `delivered` family is down to ~1,400 lines across a whole day — cas-7787 worked. But 12.5% of
+every line the daemon wrote that day is a single stage, and 16,604 of those 17,195 lines belong to
+**one message**: id 7953, `source=director`, `target=clever-owl-55`, from `22:24:15Z` to
+`22:54:20Z`. The per-minute profile is flat — 412, 538, 549, 541, 529, 562, … 557, 537, 551, 194 —
+≈9.2 lines/second, i.e. the 100ms poll tick, with no decay across thirty minutes.
+
+**What ended it: nothing in CAS.** The last line is `22:54:20.707Z`; the next line in the file is
+`22:54:20.790Z  Supervisor exited with code None, shutting down`. The loop was terminated by an
+unrelated process exit — no argument from code required.
+
+*Precision, because the first draft of this addendum overstated it and a regression test caught the
+overstatement:* on that binary the loop was genuinely unbounded, because the retry budget did not
+exist yet. On **current** code the row is terminated by `LIFECYCLE_MAX_RENUDGE_ATTEMPTS` after ~20
+minutes, so the pre-fix cost of one stuck row is ~11,400 lines rather than infinite. That is still
+570x the number of things that actually happened, and several concurrently-stuck rows is the shape
+that produced a 464MB log day — but "unbounded" was the wrong word and is withdrawn.
+
+Note the re-offer *policy* was never the problem. The same row's actual re-deliveries were perfectly
+regular at one per 60 seconds (49 of them, `22:05`→`22:54`). The cadence gate was doing its job; the
+log line simply was not behind it. (Those 49 exceed the 20-attempt budget only because
+`LIFECYCLE_MAX_RENUDGE_ATTEMPTS` did not exist in that binary — an epoch artefact, not a live bug.)
+
+### Post-fix epochs — measured, with the caveat stated
+
+| epoch | lines | `inbox_drain_unsurfaced` | max lines for any one `message_id` |
+|---|---|---|---|
+| 22:56:36Z → 00:20:32Z | 44,560 | **0** | 1 |
+| 00:23:57Z → now (v2.51.0) | 572 | **0** | 1 |
+
+In both windows `wake_deferred` and `inbox_drained` counts match exactly (73/73 and 16/16): every
+deferred write was subsequently drained. **No row ever got stuck.**
+
+That is a real result — post-GH #165 the loop's fuel is gone, which is the causal chain the epic
+predicted — but it is *not* a bound. Zero occurrences with zero stuck rows measures the absence of
+the input, not the presence of a limit. The defect was still in the source, and would fire the
+moment one row went unsurfaced (a wedged pane, or a harness that files an inbox copy without
+surfacing it — the cas-ef14 / GH #139 condition, which is not hypothetical). So this was closed by
+fixing it, not by declaring it measured-resolved.
+
+### Root cause and fix
+
+`cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs`. The `DeferredInboxOutcome::DrainedAwaitingWake`
+arm emitted its `tracing::info!` **before** falling through to the cas-d732 / cas-ceae re-nudge
+cadence gate. So the gate correctly declined the re-nudge and the line was printed anyway — an
+ordering bug, the same species as the cas-7787 defect (a log line that does not correspond to a
+state transition) relocated one match arm over.
+
+The announcement now rides the gate's `Deliver` arm — the only place a re-offer actually happens —
+and carries `attempt` / `max_attempts`. Line count per stuck row goes from O(poll ticks) to
+O(retries), bounded at `LIFECYCLE_MAX_RENUDGE_ATTEMPTS` = 20. The gate itself was left alone: its
+re-offer policy was already correct, and rewriting a working gate to fix a misplaced log line would
+have been the wrong repair.
+
+The sharper statement of what changed: the line count used to be a function of the **poll interval**
+— an implementation detail nobody chose, so making the daemon more responsive made the logs
+proportionally worse — and is now a function of the **retry budget**, which is a deliberate policy
+number. Pinned by `the_log_volume_stops_being_a_function_of_the_poll_interval`, which halves the
+poll interval and asserts the pre-fix count roughly doubles while the post-fix count does not move.

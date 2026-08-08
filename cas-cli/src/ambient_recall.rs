@@ -9,9 +9,10 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OpenFlags, params_from_iter};
+use rusqlite::{Connection, OpenFlags, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -19,6 +20,16 @@ use crate::cloud::embeddings::{
     EmbeddingMeta, KnowledgeEmbedder, KnowledgeVectorCache, VectorNamespace, code_symbol_key,
     cosine_similarity, history_commit_key, history_doc_key, is_zero_vector,
 };
+
+/// Automatic hooks are on the user's interactive critical path. Semantic
+/// recall may spend at most this long waiting for the optional provider; a
+/// timeout is an explicit degradation to the always-local lexical channel.
+const HOOK_SEMANTIC_TIMEOUT: Duration = Duration::from_millis(400);
+
+/// Maximum authoritative rows whose cached vectors may be read and compared
+/// for one namespace during one hook. Candidate discovery uses bounded FTS /
+/// index lookups and a deterministic head window, never a corpus-wide scan.
+const SEMANTIC_CANDIDATE_CAP_PER_NAMESPACE: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -270,7 +281,7 @@ pub(crate) trait RecallRetriever {
 /// then must reuse that exact vector for every compatible namespace.
 trait RecallQueryEmbedder {
     fn meta(&self) -> EmbeddingMeta;
-    fn embed_query(&self, query: &str) -> Option<Vec<f32>>;
+    fn embed_query(&self, query: &str) -> Result<Vec<f32>, ()>;
 }
 
 impl RecallQueryEmbedder for KnowledgeEmbedder {
@@ -278,11 +289,12 @@ impl RecallQueryEmbedder for KnowledgeEmbedder {
         KnowledgeEmbedder::meta(self)
     }
 
-    fn embed_query(&self, query: &str) -> Option<Vec<f32>> {
+    fn embed_query(&self, query: &str) -> Result<Vec<f32>, ()> {
         self.embed_batch(&[query.to_string()])
-            .ok()?
+            .map_err(|_| ())?
             .into_iter()
             .next()
+            .ok_or(())
     }
 }
 
@@ -294,6 +306,7 @@ impl RecallQueryEmbedder for KnowledgeEmbedder {
 /// share one cache; code remains in its isolated cache. All three consume the
 /// same query vector.
 struct SemanticRecallRetriever {
+    cas_root: PathBuf,
     db_path: PathBuf,
     embedder: Box<dyn RecallQueryEmbedder>,
     shared_cache: Option<KnowledgeVectorCache>,
@@ -302,7 +315,7 @@ struct SemanticRecallRetriever {
 
 impl SemanticRecallRetriever {
     fn existing(cas_root: &Path, config: &crate::cloud::CloudConfig) -> Option<Self> {
-        let embedder = KnowledgeEmbedder::from_config(config)?;
+        let embedder = KnowledgeEmbedder::from_config(config)?.with_timeout(HOOK_SEMANTIC_TIMEOUT);
         Self::with_embedder(cas_root, Box::new(embedder))
     }
 
@@ -315,22 +328,16 @@ impl SemanticRecallRetriever {
         let shared_cache = KnowledgeVectorCache::open_existing(cas_root)
             .ok()
             .flatten()
-            .filter(|cache| {
-                cache.meta() == &meta
-                    && (cache.count_in(VectorNamespace::Knowledge).unwrap_or(0)
-                        + cache.count_in(VectorNamespace::History).unwrap_or(0))
-                        > 0
-            });
+            .filter(|cache| cache.meta() == &meta && cache.count().unwrap_or(0) > 0);
         let code_cache = KnowledgeVectorCache::open_existing_code_read_only(cas_root)
             .ok()
             .flatten()
-            .filter(|cache| {
-                cache.meta() == &meta && cache.count_in(VectorNamespace::Code).unwrap_or(0) > 0
-            });
+            .filter(|cache| cache.meta() == &meta && cache.count().unwrap_or(0) > 0);
         if shared_cache.is_none() && code_cache.is_none() {
             return None;
         }
         Some(Self {
+            cas_root: cas_root.to_path_buf(),
             db_path,
             embedder,
             shared_cache,
@@ -422,11 +429,20 @@ impl RecallRetriever for SemanticRecallRetriever {
         }
         // Exactly one provider request per recall event. The returned vector
         // is then fanned out locally; namespace count never multiplies cost.
-        let Some(query_vector) = self.embedder.embed_query(&query.canonical) else {
-            return Vec::new();
+        let query_vector = match self.embedder.embed_query(&query.canonical) {
+            Ok(vector) => vector,
+            Err(()) => {
+                eprintln!(
+                    "cas: ambient recall semantic channel timed out or failed; using lexical fallback"
+                );
+                return Vec::new();
+            }
         };
         let meta = self.embedder.meta();
         if is_zero_vector(&query_vector) || query_vector.len() != meta.dims {
+            eprintln!(
+                "cas: ambient recall semantic channel returned an unusable vector; using lexical fallback"
+            );
             return Vec::new();
         }
 
@@ -436,7 +452,34 @@ impl RecallRetriever for SemanticRecallRetriever {
         };
         let terms = query_terms(&query.canonical);
         let mut candidates = Vec::new();
-        for semantic in read_semantic_rows(&conn, scope) {
+        let candidate_limit = limit.min(SEMANTIC_CANDIDATE_CAP_PER_NAMESPACE).max(1);
+        let semantic_rows = read_semantic_rows(
+            &conn,
+            &self.cas_root,
+            query,
+            scope,
+            candidate_limit,
+            self.shared_cache.is_some(),
+            self.code_cache.is_some(),
+        );
+        if [
+            VectorNamespace::Knowledge,
+            VectorNamespace::History,
+            VectorNamespace::Code,
+        ]
+        .into_iter()
+        .any(|namespace| {
+            semantic_rows
+                .iter()
+                .filter(|row| row.namespace == namespace)
+                .count()
+                == candidate_limit
+        }) {
+            eprintln!(
+                "cas: ambient recall semantic candidate window capped at {candidate_limit} per namespace; using bounded lexical/structural prefilter"
+            );
+        }
+        for semantic in semantic_rows {
             // Scope is resolved from the authoritative SQLite row before its
             // vector is read or compared.
             if !scope.allows(&semantic.row.scope) {
@@ -493,119 +536,257 @@ fn row_scope(raw: &str, project_id: &str) -> EvidenceScope {
     }
 }
 
-fn read_semantic_rows(conn: &Connection, scope: &ScopeGate) -> Vec<SemanticRow> {
-    let mut out = Vec::new();
-    if table_exists(conn, "knowledge_pages")
-        && let Ok(mut stmt) = conn.prepare(
+fn read_semantic_rows(
+    conn: &Connection,
+    cas_root: &Path,
+    query: &RecallQuery,
+    scope: &ScopeGate,
+    limit: usize,
+    include_shared: bool,
+    include_code: bool,
+) -> Vec<SemanticRow> {
+    let terms = query_terms(&query.canonical);
+    if terms.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let fts = terms
+        .iter()
+        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let mut out = Vec::with_capacity(limit.saturating_mul(3));
+
+    if include_shared {
+        let mut knowledge = Vec::new();
+        if table_exists(conn, "knowledge_pages_fts")
+            && let Ok(mut stmt) = conn.prepare(
+                "select p.id, substr(trim(p.title || ' ' || p.snippet || ' ' || p.page_type), 1, 480), \
+                        p.updated_at, p.rel_path from knowledge_pages_fts f \
+                 join knowledge_pages p on p.row_id = f.rowid \
+                 where knowledge_pages_fts match ?1 \
+                   and (p.origin = 'local' or p.origin_project_id = ?2) \
+                 order by bm25(knowledge_pages_fts), p.id limit ?3",
+            )
+            && let Ok(rows) = stmt.query_map(params![fts, scope.project_id, limit as i64], |row| {
+                semantic_knowledge_row(row, scope)
+            })
+        {
+            knowledge.extend(rows.filter_map(Result::ok));
+        }
+        extend_semantic_head(
+            conn,
+            &mut knowledge,
             "select id, substr(trim(title || ' ' || snippet || ' ' || page_type), 1, 480), \
                     updated_at, rel_path from knowledge_pages \
-             where origin = 'local' or origin_project_id = ?1 order by id",
-        )
-        && let Ok(rows) = stmt.query_map([&scope.project_id], |row| {
-            let id: String = row.get(0)?;
-            Ok(SemanticRow {
-                namespace: VectorNamespace::Knowledge,
-                vector_key: id.clone(),
-                row: LocalRow {
-                    id,
-                    surface: EvidenceSurface::Knowledge,
-                    scope: EvidenceScope::Project(scope.project_id.clone()),
-                    snippet: row.get(1)?,
-                    revision: row.get(2)?,
-                    stale: false,
-                    body_available: true,
-                    locator: row.get(3)?,
-                },
-            })
-        })
-    {
-        out.extend(rows.filter_map(Result::ok));
-    }
+             where origin = 'local' or origin_project_id = ?1 order by id limit ?2",
+            params![scope.project_id, limit as i64],
+            limit,
+            |row| semantic_knowledge_row(row, scope),
+        );
+        knowledge.truncate(limit);
+        out.extend(knowledge);
 
-    if table_exists(conn, "history_commits")
-        && let Ok(mut stmt) = conn.prepare(
+        let mut history = Vec::new();
+        if table_exists(conn, "history_commits_fts")
+            && let Ok(mut stmt) = conn.prepare(
+                "select c.sha, substr(trim(c.subject || ' ' || coalesce(c.body, '')), 1, 480), \
+                        c.indexed_at, c.scope from history_commits_fts f \
+                 join history_commits c on c.sha = f.sha \
+                 where history_commits_fts match ?1 and lower(c.scope) != 'private' \
+                 order by bm25(history_commits_fts), c.sha limit ?2",
+            )
+            && let Ok(rows) = stmt.query_map(params![fts, limit as i64], |row| {
+                semantic_history_commit_row(row, scope)
+            })
+        {
+            history.extend(rows.filter_map(Result::ok));
+        }
+        extend_semantic_head(
+            conn,
+            &mut history,
             "select sha, substr(trim(subject || ' ' || coalesce(body, '')), 1, 480), \
-                    indexed_at, scope from history_commits order by sha",
-        )
-        && let Ok(rows) = stmt.query_map([], |row| {
-            let id: String = row.get(0)?;
-            let raw_scope: String = row.get(3)?;
-            Ok(SemanticRow {
-                namespace: VectorNamespace::History,
-                vector_key: history_commit_key(&id),
-                row: LocalRow {
-                    locator: id.clone(),
-                    id,
-                    surface: EvidenceSurface::History,
-                    scope: row_scope(&raw_scope, &scope.project_id),
-                    snippet: row.get(1)?,
-                    revision: row.get(2)?,
-                    stale: false,
-                    body_available: true,
-                },
-            })
-        })
-    {
-        out.extend(rows.filter_map(Result::ok));
+                    indexed_at, scope from history_commits \
+             where lower(scope) != 'private' order by sha limit ?1",
+            params![limit as i64],
+            limit,
+            |row| semantic_history_commit_row(row, scope),
+        );
+        if history.len() < limit && table_exists(conn, "history_docs") {
+            extend_semantic_head(
+                conn,
+                &mut history,
+                "select id, substr(trim(coalesce(title, '') || ' ' || coalesce(body, '')), 1, 480), \
+                        coalesce(updated_at, fetched_at), coalesce(url, id), scope, state \
+                 from history_docs where lower(scope) != 'private' order by id limit ?1",
+                params![limit as i64],
+                limit,
+                |row| semantic_history_doc_row(row, scope),
+            );
+        }
+        history.truncate(limit);
+        out.extend(history);
     }
 
-    if table_exists(conn, "history_docs")
-        && let Ok(mut stmt) = conn.prepare(
-            "select id, substr(trim(coalesce(title, '') || ' ' || coalesce(body, '')), 1, 480), \
-                    coalesce(updated_at, fetched_at), coalesce(url, id), scope, state \
-             from history_docs order by id",
-        )
-        && let Ok(rows) = stmt.query_map([], |row| {
-            let id: String = row.get(0)?;
-            let raw_scope: String = row.get(4)?;
-            let state: Option<String> = row.get(5)?;
-            Ok(SemanticRow {
-                namespace: VectorNamespace::History,
-                vector_key: history_doc_key(&id),
-                row: LocalRow {
-                    id,
-                    surface: EvidenceSurface::History,
-                    scope: row_scope(&raw_scope, &scope.project_id),
-                    snippet: row.get(1)?,
-                    revision: row.get(2)?,
-                    stale: state.as_deref() == Some("closed"),
-                    body_available: true,
-                    locator: row.get(3)?,
-                },
-            })
-        })
-    {
-        out.extend(rows.filter_map(Result::ok));
-    }
-
-    if table_exists(conn, "code_symbols")
-        && let Ok(mut stmt) = conn.prepare(
+    if include_code && table_exists(conn, "code_symbols") {
+        let mut code = Vec::new();
+        let index_dir = cas_root.join("index").join("code");
+        if index_dir.join("meta.json").is_file()
+            && let Ok(index) = cas_search::Bm25Index::open(&index_dir)
+            && let Ok(hits) = index.search_filtered(&terms.join(" "), None, &[], limit)
+        {
+            let ids: Vec<String> = hits.into_iter().map(|(id, _)| id).collect();
+            code.extend(read_code_rows_by_id(conn, &ids, scope));
+        }
+        extend_semantic_head(
+            conn,
+            &mut code,
             "select id, substr(trim(qualified_name || ' ' || name || ' ' || file_path || ' ' || \
                     coalesce(documentation, '') || ' ' || coalesce(signature, '')), 1, 480), \
-                    content_hash, qualified_name, scope from code_symbols order by id",
-        )
-        && let Ok(rows) = stmt.query_map([], |row| {
-            let id: String = row.get(0)?;
-            let raw_scope: String = row.get(4)?;
-            Ok(SemanticRow {
-                namespace: VectorNamespace::Code,
-                vector_key: code_symbol_key(&id),
-                row: LocalRow {
-                    id,
-                    surface: EvidenceSurface::Code,
-                    scope: row_scope(&raw_scope, &scope.project_id),
-                    snippet: row.get(1)?,
-                    revision: row.get(2)?,
-                    stale: false,
-                    body_available: true,
-                    locator: row.get(3)?,
-                },
-            })
-        })
-    {
-        out.extend(rows.filter_map(Result::ok));
+                    content_hash, qualified_name, scope from code_symbols \
+             where lower(scope) != 'private' order by id limit ?1",
+            params![limit as i64],
+            limit,
+            |row| semantic_code_row(row, scope),
+        );
+        code.truncate(limit);
+        out.extend(code);
     }
     out
+}
+
+fn extend_semantic_head<P, F>(
+    conn: &Connection,
+    rows: &mut Vec<SemanticRow>,
+    sql: &str,
+    params: P,
+    limit: usize,
+    mut map: F,
+) where
+    P: rusqlite::Params,
+    F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<SemanticRow>,
+{
+    if rows.len() >= limit {
+        return;
+    }
+    let Ok(mut stmt) = conn.prepare(sql) else {
+        return;
+    };
+    let Ok(mapped) = stmt.query_map(params, |row| map(row)) else {
+        return;
+    };
+    for row in mapped.filter_map(Result::ok) {
+        if rows
+            .iter()
+            .all(|existing| existing.vector_key != row.vector_key)
+        {
+            rows.push(row);
+            if rows.len() == limit {
+                break;
+            }
+        }
+    }
+}
+
+fn semantic_knowledge_row(
+    row: &rusqlite::Row<'_>,
+    scope: &ScopeGate,
+) -> rusqlite::Result<SemanticRow> {
+    let id: String = row.get(0)?;
+    Ok(SemanticRow {
+        namespace: VectorNamespace::Knowledge,
+        vector_key: id.clone(),
+        row: LocalRow {
+            id,
+            surface: EvidenceSurface::Knowledge,
+            scope: EvidenceScope::Project(scope.project_id.clone()),
+            snippet: row.get(1)?,
+            revision: row.get(2)?,
+            stale: false,
+            body_available: true,
+            locator: row.get(3)?,
+        },
+    })
+}
+
+fn semantic_history_commit_row(
+    row: &rusqlite::Row<'_>,
+    scope: &ScopeGate,
+) -> rusqlite::Result<SemanticRow> {
+    let id: String = row.get(0)?;
+    let raw_scope: String = row.get(3)?;
+    Ok(SemanticRow {
+        namespace: VectorNamespace::History,
+        vector_key: history_commit_key(&id),
+        row: LocalRow {
+            locator: id.clone(),
+            id,
+            surface: EvidenceSurface::History,
+            scope: row_scope(&raw_scope, &scope.project_id),
+            snippet: row.get(1)?,
+            revision: row.get(2)?,
+            stale: false,
+            body_available: true,
+        },
+    })
+}
+
+fn semantic_history_doc_row(
+    row: &rusqlite::Row<'_>,
+    scope: &ScopeGate,
+) -> rusqlite::Result<SemanticRow> {
+    let id: String = row.get(0)?;
+    let raw_scope: String = row.get(4)?;
+    let state: Option<String> = row.get(5)?;
+    Ok(SemanticRow {
+        namespace: VectorNamespace::History,
+        vector_key: history_doc_key(&id),
+        row: LocalRow {
+            id,
+            surface: EvidenceSurface::History,
+            scope: row_scope(&raw_scope, &scope.project_id),
+            snippet: row.get(1)?,
+            revision: row.get(2)?,
+            stale: state.as_deref() == Some("closed"),
+            body_available: true,
+            locator: row.get(3)?,
+        },
+    })
+}
+
+fn semantic_code_row(row: &rusqlite::Row<'_>, scope: &ScopeGate) -> rusqlite::Result<SemanticRow> {
+    let id: String = row.get(0)?;
+    let raw_scope: String = row.get(4)?;
+    Ok(SemanticRow {
+        namespace: VectorNamespace::Code,
+        vector_key: code_symbol_key(&id),
+        row: LocalRow {
+            id,
+            surface: EvidenceSurface::Code,
+            scope: row_scope(&raw_scope, &scope.project_id),
+            snippet: row.get(1)?,
+            revision: row.get(2)?,
+            stale: false,
+            body_available: true,
+            locator: row.get(3)?,
+        },
+    })
+}
+
+fn read_code_rows_by_id(conn: &Connection, ids: &[String], scope: &ScopeGate) -> Vec<SemanticRow> {
+    let Ok(mut stmt) = conn.prepare(
+        "select id, substr(trim(qualified_name || ' ' || name || ' ' || file_path || ' ' || \
+                coalesce(documentation, '') || ' ' || coalesce(signature, '')), 1, 480), \
+                content_hash, qualified_name, scope from code_symbols \
+         where id = ?1 and lower(scope) != 'private'",
+    ) else {
+        return Vec::new();
+    };
+    ids.iter()
+        .filter_map(|id| {
+            stmt.query_row([id], |row| semantic_code_row(row, scope))
+                .ok()
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1520,9 +1701,9 @@ mod tests {
             self.meta.clone()
         }
 
-        fn embed_query(&self, _query: &str) -> Option<Vec<f32>> {
+        fn embed_query(&self, _query: &str) -> Result<Vec<f32>, ()> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Some(self.vector.clone())
+            Ok(self.vector.clone())
         }
     }
 
@@ -1536,13 +1717,14 @@ mod tests {
             self.inner.meta()
         }
 
-        fn embed_query(&self, query: &str) -> Option<Vec<f32>> {
+        fn embed_query(&self, query: &str) -> Result<Vec<f32>, ()> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.inner
                 .embed_batch(&[query.to_string()])
-                .ok()?
+                .map_err(|_| ())?
                 .into_iter()
                 .next()
+                .ok_or(())
         }
     }
 
@@ -1900,6 +2082,168 @@ mod tests {
         assert!(rows.iter().any(|row| row.evidence_id == "sym-lease"));
         assert!(!rows.iter().any(|row| row.evidence_id == "sym-private"));
         assert!(rows.iter().all(|row| row.semantic_score.is_some()));
+    }
+
+    #[test]
+    fn large_semantic_corpus_uses_fixed_candidate_windows() {
+        let project = tempfile::tempdir().unwrap();
+        let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+        let mut conn = Connection::open(cas_root.join("cas.db")).unwrap();
+        let tx = conn.transaction().unwrap();
+        {
+            let mut page = tx
+                .prepare(
+                    "insert into knowledge_pages \
+                     (id, page_type, title, rel_path, snippet, locked, sources_json, origin, \
+                      origin_project_id, created_at, updated_at, pending_embedding) \
+                     values (?1, 'guide', ?2, ?3, ?4, 0, '[]', 'local', null, 'r1', 'r1', 0)",
+                )
+                .unwrap();
+            let mut fts = tx
+                .prepare(
+                    "insert into knowledge_pages_fts (rowid, title, snippet, body) \
+                     values (?1, ?2, ?3, ?4)",
+                )
+                .unwrap();
+            for index in 0..4_096 {
+                let id = if index == 4_095 {
+                    "zzzz-target".to_string()
+                } else {
+                    format!("page-{index:06}")
+                };
+                let title = if index == 4_095 {
+                    "repair vanished worker lease".to_string()
+                } else {
+                    format!("unrelated page {index}")
+                };
+                let path = format!("guide/{id}.md");
+                page.execute(params![id, title, path, title]).unwrap();
+                let rowid = tx.last_insert_rowid();
+                fts.execute(params![rowid, title, title, title]).unwrap();
+            }
+        }
+        tx.commit().unwrap();
+
+        let query = RecallQuery::build(
+            &identity(RecallRole::Worker),
+            &RecallRequest {
+                prompt: "repair vanished worker lease".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let rows = read_semantic_rows(
+            &conn,
+            &cas_root,
+            &query,
+            &identity(RecallRole::Worker).scope_gate(),
+            7,
+            true,
+            false,
+        );
+        assert!(
+            rows.len() <= 14,
+            "knowledge + history must each stay capped"
+        );
+        assert!(rows.iter().any(|row| row.row.id == "zzzz-target"));
+
+        let meta = EmbeddingMeta::new("cas-cloud", "ambient-large", 4);
+        let cache = KnowledgeVectorCache::open(&cas_root, meta.clone()).unwrap();
+        cache.put("zzzz-target", &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        drop(cache);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let retriever = SemanticRecallRetriever::with_embedder(
+            &cas_root,
+            Box::new(CountingEmbedder {
+                calls: Arc::clone(&calls),
+                meta,
+                vector: vec![1.0, 0.0, 0.0, 0.0],
+            }),
+        )
+        .unwrap();
+        let results = retriever.retrieve(&query, &identity(RecallRole::Worker).scope_gate(), 7);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(results.iter().any(|row| row.evidence_id == "zzzz-target"));
+        assert!(results.len() <= 7);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn slow_provider_cannot_stall_automatic_hooks_and_lexical_fallback_survives() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/embeddings"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_secs(5))
+                    .set_body_json(serde_json::json!({ "embeddings": [vec![0.0; 1024]] })),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let project = tempfile::tempdir().unwrap();
+        let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+        let entries = crate::store::open_store_local(&cas_root).unwrap();
+        entries
+            .add(&Entry {
+                id: "p-lease-fallback".into(),
+                title: Some("Vanished worker lease".into()),
+                content: "repair ownership after a vanished worker lease".into(),
+                ..Entry::default()
+            })
+            .unwrap();
+        let config = crate::cloud::CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".into()),
+            ..Default::default()
+        };
+        config.save_to_cas_dir(&cas_root).unwrap();
+        let cache = KnowledgeVectorCache::open(
+            &cas_root,
+            KnowledgeEmbedder::new(server.uri(), "test-token").meta(),
+        )
+        .unwrap();
+        cache.put("unresolved-cache-row", &vec![1.0; 1024]).unwrap();
+        drop(cache);
+
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_AGENT_NAME", Some("worker-one")),
+            ("CAS_FACTORY_SESSION", Some("factory-one")),
+            (crate::internal_llm::INTERNAL_LLM_ENV, None),
+        ]);
+        for (session_id, session_start) in
+            [("slow-session-start", true), ("slow-user-prompt", false)]
+        {
+            let input = cas_core::hooks::types::HookInput {
+                session_id: session_id.into(),
+                cwd: project.path().to_string_lossy().into_owned(),
+                agent_role: Some("worker".into()),
+                ..Default::default()
+            };
+            let root = cas_root.clone();
+            let started = Instant::now();
+            let packet = tokio::task::spawn_blocking(move || {
+                build_ambient_recall_context(
+                    &input,
+                    &root,
+                    Some("repair ownership after a vanished worker lease"),
+                    session_start,
+                )
+            })
+            .await
+            .unwrap()
+            .expect("the local lexical channel must survive semantic timeout");
+            let elapsed = started.elapsed();
+            assert!(packet.full.contains("p-lease-fallback"));
+            assert!(
+                elapsed <= HOOK_SEMANTIC_TIMEOUT + Duration::from_millis(750),
+                "automatic hook stalled for {elapsed:?}"
+            );
+        }
     }
 
     /// Reproducible production-path receipt for the authenticated semantic

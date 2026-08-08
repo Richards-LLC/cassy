@@ -128,6 +128,8 @@ pub(crate) fn publish_code_symbols(
         return Ok(0);
     }
 
+    // Symbols stay in this isolated Bm25 index: the main memory index has an
+    // incompatible schema and unfiltered searches would let symbols affect memory ranking.
     let index = Bm25Index::open(&code_index_dir(cas_root)).map_err(|e| e.to_string())?;
 
     if !retired_ids.is_empty() {

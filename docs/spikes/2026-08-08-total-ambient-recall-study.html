@@ -93,6 +93,7 @@ before ranking; first-stage results are IDs, compact snippets, scores,
 and provenance; full bodies require a second, justified pull.</p>
 <p>Recommended hard defaults:</p>
 <table>
+<caption>Report data table; context, source, and units are stated in the surrounding section.</caption>
 <thead>
 <tr>
 <th>Control</th>
@@ -172,6 +173,7 @@ record without additional embedding calls.</p>
 <h3 id="32-retrieval-surfaces-and-outputs">3.2 Retrieval surfaces and
 outputs</h3>
 <table>
+<caption>Report data table; context, source, and units are stated in the surrounding section.</caption>
 <thead>
 <tr>
 <th>Surface</th>
@@ -227,6 +229,7 @@ Omitted candidates are counted so a small packet never masquerades as
 exhaustive recall.</p>
 <h3 id="33-role-specific-behavior">3.3 Role-specific behavior</h3>
 <table>
+<caption>Report data table; context, source, and units are stated in the surrounding section.</caption>
 <thead>
 <tr>
 <th>Need</th>
@@ -324,6 +327,7 @@ namespace, pending state, attempts, next-attempt time, and last error.
 Writes enqueue only when embedded text changes. The scheduler prefers
 idle periods but obeys a max-staleness ceiling.</p>
 <table>
+<caption>Report data table; context, source, and units are stated in the surrounding section.</caption>
 <thead>
 <tr>
 <th>Surface</th>
@@ -400,6 +404,7 @@ fetch), and the already-configured embedding capability. The live
 project database and vector cache were not read or mutated for benchmark
 writes.</p>
 <table>
+<caption>Report data table; context, source, and units are stated in the surrounding section.</caption>
 <thead>
 <tr>
 <th>Metric</th>
@@ -499,10 +504,11 @@ modeled</td>
 </tr>
 </tbody>
 </table>
-<p>The provider returned HTTP 503 on attempted request 64 after 63
-successful batches. The drain left 223 units pending and preserved all
-2,016 successful vectors. A second invocation made 8 requests, embedded
-the remaining 223 units in 6.85 s, and drained pending to zero. Total
+<p>The 2,239 eligible units split into 2,185 commits and 54 docs. The
+provider returned HTTP 503 on attempted request 64 after 63 successful
+batches. The drain left 223 units pending and preserved all 2,016
+successful vectors. A second invocation made 8 requests, embedded the
+remaining 223 units in 6.85 s, and drained pending to zero. Total
 attempted requests were 72 for 71 successful batches. The failure cost
 was one extra request plus about 29 s compared with the 56 s prior
 no-failure receipt; no successful work was repeated.</p>
@@ -520,6 +526,7 @@ linear SQLite scaling. “Small” is 500 commits + 10 docs; “medium” is the
 measured CAS repository; “large” is 100,000 commits + 2,000 docs. These
 are capacity scenarios, not claims about a population distribution.</p>
 <table>
+<caption>Report data table; context, source, and units are stated in the surrounding section.</caption>
 <thead>
 <tr>
 <th>Scenario</th>
@@ -646,6 +653,7 @@ scheduler embeds them within the active-project freshness SLO.</li>
 <h2 id="7-invariants-and-failure-boundaries">7. Invariants and failure
 boundaries</h2>
 <table>
+<caption>Report data table; context, source, and units are stated in the surrounding section.</caption>
 <thead>
 <tr>
 <th>Invariant / boundary</th>
@@ -724,6 +732,7 @@ top evidence, forbidden cross-scope IDs, stale/superseded IDs, and an
 ideal maximum packet. Freeze train/tuning and held-out partitions by
 repository revision.</p>
 <table>
+<caption>Report data table; context, source, and units are stated in the surrounding section.</caption>
 <thead>
 <tr>
 <th>Metric</th>
@@ -865,6 +874,7 @@ rebuild window; the shadow-generation design is planned.</li>
 <h3 id="planned-mergeable-implementation-slices">Planned mergeable
 implementation slices</h3>
 <table>
+<caption>Report data table; context, source, and units are stated in the surrounding section.</caption>
 <thead>
 <tr>
 <th>Slice</th>

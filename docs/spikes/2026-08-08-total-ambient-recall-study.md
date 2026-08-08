@@ -194,7 +194,7 @@ The benchmark used a newly initialized isolated CAS root inside this worktree, t
 | Modeled full upstream TLS bytes | not recorded | about 1,954,434 | measured 1.033x on retry applied to all input |
 | Total wire bytes | not recorded | about 12,330,000 | downstream measured + upstream modeled |
 
-The provider returned HTTP 503 on attempted request 64 after 63 successful batches. The drain left 223 units pending and preserved all 2,016 successful vectors. A second invocation made 8 requests, embedded the remaining 223 units in 6.85 s, and drained pending to zero. Total attempted requests were 72 for 71 successful batches. The failure cost was one extra request plus about 29 s compared with the 56 s prior no-failure receipt; no successful work was repeated.
+The 2,239 eligible units split into 2,185 commits and 54 docs. The provider returned HTTP 503 on attempted request 64 after 63 successful batches. The drain left 223 units pending and preserved all 2,016 successful vectors. A second invocation made 8 requests, embedded the remaining 223 units in 6.85 s, and drained pending to zero. Total attempted requests were 72 for 71 successful batches. The failure cost was one extra request plus about 29 s compared with the 56 s prior no-failure receipt; no successful work was repeated.
 
 The endpoint does not expose billed token counts. Measured bytes are therefore the authoritative input unit. A planning-only token range of 3–5 UTF-8 bytes/token puts the fresh corpus at roughly 378,000–631,000 tokens; this range is not a billing receipt.
 

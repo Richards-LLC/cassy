@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+signal="${1#-}"
+pid="$2"
+printf '%s %s\n' "$signal" "$pid" >>"$CAS_UPDATE_SIGNAL_LOG"
+behavior="$(sed -n '1p' "$CAS_UPDATE_PROC_ROOT/$pid/behavior" 2>/dev/null || printf survivor)"
+
+case "$behavior:$signal" in
+  graceful:TERM|stubborn:KILL)
+    rm -rf "$CAS_UPDATE_PROC_ROOT/$pid"
+    ;;
+  reconnect:TERM)
+    rm -f "$CAS_UPDATE_PROC_ROOT/$pid/exe"
+    ln -s "$CAS_UPDATE_NEW_EXE" "$CAS_UPDATE_PROC_ROOT/$pid/exe"
+    sed -i 's/ [0-9][0-9]* 0$/ 999999 0/' "$CAS_UPDATE_PROC_ROOT/$pid/stat"
+    ;;
+esac

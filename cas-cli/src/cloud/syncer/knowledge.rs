@@ -304,14 +304,8 @@ impl CloudSyncer {
         //
         // Absent team_id keeps the previous server behaviour, so a personal
         // (teamless) install is unaffected.
-        if let Some(team_id) = self
-            .cloud_config
-            .team_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-        {
-            params.push(format!("team_id={}", encode_query_value(team_id)));
+        if let Some(team_id) = self.cloud_config.active_team_id() {
+            params.push(format!("team_id={}", encode_query_value(&team_id)));
         }
         // Fail closed on an unresolvable project scope, exactly like the
         // canonical builder: without `project_id=` this would ask the server
@@ -511,7 +505,7 @@ impl SyncResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cloud::{CloudConfig, CloudSyncerConfig, SyncQueue};
+    use crate::cloud::{CloudConfig, CloudSyncerConfig, SyncQueue, TeamInfo};
     use cas_store::SqliteKnowledgeStore;
     use std::sync::Arc;
 
@@ -524,6 +518,46 @@ mod tests {
             ..Default::default()
         };
         CloudSyncer::new(queue, config, CloudSyncerConfig::default())
+    }
+
+    async fn knowledge_pull_query_with_user_config(
+        mut project_config: CloudConfig,
+        user_config: CloudConfig,
+    ) -> String {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(super::super::pull::PULL_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "knowledge_pages": []
+            })))
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let user_cloud_json = tmp.path().join("user-cloud.json");
+        user_config.save_to(&user_cloud_json).unwrap();
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("CAS_USER_CLOUD_JSON", &user_cloud_json);
+
+        project_config.endpoint = server.uri();
+        project_config.token = Some("test-token".to_string());
+        tokio::task::spawn_blocking(move || {
+            let store = seeded_store(&root);
+            let queue = Arc::new(SyncQueue::open(&root).unwrap());
+            queue.init().unwrap();
+            let syncer = CloudSyncer::new(queue, project_config, CloudSyncerConfig::default());
+            syncer.pull_knowledge_pages(&store).unwrap();
+        })
+        .await
+        .unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        requests[0].url.query().unwrap_or_default().to_string()
     }
 
     fn seeded_store(root: &std::path::Path) -> SqliteKnowledgeStore {
@@ -1111,6 +1145,53 @@ mod tests {
         assert!(
             query.contains("project_id="),
             "project scoping must still be present — got {query}"
+        );
+    }
+
+    #[tokio::test]
+    async fn knowledge_pull_omits_team_id_when_active_team_kill_switch_is_set() {
+        let mut project_config = CloudConfig::default();
+        project_config.team_id = Some("explicit-team".to_string());
+        project_config.team_auto_promote = Some(false);
+
+        let query =
+            knowledge_pull_query_with_user_config(project_config, CloudConfig::default()).await;
+        assert!(
+            !query.contains("team_id"),
+            "the active-team kill switch must suppress team scope — got {query}"
+        );
+    }
+
+    #[tokio::test]
+    async fn knowledge_pull_uses_opted_in_user_default_team() {
+        let mut project_config = CloudConfig::default();
+        project_config.team_auto_promote = Some(true);
+        let mut user_config = CloudConfig::default();
+        user_config.default_team_id = Some("user-default-team".to_string());
+
+        let query = knowledge_pull_query_with_user_config(project_config, user_config).await;
+        assert!(
+            query.contains("team_id=user-default-team"),
+            "an opted-in project must pull using the user default team — got {query}"
+        );
+    }
+
+    #[tokio::test]
+    async fn knowledge_pull_uses_opted_in_single_team_fallback() {
+        let mut project_config = CloudConfig::default();
+        project_config.team_auto_promote = Some(true);
+        let mut user_config = CloudConfig::default();
+        user_config.teams = vec![TeamInfo {
+            id: "solo-team".to_string(),
+            slug: "solo".to_string(),
+            name: "Solo".to_string(),
+            role: "member".to_string(),
+        }];
+
+        let query = knowledge_pull_query_with_user_config(project_config, user_config).await;
+        assert!(
+            query.contains("team_id=solo-team"),
+            "an opted-in project must pull using its one available team — got {query}"
         );
     }
 

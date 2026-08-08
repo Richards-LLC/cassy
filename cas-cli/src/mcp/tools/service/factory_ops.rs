@@ -5974,7 +5974,15 @@ fn read_context_usage_from_tail_for_cli(
 pub(crate) struct WorkerGitStatus {
     /// Current branch name (or "HEAD" if detached, "?" on error)
     pub branch: String,
-    /// Short HEAD SHA (7 hex chars, or "?" on error)
+    /// Full 40-char HEAD SHA (or "?" on error).
+    ///
+    /// cas-ea51: this was `git rev-parse --short HEAD`, whose width is git's
+    /// *dynamic* abbreviation length — it grows with object count, so the live
+    /// DB holds a mix (594 rows at 7 chars, 390 at 8 as measured for the
+    /// cas-7ad6 spec). A consumer slicing `sha[0..8]` silently missed the
+    /// 7-char rows. Storing the full SHA makes every new row an exact-match
+    /// join key. Renderers truncate for display via `head_sha_for_display`;
+    /// storage and the event metadata stay full-width.
     pub head_sha: String,
     /// Commits ahead of `base_branch` (0 when the count can't be determined)
     pub ahead: usize,
@@ -6017,9 +6025,11 @@ pub(crate) fn collect_worker_git_status(worktree_path: &std::path::Path) -> Work
     let branch = run_git(worktree_path, &["rev-parse", "--abbrev-ref", "HEAD"])
         .unwrap_or_else(|_| "?".to_string());
 
-    // --- HEAD short SHA -------------------------------------------------------
-    let head_sha = run_git(worktree_path, &["rev-parse", "--short", "HEAD"])
-        .unwrap_or_else(|_| "?".to_string());
+    // --- HEAD SHA (full 40 chars, cas-ea51) -----------------------------------
+    // Deliberately NOT `--short`: that returns git's dynamic abbreviation,
+    // which varies by repo size and made stored SHAs unjoinable without a
+    // variable-width prefix match. Display truncation happens at render.
+    let head_sha = run_git(worktree_path, &["rev-parse", "HEAD"]).unwrap_or_else(|_| "?".to_string());
 
     // --- base branch for ahead/behind ----------------------------------------
     // Prefer origin/HEAD (most authoritative), then fall back to "main".
@@ -6176,6 +6186,17 @@ pub(crate) fn shared_checkout_parked_warning(
     ))
 }
 
+/// Truncate a stored full-width SHA to a human-readable prefix for display.
+///
+/// cas-ea51: `WorkerGitStatus.head_sha` is stored full-width (40 chars) so it
+/// is an exact join key, but a 40-char SHA in a status line is noise. This
+/// keeps the pre-existing 8-char visual width. Length-safe by construction, so
+/// the `"?"` error sentinel passes through unchanged rather than panicking on a
+/// slice out of bounds.
+pub(crate) fn head_sha_for_display(sha: &str) -> &str {
+    &sha[..sha.len().min(8)]
+}
+
 /// Render a `WorkerGitStatus` as a multi-line block for injection into the
 /// `worker_status` output.  Returns an empty string when the status is
 /// entirely unknown (all sentinel values).
@@ -6220,7 +6241,7 @@ pub(crate) fn format_worker_git_status(gs: &WorkerGitStatus) -> String {
          \n    ahead: {} behind: {} (vs {}){}{}\
          \n    PR: {}",
         gs.branch,
-        gs.head_sha,
+        head_sha_for_display(&gs.head_sha),
         dirty_label,
         pushed_label,
         gs.ahead,
@@ -9834,7 +9855,7 @@ effort = "high"
 
         // Get the short SHA for assertions
         let sha_out = Command::new("git")
-            .args(["rev-parse", "--short", "HEAD"])
+            .args(["rev-parse", "HEAD"])
             .current_dir(dir)
             .output()
             .unwrap();
@@ -9925,8 +9946,49 @@ effort = "high"
         );
         assert_eq!(
             status.head_sha, expected_sha,
-            "head_sha must match git rev-parse --short HEAD"
+            "head_sha must match git rev-parse HEAD (full width, cas-ea51)"
         );
+    }
+
+    /// AC1 (cas-ea51): the emitter stores a FULL 40-char SHA, not git's
+    /// dynamic `--short` abbreviation.
+    ///
+    /// This is the regression guard for the defect the cas-7ad6 spec measured:
+    /// the live DB holds a mix of 7- and 8-char SHAs because `--short` width
+    /// grows with repo size, so any consumer slicing `sha[0..8]` silently
+    /// missed 60% of usable rows. Asserting the exact length (not just
+    /// "longer than 8") is what keeps a future `--short` from creeping back in.
+    #[test]
+    fn collect_git_status_head_sha_is_full_40_chars() {
+        let (tmp, _) = setup_git_repo_with_factory_branch("test-worker");
+        let status = collect_worker_git_status(tmp.path());
+        assert_eq!(
+            status.head_sha.len(),
+            40,
+            "head_sha must be a full 40-char SHA so it is an exact join key; got {} chars: '{}'",
+            status.head_sha.len(),
+            status.head_sha
+        );
+        assert!(
+            status.head_sha.chars().all(|c| c.is_ascii_hexdigit()),
+            "head_sha must be all hex digits, got '{}'",
+            status.head_sha
+        );
+    }
+
+    /// AC2 (cas-ea51): storage stays full-width while rendering truncates, and
+    /// the "?" error sentinel survives truncation rather than panicking on an
+    /// out-of-bounds slice.
+    #[test]
+    fn head_sha_for_display_truncates_and_is_length_safe() {
+        let full = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(head_sha_for_display(full), "01234567");
+        // The documented degradation sentinel is shorter than the display
+        // width — it must pass through, not panic.
+        assert_eq!(head_sha_for_display("?"), "?");
+        assert_eq!(head_sha_for_display(""), "");
+        // A legacy short SHA already in the DB renders unchanged.
+        assert_eq!(head_sha_for_display("abc1234"), "abc1234");
     }
 
     /// AC1 (cas-844bf): format_worker_git_status output must contain the

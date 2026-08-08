@@ -466,6 +466,7 @@ mod tests {
             body: body.map(str::to_string),
             committed_at: "2026-08-08T00:00:00Z".to_string(),
             repository: "/repo".to_string(),
+            symbol_mapping: "pending".to_string(),
             ..Default::default()
         }
     }

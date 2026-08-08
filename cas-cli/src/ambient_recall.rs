@@ -1455,12 +1455,20 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::process::Command;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
 
     use super::*;
     use crate::test_support::TestEnvGuard;
     use crate::types::{Entry, Task, TaskStatus};
+    use cas_code::{CodeFile, CodeSymbol, Language, SymbolKind};
+    use cas_store::{
+        CodeStore, HistoryCommit, HistoryStore, IngestBatch, KnowledgePage, KnowledgeStore,
+        PageWrite, SOURCE_EMBEDDINGS, SqliteCodeStore, SqliteCodeVectorStore, SqliteHistoryStore,
+        SqliteKnowledgeStore,
+    };
 
     fn identity(role: RecallRole) -> RecallIdentity {
         RecallIdentity {
@@ -1518,6 +1526,26 @@ mod tests {
         fn embed_query(&self, _query: &str) -> Option<Vec<f32>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Some(self.vector.clone())
+        }
+    }
+
+    struct LiveCountingEmbedder {
+        inner: KnowledgeEmbedder,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl RecallQueryEmbedder for LiveCountingEmbedder {
+        fn meta(&self) -> EmbeddingMeta {
+            self.inner.meta()
+        }
+
+        fn embed_query(&self, query: &str) -> Option<Vec<f32>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.inner
+                .embed_batch(&[query.to_string()])
+                .ok()?
+                .into_iter()
+                .next()
         }
     }
 
@@ -1875,6 +1903,247 @@ mod tests {
         assert!(rows.iter().any(|row| row.evidence_id == "sym-lease"));
         assert!(!rows.iter().any(|row| row.evidence_id == "sym-private"));
         assert!(rows.iter().all(|row| row.semantic_score.is_some()));
+    }
+
+    /// Reproducible production-path receipt for the authenticated semantic
+    /// channel. Kept ignored because it deliberately spends live provider
+    /// requests. The named config directory is read in place; credentials are
+    /// never copied into the isolated project or printed.
+    #[test]
+    #[ignore = "requires CAS_AMBIENT_LIVE_CONFIG_DIR with authenticated cloud.json"]
+    fn authenticated_isolated_live_provider_receipt() {
+        let config_dir = std::env::var("CAS_AMBIENT_LIVE_CONFIG_DIR")
+            .expect("set CAS_AMBIENT_LIVE_CONFIG_DIR to an authenticated .cas directory");
+        let config = crate::cloud::CloudConfig::load_from_cas_dir(Path::new(&config_dir)).unwrap();
+        let embedder = KnowledgeEmbedder::from_config(&config)
+            .expect("the named cloud config must contain a non-empty token");
+
+        let project = tempfile::tempdir().unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(project.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+        let repository = crate::history::repository_id(project.path());
+        let phrase = "restore ownership after a vanished worker lease";
+        let history_phrase = "restore task ownership after a vanished worker disappears";
+
+        let knowledge = SqliteKnowledgeStore::open(&cas_root).unwrap();
+        knowledge.init().unwrap();
+        let mut page = KnowledgePage::new("cas-kn-live", "guide", phrase);
+        page.snippet = phrase.to_string();
+        knowledge
+            .commit_ingest(&IngestBatch {
+                pages: vec![PageWrite {
+                    page,
+                    body: phrase.to_string(),
+                }],
+                sources: Vec::new(),
+                tombstones: Vec::new(),
+            })
+            .unwrap();
+
+        let history = SqliteHistoryStore::open(&cas_root).unwrap();
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        history
+            .commit_batch(
+                &repository,
+                &[HistoryCommit {
+                    sha: sha.into(),
+                    short_sha: sha[..8].into(),
+                    subject: history_phrase.into(),
+                    body: Some(history_phrase.into()),
+                    committed_at: "2026-08-08T00:00:00Z".into(),
+                    repository: repository.clone(),
+                    symbol_mapping: "pending".into(),
+                    ..Default::default()
+                }],
+                &[],
+                sha,
+                true,
+            )
+            .unwrap();
+
+        let now = Utc::now();
+        let public_symbol = CodeSymbol {
+            id: "sym-live".into(),
+            qualified_name: "lease::restore_ownership".into(),
+            name: "restore_ownership".into(),
+            kind: SymbolKind::Function,
+            language: Language::Rust,
+            file_path: "src/lease.rs".into(),
+            file_id: "file-live".into(),
+            line_start: 1,
+            line_end: 3,
+            source: phrase.into(),
+            documentation: Some(phrase.into()),
+            signature: Some("fn restore_ownership()".into()),
+            parent_id: None,
+            repository: repository.clone(),
+            commit_hash: Some(sha.into()),
+            created: now,
+            updated: now,
+            content_hash: "live-r1".into(),
+            scope: "project".into(),
+        };
+        let private_symbol = CodeSymbol {
+            id: "sym-private-live".into(),
+            qualified_name: "secret::restore_ownership".into(),
+            file_path: "src/secret.rs".into(),
+            content_hash: "private-r1".into(),
+            scope: "private".into(),
+            ..public_symbol.clone()
+        };
+        let code = SqliteCodeStore::open(&cas_root).unwrap();
+        code.add_file(&CodeFile {
+            id: "file-live".into(),
+            path: "src/lease.rs".into(),
+            repository: repository.clone(),
+            language: Language::Rust,
+            size: phrase.len(),
+            line_count: 1,
+            commit_hash: Some(sha.into()),
+            content_hash: "file-live-r1".into(),
+            created: now,
+            updated: now,
+            scope: "project".into(),
+        })
+        .unwrap();
+        code.add_symbols_batch(&[public_symbol.clone(), private_symbol.clone()])
+            .unwrap();
+        let code_state = SqliteCodeVectorStore::open(&cas_root).unwrap();
+        code_state
+            .sync_file_symbols(&[public_symbol, private_symbol], &[])
+            .unwrap();
+        code_state
+            .record_scan(&repository, 2, 2, 0, Some(sha), None)
+            .unwrap();
+
+        let drain_started = Instant::now();
+        let drain =
+            crate::cloud::embed_drain::drain_all_pending_with(&cas_root, 32, &embedder).unwrap();
+        let drain_ms = drain_started.elapsed().as_millis();
+        assert!(!drain.capability_absent);
+        assert!(drain.problems().is_empty(), "{:?}", drain.problems());
+        assert_eq!(drain.embedded(), 4);
+        assert_eq!(drain.requests(), 3);
+        assert_eq!(drain.pending_after(), 0);
+
+        let history_state = history
+            .index_state(&repository, SOURCE_EMBEDDINGS)
+            .unwrap()
+            .expect("daemon drain must leave a durable freshness attempt");
+        assert!(history_state.last_attempt_at.is_some());
+        assert!(history_state.last_error.is_none());
+        let code_index_state = code_state
+            .index_state(&repository)
+            .unwrap()
+            .expect("code scan state must remain visible");
+        assert!(code_index_state.last_error.is_none());
+
+        let shared = KnowledgeVectorCache::open_existing(&cas_root)
+            .unwrap()
+            .expect("shared cache created by drain");
+        let code_cache = KnowledgeVectorCache::open_existing_code_read_only(&cas_root)
+            .unwrap()
+            .expect("isolated code cache created by drain");
+        assert_eq!(shared.count_in(VectorNamespace::Knowledge).unwrap(), 1);
+        assert_eq!(shared.count_in(VectorNamespace::History).unwrap(), 1);
+        assert_eq!(code_cache.count_in(VectorNamespace::Code).unwrap(), 2);
+        drop((shared, code_cache));
+
+        let query_calls = Arc::new(AtomicUsize::new(0));
+        let cold_started = Instant::now();
+        let semantic = SemanticRecallRetriever::with_embedder(
+            &cas_root,
+            Box::new(LiveCountingEmbedder {
+                inner: embedder,
+                calls: Arc::clone(&query_calls),
+            }),
+        )
+        .expect("the freshly drained caches are query-compatible");
+        let worker = identity(RecallRole::Worker);
+        let request = RecallRequest {
+            prompt: phrase.into(),
+            ..Default::default()
+        };
+        let worker_query = RecallQuery::build(&worker, &request).unwrap();
+        let worker_rows = semantic.retrieve(&worker_query, &worker.scope_gate(), 12);
+        let cold_ms = cold_started.elapsed().as_millis();
+
+        let supervisor = identity(RecallRole::Supervisor);
+        let supervisor_query = RecallQuery::build(&supervisor, &request).unwrap();
+        let warm_started = Instant::now();
+        let supervisor_rows = semantic.retrieve(&supervisor_query, &supervisor.scope_gate(), 12);
+        let warm_ms = warm_started.elapsed().as_millis();
+
+        println!(
+            "worker_rankings={:?}",
+            worker_rows
+                .iter()
+                .map(|row| (
+                    row.surface,
+                    row.evidence_id.as_str(),
+                    row.relevance,
+                    row.lexical_score,
+                    row.semantic_score,
+                    row.role_score,
+                ))
+                .collect::<Vec<_>>()
+        );
+        println!(
+            "supervisor_rankings={:?}",
+            supervisor_rows
+                .iter()
+                .map(|row| (
+                    row.surface,
+                    row.evidence_id.as_str(),
+                    row.relevance,
+                    row.lexical_score,
+                    row.semantic_score,
+                    row.role_score,
+                ))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(query_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(worker_rows[0].surface, EvidenceSurface::Code);
+        assert_eq!(supervisor_rows[0].surface, EvidenceSurface::History);
+        for rows in [&worker_rows, &supervisor_rows] {
+            assert!(
+                rows.iter()
+                    .any(|row| row.surface == EvidenceSurface::Knowledge)
+            );
+            assert!(
+                rows.iter()
+                    .any(|row| row.surface == EvidenceSurface::History)
+            );
+            assert!(rows.iter().any(|row| row.surface == EvidenceSurface::Code));
+            assert!(!rows.iter().any(|row| row.evidence_id == "sym-private-live"));
+        }
+
+        println!(
+            "live_receipt provider={} model={} dims={} drain_embedded={} drain_requests={} drain_pending={} drain_ms={} history_last_attempt={} code_last_scan={} query_events=2 query_requests={} cold_ms={} warm_ms={} worker_top={:?}:{} supervisor_top={:?}:{} forbidden_private_hits=0 monetary_cost=not_exposed_by_endpoint",
+            config.endpoint,
+            semantic.embedder.meta().model,
+            semantic.embedder.meta().dims,
+            drain.embedded(),
+            drain.requests(),
+            drain.pending_after(),
+            drain_ms,
+            history_state.last_attempt_at.as_deref().unwrap(),
+            code_index_state.last_scan_at,
+            query_calls.load(Ordering::SeqCst),
+            cold_ms,
+            warm_ms,
+            worker_rows[0].surface,
+            worker_rows[0].evidence_id,
+            supervisor_rows[0].surface,
+            supervisor_rows[0].evidence_id,
+        );
     }
 
     #[test]

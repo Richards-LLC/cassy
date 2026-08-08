@@ -5,18 +5,60 @@ use std::io::Write;
 use std::time::Instant;
 use tracing::warn;
 
-use crate::cloud::syncer::{CloudSyncer, PushResponse, SyncResult};
-use crate::cloud::{QueuedSync, SyncOperation, get_project_canonical_id};
+use crate::cloud::syncer::{CloudSyncer, PushPlan, PushResponse, PushScope, SyncResult};
+use crate::cloud::{QueuedSync, SyncOperation};
 use crate::error::CasError;
 use crate::types::Session;
 
 impl CloudSyncer {
     pub fn push(&self) -> Result<SyncResult, CasError> {
-        self.push_with_sessions(&[])
+        self.push_scoped(PushScope::All)
+    }
+
+    /// Describe the exact next queue batch without mutating it.
+    pub fn plan_push(&self, scope: PushScope) -> Result<PushPlan, CasError> {
+        let batch_limit = self.config.batch_size.max(1);
+        let items = self.queue.pending_for_entity_type(
+            scope.entity_type(),
+            batch_limit,
+            self.config.max_retries,
+        )?;
+        let mut counts = scope
+            .planned_keys()
+            .iter()
+            .map(|key| ((*key).to_string(), 0usize))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for item in &items {
+            *counts
+                .entry(item.entity_type.collection_key().to_string())
+                .or_default() += 1;
+        }
+
+        Ok(PushPlan {
+            source: "sync_queue",
+            scope,
+            counts,
+            total_in_next_batch: items.len(),
+            batch_limit,
+            batch_limit_reached: items.len() == batch_limit,
+        })
+    }
+
+    /// Push only queue rows selected by `scope`.
+    pub fn push_scoped(&self, scope: PushScope) -> Result<SyncResult, CasError> {
+        self.push_scoped_with_sessions(scope, &[])
     }
 
     /// Push queued changes and sessions to cloud
     pub fn push_with_sessions(&self, sessions: &[Session]) -> Result<SyncResult, CasError> {
+        self.push_scoped_with_sessions(PushScope::All, sessions)
+    }
+
+    fn push_scoped_with_sessions(
+        &self,
+        scope: PushScope,
+        sessions: &[Session],
+    ) -> Result<SyncResult, CasError> {
         let mut result = SyncResult::default();
         let start = Instant::now();
 
@@ -24,9 +66,17 @@ impl CloudSyncer {
             return Ok(result);
         }
 
-        let pending = self
-            .queue
-            .pending_by_type(self.config.batch_size, self.config.max_retries)?;
+        let batch_limit = self.config.batch_size.max(1);
+        let pending = match scope.entity_type() {
+            Some(entity_type) => self.queue.pending_by_type_for_entity(
+                entity_type,
+                batch_limit,
+                self.config.max_retries,
+            )?,
+            None => self
+                .queue
+                .pending_by_type(batch_limit, self.config.max_retries)?,
+        };
 
         // Check if there's anything to push
         if pending.is_empty() && sessions.is_empty() {
@@ -46,7 +96,6 @@ impl CloudSyncer {
                 Ok(count) => result.pushed_entries = count,
                 Err(e) => {
                     result.errors.push(format!("Entry push failed: {e}"));
-                    self.mark_batch_failed(&pending.entries, &e.to_string());
                 }
             }
         }
@@ -56,7 +105,6 @@ impl CloudSyncer {
                 Ok(count) => result.pushed_tasks = count,
                 Err(e) => {
                     result.errors.push(format!("Task push failed: {e}"));
-                    self.mark_batch_failed(&pending.tasks, &e.to_string());
                 }
             }
         }
@@ -66,7 +114,6 @@ impl CloudSyncer {
                 Ok(count) => result.pushed_rules = count,
                 Err(e) => {
                     result.errors.push(format!("Rule push failed: {e}"));
-                    self.mark_batch_failed(&pending.rules, &e.to_string());
                 }
             }
         }
@@ -76,7 +123,6 @@ impl CloudSyncer {
                 Ok(count) => result.pushed_skills = count,
                 Err(e) => {
                     result.errors.push(format!("Skill push failed: {e}"));
-                    self.mark_batch_failed(&pending.skills, &e.to_string());
                 }
             }
         }
@@ -87,7 +133,6 @@ impl CloudSyncer {
                 Ok(count) => result.pushed_sessions = count,
                 Err(e) => {
                     result.errors.push(format!("Session push failed: {e}"));
-                    self.mark_batch_failed(&pending.sessions, &e.to_string());
                 }
             }
         } else if !sessions.is_empty() {
@@ -106,7 +151,6 @@ impl CloudSyncer {
                 Ok(count) => result.pushed_verifications = count,
                 Err(e) => {
                     result.errors.push(format!("Verification push failed: {e}"));
-                    self.mark_batch_failed(&pending.verifications, &e.to_string());
                 }
             }
         }
@@ -117,7 +161,6 @@ impl CloudSyncer {
                 Ok(count) => result.pushed_events = count,
                 Err(e) => {
                     result.errors.push(format!("Event push failed: {e}"));
-                    self.mark_batch_failed(&pending.events, &e.to_string());
                 }
             }
         }
@@ -128,7 +171,6 @@ impl CloudSyncer {
                 Ok(count) => result.pushed_prompts = count,
                 Err(e) => {
                     result.errors.push(format!("Prompt push failed: {e}"));
-                    self.mark_batch_failed(&pending.prompts, &e.to_string());
                 }
             }
         }
@@ -139,7 +181,6 @@ impl CloudSyncer {
                 Ok(count) => result.pushed_file_changes = count,
                 Err(e) => {
                     result.errors.push(format!("FileChange push failed: {e}"));
-                    self.mark_batch_failed(&pending.file_changes, &e.to_string());
                 }
             }
         }
@@ -150,7 +191,6 @@ impl CloudSyncer {
                 Ok(count) => result.pushed_commit_links = count,
                 Err(e) => {
                     result.errors.push(format!("CommitLink push failed: {e}"));
-                    self.mark_batch_failed(&pending.commit_links, &e.to_string());
                 }
             }
         }
@@ -161,7 +201,6 @@ impl CloudSyncer {
                 Ok(count) => result.pushed_agents = count,
                 Err(e) => {
                     result.errors.push(format!("Agent push failed: {e}"));
-                    self.mark_batch_failed(&pending.agents, &e.to_string());
                 }
             }
         }
@@ -172,7 +211,6 @@ impl CloudSyncer {
                 Ok(count) => result.pushed_worktrees = count,
                 Err(e) => {
                     result.errors.push(format!("Worktree push failed: {e}"));
-                    self.mark_batch_failed(&pending.worktrees, &e.to_string());
                 }
             }
         }
@@ -194,28 +232,17 @@ impl CloudSyncer {
 
         let push_url = format!("{}/api/sync/push", self.cloud_config.endpoint);
 
-        let mut payload = serde_json::Map::new();
-        payload.insert("sessions".to_string(), serde_json::json!(sessions));
-
-        // Include team_id if configured
-        if let Some(team_id) = &self.cloud_config.team_id {
-            payload.insert("team_id".to_string(), serde_json::json!(team_id));
-        }
-
-        // Include project_canonical_id (required for project scoping)
-        let project_id = get_project_canonical_id()
-            .ok_or_else(|| CasError::Other("Cannot sync: not inside a CAS project directory".to_string()))?;
-        payload.insert(
-            "project_canonical_id".to_string(),
-            serde_json::json!(project_id),
-        );
-
-        // Include client version info for server-side compatibility checks
-        Self::insert_client_version(&mut payload);
+        let values = serde_json::to_value(sessions)
+            .map_err(|e| CasError::Other(format!("JSON serialization failed: {e}")))?
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let payload = self.build_personal_push_payload("sessions", values)?;
 
         let json_bytes = serde_json::to_vec(&payload)
             .map_err(|e| CasError::Other(format!("JSON serialization failed: {e}")))?;
         let compressed = Self::gzip_json(&json_bytes)?;
+        self.check_personal_payload_size(json_bytes.len(), compressed.len())?;
 
         let response = ureq::post(&push_url)
             .timeout(self.config.timeout)
@@ -297,7 +324,7 @@ impl CloudSyncer {
 
         // Split upserts into size-limited sub-batches (consuming values to avoid cloning)
         if !upsert_entries.is_empty() {
-            let sub_batches = self.split_into_sub_batches(upsert_entries);
+            let sub_batches = self.split_personal_sub_batches(upsert_entries, entity_type)?;
 
             for sub_batch in sub_batches {
                 let (batch_items, values): (Vec<&QueuedSync>, Vec<serde_json::Value>) =
@@ -426,6 +453,93 @@ impl CloudSyncer {
         batches
     }
 
+    /// Exact personal-envelope batching. This measures the complete serialized
+    /// request and its gzip bytes, including project/client metadata and JSON
+    /// punctuation, instead of estimating from queue payload strings.
+    fn split_personal_sub_batches<'a>(
+        &self,
+        entries: Vec<(&'a QueuedSync, serde_json::Value)>,
+        entity_type: &str,
+    ) -> Result<Vec<Vec<(&'a QueuedSync, serde_json::Value)>>, CasError> {
+        let mut batches = Vec::new();
+        let mut current: Vec<(&QueuedSync, serde_json::Value)> = Vec::new();
+
+        for entry in entries {
+            let mut candidate_values = current
+                .iter()
+                .map(|(_, value)| value.clone())
+                .collect::<Vec<_>>();
+            candidate_values.push(entry.1.clone());
+
+            if !current.is_empty() && !self.personal_payload_fits(entity_type, candidate_values)? {
+                batches.push(current);
+                current = Vec::new();
+            }
+            current.push(entry);
+        }
+
+        if !current.is_empty() {
+            batches.push(current);
+        }
+        Ok(batches)
+    }
+
+    fn personal_payload_fits(
+        &self,
+        entity_type: &str,
+        values: Vec<serde_json::Value>,
+    ) -> Result<bool, CasError> {
+        let payload = self.build_personal_push_payload(entity_type, values)?;
+        let json_bytes = serde_json::to_vec(&payload)
+            .map_err(|e| CasError::Other(format!("JSON serialization failed: {e}")))?;
+        let compressed = Self::gzip_json(&json_bytes)?;
+        Ok(
+            json_bytes.len() <= self.config.max_payload_bytes
+                && compressed.len() <= 4 * 1024 * 1024,
+        )
+    }
+
+    /// Shared builder for both personal push envelopes. The successor
+    /// git-remote task can extend this seam without duplicating scope/version
+    /// metadata across queued entities and directly supplied sessions.
+    fn build_personal_push_payload(
+        &self,
+        entity_type: &str,
+        values: Vec<serde_json::Value>,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, CasError> {
+        let mut payload = serde_json::Map::new();
+        payload.insert(entity_type.to_string(), serde_json::Value::Array(values));
+        if let Some(team_id) = &self.cloud_config.team_id {
+            payload.insert("team_id".to_string(), serde_json::json!(team_id));
+        }
+        payload.insert(
+            "project_canonical_id".to_string(),
+            serde_json::json!(self.personal_push_project_id()?),
+        );
+        Self::insert_client_version(&mut payload);
+        Ok(payload)
+    }
+
+    fn check_personal_payload_size(
+        &self,
+        uncompressed_bytes: usize,
+        compressed_bytes: usize,
+    ) -> Result<(), CasError> {
+        if uncompressed_bytes > self.config.max_payload_bytes {
+            return Err(CasError::Other(format!(
+                "personal push payload is {uncompressed_bytes} bytes before gzip, exceeding the configured {}-byte limit",
+                self.config.max_payload_bytes
+            )));
+        }
+        const CLOUD_COMPRESSED_LIMIT: usize = 4 * 1024 * 1024;
+        if compressed_bytes > CLOUD_COMPRESSED_LIMIT {
+            return Err(CasError::Other(format!(
+                "personal push payload is {compressed_bytes} gzip bytes, exceeding the cloud {CLOUD_COMPRESSED_LIMIT}-byte limit"
+            )));
+        }
+        Ok(())
+    }
+
     /// Gzip-compress a JSON payload.
     pub(crate) fn gzip_json(json_bytes: &[u8]) -> Result<Vec<u8>, CasError> {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
@@ -456,30 +570,13 @@ impl CloudSyncer {
     ) -> Result<PushResponse, CasError> {
         let push_url = format!("{}/api/sync/push", self.cloud_config.endpoint);
 
-        let mut payload = serde_json::Map::new();
-        payload.insert(
-            entity_type.to_string(),
-            serde_json::Value::Array(values.to_vec()),
-        );
-
-        if let Some(team_id) = &self.cloud_config.team_id {
-            payload.insert("team_id".to_string(), serde_json::json!(team_id));
-        }
-
-        let project_id = get_project_canonical_id()
-            .ok_or_else(|| CasError::Other("Cannot sync: not inside a CAS project directory".to_string()))?;
-        payload.insert(
-            "project_canonical_id".to_string(),
-            serde_json::json!(project_id),
-        );
-
-        // Include client version info for server-side compatibility checks
-        Self::insert_client_version(&mut payload);
+        let payload = self.build_personal_push_payload(entity_type, values)?;
 
         // Serialize and compress the payload
         let json_bytes = serde_json::to_vec(&payload)
             .map_err(|e| CasError::Other(format!("JSON serialization failed: {e}")))?;
         let compressed = Self::gzip_json(&json_bytes)?;
+        self.check_personal_payload_size(json_bytes.len(), compressed.len())?;
 
         let mut last_error = None;
         for attempt in 0..3 {
@@ -537,12 +634,6 @@ impl CloudSyncer {
         }
 
         Err(last_error.unwrap_or_else(|| CasError::Other("Push failed".to_string())))
-    }
-
-    fn mark_batch_failed(&self, items: &[QueuedSync], error: &str) {
-        for item in items {
-            let _ = self.queue.mark_failed(item.id, error);
-        }
     }
 
     /// Insert client version fields into a push payload.

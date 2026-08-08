@@ -426,9 +426,7 @@ fn enqueue_spawn_warning_notice(
         .map(|id| format!("request {id}"))
         .unwrap_or_else(|| "direct spawn".to_string());
     let summary = format!("Worker spawn base warning: {worker_name}");
-    let message = format!(
-        "Factory spawn {request} for worker '{worker_name}': {warning}"
-    );
+    let message = format!("Factory spawn {request} for worker '{worker_name}': {warning}");
     Ok(queue.enqueue_with_summary(
         "director",
         supervisor_name,
@@ -709,8 +707,7 @@ impl WakeDecision {
 /// Measured in SECONDS, not poll ticks: `process_prompt_queue` runs on a 100ms
 /// poll, so a tick count here would have made "sustained silence" mean a third
 /// of a second — no evidence at all about turn boundaries.
-const SILENCE_FOR_ACTIVE_RECIPIENT_WAKE: std::time::Duration =
-    std::time::Duration::from_secs(45);
+const SILENCE_FOR_ACTIVE_RECIPIENT_WAKE: std::time::Duration = std::time::Duration::from_secs(45);
 
 /// Wall-clock PTY silence required before waking a recipient the registry
 /// already judged idle (cas-45c4). Short: this is corroboration that the pane
@@ -1786,8 +1783,16 @@ impl FactoryDaemon {
         // `<task-lifecycle …>` or `<worker-died …>` envelope — which the
         // lifecycle emitter and orphan recovery are the only producers of —
         // qualifies (cas-3dcb).
-        Self::supervisor_wake_decision(data, pane_target, supervisor_name, source, prompt, pane, now)
-            .allowed
+        Self::supervisor_wake_decision(
+            data,
+            pane_target,
+            supervisor_name,
+            source,
+            prompt,
+            pane,
+            now,
+        )
+        .allowed
     }
 
     /// Reasoned form of [`Self::supervisor_wake_is_eligible`] (cas-9e81).
@@ -1931,7 +1936,9 @@ impl FactoryDaemon {
         }
         match pane.veto_for_active_looking_recipient() {
             Some(reason) => WakeDecision::deny(reason),
-            None => WakeDecision::allow("recipient looks active but its pane is parked at a prompt"),
+            None => {
+                WakeDecision::allow("recipient looks active but its pane is parked at a prompt")
+            }
         }
     }
 
@@ -2997,9 +3004,8 @@ impl FactoryDaemon {
                         let settle = self.urgent_settle_duration(name);
                         self.app
                             .mux
-                            .interrupt_and_inject(name, &payload, settle)
+                            .interrupt_and_inject_preserving_composer(name, &payload, settle)
                             .await
-                            .map(|()| cas_mux::InjectOutcome::Delivered)
                             .map_err(Into::into)
                     } else {
                         // Recipient-aware routing (cas-b68a): each worker may run a
@@ -3126,12 +3132,13 @@ impl FactoryDaemon {
                 } else {
                     target.clone()
                 };
-                let inject_result: anyhow::Result<super::delivery::NudgeReport> = if queued.urgent
-                {
+                let inject_result: anyhow::Result<super::delivery::NudgeReport> = if queued.urgent {
                     // Urgent: interrupt-and-redirect by name via the PTY,
-                    // bypassing the inbox even in teams mode. Break the turn
-                    // (Esc), wait the bounded settle window for the turn to
-                    // actually break, then inject.
+                    // bypassing the inbox even in teams mode. An attached
+                    // operator draft is a hard boundary (cas-eacc): leave the
+                    // urgent row pending, with its priority intact, until the
+                    // human submits or clears. Only then break the agent turn
+                    // (Esc), wait the bounded settle window, and inject.
                     // cas-ab80: apply shared Codex framing before inject so
                     // urgent direct delivery matches normal PTY framing.
                     let harness = self.app.harness_for(&pane_target);
@@ -3158,9 +3165,8 @@ impl FactoryDaemon {
                     let outcome = self
                         .app
                         .mux
-                        .interrupt_and_inject(&pane_target, &payload, settle)
+                        .interrupt_and_inject_preserving_composer(&pane_target, &payload, settle)
                         .await
-                        .map(|()| cas_mux::InjectOutcome::Delivered)
                         .map_err(Into::into);
                     if matches!(outcome, Ok(cas_mux::InjectOutcome::Delivered)) {
                         self.urgent_wake_probes.insert(
@@ -3174,16 +3180,23 @@ impl FactoryDaemon {
                         );
                         urgent_wake_probe_opened = true;
                     }
-                    // cas-7a01 (GH #155): urgent delivery is an unconditional
-                    // PTY interrupt-and-inject — it always attempts a wake, and
-                    // that asymmetry with the gated non-urgent path is the
-                    // whole reason only urgent messages ever surfaced. Record
-                    // it as such so the two paths are comparable in
-                    // `message_status` instead of both reading `unobserved`.
-                    outcome.map(|outcome| super::delivery::NudgeReport {
-                        outcome,
-                        wake: cas_store::WakeAttempt::Fired,
-                        wake_detail: Some("urgent interrupt-and-inject".to_string()),
+                    // cas-7a01 (GH #155): an urgent delivery that reaches a
+                    // clean composer still attempts an unconditional wake.
+                    // cas-eacc adds the one hard veto: a human draft means no
+                    // Esc and no payload bytes, so report NotAttempted and let
+                    // the durable row retry instead of claiming a wake fired.
+                    outcome.map(|outcome| match outcome {
+                        cas_mux::InjectOutcome::Delivered => super::delivery::NudgeReport {
+                            outcome,
+                            wake: cas_store::WakeAttempt::Fired,
+                            wake_detail: Some("urgent interrupt-and-inject".to_string()),
+                        },
+                        cas_mux::InjectOutcome::DeferredComposerDirty => {
+                            super::delivery::NudgeReport::not_attempted(
+                                outcome,
+                                "urgent delivery retained until the operator composer is clean",
+                            )
+                        }
                     })
                 } else {
                     // Recipient-aware routing (cas-b68a): delivery channel +
@@ -4224,13 +4237,11 @@ impl FactoryDaemon {
 
         // Step 2: Pop FIFO when no spawn is active. While one is active, only
         // a shutdown may pass so it can mark/cancel that in-flight worker.
-        let action = match take_next_pending_spawn(
-            &mut self.pending_spawns,
-            self.spawn_task.is_some(),
-        ) {
-            Some(a) => a,
-            None => return,
-        };
+        let action =
+            match take_next_pending_spawn(&mut self.pending_spawns, self.spawn_task.is_some()) {
+                Some(a) => a,
+                None => return,
+            };
 
         match action {
             PendingSpawn::Anonymous {
@@ -4241,7 +4252,10 @@ impl FactoryDaemon {
             } => {
                 // cas-7587 (GH #122): task_id decides the worktree base (its
                 // epic branch), not the session's pinned epic focus.
-                match self.app.prepare_worker_spawn(None, isolate, task_id.as_deref()) {
+                match self
+                    .app
+                    .prepare_worker_spawn(None, isolate, task_id.as_deref())
+                {
                     Ok(prep) => {
                         let worker_name = prep.worker_name.clone();
                         append_spawn_audit(
@@ -4443,12 +4457,13 @@ impl FactoryDaemon {
                 // requested at the time of the shutdown. Otherwise a later
                 // spawn polled in the same batch could be cancelled by an older
                 // shutdown-all request.
-                let cancellable_in_flight = self.spawn_task.as_ref().and_then(
-                    |(name, spawn_request_id, _, _, _)| {
-                        spawn_predates_shutdown(*spawn_request_id, shutdown_request_id)
-                            .then_some(name.as_str())
-                    },
-                );
+                let cancellable_in_flight =
+                    self.spawn_task
+                        .as_ref()
+                        .and_then(|(name, spawn_request_id, _, _, _)| {
+                            spawn_predates_shutdown(*spawn_request_id, shutdown_request_id)
+                                .then_some(name.as_str())
+                        });
                 // Collect worker names before shutdown for GUI notification
                 let workers_to_stop = shutdown_targets(
                     self.app.worker_names(),
@@ -4999,16 +5014,14 @@ fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        LIFECYCLE_MAX_RENUDGE_ATTEMPTS,
-        append_spawn_audit, append_spawn_audit_line, cancel_targeted_in_flight_spawn,
-        enqueue_spawn_cancelled_notice,
-        enqueue_spawn_outcome_notice, is_exact_agent_name_match, matches_event_filter,
-        deliver_worker_task_brief, ensure_worker_preassignment, preassign_failure_reason,
-        prompt_poison_sweep_due, prompt_poison_sweep_targets, registration_timeout_detail,
-        registered_prompt_sweep_agents, reminder_matches_factory_session,
-        report_stale_reminder_expiry, shutdown_targets, spawn_predates_shutdown,
-        spawn_provisioning_timed_out, stalled_spawn_requests, take_next_pending_spawn,
-        take_spawn_cancellation, take_unverified_spawn_on_exit,
+        LIFECYCLE_MAX_RENUDGE_ATTEMPTS, append_spawn_audit, append_spawn_audit_line,
+        cancel_targeted_in_flight_spawn, deliver_worker_task_brief, enqueue_spawn_cancelled_notice,
+        enqueue_spawn_outcome_notice, ensure_worker_preassignment, is_exact_agent_name_match,
+        matches_event_filter, preassign_failure_reason, prompt_poison_sweep_due,
+        prompt_poison_sweep_targets, registered_prompt_sweep_agents, registration_timeout_detail,
+        reminder_matches_factory_session, report_stale_reminder_expiry, shutdown_targets,
+        spawn_predates_shutdown, spawn_provisioning_timed_out, stalled_spawn_requests,
+        take_next_pending_spawn, take_spawn_cancellation, take_unverified_spawn_on_exit,
     };
     use crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound;
     use crate::ui::factory::daemon::{FactoryDaemon, PendingSpawn, SpawnVerification};
@@ -5517,12 +5530,7 @@ mod tests {
              second PTY delivery"
         );
         assert!(
-            FactoryDaemon::target_looks_like_idle_worker(
-                &data,
-                "swift-fox",
-                "cosmic-bear-43",
-                now,
-            ),
+            FactoryDaemon::target_looks_like_idle_worker(&data, "swift-fox", "cosmic-bear-43", now,),
             "an idle worker target must remain eligible for the PTY nudge"
         );
     }
@@ -5823,8 +5831,7 @@ mod tests {
     fn a_relay_whose_supervisor_never_returns_ends_as_a_failure_not_a_zombie() {
         let start = std::time::Instant::now();
         let poll = std::time::Duration::from_millis(100);
-        let ticks = (LIFECYCLE_RENUDGE_INTERVAL.as_millis() as u64 * 60)
-            / poll.as_millis() as u64;
+        let ticks = (LIFECYCLE_RENUDGE_INTERVAL.as_millis() as u64 * 60) / poll.as_millis() as u64;
 
         let mut attempts = 0u32;
         let mut last_attempt: Option<std::time::Instant> = None;
@@ -6200,7 +6207,11 @@ mod tests {
         store.init().unwrap();
 
         let consumed = store
-            .enqueue("supervisor", "zen-merlin-47", "urgent: drop what you are doing")
+            .enqueue(
+                "supervisor",
+                "zen-merlin-47",
+                "urgent: drop what you are doing",
+            )
             .unwrap();
         // The vacuous-dedup guard (epic note 2026-08-07 23:19 item 2): a second
         // row for the SAME recipient that is never consumed. Without it, a
@@ -6209,11 +6220,17 @@ mod tests {
         // pass while proving nothing. This row must still be eligible at the
         // end, so the zero we assert is a real, targeted zero.
         let untouched = store
-            .enqueue("supervisor", "zen-merlin-47", "a second, unconsumed urgent row")
+            .enqueue(
+                "supervisor",
+                "zen-merlin-47",
+                "a second, unconsumed urgent row",
+            )
             .unwrap();
 
         assert_eq!(
-            store.count_unseen_for_recipient("zen-merlin-47", None).unwrap(),
+            store
+                .count_unseen_for_recipient("zen-merlin-47", None)
+                .unwrap(),
             2,
             "precondition: both urgent rows start genuinely unread"
         );
@@ -6225,7 +6242,9 @@ mod tests {
         // seen-receipts, so a count taken afterwards reads zero for reasons
         // that have nothing to do with this fix.
         assert_eq!(
-            store.count_unseen_for_recipient("zen-merlin-47", None).unwrap(),
+            store
+                .count_unseen_for_recipient("zen-merlin-47", None)
+                .unwrap(),
             1,
             "exactly one row was retired, and the other is still owed"
         );
@@ -6271,14 +6290,20 @@ mod tests {
             .unwrap();
         FactoryDaemon::consume_urgent_wake_row(&store, pane_keyed, "bright-spider-29").unwrap();
         assert_eq!(
-            store.count_unseen_for_recipient("supervisor", None).unwrap(),
+            store
+                .count_unseen_for_recipient("supervisor", None)
+                .unwrap(),
             1,
             "a receipt written under the PANE name retires nothing — this is why the \
              probe has to carry the row's target"
         );
 
         let target_keyed = store
-            .enqueue("golden-badger-59", "supervisor", "urgent: second merge request")
+            .enqueue(
+                "golden-badger-59",
+                "supervisor",
+                "urgent: second merge request",
+            )
             .unwrap();
         FactoryDaemon::consume_urgent_wake_row(&store, target_keyed, "supervisor").unwrap();
         let unseen: Vec<i64> = store
@@ -7091,11 +7116,7 @@ mod tests {
         assert!(!take_spawn_cancellation(&mut cancelled, worker));
 
         // Shutdown-all after completion has no in-flight generation to cancel.
-        cancel_targeted_in_flight_spawn(
-            &mut cancelled,
-            None,
-            &[worker.to_string()],
-        );
+        cancel_targeted_in_flight_spawn(&mut cancelled, None, &[worker.to_string()]);
 
         // A later spawn reusing the same name is allowed to finish and come up.
         assert!(
@@ -7158,11 +7179,7 @@ mod tests {
         store.add(&task).unwrap();
 
         let mut cancelled = HashSet::new();
-        cancel_targeted_in_flight_spawn(
-            &mut cancelled,
-            Some(worker),
-            &[worker.to_string()],
-        );
+        cancel_targeted_in_flight_spawn(&mut cancelled, Some(worker), &[worker.to_string()]);
 
         assert!(
             take_spawn_cancellation(&mut cancelled, worker),
@@ -7199,9 +7216,16 @@ mod tests {
         assert_eq!(prompts.len(), 1);
         assert_eq!(prompts[0].source, "director");
         assert_eq!(prompts[0].target, "keen-crane");
-        assert_eq!(prompts[0].summary.as_deref(), Some("Worker spawn cancelled: clock-fixer"));
+        assert_eq!(
+            prompts[0].summary.as_deref(),
+            Some("Worker spawn cancelled: clock-fixer")
+        );
         assert!(prompts[0].prompt.contains("No worker pane was registered"));
-        assert!(prompts[0].prompt.contains("worktree and branch were removed"));
+        assert!(
+            prompts[0]
+                .prompt
+                .contains("worktree and branch were removed")
+        );
     }
 
     /// GH #60: every audit stage the daemon logs is ALSO persisted on the
@@ -7500,7 +7524,10 @@ mod tests {
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
         let store = crate::store::open_task_store(&cas_dir).unwrap();
         store
-            .add(&Task::new("cas-aee6".to_string(), "awaiting_merge lifecycle".to_string()))
+            .add(&Task::new(
+                "cas-aee6".to_string(),
+                "awaiting_merge lifecycle".to_string(),
+            ))
             .unwrap();
 
         let title = ensure_worker_preassignment(&cas_dir, "cas-aee6", "cosmic-crow-41")
@@ -7581,7 +7608,11 @@ mod tests {
             prompts[0].summary.as_deref(),
             Some("Assigned task: cas-aee6")
         );
-        assert!(prompts[0].prompt.contains("cas-aee6"), "{}", prompts[0].prompt);
+        assert!(
+            prompts[0].prompt.contains("cas-aee6"),
+            "{}",
+            prompts[0].prompt
+        );
         assert!(
             prompts[0].prompt.contains("awaiting_merge lifecycle"),
             "the brief must carry the task title: {}",
@@ -7899,7 +7930,6 @@ mod urgent_wake_probe_tests {
         );
     }
 
-
     /// The verdict being right is worthless if the branch that consumes it is
     /// inverted. `resolve_urgent_wake_probes` matches on exactly this mapping,
     /// so an inverted arm fails here rather than in production as either a
@@ -7951,7 +7981,10 @@ mod urgent_wake_probe_tests {
             URGENT_WAKE_OBSERVE_WINDOW,
             URGENT_WAKE_OBSERVE_WINDOW,
         );
-        assert_eq!(urgent_probe_action(outcome), UrgentProbeAction::HoldRowPending);
+        assert_eq!(
+            urgent_probe_action(outcome),
+            UrgentProbeAction::HoldRowPending
+        );
         assert!(row_needs_renudge_cadence(
             false,
             false,

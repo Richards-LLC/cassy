@@ -172,4 +172,3 @@ pub(crate) fn cell_style_to_ratatui(cell: &CellStyle) -> Style {
 fn is_default_color(rgb: &Rgb) -> bool {
     rgb.r == 0 && rgb.g == 0 && rgb.b == 0
 }
-

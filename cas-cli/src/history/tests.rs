@@ -442,3 +442,246 @@ fn repo_root_for_errors_outside_a_repository() {
         assert!(root.exists());
     }
 }
+
+// ---------------------------------------------------------------------------
+// M3 — symbol mapping over a real repo (cas-0562)
+// ---------------------------------------------------------------------------
+
+mod symbol_mapping {
+    use super::*;
+    use crate::history::symbols::{map_with_store, SymbolMapOutcome};
+    use cas_store::SymbolMapping;
+
+    const EXTENSIONS: &[&str] = &["rs"];
+
+    fn extensions() -> Vec<String> {
+        EXTENSIONS.iter().map(|e| e.to_string()).collect()
+    }
+
+    /// Stand in for M2's indexer, driven through the **real** `SqliteCodeStore`
+    /// so the row shape is M2's and not a convenient fiction: repository = the
+    /// repo directory NAME, file_path = ABSOLUTE. Seeding these any other way
+    /// would let the test pass while the production join silently misses.
+    fn index_file(fixture: &Fixture, relative: &str, symbols: &[(&str, &str, usize, usize)]) {
+        use cas_store::CodeStore;
+
+        let code = cas_store::SqliteCodeStore::open(&fixture.cas_root).unwrap();
+        let repo_name = fixture
+            .repo
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let absolute = fixture.repo.join(relative).to_string_lossy().to_string();
+        let file_id = code.generate_file_id_for(&repo_name, &absolute);
+
+        code.add_file(&cas_code::CodeFile {
+            id: file_id.clone(),
+            path: absolute.clone(),
+            repository: repo_name.clone(),
+            language: cas_code::Language::Rust,
+            content_hash: "h".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+        for (id, name, start, end) in symbols {
+            code.add_symbol(&cas_code::CodeSymbol {
+                id: (*id).to_string(),
+                qualified_name: (*name).to_string(),
+                name: (*name).to_string(),
+                language: cas_code::Language::Rust,
+                file_path: absolute.clone(),
+                file_id: file_id.clone(),
+                line_start: *start,
+                line_end: *end,
+                repository: repo_name.clone(),
+                content_hash: "h".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+    }
+
+    fn map(fixture: &Fixture) -> SymbolMapOutcome {
+        let store = fixture.store();
+        map_with_store(
+            &store,
+            &fixture.repo,
+            &repository_id(&fixture.repo),
+            &extensions(),
+            1000,
+        )
+        .unwrap()
+    }
+
+    /// Three functions, ten lines apart; the commit edits the middle one only.
+    fn three_functions(middle_body: &str) -> String {
+        format!(
+            "fn alpha() {{\n    // 2\n    // 3\n    // 4\n}}\n\
+             \n\
+             fn beta() {{\n    {middle_body}\n    // 9\n}}\n\
+             \n\
+             fn gamma() {{\n    // 13\n}}\n"
+        )
+    }
+
+    /// AC1 — a commit touching one function maps to exactly that symbol.
+    #[test]
+    fn a_commit_editing_one_function_maps_to_exactly_that_function() {
+        let f = Fixture::new();
+        f.commit_file("src/lib.rs", &three_functions("// original"), "seed");
+        let edit = f.commit_file("src/lib.rs", &three_functions("// edited"), "touch beta");
+        f.pass();
+
+        // beta occupies lines 7..=10 in the fixture above.
+        index_file(
+            &f,
+            "src/lib.rs",
+            &[
+                ("id-alpha", "lib::alpha", 1, 5),
+                ("id-beta", "lib::beta", 7, 10),
+                ("id-gamma", "lib::gamma", 12, 14),
+            ],
+        );
+
+        let outcome = map(&f);
+        // Two commits: the seed introduced all three functions, the edit
+        // touched one. Both map; the point of the test is *which* symbols the
+        // edit maps to.
+        assert_eq!(outcome.count(SymbolMapping::Mapped), 2);
+
+        let rows = f.store().symbols_for_commit(&edit).unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.qualified_name.as_str()).collect::<Vec<_>>(),
+            vec!["lib::beta"],
+            "editing beta's body must map to beta and to nothing else"
+        );
+        assert_eq!(rows[0].file_path, "src/lib.rs");
+    }
+
+    /// AC2 — an unindexed file degrades to `absent`, not to an empty success.
+    #[test]
+    fn an_unindexed_file_records_absent_rather_than_an_empty_success() {
+        let f = Fixture::new();
+        let sha = f.commit_file("src/lib.rs", "fn alpha() {}\n", "seed");
+        f.pass();
+
+        // Deliberately no index_file() call: M2 has not caught up.
+        let outcome = map(&f);
+        assert_eq!(outcome.count(SymbolMapping::Absent), 1);
+        assert_eq!(outcome.count(SymbolMapping::None_), 0);
+        assert!(f.store().symbols_for_commit(&sha).unwrap().is_empty());
+
+        let counts = f.store().symbol_mapping_counts(&repository_id(&f.repo)).unwrap();
+        assert_eq!(counts, vec![("absent".to_string(), 1)]);
+    }
+
+    /// The point of `absent` being retryable: once the symbol index catches up,
+    /// the same commit resolves without any manual re-indexing step.
+    #[test]
+    fn an_absent_commit_resolves_once_the_symbol_index_catches_up() {
+        let f = Fixture::new();
+        let sha = f.commit_file("src/lib.rs", "fn alpha() {\n    // 2\n}\n", "seed");
+        f.pass();
+
+        assert_eq!(map(&f).count(SymbolMapping::Absent), 1);
+
+        index_file(&f, "src/lib.rs", &[("id-alpha", "lib::alpha", 1, 3)]);
+
+        let second = map(&f);
+        assert_eq!(
+            second.commits_considered, 1,
+            "an absent commit must come back for another pass"
+        );
+        assert_eq!(second.count(SymbolMapping::Mapped), 1);
+        assert_eq!(f.store().symbols_for_commit(&sha).unwrap().len(), 1);
+    }
+
+    /// A settled verdict must not be re-mapped forever.
+    #[test]
+    fn a_settled_verdict_is_not_reconsidered() {
+        let f = Fixture::new();
+        f.commit_file("docs/readme.md", "hello\n", "docs only");
+        f.pass();
+
+        assert_eq!(map(&f).count(SymbolMapping::NotApplicable), 1);
+        assert_eq!(
+            map(&f).commits_considered,
+            0,
+            "not_applicable is settled; a second pass must find nothing to do"
+        );
+    }
+
+    /// A docs-only commit is not index lag and must not inflate the bucket
+    /// operators watch to decide whether to run `cas index code`.
+    #[test]
+    fn a_docs_only_commit_is_not_applicable_not_absent() {
+        let f = Fixture::new();
+        f.commit_file("README.md", "# hi\n", "docs");
+        f.pass();
+        let outcome = map(&f);
+        assert_eq!(outcome.count(SymbolMapping::NotApplicable), 1);
+        assert_eq!(outcome.count(SymbolMapping::Absent), 0);
+    }
+
+    /// Mixed coverage records what it can and says so, rather than picking one
+    /// verdict and misdescribing half the commit.
+    #[test]
+    fn mixed_coverage_records_partial() {
+        let f = Fixture::new();
+        f.write("src/known.rs", "fn known() {\n    // 2\n}\n");
+        f.write("src/unknown.rs", "fn unknown() {\n    // 2\n}\n");
+        let sha = f.commit("two files");
+        f.pass();
+        index_file(&f, "src/known.rs", &[("id-known", "known::known", 1, 3)]);
+
+        let outcome = map(&f);
+        assert_eq!(outcome.count(SymbolMapping::Partial), 1);
+        assert_eq!(
+            f.store().symbols_for_commit(&sha).unwrap().len(),
+            1,
+            "the covered half is still recorded"
+        );
+    }
+
+    /// A deletion has no post-image lines at all. Anchoring it to the preceding
+    /// line is what keeps "this commit gutted `beta`" from reading as "this
+    /// commit touched no symbols".
+    #[test]
+    fn deleting_lines_inside_a_function_still_maps_to_it() {
+        let f = Fixture::new();
+        f.commit_file(
+            "src/lib.rs",
+            "fn alpha() {\n    // 2\n    // 3\n    // 4\n}\n",
+            "seed",
+        );
+        let trimmed = f.commit_file("src/lib.rs", "fn alpha() {\n    // 2\n}\n", "trim alpha");
+        f.pass();
+        index_file(&f, "src/lib.rs", &[("id-alpha", "lib::alpha", 1, 3)]);
+
+        map(&f);
+        let rows = f.store().symbols_for_commit(&trimmed).unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "a pure deletion inside alpha must still map to alpha"
+        );
+    }
+
+    /// The status surface must show the breakdown, because a large `absent`
+    /// bucket is the operator's signal to run `cas index code`.
+    #[test]
+    fn status_reports_the_mapping_breakdown() {
+        let f = Fixture::new();
+        f.commit_file("src/lib.rs", "fn alpha() {}\n", "code");
+        f.commit_file("README.md", "# hi\n", "docs");
+        f.pass();
+        map(&f);
+
+        let s = status(&f.cas_root, &f.repo).unwrap();
+        let counts: std::collections::HashMap<_, _> = s.symbol_mapping.into_iter().collect();
+        assert_eq!(counts.get("absent"), Some(&1));
+        assert_eq!(counts.get("not_applicable"), Some(&1));
+    }
+}

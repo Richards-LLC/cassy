@@ -197,6 +197,7 @@ mod m218_prompt_queue_recipient_transport_create_table;
 mod m219_knowledge_store_create_tables;
 mod m220_prompt_queue_wake_observability;
 mod m221_history_index_create_tables;
+mod m222_history_commit_symbols;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -412,6 +413,7 @@ pub const MIGRATIONS: &[Migration] = &[
     m219_knowledge_store_create_tables::MIGRATION,
     m220_prompt_queue_wake_observability::MIGRATION,
     m221_history_index_create_tables::MIGRATION,
+    m222_history_commit_symbols::MIGRATION,
 ];
 
 #[cfg(test)]

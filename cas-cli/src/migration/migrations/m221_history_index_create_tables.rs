@@ -35,9 +35,10 @@ pub const MIGRATION: Migration = Migration {
 mod tests {
     use rusqlite::Connection;
 
-    const TABLES: [&str; 3] = [
+    const TABLES: [&str; 4] = [
         "history_commits",
         "history_commit_files",
+        "history_commit_symbols",
         "history_index_state",
     ];
 

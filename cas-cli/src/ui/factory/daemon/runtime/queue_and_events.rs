@@ -2206,6 +2206,38 @@ impl FactoryDaemon {
             return Ok(());
         }
 
+        // cas-20ac: stale cleanup can expose many registration UUIDs for one
+        // logical worker. Collapse task-free death rows BEFORE the ordinary
+        // ten-row delivery batch is selected, otherwise each UUID steals a
+        // supervisor turn even though none carries work. The bounded scan is
+        // session/target isolated by the same store predicate as delivery.
+        let death_candidates = queue.peek_for_targets(
+            &targets,
+            Some(&self.session_name),
+            crate::mcp::tools::service::orphan_recovery::WORKER_DEATH_COALESCE_SCAN_LIMIT,
+        )?;
+        let supervisor_queue = crate::store::open_supervisor_queue_store(self.app.cas_dir()).ok();
+        match crate::mcp::tools::service::orphan_recovery::coalesce_pending_worker_deaths(
+            queue.as_ref(),
+            supervisor_queue.as_deref(),
+            &death_candidates,
+        ) {
+            Ok(report) if report.duplicates > 0 => tracing::info!(
+                target: "cas::coordination",
+                stage = "worker_death_coalesced",
+                families = report.families,
+                duplicates = report.duplicates,
+                "cas-20ac: collapsed duplicate no-task worker deaths before supervisor delivery"
+            ),
+            Err(error) => tracing::warn!(
+                target: "cas::coordination",
+                stage = "worker_death_coalesce_failed",
+                %error,
+                "cas-20ac: duplicate worker-death coalescing failed; rows remain pending"
+            ),
+            _ => {}
+        }
+
         // Peek first, only ack after successful injection to provide at-least-once delivery.
         // Filter by targets AND session to prevent cross-session message theft.
         let prompts = queue.peek_for_targets(&targets, Some(&self.session_name), 10)?;

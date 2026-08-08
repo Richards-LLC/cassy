@@ -865,6 +865,28 @@ fn codex_cat_pane(name: &str) -> Option<Pane> {
     .ok()
 }
 
+struct SubmitFailWriter {
+    writes: usize,
+}
+
+impl std::io::Write for SubmitFailWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.writes += 1;
+        if self.writes == 1 {
+            Ok(buf.len())
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "deterministic delayed submit failure",
+            ))
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 async fn settled_pane_snapshot(
     mux: &mut Mux,
     pane_id: &str,
@@ -1267,6 +1289,53 @@ async fn nonurgent_inject_never_expires_a_dirty_composer_cas_eacc() {
             .unwrap(),
         InjectOutcome::Delivered,
         "the next FIFO event releases exactly once after the prior submit boundary"
+    );
+}
+
+#[tokio::test]
+async fn failed_submit_keeps_later_injections_deferred_cas_eacc() {
+    let mut mux = Mux::new(24, 80);
+    let Some(pane) = codex_cat_pane("submit-failure") else {
+        return;
+    };
+    pane.replace_pty_writer_for_test(Box::new(SubmitFailWriter { writes: 0 }))
+        .await
+        .expect("install deterministic writer");
+    mux.add_pane(pane);
+
+    assert_eq!(
+        mux.inject("submit-failure", "director lifecycle event one")
+            .await
+            .expect("payload write succeeds before delayed CR failure"),
+        InjectOutcome::Delivered
+    );
+    assert!(
+        mux.get("submit-failure").unwrap().inject_submit_pending(),
+        "the lane closes as soon as the payload is written"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(550)).await;
+    assert!(
+        mux.get("submit-failure").unwrap().inject_submit_pending(),
+        "a failed submit CR must keep the pane unsafe instead of reopening the lane"
+    );
+    assert_eq!(
+        mux.inject("submit-failure", "director lifecycle event two")
+            .await
+            .expect("unsafe pane causes durable deferral"),
+        InjectOutcome::DeferredComposerDirty,
+        "later non-urgent lifecycle payload must not coalesce with the unsubmitted first payload"
+    );
+    assert_eq!(
+        mux.interrupt_and_inject_preserving_composer(
+            "submit-failure",
+            "urgent lifecycle event",
+            std::time::Duration::ZERO,
+        )
+        .await
+        .expect("urgent row also stays durable"),
+        InjectOutcome::DeferredComposerDirty,
+        "urgent semantics must not override the hard unsafe state after submit failure"
     );
 }
 

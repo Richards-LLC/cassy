@@ -7,6 +7,8 @@
 //!   `(commit, file)` pair. Diffs are indexed *structurally*: which files a
 //!   commit touched and how much, never the hunk text (spec §3, which makes
 //!   this a privacy property as well as a cost one).
+//! - `history_docs` — GitHub issues/PRs/comments and CHANGELOG release
+//!   sections, one row per embeddable text unit (spec §4.1, §8; cas-9a38).
 //! - `history_index_state` — the watermark plus the honesty ledger, one row per
 //!   `(repository, source)`.
 //!
@@ -87,35 +89,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS history_commits_fts USING fts5(
     subject,
     body
 );
-"#;
 
-/// The FTS5 index over commit prose, plus a one-time backfill for databases
-/// whose `history_commits` rows predate it (EPIC cas-6212 / cas-7f40, M4).
-///
-/// Split out of [`HISTORY_SCHEMA_STATEMENTS`] rather than appended to it
-/// because m221 has already run on live databases: its `detect` predicate would
-/// short-circuit and the FTS table would never appear. A separate migration is
-/// the only shape that reaches those installs.
-///
-/// **Not contentless.** `knowledge_pages_fts` uses `content=''` and joins back
-/// on `rowid` because it has a stable `row_id INTEGER PRIMARY KEY AUTOINCREMENT`
-/// to join to. `history_commits` is keyed by `sha TEXT PRIMARY KEY`, so its
-/// rowid is implicit — and SQLite does not preserve implicit rowids across
-/// `VACUUM`, which would silently disconnect every FTS row from its commit.
-/// Storing `sha` in the index costs ~1.7 MB of duplicated prose on this repo
-/// (against a 456 MB database) and removes the coupling entirely.
-pub const HISTORY_FTS_STATEMENTS: &[&str] = &[
-    "CREATE VIRTUAL TABLE IF NOT EXISTS history_commits_fts USING fts5(
-        sha UNINDEXED,
-        subject,
-        body
-    )",
-    // Backfill is guarded rather than unconditional: re-running it on a
-    // populated index would double every commit's terms and quietly skew bm25().
-    "INSERT INTO history_commits_fts (sha, subject, body)
-     SELECT sha, subject, COALESCE(body, '') FROM history_commits
-      WHERE NOT EXISTS (SELECT 1 FROM history_commits_fts)",
-];
+"#;
 
 /// Statement-level form of [`HISTORY_SCHEMA`] for the numbered migration
 /// runner, which calls `Connection::execute` once per item.
@@ -170,8 +145,129 @@ pub const HISTORY_SCHEMA_STATEMENTS: &[&str] = &[
     )",
 ];
 
+/// Canonical DDL for `history_docs` (spec §4.1, §8 — EPIC cas-6212 / cas-9a38).
+///
+/// Kept as its own constant rather than folded into [`HISTORY_SCHEMA`] so the
+/// M1 migration (`m221`) and the M6 migration (`m222`) each own exactly the
+/// tables they introduced; a database that stopped at m221 must not suddenly
+/// grow an M6 table because a shared constant moved under it.
+///
+/// # Two columns the spec's sketch does not list, and why
+///
+/// `repository` and `source` are added deliberately. `history_index_state` is
+/// keyed `(repository, source)`, so every doc must be attributable to the same
+/// pair or the ledger describes rows it cannot name — "GitHub is 400 docs
+/// behind" is unanswerable when the docs themselves do not record which source
+/// produced them. They also keep a multi-repo store from blending two projects'
+/// issues into one corpus, which is the same reason `history_commits` carries
+/// `repository`.
+pub const HISTORY_DOCS_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS history_docs (
+    id TEXT PRIMARY KEY,
+    doc_kind TEXT NOT NULL,
+    number INTEGER,
+    title TEXT,
+    body TEXT,
+    state TEXT,
+    author TEXT,
+    created_at TEXT,
+    updated_at TEXT,
+    closed_at TEXT,
+    url TEXT,
+    refs_json TEXT,
+    repository TEXT NOT NULL,
+    source TEXT NOT NULL,
+    pending_embedding INTEGER NOT NULL DEFAULT 1,
+    fetched_at TEXT NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'project'
+);
+
+CREATE INDEX IF NOT EXISTS idx_history_docs_kind
+    ON history_docs(doc_kind);
+CREATE INDEX IF NOT EXISTS idx_history_docs_updated_at
+    ON history_docs(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_history_docs_repo_source
+    ON history_docs(repository, source);
+CREATE INDEX IF NOT EXISTS idx_history_docs_pending_embedding
+    ON history_docs(updated_at) WHERE pending_embedding = 1;
+"#;
+
+/// Statement-level form of [`HISTORY_DOCS_SCHEMA`] for the migration runner.
+/// Keep in lockstep; `m222`'s shape-drift test fails on any divergence.
+pub const HISTORY_DOCS_SCHEMA_STATEMENTS: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS history_docs (
+        id TEXT PRIMARY KEY,
+        doc_kind TEXT NOT NULL,
+        number INTEGER,
+        title TEXT,
+        body TEXT,
+        state TEXT,
+        author TEXT,
+        created_at TEXT,
+        updated_at TEXT,
+        closed_at TEXT,
+        url TEXT,
+        refs_json TEXT,
+        repository TEXT NOT NULL,
+        source TEXT NOT NULL,
+        pending_embedding INTEGER NOT NULL DEFAULT 1,
+        fetched_at TEXT NOT NULL,
+        scope TEXT NOT NULL DEFAULT 'project'
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_history_docs_kind
+        ON history_docs(doc_kind)",
+    "CREATE INDEX IF NOT EXISTS idx_history_docs_updated_at
+        ON history_docs(updated_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_history_docs_repo_source
+        ON history_docs(repository, source)",
+    "CREATE INDEX IF NOT EXISTS idx_history_docs_pending_embedding
+        ON history_docs(updated_at) WHERE pending_embedding = 1",
+];
+
+/// The FTS5 index over commit prose, plus a one-time backfill for databases
+/// whose `history_commits` rows predate it (EPIC cas-6212 / cas-7f40, M4).
+///
+/// Split out of [`HISTORY_SCHEMA_STATEMENTS`] rather than appended to it
+/// because m221 has already run on live databases: its `detect` predicate would
+/// short-circuit and the FTS table would never appear. A separate migration is
+/// the only shape that reaches those installs.
+///
+/// **Not contentless.** `knowledge_pages_fts` uses `content=''` and joins back
+/// on `rowid` because it has a stable `row_id INTEGER PRIMARY KEY AUTOINCREMENT`
+/// to join to. `history_commits` is keyed by `sha TEXT PRIMARY KEY`, so its
+/// rowid is implicit — and SQLite does not preserve implicit rowids across
+/// `VACUUM`, which would silently disconnect every FTS row from its commit.
+/// Storing `sha` in the index costs ~1.7 MB of duplicated prose on this repo
+/// (against a 456 MB database) and removes the coupling entirely.
+pub const HISTORY_FTS_STATEMENTS: &[&str] = &[
+    "CREATE VIRTUAL TABLE IF NOT EXISTS history_commits_fts USING fts5(
+        sha UNINDEXED,
+        subject,
+        body
+    )",
+    // Backfill is guarded rather than unconditional: re-running it on a
+    // populated index would double every commit's terms and quietly skew bm25().
+    "INSERT INTO history_commits_fts (sha, subject, body)
+     SELECT sha, subject, COALESCE(body, '') FROM history_commits
+      WHERE NOT EXISTS (SELECT 1 FROM history_commits_fts)",
+];
+
 /// The `history_index_state.source` value for the git walker.
 pub const SOURCE_GIT: &str = "git";
+
+/// The `history_index_state.source` value for the GitHub issue/PR indexer
+/// (spec §8).
+pub const SOURCE_GITHUB: &str = "github";
+
+/// The `history_index_state.source` value for the CHANGELOG release parser.
+pub const SOURCE_CHANGELOG: &str = "changelog";
+
+/// `history_docs.doc_kind` values. These are the id prefixes too
+/// (`gh:issue:116`, `gh:pr:57`, `gh:comment:<id>`, `changelog:v2.49.0`).
+pub const DOC_KIND_ISSUE: &str = "issue";
+pub const DOC_KIND_PR: &str = "pr";
+pub const DOC_KIND_COMMENT: &str = "comment";
+pub const DOC_KIND_CHANGELOG: &str = "changelog";
 
 /// One indexed commit.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -208,6 +304,32 @@ pub struct HistoryCommitFile {
     /// different facts and the index should not conflate them.
     pub insertions: Option<i64>,
     pub deletions: Option<i64>,
+}
+
+/// One embeddable text unit from GitHub or the CHANGELOG (spec §4.1, §8).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HistoryDoc {
+    /// Namespaced id: `gh:issue:116`, `gh:pr:57`, `gh:comment:<node-id>`,
+    /// `changelog:v2.49.0`.
+    pub id: String,
+    /// One of [`DOC_KIND_ISSUE`], [`DOC_KIND_PR`], [`DOC_KIND_COMMENT`],
+    /// [`DOC_KIND_CHANGELOG`].
+    pub doc_kind: String,
+    /// Issue/PR number; the issue number for a comment; `None` for CHANGELOG.
+    pub number: Option<i64>,
+    pub title: Option<String>,
+    pub body: Option<String>,
+    pub state: Option<String>,
+    pub author: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub closed_at: Option<String>,
+    pub url: Option<String>,
+    /// JSON object of extracted references — commit SHAs, issue numbers, task
+    /// ids, and for a merged PR its merge-commit SHA (spec §8, PR↔commit).
+    pub refs_json: Option<String>,
+    pub repository: String,
+    pub source: String,
 }
 
 /// The watermark row plus its honesty fields.
@@ -362,6 +484,37 @@ pub trait HistoryStore: Send + Sync {
 
     /// Measured provenance reach for the repository (spec §10.1).
     fn provenance_coverage(&self, repository: &str) -> Result<ProvenanceCoverage>;
+
+    /// Write a batch of docs and the `(repository, source)` watermark in ONE
+    /// transaction — the same rule `commit_batch` enforces for git (spec §4.2
+    /// rule 2). A half-written GitHub page must re-fetch, never be skipped.
+    ///
+    /// `watermark_at` is the **data** cursor for this source: the newest
+    /// `updated_at` the pass observed, not the wall clock. Taking it from the
+    /// data means a clock difference between this machine and GitHub can only
+    /// cause a harmless re-fetch of the boundary item, never a skipped one.
+    /// Pass `None` to leave an existing cursor alone (a pass that found nothing
+    /// new must not advance it).
+    ///
+    /// Returns the number of doc rows written.
+    fn upsert_docs(
+        &self,
+        repository: &str,
+        source: &str,
+        docs: &[HistoryDoc],
+        watermark_at: Option<&str>,
+        backfill_complete: bool,
+    ) -> Result<usize>;
+
+    /// `(kind, count)` pairs for a repository, kind-ascending.
+    fn doc_counts(&self, repository: &str) -> Result<Vec<(String, i64)>>;
+
+    /// How many docs still await an embedding (M7's queue depth, reported by
+    /// `cas history status` so the backlog is visible before M7 exists).
+    fn docs_pending_embedding(&self, repository: &str) -> Result<i64>;
+
+    /// Read one doc by id.
+    fn get_doc(&self, id: &str) -> Result<Option<HistoryDoc>>;
 }
 
 /// SQLite-backed [`HistoryStore`] sharing the process-wide `cas.db` connection.
@@ -483,12 +636,32 @@ impl SqliteHistoryStore {
             items_indexed: row.get("items_indexed")?,
         })
     }
+
+    fn doc_from_row(row: &rusqlite::Row) -> rusqlite::Result<HistoryDoc> {
+        Ok(HistoryDoc {
+            id: row.get("id")?,
+            doc_kind: row.get("doc_kind")?,
+            number: row.get("number")?,
+            title: row.get("title")?,
+            body: row.get("body")?,
+            state: row.get("state")?,
+            author: row.get("author")?,
+            created_at: row.get("created_at")?,
+            updated_at: row.get("updated_at")?,
+            closed_at: row.get("closed_at")?,
+            url: row.get("url")?,
+            refs_json: row.get("refs_json")?,
+            repository: row.get("repository")?,
+            source: row.get("source")?,
+        })
+    }
 }
 
 impl HistoryStore for SqliteHistoryStore {
     fn init(&self) -> Result<()> {
         let conn = self.lock();
         conn.execute_batch(HISTORY_SCHEMA)?;
+        conn.execute_batch(HISTORY_DOCS_SCHEMA)?;
         Ok(())
     }
 
@@ -924,6 +1097,144 @@ impl HistoryStore for SqliteHistoryStore {
             unmeasurable_reason: None,
         })
     }
+
+    fn upsert_docs(
+        &self,
+        repository: &str,
+        source: &str,
+        docs: &[HistoryDoc],
+        watermark_at: Option<&str>,
+        backfill_complete: bool,
+    ) -> Result<usize> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+
+        {
+            // `pending_embedding` is re-armed only when the EMBEDDED text
+            // changes. Spec §4.4 embeds `title + body`; a state flip from OPEN
+            // to CLOSED, or a fresh `updated_at`, changes neither. Re-arming on
+            // every touch would make a `--force` re-fetch enqueue the whole
+            // corpus for re-embedding — 116 issues + 198 comments of paid,
+            // rate-limited work for identical vectors.
+            let mut stmt = tx.prepare(
+                "INSERT INTO history_docs (
+                     id, doc_kind, number, title, body, state, author,
+                     created_at, updated_at, closed_at, url, refs_json,
+                     repository, source, pending_embedding, fetched_at, scope
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                           ?13, ?14, 1, ?15, 'project')
+                 ON CONFLICT(id) DO UPDATE SET
+                     doc_kind = excluded.doc_kind,
+                     number = excluded.number,
+                     title = excluded.title,
+                     body = excluded.body,
+                     state = excluded.state,
+                     author = excluded.author,
+                     created_at = excluded.created_at,
+                     updated_at = excluded.updated_at,
+                     closed_at = excluded.closed_at,
+                     url = excluded.url,
+                     refs_json = excluded.refs_json,
+                     repository = excluded.repository,
+                     source = excluded.source,
+                     fetched_at = excluded.fetched_at,
+                     pending_embedding = CASE
+                         WHEN history_docs.title IS NOT excluded.title
+                           OR history_docs.body IS NOT excluded.body
+                         THEN 1
+                         ELSE history_docs.pending_embedding
+                     END",
+            )?;
+            for d in docs {
+                stmt.execute(params![
+                    d.id,
+                    d.doc_kind,
+                    d.number,
+                    d.title,
+                    d.body,
+                    d.state,
+                    d.author,
+                    d.created_at,
+                    d.updated_at,
+                    d.closed_at,
+                    d.url,
+                    d.refs_json,
+                    repository,
+                    source,
+                    now,
+                ])?;
+            }
+        }
+
+        // The cursor never moves backwards, and a pass that found nothing new
+        // (`watermark_at = None`) leaves it exactly where it was — an empty
+        // fetch is evidence of nothing to do, not evidence of freshness at
+        // wall-clock time.
+        tx.execute(
+            "INSERT INTO history_index_state (
+                 repository, source, last_indexed_at, last_attempt_at,
+                 last_error, backfill_complete, items_indexed
+             ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)
+             ON CONFLICT(repository, source) DO UPDATE SET
+                 last_indexed_at = NULLIF(
+                     MAX(
+                         COALESCE(excluded.last_indexed_at, ''),
+                         COALESCE(history_index_state.last_indexed_at, '')
+                     ), ''),
+                 last_attempt_at = excluded.last_attempt_at,
+                 last_error = NULL,
+                 backfill_complete = excluded.backfill_complete,
+                 items_indexed = history_index_state.items_indexed
+                                 + excluded.items_indexed",
+            params![
+                repository,
+                source,
+                watermark_at,
+                now,
+                i64::from(backfill_complete),
+                docs.len() as i64,
+            ],
+        )?;
+
+        tx.commit()?;
+        Ok(docs.len())
+    }
+
+    fn doc_counts(&self, repository: &str) -> Result<Vec<(String, i64)>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT doc_kind, COUNT(*) FROM history_docs
+              WHERE repository = ?1 GROUP BY doc_kind ORDER BY doc_kind",
+        )?;
+        let rows = stmt
+            .query_map(params![repository], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    fn docs_pending_embedding(&self, repository: &str) -> Result<i64> {
+        let conn = self.lock();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM history_docs
+              WHERE repository = ?1 AND pending_embedding = 1",
+            params![repository],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    fn get_doc(&self, id: &str) -> Result<Option<HistoryDoc>> {
+        let conn = self.lock();
+        let doc = conn
+            .query_row(
+                "SELECT * FROM history_docs WHERE id = ?1",
+                params![id],
+                Self::doc_from_row,
+            )
+            .optional()?;
+        Ok(doc)
+    }
 }
 
 #[cfg(test)]
@@ -1154,6 +1465,259 @@ mod tests {
             )
             .unwrap();
         assert!(ins.is_none(), "binary line counts must stay NULL, not 0");
+    }
+
+    fn doc(id: &str, kind: &str, title: &str, body: &str, updated: &str) -> HistoryDoc {
+        HistoryDoc {
+            id: id.to_string(),
+            doc_kind: kind.to_string(),
+            number: Some(1),
+            title: Some(title.to_string()),
+            body: Some(body.to_string()),
+            state: Some("OPEN".into()),
+            author: Some("ada".into()),
+            created_at: Some("2026-08-01T00:00:00Z".into()),
+            updated_at: Some(updated.to_string()),
+            closed_at: None,
+            url: Some(format!("https://example.test/{id}")),
+            refs_json: Some("{}".into()),
+            repository: "/repo".into(),
+            source: SOURCE_GITHUB.into(),
+        }
+    }
+
+    #[test]
+    fn upsert_docs_writes_rows_and_advances_the_data_cursor() {
+        let (_t, store) = store();
+        let d = doc("gh:issue:1", DOC_KIND_ISSUE, "t", "b", "2026-08-02T00:00:00Z");
+        assert_eq!(
+            store
+                .upsert_docs(
+                    "/repo",
+                    SOURCE_GITHUB,
+                    std::slice::from_ref(&d),
+                    Some("2026-08-02T00:00:00Z"),
+                    true,
+                )
+                .unwrap(),
+            1
+        );
+
+        let state = store.index_state("/repo", SOURCE_GITHUB).unwrap().unwrap();
+        assert_eq!(
+            state.last_indexed_at.as_deref(),
+            Some("2026-08-02T00:00:00Z"),
+            "cursor must be the data timestamp, not the wall clock"
+        );
+        assert!(state.backfill_complete);
+        assert_eq!(state.items_indexed, 1);
+        assert_eq!(store.get_doc("gh:issue:1").unwrap().unwrap(), d);
+        // The git watermark is a different `source` row and must be untouched.
+        assert!(store.index_state("/repo", SOURCE_GIT).unwrap().is_none());
+    }
+
+    /// A pass that fetched nothing must not restamp the cursor: an empty result
+    /// is "nothing to do", never "fresh as of now" (spec §10.1).
+    #[test]
+    fn an_empty_pass_leaves_the_cursor_where_it_was() {
+        let (_t, store) = store();
+        store
+            .upsert_docs(
+                "/repo",
+                SOURCE_GITHUB,
+                &[doc("gh:issue:1", DOC_KIND_ISSUE, "t", "b", "2026-08-02T00:00:00Z")],
+                Some("2026-08-02T00:00:00Z"),
+                true,
+            )
+            .unwrap();
+        store
+            .upsert_docs("/repo", SOURCE_GITHUB, &[], None, true)
+            .unwrap();
+
+        let state = store.index_state("/repo", SOURCE_GITHUB).unwrap().unwrap();
+        assert_eq!(
+            state.last_indexed_at.as_deref(),
+            Some("2026-08-02T00:00:00Z")
+        );
+        assert!(
+            state.last_attempt_at.is_some(),
+            "the attempt itself must still be recorded"
+        );
+    }
+
+    #[test]
+    fn the_doc_cursor_never_moves_backwards() {
+        let (_t, store) = store();
+        for at in ["2026-08-05T00:00:00Z", "2026-08-01T00:00:00Z"] {
+            store
+                .upsert_docs("/repo", SOURCE_GITHUB, &[], Some(at), true)
+                .unwrap();
+        }
+        let state = store.index_state("/repo", SOURCE_GITHUB).unwrap().unwrap();
+        assert_eq!(
+            state.last_indexed_at.as_deref(),
+            Some("2026-08-05T00:00:00Z")
+        );
+    }
+
+    /// Re-arming the embedding queue on every touch would make a `--force`
+    /// re-fetch pay to re-embed an unchanged corpus.
+    #[test]
+    fn pending_embedding_rearms_on_text_change_only() {
+        let (_t, store) = store();
+        let base = doc("gh:issue:1", DOC_KIND_ISSUE, "t", "b", "2026-08-02T00:00:00Z");
+        let mark_embedded = || {
+            let conn = store.lock();
+            conn.execute("UPDATE history_docs SET pending_embedding = 0", [])
+                .unwrap();
+        };
+
+        store
+            .upsert_docs("/repo", SOURCE_GITHUB, &[base.clone()], None, true)
+            .unwrap();
+        assert_eq!(store.docs_pending_embedding("/repo").unwrap(), 1);
+        mark_embedded();
+
+        // State + timestamps changed, embedded text did not.
+        let mut restated = base.clone();
+        restated.state = Some("CLOSED".into());
+        restated.closed_at = Some("2026-08-09T00:00:00Z".into());
+        restated.updated_at = Some("2026-08-09T00:00:00Z".into());
+        store
+            .upsert_docs("/repo", SOURCE_GITHUB, &[restated.clone()], None, true)
+            .unwrap();
+        assert_eq!(
+            store.docs_pending_embedding("/repo").unwrap(),
+            0,
+            "a state flip must not re-enqueue an unchanged body"
+        );
+        assert_eq!(
+            store.get_doc("gh:issue:1").unwrap().unwrap().state.as_deref(),
+            Some("CLOSED"),
+            "…but the row itself must still be updated"
+        );
+
+        let mut edited = restated;
+        edited.body = Some("edited body".into());
+        store
+            .upsert_docs("/repo", SOURCE_GITHUB, &[edited], None, true)
+            .unwrap();
+        assert_eq!(store.docs_pending_embedding("/repo").unwrap(), 1);
+    }
+
+    #[test]
+    fn doc_counts_are_per_kind_and_per_repository() {
+        let (_t, store) = store();
+        let mut elsewhere = doc("gh:issue:9", DOC_KIND_ISSUE, "t", "b", "2026-08-02T00:00:00Z");
+        elsewhere.repository = "/elsewhere".into();
+        store
+            .upsert_docs(
+                "/repo",
+                SOURCE_GITHUB,
+                &[
+                    doc("gh:issue:1", DOC_KIND_ISSUE, "t", "b", "2026-08-02T00:00:00Z"),
+                    doc("gh:pr:2", DOC_KIND_PR, "t", "b", "2026-08-02T00:00:00Z"),
+                    doc("gh:comment:3", DOC_KIND_COMMENT, "t", "b", "2026-08-02T00:00:00Z"),
+                ],
+                None,
+                true,
+            )
+            .unwrap();
+        store
+            .upsert_docs("/elsewhere", SOURCE_GITHUB, &[elsewhere], None, true)
+            .unwrap();
+
+        assert_eq!(
+            store.doc_counts("/repo").unwrap(),
+            vec![
+                ("comment".to_string(), 1),
+                ("issue".to_string(), 1),
+                ("pr".to_string(), 1),
+            ]
+        );
+        assert_eq!(
+            store.doc_counts("/elsewhere").unwrap(),
+            vec![("issue".to_string(), 1)]
+        );
+    }
+
+    /// github and changelog keep independent ledgers; neither may clobber the
+    /// other's cursor or the git walker's watermark.
+    #[test]
+    fn sources_keep_independent_ledgers() {
+        let (_t, store) = store();
+        let a = "a".repeat(40);
+        store
+            .commit_batch("/repo", &[commit(&a)], &[], &a, true)
+            .unwrap();
+        store
+            .upsert_docs(
+                "/repo",
+                SOURCE_GITHUB,
+                &[doc("gh:issue:1", DOC_KIND_ISSUE, "t", "b", "2026-08-02T00:00:00Z")],
+                Some("2026-08-02T00:00:00Z"),
+                true,
+            )
+            .unwrap();
+        let mut cl = doc(
+            "changelog:v2.49.0",
+            DOC_KIND_CHANGELOG,
+            "v2.49.0",
+            "notes",
+            "2026-08-07T00:00:00Z",
+        );
+        cl.source = SOURCE_CHANGELOG.into();
+        cl.number = None;
+        store
+            .upsert_docs("/repo", SOURCE_CHANGELOG, &[cl], None, true)
+            .unwrap();
+
+        assert_eq!(
+            store
+                .index_state("/repo", SOURCE_GIT)
+                .unwrap()
+                .unwrap()
+                .last_indexed_sha
+                .as_deref(),
+            Some(a.as_str())
+        );
+        assert_eq!(
+            store
+                .index_state("/repo", SOURCE_GITHUB)
+                .unwrap()
+                .unwrap()
+                .items_indexed,
+            1
+        );
+        assert_eq!(
+            store
+                .index_state("/repo", SOURCE_CHANGELOG)
+                .unwrap()
+                .unwrap()
+                .items_indexed,
+            1
+        );
+    }
+
+    /// Offline: `record_attempt` must be able to file a github failure without
+    /// disturbing anything the git half indexed (spec §10.2).
+    #[test]
+    fn a_github_failure_is_recorded_without_touching_the_git_watermark() {
+        let (_t, store) = store();
+        let a = "a".repeat(40);
+        store
+            .commit_batch("/repo", &[commit(&a)], &[], &a, true)
+            .unwrap();
+        store
+            .record_attempt("/repo", SOURCE_GITHUB, Some("gh not authenticated"))
+            .unwrap();
+
+        let github = store.index_state("/repo", SOURCE_GITHUB).unwrap().unwrap();
+        assert_eq!(github.last_error.as_deref(), Some("gh not authenticated"));
+        assert!(github.last_indexed_at.is_none());
+        let git = store.index_state("/repo", SOURCE_GIT).unwrap().unwrap();
+        assert_eq!(git.last_indexed_sha.as_deref(), Some(a.as_str()));
+        assert!(git.last_error.is_none());
     }
 
     // ── Query surface (EPIC cas-6212 / cas-7f40, M4) ────────────────────

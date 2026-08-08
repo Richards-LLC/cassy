@@ -17,7 +17,7 @@
 use crate::migration::{Migration, Subsystem};
 
 pub const MIGRATION: Migration = Migration {
-    id: 222,
+    id: 223,
     name: "history_commits_fts",
     subsystem: Subsystem::Code,
     description: "Add FTS5 lexical index over git-history commit subject/body, backfilled from existing rows (cas-7f40)",

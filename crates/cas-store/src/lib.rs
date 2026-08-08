@@ -102,9 +102,11 @@ pub use entity_store::{ENTITY_SCHEMA, SqliteEntityStore};
 // Structural git-history index (EPIC cas-6212 / cas-7a21): commits, their
 // touched files, and the walker watermark.
 pub use history_store::{
-    CoChangedFile, HISTORY_FTS_STATEMENTS, HISTORY_SCHEMA, HISTORY_SCHEMA_STATEMENTS,
-    HistoryCommit, HistoryCommitFile, HistoryCommitHit, HistoryIndexState, HistoryQuery,
-    HistoryStore, ProvenanceCoverage, SOURCE_GIT, SqliteHistoryStore,
+    CoChangedFile, DOC_KIND_CHANGELOG, DOC_KIND_COMMENT, DOC_KIND_ISSUE, DOC_KIND_PR,
+    HISTORY_DOCS_SCHEMA, HISTORY_DOCS_SCHEMA_STATEMENTS, HISTORY_FTS_STATEMENTS, HISTORY_SCHEMA,
+    HISTORY_SCHEMA_STATEMENTS, HistoryCommit, HistoryCommitFile, HistoryCommitHit, HistoryDoc,
+    HistoryIndexState, HistoryQuery, HistoryStore, ProvenanceCoverage, SOURCE_CHANGELOG,
+    SOURCE_GIT, SOURCE_GITHUB, SqliteHistoryStore,
 };
 
 // Knowledge store for LLM-distilled repo prose (EPIC cas-7d31 / cas-cbf1):

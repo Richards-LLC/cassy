@@ -44,11 +44,15 @@ use std::process::Command;
 
 use anyhow::{Context, Result, anyhow};
 use cas_store::{
-    HistoryCommit, HistoryCommitFile, HistoryIndexState, HistoryStore, SOURCE_GIT,
-    SqliteHistoryStore,
+    HistoryCommit, HistoryCommitFile, HistoryIndexState, HistoryStore, SOURCE_CHANGELOG, SOURCE_GIT,
+    SOURCE_GITHUB, SqliteHistoryStore,
 };
 
 use crate::git_log::{parse_name_status_z, parse_numstat_z};
+
+pub mod changelog;
+pub mod github;
+pub mod refs;
 
 /// Commits per transaction during backfill (spec §4.2 rule 4).
 pub const CHUNK_SIZE: usize = 500;
@@ -114,6 +118,18 @@ pub struct HistoryStatus {
     pub lag_commits: Option<i64>,
     pub watermark_is_ancestor: bool,
     pub state: Option<HistoryIndexState>,
+    /// `(doc_kind, count)` for `history_docs` (M6). Empty when the doc index
+    /// has never run, which is a different fact from "the repository has no
+    /// issues" and is reported as such.
+    pub doc_counts: Vec<(String, i64)>,
+    /// Docs still awaiting an embedding — M7's queue depth, surfaced now so the
+    /// backlog is visible before the drain that consumes it exists.
+    pub docs_pending_embedding: i64,
+    /// The `github` ledger row: cursor, last attempt, and the declared boundary
+    /// (`last_error`) when GitHub data is absent (spec §10.2).
+    pub github_state: Option<HistoryIndexState>,
+    /// The `changelog` ledger row.
+    pub changelog_state: Option<HistoryIndexState>,
 }
 
 impl HistoryStatus {
@@ -529,6 +545,10 @@ pub fn status(cas_root: &Path, repo_root: &Path) -> Result<HistoryStatus> {
     };
 
     Ok(HistoryStatus {
+        doc_counts: store.doc_counts(&repository)?,
+        docs_pending_embedding: store.docs_pending_embedding(&repository)?,
+        github_state: store.index_state(&repository, SOURCE_GITHUB)?,
+        changelog_state: store.index_state(&repository, SOURCE_CHANGELOG)?,
         repository,
         head_sha: head,
         indexed_commits,
@@ -541,6 +561,101 @@ pub fn status(cas_root: &Path, repo_root: &Path) -> Result<HistoryStatus> {
 }
 
 pub mod search;
+
+/// What one docs pass did, per source. Both halves are reported independently
+/// because either can be a declared boundary while the other succeeds — a repo
+/// with no CHANGELOG and a working `gh` is an ordinary, fully-honest state.
+#[derive(Debug, Clone, Default)]
+pub struct DocsOutcome {
+    /// `Ok` with the fetch counts, `Err` with the declared boundary text.
+    pub github: Option<Result<github::FetchOutcome, String>>,
+    /// Number of CHANGELOG sections indexed, or `None` when the repository has
+    /// no CHANGELOG (a boundary, not a failure).
+    pub changelog_sections: Option<usize>,
+    pub changelog_error: Option<String>,
+}
+
+/// Index the CHANGELOG's release sections.
+///
+/// Returns `Ok(None)` when there is no CHANGELOG — spec §10.2 treats absent
+/// source data as a declared boundary, and a repository without a CHANGELOG is
+/// the overwhelmingly common case.
+pub fn run_changelog_pass(cas_root: &Path, repo_root: &Path) -> Result<Option<usize>> {
+    let store = SqliteHistoryStore::open(cas_root)?;
+    let repository = repository_id(repo_root);
+
+    match changelog::collect(repo_root, &repository) {
+        Ok(None) => {
+            store.record_attempt(
+                &repository,
+                SOURCE_CHANGELOG,
+                Some("no CHANGELOG.md in the repository root"),
+            )?;
+            Ok(None)
+        }
+        Ok(Some(docs)) => {
+            // The cursor is the newest release date the file carries. It is not
+            // used to skip work — the file is re-parsed in full every pass —
+            // but it makes "how current is the CHANGELOG index" answerable.
+            let cursor = docs.iter().filter_map(|d| d.updated_at.clone()).max();
+            let count = store.upsert_docs(
+                &repository,
+                SOURCE_CHANGELOG,
+                &docs,
+                cursor.as_deref(),
+                true,
+            )?;
+            Ok(Some(count))
+        }
+        Err(e) => {
+            store.record_attempt(&repository, SOURCE_CHANGELOG, Some(&e.to_string()))?;
+            Err(e)
+        }
+    }
+}
+
+/// Run both doc sources. Neither half can stop the other: spec §8 requires the
+/// git index to keep working when GitHub is absent, and the same logic applies
+/// between the two doc sources.
+pub fn run_docs_pass(
+    cas_root: &Path,
+    repo_root: &Path,
+    repo: Option<&str>,
+    force: bool,
+    want_github: bool,
+    want_changelog: bool,
+) -> DocsOutcome {
+    let mut outcome = DocsOutcome::default();
+
+    if want_github {
+        outcome.github = Some(match repo {
+            Some(repo) => github::run_pass(cas_root, repo_root, repo, force)
+                .map_err(|e| e.to_string()),
+            // No `issues.repo`: report the boundary and propose nothing, the
+            // precedent set by the SessionStart detector (spec §8).
+            None => {
+                let repository = repository_id(repo_root);
+                if let Ok(store) = SqliteHistoryStore::open(cas_root) {
+                    let _ = store.record_attempt(
+                        &repository,
+                        SOURCE_GITHUB,
+                        Some(&crate::gh_graphql::GhError::RepoNotConfigured.to_string()),
+                    );
+                }
+                Err(crate::gh_graphql::GhError::RepoNotConfigured.to_string())
+            }
+        });
+    }
+
+    if want_changelog {
+        match run_changelog_pass(cas_root, repo_root) {
+            Ok(sections) => outcome.changelog_sections = sections,
+            Err(e) => outcome.changelog_error = Some(e.to_string()),
+        }
+    }
+
+    outcome
+}
 
 #[cfg(test)]
 mod tests;

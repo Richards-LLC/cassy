@@ -456,6 +456,10 @@ impl EmbeddedDaemon {
         let mut history_index_interval = tokio::time::interval(Duration::from_secs(
             self.config.history_index_interval_secs.max(1),
         ));
+        // GitHub + CHANGELOG docs (EPIC cas-6212 / cas-9a38, spec §8).
+        let mut history_docs_interval = tokio::time::interval(Duration::from_secs(
+            self.config.history_docs_interval_secs.max(1),
+        ));
         // cas-499c: the max-staleness half of the idle-preferred scheduler. Starts "now" so a
         // freshly-started daemon still waits out one full ceiling before overriding idleness.
         let mut last_code_index = tokio::time::Instant::now();
@@ -474,6 +478,7 @@ impl EmbeddedDaemon {
         heartbeat_interval.tick().await;
         code_index_interval.tick().await;
         history_index_interval.tick().await;
+        history_docs_interval.tick().await;
         proxy_config_interval.tick().await;
 
         // Check if agent was already registered directly (fallback path in SessionStart hook)
@@ -631,6 +636,25 @@ impl EmbeddedDaemon {
                     }
                 }
 
+                // GitHub + CHANGELOG doc indexing (EPIC cas-6212 / cas-9a38).
+                //
+                // Ungated like the git arm above, but on a fifteen-minute
+                // interval rather than five: this half is bounded by a third
+                // party's rate limits and by how fast humans write issues, not
+                // by local work (spec §8). Absent `gh`, an unset `issues.repo`
+                // or a missing CHANGELOG are declared boundaries recorded on
+                // the ledger rows — they must never surface as a daemon error,
+                // or every repository without GitHub configured would report a
+                // permanently unhealthy daemon.
+                _ = history_docs_interval.tick() => {
+                    if self.config.index_history_docs {
+                        if let Err(e) = self.run_history_docs_cycle().await {
+                            let mut status = self.status.write().await;
+                            status.last_error = Some(format!("History doc indexing failed: {e}"));
+                        }
+                    }
+                }
+
                 // Proxy config hot-reload - check .cas/proxy.toml for changes
                 _ = proxy_config_interval.tick() => {
                     #[cfg(feature = "mcp-proxy")]
@@ -730,6 +754,52 @@ impl EmbeddedDaemon {
                     outcome.files_indexed,
                 );
             }
+        }
+
+        Ok(())
+    }
+
+    /// Run one GitHub + CHANGELOG doc indexing pass (EPIC cas-6212 / cas-9a38).
+    ///
+    /// Returns `Ok` for every *declared boundary* — no git repo, no `gh`, no
+    /// `issues.repo`, no CHANGELOG — because those are states of the world, not
+    /// daemon failures, and each has already been recorded on its own
+    /// `history_index_state` row where `cas history status` will report it
+    /// (spec §10.2). Only a local store failure reaches the caller.
+    async fn run_history_docs_cycle(&self) -> Result<(), CasError> {
+        let cas_root = self.config.cas_root.clone();
+
+        let outcome = tokio::task::spawn_blocking(move || {
+            let Ok(repo_root) = crate::history::repo_root_for(&cas_root) else {
+                return None;
+            };
+            let repo = crate::config::Config::load(&cas_root)
+                .unwrap_or_default()
+                .issues
+                .as_ref()
+                .and_then(|i| i.repo.clone())
+                .map(|r| r.trim().to_string())
+                .filter(|r| !r.is_empty());
+            Some(crate::history::run_docs_pass(
+                &cas_root,
+                &repo_root,
+                repo.as_deref(),
+                false,
+                true,
+                true,
+            ))
+        })
+        .await
+        .map_err(|e| CasError::Other(format!("Task join error: {e}")))?;
+
+        if let Some(outcome) = outcome
+            && let Some(Ok(fetch)) = &outcome.github
+            && fetch.docs_total() > 0
+        {
+            eprintln!(
+                "[CAS] History docs: {} issue(s), {} PR(s), {} comment(s)",
+                fetch.issues, fetch.pull_requests, fetch.comments,
+            );
         }
 
         Ok(())

@@ -147,6 +147,34 @@ impl HistoryStatus {
             && self.lag_commits == Some(0)
             && self.indexed_commits >= self.repo_commits
     }
+
+    /// Age of a non-zero lag since the last successful observation, in
+    /// seconds. Commit timestamps cannot answer this question: a watermark and
+    /// HEAD committed one second apart stay one second apart even when the
+    /// daemon has been stalled for days.
+    ///
+    /// A caught-up watermark is exactly zero. Missing, diverged, or malformed
+    /// timestamps stay unknown rather than being rendered as fresh.
+    pub(crate) fn lag_age_seconds_at(&self, now: chrono::DateTime<chrono::Utc>) -> Option<i64> {
+        match self.lag_commits {
+            Some(0) => Some(0),
+            Some(lag) if lag > 0 => {
+                let state = self.state.as_ref()?;
+                // A failed attempt is not a successful observation. The
+                // previous successful batch remains the honest lower bound.
+                let observed_at = if state.last_error.is_none() {
+                    state.last_attempt_at.as_ref().or(state.last_indexed_at.as_ref())
+                } else {
+                    state.last_indexed_at.as_ref()
+                }?;
+                let observed_at = chrono::DateTime::parse_from_rfc3339(observed_at)
+                    .ok()?
+                    .with_timezone(&chrono::Utc);
+                Some((now - observed_at).num_seconds().max(0))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Resolve the repository root for `cas_root` (`.cas/` lives inside it).
@@ -195,18 +223,6 @@ fn git(repo_root: &Path, args: &[&str]) -> Result<String> {
 
 fn head_sha(repo_root: &Path) -> Result<String> {
     Ok(git(repo_root, &["rev-parse", "HEAD"])?.trim().to_string())
-}
-
-/// Commit time of `sha` in epoch seconds, or `None` when git cannot resolve it
-/// (a watermark from a rewritten branch, most often). `None` propagates into
-/// the response as `lag_seconds: null` rather than 0 — spec §10.1's rule that
-/// "unknown" must never be rendered as "fresh".
-pub(crate) fn commit_epoch(repo_root: &Path, sha: &str) -> Option<i64> {
-    git(repo_root, &["show", "-s", "--format=%ct", sha])
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
 }
 
 /// Is `sha` reachable from HEAD? A `false` here is what distinguishes "nothing

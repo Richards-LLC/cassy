@@ -490,6 +490,52 @@ async fn every_response_carries_the_index_status_contract() {
     assert!(status["last_error"].is_null());
 }
 
+/// A tiny commit timestamp gap must still age into a stale-index signal when
+/// the daemon has not successfully observed the repository for days.
+#[tokio::test]
+async fn nonzero_history_lag_ages_from_the_last_successful_observation() {
+    let fx = Fixture::new();
+    let stale = (chrono::Utc::now() - chrono::Duration::days(2)).to_rfc3339();
+    fx.db()
+        .execute(
+            "UPDATE history_index_state
+                SET last_indexed_at = ?1, last_attempt_at = ?1
+              WHERE source = 'git'",
+            [&stale],
+        )
+        .unwrap();
+    commit(
+        &fx.repo,
+        "src/new_since_last_tick.rs",
+        "fn still_unindexed() {}\n",
+        "new work after the stalled history tick",
+    );
+
+    let response = fx
+        .history(serde_json::json!({"action": "history", "query": "backoff"}))
+        .await;
+    let status = &response["index_status"];
+    assert_eq!(status["lag_commits"], 1);
+    assert!(
+        status["lag_seconds"].as_i64().unwrap() >= 2 * 24 * 60 * 60 - 5,
+        "lag did not age from the stale successful observation: {status}"
+    );
+
+    // A malformed/missing observation is not evidence of freshness.
+    fx.db()
+        .execute(
+            "UPDATE history_index_state
+                SET last_indexed_at = 'not-a-time', last_attempt_at = 'not-a-time'
+              WHERE source = 'git'",
+            [],
+        )
+        .unwrap();
+    let unknown = fx
+        .history(serde_json::json!({"action": "history", "query": "backoff"}))
+        .await;
+    assert!(unknown["index_status"]["lag_seconds"].is_null());
+}
+
 /// A `kind` this surface cannot serve must not be answered with commits.
 #[tokio::test]
 async fn an_unsupported_kind_returns_no_results_and_says_why() {
@@ -567,6 +613,55 @@ async fn a_symbol_filter_returns_matches_and_surfaces_absent_mapping() {
         .find(|hit| hit["subject"] == "widen the transcript pane")
         .expect("an unindexed file must remain an explicit unknown, not a false negative");
     assert_eq!(absent["symbol_mapping"], "absent");
+}
+
+/// Exact mapped hits are the certain tier. Newer pending rows remain a visible
+/// but bounded tail; neither SQL LIMIT nor the hybrid recency sort may displace
+/// the older exact hits.
+#[tokio::test]
+async fn exact_symbol_hits_precede_a_bounded_uncertain_tail_in_production() {
+    let fx = Fixture::new();
+    fx.index_symbol_file(
+        "src/delivery/retry.rs",
+        &[("retry-symbol-priority", "delivery::retry", 1, 1)],
+    );
+    fx.map_symbols();
+    for n in 0..15 {
+        commit(
+            &fx.repo,
+            &format!("src/newer/uncertain_{n}.rs"),
+            &format!("fn uncertain_{n}() {{}}\n"),
+            &format!("newer uncertain history row {n}"),
+        );
+    }
+    cas::history::run_index_pass(&fx.cas_root, &fx.repo).expect("index newer pending rows");
+
+    let response = fx
+        .history(serde_json::json!({
+            "action": "history",
+            "symbol": "delivery::retry",
+            "limit": 100,
+        }))
+        .await;
+    let hits = response["results"].as_array().unwrap();
+    assert_eq!(
+        response["filters"]["symbol_uncertain_limit"],
+        serde_json::json!(cas_store::HISTORY_SYMBOL_UNCERTAIN_LIMIT)
+    );
+    let exact = hits
+        .iter()
+        .take_while(|hit| hit["symbol_mapping"] == "mapped")
+        .count();
+    assert_eq!(exact, 2, "both older exact hits must lead the result: {hits:?}");
+    assert!(
+        hits.iter().skip(exact).all(|hit| hit["symbol_mapping"] != "mapped"),
+        "certainty tiers interleaved: {hits:?}"
+    );
+    assert_eq!(
+        hits.len() - exact,
+        cas_store::HISTORY_SYMBOL_UNCERTAIN_LIMIT,
+        "uncertainty must remain visible but capped"
+    );
 }
 
 /// A mistyped time bound must fail loudly. Widening silently to all of history

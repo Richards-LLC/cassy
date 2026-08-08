@@ -335,3 +335,153 @@ fn test_maintenance_cycle_runs_pruning_and_checkpoint() {
     assert_eq!(result.lease_history_pruned, 0);
     assert!(result.errors.is_empty(), "unexpected errors: {:?}", result.errors);
 }
+
+// ===== cas-499c: symbol index revival =====
+
+/// `repository` used to be the file's parent-directory name, so `a/src/lib.rs` and
+/// `b/src/lib.rs` collapsed onto repository = "src" and fought over `UNIQUE(repository, path)`.
+#[test]
+fn resolve_repository_uses_git_work_tree_root() {
+    use crate::daemon::indexing::resolve_repository;
+
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let repo = temp.path().join("my-project");
+    let nested = repo.join("crates/cas-code/src/parser");
+    std::fs::create_dir_all(&nested).expect("nested dirs");
+    std::fs::create_dir_all(repo.join(".git")).expect(".git dir");
+    let file = nested.join("mod.rs");
+    std::fs::write(&file, "pub fn parse() {}").expect("write file");
+
+    let (root, name) = resolve_repository(&file);
+    assert_eq!(root.as_deref(), Some(repo.as_path()));
+    assert_eq!(name, "my-project", "must be the work-tree root, not `parser`");
+}
+
+/// A linked worktree / submodule has `.git` as a *file*, so the walk must test existence.
+#[test]
+fn resolve_repository_handles_git_file_worktrees() {
+    use crate::daemon::indexing::resolve_repository;
+
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let repo = temp.path().join("worktree-checkout");
+    std::fs::create_dir_all(repo.join("src")).expect("src dir");
+    std::fs::write(repo.join(".git"), "gitdir: /elsewhere/.git/worktrees/x").expect(".git file");
+    let file = repo.join("src/lib.rs");
+    std::fs::write(&file, "pub fn hello() {}").expect("write file");
+
+    let (root, name) = resolve_repository(&file);
+    assert_eq!(root.as_deref(), Some(repo.as_path()));
+    assert_eq!(name, "worktree-checkout");
+}
+
+/// Outside any git tree there is nothing better than the old behaviour, so keep it.
+#[test]
+fn resolve_repository_falls_back_to_parent_dir_outside_git() {
+    use crate::daemon::indexing::resolve_repository;
+
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let dir = temp.path().join("loose-files");
+    std::fs::create_dir_all(&dir).expect("dir");
+    let file = dir.join("thing.rs");
+    std::fs::write(&file, "pub fn thing() {}").expect("write file");
+
+    let (root, name) = resolve_repository(&file);
+    assert!(root.is_none());
+    assert_eq!(name, "loose-files");
+}
+
+/// The whole point of M2: indexing a file must leave behind searchable symbols AND the
+/// `<cas_root>/index/code` BM25 index that `code_search` probes before answering.
+#[test]
+fn index_code_files_populates_symbols_and_code_search_index() {
+    use crate::daemon::indexing::index_code_files;
+
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let repo = temp.path().join("demo-repo");
+    std::fs::create_dir_all(repo.join("src")).expect("src dir");
+    std::fs::create_dir_all(repo.join(".git")).expect(".git dir");
+    let cas_root = repo.join(".cas");
+    std::fs::create_dir_all(&cas_root).expect("cas root");
+
+    let file = repo.join("src/lib.rs");
+    std::fs::write(
+        &file,
+        "/// Adds two numbers.\npub fn quicksilver_add(a: i64, b: i64) -> i64 { a + b }\n",
+    )
+    .expect("write file");
+
+    assert!(
+        !crate::hybrid_search::code::code_search_available(&cas_root),
+        "precondition: no code index yet"
+    );
+
+    let result = index_code_files(&[file], &cas_root).expect("indexing should succeed");
+    assert!(result.errors.is_empty(), "unexpected errors: {:?}", result.errors);
+    assert_eq!(result.files_indexed, 1);
+    assert!(result.symbols_indexed > 0, "no symbols parsed");
+
+    let store = crate::store::open_code_store(&cas_root).expect("code store");
+    assert!(store.count_symbols().expect("count") > 0, "code_symbols stayed empty");
+    assert!(
+        crate::hybrid_search::code::code_search_available(&cas_root),
+        "`.cas/index/code` was never written, so code_search would still return the stub"
+    );
+
+    // And the index actually answers, rather than merely existing.
+    let search =
+        crate::hybrid_search::code::open_code_search(&cas_root).expect("open code search");
+    let hits = search
+        .search(&cas_search::CodeSearchOptions {
+            query: "quicksilver_add".to_string(),
+            limit: 5,
+            ..Default::default()
+        })
+        .expect("search");
+    assert!(!hits.is_empty(), "code search returned nothing for an indexed symbol");
+}
+
+/// `commit_hash` was hardcoded `None` on every row; the git watermark now lands.
+#[test]
+fn index_code_files_records_head_commit_hash() {
+    use crate::daemon::indexing::index_code_files;
+
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let repo = temp.path().join("git-repo");
+    std::fs::create_dir_all(repo.join("src")).expect("src dir");
+
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .output()
+    };
+    if !git(&["init", "-q"]).map(|o| o.status.success()).unwrap_or(false) {
+        eprintln!("git unavailable; skipping commit-hash assertion");
+        return;
+    }
+    let _ = git(&["config", "user.email", "t@example.com"]);
+    let _ = git(&["config", "user.name", "T"]);
+
+    let file = repo.join("src/lib.rs");
+    std::fs::write(&file, "pub fn tracked() {}\n").expect("write file");
+    let _ = git(&["add", "-A"]);
+    let _ = git(&["commit", "-qm", "seed"]);
+
+    let head = String::from_utf8(
+        git(&["rev-parse", "HEAD"]).expect("rev-parse").stdout,
+    )
+    .expect("utf8")
+    .trim()
+    .to_string();
+    assert_eq!(head.len(), 40, "expected a full sha, got {head:?}");
+
+    let cas_root = repo.join(".cas");
+    std::fs::create_dir_all(&cas_root).expect("cas root");
+    index_code_files(&[file], &cas_root).expect("indexing should succeed");
+
+    let store = crate::store::open_code_store(&cas_root).expect("code store");
+    let files = store.list_files("git-repo", None).expect("list files");
+    assert_eq!(files.len(), 1, "expected one indexed file: {files:?}");
+    assert_eq!(files[0].commit_hash.as_deref(), Some(head.as_str()));
+}

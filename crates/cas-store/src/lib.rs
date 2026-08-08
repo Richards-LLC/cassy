@@ -43,6 +43,9 @@ mod entity_store;
 pub mod error;
 mod event_store;
 mod file_change_store;
+mod fts_query;
+mod history_provenance;
+mod history_store;
 mod knowledge_store;
 pub mod layered;
 mod loop_store;
@@ -96,6 +99,28 @@ pub use sqlite_code_store::{CODE_SCHEMA, SqliteCodeStore};
 
 // Entity store for knowledge graph feature
 pub use entity_store::{ENTITY_SCHEMA, SqliteEntityStore};
+
+// Structural git-history index (EPIC cas-6212 / cas-7a21): commits, their
+// touched files, and the walker watermark.
+pub use history_store::{
+    CoChangedFile, DOC_KIND_CHANGELOG, DOC_KIND_COMMENT, DOC_KIND_ISSUE, DOC_KIND_PR,
+    HISTORY_DOCS_SCHEMA, HISTORY_DOCS_SCHEMA_STATEMENTS, HISTORY_FTS_STATEMENTS, HISTORY_SCHEMA,
+    HISTORY_SCHEMA_STATEMENTS, HistoryCommit, HistoryCommitFile, HistoryCommitHit,
+    HistoryCommitSymbol, HistoryDoc, HistoryIndexState, HistoryQuery, HistoryStore,
+    ProvenanceCoverage, SOURCE_CHANGELOG, SOURCE_EMBEDDINGS, SOURCE_GIT, SOURCE_GITHUB,
+    SqliteHistoryStore,
+    SymbolMapping, SymbolRange,
+};
+
+// Commit → task / session provenance resolution (EPIC cas-6212 / cas-519f,
+// spec §5): the link_method vocabulary, the confidence ladder, and the
+// variable-width prefix matcher §5.2 requires.
+pub use history_provenance::{
+    CandidateClass, CommitProvenance, EdgeHealth, FULL_SHA_LEN, HEAD_SHA_STUB,
+    LINK_METHOD_FACTORY_ANCHOR, LINK_METHOD_HOOK_OBSERVED, LINK_METHOD_INDEXER_WORKER_EVENT,
+    LINK_METHOD_TASK_NOTE, LINK_METHOD_WORKER_EVENT_EXACT, LINK_METHOD_WORKER_EVENT_PREFIX,
+    LinkConfidence, MIN_PREFIX_LEN, ProvenanceLink, candidate_matches, classify_candidate,
+};
 
 // Knowledge store for LLM-distilled repo prose (EPIC cas-7d31 / cas-cbf1):
 // markdown bodies on disk, index + content-hash source ledger in cas.db.
@@ -197,7 +222,8 @@ pub use file_change_store::{
 
 // Commit link store for associating git commits with AI sessions (code attribution)
 pub use commit_link_store::{
-    COMMIT_LINK_SCHEMA, CommitLinkStore, SqliteCommitLinkStore, add_commit_link_with_conn,
+    COMMIT_LINK_LINK_METHOD_STATEMENTS, COMMIT_LINK_SCHEMA, CommitLinkStore,
+    SqliteCommitLinkStore, add_commit_link_with_conn,
 };
 
 // Recording text store for full-text search in factory recordings

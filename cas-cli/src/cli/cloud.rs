@@ -1121,9 +1121,11 @@ pub(crate) fn local_knowledge_counts(cas_root: &Path) -> Option<KnowledgeCounts>
 /// swallowed — knowledge distribution is an enhancement, and it must never
 /// take down a sync that already moved entries and tasks.
 pub(crate) fn sync_project_knowledge(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
-    use crate::cloud::embeddings::{KnowledgeEmbedder, KnowledgeVectorCache, embed_pending_pages};
+    use crate::cloud::embeddings::{
+        DEFAULT_EMBED_BATCH, KnowledgeEmbedder, KnowledgeVectorCache, embed_pending_pages,
+    };
     use crate::cloud::{CloudSyncer, CloudSyncerConfig};
-    use cas_store::SqliteKnowledgeStore;
+    use cas_store::{KnowledgeStore, SqliteKnowledgeStore};
     use std::sync::Arc;
 
     let config = CloudConfig::load()?;
@@ -1164,21 +1166,54 @@ pub(crate) fn sync_project_knowledge(cli: &Cli, cas_root: &Path) -> anyhow::Resu
     };
 
     // Embeddings: only when the capability is present. `from_config` returning
-    // None is the gate — no embedder, no vector cache on disk, no cloud call.
+    // None is the first gate — no auth, no embedder, no vector cache on disk,
+    // no cloud call. Whether the endpoint actually implements the capability is
+    // discovered on first use and reported as `capability_absent`.
     let mut embedded = 0usize;
+    // Everything the run could not cover, so the summary can say so out loud
+    // instead of printing a cheerful "0 embedded" (cas-a924).
+    let mut awaiting = store.count_pending_embedding().unwrap_or(0);
+    let mut embed_requests = 0usize;
+    let mut embed_problems: Vec<String> = Vec::new();
+    let mut embed_capability_absent = false;
+
     if let Some(embedder) = KnowledgeEmbedder::from_config(&config) {
         match KnowledgeVectorCache::open(cas_root, embedder.meta()) {
-            Ok(cache) => match embed_pending_pages(&store, &embedder, &cache, 32) {
-                Ok(report) => {
-                    embedded = report.embedded;
-                    if report.reindexed {
-                        tracing::info!("embedding model changed: knowledge vectors re-indexed");
+            Ok(cache) => {
+                match embed_pending_pages(&store, &embedder, &cache, DEFAULT_EMBED_BATCH) {
+                    Ok(report) => {
+                        embedded = report.embedded;
+                        awaiting = report.pending_after;
+                        embed_requests = report.requests;
+                        embed_capability_absent = report.capability_absent;
+                        if report.reindexed {
+                            tracing::info!("embedding model changed: knowledge vectors re-indexed");
+                        }
+                        embed_problems.extend(report.request_errors.iter().cloned());
+                        if report.rejected_zero > 0 {
+                            embed_problems.push(format!(
+                                "{} page(s) got an unusable zero vector",
+                                report.rejected_zero
+                            ));
+                        }
+                        if report.rejected_dims > 0 {
+                            embed_problems.push(format!(
+                                "{} page(s) got the wrong vector dimension",
+                                report.rejected_dims
+                            ));
+                        }
+                        for (id, message) in &report.errors {
+                            embed_problems.push(format!("{id}: {message}"));
+                        }
                     }
+                    Err(e) => embed_problems.push(e.to_string()),
                 }
-                Err(e) => tracing::warn!(error = %e, "knowledge embedding failed (non-fatal)"),
-            },
-            Err(e) => tracing::warn!(error = %e, "could not open knowledge vector cache"),
+            }
+            Err(e) => embed_problems.push(format!("could not open knowledge vector cache: {e}")),
         }
+    } else if awaiting > 0 {
+        embed_problems
+            .push("no cloud embedding capability configured (not logged in)".to_string());
     }
 
     if cli.json {
@@ -1190,14 +1225,32 @@ pub(crate) fn sync_project_knowledge(cli: &Cli, cas_root: &Path) -> anyhow::Resu
                     "pulled": pulled.applied,
                     "locked_preserved": pulled.locked_preserved,
                     "embedded": embedded,
+                    "embed_requests": embed_requests,
+                    "awaiting_embedding": awaiting,
+                    "embedding_capability_absent": embed_capability_absent,
+                    "embed_problems": embed_problems,
                 }
             })
         );
-    } else if pushed > 0 || pulled.applied > 0 || embedded > 0 {
-        println!(
-            "  Knowledge: {pushed} pushed, {} pulled, {embedded} embedded",
-            pulled.applied
-        );
+    } else {
+        if pushed > 0 || pulled.applied > 0 || embedded > 0 {
+            println!(
+                "  Knowledge: {pushed} pushed, {} pulled, {embedded} embedded",
+                pulled.applied
+            );
+        }
+        // The loud half: never let a failed or partial embed pass as silence.
+        if awaiting > 0 {
+            println!("  Knowledge: {awaiting} page(s) still awaiting an embedding");
+        }
+        if embed_capability_absent {
+            println!(
+                "  Knowledge: this cloud endpoint does not provide embeddings — semantic search stays local-only"
+            );
+        }
+        for problem in &embed_problems {
+            eprintln!("  Knowledge: embedding problem: {problem}");
+        }
     }
 
     Ok(())

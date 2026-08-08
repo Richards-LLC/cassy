@@ -50,8 +50,15 @@ impl SemanticChannel {
     /// it can only return an empty list, so the capability flag must stay
     /// false or the scorer would again allocate weight to a dead channel —
     /// the exact dishonesty T3 removed.
+    ///
+    /// Counted **in the knowledge namespace only**: since M7 the same LMDB env
+    /// also holds `history:*` vectors (spec §4.4), and a raw env count would
+    /// report this channel live off the back of commits it cannot resolve to
+    /// pages — the same dishonesty by a different route.
     pub fn cached_vectors(&self) -> usize {
-        self.cache.count().unwrap_or(0)
+        self.cache
+            .count_in(crate::cloud::embeddings::VectorNamespace::Knowledge)
+            .unwrap_or(0)
     }
 
     pub fn is_live(&self) -> bool {

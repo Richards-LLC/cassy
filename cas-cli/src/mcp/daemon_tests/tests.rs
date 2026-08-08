@@ -1016,3 +1016,47 @@ fn stamp_pid_fingerprint_writes_metadata_for_self() {
         "stamped value must round-trip as a u64 equal to read_pid_starttime(self)"
     );
 }
+
+// ===== cas-499c: idle-preferred code-index scheduling =====
+
+/// The polite path is unchanged: an idle daemon indexes on every tick.
+#[test]
+fn code_index_runs_immediately_when_idle() {
+    assert!(should_run_code_index(true, std::time::Duration::ZERO));
+    assert!(should_run_code_index(
+        true,
+        std::time::Duration::from_secs(CODE_INDEX_MAX_STALENESS_SECS * 10)
+    ));
+}
+
+/// A busy daemon defers — but only up to the ceiling. This is the regression that made the
+/// symbol index empty on every install: a hard `is_idle()` gate on a daemon that is never idle
+/// means the job never runs at all, so `code_files` stays 0 forever.
+#[test]
+fn code_index_defers_while_busy_then_overrides_at_the_ceiling() {
+    let ceiling = std::time::Duration::from_secs(CODE_INDEX_MAX_STALENESS_SECS);
+
+    assert!(
+        !should_run_code_index(false, std::time::Duration::ZERO),
+        "a busy daemon with a fresh index must wait for a quiet moment"
+    );
+    assert!(
+        !should_run_code_index(false, ceiling - std::time::Duration::from_secs(1)),
+        "still inside the ceiling: keep deferring"
+    );
+    assert!(
+        should_run_code_index(false, ceiling),
+        "at the ceiling the daemon must index anyway — politeness may defer, never cancel"
+    );
+    assert!(
+        should_run_code_index(false, ceiling * 3),
+        "long past the ceiling it must certainly run"
+    );
+}
+
+/// The ceiling is a product decision, not an incidental number: it bounds how stale
+/// `code_search` may be, and the doctor lag line is calibrated against it.
+#[test]
+fn code_index_max_staleness_is_five_minutes() {
+    assert_eq!(CODE_INDEX_MAX_STALENESS_SECS, 300);
+}

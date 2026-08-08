@@ -57,9 +57,22 @@ pub const DEFAULT_EMBEDDING_MODEL: &str = "cas-embed-v1";
 /// response has been seen.
 pub const DEFAULT_EMBEDDING_DIMS: usize = 1024;
 
+/// Hard cap on how many inputs the cloud endpoint accepts in ONE request.
+///
+/// Server contract: more than this is a `400`, always. This is the number
+/// [`embed_pending_pages`] chunks on — it is a wire-protocol constant, not a
+/// tuning knob, and no caller may pass a longer `input` list.
+pub const MAX_EMBED_INPUTS_PER_REQUEST: usize = 32;
+
 /// Default cap on pages embedded per invocation, so a first run on a large
 /// repo cannot turn into an unbounded burst of cloud calls.
-pub const DEFAULT_EMBED_BATCH: usize = 32;
+///
+/// This is a *page* budget, not a request size: [`embed_pending_pages`] splits
+/// the pages it fetched into chunks of [`MAX_EMBED_INPUTS_PER_REQUEST`], so
+/// this many pages costs `ceil(n / 32)` requests. The two used to be the same
+/// number by coincidence, which hid the fact that nothing chunked at all
+/// (cas-a924).
+pub const DEFAULT_EMBED_BATCH: usize = 512;
 
 /// Identity of the embedding space a cached vector belongs to.
 ///
@@ -83,6 +96,35 @@ impl EmbeddingMeta {
     }
 }
 
+/// Why an embedding request did not produce vectors.
+///
+/// The split is load-bearing: `Unsupported` is a boundary of the installation
+/// (this endpoint has no embedding capability) and should be reported as such,
+/// while `Failed` is a real error that must never be swallowed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EmbedError {
+    /// The endpoint does not implement `/api/embeddings` (404/501).
+    Unsupported(String),
+    /// Auth, rate limit, payload, transport or malformed-response failure.
+    Failed(String),
+}
+
+impl std::fmt::Display for EmbedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EmbedError::Unsupported(m) | EmbedError::Failed(m) => write!(f, "{m}"),
+        }
+    }
+}
+
+impl std::error::Error for EmbedError {}
+
+impl From<EmbedError> for CasError {
+    fn from(e: EmbedError) -> Self {
+        CasError::Other(e.to_string())
+    }
+}
+
 /// What [`embed_pending_pages`] actually did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EmbedReport {
@@ -97,6 +139,38 @@ pub struct EmbedReport {
     pub reindexed: bool,
     /// Per-page failures (id, message). Non-fatal: other pages still proceed.
     pub errors: Vec<(String, String)>,
+    /// Embedding requests actually issued this run. With chunking this is
+    /// `ceil(pages / MAX_EMBED_INPUTS_PER_REQUEST)`, so a caller (or a test)
+    /// can see that chunking happened rather than inferring it.
+    pub requests: usize,
+    /// Pages that never reached the provider because a request failed and the
+    /// run stopped issuing more. They keep `pending_embedding`.
+    pub deferred: usize,
+    /// Request-level failures, verbatim. A non-empty vector means this run did
+    /// NOT do what it was asked to; callers must surface it, never swallow it.
+    pub request_errors: Vec<String>,
+    /// True when the endpoint answered "no such capability" (404/501) rather
+    /// than failing. A boundary to report, not an error to alarm about.
+    pub capability_absent: bool,
+    /// Pages still awaiting an embedding once this run finished — including
+    /// pages beyond this run's `limit`. This is the number that must drain to
+    /// zero across runs; it is the honest measure of coverage.
+    pub pending_after: usize,
+    /// Units deliberately excluded from embedding and retired from the queue
+    /// without a vector — merge commits whose whole message is
+    /// `Merge branch 'x'` (spec §7.1, §12 Q5). Counted rather than silent, so
+    /// "embedded + skipped < listed" is always explainable.
+    pub skipped: usize,
+}
+
+impl EmbedReport {
+    /// True when this run left work undone for a reason the user should see.
+    pub fn had_trouble(&self) -> bool {
+        !self.request_errors.is_empty()
+            || !self.errors.is_empty()
+            || self.rejected_zero > 0
+            || self.rejected_dims > 0
+    }
 }
 
 /// A client for the cloud embedding endpoint.
@@ -162,13 +236,23 @@ impl KnowledgeEmbedder {
 
     /// `POST {endpoint}/api/embeddings` with `{model, input: [..]}`.
     ///
-    /// Accepts both the flat shape (`{"embeddings": [[..]]}`) and the
-    /// OpenAI-compatible shape (`{"data": [{"embedding": [..]}]}`) so the
-    /// client does not have to be re-released if the cloud settles on the
-    /// other one.
-    pub fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, CasError> {
+    /// The response shape is the flat single-key `{"embeddings": [[..]]}` — the
+    /// cloud team has committed to it as the contract and will not emit the
+    /// OpenAI-compatible `data[].embedding` envelope, so the client no longer
+    /// accepts that shape (cas-a924).
+    ///
+    /// `texts` must not exceed [`MAX_EMBED_INPUTS_PER_REQUEST`]; the server
+    /// rejects a longer input list with `400`. Callers that may have more work
+    /// than that should go through [`embed_pending_pages`], which chunks.
+    pub fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
         if texts.is_empty() {
             return Ok(Vec::new());
+        }
+        if texts.len() > MAX_EMBED_INPUTS_PER_REQUEST {
+            return Err(EmbedError::Failed(format!(
+                "refusing to send {} inputs in one embedding request: the endpoint caps a request at {MAX_EMBED_INPUTS_PER_REQUEST}",
+                texts.len()
+            )));
         }
 
         let url = format!("{}/api/embeddings", self.endpoint);
@@ -186,26 +270,33 @@ impl KnowledgeEmbedder {
         let body: serde_json::Value = match response {
             Ok(resp) => resp
                 .into_json()
-                .map_err(|e| CasError::Other(format!("Embedding response parse failed: {e}")))?,
+                .map_err(|e| EmbedError::Failed(format!("Embedding response parse failed: {e}")))?,
             Err(ureq::Error::Status(code, resp)) => {
                 let body = resp.into_string().unwrap_or_default();
-                return Err(CasError::Other(format!(
+                // 404/501 is not a failure of this run: it says the endpoint
+                // has no embedding capability at all. Classified separately so
+                // the caller can report a boundary instead of an error.
+                if code == 404 || code == 501 {
+                    return Err(EmbedError::Unsupported(format!(
+                        "endpoint {} does not provide /api/embeddings (status {code})",
+                        self.endpoint
+                    )));
+                }
+                return Err(EmbedError::Failed(format!(
                     "Embedding request failed with status {code}: {body}"
                 )));
             }
             Err(ureq::Error::Transport(e)) => {
-                return Err(CasError::Other(format!("Network error: {e}")));
+                return Err(EmbedError::Failed(format!("Network error: {e}")));
             }
         };
 
         let vectors = parse_embedding_response(&body).ok_or_else(|| {
-            CasError::Other(
-                "Embedding response had neither `embeddings` nor `data[].embedding`".to_string(),
-            )
+            EmbedError::Failed("Embedding response had no `embeddings` array".to_string())
         })?;
 
         if vectors.len() != texts.len() {
-            return Err(CasError::Other(format!(
+            return Err(EmbedError::Failed(format!(
                 "Embedding provider returned {} vectors for {} inputs",
                 vectors.len(),
                 texts.len()
@@ -216,23 +307,16 @@ impl KnowledgeEmbedder {
     }
 }
 
-/// Extract vectors from either supported response shape.
+/// Extract vectors from the committed response shape.
+///
+/// One shape only: `{"embeddings": [[..]]}`. The OpenAI-compatible
+/// `data[].embedding` branch was dropped in cas-a924 — the cloud team's
+/// contract response states they will not emit it, and keeping a second
+/// accepted shape meant a malformed body could silently parse as a list of
+/// empty vectors instead of failing.
 pub fn parse_embedding_response(body: &serde_json::Value) -> Option<Vec<Vec<f32>>> {
-    if let Some(list) = body.get("embeddings").and_then(|v| v.as_array()) {
-        return Some(list.iter().map(json_to_vector).collect());
-    }
-    if let Some(list) = body.get("data").and_then(|v| v.as_array()) {
-        return Some(
-            list.iter()
-                .map(|item| {
-                    item.get("embedding")
-                        .map(json_to_vector)
-                        .unwrap_or_default()
-                })
-                .collect(),
-        );
-    }
-    None
+    let list = body.get("embeddings").and_then(|v| v.as_array())?;
+    Some(list.iter().map(json_to_vector).collect())
 }
 
 fn json_to_vector(value: &serde_json::Value) -> Vec<f32> {
@@ -273,6 +357,45 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         return 0.0;
     }
     dot / (norm_a.sqrt() * norm_b.sqrt())
+}
+
+/// Key prefix for every code-history vector (spec §4.4).
+///
+/// History and knowledge vectors live in ONE LMDB env; this prefix is the only
+/// thing that keeps the two corpora from being read as each other.
+pub const HISTORY_KEY_PREFIX: &str = "history:";
+
+/// Vector key for a commit: `history:commit:{sha}`.
+pub fn history_commit_key(sha: &str) -> String {
+    format!("{HISTORY_KEY_PREFIX}commit:{sha}")
+}
+
+/// Vector key for a GitHub/CHANGELOG doc: `history:doc:{id}`.
+pub fn history_doc_key(id: &str) -> String {
+    format!("{HISTORY_KEY_PREFIX}doc:{id}")
+}
+
+/// Which corpus a cached vector belongs to.
+///
+/// Deliberately a closed enum over one shared env rather than two envs: LMDB
+/// refuses a double-open in a process (see [`OPEN_ENVS`]), so a second
+/// environment would add a failure mode without adding isolation that a key
+/// prefix cannot provide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorNamespace {
+    /// Distilled knowledge pages — every key that is not a history key.
+    Knowledge,
+    /// Code history: commits and GitHub/CHANGELOG docs.
+    History,
+}
+
+impl VectorNamespace {
+    pub fn contains(&self, id: &str) -> bool {
+        match self {
+            VectorNamespace::History => id.starts_with(HISTORY_KEY_PREFIX),
+            VectorNamespace::Knowledge => !id.starts_with(HISTORY_KEY_PREFIX),
+        }
+    }
 }
 
 /// Local vector cache for knowledge pages, tagged with the embedding space it
@@ -420,6 +543,19 @@ impl KnowledgeVectorCache {
             .map_err(|e| CasError::Other(format!("Failed to count cached embeddings: {e}")))
     }
 
+    /// Cached vectors belonging to one namespace.
+    ///
+    /// The raw [`Self::count`] answers "how big is the env", which stopped
+    /// being the same question as "does the knowledge channel have anything to
+    /// return" the moment history vectors moved in beside it (spec §4.4).
+    pub fn count_in(&self, namespace: VectorNamespace) -> Result<usize, CasError> {
+        let ids = self
+            .store
+            .list_ids()
+            .map_err(|e| CasError::Other(format!("Failed to list cached embeddings: {e}")))?;
+        Ok(ids.iter().filter(|id| namespace.contains(id)).count())
+    }
+
     pub fn delete(&self, id: &str) -> Result<(), CasError> {
         self.store
             .delete(id)
@@ -433,6 +569,24 @@ impl KnowledgeVectorCache {
     /// and a distilled-knowledge corpus is pages, not millions of rows. Ties
     /// break on id so results are stable across runs.
     pub fn nearest(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>, CasError> {
+        self.nearest_in(VectorNamespace::Knowledge, query, k)
+    }
+
+    /// Brute-force kNN restricted to one namespace.
+    ///
+    /// The restriction is load-bearing, not hygiene. Knowledge pages and code
+    /// history share one LMDB env (spec §4.4 — a second env would be a second
+    /// double-open failure mode for no benefit), and the knowledge channel
+    /// resolves every id it gets back as a page id. Without this filter a
+    /// `history:commit:{sha}` hit would come back as a page that does not
+    /// exist, and the better the commit matched the more certainly it would
+    /// displace a real page.
+    pub fn nearest_in(
+        &self,
+        namespace: VectorNamespace,
+        query: &[f32],
+        k: usize,
+    ) -> Result<Vec<(String, f32)>, CasError> {
         if is_zero_vector(query) || k == 0 {
             return Ok(Vec::new());
         }
@@ -443,6 +597,9 @@ impl KnowledgeVectorCache {
 
         let mut scored: Vec<(String, f32)> = Vec::with_capacity(ids.len());
         for id in ids {
+            if !namespace.contains(&id) {
+                continue;
+            }
             if let Some(vector) = self.get(&id)? {
                 let score = cosine_similarity(query, &vector);
                 if score > 0.0 {
@@ -468,6 +625,18 @@ pub fn page_embedding_text(page: &KnowledgePage, body: &str) -> String {
 ///
 /// Failure of one page never aborts the batch: it is recorded in
 /// [`EmbedReport::errors`] and the page keeps its `pending_embedding` flag.
+///
+/// The pages are sent in chunks of [`MAX_EMBED_INPUTS_PER_REQUEST`] — the
+/// endpoint's hard cap. Before cas-a924 every fetched page went out in a
+/// single request, so any `limit` above 32 produced a permanent `400` and
+/// **zero** pages embedded; the invariant was held only by a magic `32`
+/// duplicated at the one production call site.
+///
+/// A request-level failure is reported, never swallowed: it lands in
+/// [`EmbedReport::request_errors`], the remaining pages are counted as
+/// [`EmbedReport::deferred`], and the function still returns `Ok` so the
+/// caller gets the partial results *and* the failure. Only store errors are
+/// `Err`.
 pub fn embed_pending_pages(
     store: &dyn KnowledgeStore,
     embedder: &KnowledgeEmbedder,
@@ -491,36 +660,224 @@ pub fn embed_pending_pages(
         .list_pending_embedding(limit)
         .map_err(|e| CasError::Other(format!("Failed to list pending pages: {e}")))?;
     if pages.is_empty() {
+        report.pending_after = count_pending(store)?;
         return Ok(report);
     }
 
-    let mut texts = Vec::with_capacity(pages.len());
-    for page in &pages {
-        let body = store.read_body(&page.rel_path).unwrap_or_default();
-        texts.push(page_embedding_text(page, &body));
-    }
+    let units: Vec<EmbedUnit> = pages
+        .iter()
+        .map(|page| {
+            let body = store.read_body(&page.rel_path).unwrap_or_default();
+            // Key and id coincide for knowledge pages; history keys do not
+            // (spec §4.4 namespaces them), which is why the unit carries both.
+            EmbedUnit::new(
+                page.id.clone(),
+                page.id.clone(),
+                page_embedding_text(page, &body),
+            )
+        })
+        .collect();
 
-    let vectors = embedder.embed_batch(&texts)?;
+    let mut mark = |id: &str| store.mark_embedded(id).map_err(|e| e.to_string());
+    drain_units(
+        embedder,
+        cache,
+        &units,
+        &RateLimiter::cloud(),
+        &mut mark,
+        &mut report,
+    );
 
-    for (page, vector) in pages.iter().zip(vectors.iter()) {
-        if is_zero_vector(vector) {
-            report.rejected_zero += 1;
-            continue;
-        }
-        if vector.len() != cache.meta().dims {
-            report.rejected_dims += 1;
-            continue;
-        }
-        match cache.put(&page.id, vector) {
-            Ok(()) => match store.mark_embedded(&page.id) {
-                Ok(()) => report.embedded += 1,
-                Err(e) => report.errors.push((page.id.clone(), e.to_string())),
-            },
-            Err(e) => report.errors.push((page.id.clone(), e.to_string())),
-        }
-    }
-
+    report.pending_after = count_pending(store)?;
     Ok(report)
+}
+
+/// One thing to embed: where its vector is filed, which row to clear when the
+/// vector lands, and the text that gets sent.
+///
+/// The split between `key` and `id` is spec §4.4's namespacing: a knowledge
+/// page's vector is filed under its own id, while a commit's is filed under
+/// `history:commit:{sha}` in the *same* LMDB env. One store, two namespaces,
+/// and no second environment to double-open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbedUnit {
+    /// Vector-store key.
+    pub key: String,
+    /// Row identity handed back to the caller's `mark embedded` callback.
+    pub id: String,
+    /// The text sent to the provider.
+    pub text: String,
+}
+
+impl EmbedUnit {
+    pub fn new(key: impl Into<String>, id: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            id: id.into(),
+            text: text.into(),
+        }
+    }
+}
+
+/// The one chunked, rate-limited, failure-reporting drain.
+///
+/// Every corpus goes through this function — knowledge pages and code history
+/// alike — so there is exactly one place that knows the endpoint caps a request
+/// at [`MAX_EMBED_INPUTS_PER_REQUEST`] inputs, one place that stops rather than
+/// repeating a systemic failure per chunk, and one place that accounts for the
+/// units it did not attempt. A second copy of this loop is how the cas-a924
+/// defect (an un-chunked request that 400s forever, reported as "0 embedded")
+/// would come back for a different corpus.
+///
+/// `mark` is called only after the vector is safely cached; a row whose vector
+/// never landed keeps `pending_embedding = 1` and is retried next run.
+pub fn drain_units(
+    embedder: &KnowledgeEmbedder,
+    cache: &KnowledgeVectorCache,
+    units: &[EmbedUnit],
+    limiter: &RateLimiter,
+    mark: &mut dyn FnMut(&str) -> Result<(), String>,
+    report: &mut EmbedReport,
+) {
+    let mut chunks = units.chunks(MAX_EMBED_INPUTS_PER_REQUEST);
+    let mut halted = false;
+
+    for chunk in chunks.by_ref() {
+        let texts: Vec<String> = chunk.iter().map(|u| u.text.clone()).collect();
+
+        limiter.acquire();
+        report.requests += 1;
+        let vectors = match embedder.embed_batch(&texts) {
+            Ok(vectors) => vectors,
+            Err(e) => {
+                // A request-level failure is systemic (auth, rate limit,
+                // capability, payload) — hammering the endpoint with the
+                // remaining chunks would only multiply it. Stop, and account
+                // for every unit we did not attempt.
+                if matches!(e, EmbedError::Unsupported(_)) {
+                    report.capability_absent = true;
+                }
+                report.request_errors.push(e.to_string());
+                report.deferred += chunk.len();
+                halted = true;
+                break;
+            }
+        };
+
+        for (unit, vector) in chunk.iter().zip(vectors.iter()) {
+            if is_zero_vector(vector) {
+                report.rejected_zero += 1;
+                continue;
+            }
+            if vector.len() != cache.meta().dims {
+                report.rejected_dims += 1;
+                continue;
+            }
+            match cache.put(&unit.key, vector) {
+                Ok(()) => match mark(&unit.id) {
+                    Ok(()) => report.embedded += 1,
+                    Err(e) => report.errors.push((unit.id.clone(), e)),
+                },
+                Err(e) => report.errors.push((unit.id.clone(), e.to_string())),
+            }
+        }
+    }
+
+    if halted {
+        report.deferred += chunks.map(<[EmbedUnit]>::len).sum::<usize>();
+    }
+}
+
+/// Client-side pacing for the embedding endpoint.
+///
+/// The server allows [`RATE_LIMIT_REQUESTS`] requests per
+/// [`RATE_LIMIT_WINDOW_SECS`]; a full backfill of this repo is ~66 requests, so
+/// the cap is only reachable when several corpora drain at once or a large
+/// backlog clears in one tick. Pacing here rather than reacting to a 429 keeps
+/// the drain from converting a burst into a request-level failure that halts it
+/// — the halt is for *systemic* problems, and self-inflicted throttling is not
+/// one.
+///
+/// Sleeps only when the window is genuinely full: a run under the limit pays
+/// nothing, which is why the ordinary steady-state pass (2 requests/day per
+/// spec §7.2) never blocks.
+#[derive(Debug)]
+pub struct RateLimiter {
+    max_requests: usize,
+    window: Duration,
+    recent: Mutex<std::collections::VecDeque<std::time::Instant>>,
+}
+
+/// Server contract: requests allowed per [`RATE_LIMIT_WINDOW_SECS`].
+pub const RATE_LIMIT_REQUESTS: usize = 120;
+/// Server contract: the rate-limit window.
+pub const RATE_LIMIT_WINDOW_SECS: u64 = 60;
+
+impl RateLimiter {
+    /// The cloud endpoint's published limit: 120 requests / 60 s.
+    pub fn cloud() -> Self {
+        Self::new(
+            RATE_LIMIT_REQUESTS,
+            Duration::from_secs(RATE_LIMIT_WINDOW_SECS),
+        )
+    }
+
+    pub fn new(max_requests: usize, window: Duration) -> Self {
+        Self {
+            max_requests,
+            window,
+            recent: Mutex::new(std::collections::VecDeque::new()),
+        }
+    }
+
+    /// Block until issuing one more request keeps the window under the cap.
+    pub fn acquire(&self) {
+        if self.max_requests == 0 {
+            return;
+        }
+        loop {
+            let wait = {
+                let mut recent = self.recent.lock().unwrap_or_else(|p| p.into_inner());
+                let now = std::time::Instant::now();
+                while recent
+                    .front()
+                    .is_some_and(|t| now.duration_since(*t) >= self.window)
+                {
+                    recent.pop_front();
+                }
+                if recent.len() < self.max_requests {
+                    recent.push_back(now);
+                    return;
+                }
+                // Full: wait out the oldest request in the window.
+                recent
+                    .front()
+                    .map(|t| self.window.saturating_sub(now.duration_since(*t)))
+                    .unwrap_or_default()
+            };
+            std::thread::sleep(wait.max(Duration::from_millis(1)));
+        }
+    }
+
+    /// Requests currently inside the window (tests and diagnostics).
+    pub fn in_window(&self) -> usize {
+        let mut recent = self.recent.lock().unwrap_or_else(|p| p.into_inner());
+        let now = std::time::Instant::now();
+        while recent
+            .front()
+            .is_some_and(|t| now.duration_since(*t) >= self.window)
+        {
+            recent.pop_front();
+        }
+        recent.len()
+    }
+}
+
+/// How many pages are still awaiting an embedding, store-wide.
+fn count_pending(store: &dyn KnowledgeStore) -> Result<usize, CasError> {
+    store
+        .count_pending_embedding()
+        .map_err(|e| CasError::Other(format!("Failed to count pending pages: {e}")))
 }
 
 #[cfg(test)]
@@ -675,18 +1032,184 @@ mod tests {
     }
 
     #[test]
-    fn parses_flat_and_openai_response_shapes() {
+    fn parses_only_the_committed_flat_response_shape() {
         let flat = serde_json::json!({"embeddings": [[1.0, 2.0], [3.0, 4.0]]});
         assert_eq!(
             parse_embedding_response(&flat).unwrap(),
             vec![vec![1.0, 2.0], vec![3.0, 4.0]]
         );
+        // The OpenAI-compatible envelope is NOT accepted any more (cas-a924):
+        // the cloud contract is the flat single key, and tolerating a second
+        // shape meant a stray `data` array parsed as empty vectors instead of
+        // failing loudly.
         let openai = serde_json::json!({"data": [{"embedding": [1.0, 2.0]}]});
-        assert_eq!(
-            parse_embedding_response(&openai).unwrap(),
-            vec![vec![1.0, 2.0]]
-        );
+        assert!(parse_embedding_response(&openai).is_none());
         assert!(parse_embedding_response(&serde_json::json!({"oops": 1})).is_none());
+    }
+
+    #[test]
+    fn embed_batch_refuses_an_input_list_over_the_endpoint_cap() {
+        // The client must never be the one that discovers the cap as a 400.
+        let embedder = KnowledgeEmbedder::new("https://example.invalid", "t").with_model("m", 4);
+        let texts: Vec<String> = (0..MAX_EMBED_INPUTS_PER_REQUEST + 1)
+            .map(|i| format!("text {i}"))
+            .collect();
+        let err = embedder.embed_batch(&texts).unwrap_err();
+        assert!(matches!(err, EmbedError::Failed(_)), "got {err:?}");
+        assert!(err.to_string().contains("caps a request at 32"), "{err}");
+    }
+
+    /// Answers with one unit vector per input, and records how many inputs
+    /// each request carried — that record is the chunking receipt.
+    struct EchoEmbeddings {
+        dims: usize,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
+    }
+
+    impl wiremock::Respond for EchoEmbeddings {
+        fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            let n = body
+                .get("input")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            self.seen.lock().unwrap().push(n);
+            let vectors: Vec<Vec<f32>> = (0..n)
+                .map(|_| {
+                    let mut v = vec![0.0f32; self.dims];
+                    v[0] = 1.0;
+                    v
+                })
+                .collect();
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "embeddings": vectors }))
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_pages_are_chunked_at_the_endpoint_input_cap() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer};
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/embeddings"))
+            .respond_with(EchoEmbeddings {
+                dims: 4,
+                seen: seen.clone(),
+            })
+            .mount(&server)
+            .await;
+        let endpoint = server.uri();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        // More pages than one request may carry: before chunking this was a
+        // single 33+-input request and a permanent 400.
+        let titles: Vec<String> = (0..70).map(|i| format!("Page {i}")).collect();
+
+        let report = tokio::task::spawn_blocking(move || {
+            let refs: Vec<&str> = titles.iter().map(String::as_str).collect();
+            let store = seed_store(&root, &refs);
+            let embedder = KnowledgeEmbedder::new(&endpoint, "test-token").with_model("m", 4);
+            let cache = KnowledgeVectorCache::open(&root, embedder.meta()).unwrap();
+            embed_pending_pages(&store, &embedder, &cache, 100).unwrap()
+        })
+        .await
+        .unwrap();
+
+        let sizes = seen.lock().unwrap().clone();
+        assert_eq!(
+            sizes,
+            vec![MAX_EMBED_INPUTS_PER_REQUEST, MAX_EMBED_INPUTS_PER_REQUEST, 6],
+            "70 pages must go out as 32 + 32 + 6, never as one oversized request"
+        );
+        assert_eq!(report.requests, 3);
+        assert_eq!(report.embedded, 70);
+        assert_eq!(report.deferred, 0);
+        assert!(report.request_errors.is_empty());
+        assert_eq!(
+            report.pending_after, 0,
+            "the awaiting-embedding count must drain to zero"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_embedding_request_is_reported_not_swallowed() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/embeddings"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("too many inputs"))
+            .mount(&server)
+            .await;
+        let endpoint = server.uri();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let titles: Vec<String> = (0..40).map(|i| format!("Page {i}")).collect();
+
+        let report = tokio::task::spawn_blocking(move || {
+            let refs: Vec<&str> = titles.iter().map(String::as_str).collect();
+            let store = seed_store(&root, &refs);
+            let embedder = KnowledgeEmbedder::new(&endpoint, "test-token").with_model("m", 4);
+            let cache = KnowledgeVectorCache::open(&root, embedder.meta()).unwrap();
+            embed_pending_pages(&store, &embedder, &cache, 100).unwrap()
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(report.embedded, 0);
+        assert_eq!(
+            report.requests, 1,
+            "a systemic failure must stop the run, not repeat itself per chunk"
+        );
+        assert_eq!(
+            report.deferred, 40,
+            "every page not attempted must be accounted for"
+        );
+        assert_eq!(report.request_errors.len(), 1);
+        assert!(report.request_errors[0].contains("400"));
+        assert!(report.had_trouble(), "the run must not look successful");
+        assert!(!report.capability_absent, "a 400 is a failure, not a boundary");
+        assert_eq!(report.pending_after, 40);
+    }
+
+    #[tokio::test]
+    async fn an_endpoint_without_the_route_is_a_boundary_not_an_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/embeddings"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let endpoint = server.uri();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        let report = tokio::task::spawn_blocking(move || {
+            let store = seed_store(&root, &["Build System"]);
+            let embedder = KnowledgeEmbedder::new(&endpoint, "test-token").with_model("m", 4);
+            let cache = KnowledgeVectorCache::open(&root, embedder.meta()).unwrap();
+            embed_pending_pages(&store, &embedder, &cache, 100).unwrap()
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            report.capability_absent,
+            "404 means this endpoint has no embedding capability"
+        );
+        assert_eq!(report.embedded, 0);
+        assert_eq!(report.pending_after, 1);
     }
 
     #[tokio::test]

@@ -86,6 +86,24 @@ warning, any server change that echoes a *differently-cased or differently-deriv
 `project_id` than the client sent silently drops **100%** of rows. That is a total blackout
 presenting as a successful, quiet sync. It is a hard constraint on both sides.
 
+> **Correction, from `docs/requests/completed/RESPONSE-git-remote-personal-push-ack.md` §3
+> (SERVER-ASSERTED).** The real failure mode is *worse* than the one above and does not
+> involve `pull.rs:106` at all. Their pull **filters** on the requested value
+> (`eq(syncEntities.projectId, projectId)`) and echoes the stored column. So if rows were
+> ever stored under a canonical id different from the one the client sends, the client would
+> not receive mismatched rows to reject — it would receive an **empty envelope, indefinitely,
+> with no warning on either side**. Silent starvation, not a loud drop. `pull.rs:106` is the
+> second line of defence; the first failure is that nothing arrives to be checked.
+>
+> This is not hypothetical: `resolveCanonicalProject` *can* return a canonical id different
+> from the slug it was given (that is the point of its alias and conflict branches). The team
+> route survives it because the team push **response** carries `canonical_id`/`git_remote`
+> back and the client repins (`canonical_id_from_team_response`). **The personal push
+> response carries no canonical id and the personal path has nothing to repin from** — so
+> dropping remote-first resolution into the personal push unchanged would produce exactly
+> this bug. They have committed to echoing the caller's `project_canonical_id` verbatim,
+> always, as a non-negotiable regression-tested invariant.
+
 ### 1.4 What the server enforces (SERVER-ASSERTED, not verifiable here)
 
 - `project_id` mandatory on both pull routes, `400` before any query runs; every
@@ -374,9 +392,54 @@ strings) must follow the local purge, never precede it.
    and a live, contract-pinned embeddings endpoint. The remaining server-side gaps are
    tombstones, `team_id`-on-knowledge-pull (our half), account scope, and capability
    discovery — all four already have named owners.
-5. **`pull.rs:106` is the most dangerous line in the sync client**: a byte-exact comparison
-   whose failure mode is a total, silent, warning-only blackout. Both sides now know it; it
-   should be stated as a protocol invariant, not left as an implementation detail.
+5. **Project-id identity is the protocol's single point of catastrophic, silent failure.**
+   `pull.rs:106` is a byte-exact comparison whose failure mode is a total, warning-only
+   blackout — and per the cloud team's §3 correction the *first* failure is even quieter: an
+   empty envelope forever, because their pull filters on the value we send. Both sides now
+   treat "echo the caller's `project_canonical_id` verbatim" as a hard invariant. It should
+   be written down as a protocol invariant, not left as an implementation detail on either
+   side.
+6. **One decision is open and it blocks cas-7719** — see below.
+
+## Addendum: the open `git_remote` decision (blocks cas-7719)
+
+`docs/requests/completed/RESPONSE-git-remote-personal-push-ack.md` accepts our §7.1/§7.2/§7.3
+without objection but identifies a genuine **contradiction in our §7.4**: (a) "two working
+copies with distinct remotes that derive the same slug land in distinct projects" is a
+property of the **push** path, while (b) "a pull echoes back the `project_id` that working
+copy requested" is a property of the **pull** path — and *pull carries no `git_remote`*. Two
+such working copies issue byte-identical GETs, so every way of honouring (a) at pull time
+violates (b), regresses cas-2eb3's contamination fix, or causes non-deterministic loss.
+
+Their options, with their recommendation: **A** bookkeeping-only (accept and *persist*
+`git_remote` on personal push, echo the client's slug verbatim always, no split — shippable
+now, zero client coupling); **B** send `git_remote` on the pull too (the only option
+delivering (a) and §7.3 together, costs one more call site in cas-7719 plus a rollout order);
+**C** server-derived ids + client repin (rejected on our own reasoning); **D** narrow §7.4(a)
+to cross-user only (= A with the AC reworded). They recommend **A now, B as the follow-up,
+and B is our call**.
+
+**Scheduling consequence worth surfacing:** they persist `git_remote` from day one under
+Option A, so **cas-7719 does not need to wait** on their decision or ours — nothing sent is
+wasted. Only Option B carries an ordering constraint (their pull-side change must ship first).
+
+**The one question they asked us — answered here, VERIFIED, so nobody has to go back for it.**
+They asked whether our normalizer ever emits the `ssh://git@…` form, because their
+`normalizeGitRemote` does not strip `ssh://` and would leave it intact.
+
+**Answer: no. It never reaches the wire.** `normalize_git_remote_url`
+(`cloud/config.rs:244-279`) strips the **entire `ssh://git@` prefix** at `:256-258`
+(`trimmed.strip_prefix("ssh://git@")` → `rest.to_string()`), so
+`ssh://git@github.com/o/r.git` collapses to `github.com/o/r` before anything is sent. All
+four recognized forms — `https://`, `http://`, `ssh://git@`, `git@host:` — reduce to
+`<host>/<owner>/<repo>`, and everything else returns `None` (`:265`) so the caller falls
+through rather than persisting a non-canonical value. **Their regex needs no change.**
+
+One adjacent detail they should also have, since it is the reason our two rules agree only at
+the call site: `normalize_git_remote_url` deliberately **preserves case** — the lowercasing
+happens at `team_push.rs:52`, documented at `cloud/config.rs:289-291`. Their
+`normalizeGitRemote` lowercases as its own last step. Same output, different place, and
+cas-7719 must keep lowercasing at the call site for the personal envelopes too.
 
 ## Files read
 

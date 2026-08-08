@@ -197,6 +197,7 @@ mod m218_prompt_queue_recipient_transport_create_table;
 mod m219_knowledge_store_create_tables;
 mod m220_prompt_queue_wake_observability;
 mod m221_history_index_create_tables;
+mod m222_history_commits_fts;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -412,6 +413,10 @@ pub const MIGRATIONS: &[Migration] = &[
     m219_knowledge_store_create_tables::MIGRATION,
     m220_prompt_queue_wake_observability::MIGRATION,
     m221_history_index_create_tables::MIGRATION,
+    // Lexical (FTS5) half of the history query surface (EPIC cas-6212 /
+    // cas-7f40), separate from m221 so installs that already applied it are
+    // reached.
+    m222_history_commits_fts::MIGRATION,
 ];
 
 #[cfg(test)]

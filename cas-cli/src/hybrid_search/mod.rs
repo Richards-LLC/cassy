@@ -78,7 +78,7 @@ pub mod metrics;
 pub mod scorer;
 pub mod semantic;
 
-pub use hybrid::{HybridSearch, HybridSearchOptions};
+pub use hybrid::{HistoryFilter, HybridSearch, HybridSearchOptions};
 pub use semantic::{SemanticChannel, open_semantic_channel};
 pub use metrics::{LatencyTimer, MetricsStore, SearchEvent, SearchMethod, generate_event_id};
 
@@ -109,6 +109,13 @@ pub enum DocType {
     CodeFile,
     /// A distilled project-knowledge page (`.cas/knowledge/<type>/<slug>.md`)
     KnowledgePage,
+    /// An indexed git commit (`history_commits`). The `id` is its full SHA.
+    HistoryCommit,
+    /// An indexed GitHub issue/PR/comment or CHANGELOG section
+    /// (`history_docs`). Declared here with `HistoryCommit` so the history
+    /// channel's two row classes are distinguishable from the first response
+    /// that can carry either; the table itself lands in M6.
+    HistoryDoc,
 }
 
 impl DocType {
@@ -122,6 +129,8 @@ impl DocType {
             DocType::CodeSymbol => "code_symbol",
             DocType::CodeFile => "code_file",
             DocType::KnowledgePage => "knowledge_page",
+            DocType::HistoryCommit => "history_commit",
+            DocType::HistoryDoc => "history_doc",
         }
     }
 
@@ -137,6 +146,10 @@ impl DocType {
             "knowledge_page" | "knowledgepage" | "knowledge" | "page" | "pages" => {
                 Some(DocType::KnowledgePage)
             }
+            "history_commit" | "historycommit" | "commit" | "commits" => {
+                Some(DocType::HistoryCommit)
+            }
+            "history_doc" | "historydoc" | "history" => Some(DocType::HistoryDoc),
             _ => None,
         }
     }

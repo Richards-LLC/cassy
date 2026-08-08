@@ -116,10 +116,24 @@ These require a major version bump:
 
 ### Steps to cut a release
 
-1. Update version in `cas-cli/Cargo.toml`
-2. Add a `## [X.Y.Z] - YYYY-MM-DD` section to `CHANGELOG.md` (Keep a Changelog format)
-3. Update the comparison links at the bottom of `CHANGELOG.md`
-4. Commit: `chore(release): bump to vX.Y.Z`
-5. Tag: `git tag -a vX.Y.Z -m "vX.Y.Z"`
-6. Push: `git push && git push --tags`
-7. Create GitHub release: `gh release create vX.Y.Z --generate-notes`
+1. Update version in `cas-cli/Cargo.toml`.
+2. Add a `## [X.Y.Z] - YYYY-MM-DD` section to `CHANGELOG.md` (Keep a Changelog format).
+3. Update the comparison links at the bottom of `CHANGELOG.md`.
+4. Commit: `chore(release): bump to vX.Y.Z`.
+5. Before creating a tag, run the release migration-snapshot guard:
+
+   ```bash
+   ./scripts/check-release-migration-snapshots.sh
+   ```
+
+   When `cas-cli/src/migration/migrations/mod.rs` changed since the last tag,
+   this runs the required command `cargo test -p cas --test component_output_test`.
+   That snapshot suite checks the doctor/status schema and ledger counts that a
+   migration moves; the scoped release suites do not build it. If no previous
+   tag is reachable, the guard runs the snapshots conservatively.
+6. Prefer `./scripts/release.sh --publish` for the local release path. It runs
+   the same guard before it can create or push a tag, so the check is enforced
+   even if the checklist step is missed.
+7. For a manual release, only after the guard passes: `git tag -a vX.Y.Z -m "vX.Y.Z"`.
+8. Push: `git push && git push --tags`.
+9. Create GitHub release: `gh release create vX.Y.Z --generate-notes`.

@@ -199,6 +199,7 @@ mod m220_prompt_queue_wake_observability;
 mod m221_history_index_create_tables;
 mod m222_history_docs_create_table;
 mod m223_history_commits_fts;
+mod m224_history_commit_symbols;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -420,6 +421,10 @@ pub const MIGRATIONS: &[Migration] = &[
     // reached. Renumbered 222 → 223 when the M6 lane claimed 222 first; IDs
     // are never reused, so the later lane moves.
     m223_history_commits_fts::MIGRATION,
+    // Commit ↔ symbol mapping plus the history_commits.symbol_mapping verdict
+    // column (EPIC cas-6212 / cas-0562), separate from m221 for the same reason
+    // m223 is. Renumbered 222 → 224 after the M6 and M4 lanes claimed 222/223.
+    m224_history_commit_symbols::MIGRATION,
 ];
 
 #[cfg(test)]

@@ -104,9 +104,10 @@ pub use entity_store::{ENTITY_SCHEMA, SqliteEntityStore};
 pub use history_store::{
     CoChangedFile, DOC_KIND_CHANGELOG, DOC_KIND_COMMENT, DOC_KIND_ISSUE, DOC_KIND_PR,
     HISTORY_DOCS_SCHEMA, HISTORY_DOCS_SCHEMA_STATEMENTS, HISTORY_FTS_STATEMENTS, HISTORY_SCHEMA,
-    HISTORY_SCHEMA_STATEMENTS, HistoryCommit, HistoryCommitFile, HistoryCommitHit, HistoryDoc,
-    HistoryIndexState, HistoryQuery, HistoryStore, ProvenanceCoverage, SOURCE_CHANGELOG,
-    SOURCE_GIT, SOURCE_GITHUB, SqliteHistoryStore,
+    HISTORY_SCHEMA_STATEMENTS, HistoryCommit, HistoryCommitFile, HistoryCommitHit,
+    HistoryCommitSymbol, HistoryDoc, HistoryIndexState, HistoryQuery, HistoryStore,
+    ProvenanceCoverage, SOURCE_CHANGELOG, SOURCE_GIT, SOURCE_GITHUB, SqliteHistoryStore,
+    SymbolMapping, SymbolRange,
 };
 
 // Knowledge store for LLM-distilled repo prose (EPIC cas-7d31 / cas-cbf1):

@@ -15,7 +15,7 @@ use crate::ui::theme::ActiveTheme;
 use crate::cli::Cli;
 use crate::cli::hook::config_gen::{get_cas_hooks_config, has_cas_hook_entries};
 
-mod config_gen;
+pub(crate) mod config_gen;
 pub use crate::cli::hook::config_gen::{
     configure_codex_mcp_server, configure_mcp_server, global_has_cas_hooks, strip_cas_hooks,
 };

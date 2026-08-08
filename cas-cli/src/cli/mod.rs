@@ -33,7 +33,9 @@ pub(crate) mod factory;
 mod factory_tooling;
 // cas-fc6fa: read-only cross-project contamination scan used by `cas doctor`.
 pub mod foreign_rows;
-mod hook;
+// cas-9e81: pub(crate) so factory_ops can reuse `config_gen`'s canonical
+// known-Claude-config-dir list instead of re-deriving `~/.claude` by hand.
+pub(crate) mod hook;
 mod init;
 pub mod integrate;
 pub mod interactive;

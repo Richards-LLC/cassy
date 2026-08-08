@@ -542,10 +542,47 @@ pub(crate) struct PaneWakeState {
     /// How long the pane has produced no PTY output at all. `None` when there
     /// is no baseline yet (first observation of this pane).
     pub silent_for: Option<std::time::Duration>,
-    /// The recipient's transcript shows an outstanding tool call — it is
-    /// mid-turn, or blocked on an approval dialog, whatever the pane's silence
-    /// suggests. Read with the same helper `cas factory is-wedged` uses.
-    pub tool_call_in_flight: bool,
+    /// What the recipient's transcript says about an outstanding tool call.
+    /// Read with the same helper `cas factory is-wedged` uses.
+    pub tool_call: ToolCallEvidence,
+}
+
+/// cas-9e81: what the transcript actually told us about an in-flight tool
+/// call — three states, not two.
+///
+/// This used to be a plain `bool` where "we could not read a transcript at
+/// all" was folded into `true` (in flight). That conflation is what made the
+/// wake gate fail closed forever: `resolve_worker` returns
+/// `transcript_path: None` for every pane whose session was written under a
+/// non-default `CLAUDE_CONFIG_DIR`, so the daemon read "no telemetry" as
+/// "busy" and declined 34 of 35 wakes on a live fleet — the entire fleet, on
+/// every pass, with a message that named nothing.
+///
+/// Splitting `Unknown` out keeps the protective half honest (a transcript
+/// that really does show a pending call still vetoes) while making the
+/// no-evidence case *demotion* rather than *veto*: an unknown recipient is
+/// held to the conservative sustained-silence bar instead of being treated as
+/// permanently busy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolCallEvidence {
+    /// The transcript shows a tool call that has not come back — mid-turn, or
+    /// blocked on an approval dialog, whatever the pane's silence suggests.
+    InFlight,
+    /// The transcript was read and shows no outstanding call.
+    Idle,
+    /// No transcript could be read (unresolvable path, unknown agent, I/O
+    /// error). We know nothing either way.
+    Unknown,
+}
+
+impl ToolCallEvidence {
+    fn from_transcript(has_in_flight_call: bool) -> Self {
+        if has_in_flight_call {
+            Self::InFlight
+        } else {
+            Self::Idle
+        }
+    }
 }
 
 impl PaneWakeState {
@@ -558,12 +595,51 @@ impl PaneWakeState {
     /// blocked on an approval dialog is silent too, and the injected payload
     /// ends in a submit CR that would answer it.
     fn is_safe_to_type_into(self) -> bool {
-        !self.composer_dirty
-            && self.ready_for_injection
-            && !self.tool_call_in_flight
-            && self
-                .silent_for
-                .is_some_and(|silence| silence >= SILENCE_FOR_IDLE_RECIPIENT_WAKE)
+        self.veto_for_idle_recipient().is_none()
+    }
+
+    /// Why an idle-looking recipient's pane may not be typed into right now,
+    /// or `None` when it may (cas-9e81).
+    ///
+    /// Returning the reason instead of a bare `false` is the point: every
+    /// specimen on this task recorded the same contentless
+    /// "idle gate declined the wake for this pass", which named neither the
+    /// failing signal nor the recipient's state, so a fleet-wide 97% decline
+    /// rate looked exactly like normal busy-recipient protection.
+    fn veto_for_idle_recipient(self) -> Option<&'static str> {
+        if let Some(reason) = self.pane_typing_veto() {
+            return Some(reason);
+        }
+        match self.tool_call {
+            ToolCallEvidence::InFlight => Some("recipient has a tool call in flight"),
+            // Known-idle: the registry already supplied the "not working"
+            // half, so the pane only has to have settled.
+            ToolCallEvidence::Idle => self.silence_veto(SILENCE_FOR_IDLE_RECIPIENT_WAKE),
+            // No transcript evidence either way — hold this recipient to the
+            // conservative sustained-silence bar rather than vetoing forever.
+            ToolCallEvidence::Unknown => self
+                .silence_veto(SILENCE_FOR_ACTIVE_RECIPIENT_WAKE)
+                .map(|_| "no transcript evidence and the pane has not been silent long enough"),
+        }
+    }
+
+    /// Pane-level vetoes shared by both wake paths.
+    fn pane_typing_veto(self) -> Option<&'static str> {
+        if self.composer_dirty {
+            return Some("operator has an unsubmitted draft in the composer");
+        }
+        if !self.ready_for_injection {
+            return Some("pane is not ready for injection yet");
+        }
+        None
+    }
+
+    fn silence_veto(self, required: std::time::Duration) -> Option<&'static str> {
+        match self.silent_for {
+            None => Some("pane has no silence baseline yet"),
+            Some(silence) if silence < required => Some("pane has not been silent long enough"),
+            Some(_) => None,
+        }
     }
 
     /// cas-45c4 (GH #102): safe to type into the pane of a recipient the
@@ -579,12 +655,51 @@ impl PaneWakeState {
     ///   maximally wakeable — and the injected payload ends in a submit CR,
     ///   which would answer whatever that dialog has highlighted.
     fn is_safe_to_wake_an_active_looking_recipient(self) -> bool {
-        !self.composer_dirty
-            && self.ready_for_injection
-            && !self.tool_call_in_flight
-            && self
-                .silent_for
-                .is_some_and(|silence| silence >= SILENCE_FOR_ACTIVE_RECIPIENT_WAKE)
+        self.veto_for_active_looking_recipient().is_none()
+    }
+
+    /// Reasoned form of [`Self::is_safe_to_wake_an_active_looking_recipient`]
+    /// (cas-9e81).
+    ///
+    /// `Unknown` transcript evidence is NOT a veto here: this path already
+    /// demands 45s of unbroken PTY silence, which is the same bar the unknown
+    /// case is demoted to on the idle path. Only a transcript that positively
+    /// shows a pending call vetoes.
+    fn veto_for_active_looking_recipient(self) -> Option<&'static str> {
+        if let Some(reason) = self.pane_typing_veto() {
+            return Some(reason);
+        }
+        if self.tool_call == ToolCallEvidence::InFlight {
+            return Some("recipient has a tool call in flight");
+        }
+        self.silence_veto(SILENCE_FOR_ACTIVE_RECIPIENT_WAKE)
+    }
+}
+
+/// Whether a queued row may PTY-wake its recipient right now, and — always —
+/// why (cas-9e81).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WakeDecision {
+    pub allowed: bool,
+    /// Operator-facing explanation, persisted as the row's
+    /// `wake_attempt_detail` so `message_status` reports which signal
+    /// actually decided, not just that "the gate" did.
+    pub reason: &'static str,
+}
+
+impl WakeDecision {
+    fn allow(reason: &'static str) -> Self {
+        Self {
+            allowed: true,
+            reason,
+        }
+    }
+
+    fn deny(reason: &'static str) -> Self {
+        Self {
+            allowed: false,
+            reason,
+        }
     }
 }
 
@@ -1630,8 +1745,6 @@ impl FactoryDaemon {
         pane: PaneWakeState,
         now: chrono::DateTime<chrono::Utc>,
     ) -> bool {
-        use crate::mcp::tools::core::task::lifecycle::supervisor_push::is_lifecycle_wake_source;
-
         // The source marker states intent, but `prompt_queue.source` is
         // caller-settable (`cas factory message --from …`, bridge POST
         // /message), so on its own it would let any client hand arbitrary text
@@ -1640,11 +1753,41 @@ impl FactoryDaemon {
         // `<task-lifecycle …>` or `<worker-died …>` envelope — which the
         // lifecycle emitter and orphan recovery are the only producers of —
         // qualifies (cas-3dcb).
-        pane_target == supervisor_name
-            && is_lifecycle_wake_source(source)
-            && crate::prompt_revalidation::is_supervisor_wake_envelope(prompt)
-            && pane.is_safe_to_type_into()
-            && Self::agent_signals_look_quiet(data, pane_target, now)
+        Self::supervisor_wake_decision(data, pane_target, supervisor_name, source, prompt, pane, now)
+            .allowed
+    }
+
+    /// Reasoned form of [`Self::supervisor_wake_is_eligible`] (cas-9e81).
+    fn supervisor_wake_decision(
+        data: &crate::ui::factory::director::DirectorData,
+        pane_target: &str,
+        supervisor_name: &str,
+        source: &str,
+        prompt: &str,
+        pane: PaneWakeState,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> WakeDecision {
+        use crate::mcp::tools::core::task::lifecycle::supervisor_push::is_lifecycle_wake_source;
+
+        if pane_target != supervisor_name {
+            return WakeDecision::deny("not the supervisor pane");
+        }
+        if !is_lifecycle_wake_source(source)
+            || !crate::prompt_revalidation::is_supervisor_wake_envelope(prompt)
+        {
+            // cas-dab2: ordinary supervisor traffic stays inbox-only by
+            // design. Say so, so it is not mistaken for a gate failure.
+            return WakeDecision::deny(
+                "supervisor rows wake the pane only for lifecycle/worker-death envelopes (cas-dab2)",
+            );
+        }
+        if let Some(reason) = pane.veto_for_idle_recipient() {
+            return WakeDecision::deny(reason);
+        }
+        if !Self::agent_signals_look_quiet(data, pane_target, now) {
+            return WakeDecision::deny("supervisor heartbeat and activity both look live");
+        }
+        WakeDecision::allow("supervisor pane is quiet and the row is a lifecycle wake")
     }
 
     /// Whether this delivery should also PTY-nudge the recipient's pane
@@ -1662,8 +1805,31 @@ impl FactoryDaemon {
         pane: PaneWakeState,
         now: chrono::DateTime<chrono::Utc>,
     ) -> bool {
+        Self::delivery_wake_decision(
+            data,
+            pane_target,
+            supervisor_name,
+            source,
+            prompt,
+            pane,
+            now,
+        )
+        .allowed
+    }
+
+    /// Reasoned form of [`Self::delivery_should_nudge_pane`] (cas-9e81) — the
+    /// decision the delivery path actually records.
+    fn delivery_wake_decision(
+        data: &crate::ui::factory::director::DirectorData,
+        pane_target: &str,
+        supervisor_name: &str,
+        source: &str,
+        prompt: &str,
+        pane: PaneWakeState,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> WakeDecision {
         if pane_target == supervisor_name {
-            return Self::supervisor_wake_is_eligible(
+            return Self::supervisor_wake_decision(
                 data,
                 pane_target,
                 supervisor_name,
@@ -1690,9 +1856,12 @@ impl FactoryDaemon {
         // So when the registry says "active", ask the pane and the transcript
         // instead — evidence that does track turns.
         if Self::target_looks_like_idle_worker(data, pane_target, supervisor_name, now) {
-            return pane.is_safe_to_type_into();
+            return match pane.veto_for_idle_recipient() {
+                Some(reason) => WakeDecision::deny(reason),
+                None => WakeDecision::allow("recipient is idle and its pane has settled"),
+            };
         }
-        Self::active_looking_recipient_is_parked(data, pane_target, supervisor_name, pane)
+        Self::active_looking_recipient_decision(data, pane_target, supervisor_name, pane)
     }
 
     /// cas-45c4: a recipient the agent registry currently calls active, but
@@ -1709,15 +1878,28 @@ impl FactoryDaemon {
         supervisor_name: &str,
         pane: PaneWakeState,
     ) -> bool {
+        Self::active_looking_recipient_decision(data, pane_target, supervisor_name, pane).allowed
+    }
+
+    /// Reasoned form of [`Self::active_looking_recipient_is_parked`] (cas-9e81).
+    fn active_looking_recipient_decision(
+        data: &crate::ui::factory::director::DirectorData,
+        pane_target: &str,
+        supervisor_name: &str,
+        pane: PaneWakeState,
+    ) -> WakeDecision {
         if pane_target == supervisor_name {
-            return false;
+            return WakeDecision::deny("supervisor pane is not an active-worker wake candidate");
         }
         // Unknown agents (mid-spawn) are not wake candidates: absence of a
         // registry row is not evidence the pane is parked.
         if !data.agents.iter().any(|a| a.name == pane_target) {
-            return false;
+            return WakeDecision::deny("recipient has no agent-registry row (mid-spawn?)");
         }
-        pane.is_safe_to_wake_an_active_looking_recipient()
+        match pane.veto_for_active_looking_recipient() {
+            Some(reason) => WakeDecision::deny(reason),
+            None => WakeDecision::allow("recipient looks active but its pane is parked at a prompt"),
+        }
     }
 
     /// Minimum settle floor between an urgent turn-break (Esc) and the
@@ -1821,7 +2003,7 @@ impl FactoryDaemon {
                 .pane_silent_since
                 .get(pane_target)
                 .map(|since| since.elapsed()),
-            tool_call_in_flight: self.recipient_has_tool_call_in_flight(pane_target),
+            tool_call: self.recipient_tool_call_evidence(pane_target),
         }
     }
 
@@ -1831,19 +2013,36 @@ impl FactoryDaemon {
     /// is-wedged` and the director's stall detector use, so the three cannot
     /// disagree about what "still working" means.
     ///
-    /// Unresolvable transcript → `true` (assume in flight). Absence of
-    /// telemetry is not permission to type into someone's pane; the message
-    /// still reaches the inbox and the recipient reads it at its own next turn.
-    fn recipient_has_tool_call_in_flight(&self, pane_target: &str) -> bool {
+    /// Unresolvable transcript → [`ToolCallEvidence::Unknown`] (cas-9e81).
+    ///
+    /// This used to return `true` ("assume in flight") on both unresolvable
+    /// arms, on the principle that absence of telemetry is not permission to
+    /// type into someone's pane. The principle is sound; folding it into the
+    /// same value as observed evidence was not. `resolve_worker` returns
+    /// `transcript_path: None` for every pane whose Claude session lives under
+    /// a non-default `CLAUDE_CONFIG_DIR`, so on a two-account factory this
+    /// arm fired for EVERY recipient on EVERY pass — a permanent fleet-wide
+    /// veto that was indistinguishable, in the logs and in `message_status`,
+    /// from ordinary busy-recipient protection. Note the neighbours already
+    /// disagreed with it: `classify_worker` maps a missing transcript to
+    /// `in_flight = false`, and `transcript_has_in_flight_tool_call` maps a
+    /// missing FILE to `false`.
+    ///
+    /// `Unknown` keeps the caution — it is held to the conservative
+    /// sustained-silence bar — without turning "we cannot see" into "it is
+    /// busy, forever".
+    fn recipient_tool_call_evidence(&self, pane_target: &str) -> ToolCallEvidence {
         let cas_root = self.app.cas_dir();
         let Ok(resolved) = crate::cli::factory::wedged::resolve_worker(cas_root, pane_target)
         else {
-            return true;
+            return ToolCallEvidence::Unknown;
         };
         let Some(path) = resolved.transcript_path.as_deref() else {
-            return true;
+            return ToolCallEvidence::Unknown;
         };
-        crate::cli::factory::wedged::transcript_has_in_flight_tool_call(path, resolved.cli)
+        ToolCallEvidence::from_transcript(
+            crate::cli::factory::wedged::transcript_has_in_flight_tool_call(path, resolved.cli),
+        )
     }
 
     /// Process prompt queue
@@ -2480,7 +2679,16 @@ impl FactoryDaemon {
                         let _ = queue.record_pending_reason(
                             queued.id,
                             cas_store::PendingReason::GatedNotReady,
-                            Some("lifecycle re-nudge cooldown — transition already delivered this interval"),
+                            // cas-9e81: cas-ceae widened this cadence from
+                            // supervisor lifecycle rows to ANY row already
+                            // written to an inbox, but the operator-facing
+                            // detail kept cas-d732's lifecycle-only wording —
+                            // so a plain assignment message reported itself as
+                            // gated by a "lifecycle" cooldown it had nothing
+                            // to do with. Same rule, honest label.
+                            Some(
+                                "re-nudge cooldown — this row was already delivered this interval",
+                            ),
                         );
                         tracing::debug!(
                             target: "cas::coordination",
@@ -2969,8 +3177,10 @@ impl FactoryDaemon {
                     // would take a burst of back-to-back injects. The rows that
                     // lose the race stay pending and wake on later ticks.
                     let wake_slot_available = !supervisor_wake_sent;
-                    let worker_is_idle = wake_slot_available
-                        && Self::delivery_should_nudge_pane(
+                    // cas-9e81: keep the REASON, not just the verdict — it is
+                    // persisted as the row's wake_attempt_detail below.
+                    let wake_decision = if wake_slot_available {
+                        Self::delivery_wake_decision(
                             self.app.director_data(),
                             &pane_target,
                             self.app.supervisor_name(),
@@ -2978,7 +3188,23 @@ impl FactoryDaemon {
                             &queued.prompt,
                             pane_state,
                             chrono::Utc::now(),
+                        )
+                    } else {
+                        WakeDecision::deny(
+                            "no wake slot left this pass (a supervisor wake already fired)",
+                        )
+                    };
+                    let worker_is_idle = wake_decision.allowed;
+                    if !worker_is_idle {
+                        tracing::debug!(
+                            target: "cas::coordination",
+                            stage = "wake_gate_declined",
+                            message_id = queued.id,
+                            target_agent = %pane_target,
+                            reason = wake_decision.reason,
+                            "cas-9e81: wake gate declined this pass"
                         );
+                    }
                     // cas-f02b: a wake-eligible row that did NOT wake the pane
                     // must not be consumed — the inbox write alone is precisely
                     // the silent-stall this task fixes. Repeat inbox writes are
@@ -3023,7 +3249,7 @@ impl FactoryDaemon {
                             target,
                             &inbox_source,
                             &prompt_with_instructions,
-                            worker_is_idle,
+                            wake_decision,
                         )
                         .await
                     } else {
@@ -3033,7 +3259,7 @@ impl FactoryDaemon {
                             &prompt_with_instructions,
                             queued.summary.as_deref(),
                             None,
-                            worker_is_idle,
+                            wake_decision,
                             merge_request_task.as_deref(),
                         )
                         .await
@@ -5279,7 +5505,10 @@ mod tests {
         )
     }
 
-    use super::{PaneWakeState, SILENCE_FOR_ACTIVE_RECIPIENT_WAKE, SILENCE_FOR_IDLE_RECIPIENT_WAKE};
+    use super::{
+        PaneWakeState, SILENCE_FOR_ACTIVE_RECIPIENT_WAKE, SILENCE_FOR_IDLE_RECIPIENT_WAKE,
+        ToolCallEvidence,
+    };
 
     /// A pane that has been silent long enough to wake even a recipient the
     /// registry calls active, with no outstanding tool call.
@@ -5288,7 +5517,7 @@ mod tests {
             composer_dirty: false,
             ready_for_injection: true,
             silent_for: Some(SILENCE_FOR_ACTIVE_RECIPIENT_WAKE),
-            tool_call_in_flight: false,
+            tool_call: ToolCallEvidence::Idle,
         }
     }
 
@@ -6354,7 +6583,7 @@ mod tests {
             ),
             (
                 PaneWakeState {
-                    tool_call_in_flight: true,
+                    tool_call: ToolCallEvidence::InFlight,
                     ..quiet_pane()
                 },
                 "an outstanding tool call means mid-turn or awaiting approval — the \
@@ -6381,6 +6610,233 @@ mod tests {
                 "{why}"
             );
         }
+    }
+
+    // ------------------------------------------------------------------
+    // cas-9e81 (GH #177): unreadable transcript evidence must not be a
+    // permanent veto.
+    //
+    // Live specimens: 34 of 35 post-restart rows recorded
+    // `nudge_not_attempted` / "idle gate declined the wake for this pass"
+    // across five different recipients, and the one wake that fired was a
+    // hand-sent urgent interrupt (which bypasses this gate entirely). The
+    // cause was not any pane signal: `resolve_worker` resolved
+    // `transcript_path = None` for every pane on this host, and the daemon
+    // folded "no transcript" into "tool call in flight".
+    // ------------------------------------------------------------------
+
+    /// The fresh-boot-worker shape: spawned with a pre-assigned task, three
+    /// messages waiting, no turn ever surfaced. Its transcript is unreadable
+    /// (written under another `CLAUDE_CONFIG_DIR`, or not yet flushed), so the
+    /// evidence is `Unknown` — which must DEMOTE it to the conservative
+    /// silence bar, not veto it forever.
+    #[test]
+    fn a_recipient_with_unreadable_transcript_evidence_is_still_woken_when_parked() {
+        let now = chrono::Utc::now();
+        let data = director_data_with(vec![
+            agent_summary("cosmic-bear-43", None, None, None),
+            agent_summary("warm-stork-30", None, None, None),
+        ]);
+        let unknown_evidence = PaneWakeState {
+            tool_call: ToolCallEvidence::Unknown,
+            ..quiet_pane()
+        };
+
+        let decision = FactoryDaemon::delivery_wake_decision(
+            &data,
+            "warm-stork-30",
+            "cosmic-bear-43",
+            "supervisor",
+            "Start cas-aecf",
+            unknown_evidence,
+            now,
+        );
+        assert!(
+            decision.allowed,
+            "a recipient parked at its prompt must be woken even when its transcript cannot \
+             be read — otherwise every pane on a non-default CLAUDE_CONFIG_DIR is deaf to \
+             everything except an urgent interrupt (got: {})",
+            decision.reason
+        );
+
+        // Same shape, but the pane has only just settled: unknown evidence is
+        // held to the 45s bar, not the 2s idle-path bar.
+        let just_settled = PaneWakeState {
+            silent_for: Some(SILENCE_FOR_IDLE_RECIPIENT_WAKE),
+            ..unknown_evidence
+        };
+        let decision = FactoryDaemon::delivery_wake_decision(
+            &data,
+            "warm-stork-30",
+            "cosmic-bear-43",
+            "supervisor",
+            "Start cas-aecf",
+            just_settled,
+            now,
+        );
+        assert!(
+            !decision.allowed,
+            "unknown evidence must still clear the conservative silence bar"
+        );
+        assert!(
+            decision.reason.contains("transcript"),
+            "the decline must name the missing evidence, got: {}",
+            decision.reason
+        );
+    }
+
+    /// The supervisor shape: a worker parked in `awaiting_merge` must be able
+    /// to wake the supervisor even when the supervisor's own transcript is
+    /// unreadable — specimen 3 was a supervisor that never surfaced a turn.
+    #[test]
+    fn a_supervisor_lifecycle_wake_survives_unreadable_transcript_evidence() {
+        use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
+            LifecycleTransition, lifecycle_prompt_source,
+        };
+        let now = chrono::Utc::now();
+        let data = director_data_with(vec![agent_summary("cosmic-bear-43", None, None, None)]);
+        let source = lifecycle_prompt_source(LifecycleTransition::AwaitingMerge, 41);
+
+        let decision = FactoryDaemon::delivery_wake_decision(
+            &data,
+            "cosmic-bear-43",
+            "cosmic-bear-43",
+            &source,
+            &awaiting_merge_payload("cas-9e81"),
+            PaneWakeState {
+                tool_call: ToolCallEvidence::Unknown,
+                ..quiet_pane()
+            },
+            now,
+        );
+        assert!(
+            decision.allowed,
+            "the merge wake must not depend on being able to read the supervisor's \
+             transcript (got: {})",
+            decision.reason
+        );
+    }
+
+    /// AC4: the gate's original purpose survives. Every signal that means
+    /// "this recipient is genuinely busy" still vetoes — including a
+    /// transcript that positively shows an outstanding tool call, which is
+    /// the approval-dialog case cas-45c4 added the check for.
+    #[test]
+    fn busy_recipient_protection_survives_the_tri_state_change() {
+        let now = chrono::Utc::now();
+        let data = director_data_with(vec![
+            agent_summary("cosmic-bear-43", None, None, None),
+            agent_summary("warm-stork-30", None, None, None),
+        ]);
+
+        for (state, why) in [
+            (
+                PaneWakeState {
+                    tool_call: ToolCallEvidence::InFlight,
+                    ..quiet_pane()
+                },
+                "an OBSERVED in-flight tool call still vetoes — the submit CR could answer \
+                 an approval dialog",
+            ),
+            (
+                PaneWakeState {
+                    tool_call: ToolCallEvidence::Unknown,
+                    silent_for: Some(std::time::Duration::from_secs(1)),
+                    ..quiet_pane()
+                },
+                "unknown evidence plus a pane that just emitted output is mid-turn",
+            ),
+            (
+                PaneWakeState {
+                    tool_call: ToolCallEvidence::Unknown,
+                    silent_for: None,
+                    ..quiet_pane()
+                },
+                "no silence baseline is not evidence of being parked",
+            ),
+            (
+                PaneWakeState {
+                    tool_call: ToolCallEvidence::Unknown,
+                    composer_dirty: true,
+                    ..quiet_pane()
+                },
+                "an operator's unsubmitted draft must never be typed over",
+            ),
+            (
+                PaneWakeState {
+                    tool_call: ToolCallEvidence::Unknown,
+                    ready_for_injection: false,
+                    ..quiet_pane()
+                },
+                "a pane still flushing startup output would swallow the message",
+            ),
+        ] {
+            let decision = FactoryDaemon::delivery_wake_decision(
+                &data,
+                "warm-stork-30",
+                "cosmic-bear-43",
+                "supervisor",
+                "context for your next step",
+                state,
+                now,
+            );
+            assert!(!decision.allowed, "{why}");
+            assert!(
+                !decision.reason.is_empty(),
+                "every decline must carry a reason ({why})"
+            );
+        }
+    }
+
+    /// cas-9e81: the reason is the deliverable. Every decline records which
+    /// signal decided, so a fleet-wide veto can never again look identical to
+    /// ordinary busy-recipient protection in `message_status`.
+    #[test]
+    fn each_veto_reports_a_distinct_reason() {
+        let now = chrono::Utc::now();
+        let data = director_data_with(vec![
+            agent_summary("cosmic-bear-43", None, None, None),
+            agent_summary("warm-stork-30", None, None, None),
+        ]);
+        let reasons: Vec<&str> = [
+            PaneWakeState {
+                composer_dirty: true,
+                ..quiet_pane()
+            },
+            PaneWakeState {
+                ready_for_injection: false,
+                ..quiet_pane()
+            },
+            PaneWakeState {
+                tool_call: ToolCallEvidence::InFlight,
+                ..quiet_pane()
+            },
+            PaneWakeState {
+                silent_for: Some(std::time::Duration::from_secs(1)),
+                ..quiet_pane()
+            },
+        ]
+        .into_iter()
+        .map(|state| {
+            FactoryDaemon::delivery_wake_decision(
+                &data,
+                "warm-stork-30",
+                "cosmic-bear-43",
+                "supervisor",
+                "hello",
+                state,
+                now,
+            )
+            .reason
+        })
+        .collect();
+
+        let unique: std::collections::HashSet<&&str> = reasons.iter().collect();
+        assert_eq!(
+            unique.len(),
+            reasons.len(),
+            "four different vetoes must not report the same string: {reasons:?}"
+        );
     }
 
     /// cas-45c4: an agent CAS has no registry row for (mid-spawn) is not a wake
@@ -6431,7 +6887,7 @@ mod tests {
             "supervisor",
             "your next task",
             PaneWakeState {
-                tool_call_in_flight: true,
+                tool_call: ToolCallEvidence::InFlight,
                 ..quiet_pane()
             },
             now,

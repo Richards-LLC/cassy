@@ -114,7 +114,8 @@ pub struct SearchArgs {
     #[arg(long)]
     pub path: Option<String>,
 
-    /// Only commits touching this symbol (not supported until M3; declared)
+    /// Only commits touching this exact qualified symbol. Commits whose symbol
+    /// mapping is incomplete are returned with their explicit mapping verdict.
     #[arg(long)]
     pub symbol: Option<String>,
 

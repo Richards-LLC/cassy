@@ -59,6 +59,9 @@ pub struct HistoryFilter {
     pub repository: String,
     /// Substring match against a commit's touched paths.
     pub path: Option<String>,
+    /// Exact qualified symbol name recorded by M3. Incompletely mapped commits
+    /// remain candidates so the history response can state that uncertainty.
+    pub symbol: Option<String>,
     /// Inclusive RFC3339 bounds on `committed_at`.
     pub since: Option<String>,
     pub until: Option<String>,
@@ -976,6 +979,7 @@ impl HybridSearch {
             repository: filter.repository.clone(),
             text,
             path: filter.path.clone(),
+            symbol: filter.symbol.clone(),
             since: filter.since.clone(),
             until: filter.until.clone(),
             include_merges: filter.include_merges,

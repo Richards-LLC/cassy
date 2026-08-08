@@ -199,6 +199,7 @@ mod m220_prompt_queue_wake_observability;
 mod m221_history_index_create_tables;
 mod m222_history_docs_create_table;
 mod m223_history_commits_fts;
+mod m224_history_epochs_create_table;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -420,6 +421,9 @@ pub const MIGRATIONS: &[Migration] = &[
     // reached. Renumbered 222 → 223 when the M6 lane claimed 222 first; IDs
     // are never reused, so the later lane moves.
     m223_history_commits_fts::MIGRATION,
+    // Running-binary timeline behind the is-it-fixed verdict (EPIC cas-6212 /
+    // cas-8d2a, spec §9).
+    m224_history_epochs_create_table::MIGRATION,
 ];
 
 #[cfg(test)]

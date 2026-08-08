@@ -23,6 +23,52 @@ pub enum HistoryCommands {
     Status(StatusArgs),
     /// Search indexed commits by text, path and time window
     Search(SearchArgs),
+    /// List the running-binary timeline, or backfill it from daemon records
+    Epochs(EpochsArgs),
+    /// Answer "is symptom X fixed" against the running-binary timeline
+    Verdict(VerdictArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct EpochsArgs {
+    /// Backfill historical epochs from `daemon_instances` before listing
+    #[arg(long)]
+    pub backfill: bool,
+
+    /// Only epochs starting at or after this bound (14d, 2026-08-01, RFC3339)
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// Maximum epochs to list
+    #[arg(long, default_value_t = 20)]
+    pub limit: usize,
+
+    /// Emit JSON instead of prose
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct VerdictArgs {
+    /// Symptom to look for: a substring of an event type or summary
+    pub symptom: Vec<String>,
+
+    /// Commit carrying the fix (full SHA or prefix); resolved to its commit
+    /// time, which is a *build* time, never the start of post-fix data
+    #[arg(long)]
+    pub fix_commit: Option<String>,
+
+    /// The fix's build time, if there is no indexed commit for it
+    #[arg(long)]
+    pub fix_at: Option<String>,
+
+    /// Post-boundary observations required before absence counts as verified
+    #[arg(long, default_value_t = crate::history::epochs::DEFAULT_SAMPLE_THRESHOLD)]
+    pub threshold: i64,
+
+    /// Emit JSON instead of prose
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -111,7 +157,116 @@ pub fn execute(
         HistoryCommands::Docs(args) => execute_docs(args, cas_root),
         HistoryCommands::Status(args) => execute_status(args, cas_root),
         HistoryCommands::Search(args) => execute_search(args, cas_root),
+        HistoryCommands::Epochs(args) => execute_epochs(args, cas_root),
+        HistoryCommands::Verdict(args) => execute_verdict(args, cas_root),
     }
+}
+
+/// `cas history epochs` — the running-binary timeline (spec §9).
+fn execute_epochs(args: &EpochsArgs, cas_root: &Path) -> anyhow::Result<()> {
+    use cas_store::{HistoryStore, SqliteHistoryStore};
+
+    let store = SqliteHistoryStore::open(cas_root)?;
+    let backfill = if args.backfill {
+        Some(store.backfill_epochs_from_daemons()?)
+    } else {
+        None
+    };
+
+    let since = args
+        .since
+        .as_deref()
+        .map(history::search::parse_time_bound)
+        .transpose()?;
+    let epochs = store.list_epochs(since.as_deref(), args.limit)?;
+
+    if args.json {
+        let payload = serde_json::json!({
+            "backfill": backfill.as_ref().map(|b| serde_json::json!({
+                "source_available": b.source_available,
+                "scanned": b.scanned,
+                "inserted": b.inserted,
+                "already_present": b.already_present,
+            })),
+            "epochs": epochs,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    if let Some(b) = &backfill {
+        if b.source_available {
+            println!(
+                "backfill: {} daemon record(s) scanned, {} epoch(s) added, {} already present",
+                b.scanned, b.inserted, b.already_present
+            );
+        } else {
+            // "No daemon records" and "no daemon table" are different facts.
+            println!("backfill: no daemon_instances table in this database — nothing to backfill");
+        }
+    }
+
+    if epochs.is_empty() {
+        println!("no binary epochs recorded — start `cas serve`, or run with --backfill");
+        return Ok(());
+    }
+    for e in &epochs {
+        println!(
+            "{}  {}  pid {}  {}  binary {}{}",
+            e.started_at,
+            e.ended_at.as_deref().unwrap_or("(never seen alive again)"),
+            e.pid.map(|p| p.to_string()).unwrap_or_else(|| "?".into()),
+            e.version.as_deref().unwrap_or("version unknown"),
+            e.binary_mtime.as_deref().unwrap_or("mtime unknown"),
+            if e.exe_deleted { "  [exe replaced/deleted]" } else { "" }
+        );
+    }
+    Ok(())
+}
+
+/// `cas history verdict` — the three-valued is-it-fixed answer (spec §9, §12 Q6).
+fn execute_verdict(args: &VerdictArgs, cas_root: &Path) -> anyhow::Result<()> {
+    let request = crate::history::epochs::VerdictRequest {
+        symptom: args.symptom.join(" "),
+        fix_commit: args.fix_commit.clone(),
+        fix_at: args.fix_at.clone(),
+        threshold: args.threshold,
+    };
+    let response = crate::history::epochs::run(cas_root, &request)?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+        return Ok(());
+    }
+
+    let a = &response.assessment;
+    println!("verdict: {}", response.verdict);
+    println!("  {}", a.rationale);
+    match (&a.boundary.fix_started_running, &a.boundary.clean_post_from) {
+        (Some(fix), Some(clean)) => {
+            println!("  fix first observed running: {fix}");
+            println!(
+                "  clean-post from:            {clean} ({} older daemon(s) overlapped)",
+                a.boundary.overlapping_older_epochs
+            );
+        }
+        _ => println!("  no epoch has been observed running the fixed binary"),
+    }
+    println!(
+        "  clean-post: {} match(es) in {} observation(s) (threshold {})",
+        a.clean_post_matches, a.clean_post_sample, a.threshold
+    );
+    println!(
+        "  mixed:      {} match(es) in {} observation(s) — excluded from the verdict",
+        a.mixed_matches, a.mixed_sample
+    );
+    println!(
+        "  epochs: {} recorded, {} classifiable, {} with unknown binary",
+        response.epochs_recorded,
+        a.boundary.epochs_considered,
+        a.boundary.epochs_without_binary_identity
+    );
+    Ok(())
 }
 
 fn execute_search(args: &SearchArgs, cas_root: &Path) -> anyhow::Result<()> {

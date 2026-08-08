@@ -51,6 +51,7 @@ use cas_store::{
 use crate::git_log::{parse_name_status_z, parse_numstat_z};
 
 pub mod changelog;
+pub mod epochs;
 pub mod github;
 pub mod refs;
 

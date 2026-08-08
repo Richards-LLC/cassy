@@ -7,6 +7,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+- **"Is this bug fixed?" is now answered against the software that was actually running, not the date a fix was tagged.** A fix does not start working when it is released; it starts working when the processes serving it restart, and older processes routinely keep running for a further half hour. Anything observed in that overlap comes from both versions at once and proves nothing about either — reading it as evidence of a fix is a real mistake this project made and had to withdraw. CAS now records, for every background process it starts, which binary it is running and how long it was seen alive, and reconstructs that timeline for processes that ran before this landed. A question about a symptom is answered in three parts: the window before the fix ran, the ambiguous overlap, and the clean window after the last old process finally stopped — with the overlap excluded from the verdict by rule rather than by convention. The answer is never a bare "fixed": when the clean window is too small to support the claim it says so and reports how much evidence it actually has, and when no process has yet been seen running the fixed build it says that instead. Replayed against the incident that motivated it, the boundary it derives from live records matches the one that had to be established by hand.
+
 ## [2.52.0] - 2026-08-08
 
 ### Fixed

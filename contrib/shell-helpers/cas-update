@@ -1,0 +1,677 @@
+#!/usr/bin/env bash
+# cas-update — build CAS from source, install it, migrate/sync every local CAS
+# project, then safely turn over processes still executing the previous binary.
+#
+# Canonical source: contrib/shell-helpers/cas-update
+# Install with:     contrib/shell-helpers/install.sh
+#
+# Usage:
+#   cas-update                      # build, install, migrate/sync, turn over stale CAS
+#   cas-update --no-restart         # build/install/migrate/sync; leave runtimes untouched
+#   cas-update --build-only         # build/install only; implies --no-restart
+#   cas-update --sync-only          # migrate/sync only; never changes runtime processes
+#   cas-update --branch <name>      # build from a non-main branch
+#   cas-update --no-pull            # use the currently checked-out source
+#   cas-update --debug              # use the dev profile instead of release-fast
+#   cas-update --dry-run            # show all planned work without changing anything
+#   cas-update --projects PATH[,..] # override project scan roots
+#   cas-update --force              # rebuild even when the installed hash matches HEAD
+#   cas-update -h|--help
+#
+# Runtime policy:
+#   Only PIDs whose executable bytes match the pre-install CAS hash are frozen
+#   into the turnover plan. Before each signal, both the PID start time and the
+#   executable hash are checked again. SIGTERM gets a bounded grace period;
+#   SIGKILL is narrowly applied only to that same fingerprint. There is no
+#   name-only process matching and no pkill. Factory daemons and registered
+#   servers are stopped but not guessed back into existence; their durable
+#   owner/session is printed with the exact reconnect/restart action. An MCP
+#   client's `cas serve` is allowed to reconnect through its owning client.
+#
+# Environment:
+#   CAS_SRC                   Source checkout (default: ~/Petrastella/cas-src)
+#   CAS_INSTALL               Binary destination (default: ~/.local/bin/cas)
+#   CAS_PROJECT_ROOTS         Default project scan roots (default: $HOME)
+#
+# Test-only injection points (fixture paths; never needed by operators):
+#   CAS_UPDATE_PROC_ROOT, CAS_UPDATE_KILL_BIN, CAS_UPDATE_SESSIONS_DIR,
+#   CAS_UPDATE_SERVER_REGISTRY_ROOTS, CAS_UPDATE_WAIT_STEPS,
+#   CAS_UPDATE_WAIT_SLEEP, CAS_UPDATE_SOURCE_ONLY
+
+set -euo pipefail
+
+CAS_SRC="${CAS_SRC:-$HOME/Petrastella/cas-src}"
+CAS_INSTALL="${CAS_INSTALL:-$HOME/.local/bin/cas}"
+SCAN_ROOTS_DEFAULT="${CAS_PROJECT_ROOTS:-$HOME}"
+PROC_ROOT="${CAS_UPDATE_PROC_ROOT:-/proc}"
+KILL_BIN="${CAS_UPDATE_KILL_BIN:-kill}"
+SESSIONS_DIR="${CAS_UPDATE_SESSIONS_DIR:-$HOME/.cas/sessions}"
+SERVER_REGISTRY_ROOTS="${CAS_UPDATE_SERVER_REGISTRY_ROOTS:-}"
+WAIT_STEPS="${CAS_UPDATE_WAIT_STEPS:-20}"
+WAIT_SLEEP="${CAS_UPDATE_WAIT_SLEEP:-0.25}"
+
+BRANCH="main"
+DO_BUILD=1
+DO_SYNC=1
+DO_TURNOVER=1
+DO_PULL=1
+PROFILE="release"
+DRY_RUN=0
+FORCE_BUILD=0
+SCAN_ROOTS=""
+
+OLD_INSTALLED_VERSION="not installed"
+OLD_INSTALLED_HASH="none"
+NEW_INSTALLED_VERSION="not installed"
+NEW_INSTALLED_HASH="none"
+MIGRATION_STATUS="not started"
+SYNC_STATUS="not started"
+RUNTIME_STATUS="not started"
+SUMMARY_PRINTED=0
+OLD_PROCESS_FILE=""
+TURNOVER_RESULTS_FILE=""
+SERVER_RECORD_FILE=""
+
+if [ -t 1 ]; then
+  BOLD='\033[1m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'
+  RED='\033[0;31m'; DIM='\033[2m'; RESET='\033[0m'
+else
+  BOLD=''; GREEN=''; YELLOW=''; RED=''; DIM=''; RESET=''
+fi
+
+info()  { printf '%b>%b %s\n' "$GREEN" "$RESET" "$*"; }
+warn()  { printf '%b!%b %s\n' "$YELLOW" "$RESET" "$*"; }
+error() { printf '%bx%b %s\n' "$RED" "$RESET" "$*" >&2; }
+step()  { printf '\n%b== %s ==%b\n' "$BOLD" "$*" "$RESET"; }
+dim()   { printf '%b%s%b\n' "$DIM" "$*" "$RESET"; }
+
+usage() {
+  sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \?//'
+}
+
+parse_args() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --build-only) DO_SYNC=0; DO_TURNOVER=0; shift ;;
+      --sync-only)  DO_BUILD=0; DO_TURNOVER=0; shift ;;
+      --no-restart) DO_TURNOVER=0; shift ;;
+      --no-pull)    DO_PULL=0; shift ;;
+      --debug)      PROFILE="dev"; shift ;;
+      --release)    PROFILE="release"; shift ;;
+      --dry-run)    DRY_RUN=1; shift ;;
+      --force|-f)   FORCE_BUILD=1; shift ;;
+      --branch)     BRANCH="${2:?--branch requires a value}"; shift 2 ;;
+      --projects)   SCAN_ROOTS="${2:?--projects requires a value}"; shift 2 ;;
+      -h|--help)    usage; return 2 ;;
+      *) error "Unknown arg: $1"; usage >&2; return 64 ;;
+    esac
+  done
+  SCAN_ROOTS="${SCAN_ROOTS:-$SCAN_ROOTS_DEFAULT}"
+}
+
+sha256_file() {
+  local path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" 2>/dev/null | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" 2>/dev/null | awk '{print $1}'
+  else
+    error "sha256sum or shasum is required for safe process identity checks"
+    return 1
+  fi
+}
+
+binary_version() {
+  local path="$1"
+  [ -x "$path" ] || return 1
+  "$path" --version 2>/dev/null | head -1
+}
+
+capture_installed_identity() {
+  if [ -x "$CAS_INSTALL" ]; then
+    OLD_INSTALLED_VERSION="$(binary_version "$CAS_INSTALL" || printf 'unknown')"
+    OLD_INSTALLED_HASH="$(sha256_file "$CAS_INSTALL")"
+    NEW_INSTALLED_VERSION="$OLD_INSTALLED_VERSION"
+    NEW_INSTALLED_HASH="$OLD_INSTALLED_HASH"
+  fi
+}
+
+ensure_state_files() {
+  [ -n "$OLD_PROCESS_FILE" ] || OLD_PROCESS_FILE="$(mktemp -t cas-update-old.XXXXXX)"
+  [ -n "$TURNOVER_RESULTS_FILE" ] || TURNOVER_RESULTS_FILE="$(mktemp -t cas-update-results.XXXXXX)"
+  [ -n "$SERVER_RECORD_FILE" ] || SERVER_RECORD_FILE="$(mktemp -t cas-update-servers.XXXXXX)"
+  : >"$OLD_PROCESS_FILE"
+  : >"$TURNOVER_RESULTS_FILE"
+  : >"$SERVER_RECORD_FILE"
+}
+
+proc_starttime() {
+  local pid="$1" raw rest
+  raw="$(sed -n '1p' "$PROC_ROOT/$pid/stat" 2>/dev/null)" || return 1
+  case "$raw" in *') '*) ;; *) return 1 ;; esac
+  rest="${raw##*) }"
+  printf '%s\n' "$rest" | awk '{print $20}'
+}
+
+proc_ppid() {
+  local pid="$1"
+  sed -n 's/^PPid:[[:space:]]*//p' "$PROC_ROOT/$pid/status" 2>/dev/null | head -1
+}
+
+proc_hash() {
+  sha256_file "$PROC_ROOT/$1/exe"
+}
+
+proc_cmdline() {
+  local pid="$1" value
+  value="$(tr '\000' ' ' <"$PROC_ROOT/$pid/cmdline" 2>/dev/null || true)"
+  value="${value//|//}"
+  printf '%s' "${value% }"
+}
+
+proc_env() {
+  local pid="$1" key="$2"
+  tr '\000' '\n' <"$PROC_ROOT/$pid/environ" 2>/dev/null \
+    | sed -n "s/^${key}=//p" | head -1
+}
+
+is_protected_pid() {
+  case " $PROTECTED_PIDS " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
+
+build_protected_pid_set() {
+  local pid="$$" next seen=""
+  PROTECTED_PIDS="$$ $PPID"
+  while [ -n "$pid" ] && [ "$pid" != "0" ]; do
+    case " $seen " in *" $pid "*) break ;; esac
+    seen="$seen $pid"
+    case " $PROTECTED_PIDS " in *" $pid "*) ;; *) PROTECTED_PIDS="$PROTECTED_PIDS $pid" ;; esac
+    next="$(proc_ppid "$pid" || true)"
+    [ -n "$next" ] || break
+    pid="$next"
+  done
+}
+
+json_string() {
+  local file="$1" field="$2"
+  sed -n "s/^[[:space:]]*\"${field}\":[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$file" | head -1
+}
+
+json_number() {
+  local file="$1" field="$2"
+  sed -n "s/^[[:space:]]*\"${field}\":[[:space:]]*\([0-9][0-9]*\).*/\1/p" "$file" | head -1
+}
+
+collect_server_records() {
+  local roots=() root file
+  if [ -n "$SERVER_REGISTRY_ROOTS" ]; then
+    IFS=',' read -r -a roots <<<"$SERVER_REGISTRY_ROOTS"
+    for root in "${roots[@]}"; do
+      [ -d "$root" ] || continue
+      while IFS= read -r -d '' file; do printf '%s\n' "$file" >>"$SERVER_RECORD_FILE"; done \
+        < <(find "$root" -maxdepth 1 -type f -name '*.json' -print0 2>/dev/null)
+    done
+    return
+  fi
+
+  [ -d "$HOME/.cas/factory-servers" ] && \
+    find "$HOME/.cas/factory-servers" -maxdepth 1 -type f -name '*.json' -print \
+      >>"$SERVER_RECORD_FILE" 2>/dev/null || true
+  IFS=',' read -r -a roots <<<"${SCAN_ROOTS:-$SCAN_ROOTS_DEFAULT}"
+  while IFS= read -r -d '' file; do printf '%s\n' "$file" >>"$SERVER_RECORD_FILE"; done < <(
+    find "${roots[@]}" \
+      \( -name node_modules -o -name target -o -name .git -o -name .cache \
+         -o -name .cargo -o -name .rustup -o -name .venv -o -name dist \
+         -o -name build \) -prune \
+      -o -type f -path '*/.cas/factory-servers/*.json' -print0 2>/dev/null
+  )
+  sort -u -o "$SERVER_RECORD_FILE" "$SERVER_RECORD_FILE"
+}
+
+CLASS_KIND="cas-process"
+CLASS_SESSION="none"
+CLASS_OWNER="none"
+CLASS_RESTART="not restarted (no durable owner)"
+
+classify_process() {
+  local pid="$1" cmd="$2" file record_pid name owner task cwd command
+  CLASS_KIND="cas-process"; CLASS_SESSION="none"; CLASS_OWNER="none"
+  CLASS_RESTART="not restarted (no durable owner)"
+
+  if [ -d "$SESSIONS_DIR" ]; then
+    for file in "$SESSIONS_DIR"/*.json; do
+      [ -f "$file" ] || continue
+      [ "$(json_number "$file" daemon_pid)" = "$pid" ] || continue
+      name="$(json_string "$file" name)"; [ -n "$name" ] || name="$(basename "$file" .json)"
+      CLASS_KIND="factory-daemon"; CLASS_SESSION="$name"; CLASS_OWNER="factory:$name"
+      CLASS_RESTART="stopped; run cas factory attach $name (or start a fresh factory)"
+      return
+    done
+  fi
+
+  while IFS= read -r file; do
+    [ -f "$file" ] || continue
+    record_pid="$(json_number "$file" pid)"
+    [ "$record_pid" = "$pid" ] || continue
+    name="$(json_string "$file" name)"; owner="$(json_string "$file" owner_worker)"
+    task="$(json_string "$file" owner_task)"; cwd="$(json_string "$file" cwd)"
+    command="$(json_string "$file" command)"
+    CLASS_KIND="registered-server"
+    CLASS_SESSION="$(json_string "$file" factory_session)"; CLASS_SESSION="${CLASS_SESSION:-none}"
+    CLASS_OWNER="${owner:-unknown}${task:+/$task}"
+    CLASS_RESTART="stopped; owner must run coordination server_start from ${cwd:-recorded cwd}: ${command:-recorded command}"
+    return
+  done <"$SERVER_RECORD_FILE"
+
+  CLASS_SESSION="$(proc_env "$pid" CAS_FACTORY_SESSION || true)"; CLASS_SESSION="${CLASS_SESSION:-none}"
+  CLASS_OWNER="$(proc_env "$pid" CAS_AGENT_NAME || true)"; CLASS_OWNER="${CLASS_OWNER:-none}"
+  case " $cmd " in
+    *' serve '*|*' serve')
+      CLASS_KIND="mcp-client-managed"
+      CLASS_RESTART="client reconnect requested; pending the owner's next MCP connection"
+      ;;
+    *' factory '*|*' factory')
+      CLASS_KIND="detached-factory"
+      CLASS_RESTART="stopped; reconnect/start the owning factory with installed CAS"
+      ;;
+  esac
+}
+
+snapshot_old_processes() {
+  step "Snapshot old CAS runtime epoch"
+  if [ "$OLD_INSTALLED_HASH" = "none" ]; then
+    dim "  no previously installed CAS binary — no old runtime epoch"
+    return
+  fi
+  build_protected_pid_set
+  collect_server_records
+  local dir pid hash start cmd count=0
+  for dir in "$PROC_ROOT"/[0-9]*; do
+    [ -d "$dir" ] || continue
+    pid="${dir##*/}"
+    is_protected_pid "$pid" && continue
+    hash="$(proc_hash "$pid" 2>/dev/null || true)"
+    [ "$hash" = "$OLD_INSTALLED_HASH" ] || continue
+    start="$(proc_starttime "$pid" 2>/dev/null || true)"
+    [ -n "$start" ] || { warn "PID $pid matched old CAS bytes but has no readable starttime; refusing to target it"; continue; }
+    cmd="$(proc_cmdline "$pid")"
+    classify_process "$pid" "$cmd"
+    printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
+      "$pid" "$start" "$hash" "$cmd" "$CLASS_SESSION" "$CLASS_OWNER" \
+      "$CLASS_KIND" "${CLASS_RESTART//|//}" >>"$OLD_PROCESS_FILE"
+    count=$((count + 1))
+    info "frozen PID $pid [$CLASS_KIND] session=$CLASS_SESSION owner=$CLASS_OWNER cmd=$cmd"
+  done
+  [ "$count" -gt 0 ] || dim "  no running process uses the old installed CAS bytes"
+}
+
+process_matches_fingerprint() {
+  local pid="$1" start="$2" hash="$3"
+  [ -d "$PROC_ROOT/$pid" ] || return 1
+  [ "$(proc_starttime "$pid" 2>/dev/null || true)" = "$start" ] || return 1
+  [ "$(proc_hash "$pid" 2>/dev/null || true)" = "$hash" ] || return 1
+}
+
+wait_for_fingerprint_exit() {
+  local pid="$1" start="$2" hash="$3" i=0
+  while [ "$i" -lt "$WAIT_STEPS" ]; do
+    process_matches_fingerprint "$pid" "$start" "$hash" || return 0
+    sleep "$WAIT_SLEEP"
+    i=$((i + 1))
+  done
+  ! process_matches_fingerprint "$pid" "$start" "$hash"
+}
+
+record_turnover() {
+  printf '%s|%s|%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" "$5" "$6" "$7" \
+    >>"$TURNOVER_RESULTS_FILE"
+}
+
+turnover_old_processes() {
+  step "Turn over stale CAS runtime epoch"
+  if [ "$DO_TURNOVER" != "1" ]; then
+    local skip_pid skip_start skip_hash skip_cmd skip_session skip_owner skip_kind skip_restart
+    while IFS='|' read -r skip_pid skip_start skip_hash skip_cmd skip_session skip_owner skip_kind skip_restart; do
+      [ -n "$skip_pid" ] || continue
+      record_turnover "$skip_pid" "not stopped (explicit opt-out)" "$skip_kind" \
+        "$skip_session" "$skip_owner" "$skip_cmd" "$skip_restart"
+    done <"$OLD_PROCESS_FILE"
+    RUNTIME_STATUS="skipped by explicit opt-out"
+    dim "  runtime turnover disabled explicitly; no signals sent"
+    return 0
+  fi
+  if [ ! -s "$OLD_PROCESS_FILE" ]; then
+    RUNTIME_STATUS="verified current (no old CAS processes)"
+    dim "  no stale runtime processes to turn over"
+    return 0
+  fi
+  if [ "$OLD_INSTALLED_HASH" = "$NEW_INSTALLED_HASH" ]; then
+    RUNTIME_STATUS="verified current (installed hash unchanged)"
+    dim "  installed hash is unchanged; existing processes already match"
+    return 0
+  fi
+
+  local pid start hash cmd session owner kind restart action replacement stale=0
+  while IFS='|' read -r pid start hash cmd session owner kind restart; do
+    if [ "$DRY_RUN" = "1" ]; then
+      action="planned SIGTERM; fingerprint-gated SIGKILL only if needed"
+      record_turnover "$pid" "$action" "$kind" "$session" "$owner" "$cmd" "$restart"
+      dim "  [dry-run] PID $pid SIGTERM -> bounded wait -> fingerprint-gated SIGKILL"
+      continue
+    fi
+    if ! process_matches_fingerprint "$pid" "$start" "$hash"; then
+      record_turnover "$pid" "exited before turnover" "$kind" "$session" "$owner" "$cmd" "$restart"
+      continue
+    fi
+
+    info "SIGTERM PID $pid [$kind] session=$session owner=$owner"
+    if ! "$KILL_BIN" -TERM "$pid"; then
+      if process_matches_fingerprint "$pid" "$start" "$hash"; then
+        action="STALE SURVIVOR: SIGTERM delivery failed"
+        stale=$((stale + 1))
+      else
+        action="exited during SIGTERM delivery"
+      fi
+      record_turnover "$pid" "$action" "$kind" "$session" "$owner" "$cmd" "$restart"
+      continue
+    fi
+    if wait_for_fingerprint_exit "$pid" "$start" "$hash"; then
+      action="gracefully stopped (SIGTERM)"
+    else
+      error "FORCED TERMINATION: PID $pid ignored SIGTERM; sending fingerprint-gated SIGKILL"
+      if ! process_matches_fingerprint "$pid" "$start" "$hash"; then
+        action="exited before forced signal"
+      else
+        if ! "$KILL_BIN" -KILL "$pid"; then
+          if process_matches_fingerprint "$pid" "$start" "$hash"; then
+            action="STALE SURVIVOR: SIGKILL delivery failed"
+            stale=$((stale + 1))
+          else
+            action="exited during forced signal delivery"
+          fi
+        elif wait_for_fingerprint_exit "$pid" "$start" "$hash"; then
+          action="FORCIBLY KILLED (SIGKILL)"
+        else
+          action="STALE SURVIVOR after SIGKILL"
+          stale=$((stale + 1))
+        fi
+      fi
+    fi
+    if [ "$kind" = "mcp-client-managed" ]; then
+      case "$action" in
+        gracefully*|FORCIBLY*|exited*)
+          replacement="$(find_mcp_replacement "$session" "$owner" || true)"
+          if [ -n "$replacement" ]; then
+            restart="reconnected and verified installed hash at PID $replacement"
+          fi
+          ;;
+      esac
+    fi
+    record_turnover "$pid" "$action" "$kind" "$session" "$owner" "$cmd" "$restart"
+  done <"$OLD_PROCESS_FILE"
+
+  if [ "$DRY_RUN" = "1" ]; then
+    RUNTIME_STATUS="dry-run (turnover planned, no signals sent)"
+  elif [ "$stale" -gt 0 ]; then
+    RUNTIME_STATUS="FAILED: $stale stale old-version CAS process(es) survived"
+    return 1
+  else
+    RUNTIME_STATUS="turnover complete; old snapshot retired"
+  fi
+}
+
+find_mcp_replacement() {
+  local session="$1" owner="$2" dir pid hash cmd candidate_session candidate_owner
+  [ "$NEW_INSTALLED_HASH" != "none" ] || return 1
+  # With neither owner nor factory session there is no safe attribution: do
+  # not claim some unrelated new `cas serve` is the reconnect.
+  [ "$session" != "none" ] || [ "$owner" != "none" ] || return 1
+  for dir in "$PROC_ROOT"/[0-9]*; do
+    [ -d "$dir" ] || continue
+    pid="${dir##*/}"
+    hash="$(proc_hash "$pid" 2>/dev/null || true)"; [ "$hash" = "$NEW_INSTALLED_HASH" ] || continue
+    cmd="$(proc_cmdline "$pid")"
+    case " $cmd " in *' serve '*|*' serve') ;; *) continue ;; esac
+    candidate_session="$(proc_env "$pid" CAS_FACTORY_SESSION || true)"; candidate_session="${candidate_session:-none}"
+    candidate_owner="$(proc_env "$pid" CAS_AGENT_NAME || true)"; candidate_owner="${candidate_owner:-none}"
+    [ "$session" = "none" ] || [ "$candidate_session" = "$session" ] || continue
+    [ "$owner" = "none" ] || [ "$candidate_owner" = "$owner" ] || continue
+    printf '%s\n' "$pid"
+    return 0
+  done
+  return 1
+}
+
+verify_runtime_epoch() {
+  [ "$DRY_RUN" = "1" ] && return 0
+  [ "$DO_TURNOVER" = "1" ] || return 0
+  [ "$OLD_INSTALLED_HASH" != "$NEW_INSTALLED_HASH" ] || return 0
+  local dir pid hash stale=0 cmd start target
+  for dir in "$PROC_ROOT"/[0-9]*; do
+    [ -d "$dir" ] || continue
+    pid="${dir##*/}"
+    hash="$(proc_hash "$pid" 2>/dev/null || true)"
+    target="$(readlink "$dir/exe" 2>/dev/null || true)"; target="${target% (deleted)}"
+    if [ "$hash" != "$OLD_INSTALLED_HASH" ]; then
+      # Every process launched through the canonical install path must execute
+      # the bytes now installed there. This also catches a concurrent or
+      # out-of-band replacement to an unexpected third epoch.
+      if [ "$target" = "$CAS_INSTALL" ] && [ "$hash" != "$NEW_INSTALLED_HASH" ]; then
+        cmd="$(proc_cmdline "$pid")"
+        error "UNEXPECTED CAS EPOCH PID $pid: executable hash $hash != installed $NEW_INSTALLED_HASH; cmd=$cmd"
+        record_turnover "$pid" "UNEXPECTED SURVIVING CAS EPOCH" "cas-process" "unknown" "unknown" "$cmd" \
+          "stop exact PID $pid after verifying /proc/$pid/exe"
+        stale=$((stale + 1))
+      fi
+      continue
+    fi
+    cmd="$(proc_cmdline "$pid")"; start="$(proc_starttime "$pid" 2>/dev/null || printf '?')"
+    error "STALE CAS PID $pid remains: starttime=$start cmd=$cmd"
+    record_turnover "$pid" "STALE SURVIVOR discovered during final verification" \
+      "cas-process" "unknown" "unknown" "$cmd" "stop exact PID $pid after verifying /proc/$pid/exe"
+    stale=$((stale + 1))
+  done
+  if [ "$stale" -gt 0 ]; then
+    RUNTIME_STATUS="FAILED: $stale stale/unexpected CAS process epoch(s) remain"
+    return 1
+  fi
+  RUNTIME_STATUS="verified: no process executes the previous installed hash"
+}
+
+run_cmd() {
+  if [ "$DRY_RUN" = "1" ]; then dim "  [dry-run] $*"; else "$@"; fi
+}
+
+build_and_install() {
+  step "Build CAS from source"
+  [ -d "$CAS_SRC" ] || { error "cas-src not found at $CAS_SRC"; return 1; }
+  info "src: $CAS_SRC"; info "branch: $BRANCH"; info "target: $CAS_INSTALL"; info "profile: $PROFILE"
+  if ! command -v cargo >/dev/null 2>&1 && [ -f "$HOME/.cargo/env" ]; then . "$HOME/.cargo/env"; fi
+  command -v cargo >/dev/null 2>&1 || { error "cargo not on PATH"; return 1; }
+  cd "$CAS_SRC"
+  if [ -n "$(git status --porcelain 2>/dev/null | head -1)" ]; then
+    warn "Working tree is dirty; building the checked-out content"
+  fi
+  local current_branch target_hash installed_git_hash target_dirty=0
+  current_branch="$(git rev-parse --abbrev-ref HEAD)"
+  [ "$current_branch" = "$BRANCH" ] || { info "Switching $current_branch -> $BRANCH"; run_cmd git checkout "$BRANCH"; }
+  if [ "$DO_PULL" = "1" ]; then info "Pulling origin/$BRANCH"; run_cmd git pull --ff-only origin "$BRANCH"; fi
+
+  if [ "$DRY_RUN" != "1" ] && [ "$FORCE_BUILD" != "1" ] && [ -x "$CAS_INSTALL" ]; then
+    target_hash="$(git rev-parse --short=7 HEAD 2>/dev/null || true)"
+    git diff --quiet HEAD 2>/dev/null || target_dirty=1
+    installed_git_hash="$(binary_version "$CAS_INSTALL" | grep -oE '\([a-f0-9]+(-dirty)?' | head -1 | sed 's/^(//' || true)"
+    if [ -n "$target_hash" ] && [ "$target_dirty" = "0" ] && [ "$installed_git_hash" = "$target_hash" ]; then
+      info "$(binary_version "$CAS_INSTALL") — already at $BRANCH HEAD; skipping build"
+      return 0
+    fi
+  fi
+
+  local build_log build_args=(--quiet) built_bin elapsed warn_count tmp_install
+  build_log="$(mktemp -t cas-build.XXXXXX.log)"
+  if [ "$PROFILE" = "release" ]; then
+    build_args+=(--profile release-fast -p cas); built_bin="$CAS_SRC/target/release-fast/cas"
+  else
+    build_args+=(-p cas); built_bin="$CAS_SRC/target/debug/cas"
+  fi
+  step "cargo build"
+  if [ "$DRY_RUN" = "1" ]; then
+    dim "  [dry-run] cargo build ${build_args[*]}"
+  else
+    local t0=$SECONDS
+    if ! cargo build "${build_args[@]}" >"$build_log" 2>&1; then
+      error "cargo build failed"; tail -80 "$build_log" >&2; rm -f "$build_log"; return 1
+    fi
+    elapsed=$((SECONDS - t0)); warn_count="$(grep -cE '^warning:' "$build_log" || true)"
+    info "built in ${elapsed}s (${warn_count:-0} warning(s))"
+    rm -f "$build_log"
+    [ -x "$built_bin" ] || { error "build did not produce $built_bin"; return 1; }
+  fi
+
+  step "Install atomically"
+  if [ "$DRY_RUN" = "1" ]; then
+    dim "  [dry-run] install $built_bin -> temporary sibling -> atomic rename to $CAS_INSTALL"
+  else
+    mkdir -p "$(dirname "$CAS_INSTALL")"
+    tmp_install="$(mktemp "$(dirname "$CAS_INSTALL")/.cas.install.XXXXXX")"
+    install -m 0755 "$built_bin" "$tmp_install"
+    mv -f "$tmp_install" "$CAS_INSTALL"
+    NEW_INSTALLED_VERSION="$(binary_version "$CAS_INSTALL" || printf 'unknown')"
+    NEW_INSTALLED_HASH="$(sha256_file "$CAS_INSTALL")"
+    info "$NEW_INSTALLED_VERSION"
+  fi
+}
+
+migrate_host_db() {
+  step "Migrate host-scoped DB (~/.cas)"
+  if [ ! -f "$HOME/.cas/cas.db" ]; then dim "  no ~/.cas/cas.db — skipped"; return; fi
+  if [ "$DRY_RUN" = "1" ]; then dim "  [dry-run] (cd ~ && $CAS_INSTALL update --schema-only)"; return; fi
+  local out
+  if out="$(cd "$HOME" && "$CAS_INSTALL" update --schema-only 2>&1)"; then
+    printf '%s\n' "$out" | grep -E 'Schema|migration' | tail -2 | sed 's/^/  /' || true
+  else error "host DB migration failed: $out"; return 1; fi
+}
+
+discover_projects() {
+  local roots=() db
+  IFS=',' read -r -a roots <<<"$SCAN_ROOTS"
+  find "${roots[@]}" \
+    \( -name node_modules -o -name target -o -name .git -o -name .cargo \
+       -o -name .cache -o -name .npm -o -name .rustup -o -name .pnpm-store \
+       -o -name .venv -o -name venv -o -name dist -o -name build -o -name .next \
+       -o -name .turbo \) -prune \
+    -o -type f -path '*/.cas/cas.db' -print 2>/dev/null
+}
+
+sync_projects() {
+  step "Migrate + sync all CAS projects"
+  local projects=() db proj out sub combined schema skills failed=0
+  while IFS= read -r db; do
+    proj="$(dirname "$(dirname "$db")")"; [ "$proj" = "$HOME" ] || projects+=("$proj")
+  done < <(discover_projects)
+  info "found ${#projects[@]} project(s) under $SCAN_ROOTS"
+  for proj in "${projects[@]}"; do
+    if [ "$DRY_RUN" = "1" ]; then dim "  [dry-run] $proj: --schema-only, --sync"; continue; fi
+    combined=""
+    for sub in --schema-only --sync; do
+      if out="$(cd "$proj" && "$CAS_INSTALL" update "$sub" 2>&1)"; then combined="$combined\n$out"; else
+        error "$proj: cas update $sub failed: $out"; failed=$((failed + 1)); break
+      fi
+    done
+    schema="$(printf '%b' "$combined" | grep -oE 'Schema (up to date|migrated to) \(v[0-9]+\)' | head -1 || true)"
+    skills="$(printf '%b' "$combined" | grep -oE 'Synced [0-9]+ skills, removed [0-9]+' | head -1 || true)"
+    info "$proj: ${schema:-schema current}${skills:+; $skills}"
+  done
+  [ "$failed" -eq 0 ] || return 1
+}
+
+sync_user_builtins() {
+  step "Distribute user-level built-ins"
+  if [ "$DRY_RUN" = "1" ]; then dim "  [dry-run] $CAS_INSTALL update --user"; return; fi
+  local out
+  out="$("$CAS_INSTALL" update --user 2>&1)" || { error "user-level sync failed: $out"; return 1; }
+  printf '%s\n' "$out" | grep -E '~/.claude:|~/.codex:' | sed 's/^/  /' || true
+}
+
+print_summary() {
+  if [ "$SUMMARY_PRINTED" != "0" ]; then return 0; fi
+  SUMMARY_PRINTED=1
+  step "CAS update summary"
+  printf '  Previous installed: %s\n' "$OLD_INSTALLED_VERSION"
+  printf '  Previous SHA-256:   %s\n' "$OLD_INSTALLED_HASH"
+  printf '  New installed:      %s\n' "$NEW_INSTALLED_VERSION"
+  printf '  New SHA-256:        %s\n' "$NEW_INSTALLED_HASH"
+  printf '  Migrations:         %s\n' "$MIGRATION_STATUS"
+  printf '  Sync:               %s\n' "$SYNC_STATUS"
+  printf '  Runtime turnover:   %s\n' "$RUNTIME_STATUS"
+  printf '  CAS processes stopped or killed:\n'
+  if [ -n "$TURNOVER_RESULTS_FILE" ] && [ -s "$TURNOVER_RESULTS_FILE" ]; then
+    local pid action kind session owner cmd restart
+    while IFS='|' read -r pid action kind session owner cmd restart; do
+      printf '    PID %s: %s\n' "$pid" "$action"
+      printf '      command: %s\n' "$cmd"
+      printf '      kind/session/owner: %s / %s / %s\n' "$kind" "$session" "$owner"
+      printf '      restart/reconnect: %s\n' "$restart"
+    done <"$TURNOVER_RESULTS_FILE"
+  else
+    printf '    none\n'
+  fi
+}
+
+cleanup() {
+  [ -z "$OLD_PROCESS_FILE" ] || rm -f "$OLD_PROCESS_FILE"
+  [ -z "$TURNOVER_RESULTS_FILE" ] || rm -f "$TURNOVER_RESULTS_FILE"
+  [ -z "$SERVER_RECORD_FILE" ] || rm -f "$SERVER_RECORD_FILE"
+}
+
+finish() {
+  local rc="$1"
+  trap - EXIT
+  if [ "$rc" -ne 0 ] && [ "$RUNTIME_STATUS" = "not started" ]; then RUNTIME_STATUS="not reached (update failed)"; fi
+  print_summary
+  cleanup
+  exit "$rc"
+}
+
+main() {
+  local parse_rc=0
+  parse_args "$@" || parse_rc=$?
+  if [ "$parse_rc" -ne 0 ]; then
+    if [ "$parse_rc" -eq 2 ]; then SUMMARY_PRINTED=1; return 0; fi
+    return "$parse_rc"
+  fi
+  ensure_state_files
+  capture_installed_identity
+  snapshot_old_processes
+  [ "$DRY_RUN" = "0" ] || warn "Dry run — no changes or signals will be made"
+
+  if [ "$DO_BUILD" = "1" ]; then build_and_install; else info "Build/install skipped (--sync-only)"; fi
+  if [ "$DRY_RUN" = "1" ]; then
+    NEW_INSTALLED_VERSION="planned from $BRANCH (not installed)"
+    NEW_INSTALLED_HASH="planned (not computed)"
+  elif [ -x "$CAS_INSTALL" ]; then
+    NEW_INSTALLED_VERSION="$(binary_version "$CAS_INSTALL" || printf 'unknown')"
+    NEW_INSTALLED_HASH="$(sha256_file "$CAS_INSTALL")"
+  fi
+
+  if [ "$DO_SYNC" = "1" ]; then
+    migrate_host_db; MIGRATION_STATUS="$([ "$DRY_RUN" = 1 ] && printf planned || printf complete)"
+    sync_projects; sync_user_builtins
+    SYNC_STATUS="$([ "$DRY_RUN" = 1 ] && printf planned || printf complete)"
+  else
+    MIGRATION_STATUS="skipped (--build-only)"; SYNC_STATUS="skipped (--build-only)"
+  fi
+
+  if [ "$DO_TURNOVER" = "1" ]; then
+    turnover_old_processes
+    verify_runtime_epoch
+  else
+    turnover_old_processes
+  fi
+  print_summary
+}
+
+if [ "${CAS_UPDATE_SOURCE_ONLY:-0}" != "1" ]; then
+  trap 'finish $?' EXIT
+  main "$@"
+fi

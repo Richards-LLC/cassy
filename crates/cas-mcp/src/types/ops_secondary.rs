@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 pub struct SearchContextRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'search', 'retrieval_feedback', 'retrieval_metrics', 'context', 'context_for_subagent', 'observe', 'entity_list', 'entity_show', 'entity_extract', 'code_search', 'code_show', 'grep', 'blame'"
+        description = "Action: 'search', 'retrieval_feedback', 'retrieval_metrics', 'context', 'context_for_subagent', 'observe', 'entity_list', 'entity_show', 'entity_extract', 'code_search', 'code_show', 'grep', 'blame', 'history'"
     )]
     pub action: String,
 
@@ -196,6 +196,47 @@ pub struct SearchContextRequest {
     #[schemars(description = "Filter blame by session ID")]
     #[serde(default)]
     pub session_id: Option<String>,
+
+    // ========== Code-History Fields (action=history) ==========
+    /// Path filter for history search
+    #[schemars(
+        description = "Only commits touching paths containing this substring (for history)"
+    )]
+    #[serde(default)]
+    pub path: Option<String>,
+
+    /// Symbol filter for history search
+    #[schemars(
+        description = "Only commits touching this symbol (for history). Not supported until the symbol mapping lands; the response declares it rather than ignoring it."
+    )]
+    #[serde(default)]
+    pub symbol: Option<String>,
+
+    /// Lower time bound for history search
+    #[schemars(
+        description = "Lower bound for history search: relative (14d, 2w, 6h, 45m), a date (2026-08-01), or RFC3339"
+    )]
+    #[serde(default)]
+    pub since: Option<String>,
+
+    /// Upper time bound for history search
+    #[schemars(description = "Upper bound for history search, same formats as 'since'")]
+    #[serde(default)]
+    pub until: Option<String>,
+
+    /// Include merge commits in history results
+    #[schemars(
+        description = "Include merge commits in history results (excluded by default: their message is 'Merge branch x')"
+    )]
+    #[serde(default)]
+    pub include_merges: Option<bool>,
+
+    /// Request provenance on history results
+    #[schemars(
+        description = "Request commit provenance (which task/session/prompt produced it). Not supported yet; index_status reports the measured coverage of the one populated edge instead."
+    )]
+    #[serde(default)]
+    pub include_provenance: Option<bool>,
 }
 
 /// Unified system operations request

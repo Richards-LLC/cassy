@@ -189,6 +189,7 @@ fn test_hybrid_results_cache() {
         rerank_score: None,
         doc_type: DocType::Entry,
         knowledge_score: 0.0,
+        history_score: 0.0,
     }];
 
     let options_hash = 12345u64;
@@ -244,6 +245,7 @@ fn test_invalidation_clears_affected_entries() {
             rerank_score: None,
             doc_type: DocType::Entry,
             knowledge_score: 0.0,
+            history_score: 0.0,
         },
         HybridSearchResult {
             id: "entry-b".to_string(),
@@ -256,6 +258,7 @@ fn test_invalidation_clears_affected_entries() {
             rerank_score: None,
             doc_type: DocType::Entry,
             knowledge_score: 0.0,
+            history_score: 0.0,
         },
     ];
 
@@ -270,6 +273,7 @@ fn test_invalidation_clears_affected_entries() {
         rerank_score: None,
         doc_type: DocType::Entry,
         knowledge_score: 0.0,
+        history_score: 0.0,
     }];
 
     // Cache both result sets

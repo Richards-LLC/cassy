@@ -190,6 +190,18 @@ fn head_sha(repo_root: &Path) -> Result<String> {
     Ok(git(repo_root, &["rev-parse", "HEAD"])?.trim().to_string())
 }
 
+/// Commit time of `sha` in epoch seconds, or `None` when git cannot resolve it
+/// (a watermark from a rewritten branch, most often). `None` propagates into
+/// the response as `lag_seconds: null` rather than 0 — spec §10.1's rule that
+/// "unknown" must never be rendered as "fresh".
+pub(crate) fn commit_epoch(repo_root: &Path, sha: &str) -> Option<i64> {
+    git(repo_root, &["show", "-s", "--format=%ct", sha])
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
 /// Is `sha` reachable from HEAD? A `false` here is what distinguishes "nothing
 /// new" from "the branch moved out from under us" (spec §4.2 rule 3).
 fn is_ancestor_of_head(repo_root: &Path, sha: &str) -> bool {
@@ -547,6 +559,8 @@ pub fn status(cas_root: &Path, repo_root: &Path) -> Result<HistoryStatus> {
         state,
     })
 }
+
+pub mod search;
 
 /// What one docs pass did, per source. Both halves are reported independently
 /// because either can be a declared boundary while the other succeeds — a repo

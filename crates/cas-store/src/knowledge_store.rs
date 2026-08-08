@@ -761,43 +761,13 @@ impl SqliteKnowledgeStore {
     /// ever reach the output, so no user input can close a quote or introduce
     /// an FTS5 operator. Punctuation-only input yields `None`, which `search`
     /// turns into an empty result set instead of a syntax error.
+    ///
+    /// The implementation moved to [`crate::fts_query::fts_or_query`] when the
+    /// history index became the second FTS consumer (EPIC cas-6212 / cas-7f40).
+    /// This stays as a named delegate so the reasoning above keeps living next
+    /// to the store that first needed it.
     fn fts_query(query: &str) -> Option<String> {
-        fn flush(raw: &str, is_phrase: bool, terms: &mut Vec<String>) {
-            let tokens: Vec<String> = raw
-                .split(|c: char| !c.is_alphanumeric())
-                .filter(|t| !t.is_empty())
-                .map(|t| t.to_lowercase())
-                .collect();
-            if tokens.is_empty() {
-                return;
-            }
-            if is_phrase {
-                // One FTS5 phrase: the tokens must appear adjacently, in order.
-                terms.push(format!("\"{}\"", tokens.join(" ")));
-            } else {
-                terms.extend(tokens.into_iter().map(|t| format!("\"{t}\"")));
-            }
-        }
-
-        let mut terms: Vec<String> = Vec::new();
-        let mut segment = String::new();
-        let mut in_phrase = false;
-        for ch in query.chars() {
-            if ch == '"' {
-                flush(&segment, in_phrase, &mut terms);
-                segment.clear();
-                in_phrase = !in_phrase;
-            } else {
-                segment.push(ch);
-            }
-        }
-        flush(&segment, in_phrase, &mut terms);
-
-        if terms.is_empty() {
-            None
-        } else {
-            Some(terms.join(" OR "))
-        }
+        crate::fts_query::fts_or_query(query)
     }
 
     /// Confirm a resolved directory really lives inside the knowledge dir.

@@ -21,6 +21,51 @@ pub enum HistoryCommands {
     Docs(DocsArgs),
     /// Report the watermark, indexed counts and lag without indexing anything
     Status(StatusArgs),
+    /// Search indexed commits by text, path and time window
+    Search(SearchArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct SearchArgs {
+    /// Free text matched against commit subject and body. Optional: a query
+    /// with only `--path`/`--since` is a legitimate structural question.
+    pub query: Vec<String>,
+
+    /// Only commits touching paths containing this substring
+    #[arg(long)]
+    pub path: Option<String>,
+
+    /// Only commits touching this symbol (not supported until M3; declared)
+    #[arg(long)]
+    pub symbol: Option<String>,
+
+    /// Lower bound: 14d, 2w, 6h, 45m, 2026-08-01, or RFC3339
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// Upper bound, same formats as --since
+    #[arg(long)]
+    pub until: Option<String>,
+
+    /// Doc class: commit (supported), issue/pr/changelog (M6; declared)
+    #[arg(long)]
+    pub kind: Option<String>,
+
+    /// Include merge commits (excluded by default: their message is noise)
+    #[arg(long)]
+    pub include_merges: bool,
+
+    /// Ask for provenance (not supported until M5; declared in the response)
+    #[arg(long)]
+    pub include_provenance: bool,
+
+    /// Maximum commits to return
+    #[arg(long, default_value_t = 10)]
+    pub limit: usize,
+
+    /// Emit JSON instead of prose
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -65,7 +110,108 @@ pub fn execute(
         HistoryCommands::Backfill(args) => execute_backfill(args, cas_root),
         HistoryCommands::Docs(args) => execute_docs(args, cas_root),
         HistoryCommands::Status(args) => execute_status(args, cas_root),
+        HistoryCommands::Search(args) => execute_search(args, cas_root),
     }
+}
+
+fn execute_search(args: &SearchArgs, cas_root: &Path) -> anyhow::Result<()> {
+    let query = args.query.join(" ");
+    let request = history::search::HistorySearchRequest {
+        query: (!query.trim().is_empty()).then_some(query),
+        path: args.path.clone(),
+        symbol: args.symbol.clone(),
+        since: args.since.clone(),
+        until: args.until.clone(),
+        kind: args.kind.clone(),
+        task_id: None,
+        session_id: None,
+        limit: args.limit,
+        include_provenance: args.include_provenance,
+        include_merges: args.include_merges,
+    };
+
+    // Same entry point the MCP surface uses. Two renderings, one answer.
+    let response = history::search::run(cas_root, &request)?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+        return Ok(());
+    }
+
+    let status = &response.index_status;
+    if response.results.is_empty() {
+        // "Nothing matched" and "nothing is indexed" look identical in an empty
+        // list, so the second one says so out loud (spec §10.1).
+        if status.indexed_commits == 0 {
+            println!(
+                "no commits are indexed for {} — run `cas history backfill`",
+                response.repository
+            );
+        } else {
+            println!("no commits matched");
+        }
+    }
+
+    for hit in &response.results {
+        println!(
+            "{}  {}  {}",
+            hit.short_sha,
+            &hit.committed_at.chars().take(10).collect::<String>(),
+            hit.subject
+        );
+        for file in hit.files.iter().take(5) {
+            let churn = match (file.insertions, file.deletions) {
+                (Some(i), Some(d)) => format!(" (+{i}/-{d})"),
+                // Binary files carry no line counts; saying so beats printing
+                // "+0/-0", which reads as "nothing changed".
+                _ => " (binary)".to_string(),
+            };
+            println!("    {} {}{}", file.change_type, file.file_path, churn);
+        }
+        if file_overflow(hit.files.len(), 5) > 0 {
+            println!("    … {} more file(s)", file_overflow(hit.files.len(), 5));
+        }
+    }
+
+    if !response.co_changed_files.is_empty() {
+        println!("\nusually changes alongside:");
+        for co in &response.co_changed_files {
+            println!("  {:>4}×  {}", co.commits_together, co.file_path);
+        }
+    }
+
+    println!(
+        "\nindex: {} of {} commit(s), lag {} commit(s), backfill {}",
+        status.indexed_commits,
+        status.repo_commits,
+        status
+            .lag_commits
+            .map(|l| l.to_string())
+            .unwrap_or_else(|| "unknown".into()),
+        if status.backfill_complete {
+            "complete"
+        } else {
+            "incomplete"
+        }
+    );
+    match status.provenance_coverage_pct {
+        Some(pct) => println!(
+            "provenance: NOT SUPPORTED (M5) — measured high-confidence coverage {pct:.1}%"
+        ),
+        None => println!("provenance: NOT SUPPORTED (M5) — coverage not measurable here"),
+    }
+    if let Some(err) = &status.last_error {
+        println!("last error: {err}");
+    }
+    for note in &response.unsupported {
+        println!("unsupported: {} — {} (lands in {})", note.feature, note.reason, note.lands_in);
+    }
+
+    Ok(())
+}
+
+fn file_overflow(total: usize, shown: usize) -> usize {
+    total.saturating_sub(shown)
 }
 
 /// Which sources a `cas history docs` invocation asked for. Neither flag means

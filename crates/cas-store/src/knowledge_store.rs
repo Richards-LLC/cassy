@@ -614,6 +614,14 @@ pub trait KnowledgeStore: Send + Sync {
     /// Pages still awaiting an embedding.
     fn list_pending_embedding(&self, limit: usize) -> Result<Vec<KnowledgePage>>;
 
+    /// How many pages are still awaiting an embedding, store-wide.
+    ///
+    /// Deliberately a count and not `list_pending_embedding(usize::MAX).len()`:
+    /// this is the number a sync run reports as still-uncovered, so it must not
+    /// be bounded by any caller's page budget, and it must not pay for
+    /// materializing every row to answer.
+    fn count_pending_embedding(&self) -> Result<usize>;
+
     /// Clear the `pending_embedding` flag once an embedding has been computed.
     fn mark_embedded(&self, id: &str) -> Result<()>;
 
@@ -1168,6 +1176,16 @@ impl KnowledgeStore for SqliteKnowledgeStore {
             .query_map(params![limit as i64], Self::page_from_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(pages)
+    }
+
+    fn count_pending_embedding(&self) -> Result<usize> {
+        let conn = self.lock();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM knowledge_pages WHERE pending_embedding = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
     }
 
     fn mark_embedded(&self, id: &str) -> Result<()> {

@@ -15,7 +15,7 @@ CAS can now turn accumulated project experience into a searchable project briefi
 | Live project briefing pages | 107 | Current local count; 18 protected from automatic overwrite | A usable project-level briefing exists today. | `cas knowledge status`, 2026-08-08 10:26 EDT |
 | Retrieval test coverage | 10 of 10 queries at parity or better | 7 no-result queries before fix → 0 after | The known multi-word search failure was corrected on the fixed test set. | Retrieval verdict, 2026-08-07; re-read 2026-08-08 |
 | Migrated-page lineage | 146 of 146 pages traced; 0 orphan pages | No unexplained migrated pages | Migration evidence supports the claim that mapped content was accounted for. | Retrieval verdict, 2026-08-07; re-read 2026-08-08 |
-| Legacy memory remains available | 1,702 live entries across project and global stores | 1,254 project + 450 global entries; the new pages are additive | This is a coexistence model, not a completed replacement. | Retrieval verdict, 2026-08-07; re-read 2026-08-08 |
+| Legacy memory remains available | 2,256 live entries across project and global stores | 1,615 project + 641 global entries; the new pages are additive | This is a coexistence model, not a completed replacement. | Read-only live-entry count query, 2026-08-08 10:33 EDT |
 
 ### What the numbers say
 
@@ -64,7 +64,7 @@ This is intended to make established knowledge reusable without replacing the or
 | Area | Status | Evidence | Risk / caveat | Leadership option |
 |---|---|---|---|---|
 | Local project briefing | Live | 107 current pages; 18 protected pages in this working project | Count is an inventory signal, not adoption or business-outcome evidence. | Continue as the default local capability. |
-| Migration and coexistence | Live, additive | 146 migrated pages traced with 0 orphans; 1,702 live entries remain | Two representations raise operational complexity and require clear product language. | Retain both until replacement evidence is stronger. **Recommended.** |
+| Migration and coexistence | Live, additive | 146 migrated pages traced with 0 orphans; 2,256 live entries remain | Two representations raise operational complexity and require clear product language. | Retain both until replacement evidence is stronger. **Recommended.** |
 | Basic retrieval findability | Measured, recovered | Fixed set: 7 no-results → 0; 10/10 at parity or better | Hit-count parity does not measure whether the best answer ranks first. | Fund a ranking-quality measurement before expanding reliance. |
 | Team/project sharing | In progress | Committed work addresses scoped delivery, contamination-safe retrieval, and page parity | Incorrect scope could expose irrelevant or foreign-project material; global-page sharing policy remains unresolved. | Finish safeguards before broad team rollout. **Recommended.** |
 | Cloud semantic enrichment | Optional | Local search remains functional without it | Availability and quality depend on configured cloud capability; no customer adoption, ROI, or revenue data was collected. | Treat as enhancement, not a dependency. |
@@ -81,7 +81,7 @@ This is intended to make established knowledge reusable without replacing the or
 
 The local system includes persistent memories, a project-briefing store, search, and a deliberate distillation workflow. Briefing pages are ordinary Markdown files with a local index and source tracking. A session receives a compact index rather than full page bodies, preserving prompt space; full pages are requested on demand. A hand-authored page can be locked, and the lock survives synchronization.
 
-The prior migration closed with a zero-loss accounting objective for its mapped material: the task record reports 146 pages alongside 1,702 live entries, with legacy entries retained as permanent co-residents rather than deleted. The current working project’s local status shows 107 pages, including 18 protected pages. These are implementation and inventory facts—not measurements of employee adoption, customer adoption, hours saved, revenue, or ROI. No such claims are made here.
+The prior migration closed with a zero-loss accounting objective for its mapped material: 146 pages are traced with zero orphans, and legacy entries were retained as permanent co-residents rather than deleted. A fresh read-only inventory now shows 2,256 live entries (1,615 project plus 641 global). The current working project’s local status shows 107 pages, including 18 protected pages. These are implementation and inventory facts—not measurements of employee adoption, customer adoption, hours saved, revenue, or ROI. No such claims are made here.
 
 ## Known limits and operational risks
 
@@ -98,13 +98,15 @@ Separately, the retrieval work must add a ranking-quality measurement on the sam
 
 ## Methodology and provenance
 
-**Extraction time:** 2026-08-08 10:26 EDT. **Repository commit examined:** `93e139deb590e6aa576e167a90edf00b3d66e368` (v2.53.0). **Data window:** current local status at extraction; migration and retrieval records dated 2026-08-07; active roadmap task state read 2026-08-08.
+**Extraction time:** 2026-08-08 10:33 EDT. **Repository commit examined:** `93e139deb590e6aa576e167a90edf00b3d66e368` (v2.53.0). **Data window:** current local status and read-only live-entry inventory at extraction; migration and retrieval records dated 2026-08-07; active roadmap task state read 2026-08-08.
 
 Fresh read-only commands and records:
 
 ```text
 git rev-parse HEAD
 cas knowledge status
+sqlite3 -readonly /home/pippenz/Petrastella/cas-src/.cas/cas.db "SELECT COUNT(*) FROM entries WHERE archived = 0;"
+sqlite3 -readonly /home/pippenz/.cas/cas.db "SELECT COUNT(*) FROM entries WHERE archived = 0;"
 mcp__cs__task action=show id=cas-7d31
 mcp__cs__task action=show id=cas-b129
 mcp__cs__task action=show id=cas-461a
@@ -115,7 +117,7 @@ sed -n '45,100p' cas-cli/docs/ARCHITECTURE.md
 
 Primary durable evidence:
 
-- `cas knowledge status` returned 107 pages and 18 locked pages for this project at extraction.
+- `cas knowledge status` returned 107 pages and 18 locked pages for this project at extraction. The fresh read-only entry queries returned 1,615 project and 641 global live entries, totaling 2,256.
 - `docs/migration/cas-b129-knowledge-retrieval-verdict.md` records the controlled 10-query before/after comparison, 146 traced migrated pages, 0 orphan pages, and the limits of the measure.
 - CAS task records for the completed knowledge and migration programs record what landed; the active sharing program records the remaining committed safeguards and unresolved global-page design.
 - `cas-cli/docs/ARCHITECTURE.md` documents the local-first storage boundary, protection mechanism, retrieval channels, and cloud capability limits.

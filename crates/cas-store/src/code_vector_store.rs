@@ -375,4 +375,25 @@ mod tests {
         assert_eq!(retired, vec!["sym-1"]);
         assert_eq!(store.stats().unwrap(), CodeVectorStats::default());
     }
+
+    #[test]
+    fn editing_one_symbol_rearms_only_that_chunk() {
+        let root = tempfile::tempdir().unwrap();
+        let store = SqliteCodeVectorStore::open(root.path()).unwrap();
+        let first = symbol("sym-1", "a", SymbolKind::Function);
+        let second = symbol("sym-2", "b", SymbolKind::Struct);
+        store.sync_file_symbols(&[first, second], &[]).unwrap();
+        assert!(store.mark_vectorized("sym-1", "a").unwrap());
+        assert!(store.mark_vectorized("sym-2", "b").unwrap());
+
+        let changed = symbol("sym-1", "a2", SymbolKind::Function);
+        let unchanged = symbol("sym-2", "b", SymbolKind::Struct);
+        store
+            .sync_file_symbols(&[changed, unchanged], &["sym-1".into(), "sym-2".into()])
+            .unwrap();
+        let stats = store.stats().unwrap();
+        assert_eq!(stats.pending, 1);
+        assert_eq!(stats.vectorized, 1);
+        assert_eq!(stats.eligible, 2);
+    }
 }

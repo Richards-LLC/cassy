@@ -1031,6 +1031,34 @@ mod tests {
     }
 
     #[test]
+    fn code_model_or_dimension_change_rebuilds_only_the_isolated_code_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let knowledge =
+            KnowledgeVectorCache::open(tmp.path(), EmbeddingMeta::new("p", "knowledge", 3))
+                .unwrap();
+        knowledge.put("cas-kn001", &[1.0, 0.0, 0.0]).unwrap();
+        {
+            let code =
+                KnowledgeVectorCache::open_code(tmp.path(), EmbeddingMeta::new("p", "code-1", 3))
+                    .unwrap();
+            code.put(&code_symbol_key("sym-1"), &[1.0, 0.0, 0.0])
+                .unwrap();
+        }
+
+        let code =
+            KnowledgeVectorCache::open_code(tmp.path(), EmbeddingMeta::new("p", "code-2", 4))
+                .unwrap();
+        assert!(code.reindexed());
+        assert_eq!(code.count().unwrap(), 0);
+        assert!(code.put(&code_symbol_key("zero"), &[0.0; 4]).is_err());
+        assert_eq!(
+            knowledge.count().unwrap(),
+            1,
+            "knowledge cache was contaminated"
+        );
+    }
+
+    #[test]
     fn reopening_with_the_same_meta_preserves_vectors() {
         let tmp = tempfile::tempdir().unwrap();
         {

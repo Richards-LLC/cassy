@@ -88,7 +88,7 @@ pub fn resolve_repository(file_path: &Path) -> (Option<PathBuf>, String) {
 
 /// Current `HEAD` commit of a work tree, or `None` when git cannot answer
 /// (no git, unborn branch, not a repository).
-fn head_commit(repo_root: &Path) -> Option<String> {
+pub(crate) fn head_commit(repo_root: &Path) -> Option<String> {
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(repo_root)

@@ -1336,18 +1336,6 @@ impl EmbeddedDaemon {
         }
     }
 
-    /// Send agent heartbeat to keep agent alive
-    ///
-    /// Agent registration is handled via Unix socket events from hooks.
-    /// Heartbeat only sends keepalive for the registered agent.
-    ///
-    /// When agent_id is None (e.g. this daemon lost the socket race in factory
-    /// mode), tries to adopt the agent by matching our Claude Code parent PID
-    /// against agent records in the database.
-    ///
-    /// Retries up to 3 times with backoff on failure, since heartbeat
-    /// failures under SQLite lock contention can cause workers to be
-    /// incorrectly marked stale in multi-agent factory sessions.
     /// Advance the `ended_at` of this process's binary epoch (spec §9).
     ///
     /// Best-effort and synchronous: one small UPDATE on the shared connection,
@@ -1361,6 +1349,18 @@ impl EmbeddedDaemon {
         }
     }
 
+    /// Send agent heartbeat to keep agent alive
+    ///
+    /// Agent registration is handled via Unix socket events from hooks.
+    /// Heartbeat only sends keepalive for the registered agent.
+    ///
+    /// When agent_id is None (e.g. this daemon lost the socket race in factory
+    /// mode), tries to adopt the agent by matching our Claude Code parent PID
+    /// against agent records in the database.
+    ///
+    /// Retries up to 3 times with backoff on failure, since heartbeat
+    /// failures under SQLite lock contention can cause workers to be
+    /// incorrectly marked stale in multi-agent factory sessions.
     async fn send_agent_heartbeat(&self) {
         if let Ok(store) = open_agent_store(&self.config.cas_root) {
             // If we don't have an agent_id yet, try to adopt one by PID.

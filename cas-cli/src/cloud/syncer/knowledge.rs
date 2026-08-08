@@ -38,6 +38,24 @@ const LAST_PULL_KEY: &str = "last_knowledge_pull_at";
 /// Entity-type key used in the push payload and the pull response.
 pub const KNOWLEDGE_ENTITY: &str = "knowledge_pages";
 
+/// Percent-encode a query-string *value*.
+///
+/// Conservative allow-list: anything outside unreserved characters is escaped,
+/// so a team id containing `&`, `=`, `/` or a space cannot smuggle an extra
+/// query parameter into a scoped pull URL.
+pub(crate) fn encode_query_value(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 /// Wire shape for one knowledge page.
 ///
 /// The body travels inline. Pages are distilled summaries (a page is
@@ -221,6 +239,22 @@ impl CloudSyncer {
         let mut params = vec![format!("types={KNOWLEDGE_ENTITY}")];
         if let Some(since) = self.queue().get_metadata(LAST_PULL_KEY)? {
             params.push(format!("since={since}"));
+        }
+        // Send the active team so the server can narrow to it. Without this a
+        // user who belongs to two teams that share one project_canonical_id
+        // pulls the UNION of both teams' pages — cross-team knowledge bleed
+        // (cas-f177). Project scope alone does not partition teams.
+        //
+        // Absent team_id keeps the previous server behaviour, so a personal
+        // (teamless) install is unaffected.
+        if let Some(team_id) = self
+            .cloud_config
+            .team_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            params.push(format!("team_id={}", encode_query_value(team_id)));
         }
         // Fail closed on an unresolvable project scope, exactly like the
         // canonical builder: without `project_id=` this would ask the server
@@ -436,6 +470,191 @@ mod tests {
 
         assert_eq!(first, 1, "the seeded page must be pushed");
         assert_eq!(second, 0, "an unchanged page must not be re-pushed");
+    }
+
+    /// The body a page carries must survive push → wire → pull unchanged,
+    /// byte for byte. Anything less and a teammate's copy quietly differs from
+    /// yours: trailing whitespace stripped, CRLF rewritten, a missing final
+    /// newline added back. The page IS the body; a lossy transport is a
+    /// corrupted wiki.
+    #[tokio::test]
+    async fn a_page_body_round_trips_byte_identically_through_push_and_pull() {
+        use std::io::Read;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Deliberately hostile: CRLF, a lone CR, tabs, trailing spaces, an
+        // unterminated last line, non-ASCII, and a NUL-adjacent control char.
+        let body = "# Build System\r\n\ttabbed\ttext   \nunicode: → ✅ ünïcødé\rlone-cr\n\n\ntrailing spaces:   \nno trailing newline";
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/sync/push"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        let endpoint = server.uri();
+
+        let push_root = tempfile::tempdir().unwrap();
+        let push_path = push_root.path().to_path_buf();
+        let body_for_push = body.to_string();
+        tokio::task::spawn_blocking(move || {
+            let store = SqliteKnowledgeStore::open(&push_path).unwrap();
+            let mut page = KnowledgePage::new("cas-kn001", "architecture", "Build System");
+            page.snippet = "How the build works".to_string();
+            store
+                .commit_ingest(&IngestBatch {
+                    pages: vec![PageWrite {
+                        page,
+                        body: body_for_push,
+                    }],
+                    sources: Vec::new(),
+                    tombstones: Vec::new(),
+                })
+                .unwrap();
+            let syncer = syncer(Some(&endpoint), &push_path);
+            assert_eq!(syncer.push_knowledge_pages(&store).unwrap(), 1);
+        })
+        .await
+        .unwrap();
+
+        // Take the record straight off the wire — not a re-serialization of the
+        // local page — so the assertion covers what actually got sent.
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let mut raw = Vec::new();
+        flate2::read::GzDecoder::new(&requests[0].body[..])
+            .read_to_end(&mut raw)
+            .expect("push payload must be gzip");
+        let payload: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        let pushed = payload[KNOWLEDGE_ENTITY].as_array().unwrap()[0].clone();
+        assert_eq!(
+            pushed["body"].as_str().unwrap(),
+            body,
+            "the body must reach the wire unmodified"
+        );
+
+        // Now serve that exact record back to a fresh machine.
+        let pull_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(super::super::pull::PULL_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "knowledge_pages": [pushed]
+            })))
+            .mount(&pull_server)
+            .await;
+        let pull_endpoint = pull_server.uri();
+
+        let pull_root = tempfile::tempdir().unwrap();
+        let pull_path = pull_root.path().to_path_buf();
+        let landed = tokio::task::spawn_blocking(move || {
+            let store = SqliteKnowledgeStore::open(&pull_path).unwrap();
+            let syncer = syncer(Some(&pull_endpoint), &pull_path);
+            let report = syncer.pull_knowledge_pages(&store).unwrap();
+            assert_eq!(report.applied, 1, "errors: {:?}", report.errors);
+            let page = store.get_page_by_rel_path("architecture/build-system.md");
+            let page = page.unwrap().expect("rel_path identity must be preserved");
+            store.read_body(&page.rel_path).unwrap()
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            landed, body,
+            "the pulled body must be byte-identical to the pushed one"
+        );
+    }
+
+    #[test]
+    fn query_values_are_percent_encoded() {
+        assert_eq!(encode_query_value("team-abc_123.x~y"), "team-abc_123.x~y");
+        // A value that could otherwise smuggle a second parameter.
+        assert_eq!(
+            encode_query_value("a&project_id=other"),
+            "a%26project_id%3Dother"
+        );
+        assert_eq!(encode_query_value("a b/c"), "a%20b%2Fc");
+    }
+
+    #[tokio::test]
+    async fn knowledge_pull_sends_the_active_team_id() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(super::super::pull::PULL_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "knowledge_pages": []
+            })))
+            .mount(&server)
+            .await;
+        let endpoint = server.uri();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        tokio::task::spawn_blocking(move || {
+            let store = seeded_store(&root);
+            let queue = Arc::new(SyncQueue::open(&root).unwrap());
+            queue.init().unwrap();
+            let config = CloudConfig {
+                endpoint: endpoint.clone(),
+                token: Some("test-token".to_string()),
+                team_id: Some("team-42".to_string()),
+                ..Default::default()
+            };
+            let syncer = CloudSyncer::new(queue, config, CloudSyncerConfig::default());
+            syncer.pull_knowledge_pages(&store).unwrap();
+        })
+        .await
+        .unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let query = requests[0].url.query().unwrap_or_default().to_string();
+        assert!(
+            query.contains("team_id=team-42"),
+            "cross-team bleed guard: the pull must name the active team — got {query}"
+        );
+        assert!(
+            query.contains("project_id="),
+            "project scoping must still be present — got {query}"
+        );
+    }
+
+    #[tokio::test]
+    async fn knowledge_pull_omits_team_id_for_a_personal_install() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(super::super::pull::PULL_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "knowledge_pages": []
+            })))
+            .mount(&server)
+            .await;
+        let endpoint = server.uri();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        tokio::task::spawn_blocking(move || {
+            let store = seeded_store(&root);
+            let syncer = syncer(Some(&endpoint), &root);
+            syncer.pull_knowledge_pages(&store).unwrap();
+        })
+        .await
+        .unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        let query = requests[0].url.query().unwrap_or_default().to_string();
+        assert!(
+            !query.contains("team_id"),
+            "a teamless install must not claim a team — got {query}"
+        );
     }
 
     #[tokio::test]

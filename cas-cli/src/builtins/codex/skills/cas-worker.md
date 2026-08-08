@@ -13,19 +13,19 @@ You execute tasks assigned by the Supervisor. You may be working in an isolated 
 
 ## Workflow
 
-0. **Tool loading is two steps, not one.** If `mcp__cs__task` isn't callable, run `ToolSearch(query="select:mcp__cs__task")` — that loads the schema, it does **not** execute the tool. Then make a *separate* call literally named `mcp__cs__task` with your `action=...` args — not another ToolSearch. Re-running ToolSearch for a tool it already matched never helps; call the tool.
-1. Check assignments: `mcp__cs__task action=mine`. **Empty?** Send ONE ready message to the supervisor, then wait for assignment — no polling, no re-pinging, no self-dispatch. This applies every time you go idle, not just at session start: after closing a task, come back to this step instead of picking your own next one.
-2. Start a task: `mcp__cs__task action=start id=<task-id>`
-3. Read task details and acceptance criteria: `mcp__cs__task action=show id=<task-id>`. Also read `CLAUDE.md` for project-specific build/test/convention guidance.
-4. Implement. Commit after each logical unit. Follow project commit style (`git log --oneline -10`). Include task ID in commit messages. **Shared-directory (non-isolated) mode:** commit on your `factory/<name>` branch — the commit guard rejects commits on the checked-out branch (`main`/`staging`).
-5. Report progress: `mcp__cs__task action=notes id=<task-id> notes="..." note_type=progress`
-6. Run pre-close self-verification — see [references/close-gate.md](cas-worker/references/close-gate.md). Then invoke the [`verify-before-claim`](../verify-before-claim/SKILL.md) skill: name the proof command for your claim, run it fresh, and capture exit code + tail before calling `task action=close`.
+0. **Tool loading is two steps, not one.** If `mcp__cs__task` is unavailable, use `ToolSearch(query="select:mcp__cs__task")` once; it loads the schema and does **not** execute the tool. Then call `mcp__cs__task` separately — not another ToolSearch.
+1. Run `mcp__cs__task action=mine`. If empty, send the supervisor one ready message and wait — no polling or re-pinging; no self-dispatch. This applies every time you go idle, not just at session start.
+2. Start exactly one assigned task: `mcp__cs__task action=start id=<task-id>`.
+3. Read it with `action=show`, including depth and acceptance criteria; also read project `CLAUDE.md`.
+4. Implement only its scope. Commit logical units in project style (`git log --oneline -10`) with the task ID. In shared-directory mode, use `factory/<name>`; commit guards reject `main`/`staging`.
+5. Post progress with `action=notes id=<task-id> note_type=progress notes="..."`.
+6. Before closing a deep task, follow [close-gate.md](cas-worker/references/close-gate.md), invoke [`verify-before-claim`](../verify-before-claim/SKILL.md), and capture a fresh proof command's exit code and tail.
 7. Close: `mcp__cs__task action=close id=<task-id> reason="..."`
-   - **Success** → message the supervisor, then go back to step 1. Do not pull the next ready task yourself — wait for the next explicit assignment.
-   - **queued for supervisor review** → task is in `pending_supervisor_review`. No action needed; wait for supervisor feedback.
-   - **verification-required** → message supervisor immediately. Do NOT spawn verifier agents or retry close.
-   - **MERGE REQUIRED** → drain the inbox (`action=inbox_poll`) for unread supervisor messages first; if escalation is still needed, send the current factory-branch tip SHA and say it is fresh after polling. Never route around the guard with `status=closed`. Full drill: [recovery.md](cas-worker/references/recovery.md).
-   - **task-scoped verification required** → forward the exact close guidance once, then trust the DB; unrelated MCP and other-task work remain available.
+   - **Success:** message the supervisor, return to step 1, and wait. Do not pull the next ready task yourself.
+   - **pending supervisor review:** wait for feedback.
+   - **verification required:** message the supervisor immediately; do not spawn a verifier or retry.
+   - **MERGE REQUIRED:** first `action=inbox_poll` for unread supervisor messages; if still needed, send the current factory-branch tip SHA. Never bypass with `status=closed`; see [recovery.md](cas-worker/references/recovery.md).
+   - **task-scoped verification:** forward the exact guidance once and trust the DB.
 
 ## Task Types
 
@@ -54,20 +54,19 @@ Null = use your judgment. No other posture keywords exist.
 
 ## Rules of Engagement
 
-Your scope is locked at assignment. The supervisor rejects work that violates these:
+Your scope is locked at assignment:
 
-- **Never self-dispatch.** Idle means wait, not "find something to do." Only `start` a task that is (a) yours per `action=mine`, or (b) explicitly named in a supervisor/coordination message to you. `action=ready`/`action=available` are backlog *visibility*, never authorization to `start` a task yourself — even if nothing else is queued.
+- **Never self-dispatch.** Start only a task assigned by `action=mine` or named explicitly by the supervisor. `ready`/`available` are backlog *visibility*, never authorization to `start` a task yourself. Idle means wait.
 - **One task at a time.** Complete the current task before taking another.
-- **Scope is frozen.** Build exactly what the spec says. Note "related" improvements; don't build them.
-- **Non-goals are real.** Do not touch listed non-goal areas regardless of how easy the fix looks.
-- **Stay in your layer.** Only modify files/modules declared in your assignment. Crossing the boundary is automatic rejection.
+- **Scope is frozen.** Build exactly the spec; note related improvements without implementing them.
+- **Honor non-goals and layer boundaries.** Modify only assigned files/modules.
 - **Match existing patterns.** Follow established conventions; don't introduce new ones without asking.
-- **Stow/install steps target the main checkout, never a worktree path.** Dotfile managers (`stow`, `chezmoi`) and install scripts create symlinks that outlive your worktree. Point them at the real checkout — never `$REPO/.cas/worktrees/<you>/...` — or a later worktree cleanup silently orphans every symlink it created, with the breakage surfacing much later (cas-df97).
+- **Stow/install only from the main checkout, never a worktree.** Persistent symlinks from `stow`, `chezmoi`, or install scripts otherwise break when the worktree is cleaned.
 - **No config surprises.** Don't hardcode values that should be configurable. Don't add config that wasn't requested.
 - **Document important choices.** Use `mcp__cs__task action=notes note_type=decision` for non-obvious decisions.
-- **Never block the pane.** Anything that can exceed ~2 minutes (builds, suites, deploys, servers, **every** CI wait) runs backgrounded, or becomes `action=remind remind_delay_secs=<n>` + end turn. Foreground `gh run watch` and poll loops are banned. Servers: `action=server_start`, never a raw `&`.
+- **Never block the pane.** Background anything over ~2 minutes or use `action=remind` and end the turn. Foreground `gh run watch`/poll loops are banned; servers use `action=server_start`.
 - **Report context headroom** ("context: ~60% used") in every milestone progress note.
-- **Checkpoint, never compact.** Low on context → commit + push + handoff note + ask for respawn. Small pushed commits over large WIP. Details: [discipline.md](cas-worker/references/discipline.md).
+- **Checkpoint, never compact.** When context is low: commit, push, leave a handoff note, and ask for respawn. Prefer small pushed commits. See [discipline.md](cas-worker/references/discipline.md).
 
 ## Communication
 
@@ -102,21 +101,12 @@ Before setting `status=blocked`, re-read with `action=show`. If it already shows
 
 ## References
 
-Open on demand — not pre-loaded.
+Open only what the situation needs:
 
-- **[close-gate.md](cas-worker/references/close-gate.md)** — Pre-close self-verification (6 checks), code-review gate, P0 handling, simplify-as-you-go trigger.
-- **[recovery.md](cas-worker/references/recovery.md)** — Verification jail, blocked tools, context exhaustion, worktree/MCP issues, missing CAS tools, silent supervisor, task reassigned, outbox replay.
-- **[discipline.md](cas-worker/references/discipline.md)** — Backgrounding recipes (builds/tests, servers, CI waits, full suite) and context budget: headroom reporting, checkpoint protocol, commit sizing.
-- **[details.md](cas-worker/references/details.md)** — Tool selection, sync (rebase) mechanics, prod credential pulls, full schema cheat sheet (exact field names, valid actions).
-
-## When to open which reference
-
-| Situation | Open |
-|---|---|
-| About to close (step 6) | close-gate |
-| Anything went wrong (jail, MCP, worktree, reassignment) | recovery |
-| About to run anything >2 min, or context filling | discipline |
-| Need an exact field name or action name | details |
+- [close-gate.md](cas-worker/references/close-gate.md) before a deep-task close (six checks, review/P0 handling, simplification).
+- [recovery.md](cas-worker/references/recovery.md) for errors, verification jail, reassignment, worktree/MCP trouble, exhaustion, or a silent supervisor.
+- [discipline.md](cas-worker/references/discipline.md) before >2-minute work and for backgrounding, test-loop, and checkpoint recipes.
+- [details.md](cas-worker/references/details.md) for exact fields/actions, sync, production pulls, and store-access details.
 
 ## Context budgeting
 

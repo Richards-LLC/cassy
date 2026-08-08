@@ -54,6 +54,72 @@ fn report_modified_builtin_references(
     fmt.newline()
 }
 
+/// Report one harness's builtin sync result, attributed to the harness
+/// directory it actually wrote to (cas-27bf).
+///
+/// This MUST be called immediately after that harness's
+/// `sync_all_builtins_for_harness` call, inside the same `Syncing <dir> files`
+/// section. Previously the Claude result was rendered in a trailing block that
+/// ran after the `.codex` / `.grok` subheadings had already been printed, so a
+/// Claude-only write was displayed as though Codex had performed it — a
+/// claimed-green/did-nothing shape — while the Codex and Grok counts were never
+/// printed in human mode at all. Every count and `+ path` line emitted here is
+/// derived from `SyncResult`, whose counters only advance after a successful
+/// `std::fs::write` (see `builtins::sync_all_builtins_inner`); IO failures
+/// propagate as errors and abort the run non-zero.
+fn report_builtin_sync(
+    result: &SyncResult,
+    location: &str,
+    theme: &ActiveTheme,
+) -> std::io::Result<()> {
+    {
+        let mut out = io::stdout();
+        let mut fmt = Formatter::stdout(&mut out, theme.clone());
+
+        if result.total_updated() > 0 {
+            fmt.write_raw("  ")?;
+            fmt.success(&format!(
+                "{location}: updated {} built-in files ({} agents, {} skills)",
+                result.total_updated(),
+                result.agents_updated,
+                result.skills_updated
+            ))?;
+            for file in &result.updated_files {
+                fmt.write_raw(&format!("    + {location}/{file}"))?;
+                fmt.newline()?;
+            }
+        } else {
+            fmt.write_raw("  ")?;
+            fmt.success(&format!("{location}: built-ins up to date"))?;
+        }
+
+        // cas-4900: surface silent skips so stale destinations stop
+        // accumulating invisibly. Each entry here is a file whose
+        // on-disk content differs from the source but lacks
+        // `managed_by: cas` in either frontmatter, so the gate refused
+        // to overwrite. Pre-9362ee0 this whole class of files was
+        // silently skipped with no signal whatsoever; now the user
+        // sees the list and can decide.
+        if result.has_silent_skips() {
+            fmt.write_raw("  ")?;
+            fmt.warning(&format!(
+                "{} file(s) at {location} differ from source but were NOT updated \
+                 because neither side carries `managed_by: cas` frontmatter (cas-4900):",
+                result.skipped_files.len()
+            ))?;
+            for file in &result.skipped_files {
+                fmt.write_raw(&format!("    ! {location}/{file}"))?;
+                fmt.newline()?;
+            }
+            fmt.write_raw("    ")?;
+            fmt.write_raw("(add `managed_by: cas` to the source frontmatter to enable updates)")?;
+            fmt.newline()?;
+        }
+    }
+
+    report_modified_builtin_references(result, location, theme)
+}
+
 /// GitHub repository owner
 const REPO_OWNER: &str = "pippenz";
 
@@ -327,7 +393,7 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
     let builtin_result =
         sync_all_builtins_for_harness(cas_mux::SupervisorCli::Claude, &claude_dir)?;
     if !cli.json {
-        report_modified_builtin_references(&builtin_result, ".claude", &theme)?;
+        report_builtin_sync(&builtin_result, ".claude", &theme)?;
     }
 
     // After all skill writes complete, refresh the skill-sync sentinel so that
@@ -395,7 +461,7 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
             sync_all_builtins_for_harness(cas_mux::SupervisorCli::Codex, &codex_dir)?;
         codex_modified_references = codex_result.modified_reference_files.len();
         if !cli.json {
-            report_modified_builtin_references(&codex_result, ".codex", &theme)?;
+            report_builtin_sync(&codex_result, ".codex", &theme)?;
         }
         codex_result.total_updated()
     } else {
@@ -416,7 +482,7 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
         let grok_result = sync_all_builtins_for_harness(cas_mux::SupervisorCli::Grok, &grok_dir)?;
         grok_modified_references = grok_result.modified_reference_files.len();
         if !cli.json {
-            report_modified_builtin_references(&grok_result, ".grok", &theme)?;
+            report_builtin_sync(&grok_result, ".grok", &theme)?;
         }
         grok_result.total_updated()
     } else {
@@ -449,48 +515,8 @@ fn sync_claude_files(cli: &Cli, cas_root_param: Option<&Path>) -> anyhow::Result
         let mut out = io::stdout();
         let mut fmt = Formatter::stdout(&mut out, theme);
 
-        // Report built-in updates
-        if builtin_result.total_updated() > 0 {
-            fmt.write_raw("  ")?;
-            fmt.success(&format!(
-                "Updated {} built-in files ({} agents, {} skills)",
-                builtin_result.total_updated(),
-                builtin_result.agents_updated,
-                builtin_result.skills_updated
-            ))?;
-            for file in &builtin_result.updated_files {
-                fmt.write_raw(&format!("    + {file}"))?;
-                fmt.newline()?;
-            }
-        } else {
-            fmt.write_raw("  ")?;
-            fmt.success("Built-ins up to date")?;
-        }
-
-        // cas-4900: surface silent skips so stale destinations stop
-        // accumulating invisibly. Each entry here is a file whose
-        // on-disk content differs from the source but lacks
-        // `managed_by: cas` in either frontmatter, so the gate refused
-        // to overwrite. Pre-9362ee0 this whole class of files was
-        // silently skipped with no signal whatsoever; now the user
-        // sees the list and can decide.
-        if builtin_result.has_silent_skips() {
-            fmt.write_raw("  ")?;
-            fmt.warning(&format!(
-                "{} file(s) at destination differ from source but were NOT updated \
-                 because neither side carries `managed_by: cas` frontmatter (cas-4900):",
-                builtin_result.skipped_files.len()
-            ))?;
-            for file in &builtin_result.skipped_files {
-                fmt.write_raw(&format!("    ! {file}"))?;
-                fmt.newline()?;
-            }
-            fmt.write_raw("    ")?;
-            fmt.write_raw(
-                "(add `managed_by: cas` to the source frontmatter to enable updates)",
-            )?;
-            fmt.newline()?;
-        }
+        // Built-in sync results are reported per harness, inline under each
+        // `Syncing <dir> files` heading (cas-27bf) — see report_builtin_sync.
 
         // Report database rule sync
         if rule_report.synced > 0 || rule_report.removed > 0 {

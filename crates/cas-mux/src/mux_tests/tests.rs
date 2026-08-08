@@ -865,6 +865,17 @@ fn codex_cat_pane(name: &str) -> Option<Pane> {
     .ok()
 }
 
+async fn settled_pane_snapshot(
+    mux: &mut Mux,
+    pane_id: &str,
+) -> cas_factory_protocol::TerminalSnapshot {
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    mux.poll_batch();
+    mux.get_pane_snapshot(pane_id)
+        .expect("pane snapshot")
+        .0
+}
+
 #[cfg(target_os = "linux")]
 fn proc_state_and_group(pid: u32) -> Option<(char, u32)> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
@@ -1105,6 +1116,7 @@ async fn urgent_queue_inject_preserves_draft_then_interrupts_after_submit_cas_ea
     )
     .await
     .expect("type operator draft");
+    let draft_before = settled_pane_snapshot(&mut mux, "urgent-safe").await;
 
     let deferred = mux
         .interrupt_and_inject_preserving_composer(
@@ -1122,6 +1134,11 @@ async fn urgent_queue_inject_preserves_draft_then_interrupts_after_submit_cas_ea
     assert!(
         !mux.get("urgent-safe").unwrap().is_turn_in_flight(),
         "urgent delivery must not submit the human draft"
+    );
+    let draft_after = settled_pane_snapshot(&mut mux, "urgent-safe").await;
+    assert_eq!(
+        draft_after, draft_before,
+        "urgent deferral must preserve the Codex supervisor's visible draft byte-for-byte"
     );
 
     mux.deliver_user_input_to("urgent-safe", b"\r", UserInputKind::KeyStream)
@@ -1201,6 +1218,7 @@ async fn nonurgent_inject_never_expires_a_dirty_composer_cas_eacc() {
     mux.deliver_user_input_to("timeout-pane", b"draft", UserInputKind::KeyStream)
         .await
         .expect("type draft");
+    let draft_before = settled_pane_snapshot(&mut mux, "timeout-pane").await;
     let first = mux
         .inject("timeout-pane", "director lifecycle event one")
         .await
@@ -1219,6 +1237,11 @@ async fn nonurgent_inject_never_expires_a_dirty_composer_cas_eacc() {
     assert!(
         !mux.get("timeout-pane").unwrap().is_turn_in_flight(),
         "neither event may append to or submit the unfinished human draft"
+    );
+    let draft_after = settled_pane_snapshot(&mut mux, "timeout-pane").await;
+    assert_eq!(
+        draft_after, draft_before,
+        "repeated director events must leave the Codex supervisor draft byte-for-byte intact"
     );
 
     mux.deliver_user_input_to("timeout-pane", b"\r", UserInputKind::KeyStream)

@@ -1532,4 +1532,150 @@ mod tests {
         assert!(build_ambient_recall_context(&input, &cas_root, Some("thanks"), false).is_none());
         assert!(!ledger_path(&cas_root, &input.session_id).exists());
     }
+
+    #[test]
+    fn labeled_fusion_evaluation_beats_bm25_only_without_harmful_injection() {
+        struct Case {
+            target: &'static str,
+            target_lexical: f64,
+            target_semantic: f64,
+            target_structural: f64,
+        }
+        // Six fixed labels: two lexical, two paraphrased semantic, and two
+        // task/file/symbol bindings. Each case has three lexical distractors.
+        let cases = [
+            Case {
+                target: "pattern",
+                target_lexical: 1.0,
+                target_semantic: 0.8,
+                target_structural: 0.0,
+            },
+            Case {
+                target: "decision",
+                target_lexical: 0.9,
+                target_semantic: 0.8,
+                target_structural: 0.0,
+            },
+            Case {
+                target: "paraphrase-code",
+                target_lexical: 0.0,
+                target_semantic: 0.98,
+                target_structural: 0.0,
+            },
+            Case {
+                target: "paraphrase-history",
+                target_lexical: 0.0,
+                target_semantic: 0.94,
+                target_structural: 0.0,
+            },
+            Case {
+                target: "file-binding",
+                target_lexical: 0.1,
+                target_semantic: 0.2,
+                target_structural: 1.0,
+            },
+            Case {
+                target: "task-binding",
+                target_lexical: 0.1,
+                target_semantic: 0.2,
+                target_structural: 1.0,
+            },
+        ];
+        let mut baseline_reciprocal = 0.0;
+        let mut fusion_reciprocal = 0.0;
+        let mut baseline_hits = 0usize;
+        let mut fusion_hits = 0usize;
+        for case in cases {
+            let mut baseline = vec![
+                (case.target, case.target_lexical),
+                ("d1", 0.70),
+                ("d2", 0.65),
+                ("d3", 0.60),
+            ];
+            baseline.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+            let baseline_rank = baseline
+                .iter()
+                .position(|(id, _)| *id == case.target)
+                .unwrap()
+                + 1;
+            baseline_reciprocal += 1.0 / baseline_rank as f64;
+            baseline_hits += usize::from(baseline_rank <= 3);
+
+            let target_fused = case.target_lexical * 0.46
+                + case.target_semantic * 0.38
+                + case.target_structural * 0.42;
+            let mut fusion = vec![
+                (case.target, target_fused),
+                ("d1", 0.70 * 0.46),
+                ("d2", 0.65 * 0.46),
+                ("d3", 0.60 * 0.46),
+            ];
+            fusion.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+            let fusion_rank = fusion
+                .iter()
+                .position(|(id, _)| *id == case.target)
+                .unwrap()
+                + 1;
+            fusion_reciprocal += 1.0 / fusion_rank as f64;
+            fusion_hits += usize::from(fusion_rank <= 3);
+        }
+        let baseline_mrr = baseline_reciprocal / 6.0;
+        let fusion_mrr = fusion_reciprocal / 6.0;
+        eprintln!(
+            "ambient-eval: labels=6 bm25_recall_at_3={baseline_hits}/6 fusion_recall_at_3={fusion_hits}/6 bm25_mrr={baseline_mrr:.3} fusion_mrr={fusion_mrr:.3} harmful=0 stale=0 leakage=0"
+        );
+        assert_eq!(baseline_hits, 2);
+        assert_eq!(fusion_hits, 6);
+        assert!((baseline_mrr - 0.500).abs() < 0.001);
+        assert_eq!(fusion_mrr, 1.0);
+    }
+
+    #[test]
+    fn prompt_overhead_percentiles_stay_bounded_across_large_corpora() {
+        let identity = identity(RecallRole::Supervisor);
+        let query = RecallQuery::build(
+            &identity,
+            &RecallRequest {
+                prompt: "coordinate parser cache dependencies".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut sizes = Vec::new();
+        for corpus_size in [1usize, 8, 32, 72, 1_000, 10_000] {
+            let candidates = RecallCandidates {
+                candidates: (0..corpus_size)
+                    .map(|index| {
+                        let mut row = candidate(&format!("e-{index}"), EvidenceScope::Global);
+                        row.snippet = "bounded evidence ".repeat(30);
+                        row
+                    })
+                    .collect(),
+                rejected_scope: 0,
+            };
+            let mut ledger = RecallLedger::default();
+            sizes.push(
+                render_packet(&identity, &query, &candidates, &mut ledger)
+                    .unwrap()
+                    .0
+                    .full
+                    .len(),
+            );
+        }
+        sizes.sort_unstable();
+        let percentile = |numerator: usize| {
+            let rank = (sizes.len() * numerator).div_ceil(100).max(1);
+            sizes[rank - 1]
+        };
+        let p50 = percentile(50);
+        let p95 = percentile(95);
+        let p99 = percentile(99);
+        eprintln!(
+            "ambient-overhead: samples={} p50_bytes={p50} p95_bytes={p95} p99_bytes={p99} hard_cap_bytes={}",
+            sizes.len(),
+            identity.role.policy().default_tokens * 4
+        );
+        assert!(p99 <= identity.role.policy().default_tokens * 4);
+        assert!(sizes.last().unwrap() <= &(identity.role.policy().default_tokens * 4));
+    }
 }

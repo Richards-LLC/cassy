@@ -5070,14 +5070,20 @@ pub(crate) enum TranscriptResolution {
 /// other characters are preserved. Example:
 /// `/home/a/.cas/worktrees/x` → `-home-a--cas-worktrees-x`.
 fn synthesized_transcript_path(clone_path: &str, session_id: &str) -> String {
-    let escaped: String = clone_path
+    let escaped = escaped_project_slug(clone_path);
+    format!("~/.claude/projects/{escaped}/{session_id}.jsonl")
+}
+
+/// Claude Code's per-cwd directory name: the absolute path with `/` and `.`
+/// collapsed to `-`.
+fn escaped_project_slug(clone_path: &str) -> String {
+    clone_path
         .chars()
         .map(|c| match c {
             '/' | '.' => '-',
             other => other,
         })
-        .collect();
-    format!("~/.claude/projects/{escaped}/{session_id}.jsonl")
+        .collect()
 }
 
 /// Hard cap on glob candidate collection to bound the worst-case
@@ -5161,13 +5167,53 @@ fn resolve_claude_transcript(
     clone_path: Option<&str>,
     session_id: &str,
 ) -> TranscriptResolution {
+    let roots: Vec<std::path::PathBuf> =
+        projects_dir.map(std::path::Path::to_path_buf).into_iter().collect();
+    resolve_claude_transcript_in_roots(&roots, clone_path, session_id)
+}
+
+/// cas-9e81: the same Claude resolution, but over EVERY projects root a
+/// session could have been written under.
+///
+/// A two-subscription factory runs some panes under `CLAUDE_CONFIG_DIR`
+/// (e.g. `~/.claude-alt`) and others under the default `~/.claude`, and
+/// Claude Code writes each session's transcript beneath the config dir its
+/// own process was launched with. A single hardcoded `~/.claude/projects`
+/// root therefore resolves to `None` for every pane on the other account —
+/// and `None` is not a neutral outcome downstream: the daemon's wake gate
+/// reads an unresolvable transcript as "tool call in flight" and silently
+/// refuses to wake that recipient forever.
+///
+/// Globbing several roots is safe and cheap: the match key is the session
+/// UUID, which is unique across accounts, so extra roots can only ever add
+/// the one true file (or nothing). Multiple hits still fall through to the
+/// existing `Ambiguous` handling.
+fn resolve_claude_transcript_in_roots(
+    projects_dirs: &[std::path::PathBuf],
+    clone_path: Option<&str>,
+    session_id: &str,
+) -> TranscriptResolution {
     let synthesized = clone_path.map(|p| synthesized_transcript_path(p, session_id));
-    let Some(projects) = projects_dir else {
+    if projects_dirs.is_empty() {
         return TranscriptResolution::Synthesized(
             synthesized.unwrap_or_else(|| synthesized_unknown_clone_path(session_id)),
         );
-    };
-    let (mut matches, truncated) = glob_transcript_candidates(projects, session_id);
+    }
+    let mut matches: Vec<std::path::PathBuf> = Vec::new();
+    let mut truncated = false;
+    for projects in projects_dirs {
+        let (found, hit_cap) = glob_transcript_candidates(projects, session_id);
+        truncated |= hit_cap;
+        for path in found {
+            if matches.len() >= MAX_TRANSCRIPT_CANDIDATES {
+                truncated = true;
+                break;
+            }
+            if !matches.contains(&path) {
+                matches.push(path);
+            }
+        }
+    }
     match matches.len() {
         0 => TranscriptResolution::Synthesized(
             synthesized.unwrap_or_else(|| synthesized_unknown_clone_path(session_id)),
@@ -5183,8 +5229,66 @@ fn resolve_claude_transcript(
 
 /// `~/.claude/projects` — Claude Code's per-user transcript root.
 /// Returns `None` if the user's home dir isn't resolvable.
+#[cfg(test)]
 pub(crate) fn default_claude_projects_dir() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("projects"))
+}
+
+/// Every `projects` root a Claude session on this host could have been
+/// written under (cas-9e81): the default `~/.claude` plus the active
+/// `CLAUDE_CONFIG_DIR`, deduplicated — the same set `cas hook` already keeps
+/// hooked, so the two cannot drift apart on a two-account install.
+pub(crate) fn default_claude_projects_dirs() -> Vec<std::path::PathBuf> {
+    claude_projects_dirs_from(
+        dirs::home_dir().as_deref(),
+        std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
+    )
+}
+
+/// Injectable half of [`default_claude_projects_dirs`].
+pub(crate) fn claude_projects_dirs_from(
+    home: Option<&std::path::Path>,
+    env_config_dir: Option<&str>,
+) -> Vec<std::path::PathBuf> {
+    crate::cli::hook::config_gen::known_claude_config_dirs_from(home, env_config_dir)
+        .into_iter()
+        .map(|dir| dir.join("projects"))
+        .collect()
+}
+
+/// Harness-appropriate transcript search roots. Claude may legitimately have
+/// more than one (see [`default_claude_projects_dirs`]); Codex and Grok have a
+/// single root each.
+fn default_transcript_roots(cli: cas_mux::SupervisorCli) -> Vec<std::path::PathBuf> {
+    match cli {
+        cas_mux::SupervisorCli::Grok => default_grok_sessions_dir().into_iter().collect(),
+        cas_mux::SupervisorCli::Codex => default_codex_sessions_dir().into_iter().collect(),
+        cas_mux::SupervisorCli::Claude => default_claude_projects_dirs(),
+    }
+}
+
+/// [`resolve_transcript`] over a set of roots rather than a single one.
+///
+/// Only Claude actually searches more than one (cas-9e81); Codex and Grok keep
+/// their existing single-root resolution byte-for-byte so this change cannot
+/// alter their behavior.
+pub(crate) fn resolve_transcript_in_roots(
+    roots: &[std::path::PathBuf],
+    clone_path: Option<&str>,
+    session_id: &str,
+    cli: cas_mux::SupervisorCli,
+) -> TranscriptResolution {
+    match cli {
+        cas_mux::SupervisorCli::Claude => {
+            resolve_claude_transcript_in_roots(roots, clone_path, session_id)
+        }
+        _ => resolve_transcript(
+            roots.first().map(std::path::PathBuf::as_path),
+            clone_path,
+            session_id,
+            cli,
+        ),
+    }
 }
 
 /// Placeholder synthesized path used when clone_path metadata is absent.
@@ -5416,7 +5520,9 @@ const MAX_WORKER_TRANSCRIPT_CACHE_ENTRIES: usize = 512;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct WorkerTranscriptCacheKey {
     cli: &'static str,
-    base_dir: Option<std::path::PathBuf>,
+    // cas-9e81: the full search-root set, not a single dir — Claude now
+    // resolves across every known config dir's `projects` root.
+    base_dirs: Vec<std::path::PathBuf>,
     clone_path: Option<String>,
     session_id: String,
 }
@@ -5589,12 +5695,17 @@ pub(crate) fn resolve_worker_transcript_path(
     session_id: &str,
     cli: cas_mux::SupervisorCli,
 ) -> Option<std::path::PathBuf> {
-    let base_dir = match cli {
-        cas_mux::SupervisorCli::Grok => default_grok_sessions_dir(),
-        cas_mux::SupervisorCli::Codex => default_codex_sessions_dir(),
-        cas_mux::SupervisorCli::Claude => default_claude_projects_dir(),
-    };
-    resolve_worker_transcript_path_in(base_dir.as_deref(), clone_path, session_id, cli)
+    // cas-9e81: search every root this harness could have written under, not
+    // just the default one. On a two-account factory the single-root lookup
+    // returned None for every pane on the non-default `CLAUDE_CONFIG_DIR`, and
+    // the daemon's wake gate treats an unresolvable transcript as evidence of
+    // an in-flight tool call — a permanent, silent refusal to wake.
+    transcript_path_from_resolution(resolve_transcript_in_roots(
+        &default_transcript_roots(cli),
+        clone_path,
+        session_id,
+        cli,
+    ))
 }
 
 /// Resolve the activity/context path for `worker_status`.
@@ -5642,19 +5753,18 @@ fn worker_status_cached_transcript_resolution(
     session_id: &str,
     cli: cas_mux::SupervisorCli,
 ) -> WorkerStatusTranscriptResolution {
-    let base_dir = match cli {
-        cas_mux::SupervisorCli::Grok => default_grok_sessions_dir(),
-        cas_mux::SupervisorCli::Codex => default_codex_sessions_dir(),
-        cas_mux::SupervisorCli::Claude => default_claude_projects_dir(),
-    };
+    // cas-9e81: same multi-root search as `resolve_worker_transcript_path`, so
+    // `worker_status` and the daemon's wake gate cannot disagree about whether
+    // a worker has a readable transcript.
+    let roots = default_transcript_roots(cli);
     WorkerStatusTranscriptResolution {
-        resolution: worker_status_cached_transcript_resolution_in(
-            base_dir.as_deref(),
+        resolution: worker_status_cached_transcript_resolution_in_roots(
+            &roots,
             clone_path,
             session_id,
             cli,
         ),
-        base_dir_resolved: base_dir.is_some(),
+        base_dir_resolved: !roots.is_empty(),
     }
 }
 
@@ -5691,15 +5801,30 @@ fn worker_status_codex_transcript_path_in(
 /// worker_activity for scan-based harnesses. Cache the rich resolution rather
 /// than only its concrete path so hard-dead status can surface Synthesized and
 /// Ambiguous salvage information without repeating the directory walk.
+#[cfg(test)]
 fn worker_status_cached_transcript_resolution_in(
     base_dir: Option<&std::path::Path>,
     clone_path: Option<&str>,
     session_id: &str,
     cli: cas_mux::SupervisorCli,
 ) -> TranscriptResolution {
+    let roots: Vec<std::path::PathBuf> =
+        base_dir.map(std::path::Path::to_path_buf).into_iter().collect();
+    worker_status_cached_transcript_resolution_in_roots(&roots, clone_path, session_id, cli)
+}
+
+/// Multi-root form of [`worker_status_cached_transcript_resolution_in`]
+/// (cas-9e81). The cache key covers the whole root set, so a single-root and a
+/// multi-root lookup for the same session can never alias.
+fn worker_status_cached_transcript_resolution_in_roots(
+    roots: &[std::path::PathBuf],
+    clone_path: Option<&str>,
+    session_id: &str,
+    cli: cas_mux::SupervisorCli,
+) -> TranscriptResolution {
     let key = WorkerTranscriptCacheKey {
         cli: cli.as_str(),
-        base_dir: base_dir.map(std::path::Path::to_path_buf),
+        base_dirs: roots.to_vec(),
         clone_path: clone_path.map(str::to_owned),
         session_id: session_id.to_owned(),
     };
@@ -5710,7 +5835,7 @@ fn worker_status_cached_transcript_resolution_in(
         return entry.resolution.clone();
     }
 
-    let resolution = resolve_transcript(base_dir, clone_path, session_id, cli);
+    let resolution = resolve_transcript_in_roots(roots, clone_path, session_id, cli);
     if let Ok(mut cache) = worker_transcript_cache().lock() {
         cache.retain(|_, entry| entry.resolved_at.elapsed() < WORKER_TRANSCRIPT_CACHE_TTL);
         if cache.len() >= MAX_WORKER_TRANSCRIPT_CACHE_ENTRIES {
@@ -5729,6 +5854,7 @@ fn worker_status_cached_transcript_resolution_in(
 
 /// Injectable half of [`resolve_worker_transcript_path`] for deterministic
 /// path-resolution and latency tests.
+#[cfg(test)]
 fn resolve_worker_transcript_path_in(
     base_dir: Option<&std::path::Path>,
     clone_path: Option<&str>,
@@ -5752,13 +5878,9 @@ fn format_transcript_block(
     session_id: &str,
     cli: cas_mux::SupervisorCli,
 ) -> String {
-    let base_dir = match cli {
-        cas_mux::SupervisorCli::Grok => default_grok_sessions_dir(),
-        cas_mux::SupervisorCli::Codex => default_codex_sessions_dir(),
-        cas_mux::SupervisorCli::Claude => default_claude_projects_dir(),
-    };
-    let resolution = resolve_transcript(base_dir.as_deref(), clone_path, session_id, cli);
-    render_transcript_block(&resolution, session_id, base_dir.is_some())
+    let roots = default_transcript_roots(cli);
+    let resolution = resolve_transcript_in_roots(&roots, clone_path, session_id, cli);
+    render_transcript_block(&resolution, session_id, !roots.is_empty())
 }
 
 /// Pure string-rendering half of `format_transcript_block`, split out so
@@ -5840,8 +5962,18 @@ fn transcript_path_fast(
     clone_path: Option<&str>,
     session_id: &str,
 ) -> Option<std::path::PathBuf> {
-    let home = dirs::home_dir()?;
-    transcript_path_fast_in(&home, clone_path, session_id)
+    // cas-9e81: `synthesized_transcript_path` hardcodes `~/.claude/projects`,
+    // so this stat missed every session written under a non-default
+    // `CLAUDE_CONFIG_DIR`. Stat the same slug under each known projects root.
+    let home = dirs::home_dir();
+    let clone = clone_path?;
+    let slug = escaped_project_slug(clone);
+    let file = format!("{session_id}.jsonl");
+    default_claude_projects_dirs()
+        .into_iter()
+        .map(|projects| projects.join(&slug).join(&file))
+        .find(|path| path.exists())
+        .or_else(|| transcript_path_fast_in(home.as_deref()?, clone_path, session_id))
 }
 
 fn transcript_path_fast_in(
@@ -8601,6 +8733,94 @@ effort = "high"
         (tmp, sessions)
     }
 
+    // --- cas-9e81 (GH #177): transcripts written under a non-default
+    // CLAUDE_CONFIG_DIR must still resolve. A two-subscription factory runs
+    // panes under `~/.claude-alt`; the single hardcoded `~/.claude/projects`
+    // root returned None for every one of them, and the daemon's wake gate
+    // reads an unresolvable transcript as "tool call in flight" — a silent,
+    // permanent refusal to wake that recipient.
+
+    #[test]
+    fn claude_projects_dirs_include_the_alternate_config_dir() {
+        let home = std::path::Path::new("/home/alice");
+        let dirs = claude_projects_dirs_from(Some(home), Some("~/.claude-alt"));
+        assert_eq!(
+            dirs,
+            vec![
+                std::path::PathBuf::from("/home/alice/.claude/projects"),
+                std::path::PathBuf::from("/home/alice/.claude-alt/projects"),
+            ],
+            "both the default and the active CLAUDE_CONFIG_DIR must be searched"
+        );
+
+        // No override, or an override that IS the default: exactly one root.
+        assert_eq!(
+            claude_projects_dirs_from(Some(home), None),
+            vec![std::path::PathBuf::from("/home/alice/.claude/projects")]
+        );
+        assert_eq!(
+            claude_projects_dirs_from(Some(home), Some("~/.claude")),
+            vec![std::path::PathBuf::from("/home/alice/.claude/projects")]
+        );
+    }
+
+    #[test]
+    fn a_transcript_under_the_alternate_config_dir_resolves() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let default_root = tmp.path().join(".claude").join("projects");
+        let alt_root = tmp.path().join(".claude-alt").join("projects");
+        let clone = "/home/alice/work/.cas/worktrees/warm-stork-30";
+        let slug = escaped_project_slug(clone);
+        std::fs::create_dir_all(alt_root.join(&slug)).unwrap();
+        std::fs::create_dir_all(default_root.join("some-other-project")).unwrap();
+        let transcript = alt_root.join(&slug).join(format!("{TEST_SESSION}.jsonl"));
+        std::fs::write(&transcript, b"{}\n").unwrap();
+
+        // The default root alone — the pre-cas-9e81 behavior — finds nothing.
+        assert!(
+            transcript_path_from_resolution(resolve_transcript(
+                Some(&default_root),
+                Some(clone),
+                TEST_SESSION,
+                cas_mux::SupervisorCli::Claude,
+            ))
+            .is_none(),
+            "precondition: the session is not under the default config dir"
+        );
+
+        let got = transcript_path_from_resolution(resolve_transcript_in_roots(
+            &[default_root, alt_root],
+            Some(clone),
+            TEST_SESSION,
+            cas_mux::SupervisorCli::Claude,
+        ));
+        assert_eq!(
+            got.as_deref(),
+            Some(transcript.as_path()),
+            "searching every known projects root must find the real transcript"
+        );
+    }
+
+    #[test]
+    fn multi_root_resolution_does_not_double_count_a_repeated_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("projects");
+        let clone = "/home/alice/work";
+        let slug = escaped_project_slug(clone);
+        std::fs::create_dir_all(root.join(&slug)).unwrap();
+        let transcript = root.join(&slug).join(format!("{TEST_SESSION}.jsonl"));
+        std::fs::write(&transcript, b"{}\n").unwrap();
+
+        // The same root twice must resolve, not degrade into `Ambiguous`.
+        let got = resolve_transcript_in_roots(
+            &[root.clone(), root],
+            Some(clone),
+            TEST_SESSION,
+            cas_mux::SupervisorCli::Claude,
+        );
+        assert_eq!(got, TranscriptResolution::Resolved(transcript));
+    }
+
     #[test]
     fn default_codex_sessions_dir_honors_codex_home_override() {
         let _lock = crate::hooks::test_env_lock();
@@ -9136,7 +9356,7 @@ effort = "high"
 
             let key = WorkerTranscriptCacheKey {
                 cli: "codex",
-                base_dir: Some(sessions.clone()),
+                base_dirs: vec![sessions.clone()],
                 clone_path: Some(clone.clone()),
                 session_id: session_id.clone(),
             };
@@ -9209,7 +9429,7 @@ effort = "high"
 
         let key = WorkerTranscriptCacheKey {
             cli: "codex",
-            base_dir: Some(sessions.clone()),
+            base_dirs: vec![sessions.clone()],
             clone_path: Some(clone.to_string()),
             session_id: session_id.to_string(),
         };
@@ -9246,7 +9466,7 @@ effort = "high"
 
         let key = WorkerTranscriptCacheKey {
             cli: "grok",
-            base_dir: Some(sessions.clone()),
+            base_dirs: vec![sessions.clone()],
             clone_path: Some(clone.to_string()),
             session_id: session_id.to_string(),
         };

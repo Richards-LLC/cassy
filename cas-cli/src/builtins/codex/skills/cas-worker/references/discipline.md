@@ -148,6 +148,39 @@ A worked shape, start to close: targeted filters while fixing → one full scope
 batch, backgrounded → other work while it cooks → close on that receipt, or on a banked sweep
 plus a targeted run covering exactly what changed since.
 
+### A green exit code is not a green test run
+
+Exit code 0 means "nothing reported failure". It does **not** mean tests ran. Three runs in
+this repo exited 0 while executing **zero tests**, all on one day, all judged green by their
+author (GH #173):
+
+1. `cargo test -p cas-cli --lib <filter>` — the crate is named `cas`, not `cas-cli`. cargo
+   errored; the compound command around it swallowed the status.
+2. `cargo test -p cas --lib <filter>` with a **relative** `$ZIG` — ghostty_vt_sys's build
+   script panicked. Build scripts run with cwd set to the *crate* directory, so a relative
+   `.context/zig/zig` resolves against the wrong root. A worktree does not have a `.context`
+   at all; the toolchain lives in the main checkout.
+3. `cargo test -p cas --lib some_module::tests::` where the module had been renamed to
+   `some_module::additive_only_tests::`. Output, verbatim: `test result: ok. 0 passed;
+   0 failed; 0 ignored; 0 measured; 3929 filtered out`. Exit 0.
+
+Run your final-proof suite through the guard, which enforces all of that mechanically:
+
+```bash
+make -C cas-cli test-scoped SCOPED_ARGS='-p cas --lib my_module'
+scripts/run-scoped-tests.sh -p cas --test cli_test        # same thing, directly
+```
+
+It fails the run unless cargo exited 0, **a test harness actually reported**, and the passed
+count is greater than zero. The middle condition is the one that matters: a wrapper or a
+pipeline can drop a nonzero status, but nothing can invent a `test result:` line. It also
+rejects a relative `$ZIG` before spending a build on it, and reads `cargo nextest run`'s
+`Summary` line as well as `cargo test`'s.
+
+Then quote the number. **"Tests pass" is not a receipt; "210 passed; 0 failed" is.** Read the
+`test result:` line yourself and put its counts in your close note. A passed count of 0 is a
+failure to run — never report it as green, however cheerfully cargo prints `ok`.
+
 ### Running tests in the clean-CI environment shape
 
 Your shell exports ~15 `CAS_*` identity variables. A test that reads one passes for you and

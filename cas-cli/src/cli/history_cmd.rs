@@ -9,6 +9,7 @@ use std::path::Path;
 
 use clap::{Args, Subcommand};
 
+use crate::history::symbols::{self as symbol_map, DEFAULT_MAP_LIMIT};
 use crate::history::{self, WalkMode};
 
 #[derive(Debug, Clone, Subcommand)]
@@ -23,6 +24,8 @@ pub enum HistoryCommands {
     Status(StatusArgs),
     /// Search indexed commits by text, path and time window
     Search(SearchArgs),
+    /// Map commits to the symbols their changed lines touch (M3)
+    Symbols(SymbolsArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -92,6 +95,17 @@ pub struct BackfillArgs {
     /// Report what the pass would do without writing rows
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Skip the symbol-mapping pass that normally follows indexing
+    #[arg(long)]
+    pub no_symbols: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct SymbolsArgs {
+    /// Maximum commits to map in this pass
+    #[arg(long, default_value_t = DEFAULT_MAP_LIMIT)]
+    pub limit: usize,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -111,6 +125,7 @@ pub fn execute(
         HistoryCommands::Docs(args) => execute_docs(args, cas_root),
         HistoryCommands::Status(args) => execute_status(args, cas_root),
         HistoryCommands::Search(args) => execute_search(args, cas_root),
+        HistoryCommands::Symbols(args) => execute_symbols(args, cas_root),
     }
 }
 
@@ -342,6 +357,60 @@ fn execute_backfill(args: &BackfillArgs, cas_root: &Path) -> anyhow::Result<()> 
         ),
     }
 
+    // Symbol mapping runs by default rather than behind a flag, for the same
+    // reason M2's index was flipped default-on: a stage nobody opts into is a
+    // stage that never runs, and `history_commit_symbols` would then read as
+    // "these commits touched no symbols" forever.
+    if !args.no_symbols {
+        report_symbol_pass(cas_root, &repo_root, DEFAULT_MAP_LIMIT)?;
+    }
+
+    Ok(())
+}
+
+fn execute_symbols(args: &SymbolsArgs, cas_root: &Path) -> anyhow::Result<()> {
+    let repo_root = history::repo_root_for(cas_root)?;
+    report_symbol_pass(cas_root, &repo_root, args.limit)
+}
+
+fn report_symbol_pass(cas_root: &Path, repo_root: &Path, limit: usize) -> anyhow::Result<()> {
+    let started = std::time::Instant::now();
+    let outcome = symbol_map::map_symbols(cas_root, repo_root, limit)?;
+    let elapsed = started.elapsed();
+
+    if outcome.commits_considered == 0 {
+        println!("symbol mapping: nothing to map");
+        return Ok(());
+    }
+
+    let mut verdicts: Vec<(&str, usize)> = outcome
+        .verdicts
+        .iter()
+        .map(|(name, count)| (*name, *count))
+        .collect();
+    verdicts.sort();
+    let breakdown = verdicts
+        .iter()
+        .map(|(name, count)| format!("{name} {count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    println!(
+        "symbol mapping: {} commit(s), {} symbol row(s) in {:.1}s — {breakdown}",
+        outcome.commits_considered,
+        outcome.symbol_rows,
+        elapsed.as_secs_f64()
+    );
+    let absent = outcome.count(cas_store::SymbolMapping::Absent);
+    if absent > 0 {
+        println!(
+            "  {absent} commit(s) recorded symbol_mapping=absent: the symbol index has no data"
+        );
+        println!(
+            "  for the files they touched. Run `cas index code`, then re-run — absent is retried."
+        );
+    }
+
     Ok(())
 }
 
@@ -385,6 +454,10 @@ fn execute_status(args: &StatusArgs, cas_root: &Path) -> anyhow::Result<()> {
                 "github": source_json(s.github_state.as_ref()),
                 "changelog": source_json(s.changelog_state.as_ref()),
             },
+            "symbol_mapping": s.symbol_mapping
+                .iter()
+                .map(|(name, count)| (name.clone(), serde_json::json!(count)))
+                .collect::<serde_json::Map<String, serde_json::Value>>(),
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
@@ -425,6 +498,18 @@ fn execute_status(args: &StatusArgs, cas_root: &Path) -> anyhow::Result<()> {
     }
 
     print_docs(&s);
+    if s.symbol_mapping.is_empty() {
+        println!("  symbol mapping  none recorded");
+    } else {
+        let breakdown = s
+            .symbol_mapping
+            .iter()
+            .map(|(name, count)| format!("{name} {count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  symbol mapping  {breakdown}");
+    }
+
     Ok(())
 }
 

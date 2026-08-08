@@ -134,7 +134,14 @@ impl SqliteCodeStore {
 
     /// Normalize a file path for consistent ID generation.
     /// Strips leading `./`, converts to forward slashes, and removes redundant components.
-    fn normalize_path(path: &str) -> String {
+    ///
+    /// **This runs on every write**, so the value in `code_files.path` /
+    /// `code_symbols.file_path` is NOT byte-identical to what the indexer
+    /// passed — most consequentially, an absolute path loses its leading `/`.
+    /// Any reader joining on those columns must normalize its probe the same
+    /// way, which is why this is `pub(crate)` rather than private (cas-0562:
+    /// the history↔symbol join silently matched nothing until it did).
+    pub(crate) fn normalize_path(path: &str) -> String {
         let path = path.trim();
         // Strip leading ./
         let path = path.strip_prefix("./").unwrap_or(path);

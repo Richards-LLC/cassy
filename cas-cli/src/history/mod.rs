@@ -130,6 +130,11 @@ pub struct HistoryStatus {
     pub github_state: Option<HistoryIndexState>,
     /// The `changelog` ledger row.
     pub changelog_state: Option<HistoryIndexState>,
+    /// `symbol_mapping` value → commit count (M3, spec §4.1). Reported rather
+    /// than summarised: a large `absent` bucket means the symbol index has not
+    /// caught up, and that must be visible instead of inferred from a thin
+    /// `history_commit_symbols` table.
+    pub symbol_mapping: Vec<(String, i64)>,
 }
 
 impl HistoryStatus {
@@ -544,6 +549,8 @@ pub fn status(cas_root: &Path, repo_root: &Path) -> Result<HistoryStatus> {
         _ => None,
     };
 
+    let symbol_mapping = store.symbol_mapping_counts(&repository)?;
+
     Ok(HistoryStatus {
         doc_counts: store.doc_counts(&repository)?,
         docs_pending_embedding: store.docs_pending_embedding(&repository)?,
@@ -557,6 +564,7 @@ pub fn status(cas_root: &Path, repo_root: &Path) -> Result<HistoryStatus> {
         lag_commits,
         watermark_is_ancestor,
         state,
+        symbol_mapping,
     })
 }
 
@@ -656,6 +664,7 @@ pub fn run_docs_pass(
 
     outcome
 }
+pub mod symbols;
 
 #[cfg(test)]
 mod tests;

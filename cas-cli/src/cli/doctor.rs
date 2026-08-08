@@ -413,6 +413,16 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         chrono::Utc::now(),
     ));
 
+    // Check 4c: the embedding drain (EPIC cas-6212 / cas-db6e, M7).
+    //
+    // The drain runs on a daemon tick, so its failures have no command output to
+    // appear in. Without this line a drain that has been 400ing for a week looks
+    // exactly like one with nothing to do — which is the cas-a924 failure shape,
+    // rebuilt for a different corpus.
+    checks.push(embedding_drain_check(gather_embedding_drain_state(
+        &cas_root,
+    )));
+
     // Check 5: Config
     match Config::load(&cas_root) {
         Ok(config) => {
@@ -1112,6 +1122,134 @@ fn symbol_index_check(state: SymbolIndexState, now: chrono::DateTime<chrono::Utc
     }
 }
 
+/// What `cas doctor` needs to say something true about the embedding drain.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct EmbeddingDrainState {
+    /// Whether an embedder exists at all (i.e. the user is logged in). `false`
+    /// is a declared boundary, not a failure.
+    capability: bool,
+    /// Knowledge pages awaiting a vector.
+    pages_pending: usize,
+    /// History commits awaiting a vector.
+    commits_pending: i64,
+    /// History docs awaiting a vector.
+    docs_pending: i64,
+    /// `history_index_state('embeddings').last_error` — what the last tick hit.
+    last_error: Option<String>,
+    /// `history_index_state('embeddings').last_attempt_at` — evidence the arm
+    /// is running at all. `None` means it has never completed a pass, which is
+    /// a different fact from "there was nothing to do".
+    last_attempt: Option<String>,
+}
+
+impl EmbeddingDrainState {
+    fn total_pending(&self) -> i64 {
+        self.pages_pending as i64 + self.commits_pending + self.docs_pending
+    }
+}
+
+fn gather_embedding_drain_state(cas_root: &Path) -> EmbeddingDrainState {
+    use cas_store::{HistoryStore, KnowledgeStore, SOURCE_EMBEDDINGS};
+
+    let capability = crate::cloud::CloudConfig::load()
+        .map(|config| crate::cloud::KnowledgeEmbedder::from_config(&config).is_some())
+        .unwrap_or(false);
+
+    let pages_pending = cas_store::SqliteKnowledgeStore::open(cas_root)
+        .ok()
+        .and_then(|store| store.count_pending_embedding().ok())
+        .unwrap_or(0);
+
+    let mut state = EmbeddingDrainState {
+        capability,
+        pages_pending,
+        ..Default::default()
+    };
+
+    if let Ok(store) = cas_store::SqliteHistoryStore::open(cas_root) {
+        if let Ok((commits, docs)) = store.count_pending_embedding() {
+            state.commits_pending = commits;
+            state.docs_pending = docs;
+        }
+        if let Ok(repo_root) = crate::history::repo_root_for(cas_root) {
+            let repository = crate::history::repository_id(&repo_root);
+            if let Ok(Some(ledger)) = store.index_state(&repository, SOURCE_EMBEDDINGS) {
+                state.last_error = ledger.last_error;
+                state.last_attempt = ledger.last_attempt_at;
+            }
+        }
+    }
+
+    state
+}
+
+fn embedding_drain_check(state: EmbeddingDrainState) -> Check {
+    let name = "embedding drain".to_string();
+    let pending = state.total_pending();
+
+    // A real failure outranks everything else: it is the reason the queue is
+    // not moving, and it must never be summarised away as a backlog.
+    if let Some(error) = &state.last_error {
+        return Check {
+            name,
+            status: CheckStatus::Warning,
+            message: format!(
+                "last drain reported: {error} ({pending} unit(s) still awaiting a vector)"
+            ),
+        };
+    }
+
+    if !state.capability {
+        // Not logged in. A boundary of the installation, so this is only worth
+        // a warning when there is actually a queue going nowhere.
+        return Check {
+            name,
+            status: if pending > 0 {
+                CheckStatus::Warning
+            } else {
+                CheckStatus::Ok
+            },
+            message: if pending > 0 {
+                format!(
+                    "no cloud embedding capability (not logged in): {pending} unit(s) will stay \
+                     unembedded and semantic search stays absent"
+                )
+            } else {
+                "no cloud embedding capability (not logged in); nothing is queued".to_string()
+            },
+        };
+    }
+
+    if pending == 0 {
+        return Check {
+            name,
+            status: CheckStatus::Ok,
+            message: match &state.last_attempt {
+                Some(at) => format!("nothing pending (last drain {at})"),
+                None => "nothing pending".to_string(),
+            },
+        };
+    }
+
+    // A queue with a capability present and no error is the drain doing its
+    // job across ticks — say so, and say how deep it is.
+    Check {
+        name,
+        status: CheckStatus::Ok,
+        message: format!(
+            "{pending} unit(s) queued ({} page(s), {} commit(s), {} doc(s)); the daemon drains \
+             them on its tick{}",
+            state.pages_pending,
+            state.commits_pending,
+            state.docs_pending,
+            match &state.last_attempt {
+                Some(at) => format!(" — last drain {at}"),
+                None => " — no drain has completed yet".to_string(),
+            }
+        ),
+    }
+}
+
 fn format_lag(secs: i64) -> String {
     if secs == i64::MAX {
         return "never".to_string();
@@ -1627,6 +1765,61 @@ mod tests {
         let check = symbol_index_check(state, now);
         assert!(matches!(check.status, CheckStatus::Warning));
         assert!(check.message.contains("database is locked"), "message: {}", check.message);
+    }
+
+    /// A drain failure must reach the operator here (EPIC cas-6212 / cas-db6e).
+    /// The tick has no command output of its own, so if this line stays quiet a
+    /// permanently-failing drain is indistinguishable from an empty queue —
+    /// which is exactly the cas-a924 shape.
+    #[test]
+    fn embedding_drain_check_surfaces_the_last_failure() {
+        let check = embedding_drain_check(EmbeddingDrainState {
+            capability: true,
+            commits_pending: 40,
+            docs_pending: 2,
+            last_error: Some("history: Embedding request failed with status 429".to_string()),
+            ..Default::default()
+        });
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("429"), "message: {}", check.message);
+        assert!(check.message.contains("42"), "message: {}", check.message);
+    }
+
+    #[test]
+    fn embedding_drain_check_reports_a_queue_without_calling_it_broken() {
+        let check = embedding_drain_check(EmbeddingDrainState {
+            capability: true,
+            pages_pending: 3,
+            commits_pending: 100,
+            docs_pending: 7,
+            last_attempt: Some("2026-08-08T00:00:00Z".to_string()),
+            ..Default::default()
+        });
+        // A backlog with a working drain is progress, not a fault.
+        assert!(matches!(check.status, CheckStatus::Ok));
+        assert!(check.message.contains("110"), "message: {}", check.message);
+    }
+
+    #[test]
+    fn embedding_drain_check_calls_out_a_queue_with_no_capability() {
+        let stranded = embedding_drain_check(EmbeddingDrainState {
+            capability: false,
+            commits_pending: 5,
+            ..Default::default()
+        });
+        assert!(matches!(stranded.status, CheckStatus::Warning));
+        assert!(
+            stranded.message.contains("not logged in"),
+            "message: {}",
+            stranded.message
+        );
+
+        // Logged out with nothing queued is an ordinary, fully-supported state.
+        let idle = embedding_drain_check(EmbeddingDrainState {
+            capability: false,
+            ..Default::default()
+        });
+        assert!(matches!(idle.status, CheckStatus::Ok));
     }
 
     /// End-to-end over a real code store: a seeded stale `code_files.updated` row is what the

@@ -134,6 +134,12 @@ pub struct EmbeddedDaemonConfig {
     /// interval: this half depends on a third party's rate limits, and issue
     /// bodies change far more slowly than commits arrive (spec §8).
     pub history_docs_interval_secs: u64,
+    // === Automagic embedding drain (EPIC cas-6212 / cas-db6e) ===
+    /// Enable the background drain that embeds pending knowledge pages and
+    /// code-history units without anyone running `cas cloud sync`.
+    pub embed_drain: bool,
+    /// Embedding drain interval (seconds).
+    pub embed_drain_interval_secs: u64,
 }
 
 impl Default for EmbeddedDaemonConfig {
@@ -167,6 +173,15 @@ impl Default for EmbeddedDaemonConfig {
             // nothing further.
             index_history_docs: true,
             history_docs_interval_secs: 900, // 15 minutes (spec §8)
+            // On by default and gated by nothing but the capability itself: a
+            // logged-out install makes no request and creates no vector store,
+            // and a logged-in one should never need a human to type `cas cloud
+            // sync` before its own corpus is searchable. 300 s matches the git
+            // history arm — new commits become embeddable within a tick of
+            // being indexed, and a full backfill (~2,100 units, spec §7.1)
+            // clears in about five ticks rather than one burst.
+            embed_drain: true,
+            embed_drain_interval_secs: 300,
         }
     }
 }

@@ -22,6 +22,7 @@ compile_error!(
 
 // Core modules
 pub mod agent_id;
+pub(crate) mod ambient_recall;
 pub mod async_runtime;
 mod bounded_process;
 pub mod bridge;

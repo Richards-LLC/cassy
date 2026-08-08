@@ -288,7 +288,9 @@ fn pty_doctor_has_expected_sections() {
         .unwrap();
 
     let output = runner.get_output().as_str();
-    let scr = screen(&output);
+    // New migration-accounted doctor checks may extend the report beyond the
+    // default 24-row terminal. This test verifies sections, not scrollback.
+    let scr = screen_with_size(&output, 80, 200);
 
     // Verify key sections are present
     scr.assert_contains("database").unwrap();

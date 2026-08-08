@@ -259,6 +259,43 @@ pub fn handle_session_start(
         }
     }
 
+    // cas-0c0a: builtin skill references the last sync refused to update.
+    // Surfaced to every role, not just supervisors — the stale files are the
+    // worker's own operating guidance, and the `cas update --sync` warning that
+    // reports the skip is invisible to unattended/scripted syncs.
+    if let Some(banner) =
+        crate::hooks::handlers::session_hygiene::build_session_start_stale_reference_banner_sized(
+            cas_root,
+        )
+    {
+        assembler.append_degradable(banner.full, banner.compact);
+    }
+
+    // cas-20f27: issue-filing detectors. Both are surfaced to every role — a
+    // worker is as likely as a supervisor to be the one who staged the report,
+    // and the filing directive is a standing one for both. Appended below
+    // codemap/project-overview so those keep the preview top slot.
+    //
+    // (1) Staged BUG-*/FEATURE-* reports that were never pushed to GitHub.
+    if let Some(banner) =
+        crate::hooks::handlers::session_hygiene::build_session_start_unfiled_reports_banner_sized(
+            cas_root,
+        )
+    {
+        assembler.append_degradable(banner.full, banner.compact);
+    }
+
+    // (2) No issue target configured in a project that stages requests. Never
+    // suggests a value — guessing from `origin` routes CAS bugs into a
+    // consumer's own tracker (filing-cas-bugs.md).
+    if let Some(banner) =
+        crate::hooks::handlers::session_hygiene::build_session_start_issues_target_banner_sized(
+            cas_root, &config,
+        )
+    {
+        assembler.append_degradable(banner.full, banner.compact);
+    }
+
     // cas-b7dd (GH #88): leftovers from dead sessions — orphan processes still
     // running in worktrees and stale server registrations. Surfaced here
     // because a new session otherwise inherits them invisibly and meets them
@@ -399,6 +436,21 @@ mod large_artifact_staging_tests {
     use crate::test_support::TestEnvGuard;
     use super::*;
 
+    /// Role environment for a SessionStart test, rooted in a temporary HOME.
+    ///
+    /// `handle_session_start` builds the full session context, and the Host
+    /// Constraints section resolves `~/.cas` from `HOME` rather than from the
+    /// project root (`hooks::context::build_host_constraints_section`). Without
+    /// a temp HOME these tests opened the developer's real global store — one
+    /// of the paths behind the 994 leaked fixture rows in cas-78c8 / GH #156.
+    fn staging_env(role: &str) -> TestEnvGuard {
+        let mut guard = TestEnvGuard::temp_home();
+        guard.set("CAS_AGENT_ROLE", role);
+        guard.remove("CAS_CLONE_PATH");
+        guard.remove("CAS_AGENT_NAME");
+        guard
+    }
+
     fn session_input(cwd: &str) -> HookInput {
         HookInput {
             session_id: "staging-session".to_string(),
@@ -448,11 +500,7 @@ mod large_artifact_staging_tests {
             "[staging]\nlarge_artifact_dir = \"/mnt/datacube/staging\"\n",
         )
         .unwrap();
-        let _env = TestEnvGuard::with_optional_vars(&[
-            ("CAS_AGENT_ROLE", Some("supervisor")),
-            ("CAS_CLONE_PATH", None),
-            ("CAS_AGENT_NAME", None),
-        ]);
+        let _env = staging_env("supervisor");
 
         let input = session_input(tmp.path().to_str().unwrap());
         let context = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
@@ -470,11 +518,7 @@ mod large_artifact_staging_tests {
             "[staging]\nlarge_artifact_dir = \"/mnt/datacube/staging\"\n",
         )
         .unwrap();
-        let _env = TestEnvGuard::with_optional_vars(&[
-            ("CAS_AGENT_ROLE", Some("worker")),
-            ("CAS_CLONE_PATH", None),
-            ("CAS_AGENT_NAME", None),
-        ]);
+        let _env = staging_env("worker");
 
         let input = session_input(tmp.path().to_str().unwrap());
         let context = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());

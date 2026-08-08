@@ -94,6 +94,22 @@ impl CasSandbox {
     /// them for the host known-repo registry, user config, and serve-root
     /// resolution respectively.
     pub fn configure_command<'a>(&self, cmd: &'a mut Command) -> &'a mut Command {
+        // Captured before the scrub below: the protected-store tripwire is
+        // itself a `CAS_*` variable, and dropping it would disarm the very
+        // guard that proves this sandbox works (cas-78c8). A value already set
+        // on `cmd` wins over the ambient one so a caller can arm the tripwire
+        // for a single subprocess without mutating process-global environment
+        // in a parallel test run.
+        let protected_dbs = cmd
+            .get_envs()
+            .find_map(|(key, value)| {
+                (key == cas_store::shared_db::PROTECTED_DBS_ENV)
+                    .then_some(value)
+                    .flatten()
+            })
+            .map(|value| value.to_os_string())
+            .or_else(|| std::env::var_os(cas_store::shared_db::PROTECTED_DBS_ENV));
+
         let cas_keys: Vec<OsString> = std::env::vars_os()
             .map(|(key, _)| key)
             .chain(cmd.get_envs().map(|(key, _)| key.to_os_string()))
@@ -101,6 +117,10 @@ impl CasSandbox {
             .collect();
         for key in cas_keys {
             cmd.env_remove(key);
+        }
+
+        if let Some(protected_dbs) = protected_dbs {
+            cmd.env(cas_store::shared_db::PROTECTED_DBS_ENV, protected_dbs);
         }
 
         cmd.current_dir(self.path())

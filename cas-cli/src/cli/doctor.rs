@@ -197,6 +197,115 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         }
     }
 
+    // Check 3a: Undelivered supervisor lifecycle relays (cas-7787, GH #160).
+    //
+    // A relay that dies without transport is a factory failure that used to
+    // leave no trace at all: the durable event looked healthy (stamped
+    // `prompt_delivered_at`), the queue row read `suppressed_idle` like any
+    // benign dedup, and nothing told anyone the supervisor had not been
+    // reached. Surfacing it here — as a WARNING, not an Ok line — is what
+    // makes "the relay is silent" distinguishable from "there was nothing to
+    // relay".
+    {
+        match crate::store::open_prompt_queue_store(&cas_root)
+            .map_err(|e| e.to_string())
+            .and_then(|queue| {
+                queue
+                    .list_undelivered_lifecycle_relays(50)
+                    .map_err(|e| e.to_string())
+            }) {
+            Ok(relays) if relays.is_empty() => checks.push(Check {
+                name: "supervisor relay".to_string(),
+                status: CheckStatus::Ok,
+                message: "no undelivered lifecycle relays".to_string(),
+            }),
+            Ok(relays) => {
+                let sample = relays
+                    .iter()
+                    .take(3)
+                    .filter_map(|relay| relay.summary.as_deref())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                checks.push(Check {
+                    name: "supervisor relay".to_string(),
+                    status: CheckStatus::Warning,
+                    message: format!(
+                        "{} lifecycle relay(s) expired without ever reaching the supervisor{}{}. \
+                         Those lanes may still be waiting — open each task directly.",
+                        relays.len(),
+                        if sample.is_empty() { "" } else { ": " },
+                        sample
+                    ),
+                });
+            }
+            // Fail loud rather than silently reporting health: this check
+            // exists precisely because an unreadable failure signal reads as
+            // success.
+            Err(e) => checks.push(Check {
+                name: "supervisor relay".to_string(),
+                status: CheckStatus::Warning,
+                message: format!("cannot check undelivered lifecycle relays: {e}"),
+            }),
+        }
+    }
+
+    // Check 3a-ii: messages the factory keeps failing to hand over
+    // (cas-94a1, GH #169).
+    //
+    // The read side that makes `delivery_attempts` worth writing. A row still
+    // pending after several spent attempts is the earliest honest signal that
+    // a recipient is unreachable — visible here BEFORE the row exhausts its
+    // budget and dies, which is the only window in which anyone can act.
+    {
+        const RETRY_WARN_THRESHOLD: u32 = 3;
+        match crate::store::open_prompt_queue_store(&cas_root)
+            .map_err(|e| e.to_string())
+            .and_then(|queue| {
+                queue
+                    .list_most_retried_pending(RETRY_WARN_THRESHOLD, 5)
+                    .map_err(|e| e.to_string())
+            }) {
+            Ok(rows) if rows.is_empty() => checks.push(Check {
+                name: "delivery retries".to_string(),
+                status: CheckStatus::Ok,
+                message: format!("no pending message has spent {RETRY_WARN_THRESHOLD}+ attempts"),
+            }),
+            Ok(rows) => {
+                let worst = rows
+                    .iter()
+                    .take(3)
+                    .map(|row| {
+                        format!(
+                            "#{} -> {} ({} attempts{})",
+                            row.prompt_id,
+                            row.target,
+                            row.delivery_attempts,
+                            row.reason
+                                .map(|r| format!(", {r}"))
+                                .unwrap_or_default()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                checks.push(Check {
+                    name: "delivery retries".to_string(),
+                    status: CheckStatus::Warning,
+                    message: format!(
+                        "{} pending message(s) have spent {RETRY_WARN_THRESHOLD}+ transport \
+                         attempts: {worst}. The recipient is likely unreachable — check the \
+                         pane before the row exhausts its budget.",
+                        rows.len()
+                    ),
+                });
+            }
+            Err(e) => checks.push(Check {
+                name: "delivery retries".to_string(),
+                status: CheckStatus::Warning,
+                message: format!("cannot check delivery retry counts: {e}"),
+            }),
+        }
+    }
+
     // Check 3b: Schema details (tables and columns)
     if let Ok(summary) = get_schema_summary(&cas_root) {
         let table_count = summary.tables.len();

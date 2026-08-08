@@ -469,7 +469,7 @@ pub struct TeamRequest {
 pub struct FactoryRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'spawn_workers', 'shutdown_workers', 'hold_worker', 'release_worker', 'worker_status', 'worker_activity', 'clear_context', 'my_context', 'sync_all_workers', 'gc_report', 'gc_cleanup', 'epic_status' (per-child branch merge state), 'focus_epic' (pin or clear displayed epic focus), 'remind' (create reminder), 'remind_list' (list reminders), 'remind_cancel' (cancel a reminder), 'server_start' (run a long-lived server under CAS), 'server_stop', 'server_list' (what is listening and who started it)"
+        description = "Action: 'spawn_workers', 'shutdown_workers', 'hold_worker', 'release_worker', 'worker_status', 'worker_activity', 'clear_context' (real harness context reset — confirmed against the recipient's new session id, or it errors; never reports an unverified success), 'my_context', 'sync_all_workers', 'gc_report', 'gc_cleanup', 'epic_status' (per-child branch merge state), 'focus_epic' (pin or clear displayed epic focus), 'remind' (create reminder), 'remind_list' (list reminders), 'remind_cancel' (cancel a reminder), 'server_start' (run a long-lived server under CAS), 'server_stop', 'server_list' (what is listening and who started it)"
     )]
     pub action: String,
 

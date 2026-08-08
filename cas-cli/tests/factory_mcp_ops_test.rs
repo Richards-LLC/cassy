@@ -2814,6 +2814,152 @@ async fn test_2e81_orphan_recovery_skips_psr_tasks() {
     );
 }
 
+// cas-3dcb (GH #168): worker death reaches the supervisor's PROMPT path,
+// exactly once per death incident
+// =============================================================================
+
+/// All prompt-queue rows that are worker-death relays.
+fn worker_died_prompt_rows(cas_root: &std::path::Path) -> Vec<cas_store::QueuedPrompt> {
+    cas::store::open_prompt_queue_store(cas_root)
+        .expect("prompt queue")
+        .peek_all(200)
+        .expect("peek prompt queue")
+        .into_iter()
+        .filter(|row| row.prompt.starts_with("<worker-died "))
+        .collect()
+}
+
+/// The reported defect: 2,044 death notices, 100% never injected into any
+/// supervisor turn, because the emitter wrote to `supervisor_queue` only.
+/// A death must now land on the prompt path — the one the supervisor reads.
+#[tokio::test]
+async fn test_3dcb_worker_death_reaches_the_prompt_path() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    let sup_id = env.register_supervisor("sup-prompt-path");
+
+    let worker_id =
+        env.register_stale_worker_with_clone_path("died-loud", "/tmp/cas-worktrees/loud", 90);
+    let task_store = env.task_store();
+    let mut task = Task::new("cas-loud1".to_string(), "Held at death".to_string());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("died-loud".to_string());
+    task_store.add(&task).expect("add task");
+    env.agent_store()
+        .try_claim("cas-loud1", &worker_id, 600, None)
+        .expect("claim")
+        .is_success();
+
+    env.service
+        .factory(Parameters(factory_req("worker_status")))
+        .await
+        .expect("worker_status");
+
+    let rows = worker_died_prompt_rows(&env.cas_root);
+    assert_eq!(
+        rows.len(),
+        1,
+        "a worker death must enqueue exactly one prompt-path relay. rows={rows:?}"
+    );
+    let row = &rows[0];
+    assert_eq!(
+        row.target, "supervisor",
+        "the death relay must target the supervisor pane. row={row:?}"
+    );
+    assert!(
+        row.source.starts_with("lifecycle-wake:"),
+        "the relay needs a wake-eligible source or the daemon will neither wake an idle \
+         supervisor nor report it as a lost relay. source={}",
+        row.source
+    );
+    assert!(
+        !row.source.contains("died-loud"),
+        "the source must not be the dead worker's name — `is_dead_worker_source` drops those. \
+         source={}",
+        row.source
+    );
+    assert!(
+        row.prompt.contains("died-loud") && row.prompt.contains("cas-loud1"),
+        "the relay must name the dead worker and the work it held. prompt={}",
+        row.prompt
+    );
+
+    // The durable row survives for existing consumers, and is now stamped as
+    // handed off to the prompt path.
+    let queue = cas::store::open_supervisor_queue_store(&env.cas_root).expect("queue");
+    let pending = queue.peek(&sup_id, 20).expect("peek");
+    let died: Vec<_> = pending
+        .iter()
+        .filter(|n| n.event_type == "worker_died")
+        .collect();
+    assert_eq!(
+        died.len(),
+        1,
+        "supervisor_queue consumers must still see exactly one worker_died. pending={pending:?}"
+    );
+    assert!(
+        died[0].prompt_delivered_at.is_some(),
+        "the durable row must be stamped once its prompt was handed off. row={:?}",
+        died[0]
+    );
+}
+
+/// Dedup is keyed on the death INCIDENT, not on the agent — a worker that
+/// revives, heartbeats, and dies again is a new fact the supervisor must hear.
+#[tokio::test]
+async fn test_3dcb_a_second_genuine_death_is_reported_again() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    env.register_supervisor("sup-second-death");
+
+    let worker_id =
+        env.register_stale_worker_with_clone_path("twice-dead", "/tmp/cas-worktrees/twice", 90);
+    let task_store = env.task_store();
+    let mut task = Task::new("cas-twice1".to_string(), "First life".to_string());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("twice-dead".to_string());
+    task_store.add(&task).expect("add task");
+    env.agent_store()
+        .try_claim("cas-twice1", &worker_id, 600, None)
+        .expect("claim")
+        .is_success();
+
+    env.service
+        .factory(Parameters(factory_req("worker_status")))
+        .await
+        .expect("first death");
+    assert_eq!(worker_died_prompt_rows(&env.cas_root).len(), 1);
+
+    // Revive: a fresh heartbeat is what makes the next death a new incident.
+    let agent_store = env.agent_store();
+    agent_store.revive(&worker_id).expect("revive");
+    agent_store.heartbeat(&worker_id).expect("heartbeat");
+    let mut revived = agent_store.get(&worker_id).expect("get agent");
+    revived.last_heartbeat = chrono::Utc::now() - chrono::Duration::seconds(90);
+    agent_store.update(&revived).expect("backdate heartbeat");
+
+    let mut task = task_store.get("cas-twice1").expect("task");
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("twice-dead".to_string());
+    task_store.update(&task).expect("re-assign");
+    agent_store
+        .try_claim("cas-twice1", &worker_id, 600, None)
+        .expect("re-claim")
+        .is_success();
+
+    env.service
+        .factory(Parameters(factory_req("worker_status")))
+        .await
+        .expect("second death");
+
+    assert_eq!(
+        worker_died_prompt_rows(&env.cas_root).len(),
+        2,
+        "a genuinely separate death must be reported again — dedup keys the incident, \
+         not the agent"
+    );
+}
+
 // =============================================================================
 // worker_activity tests
 // =============================================================================
@@ -2975,50 +3121,345 @@ async fn test_worker_activity_codex_tool_call_uses_worker_status_rollout_signal(
 // clear_context tests
 // =============================================================================
 
+/// Fixture for a Claude worker whose transcripts CAS can locate: a temp Claude
+/// config dir with `projects/<cwd-slug>/`, plus a registered worker agent
+/// carrying that cwd as its `clone_path`.
+struct ClearContextFixture {
+    _config: TempDir,
+    _clone: TempDir,
+    projects: PathBuf,
+    worker: Agent,
+}
+
+fn clear_context_fixture(
+    worker_name: &str,
+    cli: &str,
+    timeout_secs: &str,
+) -> (EnvGuard, ClearContextFixture) {
+    let config = TempDir::new().expect("config dir");
+    let clone = TempDir::new().expect("clone dir");
+    let clone_path = clone.path().to_string_lossy().to_string();
+    let slug: String = clone_path
+        .chars()
+        .map(|c| if c == '/' || c == '.' { '-' } else { c })
+        .collect();
+    let projects = config.path().join("projects").join(&slug);
+    std::fs::create_dir_all(&projects).expect("projects dir");
+
+    let guard = EnvGuard::set(&[
+        ("CLAUDE_CONFIG_DIR", &config.path().to_string_lossy()),
+        ("CAS_CONTEXT_RESET_TIMEOUT_SECS", timeout_secs),
+    ]);
+
+    let mut worker = Agent::new(format!("{worker_name}-session"), worker_name.to_string());
+    worker.role = AgentRole::Worker;
+    worker
+        .metadata
+        .insert("clone_path".to_string(), clone_path.clone());
+    worker
+        .metadata
+        .insert("worker_cli".to_string(), cli.to_string());
+
+    (
+        guard,
+        ClearContextFixture {
+            _config: config,
+            _clone: clone,
+            projects,
+            worker,
+        },
+    )
+}
+
+/// cas-dffe (GH #145), the regression this task exists for, pinned dead: the
+/// queued row must be a CONTROL command, never the literal text `/clear`.
+///
+/// The old implementation queued the four characters `/clear` as an ordinary
+/// message, which the daemon routes to a Claude worker's team inbox — the
+/// worker read it as a teammate note and kept its whole conversation. If this
+/// assertion ever flips back to `"/clear"`, the bug is back.
 #[tokio::test]
-async fn test_clear_context_enqueues() {
-    let env = FactoryTestEnv::with_agent_id("test-sup");
+async fn test_clear_context_queues_a_control_command_not_message_text() {
+    let (guard, fixture) = clear_context_fixture("wolf", "claude", "0");
+    let env = FactoryTestEnv::with_agent_id_and_env("test-sup", Some(guard));
 
     let store = env.agent_store();
-    let agent = Agent::new("test-sup".to_string(), "supervisor".to_string());
-    store.register(&agent).expect("register");
+    store
+        .register(&Agent::new("test-sup".to_string(), "supervisor".to_string()))
+        .expect("register supervisor");
+    store.register(&fixture.worker).expect("register worker");
 
     let mut req = factory_req("clear_context");
     req.target = Some("wolf".to_string());
-
     let result = env.service.factory(Parameters(req)).await;
-    assert!(result.is_ok());
 
-    let prompts = env.prompt_queue().peek_all(10).expect("peek");
-    assert_eq!(prompts.len(), 1);
-    assert_eq!(prompts[0].target, "wolf");
-    assert_eq!(prompts[0].prompt, "/clear");
-}
-
-#[tokio::test]
-async fn test_clear_context_all_workers() {
-    let env = FactoryTestEnv::with_agent_id("test-sup");
-
-    let store = env.agent_store();
-    let agent = Agent::new("test-sup".to_string(), "supervisor".to_string());
-    store.register(&agent).expect("register");
-
-    let mut req = factory_req("clear_context");
-    req.target = Some("all_workers".to_string());
-
-    let result = env.service.factory(Parameters(req)).await;
-    assert!(result.is_ok());
-
-    let text = get_text(&result.unwrap());
+    // No daemon is running in this fixture, so nothing types the command into a
+    // pane and no post-reset transcript ever appears. The call must therefore
+    // FAIL — reporting "queued" as success is precisely the reported bug.
+    let error = result.expect_err("an unconfirmed reset must not be reported as success");
+    let message = error.message.to_string();
     assert!(
-        text.contains("all workers"),
-        "Should mention all workers: {text}"
+        message.contains("UNCONFIRMED"),
+        "failure must name the missing post-condition: {message}"
     );
 
     let prompts = env.prompt_queue().peek_all(10).expect("peek");
     assert_eq!(prompts.len(), 1);
-    assert_eq!(prompts[0].target, "all_workers");
-    assert_eq!(prompts[0].prompt, "/clear");
+    assert_eq!(prompts[0].target, "wolf");
+    assert_ne!(
+        prompts[0].prompt, "/clear",
+        "a context reset must never be queued as readable message text"
+    );
+    assert_eq!(
+        prompts[0].prompt,
+        cas::factory_context_reset::CONTEXT_RESET_CONTROL
+    );
+    assert!(
+        prompts[0].urgent,
+        "the reset takes the interrupt-and-inject lane so a mid-turn worker is reset too"
+    );
+    drop(fixture);
+}
+
+/// cas-dffe AC1/AC2/AC4: when the post-condition actually appears — a NEW
+/// session transcript recording the `/clear` — the call succeeds, reports the
+/// old→new session ids, and points CAS's transcript resolution at the live
+/// session so `worker_status` reflects the reset.
+#[tokio::test]
+async fn test_clear_context_confirms_reset_from_new_session_transcript() {
+    let (guard, fixture) = clear_context_fixture("otter", "claude", "10");
+    let env = FactoryTestEnv::with_agent_id_and_env("test-sup", Some(guard));
+
+    let store = env.agent_store();
+    store
+        .register(&Agent::new("test-sup".to_string(), "supervisor".to_string()))
+        .expect("register supervisor");
+    store.register(&fixture.worker).expect("register worker");
+
+    // Stand in for the daemon + harness: shortly after the control command is
+    // queued, Claude Code starts a new session and writes its transcript.
+    let projects = fixture.projects.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        std::fs::write(
+            projects.join("11112222-3333-4444-5555-666677778888.jsonl"),
+            format!(
+                "{{\"type\":\"mode\"}}\n{{\"content\":\"{}\"}}\n",
+                cas::factory_context_reset::CLEAR_COMMAND_MARKER
+            ),
+        )
+        .expect("write post-clear transcript");
+    });
+
+    let mut req = factory_req("clear_context");
+    req.target = Some("otter".to_string());
+    let result = env.service.factory(Parameters(req)).await;
+
+    let text = get_text(&result.expect("a confirmed reset must succeed"));
+    assert!(text.contains("CONFIRMED"), "{text}");
+    assert!(
+        text.contains("11112222"),
+        "the new conversation id is the post-condition: {text}"
+    );
+    assert!(
+        text.contains("otter-se"),
+        "the pre-reset session must be named so the change is checkable: {text}"
+    );
+
+    let reloaded = store.get(&fixture.worker.id).expect("reload worker");
+    assert_eq!(
+        reloaded.cc_session_id.as_deref(),
+        Some("11112222-3333-4444-5555-666677778888"),
+        "worker_status resolves transcripts by cc_session_id — it must follow the new session"
+    );
+}
+
+/// cas-dffe AC2: a harness with no verified in-place reset is refused up front.
+/// Nothing is queued, and the error names the harness and the alternative.
+#[tokio::test]
+async fn test_clear_context_refuses_harness_without_verified_reset() {
+    let (guard, fixture) = clear_context_fixture("badger", "codex", "0");
+    let env = FactoryTestEnv::with_agent_id_and_env("test-sup", Some(guard));
+
+    let store = env.agent_store();
+    store
+        .register(&Agent::new("test-sup".to_string(), "supervisor".to_string()))
+        .expect("register supervisor");
+    store.register(&fixture.worker).expect("register worker");
+
+    let mut req = factory_req("clear_context");
+    req.target = Some("badger".to_string());
+    let error = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect_err("an impossible reset must not report success");
+    let message = error.message.to_string();
+    assert!(message.contains("codex"), "{message}");
+    assert!(message.contains("shutdown_workers"), "{message}");
+
+    assert!(
+        env.prompt_queue().peek_all(10).expect("peek").is_empty(),
+        "nothing may be queued for a harness that cannot be reset"
+    );
+}
+
+/// cas-dffe live measurement, codified: does typing the production reset
+/// command into a REAL `claude` produce the production post-condition?
+///
+/// `#[ignore]` — spawns a real `claude` attached to a real PTY, so it is
+/// excluded from the default gate per this repo's live/e2e convention. Run it
+/// explicitly when touching `factory_context_reset` or the reset delivery path:
+///
+/// ```bash
+/// cargo test -p cas --test factory_mcp_ops_test -- --ignored --nocapture \
+///     clear_context_command_really_resets_a_live_claude
+/// ```
+///
+/// This exists because of the cas-5fff lesson recorded in
+/// `crates/cas-mux/tests/idle_pty_injection_runtime.rs`: a claim about a
+/// harness's behavior is only valid for the harness it was measured against.
+/// Everything else in this task's coverage is fixture-driven — the *only*
+/// evidence that `/clear` typed over a PTY is a real command channel, and that
+/// Claude Code answers it with a new session transcript recording the clear, is
+/// this measurement. It deliberately uses the production helpers
+/// (`context_reset_command` + `detect_context_reset`), not hand-written
+/// equivalents, so a drift in either is caught here.
+///
+/// Note (measured the hard way): a child inheriting `CLAUDE_CODE_CHILD_SESSION`
+/// runs with "Transcript saving is off" and writes NO transcript at all, which
+/// looks exactly like a failed reset. The marker vars are stripped below.
+#[test]
+#[ignore = "spawns a real `claude` on a real PTY — run explicitly, see doc comment"]
+fn clear_context_command_really_resets_a_live_claude() {
+    use cas::factory_context_reset as reset;
+    use cas_mux::{Pane, PaneKind, Pty, PtyConfig};
+
+    if which_claude().is_none() {
+        eprintln!("SKIP: `claude` is not on PATH");
+        return;
+    }
+    // A directory Claude Code already trusts: the repo root this test is built
+    // from. A fresh temp dir would stall on the trust dialog instead.
+    let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repo root")
+        .to_path_buf();
+
+    let stripped: Vec<(String, String)> = std::env::vars()
+        .filter(|(key, _)| key.starts_with("CLAUDE_CODE"))
+        .collect();
+    for (key, _) in &stripped {
+        unsafe { std::env::remove_var(key) };
+    }
+
+    let dirs = reset::transcript_dirs_for(&cwd.to_string_lossy());
+    assert!(
+        !dirs.is_empty(),
+        "no Claude project directory for {} — run `claude` there once first",
+        cwd.display()
+    );
+    let before = reset::snapshot_transcripts(&dirs);
+
+    let pty = Pty::spawn(
+        "cas-dffe-live",
+        PtyConfig {
+            command: "claude".to_string(),
+            args: vec![],
+            cwd: Some(cwd.clone()),
+            env: vec![("TERM".to_string(), "xterm-256color".to_string())],
+            rows: 24,
+            cols: 80,
+        },
+    )
+    .expect("spawn claude on a pty");
+    let mut pane = Pane::with_pty(
+        "cas-dffe-live",
+        PaneKind::Shell,
+        pty,
+        24,
+        80,
+        SupervisorCli::Claude,
+    )
+    .expect("wrap pty in pane");
+
+    // Let the TUI boot; the readiness gate the daemon uses needs output + 5s.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
+        let _ = pane.drain_output();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(pane.ready_for_injection(), "claude never became injectable");
+
+    let command = reset::context_reset_command(SupervisorCli::Claude)
+        .expect("claude has a verified reset command");
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    rt.block_on(pane.inject_prompt(command))
+        .expect("inject the reset command");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut evidence = None;
+    while std::time::Instant::now() < deadline {
+        let _ = pane.drain_output();
+        evidence = reset::detect_context_reset(&dirs, &before);
+        if evidence.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+
+    for (key, value) in stripped {
+        unsafe { std::env::set_var(key, value) };
+    }
+
+    let evidence = evidence.expect(
+        "typing the reset command into a live claude must start a NEW session whose transcript \
+         records the /clear — that post-condition is the entire contract of clear_context",
+    );
+    eprintln!(
+        "context reset confirmed: session {} at {}",
+        evidence.session_id,
+        evidence.transcript.display()
+    );
+}
+
+fn which_claude() -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|dir| dir.join("claude"))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+#[tokio::test]
+async fn test_clear_context_all_workers_fans_out_to_live_workers() {
+    let (guard, fixture) = clear_context_fixture("wolf", "claude", "0");
+    let env = FactoryTestEnv::with_agent_id_and_env("test-sup", Some(guard));
+
+    let store = env.agent_store();
+    store
+        .register(&Agent::new("test-sup".to_string(), "supervisor".to_string()))
+        .expect("register supervisor");
+    store.register(&fixture.worker).expect("register worker");
+
+    let mut req = factory_req("clear_context");
+    req.target = Some("all_workers".to_string());
+    let result = env.service.factory(Parameters(req)).await;
+    assert!(
+        result.is_err(),
+        "no daemon is running, so no reset can be confirmed"
+    );
+
+    // `all_workers` resolves to concrete recipients: a control command is
+    // addressed to each worker's pane, never to the un-routable literal
+    // "all_workers" target.
+    let prompts = env.prompt_queue().peek_all(10).expect("peek");
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts[0].target, "wolf");
+    assert_eq!(
+        prompts[0].prompt,
+        cas::factory_context_reset::CONTEXT_RESET_CONTROL
+    );
 }
 
 // =============================================================================
@@ -4773,7 +5214,20 @@ async fn test_062d_lifecycle_reopen_pushes_ready() {
     assert_eq!(after.status, TaskStatus::Open);
 
     let queue = cas::store::open_supervisor_queue_store(&env.cas_root).expect("queue");
-    let pending = queue.peek(&sup_id, 20).expect("peek");
+    // cas-7787 (GH #160) changed `resolve_owning_supervisor` to break ties on
+    // registration recency after liveness, so that a supervisor whose harness
+    // session restarts mid-factory-session keeps receiving relays at its
+    // SUCCESSOR identity instead of at whichever duplicate row happened to
+    // sort first on a UUID. This test registers two Supervisor rows in one
+    // session — `sup_id` first, then the calling agent below — so the relay
+    // now lands at the caller, which is what the fixture always meant by
+    // "register calling supervisor". Assert against the caller, not against
+    // the row the old lexicographic coin flip used to pick.
+    assert!(
+        queue.peek(&sup_id, 20).expect("peek").is_empty(),
+        "the superseded identity must not capture the relay"
+    );
+    let pending = queue.peek("sup-reopen-agent", 20).expect("peek");
     assert!(
         pending.iter().any(|n| {
             n.event_type == "task_lifecycle"
@@ -4832,7 +5286,20 @@ async fn test_062d_lifecycle_close_pushes_closed() {
     assert_eq!(after.status, TaskStatus::Closed, "notes={}", after.notes);
 
     let queue = cas::store::open_supervisor_queue_store(&env.cas_root).expect("queue");
-    let pending = queue.peek(&sup_id, 20).expect("peek");
+    // cas-7787 (GH #160) changed `resolve_owning_supervisor` to break ties on
+    // registration recency after liveness, so that a supervisor whose harness
+    // session restarts mid-factory-session keeps receiving relays at its
+    // SUCCESSOR identity instead of at whichever duplicate row happened to
+    // sort first on a UUID. This test registers two Supervisor rows in one
+    // session — `sup_id` first, then the calling agent below — so the relay
+    // now lands at the caller, which is what the fixture always meant by
+    // "register calling supervisor". Assert against the caller, not against
+    // the row the old lexicographic coin flip used to pick.
+    assert!(
+        queue.peek(&sup_id, 20).expect("peek").is_empty(),
+        "the superseded identity must not capture the relay"
+    );
+    let pending = queue.peek("sup-close-agent", 20).expect("peek");
     assert!(
         pending.iter().any(|n| {
             n.event_type == "task_lifecycle"

@@ -10,7 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
 mod support;
@@ -62,12 +62,85 @@ struct JsonRpcError {
 // Test Helpers
 // ============================================================================
 
+/// Upper bound on how long the harness will wait for a single JSON-RPC
+/// response before failing the test.
+///
+/// WHY THIS EXISTS (cas-7bb94): this harness previously did an unbounded
+/// blocking `read_line` on the server's stdout. If a response never arrived
+/// the test thread wedged forever and was eventually killed by nextest's
+/// 600s slow-timeout — which reddens CI, costs ~10 minutes of runner time,
+/// and gets misattributed to whatever unrelated commit happened to be in
+/// flight. A bounded read turns that into a fast, legible failure.
+///
+/// The value is chosen to sit *above* every server-side bound so a genuine
+/// server fault still surfaces as the server's own diagnostic rather than
+/// being masked by the harness:
+///   * `server_handler::call_tool` self-times-out at 55s and replies with a
+///     structured "timed out after 55s" error.
+///   * `runtime::EAGER_INIT_BUDGET` aborts startup at 45s.
+/// 90s clears both with slack for loaded CI, and is ~6.6x under the 600s
+/// nextest kill, so a wedge can never again consume the slow-timeout.
+const RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// Why a request failed to produce a usable response. Returned by
+/// [`McpTestClient::try_send_request`] so tests can assert on the failure
+/// shape instead of relying on a panic message.
+#[derive(Debug)]
+enum TransportError {
+    /// No response within the client's response timeout — the server is
+    /// alive (or at least its stdout is still open) but silent.
+    Timeout {
+        method: String,
+        id: u64,
+        waited: std::time::Duration,
+        child_status: Option<std::process::ExitStatus>,
+    },
+    /// The server closed stdout (or exited) without answering.
+    Closed { method: String, id: u64 },
+}
+
+impl std::fmt::Display for TransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TransportError::Timeout {
+                method,
+                id,
+                waited,
+                child_status,
+            } => write!(
+                f,
+                "no JSON-RPC response to method '{method}' (id {id}) within {}s; \
+                 cas serve child status: {}. The server accepted the request and \
+                 never answered — this is a server-side non-response, not a slow test.",
+                waited.as_secs(),
+                match child_status {
+                    Some(status) => format!("exited {status}"),
+                    None => "still running".to_string(),
+                }
+            ),
+            TransportError::Closed { method, id } => write!(
+                f,
+                "cas serve closed stdout without responding to method '{method}' (id {id})"
+            ),
+        }
+    }
+}
+
 /// Helper to communicate with MCP server
 struct McpTestClient {
     child: std::process::Child,
     stdin: std::process::ChildStdin,
-    stdout: BufReader<std::process::ChildStdout>,
+    /// Lines drained from the child's stdout by a dedicated reader thread.
+    /// Using a channel (rather than reading the pipe inline) is what makes
+    /// the response wait bounded: `recv_timeout` can give up, a blocking
+    /// `read_line` cannot.
+    stdout_lines: std::sync::mpsc::Receiver<String>,
+    /// Accumulated stderr, present only when stderr is piped. Drained by a
+    /// dedicated thread so the child can never wedge on a full stderr pipe
+    /// mid-test (the same unbounded-blocking class as the stdout read).
+    stderr_buf: Option<std::sync::Arc<std::sync::Mutex<String>>>,
     next_id: u64,
+    response_timeout: std::time::Duration,
 }
 
 impl McpTestClient {
@@ -78,57 +151,115 @@ impl McpTestClient {
 
     fn spawn_command(mut cmd: Command) -> Self {
         cmd.arg("serve");
-        let mut child = cmd
+        let child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
             .expect("Failed to spawn cas serve");
 
-        let stdin = child.stdin.take().expect("Failed to get stdin");
-        let stdout = BufReader::new(child.stdout.take().expect("Failed to get stdout"));
-
-        Self {
-            child,
-            stdin,
-            stdout,
-            next_id: 1,
-        }
+        Self::from_child(child, false)
     }
 
     fn spawn_capturing_stderr(sandbox: &CasSandbox) -> Self {
         let mut cmd = sandbox.command();
         cmd.arg("serve");
-        let mut child = cmd
+        let child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .expect("Failed to spawn cas serve");
 
+        Self::from_child(child, true)
+    }
+
+    /// Wire a spawned child up to the draining reader threads.
+    fn from_child(mut child: std::process::Child, capture_stderr: bool) -> Self {
         let stdin = child.stdin.take().expect("Failed to get stdin");
-        let stdout = BufReader::new(child.stdout.take().expect("Failed to get stdout"));
+        let stdout = child.stdout.take().expect("Failed to get stdout");
+
+        let (tx, stdout_lines) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    // EOF: dropping `tx` disconnects the channel, which the
+                    // request path reports as `TransportError::Closed`.
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        if tx.send(line).is_err() {
+                            break; // client dropped
+                        }
+                    }
+                }
+            }
+        });
+
+        let stderr_buf = if capture_stderr {
+            let pipe = child.stderr.take().expect("Failed to get stderr");
+            let buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+            let sink = std::sync::Arc::clone(&buf);
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(pipe);
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => sink.lock().expect("stderr buffer poisoned").push_str(&line),
+                    }
+                }
+            });
+            Some(buf)
+        } else {
+            None
+        };
 
         Self {
             child,
             stdin,
-            stdout,
+            stdout_lines,
+            stderr_buf,
             next_id: 1,
+            response_timeout: RESPONSE_TIMEOUT,
         }
     }
 
     fn stop_and_read_stderr(&mut self) -> String {
         let _ = self.child.kill();
-        let mut stderr = String::new();
-        if let Some(mut pipe) = self.child.stderr.take() {
-            pipe.read_to_string(&mut stderr)
-                .expect("read cas serve stderr");
-        }
         let _ = self.child.wait();
-        stderr
+        let buf = self
+            .stderr_buf
+            .as_ref()
+            .expect("client was not spawned with stderr captured");
+        // The child is dead, so the drain thread is at (or racing toward)
+        // EOF. Poll briefly for it to finish flushing rather than joining,
+        // so a stuck reader can never wedge the test either.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut last = String::new();
+        while std::time::Instant::now() < deadline {
+            let snapshot = buf.lock().expect("stderr buffer poisoned").clone();
+            if !snapshot.is_empty() && snapshot == last {
+                break;
+            }
+            last = snapshot;
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        last
     }
 
-    fn send_request(&mut self, method: &str, params: Option<Value>) -> JsonRpcResponse {
+    /// Send a request and wait, with a bound, for its response.
+    ///
+    /// Returns `Err` instead of blocking forever when the server never
+    /// answers. `send_request` is the panicking convenience wrapper used by
+    /// the protocol tests; this variant exists so the regression test can
+    /// assert the bound actually fires.
+    fn try_send_request(
+        &mut self,
+        method: &str,
+        params: Option<Value>,
+    ) -> Result<JsonRpcResponse, TransportError> {
         let id = self.next_id;
         self.next_id += 1;
 
@@ -139,12 +270,30 @@ impl McpTestClient {
         writeln!(self.stdin, "{request_json}").expect("Failed to write request");
         self.stdin.flush().expect("Failed to flush");
 
-        // Read response (skip notifications with no id)
+        // Read response (skip notifications with no id). The deadline covers
+        // the whole exchange, so a server that streams endless notifications
+        // without ever answering cannot extend the wait indefinitely either.
+        let started = std::time::Instant::now();
+        let deadline = started + self.response_timeout;
         loop {
-            let mut response_line = String::new();
-            self.stdout
-                .read_line(&mut response_line)
-                .expect("Failed to read response");
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let response_line = match self.stdout_lines.recv_timeout(remaining) {
+                Ok(line) => line,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    return Err(TransportError::Timeout {
+                        method: method.to_string(),
+                        id,
+                        waited: started.elapsed(),
+                        child_status: self.child.try_wait().ok().flatten(),
+                    });
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(TransportError::Closed {
+                        method: method.to_string(),
+                        id,
+                    });
+                }
+            };
 
             let response: JsonRpcResponse =
                 serde_json::from_str(&response_line).expect("Failed to parse response");
@@ -153,13 +302,20 @@ impl McpTestClient {
             match response.id {
                 Some(resp_id) => {
                     assert_eq!(resp_id, id, "Response ID should match request");
-                    return response;
+                    return Ok(response);
                 }
                 None => {
                     // Notification or event; continue reading.
                     continue;
                 }
             }
+        }
+    }
+
+    fn send_request(&mut self, method: &str, params: Option<Value>) -> JsonRpcResponse {
+        match self.try_send_request(method, params) {
+            Ok(response) => response,
+            Err(err) => panic!("MCP transport failure: {err}"),
         }
     }
 
@@ -208,6 +364,24 @@ impl McpTestClient {
 
     fn list_tools(&mut self) -> JsonRpcResponse {
         self.send_request("tools/list", None)
+    }
+
+    /// Attach to a stand-in "server" that consumes stdin and never writes a
+    /// byte to stdout — the exact shape of the non-response that used to
+    /// wedge this harness for 600s. Used only by the regression test below.
+    #[cfg(unix)]
+    fn spawn_silent_stub(response_timeout: std::time::Duration) -> Self {
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("cat >/dev/null")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn silent stub");
+        let mut client = Self::from_child(child, false);
+        client.response_timeout = response_timeout;
+        client
     }
 }
 
@@ -663,6 +837,61 @@ fn test_mcp_unknown_tool() {
     assert!(
         response.error.is_some(),
         "Unknown tool should return error: {response:?}"
+    );
+}
+
+/// Regression guard for cas-7bb94.
+///
+/// `test_mcp_unknown_tool` was observed wedging on CI until nextest's 600s
+/// slow-timeout killed it, turning Fast Validation red on a commit that
+/// touched only an insta snapshot fixture. The 600s was owned by this
+/// harness: `send_request` did an unbounded blocking `read_line`, so a
+/// server that never answered produced an infinite wait instead of a test
+/// failure.
+///
+/// This test pins the invariant that made the 600s possible: a server that
+/// accepts the request and never responds must surface as a bounded,
+/// legible `TransportError::Timeout` — never as an unbounded block. It
+/// drives a deliberately silent stub so the non-response is deterministic
+/// rather than relying on the rare natural trigger.
+#[cfg(unix)]
+#[test]
+fn test_response_wait_is_bounded_when_server_never_answers() {
+    let budget = std::time::Duration::from_secs(2);
+    let mut client = McpTestClient::spawn_silent_stub(budget);
+
+    let started = std::time::Instant::now();
+    let result = client.try_send_request("tools/list", None);
+    let elapsed = started.elapsed();
+
+    let err = match result {
+        Err(err) => err,
+        Ok(response) => panic!("silent stub must not produce a response: {response:?}"),
+    };
+
+    match &err {
+        TransportError::Timeout { child_status, .. } => {
+            assert!(
+                child_status.is_none(),
+                "stub should still be running; got {child_status:?}"
+            );
+        }
+        other => panic!("expected a bounded timeout, got: {other}"),
+    }
+
+    // Generous ceiling so this cannot flake on a loaded runner, while still
+    // being orders of magnitude below the 600s nextest kill it replaces.
+    assert!(
+        elapsed < budget + std::time::Duration::from_secs(30),
+        "response wait must be bounded by the client timeout; waited {elapsed:?}"
+    );
+
+    // The diagnostic must name the method and say the server went silent,
+    // so the next occurrence is triageable from CI logs alone.
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("tools/list") && rendered.contains("never answered"),
+        "timeout diagnostic must identify the silent request: {rendered}"
     );
 }
 

@@ -625,7 +625,29 @@ pub(super) enum LifecycleRedelivery {
     /// The recipient acknowledged this notification; redelivery must stop
     /// permanently, not merely pause.
     StopAcknowledged,
+    /// cas-7787 (GH #160): the row has burned its whole retry budget without
+    /// ever reaching the recipient. Stop retrying AND record the failure —
+    /// the audience is gone, and a relay nobody will ever read must not keep
+    /// re-waking forever.
+    StopUndelivered,
 }
+
+/// cas-7787 (GH #160): how many re-nudge intervals a supervisor lifecycle
+/// wake relay may burn before the daemon concludes the supervisor is not
+/// coming back for it.
+///
+/// At [`LIFECYCLE_RENUDGE_INTERVAL`] (60s) this is a 20-minute window — far
+/// longer than any real turn boundary, so a merely-busy supervisor always wins
+/// the race, while a supervisor that restarted, crashed or was shut down stops
+/// accruing an unbounded backlog of relays it will never read.
+///
+/// The bound exists to make the two ends EXHAUSTIVE. Before it, a relay whose
+/// task never left `awaiting_merge` had no terminal state at all: the
+/// staleness suppressor only fires when the task moves on, so a lane parked
+/// behind a supervisor who never returned would retry forever. Terminating on
+/// budget exhaustion is what guarantees every relay reaches exactly one of
+/// delivered or visibly-failed, and never a third silent path.
+pub(super) const LIFECYCLE_MAX_RENUDGE_ATTEMPTS: u32 = 20;
 
 /// cas-d732 (GH #119): decide whether a pending lifecycle row may be
 /// (re)delivered on this pass.
@@ -640,14 +662,23 @@ pub(super) enum LifecycleRedelivery {
 /// `message_ack`. The complementary half — the task leaving the state that
 /// triggered the push — is handled upstream by the cas-bc8c staleness
 /// revalidation, which suppresses the row outright.
+/// cas-7787 (GH #160): `attempts` is how many times this row has already been
+/// (re)delivered without arriving. Once it exceeds
+/// [`LIFECYCLE_MAX_RENUDGE_ATTEMPTS`] the row stops retrying and is reported
+/// as a failure, so the pending set stays bounded and no relay can end in
+/// silence.
 pub(super) fn lifecycle_redelivery_decision(
     acked: bool,
     last_attempt: Option<std::time::Instant>,
     now: std::time::Instant,
     interval: std::time::Duration,
+    attempts: u32,
 ) -> LifecycleRedelivery {
     if acked {
         return LifecycleRedelivery::StopAcknowledged;
+    }
+    if attempts >= LIFECYCLE_MAX_RENUDGE_ATTEMPTS {
+        return LifecycleRedelivery::StopUndelivered;
     }
     match last_attempt {
         None => LifecycleRedelivery::Deliver,
@@ -901,6 +932,7 @@ impl FactoryDaemon {
     /// entry behind leaks one record per terminalized row.
     fn forget_row_delivery_state(&mut self, row_id: i64) {
         self.lifecycle_redelivery_attempts.remove(&row_id);
+        self.lifecycle_redelivery_counts.remove(&row_id);
         self.inbox_deferred_writes.remove(&row_id);
         self.urgent_wake_probes.remove(&row_id);
     }
@@ -1547,8 +1579,12 @@ impl FactoryDaemon {
     /// row must NOT be consumed until it has actually woken the pane.
     fn row_is_supervisor_wake(source: &str, prompt: &str) -> bool {
         use crate::mcp::tools::core::task::lifecycle::supervisor_push::is_lifecycle_wake_source;
+        // cas-3dcb (GH #168): a worker-death relay is wake-eligible on the same
+        // terms as a lifecycle transition. Both mean "a lane is stuck until you
+        // act"; a death notice that only lands in `supervisor_queue` is the
+        // 2,044-alert silence this widening exists to end.
         is_lifecycle_wake_source(source)
-            && crate::prompt_revalidation::parse_lifecycle_envelope(prompt).is_some()
+            && crate::prompt_revalidation::is_supervisor_wake_envelope(prompt)
     }
 
     fn supervisor_wake_is_eligible(
@@ -1567,11 +1603,12 @@ impl FactoryDaemon {
         // /message), so on its own it would let any client hand arbitrary text
         // a PTY write into the supervisor pane and walk straight through
         // cas-dab2's guard. Corroborate with the payload: only a genuine
-        // `<task-lifecycle …>` envelope — which the lifecycle emitter is the
-        // only producer of — qualifies.
+        // `<task-lifecycle …>` or `<worker-died …>` envelope — which the
+        // lifecycle emitter and orphan recovery are the only producers of —
+        // qualifies (cas-3dcb).
         pane_target == supervisor_name
             && is_lifecycle_wake_source(source)
-            && crate::prompt_revalidation::parse_lifecycle_envelope(prompt).is_some()
+            && crate::prompt_revalidation::is_supervisor_wake_envelope(prompt)
             && pane.is_safe_to_type_into()
             && Self::agent_signals_look_quiet(data, pane_target, now)
     }
@@ -1938,6 +1975,63 @@ impl FactoryDaemon {
         for queued in prompts {
             let target = &queued.target;
 
+            // cas-dffe (GH #145): a context-reset control command is not a
+            // message and must never enter message routing — that is precisely
+            // how `/clear` used to end up as inbox text a Claude worker read
+            // and ignored. Handle it first, in its own lane: type the harness's
+            // own reset command into the pane, or refuse and say why.
+            if crate::factory_context_reset::is_context_reset_control(&queued.prompt) {
+                let target = target.clone();
+                match self.deliver_context_reset(&target).await {
+                    super::delivery::ContextResetDelivery::Injected => {
+                        if let Err(e) = queue.mark_transport_delivered(queued.id) {
+                            tracing::warn!(
+                                prompt_id = queued.id,
+                                error = %e,
+                                "cas-dffe: failed to stamp a delivered context-reset command"
+                            );
+                        }
+                        tracing::info!(
+                            target: "cas::coordination",
+                            stage = "context_reset_delivered",
+                            message_id = queued.id,
+                            target_agent = %target,
+                            "cas-dffe: context-reset command typed into the pane; the requester \
+                             confirms the reset from the recipient's new session transcript"
+                        );
+                    }
+                    super::delivery::ContextResetDelivery::NotReady => {
+                        let _ = queue.record_pending_reason(
+                            queued.id,
+                            cas_store::PendingReason::GatedNotReady,
+                            Some("pane not ready for injection — context reset retries next tick"),
+                        );
+                    }
+                    super::delivery::ContextResetDelivery::Unsupported { detail } => {
+                        // Terminal: retrying cannot make an unsupported harness
+                        // resettable, and leaving the row pending would wedge
+                        // the queue behind an impossible command.
+                        let _ = queue.mark_dropped(queued.id, Some(&detail));
+                        tracing::warn!(
+                            target: "cas::coordination",
+                            stage = "context_reset_unsupported",
+                            message_id = queued.id,
+                            target_agent = %target,
+                            detail = %detail,
+                            "cas-dffe: refused a context reset instead of pretending it happened"
+                        );
+                    }
+                    super::delivery::ContextResetDelivery::Failed { detail } => {
+                        let _ = queue.record_retry(
+                            queued.id,
+                            cas_store::PendingReason::AdapterRetryable,
+                            Some(&detail),
+                        );
+                    }
+                }
+                continue;
+            }
+
             // cas-bc8c: structured transition prompts are only actionable
             // while the state they describe is still current. Revalidate at
             // the last shared point before inbox/PTY transport, after any
@@ -2057,16 +2151,31 @@ impl FactoryDaemon {
                 crate::prompt_revalidation::parse_lifecycle_envelope(&queued.prompt)
                 && let Ok(store) = crate::store::open_task_store_local(self.app.cas_dir())
             {
-                let stale = match store.get(&envelope.task_id) {
-                    Ok(task) => matches!(
-                        crate::prompt_revalidation::revalidate_lifecycle_prompt(
-                            &queued.prompt,
-                            task.status,
-                            task.updated_at,
-                        ),
-                        crate::prompt_revalidation::LifecyclePromptDecision::SuppressStale { .. }
+                use crate::prompt_revalidation::{
+                    LifecyclePromptDecision, LifecycleStaleOutcome, lifecycle_stale_outcome,
+                };
+                // cas-7787: what counts as "the recipient got it" for a row
+                // that is still in the queue. A row the daemon transported is
+                // stamped `transport_delivered_at` + `processed_at` by
+                // `mark_transport_delivered`, so it is no longer selectable
+                // and cannot reach this check at all — every row that does is
+                // by construction untransported. The one exception worth
+                // honouring is an explicit `message_ack`: the recipient told
+                // us it read the notification even though the delivery loop
+                // never got to consume the row, and reporting that as a lost
+                // relay would be a false alarm.
+                let queued_row_was_transported = queued.acked_at.is_some();
+                let decision = match store.get(&envelope.task_id) {
+                    Ok(task) => crate::prompt_revalidation::revalidate_lifecycle_prompt(
+                        &queued.prompt,
+                        task.status,
+                        task.updated_at,
                     ),
-                    Err(cas_store::StoreError::TaskNotFound(_)) => true,
+                    Err(cas_store::StoreError::TaskNotFound(_)) => {
+                        LifecyclePromptDecision::SuppressStale {
+                            task_id: envelope.task_id.clone(),
+                        }
+                    }
                     Err(error) => {
                         tracing::warn!(
                             prompt_id = queued.id,
@@ -2074,21 +2183,59 @@ impl FactoryDaemon {
                             error = %error,
                             "cas-bc8c: lifecycle state unavailable; retaining prompt for delivery"
                         );
-                        false
+                        LifecyclePromptDecision::Deliver
                     }
                 };
-                if stale {
-                    let _ = queue.mark_suppressed(
-                        queued.id,
-                        Some("task lifecycle occurrence no longer matches current task state"),
-                    );
-                    tracing::debug!(
-                        prompt_id = queued.id,
-                        task_id = %envelope.task_id,
-                        "cas-bc8c: suppressed stale task lifecycle prompt before transport"
-                    );
-                    self.forget_row_delivery_state(queued.id);
-                    continue;
+                // cas-7787 (GH #160): staleness decides the PAYLOAD's fate;
+                // it must not also decide whether a failed delivery is worth
+                // mentioning. A wake-eligible relay that expires having never
+                // reached the supervisor is the exact silence this fixes.
+                match lifecycle_stale_outcome(
+                    &decision,
+                    Self::row_is_supervisor_wake(&queued.source, &queued.prompt),
+                    queued_row_was_transported,
+                ) {
+                    LifecycleStaleOutcome::Deliver => {}
+                    LifecycleStaleOutcome::SuppressDelivered { .. } => {
+                        let _ = queue.mark_suppressed(
+                            queued.id,
+                            Some("task lifecycle occurrence no longer matches current task state"),
+                        );
+                        tracing::debug!(
+                            prompt_id = queued.id,
+                            task_id = %envelope.task_id,
+                            "cas-bc8c: suppressed stale task lifecycle prompt before transport"
+                        );
+                        self.forget_row_delivery_state(queued.id);
+                        continue;
+                    }
+                    LifecycleStaleOutcome::UndeliveredRelayFailure { task_id } => {
+                        let notice = crate::prompt_revalidation::undelivered_relay_notice(
+                            &task_id,
+                            queued.summary.as_deref(),
+                        );
+                        // Terminate — re-writing an expired premise every
+                        // cadence tick is the GH #124 storm — but terminate as
+                        // a recorded FAILURE, so `worker_status` / `doctor`
+                        // can name it instead of the fleet reading silence as
+                        // success.
+                        let _ = queue
+                            .mark_undelivered_lifecycle_relay(queued.id, Some(notice.as_str()));
+                        tracing::error!(
+                            target: "cas::coordination",
+                            stage = "lifecycle_relay_undelivered",
+                            channel = "prompt_queue",
+                            message_id = queued.id,
+                            source = %queued.source,
+                            target_agent = %queued.target,
+                            task_id = %task_id,
+                            "cas-7787 (GH #160): a supervisor lifecycle relay expired without \
+                             ever being transported — the supervisor was never told this lane \
+                             was waiting on them"
+                        );
+                        self.forget_row_delivery_state(queued.id);
+                        continue;
+                    }
                 }
             }
 
@@ -2224,10 +2371,20 @@ impl FactoryDaemon {
                     self.lifecycle_redelivery_attempts.get(&queued.id).copied(),
                     std::time::Instant::now(),
                     LIFECYCLE_RENUDGE_INTERVAL,
+                    self.lifecycle_redelivery_counts
+                        .get(&queued.id)
+                        .copied()
+                        .unwrap_or(0),
                 ) {
                     LifecycleRedelivery::Deliver => {
                         self.lifecycle_redelivery_attempts
                             .insert(queued.id, std::time::Instant::now());
+                        // cas-7787: only a real (re)delivery burns budget —
+                        // a cooldown tick is policy, not a failed attempt.
+                        *self
+                            .lifecycle_redelivery_counts
+                            .entry(queued.id)
+                            .or_insert(0) += 1;
                     }
                     LifecycleRedelivery::Cooldown => {
                         // GatedNotReady: withheld by policy, not a failed
@@ -2258,6 +2415,50 @@ impl FactoryDaemon {
                             prompt_id = queued.id,
                             source = %queued.source,
                             "cas-d732: stopped redelivering an acknowledged lifecycle transition"
+                        );
+                        continue;
+                    }
+                    LifecycleRedelivery::StopUndelivered => {
+                        // cas-7787 (GH #160): the retry budget is gone and the
+                        // relay never arrived. Stop retrying — an audience
+                        // that has not appeared in 20 minutes is not going to
+                        // — but terminate as a RECORDED FAILURE so the row
+                        // becomes visible in worker_status/doctor rather than
+                        // lingering as a zombie or vanishing into silence.
+                        // cas-3dcb: a death relay has no task_id, and reporting
+                        // one as "(unknown task)" would bury the one fact the
+                        // supervisor needs — which worker is gone.
+                        let notice = match crate::prompt_revalidation::parse_worker_died_envelope(
+                            &queued.prompt,
+                        ) {
+                            Some(envelope) => {
+                                crate::prompt_revalidation::undelivered_worker_died_notice(
+                                    &envelope.worker_name,
+                                )
+                            }
+                            None => crate::prompt_revalidation::undelivered_relay_notice(
+                                &crate::prompt_revalidation::parse_lifecycle_envelope(
+                                    &queued.prompt,
+                                )
+                                .map(|envelope| envelope.task_id)
+                                .unwrap_or_else(|| "(unknown task)".to_string()),
+                                queued.summary.as_deref(),
+                            ),
+                        };
+                        let _ = queue
+                            .mark_undelivered_lifecycle_relay(queued.id, Some(notice.as_str()));
+                        self.forget_row_delivery_state(queued.id);
+                        tracing::error!(
+                            target: "cas::coordination",
+                            stage = "lifecycle_relay_undelivered",
+                            channel = "prompt_queue",
+                            message_id = queued.id,
+                            source = %queued.source,
+                            target_agent = %queued.target,
+                            attempts = LIFECYCLE_MAX_RENUDGE_ATTEMPTS,
+                            "cas-7787 (GH #160): a supervisor lifecycle relay exhausted its retry \
+                             budget without ever being transported — the supervisor was never \
+                             told this lane was waiting on them"
                         );
                         continue;
                     }
@@ -2770,16 +2971,41 @@ impl FactoryDaemon {
                         // This is the number the P99 SLO tracks.
                         let deliver_ms =
                             (chrono::Utc::now() - queued.created_at).num_milliseconds();
-                        tracing::info!(
-                            target: "cas::coordination",
-                            stage = "delivered",
-                            channel = "prompt_queue",
-                            message_id = queued.id,
-                            source = %queued.source,
-                            target_agent = %pane_target,
-                            deliver_ms,
-                            "prompt_queue message delivered to inbox"
-                        );
+                        // cas-7787 (GH #160): tell the truth about what just
+                        // happened. This arm fires for an inbox WRITE, which
+                        // for a wake-deferred row is not a delivery: the row
+                        // keeps `transport_delivered_at` NULL and is written
+                        // again on every cadence tick. Labelling that
+                        // `stage="delivered"` (with a deliver_ms!) is why the
+                        // reported storms resisted diagnosis — message 7070
+                        // logged "delivered" 55,868 times while its row ended
+                        // `abandoned`, never transported. A log line that
+                        // contradicts the row it describes is worse than no
+                        // log line, so the deferred case now says so.
+                        if wake_deferred {
+                            tracing::info!(
+                                target: "cas::coordination",
+                                stage = "inbox_write_pending_turn",
+                                channel = "prompt_queue",
+                                message_id = queued.id,
+                                source = %queued.source,
+                                target_agent = %pane_target,
+                                written_ms = deliver_ms,
+                                "prompt_queue payload written to inbox; NOT yet delivered — \
+                                 row stays pending until the recipient takes a turn"
+                            );
+                        } else {
+                            tracing::info!(
+                                target: "cas::coordination",
+                                stage = "delivered",
+                                channel = "prompt_queue",
+                                message_id = queued.id,
+                                source = %queued.source,
+                                target_agent = %pane_target,
+                                deliver_ms,
+                                "prompt_queue message delivered to inbox"
+                            );
+                        }
                         if let Some(ref store) = event_store {
                             record_injection(
                                 store,
@@ -4382,6 +4608,7 @@ fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
+        LIFECYCLE_MAX_RENUDGE_ATTEMPTS,
         append_spawn_audit, append_spawn_audit_line, cancel_targeted_in_flight_spawn,
         enqueue_spawn_cancelled_notice,
         enqueue_spawn_outcome_notice, is_exact_agent_name_match, matches_event_filter,
@@ -5167,7 +5394,7 @@ mod tests {
         let ticks = (interval.as_millis() as u64 * 6) / poll.as_millis() as u64;
         for tick in 0..ticks {
             let now = start + poll * tick as u32;
-            match lifecycle_redelivery_decision(false, last_attempt, now, interval) {
+            match lifecycle_redelivery_decision(false, last_attempt, now, interval, 0) {
                 LifecycleRedelivery::Deliver => {
                     delivered += 1;
                     last_attempt = Some(now);
@@ -5176,6 +5403,9 @@ mod tests {
                 LifecycleRedelivery::StopAcknowledged => {
                     panic!("nothing acknowledged this transition")
                 }
+                LifecycleRedelivery::StopUndelivered => {
+                    panic!("budget is passed as 0 on every tick here — it cannot exhaust")
+                }
             }
         }
 
@@ -5183,6 +5413,100 @@ mod tests {
             delivered, 6,
             "an unanswered transition must re-nudge once per interval, not once per poll \
              (would have been {ticks} deliveries before cas-d732)"
+        );
+    }
+
+    /// cas-7787 (GH #160), supervisor ruling 1: an undelivered lifecycle relay
+    /// whose supervisor NEVER returns must end as a visible failure — not as a
+    /// zombie that re-wakes forever, and not back into silence.
+    ///
+    /// This is the gap the staleness suppressor cannot close: it only fires
+    /// when the task leaves the state, so a lane parked behind a supervisor
+    /// who never comes back had no terminal state at all. Drives the real
+    /// cadence across a simulated 60-minute absence and asserts the row stops
+    /// retrying at a bounded budget and lands on the failure arm.
+    #[test]
+    fn a_relay_whose_supervisor_never_returns_ends_as_a_failure_not_a_zombie() {
+        let start = std::time::Instant::now();
+        let poll = std::time::Duration::from_millis(100);
+        let ticks = (LIFECYCLE_RENUDGE_INTERVAL.as_millis() as u64 * 60)
+            / poll.as_millis() as u64;
+
+        let mut attempts = 0u32;
+        let mut last_attempt: Option<std::time::Instant> = None;
+        let mut terminal = None;
+
+        for tick in 0..ticks {
+            let now = start + poll * tick as u32;
+            // Never acked, never consumed: the supervisor is simply gone.
+            match lifecycle_redelivery_decision(
+                false,
+                last_attempt,
+                now,
+                LIFECYCLE_RENUDGE_INTERVAL,
+                attempts,
+            ) {
+                LifecycleRedelivery::Deliver => {
+                    attempts += 1;
+                    last_attempt = Some(now);
+                }
+                LifecycleRedelivery::Cooldown => {}
+                LifecycleRedelivery::StopAcknowledged => {
+                    panic!("nothing ever acknowledged this relay")
+                }
+                LifecycleRedelivery::StopUndelivered => {
+                    terminal = Some(tick);
+                    break;
+                }
+            }
+        }
+
+        assert!(
+            terminal.is_some(),
+            "a relay nobody will ever read must terminate — it retried all {ticks} ticks \
+             and never reached an end state (the zombie ruling 1 forbids)"
+        );
+        assert_eq!(
+            attempts, LIFECYCLE_MAX_RENUDGE_ATTEMPTS,
+            "the retry budget must be spent exactly once before the failure arm"
+        );
+        // And the terminal arm is the LOUD one: the daemon call site maps
+        // StopUndelivered to `mark_undelivered_lifecycle_relay` + a
+        // tracing::error!, which is what puts it in worker_status/doctor.
+        assert_eq!(
+            lifecycle_redelivery_decision(
+                false,
+                Some(start),
+                start + LIFECYCLE_RENUDGE_INTERVAL * 100,
+                LIFECYCLE_RENUDGE_INTERVAL,
+                LIFECYCLE_MAX_RENUDGE_ATTEMPTS,
+            ),
+            LifecycleRedelivery::StopUndelivered,
+            "budget exhaustion must be terminal regardless of how much time has passed"
+        );
+    }
+
+    /// The bound must never pre-empt a real delivery: an acknowledged relay
+    /// stops as acknowledged, and a relay inside its budget keeps its normal
+    /// deliver/cooldown behaviour.
+    #[test]
+    fn the_retry_bound_does_not_pre_empt_delivery_or_acknowledgement() {
+        let now = std::time::Instant::now();
+        assert_eq!(
+            lifecycle_redelivery_decision(true, None, now, LIFECYCLE_RENUDGE_INTERVAL, 999),
+            LifecycleRedelivery::StopAcknowledged,
+            "an acked relay is a success, not a failure, whatever its attempt count"
+        );
+        assert_eq!(
+            lifecycle_redelivery_decision(
+                false,
+                None,
+                now,
+                LIFECYCLE_RENUDGE_INTERVAL,
+                LIFECYCLE_MAX_RENUDGE_ATTEMPTS - 1,
+            ),
+            LifecycleRedelivery::Deliver,
+            "the last attempt in the budget must still be attempted"
         );
     }
 
@@ -5196,6 +5520,7 @@ mod tests {
                 None,
                 std::time::Instant::now(),
                 LIFECYCLE_RENUDGE_INTERVAL,
+                0,
             ),
             LifecycleRedelivery::Deliver,
             "a freshly queued lifecycle row must go out on the very next poll"
@@ -5219,6 +5544,7 @@ mod tests {
                     Some(start),
                     start + elapsed,
                     LIFECYCLE_RENUDGE_INTERVAL,
+                    0,
                 ),
                 LifecycleRedelivery::StopAcknowledged,
                 "an acked transition must never be re-nudged again, however long it has been"
@@ -5241,6 +5567,7 @@ mod tests {
                 attempts.get(&row_id).copied(),
                 now,
                 LIFECYCLE_RENUDGE_INTERVAL,
+                0,
             );
             assert_eq!(
                 decision,
@@ -5256,6 +5583,7 @@ mod tests {
                 attempts.get(&6984).copied(),
                 now,
                 LIFECYCLE_RENUDGE_INTERVAL,
+                0,
             ),
             LifecycleRedelivery::Cooldown,
             "the same row inside the interval is exactly what must be held back"
@@ -5392,10 +5720,12 @@ mod tests {
                     last_attempt_ms.map(|ms| start + std::time::Duration::from_millis(ms)),
                     start + std::time::Duration::from_millis(elapsed),
                     LIFECYCLE_RENUDGE_INTERVAL,
+                    0,
                 ) {
                     LifecycleRedelivery::Deliver => true,
                     LifecycleRedelivery::Cooldown => false,
-                    LifecycleRedelivery::StopAcknowledged => break,
+                    LifecycleRedelivery::StopAcknowledged
+                    | LifecycleRedelivery::StopUndelivered => break,
                 };
 
             if may_deliver {
@@ -6724,6 +7054,7 @@ mod urgent_wake_probe_tests {
                         last_attempt,
                         now,
                         LIFECYCLE_RENUDGE_INTERVAL,
+                        0,
                     ),
                     LifecycleRedelivery::Deliver
                 );

@@ -9,6 +9,8 @@ mod claude;
 mod claude_md;
 mod codemap_cmd;
 mod knowledge_cmd;
+mod memory_migrate;
+mod purge_fixtures;
 
 // EPIC cas-7d31: the daemon's auto-distill path needs the same complete symbol
 // load the CLI does — a narrower source set would cascade-delete module pages.
@@ -40,6 +42,7 @@ mod mcp_cmd;
 pub mod memory;
 mod open;
 mod queue;
+pub mod retrieval_parity;
 mod status;
 mod statusline;
 mod update;
@@ -232,6 +235,14 @@ pub enum Commands {
     #[command(subcommand)]
     Knowledge(knowledge_cmd::KnowledgeCommands),
 
+    /// Migrate the legacy memory store into knowledge pages (EPIC cas-b129)
+    #[command(name = "memory-migrate")]
+    MemoryMigrate(memory_migrate::MemoryMigrateArgs),
+
+    /// Delete integration-test fixture memories that leaked into real stores
+    #[command(name = "purge-test-fixtures")]
+    PurgeTestFixtures(purge_fixtures::PurgeFixturesArgs),
+
     /// PRODUCT_OVERVIEW.md staleness info and pending changes
     #[command(subcommand, name = "project-overview")]
     ProjectOverview(project_overview_cmd::ProjectOverviewCommands),
@@ -255,6 +266,10 @@ pub enum Commands {
     /// Shortcut for `cas worktree sweep --all-repos`
     #[command(name = "sweep-all")]
     SweepAll(sweep::SweepBaseArgs),
+
+    /// Capture and replay memory-retrieval baselines (migration parity harness)
+    #[command(name = "retrieval-parity", subcommand)]
+    RetrievalParity(retrieval_parity::RetrievalParityCommands),
 }
 
 /// Authentication requirement for a command.
@@ -302,12 +317,15 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::ClaudeMd(_)
         | Commands::Codemap(_)
         | Commands::Knowledge(_)
+        | Commands::MemoryMigrate(_)
+        | Commands::PurgeTestFixtures(_)
         | Commands::ProjectOverview(_)
         | Commands::Integrate(_)
         | Commands::Memory(_)
         | Commands::KnownRepos(_)
         | Commands::Worktree(_)
-        | Commands::SweepAll(_) => AuthRequirement::NotRequired,
+        | Commands::SweepAll(_)
+        | Commands::RetrievalParity(_) => AuthRequirement::NotRequired,
 
         Commands::Serve => AuthRequirement::NotRequired,
 
@@ -480,12 +498,15 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::ClaudeMd(_) => "claude-md".to_string(),
         Commands::Codemap(_) => "codemap".to_string(),
         Commands::Knowledge(_) => "knowledge".to_string(),
+        Commands::MemoryMigrate(_) => "memory-migrate".to_string(),
+        Commands::PurgeTestFixtures(_) => "purge-test-fixtures".to_string(),
         Commands::ProjectOverview(_) => "project-overview".to_string(),
         Commands::Integrate(_) => "integrate".to_string(),
         Commands::Memory(_) => "memory".to_string(),
         Commands::KnownRepos(_) => "known-repos".to_string(),
         Commands::Worktree(_) => "worktree".to_string(),
         Commands::SweepAll(_) => "sweep-all".to_string(),
+        Commands::RetrievalParity(_) => "retrieval-parity".to_string(),
     }
 }
 
@@ -550,6 +571,10 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::ClaudeMd(args) => claude_md::execute(args, cli),
         Commands::Codemap(cmd) => codemap_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::Knowledge(cmd) => knowledge_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
+        Commands::MemoryMigrate(args) => memory_migrate::execute(args, require_cas_root(cas_root)?),
+        Commands::PurgeTestFixtures(args) => {
+            purge_fixtures::execute(args, require_cas_root(cas_root)?)
+        }
         Commands::ProjectOverview(cmd) => {
             project_overview_cmd::execute(cmd, cli, require_cas_root(cas_root)?)
         }
@@ -558,6 +583,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::KnownRepos(cmd) => known_repos::execute(cmd),
         Commands::Worktree(cmd) => worktree::execute(cmd),
         Commands::SweepAll(args) => sweep::execute_sweep_all(args),
+        Commands::RetrievalParity(cmd) => retrieval_parity::execute(cmd, cas_root),
     }
 }
 

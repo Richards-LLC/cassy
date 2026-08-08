@@ -101,6 +101,175 @@ pub(crate) enum LifecyclePromptDecision {
     Unstructured,
 }
 
+/// What the daemon should do with a lifecycle prompt whose task state has
+/// moved on (cas-7787, GH #160).
+///
+/// [`revalidate_lifecycle_prompt`] answers only "is this payload still true?".
+/// That question is necessary but not sufficient, and treating it as
+/// sufficient is the reported defect: in session cas-src-fast-pelican-83 the
+/// `task_awaiting_merge` relays for cas-fe23 (18:51), cas-d897 (19:00),
+/// cas-b69a (19:17) and cas-edee (19:26) were each enqueued correctly,
+/// written to the supervisor's inbox, never transported, and then stamped
+/// `suppressed_idle` at the exact second their task went
+/// awaiting_merge → closed. Suppression was the right call for the PAYLOAD —
+/// it had genuinely expired — and the wrong call for the FACT that a relay
+/// the factory depends on had failed to arrive. Nothing recorded the failure,
+/// so a human became the delivery mechanism for three finished lanes.
+///
+/// So staleness alone no longer decides. A stale row that was delivered is a
+/// benign suppression; a stale row that was never transported is a delivery
+/// FAILURE, and a wake-eligible one is a failure the factory cannot function
+/// without knowing about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LifecycleStaleOutcome {
+    /// Payload still true — hand it to transport.
+    Deliver,
+    /// Payload expired and the recipient already got it. Quiet suppression.
+    SuppressDelivered { task_id: String },
+    /// Payload expired and the recipient NEVER got it. Terminate the row (a
+    /// live re-write would storm an expired premise) but record it loudly.
+    UndeliveredRelayFailure { task_id: String },
+}
+
+/// Decide a stale lifecycle row's fate from the payload verdict plus the two
+/// facts the payload cannot know: did it ever reach the recipient, and was it
+/// load-bearing (cas-7787, GH #160).
+///
+/// Pure so the honesty contract is testable without a daemon or a harness.
+///
+/// Fails toward NOISE, deliberately and in one direction only: when a
+/// wake-eligible relay is stale and undelivered we report a failure rather
+/// than assume it was harmless. A false alarm costs the supervisor one glance
+/// at `worker_status`; a missed one costs a parked lane an unbounded stall,
+/// which is exactly what happened.
+pub(crate) fn lifecycle_stale_outcome(
+    decision: &LifecyclePromptDecision,
+    wake_eligible: bool,
+    transport_delivered: bool,
+) -> LifecycleStaleOutcome {
+    let LifecyclePromptDecision::SuppressStale { task_id } = decision else {
+        return LifecycleStaleOutcome::Deliver;
+    };
+    // A non-wake lifecycle row (task_started / task_ready / task_closed) is
+    // progress FYI. Losing one costs nothing the factory needs, so it keeps
+    // the quiet path and does not train anyone to ignore the banner.
+    if wake_eligible && !transport_delivered {
+        return LifecycleStaleOutcome::UndeliveredRelayFailure {
+            task_id: task_id.clone(),
+        };
+    }
+    LifecycleStaleOutcome::SuppressDelivered {
+        task_id: task_id.clone(),
+    }
+}
+
+/// Operator-facing description of one undelivered lifecycle relay
+/// (cas-7787, GH #160).
+///
+/// States what did not happen and what to do, in that order, without
+/// mentioning a queue stage or a prompt row — the reader is a supervisor
+/// deciding whether a lane is waiting on them, not someone debugging CAS.
+pub(crate) fn undelivered_relay_notice(task_id: &str, summary: Option<&str>) -> String {
+    let what = summary.unwrap_or("a task lifecycle transition");
+    format!(
+        "UNDELIVERED: the factory notified the supervisor that {task_id} needed them \
+         ({what}) and that message never arrived. The task moved on before it could be \
+         delivered, so it has been withdrawn rather than re-sent with an expired premise. \
+         Check {task_id} directly — do not assume it was handled."
+    )
+}
+
+/// Operator-facing description of one undelivered worker-death relay
+/// (cas-3dcb, GH #168).
+///
+/// A death notice cannot be "stale" the way a task transition can — the worker
+/// is still dead — so this says the opposite of the lifecycle notice: the fact
+/// is still true, nobody was told, go look.
+pub(crate) fn undelivered_worker_died_notice(worker_name: &str) -> String {
+    format!(
+        "UNDELIVERED: the factory tried to tell the supervisor that worker {worker_name} died \
+         and that message never arrived. The worker is still gone and any work it held is \
+         unattended. Run `coordination action=worker_status` and re-assign {worker_name}'s \
+         tasks — do not assume this was handled."
+    )
+}
+
+/// cas-3dcb (GH #168): the worker-death relay wire format.
+///
+/// Producer ([`format_worker_died_relay`], called by orphan recovery) and
+/// classifier ([`parse_worker_died_envelope`], called by the daemon's delivery
+/// loop) share one definition on purpose. The daemon corroborates a
+/// `lifecycle-wake:` source against a self-identifying envelope before it will
+/// type anything into the supervisor pane, so a death notice that does not
+/// parse here is silently demoted to ordinary chatter — the exact silence this
+/// fixes. Keep the two functions adjacent and change them together.
+const WORKER_DIED_ENVELOPE_OPEN: &str = "<worker-died ";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkerDiedEnvelope {
+    pub worker_id: String,
+    pub worker_name: String,
+    /// Death-incident identity — one incident yields one notice (cas-3dcb).
+    pub incident: String,
+}
+
+/// Render a worker-death relay for PTY injection into the supervisor's session.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn format_worker_died_relay(
+    worker_id: &str,
+    worker_name: &str,
+    incident: &str,
+    reason: &str,
+    held_tasks: &[String],
+    recovered_tasks: &[String],
+    notification_id: i64,
+) -> String {
+    let held = if held_tasks.is_empty() {
+        "none".to_string()
+    } else {
+        held_tasks.join(", ")
+    };
+    let recovered = if recovered_tasks.is_empty() {
+        "none".to_string()
+    } else {
+        recovered_tasks.join(", ")
+    };
+    format!(
+        "<worker-died worker_id=\"{worker_id}\" worker_name=\"{worker_name}\" \
+         incident=\"{incident}\" notification_id=\"{notification_id}\">\n\
+         Worker {worker_name} died — {reason}.\n\
+         Held at death: {held}\n\
+         Parked back to Open: {recovered}\n\
+         These tasks are unattended. Re-assign them or respawn a worker; \
+         `coordination action=worker_status` shows the current fleet.\n\
+         </worker-died>"
+    )
+}
+
+/// Parse a worker-death relay envelope, if this prompt is one.
+pub(crate) fn parse_worker_died_envelope(prompt: &str) -> Option<WorkerDiedEnvelope> {
+    let tag_end = prompt.find('>')?;
+    let tag = &prompt[..tag_end];
+    if !tag.starts_with(WORKER_DIED_ENVELOPE_OPEN) {
+        return None;
+    }
+    Some(WorkerDiedEnvelope {
+        worker_id: xml_attribute(tag, "worker_id")?.to_string(),
+        worker_name: xml_attribute(tag, "worker_name")?.to_string(),
+        incident: xml_attribute(tag, "incident")?.to_string(),
+    })
+}
+
+/// Whether a prompt carries an envelope that authorizes a supervisor wake.
+///
+/// The `lifecycle-wake:` source marker states intent, but `prompt_queue.source`
+/// is caller-settable, so the daemon corroborates it with the payload. Exactly
+/// two producers emit a qualifying envelope: the task lifecycle emitter and
+/// orphan recovery's death relay.
+pub(crate) fn is_supervisor_wake_envelope(prompt: &str) -> bool {
+    parse_lifecycle_envelope(prompt).is_some() || parse_worker_died_envelope(prompt).is_some()
+}
+
 pub(crate) fn select_unambiguous_merge_task<'a>(
     parked_tasks: &'a [Task],
     worker: &str,
@@ -224,6 +393,133 @@ pub(crate) fn revalidate_lifecycle_prompt(
         LifecyclePromptDecision::SuppressStale {
             task_id: envelope.task_id,
         }
+    }
+}
+
+#[cfg(test)]
+mod cas_7787_relay_honesty_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn awaiting_merge_prompt(task_id: &str, occurrence: DateTime<Utc>) -> String {
+        format!(
+            "<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"{task_id}\" \
+             old=\"in_progress\" new=\"awaiting_merge\" actor=\"smooth-octopus-84\" \
+             notification_id=\"3386\" occurrence=\"{}\">\nparked\n</task-lifecycle>",
+            occurrence.to_rfc3339()
+        )
+    }
+
+    /// The reported incident, reduced to its decision.
+    ///
+    /// Replays the exact cas-fe23 shape from session cas-src-fast-pelican-83:
+    /// a `task_awaiting_merge` relay enqueued at 18:51:51, never transported,
+    /// and revalidated at 18:53:58 after the task had gone
+    /// awaiting_merge → closed. The old code called that a plain stale
+    /// suppression and the supervisor was never told anything had been lost.
+    #[test]
+    fn an_awaiting_merge_relay_that_expires_undelivered_is_reported_as_a_failure() {
+        let occurrence = Utc.with_ymd_and_hms(2026, 8, 7, 18, 51, 51).unwrap();
+        let closed_at = Utc.with_ymd_and_hms(2026, 8, 7, 18, 53, 58).unwrap();
+        let prompt = awaiting_merge_prompt("cas-fe23", occurrence);
+
+        let decision = revalidate_lifecycle_prompt(&prompt, TaskStatus::Closed, closed_at);
+        assert!(
+            matches!(decision, LifecyclePromptDecision::SuppressStale { .. }),
+            "the payload really is stale once the task closed — that part was never wrong"
+        );
+
+        assert_eq!(
+            lifecycle_stale_outcome(&decision, true, false),
+            LifecycleStaleOutcome::UndeliveredRelayFailure {
+                task_id: "cas-fe23".to_string()
+            },
+            "a wake-eligible relay that expired without transport is a delivery FAILURE, \
+             not a benign suppression — this is the silence GH #160 reports"
+        );
+    }
+
+    /// The honesty rule must not become a noise machine: a relay the recipient
+    /// demonstrably received (explicit `message_ack`) is a quiet suppression,
+    /// exactly as before.
+    #[test]
+    fn a_relay_the_supervisor_acknowledged_stays_a_quiet_suppression() {
+        let occurrence = Utc.with_ymd_and_hms(2026, 8, 7, 18, 51, 51).unwrap();
+        let prompt = awaiting_merge_prompt("cas-fe23", occurrence);
+        let decision = revalidate_lifecycle_prompt(
+            &prompt,
+            TaskStatus::Closed,
+            occurrence + chrono::Duration::seconds(127),
+        );
+
+        assert_eq!(
+            lifecycle_stale_outcome(&decision, true, true),
+            LifecycleStaleOutcome::SuppressDelivered {
+                task_id: "cas-fe23".to_string()
+            },
+            "delivered-then-expired must stay silent or the banner trains people to skip it"
+        );
+    }
+
+    /// Progress FYI (`task_started` / `task_closed`) is not wake-eligible.
+    /// Losing one costs the factory nothing, so it must not raise an alarm.
+    #[test]
+    fn a_non_wake_lifecycle_row_never_raises_the_alarm() {
+        let occurrence = Utc.with_ymd_and_hms(2026, 8, 7, 18, 46, 30).unwrap();
+        let prompt = format!(
+            "<task-lifecycle transition=\"task_started\" task_id=\"cas-fe23\" \
+             old=\"open\" new=\"in_progress\" actor=\"worker\" notification_id=\"3382\" \
+             occurrence=\"{}\">\nstarted\n</task-lifecycle>",
+            occurrence.to_rfc3339()
+        );
+        let decision = revalidate_lifecycle_prompt(
+            &prompt,
+            TaskStatus::Closed,
+            occurrence + chrono::Duration::seconds(60),
+        );
+
+        assert_eq!(
+            lifecycle_stale_outcome(&decision, false, false),
+            LifecycleStaleOutcome::SuppressDelivered {
+                task_id: "cas-fe23".to_string()
+            }
+        );
+    }
+
+    /// A still-true payload is untouched by the new decision layer — the
+    /// delivery path must not change shape for the healthy case.
+    #[test]
+    fn a_live_relay_is_still_delivered() {
+        let occurrence = Utc.with_ymd_and_hms(2026, 8, 7, 18, 51, 51).unwrap();
+        let prompt = awaiting_merge_prompt("cas-fe23", occurrence);
+        let decision = revalidate_lifecycle_prompt(
+            &prompt,
+            TaskStatus::AwaitingMerge,
+            occurrence + chrono::Duration::seconds(90),
+        );
+
+        assert_eq!(decision, LifecyclePromptDecision::Deliver);
+        assert_eq!(
+            lifecycle_stale_outcome(&decision, true, false),
+            LifecycleStaleOutcome::Deliver
+        );
+    }
+
+    /// The notice a supervisor actually reads must name the task and refuse to
+    /// imply the work was handled.
+    #[test]
+    fn the_undelivered_notice_names_the_task_and_refuses_to_imply_success() {
+        let notice =
+            undelivered_relay_notice("cas-edee", Some("task_awaiting_merge: cas-edee (19:26)"));
+        assert!(notice.contains("cas-edee"), "must name the task");
+        assert!(
+            notice.contains("UNDELIVERED"),
+            "must state the failure, not describe a queue stage"
+        );
+        assert!(
+            notice.contains("do not assume it was handled"),
+            "silence must not read as success"
+        );
     }
 }
 
@@ -539,5 +835,75 @@ mod tests {
                 .map(|task| task.id.as_str()),
             Some("cas-one")
         );
+    }
+}
+
+#[cfg(test)]
+mod cas_3dcb_worker_died_relay_tests {
+    use super::*;
+
+    fn relay() -> String {
+        format_worker_died_relay(
+            "6f1b-agent-id",
+            "mighty-kestrel-57",
+            "worker_died:6f1b-agent-id:1754600000000",
+            "daemon maintenance: heartbeat stale",
+            &["cas-aaaa".to_string(), "cas-bbbb".to_string()],
+            &["cas-aaaa".to_string()],
+            4211,
+        )
+    }
+
+    /// Producer and classifier must agree, or the daemon silently demotes the
+    /// death notice to ordinary chatter — the GH #168 silence.
+    #[test]
+    fn producer_output_round_trips_through_the_classifier() {
+        let envelope = parse_worker_died_envelope(&relay()).expect("relay must parse");
+        assert_eq!(envelope.worker_id, "6f1b-agent-id");
+        assert_eq!(envelope.worker_name, "mighty-kestrel-57");
+        assert_eq!(envelope.incident, "worker_died:6f1b-agent-id:1754600000000");
+    }
+
+    /// The body must carry the facts a supervisor acts on, not just the tag.
+    #[test]
+    fn relay_body_names_the_worker_and_its_unattended_work() {
+        let body = relay();
+        assert!(body.contains("mighty-kestrel-57"));
+        assert!(body.contains("heartbeat stale"));
+        assert!(body.contains("cas-aaaa") && body.contains("cas-bbbb"));
+    }
+
+    #[test]
+    fn a_death_with_no_held_work_still_renders() {
+        let body =
+            format_worker_died_relay("id", "idle-worker", "incident", "shutdown", &[], &[], 1);
+        assert!(parse_worker_died_envelope(&body).is_some());
+        assert!(body.contains("Held at death: none"));
+    }
+
+    /// Wake eligibility is corroborated by the payload, so both producers must
+    /// qualify and arbitrary text must not.
+    #[test]
+    fn wake_corroboration_accepts_both_envelopes_and_nothing_else() {
+        assert!(is_supervisor_wake_envelope(&relay()));
+        assert!(is_supervisor_wake_envelope(
+            "<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"cas-1\" old=\"in_progress\" \
+             new=\"awaiting_merge\" actor=\"w\" notification_id=\"1\" \
+             occurrence=\"2026-08-07T10:00:00+00:00\">\nbody</task-lifecycle>"
+        ));
+        assert!(!is_supervisor_wake_envelope("please merge my branch"));
+        // A lookalike that omits required attributes must not qualify.
+        assert!(!is_supervisor_wake_envelope("<worker-died >gotcha"));
+        assert!(!is_supervisor_wake_envelope(
+            "<worker-diedish worker_id=\"a\" worker_name=\"b\" incident=\"c\">x"
+        ));
+    }
+
+    #[test]
+    fn undelivered_notice_names_the_worker_not_a_task() {
+        let notice = undelivered_worker_died_notice("mighty-kestrel-57");
+        assert!(notice.contains("mighty-kestrel-57"));
+        assert!(notice.contains("UNDELIVERED"));
+        assert!(!notice.contains("(unknown task)"));
     }
 }

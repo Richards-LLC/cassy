@@ -329,6 +329,38 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-servers/SKILL.md",
         content: include_str!("builtins/skills/cas-servers/SKILL.md"),
     },
+    BuiltinFile {
+        path: "skills/cas-html-reports/SKILL.md",
+        content: include_str!("builtins/skills/cas-html-reports/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/report-types.md",
+        content: include_str!("builtins/skills/cas-html-reports/references/report-types.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/presentation-rules.md",
+        content: include_str!("builtins/skills/cas-html-reports/references/presentation-rules.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/technical-contract.md",
+        content: include_str!("builtins/skills/cas-html-reports/references/technical-contract.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/review-checklist.md",
+        content: include_str!("builtins/skills/cas-html-reports/references/review-checklist.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/sources.md",
+        content: include_str!("builtins/skills/cas-html-reports/references/sources.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/engineering-investigation.html",
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/engineering-investigation.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/financial-quarterly-brief.html",
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/financial-quarterly-brief.html"),
+    },
     // design-spec skill (GH #64): generates DESIGN.md — the UI/UX source of
     // truth (normative token frontmatter + 8 sections). Design counterpart to
     // codemap (structure) and project-overview (domain).
@@ -624,6 +656,38 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-servers/SKILL.md",
         content: include_str!("builtins/codex/skills/cas-servers/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/SKILL.md",
+        content: include_str!("builtins/codex/skills/cas-html-reports/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/report-types.md",
+        content: include_str!("builtins/codex/skills/cas-html-reports/references/report-types.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/presentation-rules.md",
+        content: include_str!("builtins/codex/skills/cas-html-reports/references/presentation-rules.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/technical-contract.md",
+        content: include_str!("builtins/codex/skills/cas-html-reports/references/technical-contract.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/review-checklist.md",
+        content: include_str!("builtins/codex/skills/cas-html-reports/references/review-checklist.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/sources.md",
+        content: include_str!("builtins/codex/skills/cas-html-reports/references/sources.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/engineering-investigation.html",
+        content: include_str!("builtins/codex/skills/cas-html-reports/references/examples/engineering-investigation.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/financial-quarterly-brief.html",
+        content: include_str!("builtins/codex/skills/cas-html-reports/references/examples/financial-quarterly-brief.html"),
     },
     // design-spec skill (GH #64) — codex mirror.
     BuiltinFile {
@@ -951,6 +1015,38 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-servers/SKILL.md",
         content: include_str!("builtins/grok/skills/cas-servers/SKILL.md"),
     },
+    BuiltinFile {
+        path: "skills/cas-html-reports/SKILL.md",
+        content: include_str!("builtins/grok/skills/cas-html-reports/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/report-types.md",
+        content: include_str!("builtins/grok/skills/cas-html-reports/references/report-types.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/presentation-rules.md",
+        content: include_str!("builtins/grok/skills/cas-html-reports/references/presentation-rules.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/technical-contract.md",
+        content: include_str!("builtins/grok/skills/cas-html-reports/references/technical-contract.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/review-checklist.md",
+        content: include_str!("builtins/grok/skills/cas-html-reports/references/review-checklist.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/sources.md",
+        content: include_str!("builtins/grok/skills/cas-html-reports/references/sources.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/engineering-investigation.html",
+        content: include_str!("builtins/grok/skills/cas-html-reports/references/examples/engineering-investigation.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/financial-quarterly-brief.html",
+        content: include_str!("builtins/grok/skills/cas-html-reports/references/examples/financial-quarterly-brief.html"),
+    },
     // design-spec skill (GH #64) — grok twin.
     BuiltinFile {
         path: "skills/design-spec/SKILL.md",
@@ -1178,6 +1274,17 @@ pub const GENERAL_PARITY_CAPABILITIES: &[RequiredCapability] = &[
         claude: Some("skills/cas-github-issues"),
         codex: Some("skills/cas-github-issues"),
         grok: Some("skills/cas-github-issues"),
+        note: "",
+    },
+    RequiredCapability {
+        // cas-b176: report deliverables ship as self-contained HTML beside their
+        // markdown source. Any harness can be the one writing the report, so all
+        // three own a twin. The skill makes no CAS MCP tool calls, so the twins
+        // are byte-identical to the claude source.
+        id: "cas-html-reports",
+        claude: Some("skills/cas-html-reports"),
+        codex: Some("skills/cas-html-reports"),
+        grok: Some("skills/cas-html-reports"),
         note: "",
     },
     RequiredCapability {
@@ -1425,6 +1532,13 @@ struct BuiltinReferenceState {
     /// as explicit consent to replace that copy once.
     #[serde(default)]
     replace_on_next_sync: BTreeSet<String>,
+    /// References the most recent sync refused to update because their content
+    /// matches neither the recorded baseline nor any version CAS has shipped
+    /// (cas-0c0a). Persisted so SessionStart can surface the skip where
+    /// operators actually look — a `tracing::warn` inside an unattended
+    /// `cas update --sync` is seen by nobody.
+    #[serde(default)]
+    skipped_references: BTreeMap<String, String>,
 }
 
 impl BuiltinReferenceState {
@@ -1441,15 +1555,13 @@ impl BuiltinReferenceState {
                     );
                     Ok(Self {
                         version: 1,
-                        files: BTreeMap::new(),
-                        replace_on_next_sync: BTreeSet::new(),
+                        ..Self::default()
                     })
                 }
             },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self {
                 version: 1,
-                files: BTreeMap::new(),
-                replace_on_next_sync: BTreeSet::new(),
+                ..Self::default()
             }),
             Err(error) => Err(error),
         }
@@ -1501,6 +1613,55 @@ fn builtin_content_hash(content: &str) -> String {
     format!("{:x}", Sha256::digest(content.as_bytes()))
 }
 
+/// SHA-256 of every previously shipped version of each builtin reference file
+/// (cas-0c0a). Regenerated by `scripts/gen-builtin-reference-history.sh`.
+///
+/// Without this, a destination installed before the baseline ledger existed
+/// (Jul 2026) had no recorded baseline, so pristine-but-old CAS content was
+/// indistinguishable from a local customization and was preserved — silently,
+/// forever. Matching the destination against known shipped hashes recovers the
+/// distinction: a known hash is an old CAS version (safe to replace), an
+/// unknown one is a real local edit (must be preserved).
+const BUILTIN_REFERENCE_HISTORY_JSON: &str = include_str!("builtins/reference-history.json");
+
+#[derive(Debug, Deserialize)]
+struct BuiltinReferenceHistory {
+    #[serde(default)]
+    files: BTreeMap<String, BTreeSet<String>>,
+}
+
+fn builtin_reference_history() -> &'static BuiltinReferenceHistory {
+    static HISTORY: std::sync::OnceLock<BuiltinReferenceHistory> = std::sync::OnceLock::new();
+    HISTORY.get_or_init(|| {
+        serde_json::from_str(BUILTIN_REFERENCE_HISTORY_JSON).unwrap_or_else(|error| {
+            tracing::warn!(
+                %error,
+                "embedded builtin reference history is unparseable; pre-ledger references \
+                 will be preserved as possible local customizations"
+            );
+            BuiltinReferenceHistory {
+                files: BTreeMap::new(),
+            }
+        })
+    })
+}
+
+/// True when `content_hash` matches a version of `path` that CAS itself
+/// shipped at some point — i.e. the destination is provably stale CAS content
+/// rather than a local edit.
+fn is_shipped_builtin_reference_version(path: &str, content_hash: &str) -> bool {
+    #[cfg(test)]
+    {
+        if let Some(found) = tests::history_override_lookup(path, content_hash) {
+            return found;
+        }
+    }
+    builtin_reference_history()
+        .files
+        .get(path)
+        .is_some_and(|hashes| hashes.contains(content_hash))
+}
+
 /// A reference is owned by its skill directory when that directory has a
 /// cataloged, managed `SKILL.md`. This makes ownership automatic for newly
 /// added reference files instead of relying on an easy-to-forget per-file
@@ -1538,6 +1699,7 @@ fn sync_owned_reference(
     match std::fs::read_to_string(&target) {
         Ok(existing) if existing == builtin.content => {
             state.files.insert(builtin.path.to_string(), source_hash);
+            state.skipped_references.remove(builtin.path);
             Ok(SyncOutcome::Unchanged)
         }
         Ok(existing) => {
@@ -1547,28 +1709,84 @@ fn sync_owned_reference(
                     .files
                     .get(builtin.path)
                     .is_some_and(|baseline| baseline == &destination_hash);
-            if !matches_baseline {
+            // cas-0c0a: no baseline is not evidence of a local edit. If the
+            // destination content is a version CAS previously shipped, it is
+            // stale CAS content and must be upgraded — otherwise every
+            // pre-ledger install keeps its Jun-2026 copy forever.
+            let is_stale_shipped_version = !matches_baseline
+                && is_shipped_builtin_reference_version(builtin.path, &destination_hash);
+            if !matches_baseline && !is_stale_shipped_version {
                 tracing::warn!(
                     path = %builtin.path,
-                    "builtin skill reference differs from its last CAS-synced content; \
-                     preserving the destination as a possible local customization. \
-                     Review it, then delete the destination and rerun `cas update --sync` \
-                     to accept the CAS version."
+                    "builtin skill reference differs from its last CAS-synced content and from \
+                     every version CAS has shipped; preserving the destination as a local \
+                     customization. Review it, then delete the destination and rerun \
+                     `cas update --sync` to accept the CAS version."
                 );
+                state
+                    .skipped_references
+                    .insert(builtin.path.to_string(), destination_hash);
                 return Ok(SyncOutcome::SkippedModifiedReference);
+            }
+            if is_stale_shipped_version {
+                tracing::info!(
+                    path = %builtin.path,
+                    "builtin skill reference had no recorded baseline but matches a previously \
+                     shipped CAS version; upgrading and baselining it (cas-0c0a)."
+                );
             }
 
             std::fs::write(&target, builtin.content)?;
             state.files.insert(builtin.path.to_string(), source_hash);
+            state.skipped_references.remove(builtin.path);
             Ok(SyncOutcome::Updated)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             std::fs::write(&target, builtin.content)?;
             state.files.insert(builtin.path.to_string(), source_hash);
+            state.skipped_references.remove(builtin.path);
             Ok(SyncOutcome::Created)
         }
         Err(error) => Err(error),
     }
+}
+
+/// References the last sync preserved instead of updating, grouped by harness
+/// (`claude` / `codex` / `grok`), read from the per-harness baseline ledgers
+/// under `<cas_root>/cache/builtin-reference-state/` (cas-0c0a).
+///
+/// This is the data behind the SessionStart staleness banner: it is the only
+/// place a skip is durable, because `cas update --sync` writes its warning to
+/// stdout/tracing that unattended runs discard.
+pub fn skipped_owned_references(cas_root: &Path) -> BTreeMap<String, Vec<String>> {
+    let dir = cas_root.join("cache").join("builtin-reference-state");
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(harness) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(state) = serde_json::from_str::<BuiltinReferenceState>(&content) else {
+            continue;
+        };
+        if state.skipped_references.is_empty() {
+            continue;
+        }
+        out.insert(
+            harness.to_string(),
+            state.skipped_references.keys().cloned().collect(),
+        );
+    }
+    out
 }
 
 /// Sync all built-in files to the target directory
@@ -1967,6 +2185,39 @@ pub fn worker_guidance() -> String {
 mod tests {
     use crate::builtins::*;
 
+    thread_local! {
+        /// Test-only stand-in for the embedded shipped-version history
+        /// (cas-0c0a), so grandfathering can be exercised with synthetic
+        /// builtin paths instead of real historical file contents.
+        static HISTORY_OVERRIDE: std::cell::RefCell<Option<BTreeMap<String, BTreeSet<String>>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// `Some(hit)` when a test has installed an override; `None` means "fall
+    /// through to the embedded history".
+    pub(super) fn history_override_lookup(path: &str, content_hash: &str) -> Option<bool> {
+        HISTORY_OVERRIDE.with(|cell| {
+            cell.borrow().as_ref().map(|files| {
+                files
+                    .get(path)
+                    .is_some_and(|hashes| hashes.contains(content_hash))
+            })
+        })
+    }
+
+    /// Declare `contents` as previously shipped versions of `path` for the rest
+    /// of this test thread.
+    fn set_history_override(path: &str, contents: &[&str]) {
+        let hashes: BTreeSet<String> = contents.iter().map(|c| builtin_content_hash(c)).collect();
+        HISTORY_OVERRIDE.with(|cell| {
+            *cell.borrow_mut() = Some(BTreeMap::from([(path.to_string(), hashes)]));
+        });
+    }
+
+    fn clear_history_override() {
+        HISTORY_OVERRIDE.with(|cell| *cell.borrow_mut() = None);
+    }
+
     fn extract_js_function(source: &str, name: &str) -> String {
         let needle = format!("function {name}(");
         let start = source
@@ -2217,13 +2468,23 @@ This is the body content."#;
     /// instead of inlining.
     #[test]
     fn test_worker_guidance_under_12kb() {
+        const HARD_CEILING: usize = 12_288; // Claude Code harness truncation point.
+        const SOFT_CAP: usize = 11_488; // early-warning margin (800B) below the ceiling.
         let guide = worker_guidance();
         assert!(
-            guide.len() < 12_288,
+            guide.len() < HARD_CEILING,
             "worker_guidance is {} bytes — over the 12KB ceiling. \
              Move content into cas-worker/references/ instead of \
              inlining it in cas-worker.md.",
             guide.len()
+        );
+        assert!(
+            guide.len() <= SOFT_CAP,
+            "worker_guidance is {} bytes — over the {SOFT_CAP}B soft cap (only \
+             {}B from the {HARD_CEILING}B hard ceiling). Trim body prose or move it \
+             into cas-worker/references/ to keep CI headroom.",
+            guide.len(),
+            HARD_CEILING - guide.len()
         );
     }
 
@@ -2594,6 +2855,84 @@ This is the body content."#;
         }
     }
 
+    /// cas-3627 (GH #159): the worker builtin must teach the difference
+    /// between the INNER test loop and the FINAL proof.
+    ///
+    /// Observed live before this rule existed: a worker fixing several test
+    /// entry points ran the full ~3,700-test lib sweep (~5 min) after each
+    /// individual micro-fix, foreground-`sleep`ing between checks — 47+
+    /// minutes of wall-clock for a few minutes of edits. cas-b4921 already
+    /// mandated backgrounding, so the gap was not "don't block"; it was that
+    /// nothing distinguished the seconds-long targeted loop you iterate in
+    /// from the minutes-long full sweep you are allowed to run twice.
+    ///
+    /// Same two-layer shape as the backgrounding mandate above: terse rules on
+    /// the always-loaded SKILL.md body (12 KB ceiling — see
+    /// `test_worker_guidance_under_12kb`), the worked recipe in
+    /// references/discipline.md. All three flavors, because the builtin skills
+    /// have a documented drift history (GH #116, cas-703a).
+    #[test]
+    fn test_worker_skills_teach_test_loop_discipline_cas_3627() {
+        for (label, skill_content, ref_content) in [
+            (
+                "claude",
+                include_str!("builtins/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker/references/discipline.md"),
+            ),
+            (
+                "codex",
+                include_str!("builtins/codex/skills/cas-worker.md"),
+                include_str!("builtins/codex/skills/cas-worker/references/discipline.md"),
+            ),
+            (
+                "grok",
+                include_str!("builtins/grok/skills/cas-worker.md"),
+                include_str!("builtins/grok/skills/cas-worker/references/discipline.md"),
+            ),
+        ] {
+            // Always-loaded body: batch-first, the two named loops, the
+            // two-sweep ceiling, nextest, and the no-foreground-sleep rule.
+            for required in [
+                "Batch the fixes",
+                "Inner loop",
+                "Final proof",
+                "at most twice",
+                "cargo nextest run",
+                "sleep",
+            ] {
+                assert!(
+                    skill_content.contains(required),
+                    "{label} cas-worker SKILL.md missing test-loop marker: {required:?}"
+                );
+            }
+            // The recipe: both loops named, the batching rule, the banked-receipt
+            // allowance, nextest with a fallback, and the ban on sleeping in the
+            // foreground while a background run cooks.
+            for required in [
+                "inner loop",
+                "Final proof",
+                "Batch before you verify",
+                "banked receipt",
+                "cargo nextest run",
+                "foreground-`sleep`",
+            ] {
+                assert!(
+                    ref_content.contains(required),
+                    "{label} cas-worker discipline.md missing test-loop recipe: {required:?}"
+                );
+            }
+            // The targeted-filter forms are the whole point of the inner loop:
+            // a rule that says "be targeted" without naming the flags is not
+            // actionable at 2am.
+            for required in ["--lib <module>", "--test <name>"] {
+                assert!(
+                    ref_content.contains(required),
+                    "{label} cas-worker discipline.md missing targeted-filter form: {required:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_cas_worker_skill_documents_code_review_gate() {
         // Phase 1 Subsystem A Unit 10 (EPIC cas-0750): the cas-worker
@@ -2731,6 +3070,147 @@ This is the body content."#;
                 "{label} cas-servers SKILL.md must match the claude copy except for the \
                  harness tool prefix — the guidance itself must not drift per harness"
             );
+        }
+    }
+
+    /// cas-b176: the cas-html-reports skill must ship for every harness with its
+    /// full reference set. The load-bearing content is the two-axis taxonomy
+    /// (type x audience), the invariant technical contract, the judgment rules
+    /// that keep chat answers out of HTML, and the two worked examples. The
+    /// examples are also asserted to be genuinely self-contained — an example
+    /// that reaches for a CDN teaches the opposite of the contract it documents.
+    #[test]
+    fn test_builtin_skills_contains_cas_html_reports() {
+        const FILES: &[&str] = &[
+            "skills/cas-html-reports/SKILL.md",
+            "skills/cas-html-reports/references/report-types.md",
+            "skills/cas-html-reports/references/presentation-rules.md",
+            "skills/cas-html-reports/references/technical-contract.md",
+            "skills/cas-html-reports/references/review-checklist.md",
+            "skills/cas-html-reports/references/sources.md",
+            "skills/cas-html-reports/references/examples/engineering-investigation.html",
+            "skills/cas-html-reports/references/examples/financial-quarterly-brief.html",
+        ];
+
+        let mut claude_bodies: Vec<(&str, &str)> = Vec::new();
+
+        for (label, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ] {
+            let get = |path: &str| -> &'static str {
+                catalog
+                    .iter()
+                    .find(|b| b.path == path)
+                    .unwrap_or_else(|| panic!("{path} missing from {label} catalog"))
+                    .content
+            };
+
+            let skill = get(FILES[0]);
+            assert!(
+                is_managed_by_cas(skill),
+                "{label} cas-html-reports SKILL.md must be managed_by: cas"
+            );
+            for required in [
+                "name: cas-html-reports",
+                // The core stance the whole skill hangs off.
+                "Markdown is the source of truth",
+                // Trigger + the judgment rule that prevents HTML overuse.
+                "What counts as a report",
+                "When HTML is NOT required",
+                "Task notes",
+                // The invariant contract, summarized on the front page.
+                "No CDN",
+                "progressive enhancement",
+                "Print-ready",
+                "Provenance per figure",
+                // Both worked examples must be advertised, not just shipped.
+                "engineering-investigation.html",
+                "financial-quarterly-brief.html",
+            ] {
+                assert!(
+                    skill.contains(required),
+                    "{label} cas-html-reports SKILL.md missing required marker: {required:?}"
+                );
+            }
+
+            // The two-axis taxonomy is the acceptance surface: every report type
+            // AND the audience axis must be reachable from one reference file.
+            let types = get(FILES[1]);
+            for required in [
+                "Executive",
+                "Practitioner",
+                "External",
+                "Investigation / diagnostic",
+                "Metrics / mining analysis",
+                "Decision brief",
+                "Comparison / benchmark",
+                "Incident / post-mortem",
+                "Status / release summary",
+                "Financial report",
+                "Executive / C-suite brief",
+                "Board / stakeholder update",
+                "Client-facing deliverable",
+                "Research / market analysis",
+                // Financial encodings (IBCS-derived) must be spelled out, not implied.
+                "Actual** = solid fill",
+                "outlined",
+                "hatched",
+                // Executive ordering rule.
+                "methodology is present but LAST",
+            ] {
+                assert!(
+                    types.contains(required),
+                    "{label} cas-html-reports report-types.md missing marker: {required:?}"
+                );
+            }
+
+            // Attribution-only citation of all three research sources.
+            let sources = get(FILES[5]);
+            for required in [
+                "html-artifact-best-practices",
+                "IBCS",
+                "pi-skill-html-report",
+                "attribution only",
+            ] {
+                assert!(
+                    sources.contains(required),
+                    "{label} cas-html-reports sources.md missing marker: {required:?}"
+                );
+            }
+
+            // The examples must practice what the contract preaches.
+            for example in &FILES[6..] {
+                let html = get(example);
+                for banned in ["https://", "http://", "@import", "<img", "cdn."] {
+                    assert!(
+                        !html.to_lowercase().contains(banned),
+                        "{label} {example} must be self-contained (found {banned:?})"
+                    );
+                }
+                for required in ["<!DOCTYPE html>", "@media print", "role=\"img\"", "<table"] {
+                    assert!(
+                        html.contains(required),
+                        "{label} {example} missing required element: {required:?}"
+                    );
+                }
+            }
+
+            // The skill makes no CAS MCP tool calls, so the twins are held
+            // byte-identical — no per-harness prefix to swap.
+            if label == "claude" {
+                claude_bodies = FILES.iter().map(|f| (*f, get(f))).collect();
+            } else {
+                for (path, claude) in &claude_bodies {
+                    assert_eq!(
+                        get(path),
+                        *claude,
+                        "{label} {path} must be byte-identical to the claude copy \
+                         (cas-html-reports is harness-neutral)"
+                    );
+                }
+            }
         }
     }
 
@@ -3856,6 +4336,172 @@ This is the body content."#;
             remediated.modified_reference_files.is_empty(),
             "a remediated reference must no longer report a customization conflict"
         );
+    }
+
+    /// cas-0c0a: a destination with no recorded baseline whose content is a
+    /// version CAS previously shipped is stale CAS content, not a local edit.
+    /// Before this, every pre-ledger install kept its old copy forever while
+    /// `cas update --sync` reported success.
+    #[test]
+    fn pre_ledger_reference_matching_a_shipped_version_is_upgraded_and_baselined() {
+        use tempfile::tempdir;
+
+        const BODY: &str = "---\nname: cas-test\nmanaged_by: cas\n---\n# Test\n";
+        const SHIPPED_OLD: &str = "# Reference\n\nshipped june\n";
+        const SHIPPED_NEW: &str = "# Reference\n\nshipped august\n";
+        const PATH: &str = "skills/cas-test/references/pre-ledger.md";
+        const BODY_FILE: BuiltinFile = BuiltinFile {
+            path: "skills/cas-test/SKILL.md",
+            content: BODY,
+        };
+        const NEW_FILE: BuiltinFile = BuiltinFile {
+            path: PATH,
+            content: SHIPPED_NEW,
+        };
+
+        let temp = tempdir().unwrap();
+        let target_dir = temp.path().join(".claude");
+        let target = target_dir.join(PATH);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        // Pre-ledger world: old shipped content on disk, no baseline recorded.
+        std::fs::write(&target, SHIPPED_OLD).unwrap();
+
+        set_history_override(PATH, &[SHIPPED_OLD]);
+        let result = sync_all_builtins_inner(&target_dir, &[], &[BODY_FILE, NEW_FILE]).unwrap();
+        clear_history_override();
+
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            SHIPPED_NEW,
+            "a pre-ledger destination matching an older shipped version must be upgraded"
+        );
+        assert!(
+            result.modified_reference_files.is_empty(),
+            "an upgraded stale reference is not a customization conflict"
+        );
+        let state = BuiltinReferenceState::load(&target_dir).unwrap();
+        assert_eq!(
+            state.files.get(PATH),
+            Some(&builtin_content_hash(SHIPPED_NEW)),
+            "the upgrade must baseline the new content so later syncs propagate cleanly"
+        );
+        assert!(
+            state.skipped_references.is_empty(),
+            "an upgraded reference must not be recorded as skipped"
+        );
+    }
+
+    /// cas-0c0a companion: content matching *no* shipped version is a genuine
+    /// local customization — preserved, and recorded so SessionStart can say so.
+    #[test]
+    fn unknown_reference_content_is_preserved_and_recorded_for_the_session_banner() {
+        use tempfile::tempdir;
+
+        const BODY: &str = "---\nname: cas-test\nmanaged_by: cas\n---\n# Test\n";
+        const SHIPPED_OLD: &str = "# Reference\n\nshipped june\n";
+        const SHIPPED_NEW: &str = "# Reference\n\nshipped august\n";
+        const LOCAL_EDIT: &str = "# Reference\n\nour own house rules\n";
+        const PATH: &str = "skills/cas-test/references/customized.md";
+        const BODY_FILE: BuiltinFile = BuiltinFile {
+            path: "skills/cas-test/SKILL.md",
+            content: BODY,
+        };
+        const NEW_FILE: BuiltinFile = BuiltinFile {
+            path: PATH,
+            content: SHIPPED_NEW,
+        };
+
+        let temp = tempdir().unwrap();
+        let target_dir = temp.path().join(".claude");
+        let target = target_dir.join(PATH);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        // The per-harness ledger only lands under <repo>/.cas/cache when a
+        // `.cas` directory exists — that is the layout SessionStart reads.
+        std::fs::create_dir_all(temp.path().join(".cas")).unwrap();
+        std::fs::write(&target, LOCAL_EDIT).unwrap();
+
+        set_history_override(PATH, &[SHIPPED_OLD]);
+        let result = sync_all_builtins_inner(&target_dir, &[], &[BODY_FILE, NEW_FILE]).unwrap();
+        clear_history_override();
+
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            LOCAL_EDIT,
+            "content matching no shipped CAS version must still be preserved"
+        );
+        assert_eq!(
+            result.modified_reference_files,
+            vec![PATH.to_string()],
+            "the preserved customization must be reported to the caller"
+        );
+
+        let state = BuiltinReferenceState::load(&target_dir).unwrap();
+        assert!(
+            state.skipped_references.contains_key(PATH),
+            "the skip must be persisted so SessionStart can surface it"
+        );
+
+        // The ledger for `.claude` lives under <cas_root>/cache/... and is what
+        // the SessionStart banner reads.
+        let cas_root = temp.path().join(".cas");
+        let skipped = skipped_owned_references(&cas_root);
+        assert_eq!(
+            skipped.get("claude").map(Vec::as_slice),
+            Some([PATH.to_string()].as_slice()),
+            "skipped references must be readable per harness from the cas cache"
+        );
+        let banner =
+            crate::hooks::handlers::session_hygiene::render_stale_reference_banner(&skipped);
+        assert!(
+            banner.full.contains(PATH) && banner.full.contains("cas update --sync"),
+            "the banner must name the skipped path and the acceptance remediation: {}",
+            banner.full
+        );
+        assert!(
+            banner.compact.contains("cas update --sync"),
+            "the degraded rendering must still carry the remediation command"
+        );
+
+        // Once the local edit is reconciled, the banner must fall silent.
+        std::fs::write(&target, SHIPPED_NEW).unwrap();
+        sync_all_builtins_inner(&target_dir, &[], &[BODY_FILE, NEW_FILE]).unwrap();
+        assert!(
+            skipped_owned_references(&cas_root).is_empty(),
+            "a resolved reference must clear the persisted skip"
+        );
+    }
+
+    /// The embedded history is the whole mechanism — an empty or unparseable
+    /// ledger silently reverts to the pre-fix behaviour, so assert it is real.
+    #[test]
+    fn embedded_builtin_reference_history_covers_shipped_reference_paths() {
+        let history = builtin_reference_history();
+        assert!(
+            history.files.len() >= 20,
+            "embedded reference history looks truncated ({} paths); rerun \
+             scripts/gen-builtin-reference-history.sh",
+            history.files.len()
+        );
+        for path in [
+            "skills/cas-supervisor/references/worker-recovery.md",
+            "skills/cas-worker/references/recovery.md",
+        ] {
+            let hashes = history
+                .files
+                .get(path)
+                .unwrap_or_else(|| panic!("no shipped-version history recorded for {path}"));
+            assert!(
+                hashes.len() >= 2,
+                "{path} should have multiple shipped versions recorded, got {}",
+                hashes.len()
+            );
+            assert!(
+                hashes.iter().all(|h| h.len() == 64
+                    && h.chars()
+                        .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())),
+                "{path} history must contain lowercase sha256 hex digests"
+            );
+        }
     }
 
     #[test]

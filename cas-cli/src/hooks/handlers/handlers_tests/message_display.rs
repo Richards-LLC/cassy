@@ -16,15 +16,56 @@ use crate::hooks::handlers::handlers_events::handle_message_display;
 // Helpers
 // ============================================================================
 
-/// Build a minimal MessageDisplay HookInput with the given message text.
+/// Build a MessageDisplay `HookInput` by **parsing the real wire payload**.
+///
+/// cas-f3e3: this helper used to build the struct by hand with
+/// `message: Some(...)`. That is why all four tests below stayed green while
+/// the handler was unreachable in production — Claude Code sends the assistant
+/// text under `delta`, never `message`, so `input.message` was `None` on every
+/// real event and `handle_message_display` returned on its first line.
+///
+/// The envelope below is a verbatim capture from Claude Code 2.1.224. Keeping
+/// these tests on the parse path is the point: a struct literal cannot catch a
+/// deserialization-contract bug, and this file is the proof.
 fn md_input(message: &str) -> HookInput {
-    HookInput {
-        session_id: "test-session".into(),
-        cwd: "/test".into(),
-        hook_event_name: "MessageDisplay".into(),
-        message: Some(message.to_string()),
-        ..HookInput::default()
-    }
+    let payload = serde_json::json!({
+        "session_id": "test-session",
+        "transcript_path": "/test/transcript.jsonl",
+        "cwd": "/test",
+        "prompt_id": "d323a56b-73b1-4afc-8b3f-32605be51b91",
+        "hook_event_name": "MessageDisplay",
+        "turn_id": "83db6fbe-820e-4db4-8845-d5515e9158c3",
+        "message_id": "513a75fd-35f5-451b-a7ed-b925c5ecc4d9",
+        "index": 0,
+        "final": true,
+        "delta": message,
+    });
+    serde_json::from_value(payload).expect("real MessageDisplay payload must deserialize")
+}
+
+/// The guard must be unreachable for a non-final streaming chunk: a fence or a
+/// secret spanning a chunk boundary cannot be judged from one chunk.
+#[test]
+fn non_final_chunk_is_passthrough_even_with_the_guard_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let cas_root = write_guard_config(dir.path());
+
+    let partial: HookInput = serde_json::from_value(serde_json::json!({
+        "session_id": "test-session",
+        "cwd": "/test",
+        "hook_event_name": "MessageDisplay",
+        "index": 0,
+        "final": false,
+        "delta": "leaked token: sk-abcdef1234567890abcdef1234567890",
+    }))
+    .unwrap();
+
+    let out = handle_message_display(&partial, Some(&cas_root)).unwrap();
+    assert_eq!(
+        serde_json::to_string(&out).unwrap(),
+        "{}",
+        "a partial chunk must pass through untouched"
+    );
 }
 
 /// Create a `.cas` subdirectory inside `dir`, write

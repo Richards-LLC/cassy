@@ -464,4 +464,66 @@ mod tests {
             last_id = m.id;
         }
     }
+
+    /// cas-0955: guard against orphan migration files.
+    ///
+    /// Thirteen files (m035/m036/m037, m061-m063, m082-m084, m125-m128) sat in
+    /// this directory for months with no `mod` declaration and no `MIGRATIONS`
+    /// entry, so they never compiled and never ran — the schema changes they
+    /// described (`visibility`, `owner_id`, `collaborators`) simply did not
+    /// exist in any live database. A migration that is not declared *and*
+    /// registered is dead code that reads like shipped schema, so fail loudly
+    /// the moment one appears.
+    #[test]
+    fn test_every_migration_file_is_declared_and_registered() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/migration/migrations");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            // Source tree unavailable (packaged/vendored build) — nothing to check.
+            return;
+        };
+        let source = std::fs::read_to_string(dir.join("mod.rs"))
+            .expect("migrations/mod.rs must be readable when the source tree is present");
+
+        let declared: HashSet<&str> = source
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                let rest = line
+                    .strip_prefix("pub mod ")
+                    .or_else(|| line.strip_prefix("mod "))?;
+                rest.strip_suffix(';')
+            })
+            .collect();
+        let registered: HashSet<&str> = source
+            .lines()
+            .filter_map(|line| line.trim().strip_suffix("::MIGRATION,"))
+            .collect();
+
+        let mut modules: Vec<String> = entries
+            .filter_map(|entry| {
+                let path = entry.ok()?.path();
+                if path.extension()? != "rs" {
+                    return None;
+                }
+                let stem = path.file_stem()?.to_str()?.to_string();
+                (stem != "mod").then_some(stem)
+            })
+            .collect();
+        modules.sort();
+        assert!(
+            !modules.is_empty(),
+            "no migration files found in {} — the guard would pass vacuously",
+            dir.display()
+        );
+
+        let orphans: Vec<&String> = modules
+            .iter()
+            .filter(|m| !declared.contains(m.as_str()) || !registered.contains(m.as_str()))
+            .collect();
+        assert!(
+            orphans.is_empty(),
+            "migration files exist but are never compiled or run \
+             (missing a `mod` declaration and/or a MIGRATIONS entry in mod.rs): {orphans:?}"
+        );
+    }
 }

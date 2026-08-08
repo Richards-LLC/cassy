@@ -36,6 +36,13 @@ async fn run_server_impl() -> anyhow::Result<()> {
     // auto-respawn path gives us no diagnostic trail.
     install_serve_panic_hook(&cas_root);
 
+    // Parent-death watchdog (cas-82d6c). Armed before any store is opened so a
+    // startup that wedges *before* the transport exists is covered too — an
+    // orphan stuck in eager init holds the same write-side database fds as one
+    // stuck in the serve loop. See `parent_watchdog` for why stdin EOF is not
+    // sufficient and why the server reaps itself rather than being reaped.
+    let parent_watchdog = crate::mcp::server::parent_watchdog::spawn();
+
     // Register this repo in the host-scoped known_repos registry. Fires
     // every time `cas serve` starts in a directory with `.cas/`, catching
     // repos that pre-date the `cas init` registration hook. Non-fatal:
@@ -349,8 +356,19 @@ async fn run_server_impl() -> anyhow::Result<()> {
     );
 
     let server = service.serve(stdio()).await?;
-    if let Err(e) = server.waiting().await {
-        eprintln!("[CAS] MCP server terminated with error: {e}");
+    // Two ways out: the transport ends (stdin EOF / client disconnect), or the
+    // watchdog proves the harness that spawned us is gone. The second exists
+    // because the first never fires when the stdin write end outlives the
+    // harness — a pty, or a sibling that inherited the pipe (cas-82d6c).
+    let waiting = server.waiting();
+    tokio::pin!(waiting);
+    tokio::select! {
+        result = &mut waiting => {
+            if let Err(e) = result {
+                eprintln!("[CAS] MCP server terminated with error: {e}");
+            }
+        }
+        () = parent_watchdog.tripped() => {}
     }
 
     eprintln!("[CAS] Shutting down, releasing tasks...");

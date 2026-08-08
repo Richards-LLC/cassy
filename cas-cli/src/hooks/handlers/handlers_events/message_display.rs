@@ -36,8 +36,16 @@ pub fn handle_message_display(
     cas_root: Option<&Path>,
 ) -> Result<HookOutput, MemError> {
     // Fast-path: no message text to inspect.
-    let message = match &input.message {
-        Some(m) => m.as_str(),
+    //
+    // cas-f3e3: this reads `display_text()`, not `input.message` directly.
+    // Claude Code sends the assistant text under the wire key `delta` (now
+    // aliased onto `message`), so the previous direct read was `None` on every
+    // real MessageDisplay event and this handler returned here, unconditionally
+    // — the whole guard below was unreachable in production. `display_text`
+    // also declines non-final chunks, since a fence or a secret split across a
+    // streaming boundary cannot be judged from one chunk.
+    let message = match input.display_text() {
+        Some(m) => m,
         None => return Ok(HookOutput::empty()),
     };
 

@@ -486,6 +486,179 @@ pub fn build_session_start_orphan_banner(cas_root: &Path) -> Option<String> {
     build_session_start_orphan_banner_sized(cas_root).map(|b| b.full)
 }
 
+/// Full + compact renderings of the stale-builtin-reference banner (cas-0c0a).
+///
+/// `cas update --sync` refuses to overwrite a skill reference whose content
+/// matches neither its recorded baseline nor any version CAS shipped, and says
+/// so only in CLI output that scripted/unattended syncs discard. Eight
+/// supervisor/worker reference files sat six weeks stale that way, including
+/// worker-recovery guidance whose absence can strand live workers. This
+/// surfaces the same skip where every session sees it.
+///
+/// Returns `None` when the last sync skipped nothing — the common case.
+pub fn build_session_start_stale_reference_banner_sized(
+    cas_root: &Path,
+) -> Option<SessionStartBanner> {
+    let skipped = crate::builtins::skipped_owned_references(cas_root);
+    if skipped.is_empty() {
+        return None;
+    }
+    Some(render_stale_reference_banner(&skipped))
+}
+
+/// Pure renderer for the stale-reference banner — separated from the ledger
+/// read so tests (and the SessionStart budget test) can drive it directly.
+pub(crate) fn render_stale_reference_banner(
+    skipped: &std::collections::BTreeMap<String, Vec<String>>,
+) -> SessionStartBanner {
+    let total: usize = skipped.values().map(Vec::len).sum();
+    let compact = format!(
+        "⚠ {total} builtin skill reference file(s) are NOT being updated by `cas update --sync` \
+         — they differ from every version CAS shipped and are preserved as local edits. \
+         Run `cas update --sync` for the path list; to accept the CAS version, delete the file \
+         and rerun the sync.\n"
+    );
+
+    let mut full = format!(
+        "⚠ {total} builtin skill reference file(s) are NOT being updated by `cas update --sync`: \
+         their content matches neither the last synced baseline nor any version CAS shipped, so \
+         sync preserves them as local customizations. Until resolved these files stay stale \
+         forever.\n"
+    );
+    for (harness, paths) in skipped {
+        for path in paths {
+            full.push_str(&format!("  ! .{harness}/{path}\n"));
+        }
+    }
+    full.push_str(
+        "  Review each file; to accept the CAS version, delete it and rerun `cas update --sync`.\n",
+    );
+
+    SessionStartBanner { full, compact }
+}
+
+/// Maximum staged-report file names the unfiled-reports banner lists inline.
+const UNFILED_REPORTS_BANNER_MAX_ENTRIES: usize = 10;
+
+/// Staged bug/feature reports sitting unfiled at `docs/requests/` (cas-20f27).
+///
+/// The write-first filing flow stages a report as `docs/requests/BUG-<slug>.md`
+/// before pushing it to GitHub, and the durable fallback deliberately keeps that
+/// file when `gh` or `issues.repo` is unavailable. Nothing then notices the file
+/// again: 13 reports pooled there for weeks. Filing is recall-based today; this
+/// makes the leftover state deterministic, per the codemap/project-overview
+/// detector pattern.
+///
+/// Scans the `docs/requests/` root only — `completed/` is the archive and never
+/// counts. Returns `None` when nothing is staged, which is the common case.
+pub fn build_session_start_unfiled_reports_banner_sized(
+    cas_root: &Path,
+) -> Option<SessionStartBanner> {
+    let repo_root = cas_root.parent()?;
+    let staged = staged_request_reports(repo_root);
+    if staged.is_empty() {
+        return None;
+    }
+    Some(render_unfiled_reports_banner(&staged))
+}
+
+/// File names of staged `BUG-*` / `FEATURE-*` reports directly under
+/// `<repo_root>/docs/requests/`, sorted. Sub-directories (notably `completed/`)
+/// are ignored — the archive is not a backlog.
+pub(crate) fn staged_request_reports(repo_root: &Path) -> Vec<String> {
+    let dir = repo_root.join("docs").join("requests");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter(|entry| entry.file_type().map(|t| t.is_file()).unwrap_or(false))
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.starts_with("BUG-") || name.starts_with("FEATURE-"))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Pure renderer for the unfiled-staged-reports banner — separated from the
+/// directory scan so tests and the SessionStart budget test drive it directly.
+pub(crate) fn render_unfiled_reports_banner(staged: &[String]) -> SessionStartBanner {
+    let total = staged.len();
+    let remediation = if total == 1 {
+        "File it now: `gh issue create --repo \"$(cas config get issues.repo)\" \
+         --title \"<title>\" --body-file docs/requests/<file>`, then remove the staged file \
+         once the issue URL is known (see the cas-supervisor filing-cas-bugs reference)."
+    } else {
+        "Run the cas-github-issues sweep skill to file and reconcile them; each file is \
+         removed only after `gh issue create` succeeds and the issue URL is known."
+    };
+    let compact = format!(
+        "⚠ {total} staged bug/feature report(s) in docs/requests/ were never filed to GitHub. \
+         {remediation}\n"
+    );
+
+    let mut full = format!(
+        "⚠ {total} staged bug/feature report(s) sit unfiled in docs/requests/ — written by the \
+         write-first flow but never pushed to the issue tracker, so no one outside this \
+         checkout can see them:\n"
+    );
+    for name in staged.iter().take(UNFILED_REPORTS_BANNER_MAX_ENTRIES) {
+        full.push_str(&format!("  ! docs/requests/{name}\n"));
+    }
+    if total > UNFILED_REPORTS_BANNER_MAX_ENTRIES {
+        full.push_str(&format!(
+            "  ... and {} more\n",
+            total - UNFILED_REPORTS_BANNER_MAX_ENTRIES
+        ));
+    }
+    full.push_str(&format!("  {remediation}\n"));
+
+    SessionStartBanner { full, compact }
+}
+
+/// Unset `[issues] repo` in a project that stages requests (cas-20f27).
+///
+/// Without a target the filing flow has nowhere to push, so every report takes
+/// the durable-fallback path and silently accumulates. Fires only when the
+/// project shows it wants the flow (a `docs/requests/` directory exists), and
+/// deliberately never proposes a value: `origin` in a downstream project is the
+/// consumer's own repo, and guessing routes CAS bugs into the wrong tracker
+/// (filing-cas-bugs.md rule).
+pub fn build_session_start_issues_target_banner_sized(
+    cas_root: &Path,
+    config: &crate::config::Config,
+) -> Option<SessionStartBanner> {
+    let configured = config
+        .issues
+        .as_ref()
+        .and_then(|issues| issues.repo.as_deref())
+        .map(str::trim)
+        .filter(|repo| !repo.is_empty());
+    if configured.is_some() {
+        return None;
+    }
+    let repo_root = cas_root.parent()?;
+    if !repo_root.join("docs").join("requests").is_dir() {
+        return None;
+    }
+    Some(render_issues_target_banner())
+}
+
+/// Pure renderer for the unset-issues-target banner. Takes no arguments on
+/// purpose: there is nothing project-specific to interpolate, and in particular
+/// no origin-derived suggestion.
+pub(crate) fn render_issues_target_banner() -> SessionStartBanner {
+    let text = "⚠ This project stages requests in docs/requests/ but `[issues] repo` is unset, \
+                so bug/feature reports have nowhere to be filed. Set the tracker the receiving \
+                team gave you — `cas config set issues.repo owner/repo`. Do not derive it from \
+                the `origin` remote.\n"
+        .to_string();
+    SessionStartBanner {
+        full: text.clone(),
+        compact: text,
+    }
+}
+
 /// Full + compact renderings of the orphan/stale-server banner (cas-b114).
 pub fn build_session_start_orphan_banner_sized(cas_root: &Path) -> Option<SessionStartBanner> {
     let report = crate::ui::factory::orphan_gc::scan(
@@ -1112,6 +1285,151 @@ mod tests {
                 .unwrap()
                 .is_some(),
             "and must never clear records"
+        );
+    }
+
+    /// cas-20f27 detector 1: staged reports at the `docs/requests/` root are
+    /// invisible to everyone outside the checkout. The banner must name the
+    /// count and the remediation skill; an empty or archive-only directory must
+    /// stay silent so the detector never cries wolf.
+    #[test]
+    fn unfiled_reports_banner_counts_staged_reports_and_ignores_the_archive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        let cas_root = repo.join(".cas");
+        fs::create_dir_all(&cas_root).unwrap();
+        let requests = repo.join("docs").join("requests");
+        fs::create_dir_all(requests.join("completed")).unwrap();
+
+        // Empty root (README + completed/ only) → silent.
+        fs::write(requests.join("README.md"), "# intake").unwrap();
+        fs::write(
+            requests.join("completed").join("BUG-already-filed.md"),
+            "archived",
+        )
+        .unwrap();
+        assert!(
+            build_session_start_unfiled_reports_banner_sized(&cas_root).is_none(),
+            "archived reports are not a backlog — the banner must stay quiet"
+        );
+
+        // Stage two reports at the root.
+        fs::write(requests.join("BUG-close-hangs.md"), "report").unwrap();
+        fs::write(requests.join("FEATURE-detectors.md"), "report").unwrap();
+
+        let banner = build_session_start_unfiled_reports_banner_sized(&cas_root)
+            .expect("staged reports must be surfaced");
+        assert!(banner.full.contains("2 staged"), "banner: {}", banner.full);
+        assert!(banner.full.contains("docs/requests/BUG-close-hangs.md"));
+        assert!(banner.full.contains("docs/requests/FEATURE-detectors.md"));
+        assert!(
+            banner.full.contains("cas-github-issues"),
+            "the banner must name the remediation skill: {}",
+            banner.full
+        );
+        assert!(banner.compact.contains("2 staged"));
+        assert!(banner.compact.contains("cas-github-issues"));
+        assert!(
+            !banner.full.contains("BUG-already-filed"),
+            "completed/ must never be scanned: {}",
+            banner.full
+        );
+
+        // Condition clears → banner goes quiet.
+        fs::remove_file(requests.join("BUG-close-hangs.md")).unwrap();
+        fs::remove_file(requests.join("FEATURE-detectors.md")).unwrap();
+        assert!(
+            build_session_start_unfiled_reports_banner_sized(&cas_root).is_none(),
+            "the banner must disappear once the reports are filed"
+        );
+    }
+
+    /// A single staged report gets the single-file filing command rather than
+    /// the sweep skill, and a large backlog caps its inline rows.
+    #[test]
+    fn unfiled_reports_banner_scales_from_one_report_to_a_capped_list() {
+        let one = render_unfiled_reports_banner(&["BUG-only.md".to_string()]);
+        assert!(one.full.contains("1 staged"));
+        assert!(
+            one.full.contains("gh issue create"),
+            "a single report gets the direct filing command: {}",
+            one.full
+        );
+
+        let many: Vec<String> = (0..UNFILED_REPORTS_BANNER_MAX_ENTRIES + 3)
+            .map(|i| format!("BUG-report-{i:03}.md"))
+            .collect();
+        let banner = render_unfiled_reports_banner(&many);
+        let rows = banner.full.matches("  ! docs/requests/").count();
+        assert_eq!(rows, UNFILED_REPORTS_BANNER_MAX_ENTRIES);
+        assert!(banner.full.contains("and 3 more"), "{}", banner.full);
+        assert!(banner.full.contains("cas-github-issues"));
+    }
+
+    /// cas-20f27 detector 2: an unset `issues.repo` in a project that stages
+    /// requests must be surfaced with the literal config command — and must
+    /// never propose a value derived from the `origin` remote, which in a
+    /// downstream project is the consumer's own tracker.
+    #[test]
+    fn issues_target_banner_fires_only_when_unset_and_never_suggests_origin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        // A configured remote that must not leak into the banner.
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/downstream-consumer/private-app.git",
+            ])
+            .status();
+        let cas_root = repo.join(".cas");
+        fs::create_dir_all(&cas_root).unwrap();
+
+        let unset = crate::config::Config::default();
+
+        // No docs/requests/ → the project does not use the flow → silent.
+        assert!(
+            build_session_start_issues_target_banner_sized(&cas_root, &unset).is_none(),
+            "projects that do not stage requests must not be nagged"
+        );
+
+        fs::create_dir_all(repo.join("docs").join("requests")).unwrap();
+        let banner = build_session_start_issues_target_banner_sized(&cas_root, &unset)
+            .expect("unset target with a requests dir must be surfaced");
+        let full = banner.full.as_str();
+        assert!(
+            full.contains("cas config set issues.repo owner/repo"),
+            "banner must name the exact command: {full}"
+        );
+        assert!(
+            !banner.full.contains("downstream-consumer")
+                && !banner.full.contains("private-app")
+                && !banner.compact.contains("downstream-consumer"),
+            "the banner must never derive a value from origin: {}",
+            banner.full
+        );
+
+        // Set → silent. Whitespace-only is treated as unset.
+        let mut set = crate::config::Config::default();
+        set.issues = Some(crate::config::IssuesConfig {
+            repo: Some("owner/cas".to_string()),
+        });
+        assert!(
+            build_session_start_issues_target_banner_sized(&cas_root, &set).is_none(),
+            "a configured target must silence the banner"
+        );
+
+        let mut blank = crate::config::Config::default();
+        blank.issues = Some(crate::config::IssuesConfig {
+            repo: Some("   ".to_string()),
+        });
+        assert!(
+            build_session_start_issues_target_banner_sized(&cas_root, &blank).is_some(),
+            "a blank repo value is not a target"
         );
     }
 

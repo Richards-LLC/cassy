@@ -986,6 +986,81 @@ fn test_knowledge_search_and_read_round_trip() {
         ));
 }
 
+/// cas-461a, through the shipped command rather than the store API.
+///
+/// `fts_query` joined tokens with a space, which FTS5 reads as an implicit
+/// AND, so a multi-term search only matched pages containing *every* term.
+/// The cas-d075 measurement
+/// (`docs/migration/cas-b129-knowledge-retrieval-verdict.md`) recorded 7 of 10
+/// real-vocabulary queries returning zero pages where legacy returned 4–10.
+///
+/// The regression is asserted at the CLI boundary because that is where it was
+/// observed and because the failure was silent: `cas knowledge search` printed
+/// a clean "No distilled pages match", not an error, so nothing upstream could
+/// notice it.
+#[test]
+fn test_knowledge_multi_term_search_is_disjunctive() {
+    let temp = TempDir::new().unwrap();
+
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["init", "--yes"])
+        .assert()
+        .success();
+
+    seed_knowledge_page(&temp.path().join(".cas"));
+
+    // Every term present: worked before this fix, must keep working.
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["knowledge", "search", "worktrees factory branch"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("subsystem/worktree-manager.md"));
+
+    // The actual regression: a query where only some terms occur on the page.
+    // Under the implicit-AND conjunction this printed "No distilled pages
+    // match" and the page was unreachable.
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args([
+            "knowledge",
+            "search",
+            "worktrees deployment kubernetes rollback",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("subsystem/worktree-manager.md"))
+        .stdout(predicate::str::contains("No distilled pages match").not());
+
+    // Disjunctive must not mean "matches anything": a query sharing no term
+    // with the corpus still reports no matches.
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["knowledge", "search", "kubernetes rollback helm"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No distilled pages match"));
+
+    // An explicitly quoted phrase keeps adjacency: these two words both appear
+    // on the page but never next to each other in this order.
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["knowledge", "search", "\"branch worktrees\""])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No distilled pages match"));
+
+    // ...while the phrase that does appear verbatim is found, proving the
+    // result above is adjacency rather than a tokenisation accident.
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["knowledge", "search", "\"isolated branch\""])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("subsystem/worktree-manager.md"));
+}
+
 #[test]
 fn test_knowledge_search_with_no_match_is_not_an_error() {
     let temp = TempDir::new().unwrap();
@@ -1019,4 +1094,109 @@ fn test_knowledge_read_of_unknown_page_fails_loudly() {
         .args(["knowledge", "read", "subsystem/does-not-exist.md"])
         .assert()
         .failure();
+}
+
+/// cas-b69a (GH #157): the cas-b129 M3 incident in miniature — copy a project
+/// store, `cd` into the copy, and run a MUTATING command while `CAS_ROOT` (as a
+/// factory session exports it) still points at the live store.
+///
+/// The write must still land in the CAS_ROOT store (precedence is deliberately
+/// unchanged — factory workers in clones depend on it), but the operator must be
+/// told, on stderr, that the store under their feet lost.
+#[test]
+fn cas_root_override_of_a_differing_cwd_root_is_announced_on_stderr() {
+    let temp = TempDir::new().unwrap();
+    let live = temp.path().join("live");
+    let copy = temp.path().join("copy");
+    std::fs::create_dir_all(&live).unwrap();
+    std::fs::create_dir_all(&copy).unwrap();
+
+    // Two independent projects, each with its own .cas.
+    cas_cmd(temp.path())
+        .current_dir(&live)
+        .args(["init", "--yes"])
+        .assert()
+        .success();
+    cas_cmd(temp.path())
+        .current_dir(&copy)
+        .args(["init", "--yes"])
+        .assert()
+        .success();
+
+    let live_root = live.join(".cas");
+    let copy_root = copy.join(".cas");
+
+    // A mutating command, run from the copy, with CAS_ROOT aimed at the live store.
+    let output = cas_cmd(temp.path())
+        .current_dir(&copy)
+        .env("CAS_ROOT", &live_root)
+        .args(["config", "set", "sync.min_helpful", "7"])
+        .output()
+        .expect("cas config set must run");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // (1) Both roots named, winner stated.
+    assert!(
+        stderr.contains(&live_root.display().to_string()),
+        "stderr must name the winning CAS_ROOT store.\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains(&copy_root.display().to_string()),
+        "stderr must name the working-directory store that lost.\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("CAS_ROOT wins"),
+        "stderr must state which root won.\nstderr: {stderr}"
+    );
+
+    // (3) stderr only — stdout stays parseable.
+    assert!(
+        !stdout.contains("CAS_ROOT override"),
+        "the notice must never reach stdout.\nstdout: {stdout}"
+    );
+
+    // (2) Precedence itself is unchanged: the write really did land in the
+    // CAS_ROOT store, which is exactly why the notice has to exist.
+    let live_config = std::fs::read_to_string(live_root.join("config.toml")).unwrap();
+    let copy_config = std::fs::read_to_string(copy_root.join("config.toml")).unwrap();
+    assert!(
+        live_config.contains("min_helpful = 7"),
+        "CAS_ROOT must keep winning.\nlive config: {live_config}"
+    );
+    assert!(
+        !copy_config.contains("min_helpful = 7"),
+        "the working-directory store must be untouched.\ncopy config: {copy_config}"
+    );
+}
+
+/// The other half of the honesty contract: when there is nothing to
+/// disambiguate — CAS_ROOT pointing at the very store the working directory
+/// would have resolved on its own — there must be no notice at all. A banner
+/// that fires on every ordinary factory command is a banner nobody reads.
+#[test]
+fn cas_root_matching_the_cwd_root_produces_no_notice() {
+    let temp = TempDir::new().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+
+    cas_cmd(temp.path())
+        .current_dir(&project)
+        .args(["init", "--yes"])
+        .assert()
+        .success();
+
+    let output = cas_cmd(temp.path())
+        .current_dir(&project)
+        .env("CAS_ROOT", project.join(".cas"))
+        .args(["config", "set", "sync.min_helpful", "7"])
+        .output()
+        .expect("cas config set must run");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("CAS_ROOT override"),
+        "no conflict means no notice.\nstderr: {stderr}"
+    );
 }

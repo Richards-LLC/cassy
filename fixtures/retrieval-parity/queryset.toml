@@ -1,0 +1,256 @@
+# Retrieval-parity query set (cas-90fd, phase M4 of cas-b129).
+#
+# This file is the contract for "memory retrieval did not regress across the
+# memory -> knowledge migration". `cas retrieval-parity capture` runs every
+# case below against the current system and writes a baseline fixture;
+# `cas retrieval-parity replay` re-runs them afterwards and fails on any hit
+# that became unretrievable or fell more than the rank tolerance.
+#
+# EXTENDING THIS FILE
+# -------------------
+# It is TOML, not code, precisely so it can grow without a rebuild. M1
+# (cas-13aa) is inventorying legacy read paths in parallel; every read path it
+# turns up should become a case here.
+#
+#   id             required, unique, stable. It is the diff key: renaming a
+#                  case reads as "old case deleted, new case added".
+#   channel        search | recent | list | pinned | helpful
+#                  | by_type | by_tier | by_tag | session_merge | global_list
+#   query          the channel's argument. Required for search / by_type /
+#                  by_tier / by_tag; ignored by the rest.
+#   limit          optional result depth (default: default_limit)
+#   rank_tolerance optional per-case override (default: default_rank_tolerance)
+#   note           optional; say why the case earns its place.
+#
+# COVERAGE RULE
+# -------------
+# `capture` refuses to run unless there is a by_type case for every entry type
+# and a by_tier case for every tier present in the store. A blind spot in the
+# query set is a blind spot in the migration's safety net, so widening the set
+# is the correct response to a coverage error -- not `--allow-uncovered`.
+
+version = 1
+default_limit = 10
+default_rank_tolerance = 3
+
+# Integration-test fixtures written into the live databases by the test suite.
+# These five literal strings are 994 of 1696 rows (58.6%) -- see
+# docs/migration/cas-b129-mapping-spec.md section 3. They are dropped from every
+# result before ranks are recorded, so the baseline measures the 702 real rows
+# rather than test detritus.
+#
+# Excluding a row means the harness makes NO claim about whether it survives the
+# migration -- which is exactly right for fixtures, because their lifecycle is
+# deliberately outside parity's scope. M3 does NOT drop them (rule R1 disposition
+# is deliberately-leave: not carried to pages, rows left untouched in `entries`);
+# their deletion is owned by the separate exact-match purge cas-78c8 / GH #156.
+# Under exclusion both their presence at replay time and their later absence
+# after that purge are non-regressions.
+exclude_contents = [
+  "Test memory from MCP protocol test",
+  "Rust programming language with ownership and borrowing",
+  "Context test memory entry",
+  "Consolidated memory test entry",
+  "Test entry for notification test",
+]
+
+# --- Channel: whole-surface orderings -------------------------------------
+# These pin the shape of the untargeted read paths: what an agent gets when it
+# asks for "recent" or "list" with no query at all.
+
+[[query]]
+id = "recent-default"
+channel = "recent"
+limit = 25
+note = "mcp__cas__memory action=recent — the most-used untargeted read path."
+
+[[query]]
+id = "list-default"
+channel = "list"
+limit = 25
+note = "mcp__cas__memory action=list — created-desc ordering."
+
+[[query]]
+id = "pinned-always-active"
+channel = "pinned"
+limit = 25
+rank_tolerance = 0
+note = """
+The SessionStart "Pinned Memories (Always Active)" block. Zero tolerance: this
+set is injected verbatim into every session, ignores the token budget, and is
+small enough that any reordering is a real behavioural change.
+"""
+
+[[query]]
+id = "session-merge"
+channel = "session_merge"
+limit = 60
+note = """
+The SessionStart context merge -- the highest-volume reader of legacy entries
+(inventory section 3.1). Mirrors merge_entries: store_list on the project store
+then the global store (archived = 0, LIMIT 10000, NO tier filter, so archive-tier
+rows are live and still injected), de-duplicated on the p-/g--stripped id with
+project winning. Deep limit because this path feeds every session.
+
+NOTE: this case alone does NOT measure the global store. The merge puts project
+rows first and this limit truncates long before the global tail on any host with
+more than 60 project rows -- see global-list-default below.
+"""
+
+[[query]]
+id = "global-list-default"
+channel = "global_list"
+limit = 25
+note = """
+store_list against the GLOBAL store (~/.cas) on its own. Exists because
+session-merge structurally cannot see global content on a host with a large
+project store, which is how the global tier went unmeasured through every
+earlier green run (cas-96ae). Reports UNAVAILABLE rather than zero hits when no
+global store is reachable, so the blind spot cannot silently return.
+"""
+
+[[query]]
+id = "helpful-feedback-ranked"
+channel = "helpful"
+limit = 25
+note = "Feedback-ranked retrieval (helpful_count - harmful_count)."
+
+# --- Channel: by_type -----------------------------------------------------
+# One case per EntryType variant. Required by the coverage rule for every type
+# actually present in the store; the others are cheap and keep the set valid
+# if the corpus later grows a type it lacks today.
+
+[[query]]
+id = "type-learning"
+channel = "by_type"
+query = "learning"
+limit = 25
+
+[[query]]
+id = "type-context"
+channel = "by_type"
+query = "context"
+limit = 25
+
+[[query]]
+id = "type-preference"
+channel = "by_type"
+query = "preference"
+limit = 25
+
+[[query]]
+id = "type-observation"
+channel = "by_type"
+query = "observation"
+limit = 25
+
+# --- Channel: by_tier -----------------------------------------------------
+# One case per MemoryTier variant. Note that `memory_tier = 'archive'` is a
+# distinct thing from the `archived` flag: archive-tier entries are still live
+# rows and must still survive the migration.
+
+[[query]]
+id = "tier-in-context"
+channel = "by_tier"
+query = "in-context"
+limit = 25
+
+[[query]]
+id = "tier-working"
+channel = "by_tier"
+query = "working"
+limit = 25
+
+[[query]]
+id = "tier-cold"
+channel = "by_tier"
+query = "cold"
+limit = 25
+
+[[query]]
+id = "tier-archive"
+channel = "by_tier"
+query = "archive"
+limit = 50
+note = "Largest tier in the current corpus; deeper limit to widen the net."
+
+# --- Channel: search ------------------------------------------------------
+# BM25 over the Tantivy memory index (doc_type = entry), i.e.
+# mcp__cas__search action=search.
+#
+# BM25-ONLY, DELIBERATELY. Legacy entries have no embeddings
+# (pending_embedding = 1 on every row) and the semantic channel is defined over
+# KnowledgePage, not Entry -- legacy memories have never had semantic retrieval
+# (inventory section 3.2). Baselining a "legacy semantic" channel would measure
+# something that never existed, so no such case belongs here. Post-migration
+# semantic hits are an upgrade to be reported, not a parity target.
+#
+# There is no mined relevance history to seed from either (retrieval_queries and
+# retrieval_outcomes are empty in both databases), so these queries are derived
+# from the actual vocabulary of the 702 real rows -- the highest-frequency
+# content terms, grouped into the topics the corpus actually covers.
+
+[[query]]
+id = "search-factory-workers"
+channel = "search"
+query = "factory worker supervisor spawn"
+note = "Densest topic in the real corpus (factory 194, worker/workers 295, supervisor 108)."
+
+[[query]]
+id = "search-task-close-verification"
+channel = "search"
+query = "task close verification merge branch"
+note = "Task lifecycle and the close/merge gate (close 64, verification 55, merge 60, branch 59)."
+
+[[query]]
+id = "search-worktree-commit"
+channel = "search"
+query = "worktree commit cas-src crates"
+note = "Repo mechanics (worktree 56, commit 61, cas-src 54, crates 34)."
+
+[[query]]
+id = "search-build-tests"
+channel = "search"
+query = "cargo build tests check"
+note = "Build and test lore (cargo 43, build 34, tests 61, check 32)."
+
+[[query]]
+id = "search-session-agents"
+channel = "search"
+query = "session claude codex agent message"
+note = "Agent/session behaviour (session 93, claude 111, codex 92, agent 44, message 40)."
+
+[[query]]
+id = "search-cloud-sync-config"
+channel = "search"
+query = "cloud sync config server local"
+note = "Cloud/sync/config surface (cloud 51, config 62, server 33, local 33)."
+
+[[query]]
+id = "search-release-staging"
+channel = "search"
+query = "release staging shipped status"
+note = "Release flow (release 30, staging 34, shipped 53, status 49)."
+
+[[query]]
+id = "search-root-cause-fixed"
+channel = "search"
+query = "root cause fixed stale pattern"
+note = "Bug lore (cause 31, fixed 34, stale 28, pattern 32)."
+
+[[query]]
+id = "search-review-skill"
+channel = "search"
+query = "review skill files project"
+note = "Review/skill surface (review 44, skill 29, files 47, project 62)."
+
+[[query]]
+id = "search-cross-project-contamination"
+channel = "search"
+query = "roark richards account"
+note = """
+Accounting-domain rows from another project that leaked into this database via
+cloud sync (mapping-spec section 3: 41 of 210 high-importance real rows). They are
+retrievable today, so they are baselined -- if M3 routes them elsewhere this case
+will report it rather than letting the change pass unseen.
+"""

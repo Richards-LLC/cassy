@@ -53,6 +53,11 @@ pub fn find_cas_root() -> Result<PathBuf> {
     if let Ok(cas_root) = std::env::var("CAS_ROOT") {
         let path = PathBuf::from(&cas_root);
         if path.exists() && path.is_dir() {
+            // cas-b69a (GH #157): the override is legitimate but must never be
+            // silent — announce it before the caller reads or writes anything.
+            if let Ok(cwd) = std::env::current_dir() {
+                announce_root_override_once(&path, &cwd);
+            }
             return Ok(path);
         }
         // If CAS_ROOT is set but invalid, fall through to other methods
@@ -62,6 +67,71 @@ pub fn find_cas_root() -> Result<PathBuf> {
     // 2. Existing logic: worktree detection, directory walk
     let cwd = std::env::current_dir()?;
     find_cas_root_from(&cwd)
+}
+
+/// cas-b69a (GH #157): the one-line notice emitted when `CAS_ROOT` resolves a
+/// different store than the caller's location would have.
+///
+/// ROOT CAUSE this makes visible: `find_cas_root` checks `CAS_ROOT` before the
+/// working directory, and nothing said so. During the cas-b129 M3 rehearsal an
+/// operator copied the project store to `/tmp`, `cd`'d into the copy and ran the
+/// migration — under a factory session `CAS_ROOT` still pointed at the live
+/// project, so the "rehearsal" wrote 126 knowledge_pages rows and deleted 11
+/// sync_queue rows in production (restored from the tool's own ledger).
+///
+/// The precedence is deliberately NOT changed: factory workers in clones and
+/// worktrees depend on `CAS_ROOT` winning. What changes is that the loser is
+/// named out loud.
+///
+/// Returns `None` when there is nothing to disambiguate: no competing root, or
+/// both candidates are the same store (compared through `canonicalize` so a
+/// symlinked or `..`-laden spelling of the same directory is not reported as a
+/// conflict).
+pub(crate) fn root_override_notice(env_root: &Path, cwd_root: &Path) -> Option<String> {
+    let same = canonical_or_owned(env_root) == canonical_or_owned(cwd_root);
+    if same {
+        return None;
+    }
+    Some(format!(
+        "⚠️  CAS_ROOT override: CAS_ROOT={} overrides the working-directory store {} \
+         — CAS_ROOT wins; every read and write below targets {}.\n\
+         \x20   This precedence is intentional (factory workers in clones rely on it). \
+         To act on the working-directory store instead, clear the variable for this \
+         command: `env -u CAS_ROOT cas <command>`.",
+        env_root.display(),
+        cwd_root.display(),
+        env_root.display(),
+    ))
+}
+
+/// `canonicalize` when the path resolves, otherwise the path as given. Used only
+/// for equality comparison, never for anything the user sees.
+fn canonical_or_owned(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// cas-b69a (GH #157): print [`root_override_notice`] to **stderr**, at most
+/// once per process.
+///
+/// stderr, not stdout, so the notice can never corrupt parseable command output
+/// (`--json`, hook payloads, MCP stdio framing). Once per process, because
+/// `find_cas_root` is called dozens of times per command and a repeated banner
+/// would train everyone to ignore it.
+///
+/// The comparison itself is also done at most once: resolving the competing root
+/// walks the directory tree, and that cost should not ride on every lookup.
+fn announce_root_override_once(env_root: &Path, start: &Path) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let Ok(cwd_root) = find_cas_root_ignoring_env(start) else {
+            // No competing store at all — CAS_ROOT is the only candidate and
+            // there is nothing for the operator to be confused about.
+            return;
+        };
+        if let Some(notice) = root_override_notice(env_root, &cwd_root) {
+            eprintln!("{notice}");
+        }
+    });
 }
 
 /// Find the .cas directory starting from a specific path
@@ -81,10 +151,23 @@ pub fn find_cas_root_from(start: &Path) -> Result<PathBuf> {
     if let Ok(cas_root) = std::env::var("CAS_ROOT") {
         let path = PathBuf::from(&cas_root);
         if path.exists() && path.is_dir() {
+            // cas-b69a (GH #157): name the root that lost, before any I/O.
+            announce_root_override_once(&path, start);
             return Ok(path);
         }
     }
 
+    find_cas_root_ignoring_env(start)
+}
+
+/// The root `start` resolves to when `CAS_ROOT` is not consulted at all:
+/// CAS worktree detection, then git-worktree detection, then a directory walk.
+///
+/// Split out for cas-b69a (GH #157) so the detect layer can answer "what would
+/// this location have resolved to on its own?" and name it when `CAS_ROOT`
+/// overrides it. The resolution order is byte-for-byte the pre-existing one —
+/// only its call site moved.
+fn find_cas_root_ignoring_env(start: &Path) -> Result<PathBuf> {
     // Check if we're inside a CAS worktree (.cas/worktrees/<name>/).
     // This is the most reliable detection for factory workers because it
     // doesn't depend on git state or .git file parsing.
@@ -625,6 +708,7 @@ pub fn init_cas_dir(path: &Path) -> Result<PathBuf> {
 mod tests {
     use crate::store::detect::*;
     use crate::test_support::TestEnvGuard;
+    use std::path::Path;
     use tempfile::TempDir;
 
     #[test]
@@ -828,6 +912,85 @@ mod tests {
         let found_canon = found.unwrap().canonicalize().unwrap();
         let expected_canon = main_repo.canonicalize().unwrap();
         assert_eq!(found_canon, expected_canon);
+    }
+
+    /// cas-b69a (GH #157): the notice must name BOTH roots and say which one
+    /// won — that is the whole point, an operator reading it has to be able to
+    /// tell that the store under their feet was not the one used.
+    #[test]
+    fn root_override_notice_names_both_roots_and_the_winner_cas_b69a() {
+        let notice = root_override_notice(
+            Path::new("/live/project/.cas"),
+            Path::new("/tmp/casmig/proj/.cas"),
+        )
+        .expect("differing roots must produce a notice");
+
+        assert!(notice.contains("/live/project/.cas"), "{notice}");
+        assert!(notice.contains("/tmp/casmig/proj/.cas"), "{notice}");
+        assert!(notice.contains("CAS_ROOT wins"), "{notice}");
+        // The first line alone must carry both paths and the verdict: some
+        // consoles show only the first stderr line before a wall of output.
+        let first_line = notice.lines().next().unwrap();
+        assert!(first_line.contains("/live/project/.cas"), "{first_line}");
+        assert!(first_line.contains("/tmp/casmig/proj/.cas"), "{first_line}");
+        assert!(first_line.contains("CAS_ROOT wins"), "{first_line}");
+        // And it must point at the escape hatch, not just complain.
+        assert!(notice.contains("env -u CAS_ROOT"), "{notice}");
+    }
+
+    /// No conflict, no noise: CAS_ROOT pointing at the very store the working
+    /// directory would have found is the overwhelmingly common factory case.
+    #[test]
+    fn identical_roots_produce_no_notice_cas_b69a() {
+        assert!(
+            root_override_notice(Path::new("/project/.cas"), Path::new("/project/.cas")).is_none()
+        );
+    }
+
+    /// Two spellings of the same directory are the same store, not a conflict —
+    /// a false alarm here would be worse than silence, because it would teach
+    /// people to ignore the real one.
+    #[test]
+    fn equivalent_paths_spelled_differently_produce_no_notice_cas_b69a() {
+        let temp = TempDir::new().unwrap();
+        let project = temp.path().join("project");
+        let cas_dir = init_cas_dir(&project).unwrap();
+        let round_about = project.join("sub").join("..").join(".cas");
+        std::fs::create_dir_all(project.join("sub")).unwrap();
+
+        assert!(
+            root_override_notice(&cas_dir, &round_about).is_none(),
+            "'{}' and '{}' are the same directory",
+            cas_dir.display(),
+            round_about.display()
+        );
+    }
+
+    /// cas-b69a: the split-out helper must resolve exactly what the old inline
+    /// code did, and must ignore CAS_ROOT entirely — it is what names the loser.
+    #[test]
+    fn find_cas_root_ignoring_env_reports_the_cwd_derived_root_cas_b69a() {
+        let temp = TempDir::new().unwrap();
+        let copy = temp.path().join("copy");
+        let live = temp.path().join("live");
+        init_cas_dir(&copy).unwrap();
+        init_cas_dir(&live).unwrap();
+
+        let _env =
+            TestEnvGuard::with_optional_vars(&[("CAS_ROOT", Some(live.join(".cas").to_str().unwrap()))]);
+
+        // Precedence is unchanged: CAS_ROOT still wins the actual resolution...
+        assert_eq!(
+            find_cas_root_from(&copy).unwrap(),
+            live.join(".cas"),
+            "CAS_ROOT precedence must NOT change — factory workers depend on it"
+        );
+        // ...but the losing root is knowable, which is what the notice reports.
+        assert_eq!(find_cas_root_ignoring_env(&copy).unwrap(), copy.join(".cas"));
+        assert!(
+            root_override_notice(&live.join(".cas"), &copy.join(".cas")).is_some(),
+            "a cwd store different from CAS_ROOT must be reported"
+        );
     }
 
     #[test]

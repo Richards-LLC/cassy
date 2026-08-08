@@ -42,6 +42,10 @@ git stash pop               # restore WIP
 
 If the rebase has conflicts, resolve them before popping the stash. Message the supervisor if you're stuck.
 
+## Running Scripts Against Prod
+
+Project-specific, so it lives here rather than in the skill body. For Vercel projects, `vercel env pull .env.<env> --environment=<env>` (run from the linked project dir) pulls real prod credentials (Neon, QStash, etc.) into a local file. Add that file to `.gitignore` — never commit credentials.
+
 ## Schema Cheat Sheet (exact field names and valid actions)
 
 Wrong field names are rejected. These are the **exact** names for the calls workers make most often.

@@ -41,6 +41,12 @@ pub(crate) fn worker_cli_from_agent(agent: &cas_types::Agent) -> cas_mux::Superv
         .unwrap_or(cas_mux::SupervisorCli::Claude)
 }
 
+/// First 8 characters of a session UUID — enough to compare two sessions at a
+/// glance without wrapping the line (cas-dffe).
+fn short_session(session_id: &str) -> &str {
+    &session_id[..8.min(session_id.len())]
+}
+
 fn worker_effort_from_agent(agent: &cas_types::Agent) -> Option<cas_mux::Effort> {
     agent
         .metadata
@@ -409,6 +415,43 @@ fn format_assigned_task_info(
 ///
 /// Pure over its inputs so the interesting states are unit-testable without a
 /// daemon, a queue, or a clock.
+/// Render the undelivered-lifecycle-relay banner for `worker_status`
+/// (cas-7787, GH #160).
+///
+/// Each row is a moment CAS told the supervisor a lane was parked behind them
+/// and the message did not arrive. In the reported session four of these went
+/// completely unrecorded, so the supervisor's `worker_status` looked healthy
+/// while three finished lanes waited on a human to notice.
+///
+/// Empty input renders NOTHING — a banner that appears when there is no
+/// problem is a banner people learn to skip, and this one has to be believed
+/// the one time it fires.
+///
+/// Pure over its input so the wording and the empty case are unit-testable
+/// without a daemon, a queue, or a clock.
+fn format_undelivered_relay_section(rows: &[cas_store::UndeliveredLifecycleRelay]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    let mut out = format!(
+        "⚠ UNDELIVERED SUPERVISOR RELAY ({}) — these never reached you:\n",
+        rows.len()
+    );
+    for row in rows {
+        let what = row.summary.as_deref().unwrap_or("task lifecycle transition");
+        out.push_str(&format!(
+            "  • {what} (queued {}, source {})\n",
+            row.created_at.to_rfc3339(),
+            row.source
+        ));
+    }
+    out.push_str(
+        "  These lanes may still be waiting on you. Open each task directly \
+         (`task action=show id=<id>`) — a missing relay is not evidence the work was handled.\n\n",
+    );
+    out
+}
+
 fn format_spawn_lifecycle_section(
     rows: &[cas_store::SpawnLifecycle],
     now: chrono::DateTime<chrono::Utc>,
@@ -1381,10 +1424,23 @@ impl CasService {
             .map(|rows| format_spawn_lifecycle_section(&rows, chrono::Utc::now()))
             .unwrap_or_default();
 
+        // cas-7787 (GH #160): lifecycle relays that expired without ever
+        // reaching the supervisor. This goes FIRST, above the roster, and is
+        // rendered even when no agents are registered — the whole failure mode
+        // being fixed is that a lost relay left no trace anywhere, so the
+        // fleet read silence as "nothing is waiting on me".
+        let undelivered_section = format_undelivered_relay_section(
+            &crate::store::open_prompt_queue_store(&self.inner.cas_root)
+                .ok()
+                .and_then(|queue| queue.list_undelivered_lifecycle_relays(10).ok())
+                .unwrap_or_default(),
+        );
+
         if agents.is_empty() {
             let mut msg = String::from(
                 "No active agents registered.\n\nNote: Factory TUI must be running for agents to be registered.",
             );
+            msg.push_str(&undelivered_section);
             msg.push_str(&spawn_section);
             msg.push_str(&died_section);
             if stale_pruned > 0 {
@@ -1397,6 +1453,7 @@ impl CasService {
 
         let owned = supervisor_owned_workers();
         let mut output = String::from("Worker Status\n=============\n\n");
+        output.push_str(&undelivered_section);
 
         // cas-d165 (Finding 2): assignees of currently InProgress tasks,
         // resolved ONCE for the whole roster. `has_in_progress_task` below
@@ -2154,11 +2211,44 @@ impl CasService {
         Ok(Self::success(output))
     }
 
+    /// cas-dffe (GH #145): reset a worker's context for real, and prove it —
+    /// or fail loudly.
+    ///
+    /// The old implementation enqueued the four characters `/clear` as an
+    /// ordinary message. A Claude worker under Agent Teams therefore received
+    /// the *string* "/clear" in its inbox, acknowledged it as a teammate note,
+    /// and carried on with its whole conversation loaded — while this tool
+    /// reported `Queued /clear for <worker>`. Six such calls across four
+    /// workers in one session all "succeeded" and none reset anything.
+    ///
+    /// What happens now, per target:
+    ///
+    /// 1. Resolve the recipient's harness. A harness with no verified in-place
+    ///    reset command is refused here, before anything is queued
+    ///    ([`crate::factory_context_reset::context_reset_command`]).
+    /// 2. Snapshot the recipient's existing session transcripts.
+    /// 3. Queue a control command — the
+    ///    [`crate::factory_context_reset::CONTEXT_RESET_CONTROL`] sentinel, not
+    ///    readable text — which the daemon hard-routes to the PTY and delivers
+    ///    as the harness's own command.
+    /// 4. Wait (bounded) for the post-condition: a NEW session transcript whose
+    ///    head records the `/clear`. That is the "new conversation id" evidence
+    ///    the supervisor could never get before, and it is measured, not
+    ///    assumed.
+    /// 5. On confirmation, record the new session id on the agent so
+    ///    `worker_status` follows the live transcript (its context band resets
+    ///    with it) instead of reading the dead pre-reset file forever.
+    ///
+    /// If step 4 does not land inside the window the call returns an **error**
+    /// naming exactly what was and was not observed. A reset CAS cannot prove
+    /// is never reported as a success.
     pub(super) async fn factory_clear_context(
         &self,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
-        use crate::store::open_prompt_queue_store;
+        use crate::factory_context_reset as reset;
+        use crate::store::{open_agent_store, open_prompt_queue_store};
+        use cas_types::{AgentRole, AgentStatus};
 
         let target = req.target.ok_or_else(|| {
             Self::error(
@@ -2183,46 +2273,225 @@ impl CasService {
             }
         }
 
+        let agent_store = open_agent_store(&self.inner.cas_root).map_err(|e| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to open agent store: {e}"),
+            )
+        })?;
+        let factory_session = current_factory_session();
+        let owned = supervisor_owned_workers();
+        let live_agents = agent_store.list(Some(AgentStatus::Active)).map_err(|e| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to list agents: {e}"),
+            )
+        })?;
+
+        // Resolve the concrete recipients. `all_workers` fans out over this
+        // supervisor's live workers; every other target names exactly one.
+        let recipients: Vec<cas_types::Agent> = if target == "all_workers" {
+            live_agents
+                .into_iter()
+                .filter(|agent| {
+                    agent.role == AgentRole::Worker
+                        && agent.visible_to_factory_session(factory_session.as_deref())
+                        && owned.as_ref().is_none_or(|set| set.contains(&agent.name))
+                })
+                .collect()
+        } else {
+            let found = live_agents
+                .into_iter()
+                .find(|agent| agent.name == target)
+                .ok_or_else(|| {
+                    Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        format!(
+                            "No live agent named '{target}' — cannot reset the context of an \
+                             agent CAS cannot see. Check `worker_status`."
+                        ),
+                    )
+                })?;
+            vec![found]
+        };
+
+        if recipients.is_empty() {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "No live workers to reset.".to_string(),
+            ));
+        }
+
         let queue = open_prompt_queue_store(&self.inner.cas_root).map_err(|e| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
                 format!("Failed to open message queue: {e}"),
             )
         })?;
-
-        // Use the MCP caller's agent ID as the source
         let source = self
             .inner
             .get_agent_id()
             .unwrap_or_else(|_| "unknown".to_string());
 
-        // Enqueue /clear directly without XML wrapping - this is a raw command
-        let factory_session = current_factory_session();
-        if let Some(ref session) = factory_session {
+        // Pre-flight every recipient BEFORE queueing anything: an unsupported
+        // harness or an unlocatable transcript directory means CAS could never
+        // confirm the reset, so it must not claim one.
+        struct PendingReset {
+            agent: cas_types::Agent,
+            dirs: Vec<std::path::PathBuf>,
+            before: std::collections::BTreeSet<std::path::PathBuf>,
+        }
+        let mut pending: Vec<PendingReset> = Vec::new();
+        let mut refusals: Vec<String> = Vec::new();
+
+        for agent in recipients {
+            let cli = worker_cli_from_agent(&agent);
+            if reset::context_reset_command(cli).is_none() {
+                refusals.push(format!(
+                    "{}: {}",
+                    agent.name,
+                    reset::unsupported_reason(cli)
+                ));
+                continue;
+            }
+            let Some(clone_path) = agent.metadata.get("clone_path").cloned() else {
+                refusals.push(format!(
+                    "{}: no clone_path recorded for this worker, so CAS cannot locate its session \
+                     transcripts and could not verify a reset. Refusing rather than reporting an \
+                     unverifiable success.",
+                    agent.name
+                ));
+                continue;
+            };
+            let dirs = reset::transcript_dirs_for(&clone_path);
+            if dirs.is_empty() {
+                refusals.push(format!(
+                    "{}: no Claude project directory found for {clone_path} under {}. CAS could \
+                     not verify a reset, so it did not attempt one.",
+                    agent.name,
+                    reset::claude_config_roots()
+                        .iter()
+                        .map(|root| root.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                continue;
+            }
+            let before = reset::snapshot_transcripts(&dirs);
+            pending.push(PendingReset {
+                agent,
+                dirs,
+                before,
+            });
+        }
+
+        if pending.is_empty() {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!(
+                    "No context reset was attempted:\n  • {}",
+                    refusals.join("\n  • ")
+                ),
+            ));
+        }
+
+        for item in &pending {
             queue
-                .enqueue_with_session(&source, &target, "/clear", session)
+                .enqueue_urgent_with_outcome(
+                    &source,
+                    &item.agent.name,
+                    reset::CONTEXT_RESET_CONTROL,
+                    factory_session.as_deref(),
+                    Some(reset::CONTEXT_RESET_SUMMARY),
+                    Some(cas_store::NotificationPriority::Critical),
+                    // Control rows take the interrupt-and-inject lane: a worker
+                    // mid-turn must have its turn broken before the reset
+                    // command can be typed, and two resets in a row must never
+                    // be content-deduped into one.
+                    true,
+                )
                 .map_err(|e| {
                     Self::error(
                         ErrorCode::INTERNAL_ERROR,
-                        format!("Failed to queue clear command: {e}"),
+                        format!("Failed to queue context reset for {}: {e}", item.agent.name),
                     )
                 })?;
-        } else {
-            queue.enqueue(&source, &target, "/clear").map_err(|e| {
-                Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("Failed to queue clear command: {e}"),
-                )
-            })?;
         }
 
-        let msg = if target == "all_workers" {
-            "Queued /clear for all workers".to_string()
-        } else {
-            format!("Queued /clear for {target}")
-        };
+        // Wait for the post-condition. Polling the filesystem is what makes the
+        // result verifiable: the daemon can only prove it typed bytes into a
+        // pane, and "bytes typed" is precisely the evidence that was never
+        // enough (GH #145).
+        let deadline = std::time::Instant::now() + reset::confirmation_timeout();
+        let mut confirmed: Vec<(String, reset::ContextResetEvidence, String)> = Vec::new();
+        let mut outstanding: Vec<PendingReset> = pending;
+        while !outstanding.is_empty() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(reset::CONFIRMATION_POLL).await;
+            outstanding.retain(|item| {
+                match reset::detect_context_reset(&item.dirs, &item.before) {
+                    Some(evidence) => {
+                        let previous = item
+                            .agent
+                            .cc_session_id
+                            .clone()
+                            .unwrap_or_else(|| item.agent.id.clone());
+                        // Point CAS's transcript resolution at the live session
+                        // so worker_status/worker_activity/is-wedged stop
+                        // reading the pre-reset file (AC4).
+                        let mut updated = item.agent.clone();
+                        updated.cc_session_id = Some(evidence.session_id.clone());
+                        if let Err(e) = agent_store.update(&updated) {
+                            tracing::warn!(
+                                agent = %item.agent.name,
+                                error = %e,
+                                "cas-dffe: context reset confirmed but recording the new session \
+                                 id failed; worker_status will keep resolving the old transcript"
+                            );
+                        }
+                        confirmed.push((item.agent.name.clone(), evidence, previous));
+                        false
+                    }
+                    None => true,
+                }
+            });
+        }
 
-        Ok(Self::success(msg))
+        let mut output = String::new();
+        for (name, evidence, previous) in &confirmed {
+            output.push_str(&format!(
+                "✅ {name}: context reset CONFIRMED\n    session: {} → {} (new conversation)\n    \
+                 evidence: {}\n    preserved: registration, worktree, model/effort settings (the \
+                 worker process was not restarted)\n",
+                short_session(previous),
+                short_session(&evidence.session_id),
+                evidence.transcript.display(),
+            ));
+        }
+        for item in &outstanding {
+            output.push_str(&format!(
+                "❌ {}: reset UNCONFIRMED after {}s — no new session transcript recording a \
+                 /clear appeared under {}. The command is still queued and may yet land; verify \
+                 with worker_status, and if the worker is wedged use shutdown_workers + \
+                 spawn_workers (same name/worktree).\n",
+                item.agent.name,
+                reset::confirmation_timeout().as_secs(),
+                item.dirs
+                    .iter()
+                    .map(|dir| dir.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ));
+        }
+        for refusal in &refusals {
+            output.push_str(&format!("❌ {refusal}\n"));
+        }
+
+        if !outstanding.is_empty() || !refusals.is_empty() {
+            // Never report success for a reset that was not observed.
+            return Err(Self::error(ErrorCode::INTERNAL_ERROR, output));
+        }
+
+        Ok(Self::success(output))
     }
 
     pub(super) async fn factory_my_context(
@@ -5804,6 +6073,52 @@ mod spawn_lifecycle_tests {
 
     fn render(rows: &[SpawnLifecycle]) -> String {
         format_spawn_lifecycle_section(rows, chrono::Utc::now())
+    }
+
+    fn lost_relay(task_summary: &str) -> cas_store::UndeliveredLifecycleRelay {
+        cas_store::UndeliveredLifecycleRelay {
+            prompt_id: 7783,
+            source: "lifecycle-wake:3386".to_string(),
+            target: "supervisor".to_string(),
+            summary: Some(task_summary.to_string()),
+            stage: "abandoned".to_string(),
+            reason: Some(cas_store::PendingReason::UndeliveredLifecycleRelay),
+            detail: Some("task closed before delivery".to_string()),
+            factory_session: Some("cas-src-fast-pelican-83".to_string()),
+            created_at: chrono::Utc::now(),
+            processed_at: Some(chrono::Utc::now()),
+        }
+    }
+
+    /// cas-7787 (GH #160), acceptance criterion 3: a lost relay must be LOUD
+    /// in `worker_status`, naming the task, and must never let the supervisor
+    /// read the absence of a message as "nothing needs me".
+    #[test]
+    fn an_undelivered_relay_is_named_in_worker_status() {
+        let out = format_undelivered_relay_section(&[lost_relay(
+            "task_awaiting_merge: cas-fe23 (2026-08-07T18:51:51Z)",
+        )]);
+        assert!(
+            out.contains("UNDELIVERED SUPERVISOR RELAY"),
+            "the banner must state the failure outright: {out}"
+        );
+        assert!(out.contains("cas-fe23"), "must name the task: {out}");
+        assert!(
+            out.contains("still be waiting on you"),
+            "must say the lane may still need the supervisor: {out}"
+        );
+        assert!(
+            out.contains("not evidence the work was handled"),
+            "must refuse to let silence read as success: {out}"
+        );
+    }
+
+    /// The banner must be absent when there is nothing lost — a heading that
+    /// renders on every healthy poll is one people stop reading, and this one
+    /// has to be believed the single time it fires.
+    #[test]
+    fn no_undelivered_relays_renders_nothing() {
+        assert!(format_undelivered_relay_section(&[]).is_empty());
     }
 
     /// No spawn history → no section. `worker_status` must not grow a stub

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -110,6 +111,63 @@ fn head_commit(repo_root: &Path) -> Option<String> {
 /// thousands of symbol documents there would silently reshape every memory search.
 pub(crate) fn code_index_dir(cas_root: &Path) -> PathBuf {
     cas_root.join("index").join("code")
+}
+
+/// Walk configured roots using gitignore plus explicit exclude globs.
+/// Shared by startup reconciliation, the manual command, and doctor so all
+/// three agree on the denominator called "eligible".
+pub(crate) fn collect_source_files(
+    roots: &[PathBuf],
+    extensions: &[String],
+    exclude_patterns: &[String],
+) -> Vec<PathBuf> {
+    let wanted: HashSet<String> = extensions.iter().map(|e| e.to_lowercase()).collect();
+    let excludes: Vec<glob::Pattern> = exclude_patterns
+        .iter()
+        .filter_map(|pattern| glob::Pattern::new(pattern).ok())
+        .collect();
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    for root in roots {
+        if root.is_file() {
+            if is_wanted(root, &wanted) && seen.insert(root.clone()) {
+                out.push(root.clone());
+            }
+            continue;
+        }
+        for entry in ignore::WalkBuilder::new(root)
+            .hidden(true)
+            .git_ignore(true)
+            .build()
+            .flatten()
+        {
+            let path = entry.path();
+            if !path.is_file() || !is_wanted(path, &wanted) {
+                continue;
+            }
+            let relative = path.strip_prefix(root).unwrap_or(path);
+            if excludes
+                .iter()
+                .any(|pattern| pattern.matches_path(relative))
+            {
+                continue;
+            }
+            let path = path.to_path_buf();
+            if seen.insert(path.clone()) {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+fn is_wanted(path: &Path, wanted: &HashSet<String>) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .map(|value| wanted.contains(&value.to_lowercase()))
+        .unwrap_or(false)
 }
 
 /// Publish parsed symbols to the code BM25 index and retire deleted ones.
@@ -302,8 +360,9 @@ pub fn index_code_files_with(
                     symbols.iter().map(|symbol| symbol.id.as_str()).collect();
                 retired.extend(
                     previous_symbol_ids
-                        .into_iter()
-                        .filter(|id| !surviving.contains(id.as_str())),
+                        .iter()
+                        .filter(|id| !surviving.contains(id.as_str()))
+                        .cloned(),
                 );
                 published.extend(symbols.iter().cloned());
 
@@ -333,7 +392,60 @@ pub fn index_code_files_with(
     if let Err(error) = publish_code_symbols(cas_root, &published, &retired) {
         result.errors.push(format!("code search index: {error}"));
     }
+    Ok(result)
+}
 
+/// Full-tree reconciliation used on daemon startup and by `cas index code`
+/// with its default root. In addition to content-hash incremental updates it
+/// retires files that disappeared while the daemon was stopped and records a
+/// durable coverage/HEAD receipt.
+pub fn reconcile_code_tree(
+    files: &[PathBuf],
+    cas_root: &Path,
+    force: bool,
+) -> Result<CodeIndexResult, CasError> {
+    use crate::store::open_code_store;
+
+    let mut result = index_code_files_with(files, cas_root, force)?;
+    let code_store = open_code_store(cas_root)?;
+
+    let mut by_repo: std::collections::HashMap<String, (PathBuf, HashSet<String>)> =
+        std::collections::HashMap::new();
+    for file in files {
+        let (root, repository) = resolve_repository(file);
+        let file_id = code_store.generate_file_id_for(&repository, &file.to_string_lossy());
+        by_repo
+            .entry(repository)
+            .or_insert_with(|| {
+                (
+                    root.unwrap_or_else(|| file.parent().unwrap_or(file).to_path_buf()),
+                    HashSet::new(),
+                )
+            })
+            .1
+            .insert(file_id);
+    }
+
+    for (repository, (repo_root, current_ids)) in by_repo {
+        let stored = code_store.list_files(&repository, None).unwrap_or_default();
+        let mut retired = Vec::new();
+        for stale in stored.iter().filter(|file| !current_ids.contains(&file.id)) {
+            retired.extend(
+                code_store
+                    .get_symbols_in_file(&stale.id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|symbol| symbol.id),
+            );
+            if code_store.delete_file(&stale.id).is_ok() {
+                result.files_deleted += 1;
+            }
+        }
+        if !retired.is_empty() {
+            let _ = publish_code_symbols(cas_root, &[], &retired);
+        }
+        let _ = repo_root;
+    }
     Ok(result)
 }
 
@@ -389,7 +501,11 @@ pub fn run_code_index_cycle(
 
     let pending_files = watcher.take_pending();
     if !pending_files.is_empty() {
-        let index_result = index_code_files(&pending_files, cas_root)?;
+        let index_result = if watcher.take_initial_reconcile() {
+            reconcile_code_tree(&pending_files, cas_root, false)?
+        } else {
+            index_code_files(&pending_files, cas_root)?
+        };
         result.files_indexed = index_result.files_indexed;
         result.symbols_indexed = index_result.symbols_indexed;
         result.errors.extend(index_result.errors);

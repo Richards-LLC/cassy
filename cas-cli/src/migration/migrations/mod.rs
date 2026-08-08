@@ -202,6 +202,7 @@ mod m223_history_commits_fts;
 mod m224_history_commit_symbols;
 mod m225_commit_links_link_method;
 mod m226_knowledge_pages_add_attribution;
+mod m227_knowledge_page_tombstones;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -433,6 +434,7 @@ pub const MIGRATIONS: &[Migration] = &[
     // Renumbered 224 → 225 after the M3 lane claimed 224.
     m225_commit_links_link_method::MIGRATION,
     m226_knowledge_pages_add_attribution::MIGRATION,
+    m227_knowledge_page_tombstones::MIGRATION,
 ];
 
 #[cfg(test)]

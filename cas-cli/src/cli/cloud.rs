@@ -1223,6 +1223,9 @@ pub(crate) fn sync_project_knowledge(cli: &Cli, cas_root: &Path) -> anyhow::Resu
                     "pushed": pushed,
                     "pulled": pulled.applied,
                     "locked_preserved": pulled.locked_preserved,
+                    "tombstones_applied": pulled.tombstones_applied,
+                    "tombstones_locked_preserved": pulled.tombstones_locked_preserved,
+                    "tombstoned_pages_refused": pulled.tombstoned_pages_refused,
                     "refused_foreign": pulled.refused_foreign,
                     "refused_foreign_ids": pulled.refused_foreign_ids,
                     "starvation_warning": pulled.starvation_warning,
@@ -1253,6 +1256,18 @@ pub(crate) fn sync_project_knowledge(cli: &Cli, cas_root: &Path) -> anyhow::Resu
                 "  Knowledge: REFUSED {} foreign page(s) at ingest: {}",
                 pulled.refused_foreign,
                 pulled.refused_foreign_ids.join(", ")
+            );
+        }
+        if pulled.tombstones_locked_preserved > 0 {
+            eprintln!(
+                "  Knowledge: preserved {} locked page(s) against incoming tombstone(s)",
+                pulled.tombstones_locked_preserved
+            );
+        }
+        if pulled.tombstoned_pages_refused > 0 {
+            eprintln!(
+                "  Knowledge: refused {} stale page record(s) after a tombstone",
+                pulled.tombstoned_pages_refused
             );
         }
         // The loud half: never let a failed or partial embed pass as silence.

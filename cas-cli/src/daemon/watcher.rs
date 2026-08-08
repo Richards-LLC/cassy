@@ -5,6 +5,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -72,6 +73,9 @@ pub struct CodeWatcher {
     _event_tx: Option<Sender<WatchEvent>>,
     /// The debouncer (kept alive to maintain the watcher)
     _debouncer: Option<Debouncer<RecommendedWatcher>>,
+    /// The first drain is a full reconciliation, not merely a batch of
+    /// watcher events. Atomic because the scheduler reads it through `&self`.
+    initial_reconcile: AtomicBool,
 }
 
 impl CodeWatcher {
@@ -83,6 +87,7 @@ impl CodeWatcher {
             event_rx: None,
             _event_tx: None,
             _debouncer: None,
+            initial_reconcile: AtomicBool::new(false),
         }
     }
 
@@ -201,6 +206,18 @@ impl CodeWatcher {
         }
     }
 
+    /// Seed the first daemon pass with every currently eligible file.
+    pub fn seed_initial(&self, files: impl IntoIterator<Item = PathBuf>) {
+        if let Ok(mut pending) = self.pending_files.lock() {
+            pending.extend(files);
+            self.initial_reconcile.store(true, Ordering::Release);
+        }
+    }
+
+    pub fn take_initial_reconcile(&self) -> bool {
+        self.initial_reconcile.swap(false, Ordering::AcqRel)
+    }
+
     /// Check if there are pending files
     pub fn has_pending(&self) -> bool {
         if let Ok(pending) = self.pending_files.lock() {
@@ -311,5 +328,15 @@ mod tests {
         assert!(!watcher.has_pending());
         assert_eq!(watcher.pending_count(), 0);
         assert!(watcher.take_pending().is_empty());
+    }
+
+    #[test]
+    fn initial_seed_is_drained_once_as_a_reconciliation() {
+        let watcher = CodeWatcher::new(WatcherConfig::default());
+        watcher.seed_initial([PathBuf::from("src/a.rs"), PathBuf::from("src/b.rs")]);
+        assert_eq!(watcher.pending_count(), 2);
+        assert!(watcher.take_initial_reconcile());
+        assert!(!watcher.take_initial_reconcile());
+        assert_eq!(watcher.take_pending().len(), 2);
     }
 }

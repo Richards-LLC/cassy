@@ -485,3 +485,37 @@ fn index_code_files_records_head_commit_hash() {
     assert_eq!(files.len(), 1, "expected one indexed file: {files:?}");
     assert_eq!(files[0].commit_hash.as_deref(), Some(head.as_str()));
 }
+
+#[test]
+fn full_tree_reconciliation_retires_files_deleted_while_daemon_was_stopped() {
+    use crate::daemon::indexing::reconcile_code_tree;
+
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let repo = temp.path().join("reconcile-repo");
+    std::fs::create_dir_all(repo.join("src")).expect("src dir");
+    std::fs::create_dir_all(repo.join(".git")).expect("git marker");
+    let cas_root = repo.join(".cas");
+    std::fs::create_dir_all(&cas_root).expect("cas root");
+    let old = repo.join("src/old.rs");
+    std::fs::write(&old, "pub fn removed_symbol() {}\n").expect("old file");
+
+    reconcile_code_tree(std::slice::from_ref(&old), &cas_root, false).expect("initial scan");
+    std::fs::remove_file(&old).expect("delete while stopped");
+    let new = repo.join("src/new.rs");
+    std::fs::write(&new, "pub fn surviving_symbol() {}\n").expect("new file");
+    let result = reconcile_code_tree(std::slice::from_ref(&new), &cas_root, false)
+        .expect("restart reconciliation");
+
+    assert_eq!(result.files_deleted, 1);
+    let store = crate::store::open_code_store(&cas_root).expect("code store");
+    let files = store.list_files("reconcile-repo", None).expect("files");
+    assert_eq!(files.len(), 1);
+    assert!(files[0].path.ends_with("src/new.rs"));
+    assert!(
+        store
+            .search_symbols("%removed_symbol%", None, None, 10)
+            .expect("symbols")
+            .is_empty(),
+        "deleted symbol survived SQLite reconciliation"
+    );
+}

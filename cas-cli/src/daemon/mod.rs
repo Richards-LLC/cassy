@@ -26,7 +26,8 @@ mod tests;
 mod types;
 
 pub use indexing::{
-    index_code_files, run_code_index_cycle, run_embedding_cycle, run_indexing_cycle,
+    index_code_files, reconcile_code_tree, run_code_index_cycle, run_embedding_cycle,
+    run_indexing_cycle,
 };
 pub use maintenance::{run_maintenance, run_once};
 pub use queue::{

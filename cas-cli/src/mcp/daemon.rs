@@ -1935,6 +1935,11 @@ fn init_code_watcher(config: &EmbeddedDaemonConfig) -> Option<Arc<std::sync::Mut
         ignore_patterns: config.code_exclude_patterns.clone(),
     };
 
+    let initial = crate::daemon::indexing::collect_source_files(
+        &watcher_config.watch_paths,
+        &watcher_config.extensions,
+        &watcher_config.ignore_patterns,
+    );
     let mut watcher = CodeWatcher::new(watcher_config);
 
     // Start the watcher
@@ -1942,6 +1947,11 @@ fn init_code_watcher(config: &EmbeddedDaemonConfig) -> Option<Arc<std::sync::Mut
         eprintln!("[CAS] Failed to start code watcher: {e}");
         return None;
     }
+
+    // A watcher reports changes *after* registration; it does not describe
+    // the tree that already exists. Seed the first scheduled pass so a fresh
+    // checkout reaches complete coverage without a manual `cas index code`.
+    watcher.seed_initial(initial);
 
     eprintln!("[CAS] Code watcher started");
     Some(Arc::new(std::sync::Mutex::new(watcher)))

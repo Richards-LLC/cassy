@@ -236,7 +236,12 @@ impl CloudSyncer {
             .and_then(|raw| DateTime::parse_from_rfc3339(&raw).ok())
             .map(|dt| dt.with_timezone(&Utc));
 
-        let share = knowledge_share_scope(self.cloud_config.active_team_id().is_some());
+        // Resolve once: every team-visible page must be published into the
+        // same active team that the pull path selects. Consulting the raw
+        // project `team_id` again would lose opted-in user-default and
+        // sole-team fallbacks (and could bypass the kill switch).
+        let active_team_id = self.cloud_config.active_team_id();
+        let share = knowledge_share_scope(active_team_id.is_some());
 
         let pages = store
             .list_pages()
@@ -280,7 +285,12 @@ impl CloudSyncer {
             })
             .map(serde_json::to_value)
             .collect::<Result<Vec<_>, _>>()?;
-        let response = self.push_knowledge_batch(records, tombstone_records, &token)?;
+        let response = self.push_knowledge_batch(
+            records,
+            tombstone_records,
+            active_team_id.as_deref(),
+            &token,
+        )?;
 
         // Read the refusal count instead of discarding the response. The
         // knowledge push has no per-row queue to leave un-marked, so its only
@@ -581,20 +591,25 @@ impl CloudSyncer {
         Ok(report.pages_written > 0)
     }
 
-    /// Send live pages and newly authored tombstones in one normal personal
-    /// push envelope. The cloud proposal intentionally reuses this envelope so
+    /// Send live pages and newly authored tombstones in one normal sync push
+    /// envelope. The cloud proposal intentionally reuses this transport so
     /// auth, gzip, project scope and server-side `skipped` reporting stay
-    /// identical for both kinds of change.
+    /// identical for both kinds of change, while knowledge alone may add its
+    /// resolved active-team scope.
     fn push_knowledge_batch(
         &self,
         pages: Vec<serde_json::Value>,
         tombstones: Vec<serde_json::Value>,
+        team_id: Option<&str>,
         token: &str,
     ) -> Result<super::PushResponse, CasError> {
-        let payload = self.build_personal_push_payload_fields([
-            (KNOWLEDGE_ENTITY.to_string(), pages),
-            (KNOWLEDGE_TOMBSTONE_ENTITY.to_string(), tombstones),
-        ])?;
+        let payload = self.build_team_scoped_push_payload_fields(
+            [
+                (KNOWLEDGE_ENTITY.to_string(), pages),
+                (KNOWLEDGE_TOMBSTONE_ENTITY.to_string(), tombstones),
+            ],
+            team_id,
+        )?;
         self.push_personal_payload(payload, token)
     }
 }
@@ -668,6 +683,83 @@ mod tests {
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 1);
         requests[0].url.query().unwrap_or_default().to_string()
+    }
+
+    async fn knowledge_push_payload_with_user_config(
+        mut project_config: CloudConfig,
+        user_config: CloudConfig,
+    ) -> serde_json::Value {
+        use std::io::Read;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/sync/push"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let user_cloud_json = tmp.path().join("user-cloud.json");
+        user_config.save_to(&user_cloud_json).unwrap();
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("CAS_USER_CLOUD_JSON", &user_cloud_json);
+
+        project_config.endpoint = server.uri();
+        project_config.token = Some("test-token".to_string());
+        tokio::task::spawn_blocking(move || {
+            let store = seeded_store(&root);
+            let queue = Arc::new(SyncQueue::open(&root).unwrap());
+            queue.init().unwrap();
+            let syncer = CloudSyncer::new(queue, project_config, CloudSyncerConfig::default());
+            assert_eq!(syncer.push_knowledge_pages(&store).unwrap(), 1);
+        })
+        .await
+        .unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let mut raw = Vec::new();
+        flate2::read::GzDecoder::new(&requests[0].body[..])
+            .read_to_end(&mut raw)
+            .unwrap();
+        serde_json::from_slice(&raw).unwrap()
+    }
+
+    async fn assert_knowledge_push_pull_team_parity(
+        project_config: CloudConfig,
+        user_config: CloudConfig,
+        expected_team_id: Option<&str>,
+    ) {
+        let payload =
+            knowledge_push_payload_with_user_config(project_config.clone(), user_config.clone())
+                .await;
+        let query = knowledge_pull_query_with_user_config(project_config, user_config).await;
+        let pushed_page = &payload[KNOWLEDGE_ENTITY][0];
+
+        match expected_team_id {
+            Some(team_id) => {
+                assert_eq!(payload["team_id"], team_id);
+                assert_eq!(pushed_page["share"], "team");
+                assert!(
+                    query.contains(&format!("team_id={}", encode_query_value(team_id))),
+                    "pull must select the same active team as push — got {query}"
+                );
+            }
+            None => {
+                assert!(
+                    payload.get("team_id").is_none(),
+                    "an unscoped knowledge push must omit team_id — got {payload}"
+                );
+                assert_eq!(pushed_page["share"], "private");
+                assert!(
+                    !query.contains("team_id="),
+                    "an unscoped knowledge pull must omit team_id — got {query}"
+                );
+            }
+        }
     }
 
     fn seeded_store(root: &std::path::Path) -> SqliteKnowledgeStore {
@@ -1352,82 +1444,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn knowledge_pull_sends_the_active_team_id() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path(super::super::pull::PULL_PATH))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "knowledge_pages": []
-            })))
-            .mount(&server)
-            .await;
-        let endpoint = server.uri();
-
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().to_path_buf();
-
-        tokio::task::spawn_blocking(move || {
-            let store = seeded_store(&root);
-            let queue = Arc::new(SyncQueue::open(&root).unwrap());
-            queue.init().unwrap();
-            let config = CloudConfig {
-                endpoint: endpoint.clone(),
-                token: Some("test-token".to_string()),
-                team_id: Some("team-42".to_string()),
-                ..Default::default()
-            };
-            let syncer = CloudSyncer::new(queue, config, CloudSyncerConfig::default());
-            syncer.pull_knowledge_pages(&store).unwrap();
-        })
-        .await
-        .unwrap();
-
-        let requests = server.received_requests().await.unwrap();
-        assert_eq!(requests.len(), 1);
-        let query = requests[0].url.query().unwrap_or_default().to_string();
-        assert!(
-            query.contains("team_id=team-42"),
-            "cross-team bleed guard: the pull must name the active team — got {query}"
-        );
-        assert!(
-            query.contains("project_id="),
-            "project scoping must still be present — got {query}"
-        );
+    async fn knowledge_push_and_pull_use_explicit_active_team() {
+        let project_config = CloudConfig {
+            team_id: Some("team-42".to_string()),
+            ..Default::default()
+        };
+        assert_knowledge_push_pull_team_parity(
+            project_config,
+            CloudConfig::default(),
+            Some("team-42"),
+        )
+        .await;
     }
 
     #[tokio::test]
-    async fn knowledge_pull_omits_team_id_when_active_team_kill_switch_is_set() {
+    async fn knowledge_push_and_pull_obey_active_team_kill_switch() {
         let mut project_config = CloudConfig::default();
         project_config.team_id = Some("explicit-team".to_string());
         project_config.team_auto_promote = Some(false);
 
-        let query =
-            knowledge_pull_query_with_user_config(project_config, CloudConfig::default()).await;
-        assert!(
-            !query.contains("team_id"),
-            "the active-team kill switch must suppress team scope — got {query}"
-        );
+        assert_knowledge_push_pull_team_parity(project_config, CloudConfig::default(), None).await;
     }
 
     #[tokio::test]
-    async fn knowledge_pull_uses_opted_in_user_default_team() {
+    async fn knowledge_push_and_pull_use_opted_in_user_default_team() {
         let mut project_config = CloudConfig::default();
         project_config.team_auto_promote = Some(true);
         let mut user_config = CloudConfig::default();
         user_config.default_team_id = Some("user-default-team".to_string());
 
-        let query = knowledge_pull_query_with_user_config(project_config, user_config).await;
-        assert!(
-            query.contains("team_id=user-default-team"),
-            "an opted-in project must pull using the user default team — got {query}"
-        );
+        assert_knowledge_push_pull_team_parity(
+            project_config,
+            user_config,
+            Some("user-default-team"),
+        )
+        .await;
     }
 
     #[tokio::test]
-    async fn knowledge_pull_uses_opted_in_single_team_fallback() {
+    async fn knowledge_push_and_pull_use_opted_in_single_team_fallback() {
         let mut project_config = CloudConfig::default();
         project_config.team_auto_promote = Some(true);
         let mut user_config = CloudConfig::default();
@@ -1438,45 +1493,18 @@ mod tests {
             role: "member".to_string(),
         }];
 
-        let query = knowledge_pull_query_with_user_config(project_config, user_config).await;
-        assert!(
-            query.contains("team_id=solo-team"),
-            "an opted-in project must pull using its one available team — got {query}"
-        );
+        assert_knowledge_push_pull_team_parity(project_config, user_config, Some("solo-team"))
+            .await;
     }
 
     #[tokio::test]
-    async fn knowledge_pull_omits_team_id_for_a_personal_install() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path(super::super::pull::PULL_PATH))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "knowledge_pages": []
-            })))
-            .mount(&server)
-            .await;
-        let endpoint = server.uri();
-
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().to_path_buf();
-
-        tokio::task::spawn_blocking(move || {
-            let store = seeded_store(&root);
-            let syncer = syncer(Some(&endpoint), &root);
-            syncer.pull_knowledge_pages(&store).unwrap();
-        })
-        .await
-        .unwrap();
-
-        let requests = server.received_requests().await.unwrap();
-        let query = requests[0].url.query().unwrap_or_default().to_string();
-        assert!(
-            !query.contains("team_id"),
-            "a teamless install must not claim a team — got {query}"
-        );
+    async fn knowledge_push_and_pull_remain_unscoped_without_an_active_team() {
+        assert_knowledge_push_pull_team_parity(
+            CloudConfig::default(),
+            CloudConfig::default(),
+            None,
+        )
+        .await;
     }
 
     #[tokio::test]

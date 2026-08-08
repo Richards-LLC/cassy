@@ -6,7 +6,7 @@
 //! Includes PtyRunner-based tests that verify output in a real terminal.
 
 use assert_cmd::Command;
-use cas_tui_test::{PtyRunner, PtyRunnerConfig, WaitExt, screen};
+use cas_tui_test::{PtyRunner, PtyRunnerConfig, WaitExt, screen, screen_with_size};
 use predicates::prelude::*;
 use std::path::Path;
 use std::time::Duration;
@@ -250,7 +250,12 @@ fn pty_doctor_output() {
     assert!(result.is_ok(), "Should find 'doctor' in PTY output");
 
     let output = runner.get_output().as_str();
-    let scr = screen(&output);
+    // Render tall enough to hold the whole report. The default 24-row screen
+    // made this assertion depend on the report's LENGTH, not on whether doctor
+    // rendered: the command echo sits on line 3, so the first check added to
+    // doctor after the report reached 24 lines scrolls the echo off the top and
+    // fails a test that is supposed to be about PTY rendering.
+    let scr = screen_with_size(&output, 80, 200);
     scr.assert_contains("doctor").unwrap();
 }
 

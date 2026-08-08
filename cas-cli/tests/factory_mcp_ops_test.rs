@@ -2870,6 +2870,195 @@ fn worker_died_prompt_rows(cas_root: &std::path::Path) -> Vec<cas_store::QueuedP
         .collect()
 }
 
+/// cas-20ac: lifecycle relays print the durable `supervisor_queue` ID, while
+/// replay is driven by a separately numbered `prompt_queue` row. Both public
+/// acknowledgement actions must resolve that link instead of blindly applying
+/// the visible integer to an unrelated prompt row with the same ID.
+#[tokio::test]
+async fn test_20ac_lifecycle_ack_actions_terminate_both_queue_lanes_without_replay() {
+    let _guard = EnvGuard::set(&[]);
+
+    for action in ["message_ack", "queue_ack"] {
+        let env = FactoryTestEnv::new();
+        let prompt_queue = env.prompt_queue();
+        let durable_queue =
+            cas::store::open_supervisor_queue_store(&env.cas_root).expect("durable queue");
+
+        // Reproduce the live ambiguity: visible durable notification 1 exists
+        // alongside unrelated prompt 1; its actual relay is prompt 2.
+        let unrelated = prompt_queue
+            .enqueue("worker", "supervisor", "unrelated ordinary message")
+            .expect("unrelated prompt");
+        assert_eq!(unrelated, 1);
+        let durable_id = durable_queue
+            .notify(
+                "supervisor-id",
+                "worker_died",
+                r#"{"worker_name":"duplicate-worker"}"#,
+                cas_store::NotificationPriority::Critical,
+            )
+            .expect("durable worker death");
+        assert_eq!(durable_id, 1);
+        let linked_prompt = match prompt_queue
+            .enqueue_idempotent(
+                "lifecycle-wake:worker-died:1",
+                "supervisor",
+                "<worker-died worker_id=\"registration-1\" worker_name=\"duplicate-worker\" incident=\"incident-1\" notification_id=\"1\">\nHeld at death: none\nParked back to Open: none\n</worker-died>",
+                None,
+                Some("worker died: duplicate-worker"),
+                Some(cas_store::NotificationPriority::Critical),
+                "worker-died-outbox:1",
+            )
+            .expect("linked relay")
+        {
+            cas_store::EnqueueIdempotentResult::Created(id)
+            | cas_store::EnqueueIdempotentResult::AlreadyExists(id) => id,
+        };
+        assert_eq!(linked_prompt, 2);
+        prompt_queue
+            .mark_transport_delivered(linked_prompt)
+            .expect("simulate first injection");
+
+        let mut request = coord_req(action);
+        request.notification_id = Some(durable_id);
+        let result = env
+            .service
+            .coordination(Parameters(request))
+            .await
+            .expect("public lifecycle acknowledgement");
+        let text = get_text(&result);
+        assert!(
+            text.contains("across durable and prompt queues"),
+            "{action} must describe the unified lifecycle acknowledgement: {text}"
+        );
+
+        assert!(
+            durable_queue
+                .get(durable_id)
+                .expect("durable lookup")
+                .expect("durable row")
+                .processed_at
+                .is_some(),
+            "{action} must terminalize the durable row"
+        );
+        let linked_report = prompt_queue
+            .message_delivery_report(linked_prompt)
+            .expect("linked report")
+            .expect("linked row");
+        assert_eq!(
+            linked_report.stage,
+            cas_store::DeliveryStage::Confirmed,
+            "{action} must terminalize the exact replay-driving prompt"
+        );
+        let unrelated_report = prompt_queue
+            .message_delivery_report(unrelated)
+            .expect("unrelated report")
+            .expect("unrelated row");
+        assert!(
+            unrelated_report.confirmed_at.is_none(),
+            "{action} must not acknowledge a numerically colliding ordinary prompt"
+        );
+
+        let replay = prompt_queue
+            .poll_unseen_for_recipient("supervisor", None, 10)
+            .expect("replay poll");
+        assert!(
+            replay.iter().all(|row| row.id != linked_prompt),
+            "{action} allowed exact notification {durable_id} to re-inject: {replay:?}"
+        );
+        assert!(
+            durable_queue
+                .peek("supervisor-id", 10)
+                .expect("durable replay poll")
+                .is_empty(),
+            "{action} left the durable notification eligible for replay"
+        );
+    }
+}
+
+/// Exact live 3764/3765 shape: the old queue_ack processed the durable row,
+/// but the already-delivered prompt row survived and injected the same turn
+/// again. A repeated queue_ack must now resolve the processed durable row and
+/// terminalize its still-pending linked prompt instead of returning "not found
+/// or already processed" while replay remains armed.
+#[tokio::test]
+async fn test_20ac_queue_ack_repairs_processed_durable_row_with_replay_pending() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    let prompt_queue = env.prompt_queue();
+    let durable_queue =
+        cas::store::open_supervisor_queue_store(&env.cas_root).expect("durable queue");
+
+    let durable_id = durable_queue
+        .notify(
+            "supervisor-id",
+            "worker_died",
+            r#"{"worker_name":"duplicate-worker"}"#,
+            cas_store::NotificationPriority::Critical,
+        )
+        .expect("durable worker death");
+    let linked_prompt = match prompt_queue
+        .enqueue_idempotent(
+            &format!("lifecycle-wake:worker-died:{durable_id}"),
+            "supervisor",
+            &format!(
+                "<worker-died worker_id=\"registration-3765\" worker_name=\"duplicate-worker\" incident=\"incident-3765\" notification_id=\"{durable_id}\">\nHeld at death: none\nParked back to Open: none\n</worker-died>"
+            ),
+            None,
+            Some("worker died: duplicate-worker"),
+            Some(cas_store::NotificationPriority::Critical),
+            &format!("worker-died-outbox:{durable_id}"),
+        )
+        .expect("linked relay")
+    {
+        cas_store::EnqueueIdempotentResult::Created(id)
+        | cas_store::EnqueueIdempotentResult::AlreadyExists(id) => id,
+    };
+    prompt_queue
+        .mark_transport_delivered(linked_prompt)
+        .expect("first turn injection");
+
+    // Reproduce the old successful queue_ack: only the durable lane became
+    // terminal, so the exact prompt remained eligible for another user turn.
+    durable_queue
+        .ack(durable_id)
+        .expect("legacy durable-only queue_ack");
+    let reinjected = prompt_queue
+        .poll_unseen_for_recipient("supervisor", None, 10)
+        .expect("historical reinjection");
+    assert!(
+        reinjected.iter().any(|row| row.id == linked_prompt),
+        "fixture must reproduce processed durable row + exact prompt reinjection"
+    );
+
+    let mut request = coord_req("queue_ack");
+    request.notification_id = Some(durable_id);
+    let result = env
+        .service
+        .coordination(Parameters(request))
+        .await
+        .expect("repeated queue_ack bridges processed durable row");
+    assert!(
+        get_text(&result).contains("across durable and prompt queues"),
+        "repeated queue_ack must report the repaired cross-queue acknowledgement"
+    );
+    assert_eq!(
+        prompt_queue
+            .message_delivery_report(linked_prompt)
+            .expect("linked report")
+            .expect("linked row")
+            .stage,
+        cas_store::DeliveryStage::Confirmed
+    );
+    let after = prompt_queue
+        .poll_unseen_for_recipient("supervisor", None, 10)
+        .expect("post-ack replay poll");
+    assert!(
+        after.iter().all(|row| row.id != linked_prompt),
+        "processed-row repair still allowed notification {durable_id} to re-inject: {after:?}"
+    );
+}
+
 /// The reported defect: 2,044 death notices, 100% never injected into any
 /// supervisor turn, because the emitter wrote to `supervisor_queue` only.
 /// A death must now land on the prompt path — the one the supervisor reads.

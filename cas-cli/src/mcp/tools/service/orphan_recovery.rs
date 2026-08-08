@@ -476,7 +476,7 @@ pub(crate) fn coalesce_pending_worker_deaths(
             continue;
         }
         family.sort_by_key(|(row, _)| row.id);
-        let (canonical, _) = &family[0];
+        let (canonical, canonical_envelope) = &family[0];
         let mut worker_ids = family
             .iter()
             .flat_map(|(_, envelope)| envelope.forensic_worker_ids.clone())
@@ -493,6 +493,12 @@ pub(crate) fn coalesce_pending_worker_deaths(
             .collect::<Vec<_>>();
         notification_ids.sort_unstable();
         notification_ids.dedup();
+        // The visible notification ID must identify the canonical prompt row's
+        // dedupe key. The two queues have independent sequences, so sorting
+        // durable IDs can otherwise expose a suppressed sibling's ID and make
+        // message_ack leave the canonical replay row pending.
+        notification_ids.retain(|id| *id != canonical_envelope.notification_id);
+        notification_ids.insert(0, canonical_envelope.notification_id);
         let Some(prompt) = crate::prompt_revalidation::format_coalesced_worker_died_relay(
             &worker_name,
             &worker_ids,
@@ -926,6 +932,93 @@ mod cas_3dcb_death_relay_tests {
             fixture.durable_notices(),
             1,
             "queue_poll/queue_peek must see the same single batch, not 30 rows"
+        );
+    }
+
+    /// The durable and prompt queues use independent sequences. A coalesced
+    /// batch must expose the durable ID linked to the canonical prompt, even
+    /// when durable notification order and prompt insertion order disagree.
+    #[test]
+    fn coalesced_batch_ack_id_always_points_to_the_canonical_prompt() {
+        let fixture = Fixture::new();
+        let prompt_queue = open_prompt_queue_store(&fixture.cas_root).expect("prompt queue");
+        let supervisor_queue =
+            open_supervisor_queue_store(&fixture.cas_root).expect("supervisor queue");
+
+        let durable_one = supervisor_queue
+            .notify(
+                &fixture.supervisor_id,
+                "worker_died",
+                "{}",
+                NotificationPriority::Critical,
+            )
+            .expect("durable one");
+        let durable_two = supervisor_queue
+            .notify(
+                &fixture.supervisor_id,
+                "worker_died",
+                "{}",
+                NotificationPriority::Critical,
+            )
+            .expect("durable two");
+
+        // Reverse the durable order in prompt_queue: durable_two owns the
+        // canonical (lowest prompt ID), while durable_one is the sibling.
+        for (worker_id, incident, notification_id) in [
+            ("registration-two", "incident-two", durable_two),
+            ("registration-one", "incident-one", durable_one),
+        ] {
+            prompt_queue
+                .enqueue_idempotent(
+                    &format!("lifecycle-wake:worker-died:{notification_id}"),
+                    "supervisor",
+                    &crate::prompt_revalidation::format_worker_died_relay(
+                        worker_id,
+                        "logical-worker",
+                        incident,
+                        "stale registration",
+                        &[],
+                        &[],
+                        notification_id,
+                    ),
+                    None,
+                    Some("worker died: logical-worker"),
+                    Some(NotificationPriority::Critical),
+                    &format!("worker-died-outbox:{notification_id}"),
+                )
+                .expect("prompt relay");
+        }
+
+        let before = fixture.prompt_relays();
+        coalesce_pending_worker_deaths(
+            prompt_queue.as_ref(),
+            Some(supervisor_queue.as_ref()),
+            &before,
+        )
+        .expect("coalesce");
+
+        let canonical = fixture.prompt_relays();
+        assert_eq!(canonical.len(), 1);
+        let envelope = crate::prompt_revalidation::parse_worker_died_envelope(&canonical[0].prompt)
+            .expect("batch envelope");
+        assert_eq!(
+            envelope.notification_id, durable_two,
+            "the visible ACK ID must resolve to the canonical prompt's dedupe key"
+        );
+
+        prompt_queue
+            .ack_by_dedupe_key(&format!(
+                "worker-died-outbox:{}",
+                envelope.notification_id
+            ))
+            .expect("ack canonical dedupe key")
+            .expect("canonical prompt");
+        let replay = prompt_queue
+            .poll_unseen_for_recipient("supervisor", None, 10)
+            .expect("replay poll");
+        assert!(
+            replay.iter().all(|row| row.id != canonical[0].id),
+            "acknowledging the visible batch ID must prevent canonical replay: {replay:?}"
         );
     }
 

@@ -472,6 +472,99 @@ mod tests {
         assert_eq!(second, 0, "an unchanged page must not be re-pushed");
     }
 
+    /// The body a page carries must survive push → wire → pull unchanged,
+    /// byte for byte. Anything less and a teammate's copy quietly differs from
+    /// yours: trailing whitespace stripped, CRLF rewritten, a missing final
+    /// newline added back. The page IS the body; a lossy transport is a
+    /// corrupted wiki.
+    #[tokio::test]
+    async fn a_page_body_round_trips_byte_identically_through_push_and_pull() {
+        use std::io::Read;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Deliberately hostile: CRLF, a lone CR, tabs, trailing spaces, an
+        // unterminated last line, non-ASCII, and a NUL-adjacent control char.
+        let body = "# Build System\r\n\ttabbed\ttext   \nunicode: → ✅ ünïcødé\rlone-cr\n\n\ntrailing spaces:   \nno trailing newline";
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/sync/push"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        let endpoint = server.uri();
+
+        let push_root = tempfile::tempdir().unwrap();
+        let push_path = push_root.path().to_path_buf();
+        let body_for_push = body.to_string();
+        tokio::task::spawn_blocking(move || {
+            let store = SqliteKnowledgeStore::open(&push_path).unwrap();
+            let mut page = KnowledgePage::new("cas-kn001", "architecture", "Build System");
+            page.snippet = "How the build works".to_string();
+            store
+                .commit_ingest(&IngestBatch {
+                    pages: vec![PageWrite {
+                        page,
+                        body: body_for_push,
+                    }],
+                    sources: Vec::new(),
+                    tombstones: Vec::new(),
+                })
+                .unwrap();
+            let syncer = syncer(Some(&endpoint), &push_path);
+            assert_eq!(syncer.push_knowledge_pages(&store).unwrap(), 1);
+        })
+        .await
+        .unwrap();
+
+        // Take the record straight off the wire — not a re-serialization of the
+        // local page — so the assertion covers what actually got sent.
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let mut raw = Vec::new();
+        flate2::read::GzDecoder::new(&requests[0].body[..])
+            .read_to_end(&mut raw)
+            .expect("push payload must be gzip");
+        let payload: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        let pushed = payload[KNOWLEDGE_ENTITY].as_array().unwrap()[0].clone();
+        assert_eq!(
+            pushed["body"].as_str().unwrap(),
+            body,
+            "the body must reach the wire unmodified"
+        );
+
+        // Now serve that exact record back to a fresh machine.
+        let pull_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(super::super::pull::PULL_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "knowledge_pages": [pushed]
+            })))
+            .mount(&pull_server)
+            .await;
+        let pull_endpoint = pull_server.uri();
+
+        let pull_root = tempfile::tempdir().unwrap();
+        let pull_path = pull_root.path().to_path_buf();
+        let landed = tokio::task::spawn_blocking(move || {
+            let store = SqliteKnowledgeStore::open(&pull_path).unwrap();
+            let syncer = syncer(Some(&pull_endpoint), &pull_path);
+            let report = syncer.pull_knowledge_pages(&store).unwrap();
+            assert_eq!(report.applied, 1, "errors: {:?}", report.errors);
+            let page = store.get_page_by_rel_path("architecture/build-system.md");
+            let page = page.unwrap().expect("rel_path identity must be preserved");
+            store.read_body(&page.rel_path).unwrap()
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            landed, body,
+            "the pulled body must be byte-identical to the pushed one"
+        );
+    }
+
     #[test]
     fn query_values_are_percent_encoded() {
         assert_eq!(encode_query_value("team-abc_123.x~y"), "team-abc_123.x~y");

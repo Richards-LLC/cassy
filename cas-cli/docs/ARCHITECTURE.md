@@ -87,6 +87,15 @@ Rules that keep that boundary honest:
 - **A model change forces a reindex.** The cache is tagged with `{provider, model, dims}`; on mismatch it is wiped and `mark_all_pending_embedding` re-arms every page. Vectors from two models are not comparable, and mixing them corrupts ranking silently.
 - **The `locked` bit rides the wire and is honoured on arrival.** Incoming pages are applied through `commit_ingest`, whose `WHERE knowledge_pages.locked = 0` guard means a teammate's copy can no more overwrite a page you locked than distillation can. A page locked upstream arrives locked.
 - **Pulled pages always arrive `pending_embedding = 1`.** A teammate's vector lives in a teammate's cache; this machine embeds the page itself or it is semantically invisible here.
+- **Embedding requests chunk at 32 inputs, and that cap is a constant, not a literal.** `MAX_EMBED_INPUTS_PER_REQUEST` is the endpoint's hard cap; `embed_pending_pages` splits its page budget into chunks of it and `embed_batch` refuses a longer input list outright. `DEFAULT_EMBED_BATCH` is a *page* budget per invocation, a different number with a different job. They were once both `32` at two call sites, which is exactly how "one request with every page in it" survived: the cap looked enforced and wasn't.
+- **An embedding run that did not do its job says so.** A request failure is reported through `EmbedReport::request_errors` with the unattempted pages counted as `deferred`, never downgraded to a `tracing::warn!`. `cas cloud sync` prints the problem and the store-wide `pending_after` count, so "0 embedded" can never read as "nothing to do". A `404`/`501` is classified as `capability_absent` — a boundary of the installation to state plainly, not an error to alarm about.
+- **One response shape.** `/api/embeddings` returns flat `{"embeddings": [[..]]}`. The client accepts that and nothing else: an OpenAI-style `data[].embedding` fallback used to make an unrelated `data` array parse as a list of empty vectors rather than fail.
+- **The knowledge pull carries `team_id` when there is one.** Project scope alone does not partition teams: a user in two teams that share one `project_canonical_id` would otherwise pull the union of both teams' pages. A teamless install sends no `team_id` and is unaffected.
+
+**What page sync does NOT cover** (boundaries by construction, not gaps to paper over):
+
+- **There is no page delete over sync.** The generic `DELETE /api/sync/{type}/{id}` route accepts `knowledge_page`, but the server keeps no tombstone for it: it removes only the caller's own row, records nothing, and cross-row dedupe can re-deliver the same page on the very next pull. Building delete on that route would produce a resurrection loop that looks like a client bug. Deletion stays local until the server has tombstones.
+- **Account- and global-scope pages have no wire identity.** `project_id` is `NOT NULL` server-side and the client fails closed without a canonical id, so a page outside a project simply does not sync.
 
 ### Key Patterns
 

@@ -92,6 +92,11 @@ if ! "$BUILD_ONLY" && ! command -v gh &>/dev/null; then
     exit 1
 fi
 
+# A registered migration changes the doctor/status component snapshots, while
+# the scoped release suites do not build that integration test.  Keep this
+# before builds and, crucially, before create_release can create or push TAG.
+./scripts/check-release-migration-snapshots.sh
+
 # ---------------------------------------------------------------------------
 # Bootstrap Zig if needed
 # ---------------------------------------------------------------------------

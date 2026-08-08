@@ -7,7 +7,9 @@
 //!
 //! Separate from `m221` for the same reason `m223` is: `m221` has already run
 //! on live databases and its `detect` predicate would short-circuit, so a table
-//! folded into it would never reach those installs.
+//! folded into it would never reach those installs. Numbered **228** after M3,
+//! M5, and the knowledge-store migrations claimed 224–227; IDs are never
+//! reused, so a lane that lands later takes the higher number.
 
 use crate::migration::{Migration, Subsystem};
 

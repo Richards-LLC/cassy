@@ -1090,6 +1090,34 @@ impl FactoryDaemon {
         )
     }
 
+    /// cas-b8ce (GH #176): stamp the per-recipient surfacing receipt for a row
+    /// this daemon's own transport put in front of `recipient`.
+    ///
+    /// Best-effort by design, like every other observability write on the
+    /// delivery path: a receipt that fails to persist costs a redelivery, and a
+    /// delivery failed over a receipt costs the message. The former is
+    /// recoverable and the latter is not, so this never propagates.
+    fn record_transport_receipt(
+        queue: &dyn cas_store::PromptQueueStore,
+        prompt_id: i64,
+        recipient: &str,
+    ) {
+        if let Err(error) = queue.record_recipient_surfaced(
+            prompt_id,
+            recipient,
+            cas_store::SurfacingSource::TransportDelivered,
+        ) {
+            tracing::debug!(
+                target: "cas::coordination",
+                message_id = prompt_id,
+                %recipient,
+                %error,
+                "cas-b8ce: could not persist the transport surfacing receipt — \
+                 the row may be re-served by the recipient's next inbox_poll"
+            );
+        }
+    }
+
     pub(super) async fn handle_mux_event(&mut self, event: cas_mux::MuxEvent) {
         match event {
             cas_mux::MuxEvent::PaneOutput { pane_id, data } => {
@@ -2287,6 +2315,14 @@ impl FactoryDaemon {
             ) {
                 DeferredInboxOutcome::HarnessConsumed => {
                     self.forget_row_delivery_state(queued.id);
+                    // cas-b8ce (GH #176): this arm is CAS's strongest evidence
+                    // that a NON-CAS transport surfaced the content — the
+                    // harness took our inbox copy AND the pane then produced
+                    // output. Write the per-recipient receipt so the row leaves
+                    // the recipient's unread set for good; stamping only
+                    // `transport_delivered` left it `seen.prompt_id IS NULL`,
+                    // and the recipient's next `inbox_poll` re-served it.
+                    Self::record_transport_receipt(&*queue, queued.id, &queued.target);
                     if let Err(error) = queue.mark_transport_delivered(queued.id) {
                         tracing::error!(
                             prompt_id = queued.id,
@@ -2738,6 +2774,15 @@ impl FactoryDaemon {
                     match inject_result {
                         Ok(cas_mux::InjectOutcome::Delivered) => {
                             succeeded += 1;
+                            // cas-b8ce (GH #176): a broadcast's read state is
+                            // per-recipient by construction — `all_workers` is
+                            // exempt from every row-level ack filter
+                            // (NOT_ALREADY_CONSUMED_SQL), so the receipt table
+                            // is the ONLY thing that can retire it for a worker
+                            // that already received it. Without this write, one
+                            // broadcast is re-served to every worker on every
+                            // `inbox_poll`, forever.
+                            Self::record_transport_receipt(&*queue, queued.id, name);
                             tracing::info!("Injected to worker '{}'", name);
                             if let Some(ref store) = event_store {
                                 record_injection(
@@ -3307,6 +3352,32 @@ impl FactoryDaemon {
                 // cas-d732: the row is consumed — its re-nudge clock is dead
                 // weight now, and leaving it would leak one entry per row.
                 self.forget_row_delivery_state(queued.id);
+                // cas-b8ce (GH #176): reaching this arm means the delivery was
+                // NOT wake-deferred and NOT awaiting an urgent wake probe — the
+                // content went into the recipient's turn over CAS's transport.
+                // Record the receipt against the ADDRESSED target (the key the
+                // recipient's own poll joins on), not the pane name, or the
+                // supervisor's `supervisor`/pane alias split leaves the row
+                // unread under the very alias that would fetch it.
+                //
+                // TRADE-OFF, stated deliberately: for a `TeamsInbox` recipient
+                // this arm's evidence is "the inbox write landed and the wake
+                // fired", not "the harness surfaced it" — so the receipt costs
+                // `inbox_poll` as a recovery path if the harness silently drops
+                // the copy. That is accepted for three reasons. (1) The bug this
+                // pairs against is OBSERVED (rows 8210/8215/8217 and
+                // 8221/8223/8225/8229/8241 re-served in full after being read,
+                // acted on and replied to); the recovery it costs is
+                // hypothetical. (2) Not writing the receipt here would leave the
+                // reported Claude-worker case unfixed, since that is precisely
+                // the channel those rows travelled. (3) The drop case keeps its
+                // own, stronger safety net: `message_status` still reports the
+                // row `delivered` with `confirmed_at` NULL and its undelivered
+                // clock running, and cas-ef14's drained-awaiting-wake machinery
+                // plus the re-nudge cadence still cover the deferred path. The
+                // recipient's unread view was never the right place to hide a
+                // delivery failure.
+                Self::record_transport_receipt(&*queue, queued.id, &queued.target);
                 // cas-2c5f: authoritative transport handoff only.
                 if let Err(e) = queue.mark_transport_delivered(queued.id) {
                     tracing::error!(
@@ -5777,6 +5848,58 @@ mod tests {
             ),
             LifecycleRedelivery::Cooldown,
             "the same row inside the interval is exactly what must be held back"
+        );
+    }
+
+    /// cas-b8ce (GH #176): the daemon's terminal-delivery decision and the
+    /// recipient's unread view must agree.
+    ///
+    /// The bug was that they could not: `mark_transport_delivered` writes only
+    /// `prompt_queue` columns, while `poll_unseen_for_recipient` answers from
+    /// `prompt_queue_recipient_seen`. A row could therefore be `delivered`
+    /// according to `message_status` and simultaneously unread according to the
+    /// recipient's own `inbox_poll`, which then handed it back — the observed
+    /// redelivery bursts.
+    ///
+    /// This pins the pairing at the daemon's own helper, so a future refactor
+    /// that drops the receipt write from a success arm fails here rather than
+    /// in production three releases later.
+    #[test]
+    fn a_terminally_delivered_row_leaves_the_recipients_unread_view() {
+        use cas_store::PromptQueueStore;
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        let id = store
+            .enqueue("supervisor", "zealous-fox-95", "Assignment: cas-5c50")
+            .unwrap();
+
+        assert_eq!(
+            store
+                .count_unseen_for_recipient("zealous-fox-95", None)
+                .unwrap(),
+            1,
+            "precondition: before delivery the row is genuinely unread"
+        );
+
+        // Exactly the pair the daemon's success arms now perform.
+        FactoryDaemon::record_transport_receipt(&store, id, "zealous-fox-95");
+        store.mark_transport_delivered(id).unwrap();
+
+        assert_eq!(
+            store
+                .count_unseen_for_recipient("zealous-fox-95", None)
+                .unwrap(),
+            0,
+            "a row the daemon reports as delivered must not still be unread — \
+             that contradiction IS the GH #176 redelivery"
+        );
+        assert!(
+            store
+                .poll_unseen_for_recipient("zealous-fox-95", None, 20)
+                .unwrap()
+                .is_empty(),
+            "the recipient's own inbox_poll must not re-serve it"
         );
     }
 

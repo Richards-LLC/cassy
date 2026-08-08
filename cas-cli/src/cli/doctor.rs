@@ -64,6 +64,8 @@ const EXPECTED_TABLES: &[&str] = &[
     "history_docs",
     "history_commit_symbols",
     "history_epochs",
+    "code_vector_queue",
+    "code_index_state",
 ];
 
 /// Pure schema verdict so the missing-table path is exercised directly in
@@ -339,9 +341,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                             row.prompt_id,
                             row.target,
                             row.delivery_attempts,
-                            row.reason
-                                .map(|r| format!(", {r}"))
-                                .unwrap_or_default()
+                            row.reason.map(|r| format!(", {r}")).unwrap_or_default()
                         )
                     })
                     .collect::<Vec<_>>()
@@ -1079,6 +1079,15 @@ struct SymbolIndexState {
     symbols: usize,
     /// Newest `code_files.updated` for this repository: the catch-up watermark.
     last_indexed: Option<chrono::DateTime<chrono::Utc>>,
+    eligible_files: usize,
+    indexed_files: usize,
+    failed_files: usize,
+    vector_eligible: usize,
+    vectorized: usize,
+    vector_pending: usize,
+    vector_failed: usize,
+    head_lag: Option<bool>,
+    scan_error: Option<String>,
     /// Set when the state could not be read; reported instead of silently skipped.
     error: Option<String>,
 }
@@ -1120,12 +1129,48 @@ fn gather_symbol_index_state(cas_root: &Path) -> SymbolIndexState {
         }
     };
 
+    let vector_store = match cas_store::SqliteCodeVectorStore::open(cas_root) {
+        Ok(store) => store,
+        Err(e) => {
+            return SymbolIndexState {
+                enabled,
+                searchable,
+                files: files.len(),
+                symbols: store.count_symbols().unwrap_or(0),
+                last_indexed: files.iter().map(|file| file.updated).max(),
+                error: Some(e.to_string()),
+                ..Default::default()
+            };
+        }
+    };
+    let vectors = vector_store.stats().unwrap_or_default();
+    let scan = vector_store.index_state(&repository).ok().flatten();
+    let current_head = crate::daemon::indexing::resolve_repository(project_root)
+        .0
+        .as_deref()
+        .and_then(crate::daemon::indexing::head_commit);
+    let head_lag = scan.as_ref().and_then(|scan| {
+        current_head
+            .as_ref()
+            .zip(scan.last_head.as_ref())
+            .map(|(current, indexed)| current != indexed)
+    });
+
     SymbolIndexState {
         enabled,
         searchable,
         files: files.len(),
         symbols: store.count_symbols().unwrap_or(0),
         last_indexed: files.iter().map(|file| file.updated).max(),
+        eligible_files: scan.as_ref().map(|scan| scan.eligible_files).unwrap_or(0),
+        indexed_files: scan.as_ref().map(|scan| scan.indexed_files).unwrap_or(0),
+        failed_files: scan.as_ref().map(|scan| scan.failed_files).unwrap_or(0),
+        vector_eligible: vectors.eligible,
+        vectorized: vectors.vectorized,
+        vector_pending: vectors.pending,
+        vector_failed: vectors.failed,
+        head_lag,
+        scan_error: scan.and_then(|scan| scan.last_error),
         error: None,
     }
 }
@@ -1148,6 +1193,40 @@ fn symbol_index_check(state: SymbolIndexState, now: chrono::DateTime<chrono::Utc
             message: "code indexing is disabled (`cas config set code.enabled true`); \
                       `code_search` will keep returning nothing"
                 .to_string(),
+        };
+    }
+
+    let file_lag = state.eligible_files.saturating_sub(state.indexed_files);
+    if state.scan_error.is_some()
+        || state.failed_files > 0
+        || file_lag > 0
+        || state.head_lag == Some(true)
+        || state.vector_failed > 0
+    {
+        return Check {
+            name,
+            status: CheckStatus::Warning,
+            message: format!(
+                "symbol index coverage is incomplete: {}/{} eligible file(s), {} file(s) lagging, {} file failure(s), HEAD {}; code vectors {}/{} vectorized, {} pending, {} failed{}. Run `cas index code` to reconcile now.",
+                state.indexed_files,
+                state.eligible_files,
+                file_lag,
+                state.failed_files,
+                match state.head_lag {
+                    Some(true) => "behind",
+                    Some(false) => "current",
+                    None => "unknown",
+                },
+                state.vectorized,
+                state.vector_eligible,
+                state.vector_pending,
+                state.vector_failed,
+                state
+                    .scan_error
+                    .as_deref()
+                    .map(|error| format!("; last error: {error}"))
+                    .unwrap_or_default(),
+            ),
         };
     }
 
@@ -1184,7 +1263,7 @@ fn symbol_index_check(state: SymbolIndexState, now: chrono::DateTime<chrono::Utc
                  `cas index code` to catch up now.",
                 state.files,
                 state.symbols,
-                format_lag(lag_secs)
+                format_lag(lag_secs),
             ),
         }
     } else {
@@ -1193,10 +1272,19 @@ fn symbol_index_check(state: SymbolIndexState, now: chrono::DateTime<chrono::Utc
             status: CheckStatus::Ok,
             message: format!(
                 "{} file(s) from this project indexed ({} symbol(s) stored in total), newest \
-                 entry {}",
+                 entry {}; code vectors {}/{} vectorized, {} pending, {} failed; HEAD {}",
                 state.files,
                 state.symbols,
-                format_lag(lag_secs)
+                format_lag(lag_secs),
+                state.vectorized,
+                state.vector_eligible,
+                state.vector_pending,
+                state.vector_failed,
+                match state.head_lag {
+                    Some(true) => "behind",
+                    Some(false) => "current",
+                    None => "unknown",
+                }
             ),
         }
     }
@@ -1382,8 +1470,8 @@ struct HistoryIndexHealth {
 }
 
 fn gather_history_index_state(cas_root: &Path) -> HistoryIndexHealth {
-    let tick_interval_secs = crate::mcp::daemon::EmbeddedDaemonConfig::default()
-        .history_index_interval_secs;
+    let tick_interval_secs =
+        crate::mcp::daemon::EmbeddedDaemonConfig::default().history_index_interval_secs;
     let enabled = crate::mcp::daemon::EmbeddedDaemonConfig::default().index_history;
     let base = HistoryIndexHealth {
         enabled,
@@ -1431,7 +1519,10 @@ fn gather_history_index_state(cas_root: &Path) -> HistoryIndexHealth {
     // Only meaningful while the watermark is still on HEAD's ancestry — the
     // same precondition `lag_commits` uses, applied to the clock.
     let lag_seconds = match (
-        status.state.as_ref().and_then(|s| s.last_indexed_sha.as_ref()),
+        status
+            .state
+            .as_ref()
+            .and_then(|s| s.last_indexed_sha.as_ref()),
         status.watermark_is_ancestor,
     ) {
         (Some(sha), true) => match (
@@ -1456,10 +1547,7 @@ fn gather_history_index_state(cas_root: &Path) -> HistoryIndexHealth {
         lag_commits: status.lag_commits,
         lag_seconds,
         watermark_is_ancestor: status.watermark_is_ancestor,
-        backfill_complete: status
-            .state
-            .as_ref()
-            .is_some_and(|s| s.backfill_complete),
+        backfill_complete: status.state.as_ref().is_some_and(|s| s.backfill_complete),
         ever_indexed: status
             .state
             .as_ref()
@@ -2032,6 +2120,7 @@ mod tests {
             symbols: 3_400,
             last_indexed: None,
             error: None,
+            ..Default::default()
         }
     }
 
@@ -2047,18 +2136,57 @@ mod tests {
 
         let check = symbol_index_check(state, now);
         assert!(matches!(check.status, CheckStatus::Warning));
-        assert!(check.message.contains("behind"), "message: {}", check.message);
+        assert!(
+            check.message.contains("behind"),
+            "message: {}",
+            check.message
+        );
         assert!(
             check.message.contains("120 file(s) from this project"),
             "message: {}",
             check.message
         );
-        assert!(check.message.contains("6d old"), "message: {}", check.message);
+        assert!(
+            check.message.contains("6d old"),
+            "message: {}",
+            check.message
+        );
         assert!(
             check.message.contains("cas index code"),
             "a lag warning must name the catch-up command: {}",
             check.message
         );
+    }
+
+    #[test]
+    fn symbol_index_check_names_file_vector_and_head_lag() {
+        let now = chrono::Utc::now();
+        let state = SymbolIndexState {
+            eligible_files: 100,
+            indexed_files: 96,
+            failed_files: 1,
+            vector_eligible: 900,
+            vectorized: 850,
+            vector_pending: 47,
+            vector_failed: 3,
+            head_lag: Some(true),
+            scan_error: Some("one parser failure".into()),
+            last_indexed: Some(now),
+            ..healthy_state()
+        };
+        let check = symbol_index_check(state, now);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        for expected in [
+            "96/100 eligible",
+            "4 file(s) lagging",
+            "HEAD behind",
+            "850/900 vectorized",
+            "47 pending",
+            "3 failed",
+            "one parser failure",
+        ] {
+            assert!(check.message.contains(expected), "missing {expected}: {}", check.message);
+        }
     }
 
     /// A freshly-indexed tree reports Ok with the counts, not a warning.
@@ -2071,7 +2199,11 @@ mod tests {
         };
 
         let check = symbol_index_check(state, now);
-        assert!(matches!(check.status, CheckStatus::Ok), "message: {}", check.message);
+        assert!(
+            matches!(check.status, CheckStatus::Ok),
+            "message: {}",
+            check.message
+        );
         assert!(
             check.message.contains("120 file(s) from this project"),
             "the count must be scoped to this project, not a bare global: {}",
@@ -2107,7 +2239,11 @@ mod tests {
             "message: {}",
             check.message
         );
-        assert!(check.message.contains("cas index code"), "message: {}", check.message);
+        assert!(
+            check.message.contains("cas index code"),
+            "message: {}",
+            check.message
+        );
     }
 
     /// An explicit opt-out must be reported honestly rather than as a healthy index.
@@ -2121,7 +2257,11 @@ mod tests {
 
         let check = symbol_index_check(state, now);
         assert!(matches!(check.status, CheckStatus::Warning));
-        assert!(check.message.contains("disabled"), "message: {}", check.message);
+        assert!(
+            check.message.contains("disabled"),
+            "message: {}",
+            check.message
+        );
     }
 
     /// A store that cannot be read is a warning that says so — never a silent skip.
@@ -2135,7 +2275,11 @@ mod tests {
 
         let check = symbol_index_check(state, now);
         assert!(matches!(check.status, CheckStatus::Warning));
-        assert!(check.message.contains("database is locked"), "message: {}", check.message);
+        assert!(
+            check.message.contains("database is locked"),
+            "message: {}",
+            check.message
+        );
     }
 
     /// A drain failure must reach the operator here (EPIC cas-6212 / cas-db6e).
@@ -2224,7 +2368,10 @@ mod tests {
             .expect("seed code file");
 
         let state = gather_symbol_index_state(&cas_root);
-        assert_eq!(state.files, 1, "seeded row not found (repository derivation drift?)");
+        assert_eq!(
+            state.files, 1,
+            "seeded row not found (repository derivation drift?)"
+        );
         let last = state.last_indexed.expect("watermark");
         assert!(
             (last - stale).num_seconds().abs() <= 1,
@@ -2284,7 +2431,11 @@ mod tests {
             indexed_commits: 2_437,
             ..healthy_history()
         });
-        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        assert!(
+            matches!(check.status, CheckStatus::Warning),
+            "{}",
+            check.message
+        );
         assert!(check.message.contains("41 commit(s)"), "{}", check.message);
         assert!(check.message.contains("2d old"), "{}", check.message);
         // The remedy is named, not implied.
@@ -2318,7 +2469,11 @@ mod tests {
             watermark_is_ancestor: false,
             ..healthy_history()
         });
-        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        assert!(
+            matches!(check.status, CheckStatus::Warning),
+            "{}",
+            check.message
+        );
         assert!(
             check.message.contains("not an ancestor"),
             "{}",
@@ -2342,7 +2497,11 @@ mod tests {
             ],
             ..healthy_history()
         });
-        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        assert!(
+            matches!(check.status, CheckStatus::Warning),
+            "{}",
+            check.message
+        );
         assert!(check.message.contains("github"), "{}", check.message);
         assert!(
             check.message.contains("not authenticated"),
@@ -2360,7 +2519,11 @@ mod tests {
             error: Some("no such table: history_commits".to_string()),
             ..healthy_history()
         });
-        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        assert!(
+            matches!(check.status, CheckStatus::Warning),
+            "{}",
+            check.message
+        );
         assert!(
             check
                 .message
@@ -2379,7 +2542,11 @@ mod tests {
             lag_commits: None,
             ..healthy_history()
         });
-        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        assert!(
+            matches!(check.status, CheckStatus::Warning),
+            "{}",
+            check.message
+        );
         assert!(check.message.contains("never indexed"), "{}", check.message);
     }
 
@@ -2390,7 +2557,11 @@ mod tests {
             indexed_commits: 1_200,
             ..healthy_history()
         });
-        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        assert!(
+            matches!(check.status, CheckStatus::Warning),
+            "{}",
+            check.message
+        );
         assert!(
             check.message.contains("backfill incomplete"),
             "{}",
@@ -2435,12 +2606,12 @@ mod tests {
             provenance_unmeasurable_reason: Some("no tasks table".to_string()),
             ..healthy_history()
         });
+        assert!(check.message.contains("unmeasurable"), "{}", check.message);
         assert!(
-            check.message.contains("unmeasurable"),
+            check.message.contains("no tasks table"),
             "{}",
             check.message
         );
-        assert!(check.message.contains("no tasks table"), "{}", check.message);
         assert!(
             !check.message.contains("0.0%"),
             "unmeasurable must never render as a number: {}",
@@ -2456,7 +2627,11 @@ mod tests {
             provenance_unmeasurable_reason: Some("commit_links unreadable".to_string()),
             ..healthy_history()
         });
-        assert!(check.message.contains("8.9% high-confidence"), "{}", check.message);
+        assert!(
+            check.message.contains("8.9% high-confidence"),
+            "{}",
+            check.message
+        );
         assert!(check.message.contains("partial:"), "{}", check.message);
     }
 
@@ -2467,7 +2642,12 @@ mod tests {
     fn missing_history_tables_produce_a_warning_that_names_each_table() {
         use crate::migration::detector::TableInfo;
 
-        for missing in ["history_commit_symbols", "history_epochs"] {
+        for missing in [
+            "history_commit_symbols",
+            "history_epochs",
+            "code_vector_queue",
+            "code_index_state",
+        ] {
             let summary = SchemaSummary {
                 tables: EXPECTED_TABLES
                     .iter()

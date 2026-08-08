@@ -53,6 +53,9 @@ pub struct DrainReport {
     /// Code-history half (commits + docs). `None` when there is no history
     /// store.
     pub history: Option<EmbedReport>,
+    /// Current source-code symbols. Stored and ranked separately from both
+    /// knowledge and history.
+    pub code: Option<EmbedReport>,
     /// True when this installation has no embedding capability: logged out, or
     /// an endpoint that does not implement `/api/embeddings`. A declared
     /// boundary — the drain did nothing and that is correct.
@@ -63,16 +66,19 @@ impl DrainReport {
     pub fn embedded(&self) -> usize {
         self.knowledge.as_ref().map_or(0, |r| r.embedded)
             + self.history.as_ref().map_or(0, |r| r.embedded)
+            + self.code.as_ref().map_or(0, |r| r.embedded)
     }
 
     pub fn requests(&self) -> usize {
         self.knowledge.as_ref().map_or(0, |r| r.requests)
             + self.history.as_ref().map_or(0, |r| r.requests)
+            + self.code.as_ref().map_or(0, |r| r.requests)
     }
 
     pub fn skipped(&self) -> usize {
         self.knowledge.as_ref().map_or(0, |r| r.skipped)
             + self.history.as_ref().map_or(0, |r| r.skipped)
+            + self.code.as_ref().map_or(0, |r| r.skipped)
     }
 
     /// Units still awaiting a vector across every corpus. The number that must
@@ -80,6 +86,7 @@ impl DrainReport {
     pub fn pending_after(&self) -> usize {
         self.knowledge.as_ref().map_or(0, |r| r.pending_after)
             + self.history.as_ref().map_or(0, |r| r.pending_after)
+            + self.code.as_ref().map_or(0, |r| r.pending_after)
     }
 
     /// Every problem worth showing a human, verbatim.
@@ -88,6 +95,7 @@ impl DrainReport {
         for (corpus, report) in [
             ("knowledge", self.knowledge.as_ref()),
             ("history", self.history.as_ref()),
+            ("code", self.code.as_ref()),
         ] {
             let Some(report) = report else { continue };
             for message in &report.request_errors {
@@ -334,6 +342,19 @@ pub fn drain_all_pending_with(
             let problems = report.problems();
             let error = (!problems.is_empty()).then(|| problems.join("; "));
             let _ = store.record_attempt(&repository, SOURCE_EMBEDDINGS, error.as_deref());
+        }
+    }
+
+    match crate::cloud::code_embeddings::embed_pending_code(cas_root, embedder, &limiter, limit) {
+        Ok(code_report) => {
+            report.capability_absent |= code_report.capability_absent;
+            report.code = Some(code_report);
+        }
+        Err(e) => {
+            report.code = Some(EmbedReport {
+                request_errors: vec![e.to_string()],
+                ..Default::default()
+            });
         }
     }
 

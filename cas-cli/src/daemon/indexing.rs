@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -87,7 +88,7 @@ pub fn resolve_repository(file_path: &Path) -> (Option<PathBuf>, String) {
 
 /// Current `HEAD` commit of a work tree, or `None` when git cannot answer
 /// (no git, unborn branch, not a repository).
-fn head_commit(repo_root: &Path) -> Option<String> {
+pub(crate) fn head_commit(repo_root: &Path) -> Option<String> {
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(repo_root)
@@ -110,6 +111,72 @@ fn head_commit(repo_root: &Path) -> Option<String> {
 /// thousands of symbol documents there would silently reshape every memory search.
 pub(crate) fn code_index_dir(cas_root: &Path) -> PathBuf {
     cas_root.join("index").join("code")
+}
+
+/// Walk configured roots using gitignore plus explicit exclude globs.
+/// Shared by startup reconciliation, the manual command, and doctor so all
+/// three agree on the denominator called "eligible".
+pub(crate) fn collect_source_files(
+    roots: &[PathBuf],
+    extensions: &[String],
+    exclude_patterns: &[String],
+) -> Vec<PathBuf> {
+    let wanted: HashSet<String> = extensions.iter().map(|e| e.to_lowercase()).collect();
+    let excludes: Vec<glob::Pattern> = exclude_patterns
+        .iter()
+        .filter_map(|pattern| glob::Pattern::new(pattern).ok())
+        .collect();
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    for root in roots {
+        if root.is_file() {
+            if is_wanted(root, &wanted) && seen.insert(root.clone()) {
+                out.push(root.clone());
+            }
+            continue;
+        }
+        for entry in ignore::WalkBuilder::new(root)
+            .hidden(true)
+            .git_ignore(true)
+            .build()
+            .flatten()
+        {
+            let path = entry.path();
+            if !path.is_file() || !is_wanted(path, &wanted) {
+                continue;
+            }
+            let relative = path.strip_prefix(root).unwrap_or(path);
+            if excludes
+                .iter()
+                .any(|pattern| pattern.matches_path(relative))
+            {
+                continue;
+            }
+            let path = path.to_path_buf();
+            if seen.insert(path.clone()) {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+fn is_wanted(path: &Path, wanted: &HashSet<String>) -> bool {
+    let Some(extension) = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_lowercase)
+    else {
+        return false;
+    };
+
+    wanted.contains(&extension)
+        && !matches!(
+            cas_code::Language::from_extension(&extension),
+            cas_code::Language::Unknown
+        )
 }
 
 /// Publish parsed symbols to the code BM25 index and retire deleted ones.
@@ -147,6 +214,61 @@ pub(crate) fn publish_code_symbols(
         .map_err(|e| e.to_string())
 }
 
+/// Remove source-code vectors without creating the optional LMDB cache.
+///
+/// Indexing runs while logged out, so retirement may only open a cache that
+/// already exists. This keeps delete/rename cleanup local and guarantees the
+/// capability-absent path never materializes `index/code-vectors`.
+fn retire_cached_code_vectors(cas_root: &Path, symbol_ids: &[String]) -> Result<(), String> {
+    if symbol_ids.is_empty() {
+        return Ok(());
+    }
+    let Some(cache) = crate::cloud::embeddings::KnowledgeVectorCache::open_existing_code(cas_root)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(());
+    };
+    for symbol_id in symbol_ids {
+        cache
+            .delete(&crate::cloud::embeddings::code_symbol_key(symbol_id))
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+/// Retire one deleted/renamed file from every source-code search channel.
+///
+/// The replayable secondary indexes are removed before SQLite source rows.
+/// If any step fails, the file and its symbol ids remain available for the
+/// next reconciliation pass instead of losing the only durable retirement
+/// manifest. Every operation before the final SQLite delete is idempotent.
+fn retire_code_file(
+    cas_root: &Path,
+    code_store: &dyn cas_store::CodeStore,
+    file: &cas_code::CodeFile,
+) -> Result<usize, String> {
+    let symbol_ids: Vec<String> = code_store
+        .get_symbols_in_file(&file.id)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|symbol| symbol.id)
+        .collect();
+
+    publish_code_symbols(cas_root, &[], &symbol_ids)?;
+    retire_cached_code_vectors(cas_root, &symbol_ids)?;
+    cas_store::SqliteCodeVectorStore::open(cas_root)
+        .map_err(|error| error.to_string())?
+        .retire(&symbol_ids)
+        .map_err(|error| error.to_string())?;
+    code_store
+        .delete_symbols_in_file(&file.id)
+        .map_err(|error| error.to_string())?;
+    code_store
+        .delete_file(&file.id)
+        .map_err(|error| error.to_string())?;
+    Ok(symbol_ids.len())
+}
+
 /// Index changed code files (called by file watcher or periodic task).
 ///
 /// Files whose content hash already matches the stored one are skipped.
@@ -176,6 +298,8 @@ pub fn index_code_files_with(
     }
 
     let code_store = open_code_store(cas_root)?;
+    let vector_state = cas_store::SqliteCodeVectorStore::open(cas_root)
+        .map_err(|error| CasError::Other(format!("Failed to open code vector queue: {error}")))?;
 
     let mut result = CodeIndexResult::default();
     let mut parser = match MultiLanguageParser::new() {
@@ -252,11 +376,10 @@ pub fn index_code_files_with(
                 // Symbols that existed in the previous parse of this file but are about to be
                 // dropped must also leave the BM25 index, or a renamed/deleted function keeps
                 // answering searches from a stale document.
-                let previous_symbol_ids: Vec<String> = code_store
-                    .get_symbols_in_file(&file_id)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|symbol| symbol.id)
+                let previous_symbols = code_store.get_symbols_in_file(&file_id).unwrap_or_default();
+                let previous_symbol_ids: Vec<String> = previous_symbols
+                    .iter()
+                    .map(|symbol| symbol.id.clone())
                     .collect();
 
                 let _ = code_store.delete_symbols_in_file(&file_id);
@@ -302,8 +425,9 @@ pub fn index_code_files_with(
                     symbols.iter().map(|symbol| symbol.id.as_str()).collect();
                 retired.extend(
                     previous_symbol_ids
-                        .into_iter()
-                        .filter(|id| !surviving.contains(id.as_str())),
+                        .iter()
+                        .filter(|id| !surviving.contains(id.as_str()))
+                        .cloned(),
                 );
                 published.extend(symbols.iter().cloned());
 
@@ -316,6 +440,36 @@ pub fn index_code_files_with(
                                 .push(format!("Symbol {}: {}", symbol.name, error));
                         }
                     }
+                }
+
+                // Re-arm only changed semantic chunks, retire symbols that
+                // disappeared/became low-value, and remove cached vectors for
+                // both cases so queries never observe an old vector while the
+                // replacement is pending.
+                let current_vectors: std::collections::HashMap<&str, &str> = symbols
+                    .iter()
+                    .filter(|symbol| symbol.kind.should_embed())
+                    .map(|symbol| (symbol.id.as_str(), symbol.content_hash.as_str()))
+                    .collect();
+                let stale_vectors: Vec<String> = previous_symbols
+                    .iter()
+                    .filter(|symbol| {
+                        current_vectors.get(symbol.id.as_str()).copied()
+                            != Some(symbol.content_hash.as_str())
+                    })
+                    .map(|symbol| symbol.id.clone())
+                    .collect();
+                if let Err(error) = retire_cached_code_vectors(cas_root, &stale_vectors) {
+                    result.errors.push(format!(
+                        "{}: failed to retire stale code vectors: {error}",
+                        file_path.display()
+                    ));
+                }
+                if let Err(error) = vector_state.sync_file_symbols(&symbols, &previous_symbol_ids) {
+                    result.errors.push(format!(
+                        "{}: failed to reconcile code vector queue: {error}",
+                        file_path.display()
+                    ));
                 }
 
                 result.symbols_indexed += symbol_count;
@@ -333,7 +487,96 @@ pub fn index_code_files_with(
     if let Err(error) = publish_code_symbols(cas_root, &published, &retired) {
         result.errors.push(format!("code search index: {error}"));
     }
+    Ok(result)
+}
 
+/// Full-tree reconciliation used on daemon startup and by `cas index code`
+/// with its default root. In addition to content-hash incremental updates it
+/// retires files that disappeared while the daemon was stopped and records a
+/// durable coverage/HEAD receipt.
+pub fn reconcile_code_tree(
+    files: &[PathBuf],
+    cas_root: &Path,
+    force: bool,
+) -> Result<CodeIndexResult, CasError> {
+    use crate::store::open_code_store;
+
+    let mut result = index_code_files_with(files, cas_root, force)?;
+    let code_store = open_code_store(cas_root)?;
+
+    let mut by_repo: std::collections::HashMap<String, (PathBuf, HashSet<String>)> =
+        std::collections::HashMap::new();
+    for file in files {
+        let (root, repository) = resolve_repository(file);
+        let file_id = code_store.generate_file_id_for(&repository, &file.to_string_lossy());
+        by_repo
+            .entry(repository)
+            .or_insert_with(|| {
+                (
+                    root.unwrap_or_else(|| file.parent().unwrap_or(file).to_path_buf()),
+                    HashSet::new(),
+                )
+            })
+            .1
+            .insert(file_id);
+    }
+
+    for (repository, (repo_root, current_ids)) in by_repo {
+        let errors_before_retirement = result.errors.len();
+        let stored = match code_store.list_files(&repository, None) {
+            Ok(stored) => stored,
+            Err(error) => {
+                result.errors.push(format!(
+                    "{repository}: failed to list indexed source files: {error}"
+                ));
+                Vec::new()
+            }
+        };
+        for stale in stored.iter().filter(|file| !current_ids.contains(&file.id)) {
+            match retire_code_file(cas_root, code_store.as_ref(), stale) {
+                Ok(_) => result.files_deleted += 1,
+                Err(error) => result.errors.push(format!(
+                    "{}: failed to retire deleted source file: {error}",
+                    stale.path
+                )),
+            }
+        }
+
+        let current_indexed = code_store
+            .list_files(&repository, None)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|file| current_ids.contains(&file.id))
+            .count();
+        let retirement_errors = result.errors.len() - errors_before_retirement;
+        let failed_files = current_ids
+            .len()
+            .saturating_sub(current_indexed)
+            .saturating_add(retirement_errors);
+        let scan_error = (!result.errors.is_empty()).then(|| {
+            result
+                .errors
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ")
+        });
+        if let Err(error) = cas_store::SqliteCodeVectorStore::open(cas_root).and_then(|state| {
+            state.record_scan(
+                &repository,
+                current_ids.len(),
+                current_indexed,
+                failed_files,
+                head_commit(&repo_root).as_deref(),
+                scan_error.as_deref(),
+            )
+        }) {
+            result.errors.push(format!(
+                "{repository}: failed to record code-index scan receipt: {error}"
+            ));
+        }
+    }
     Ok(result)
 }
 
@@ -360,7 +603,6 @@ pub fn run_code_index_cycle(
 
     if !deleted_paths.is_empty() {
         if let Ok(code_store) = open_code_store(cas_root) {
-            let mut retired: Vec<String> = Vec::new();
             for path in &deleted_paths {
                 // Same work-tree-root derivation the writer uses; a mismatch here would look up
                 // a repository that was never written and silently leave the rows behind.
@@ -368,28 +610,25 @@ pub fn run_code_index_cycle(
 
                 let path_str = path.to_string_lossy();
                 if let Ok(Some(file)) = code_store.get_file_by_path(&repo_name, &path_str) {
-                    retired.extend(
-                        code_store
-                            .get_symbols_in_file(&file.id)
-                            .unwrap_or_default()
-                            .into_iter()
-                            .map(|symbol| symbol.id),
-                    );
-                    if code_store.delete_file(&file.id).is_ok() {
-                        result.files_deleted += 1;
+                    match retire_code_file(cas_root, code_store.as_ref(), &file) {
+                        Ok(_) => result.files_deleted += 1,
+                        Err(error) => result.errors.push(format!(
+                            "{}: failed to retire deleted source file: {error}",
+                            path.display()
+                        )),
                     }
                 }
-            }
-
-            if let Err(error) = publish_code_symbols(cas_root, &[], &retired) {
-                result.errors.push(format!("code search index: {error}"));
             }
         }
     }
 
     let pending_files = watcher.take_pending();
     if !pending_files.is_empty() {
-        let index_result = index_code_files(&pending_files, cas_root)?;
+        let index_result = if watcher.take_initial_reconcile() {
+            reconcile_code_tree(&pending_files, cas_root, false)?
+        } else {
+            index_code_files(&pending_files, cas_root)?
+        };
         result.files_indexed = index_result.files_indexed;
         result.symbols_indexed = index_result.symbols_indexed;
         result.errors.extend(index_result.errors);

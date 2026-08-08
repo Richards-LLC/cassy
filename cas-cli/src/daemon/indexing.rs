@@ -203,6 +203,61 @@ pub(crate) fn publish_code_symbols(
         .map_err(|e| e.to_string())
 }
 
+/// Remove source-code vectors without creating the optional LMDB cache.
+///
+/// Indexing runs while logged out, so retirement may only open a cache that
+/// already exists. This keeps delete/rename cleanup local and guarantees the
+/// capability-absent path never materializes `index/code-vectors`.
+fn retire_cached_code_vectors(cas_root: &Path, symbol_ids: &[String]) -> Result<(), String> {
+    if symbol_ids.is_empty() {
+        return Ok(());
+    }
+    let Some(cache) = crate::cloud::embeddings::KnowledgeVectorCache::open_existing_code(cas_root)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(());
+    };
+    for symbol_id in symbol_ids {
+        cache
+            .delete(&crate::cloud::embeddings::code_symbol_key(symbol_id))
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+/// Retire one deleted/renamed file from every source-code search channel.
+///
+/// The replayable secondary indexes are removed before SQLite source rows.
+/// If any step fails, the file and its symbol ids remain available for the
+/// next reconciliation pass instead of losing the only durable retirement
+/// manifest. Every operation before the final SQLite delete is idempotent.
+fn retire_code_file(
+    cas_root: &Path,
+    code_store: &dyn cas_store::CodeStore,
+    file: &cas_code::CodeFile,
+) -> Result<usize, String> {
+    let symbol_ids: Vec<String> = code_store
+        .get_symbols_in_file(&file.id)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|symbol| symbol.id)
+        .collect();
+
+    publish_code_symbols(cas_root, &[], &symbol_ids)?;
+    retire_cached_code_vectors(cas_root, &symbol_ids)?;
+    cas_store::SqliteCodeVectorStore::open(cas_root)
+        .map_err(|error| error.to_string())?
+        .retire(&symbol_ids)
+        .map_err(|error| error.to_string())?;
+    code_store
+        .delete_symbols_in_file(&file.id)
+        .map_err(|error| error.to_string())?;
+    code_store
+        .delete_file(&file.id)
+        .map_err(|error| error.to_string())?;
+    Ok(symbol_ids.len())
+}
+
 /// Index changed code files (called by file watcher or periodic task).
 ///
 /// Files whose content hash already matches the stored one are skipped.
@@ -232,6 +287,8 @@ pub fn index_code_files_with(
     }
 
     let code_store = open_code_store(cas_root)?;
+    let vector_state = cas_store::SqliteCodeVectorStore::open(cas_root)
+        .map_err(|error| CasError::Other(format!("Failed to open code vector queue: {error}")))?;
 
     let mut result = CodeIndexResult::default();
     let mut parser = match MultiLanguageParser::new() {
@@ -308,11 +365,10 @@ pub fn index_code_files_with(
                 // Symbols that existed in the previous parse of this file but are about to be
                 // dropped must also leave the BM25 index, or a renamed/deleted function keeps
                 // answering searches from a stale document.
-                let previous_symbol_ids: Vec<String> = code_store
-                    .get_symbols_in_file(&file_id)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|symbol| symbol.id)
+                let previous_symbols = code_store.get_symbols_in_file(&file_id).unwrap_or_default();
+                let previous_symbol_ids: Vec<String> = previous_symbols
+                    .iter()
+                    .map(|symbol| symbol.id.clone())
                     .collect();
 
                 let _ = code_store.delete_symbols_in_file(&file_id);
@@ -375,6 +431,36 @@ pub fn index_code_files_with(
                     }
                 }
 
+                // Re-arm only changed semantic chunks, retire symbols that
+                // disappeared/became low-value, and remove cached vectors for
+                // both cases so queries never observe an old vector while the
+                // replacement is pending.
+                let current_vectors: std::collections::HashMap<&str, &str> = symbols
+                    .iter()
+                    .filter(|symbol| symbol.kind.should_embed())
+                    .map(|symbol| (symbol.id.as_str(), symbol.content_hash.as_str()))
+                    .collect();
+                let stale_vectors: Vec<String> = previous_symbols
+                    .iter()
+                    .filter(|symbol| {
+                        current_vectors.get(symbol.id.as_str()).copied()
+                            != Some(symbol.content_hash.as_str())
+                    })
+                    .map(|symbol| symbol.id.clone())
+                    .collect();
+                if let Err(error) = retire_cached_code_vectors(cas_root, &stale_vectors) {
+                    result.errors.push(format!(
+                        "{}: failed to retire stale code vectors: {error}",
+                        file_path.display()
+                    ));
+                }
+                if let Err(error) = vector_state.sync_file_symbols(&symbols, &previous_symbol_ids) {
+                    result.errors.push(format!(
+                        "{}: failed to reconcile code vector queue: {error}",
+                        file_path.display()
+                    ));
+                }
+
                 result.symbols_indexed += symbol_count;
                 result.files_indexed += 1;
             }
@@ -425,24 +511,60 @@ pub fn reconcile_code_tree(
     }
 
     for (repository, (repo_root, current_ids)) in by_repo {
-        let stored = code_store.list_files(&repository, None).unwrap_or_default();
-        let mut retired = Vec::new();
+        let errors_before_retirement = result.errors.len();
+        let stored = match code_store.list_files(&repository, None) {
+            Ok(stored) => stored,
+            Err(error) => {
+                result.errors.push(format!(
+                    "{repository}: failed to list indexed source files: {error}"
+                ));
+                Vec::new()
+            }
+        };
         for stale in stored.iter().filter(|file| !current_ids.contains(&file.id)) {
-            retired.extend(
-                code_store
-                    .get_symbols_in_file(&stale.id)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|symbol| symbol.id),
-            );
-            if code_store.delete_file(&stale.id).is_ok() {
-                result.files_deleted += 1;
+            match retire_code_file(cas_root, code_store.as_ref(), stale) {
+                Ok(_) => result.files_deleted += 1,
+                Err(error) => result.errors.push(format!(
+                    "{}: failed to retire deleted source file: {error}",
+                    stale.path
+                )),
             }
         }
-        if !retired.is_empty() {
-            let _ = publish_code_symbols(cas_root, &[], &retired);
+
+        let current_indexed = code_store
+            .list_files(&repository, None)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|file| current_ids.contains(&file.id))
+            .count();
+        let retirement_errors = result.errors.len() - errors_before_retirement;
+        let failed_files = current_ids
+            .len()
+            .saturating_sub(current_indexed)
+            .saturating_add(retirement_errors);
+        let scan_error = (!result.errors.is_empty()).then(|| {
+            result
+                .errors
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ")
+        });
+        if let Err(error) = cas_store::SqliteCodeVectorStore::open(cas_root).and_then(|state| {
+            state.record_scan(
+                &repository,
+                current_ids.len(),
+                current_indexed,
+                failed_files,
+                head_commit(&repo_root).as_deref(),
+                scan_error.as_deref(),
+            )
+        }) {
+            result.errors.push(format!(
+                "{repository}: failed to record code-index scan receipt: {error}"
+            ));
         }
-        let _ = repo_root;
     }
     Ok(result)
 }
@@ -470,7 +592,6 @@ pub fn run_code_index_cycle(
 
     if !deleted_paths.is_empty() {
         if let Ok(code_store) = open_code_store(cas_root) {
-            let mut retired: Vec<String> = Vec::new();
             for path in &deleted_paths {
                 // Same work-tree-root derivation the writer uses; a mismatch here would look up
                 // a repository that was never written and silently leave the rows behind.
@@ -478,21 +599,14 @@ pub fn run_code_index_cycle(
 
                 let path_str = path.to_string_lossy();
                 if let Ok(Some(file)) = code_store.get_file_by_path(&repo_name, &path_str) {
-                    retired.extend(
-                        code_store
-                            .get_symbols_in_file(&file.id)
-                            .unwrap_or_default()
-                            .into_iter()
-                            .map(|symbol| symbol.id),
-                    );
-                    if code_store.delete_file(&file.id).is_ok() {
-                        result.files_deleted += 1;
+                    match retire_code_file(cas_root, code_store.as_ref(), &file) {
+                        Ok(_) => result.files_deleted += 1,
+                        Err(error) => result.errors.push(format!(
+                            "{}: failed to retire deleted source file: {error}",
+                            path.display()
+                        )),
                     }
                 }
-            }
-
-            if let Err(error) = publish_code_symbols(cas_root, &[], &retired) {
-                result.errors.push(format!("code search index: {error}"));
             }
         }
     }

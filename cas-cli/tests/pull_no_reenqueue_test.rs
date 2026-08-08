@@ -324,9 +324,8 @@ fn pull_apply_sites_use_local_openers() {
         "stale daemon comment must be removed/rewritten (cas-7fbb AC3)"
     );
 
-    // Local edit / push paths should still use open_store (enqueue).
-    assert!(
-        cloud.contains("open_store("),
-        "push/local paths should still reference open_store"
-    );
+    // `open_store_still_enqueues_local_writes_when_logged_in` above is the
+    // behavioral guard that SyncingStore remains live for local edits. Do not
+    // couple that invariant to a particular CLI push implementation: push is
+    // queue-driven and need not open an entry store itself.
 }

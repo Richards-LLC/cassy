@@ -3,11 +3,12 @@
 //! Handles pushing queued changes to cloud and pulling updates from cloud.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::cloud::{CloudConfig, SyncQueue};
+use crate::cloud::{CloudConfig, EntityType, SyncQueue};
 use crate::types::{Entry, Rule, Skill};
 
 mod knowledge;
@@ -73,6 +74,68 @@ pub struct SyncResult {
     pub errors: Vec<String>,
     /// Duration of sync in milliseconds
     pub duration_ms: u64,
+}
+
+/// Entity selection for a personal queue-driven push.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PushScope {
+    All,
+    EntriesOnly,
+    TasksOnly,
+}
+
+impl PushScope {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::EntriesOnly => "entries_only",
+            Self::TasksOnly => "tasks_only",
+        }
+    }
+
+    fn entity_type(self) -> Option<EntityType> {
+        match self {
+            Self::All => None,
+            Self::EntriesOnly => Some(EntityType::Entry),
+            Self::TasksOnly => Some(EntityType::Task),
+        }
+    }
+
+    fn planned_keys(self) -> &'static [&'static str] {
+        match self {
+            Self::EntriesOnly => &["entries"],
+            Self::TasksOnly => &["tasks"],
+            Self::All => &[
+                "entries",
+                "tasks",
+                "rules",
+                "skills",
+                "sessions",
+                "verifications",
+                "events",
+                "prompts",
+                "file_changes",
+                "commit_links",
+                "agents",
+                "worktrees",
+            ],
+        }
+    }
+}
+
+/// Read-only description of the next queue batch a push would attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PushPlan {
+    pub source: &'static str,
+    pub scope: PushScope,
+    pub counts: BTreeMap<String, usize>,
+    pub total_in_next_batch: usize,
+    pub batch_limit: usize,
+    /// Conservative saturation marker. At exactly the query limit the queue
+    /// read cannot prove whether more matching rows exist, so callers must not
+    /// present the selected count as the complete backlog size.
+    pub batch_limit_reached: bool,
 }
 
 impl SyncResult {
@@ -180,7 +243,9 @@ pub struct CloudSyncerConfig {
     pub backoff_base_ms: u64,
     /// Maximum items to sync per batch
     pub batch_size: usize,
-    /// Maximum payload size per HTTP request in bytes (default: 5MB)
+    /// Maximum serialized (pre-gzip) payload size per HTTP request.
+    /// The 4 MiB default is conservative against the cloud's 4 MiB compressed
+    /// request cap; the personal path also checks the actual gzip size.
     pub max_payload_bytes: usize,
     /// Default conflict resolution strategy for team sync
     pub team_conflict_resolution: ConflictResolution,
@@ -193,7 +258,7 @@ impl Default for CloudSyncerConfig {
             max_retries: 5,
             backoff_base_ms: 1000,
             batch_size: 50,
-            max_payload_bytes: 5 * 1024 * 1024, // 5MB
+            max_payload_bytes: 4 * 1024 * 1024,
             team_conflict_resolution: ConflictResolution::RemoteWins,
         }
     }
@@ -218,6 +283,9 @@ pub struct CloudSyncer {
     config: CloudSyncerConfig,
     queue: Arc<SyncQueue>,
     cloud_config: CloudConfig,
+    /// Explicit project scope for callers that already own a concrete CAS
+    /// root. Legacy callers leave this unset and retain cwd-based resolution.
+    push_project_canonical_id: Option<String>,
 }
 
 impl CloudSyncer {
@@ -231,7 +299,35 @@ impl CloudSyncer {
             config,
             queue,
             cloud_config,
+            push_project_canonical_id: None,
         }
+    }
+
+    /// Create a syncer whose personal push envelopes are pinned to the same
+    /// project root that owns `queue` and `cloud_config`.
+    pub fn new_for_project(
+        queue: Arc<SyncQueue>,
+        cloud_config: CloudConfig,
+        config: CloudSyncerConfig,
+        project_canonical_id: String,
+    ) -> Self {
+        Self {
+            config,
+            queue,
+            cloud_config,
+            push_project_canonical_id: Some(project_canonical_id),
+        }
+    }
+
+    fn personal_push_project_id(&self) -> Result<String, crate::error::CasError> {
+        self.push_project_canonical_id
+            .clone()
+            .or_else(crate::cloud::get_project_canonical_id)
+            .ok_or_else(|| {
+                crate::error::CasError::Other(
+                    "Cannot sync: not inside a CAS project directory".to_string(),
+                )
+            })
     }
 
     /// Check if cloud sync is available (user logged in)

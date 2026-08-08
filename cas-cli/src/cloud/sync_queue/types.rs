@@ -61,6 +61,25 @@ impl EntityType {
             _ => None,
         }
     }
+
+    /// Collection key used by personal/team push JSON envelopes.
+    pub fn collection_key(&self) -> &'static str {
+        match self {
+            EntityType::Entry => "entries",
+            EntityType::Task => "tasks",
+            EntityType::Rule => "rules",
+            EntityType::Skill => "skills",
+            EntityType::Session => "sessions",
+            EntityType::Verification => "verifications",
+            EntityType::Event => "events",
+            EntityType::Prompt => "prompts",
+            EntityType::FileChange => "file_changes",
+            EntityType::CommitLink => "commit_links",
+            EntityType::Agent => "agents",
+            EntityType::Worktree => "worktrees",
+            EntityType::KnowledgePage => "knowledge_pages",
+        }
+    }
 }
 
 impl fmt::Display for EntityType {

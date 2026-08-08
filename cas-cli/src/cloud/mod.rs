@@ -54,6 +54,6 @@ pub use device::DeviceConfig;
 pub use sync_queue::{EntityType, QueuedSync, SyncOperation, SyncQueue};
 pub use syncer::{
     CloudSyncer, CloudSyncerConfig, ConflictAction, ConflictResolution, KNOWLEDGE_ENTITY,
-    KnowledgePageRecord, KnowledgePullReport, SyncConflict, SyncResult, TeamMemoriesResponse,
-    TeamProject, TeamProjectsResponse, knowledge_share_scope,
+    KnowledgePageRecord, KnowledgePullReport, PushPlan, PushScope, SyncConflict, SyncResult,
+    TeamMemoriesResponse, TeamProject, TeamProjectsResponse, knowledge_share_scope,
 };

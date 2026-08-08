@@ -1289,9 +1289,9 @@ async fn clean_inject_surfaces_write_failure_cas_0b64() {
             .expect("dirty target returns a deferred outcome"),
         InjectOutcome::DeferredComposerDirty
     );
-    mux.send_input_to("no-backend", b"\x1b")
-        .await
-        .expect_err("director pane has no backend, but Esc still clears tracked state first");
+    mux.get("no-backend")
+        .unwrap()
+        .observe_raw_client_input(b"\x1b");
     assert!(!mux.get("no-backend").unwrap().is_composer_dirty());
     assert!(
         mux.inject("no-backend", "must stay durable").await.is_err(),

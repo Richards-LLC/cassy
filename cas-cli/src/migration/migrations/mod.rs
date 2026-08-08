@@ -196,6 +196,7 @@ mod m217_spawn_queue_add_lifecycle_state;
 mod m218_prompt_queue_recipient_transport_create_table;
 mod m219_knowledge_store_create_tables;
 mod m220_prompt_queue_wake_observability;
+mod m221_history_index_create_tables;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -410,6 +411,7 @@ pub const MIGRATIONS: &[Migration] = &[
     // ledger and contentless FTS5 body index (EPIC cas-7d31 / cas-cbf1).
     m219_knowledge_store_create_tables::MIGRATION,
     m220_prompt_queue_wake_observability::MIGRATION,
+    m221_history_index_create_tables::MIGRATION,
 ];
 
 #[cfg(test)]

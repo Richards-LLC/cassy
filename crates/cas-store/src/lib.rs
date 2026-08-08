@@ -43,6 +43,7 @@ mod entity_store;
 pub mod error;
 mod event_store;
 mod file_change_store;
+mod history_store;
 mod knowledge_store;
 pub mod layered;
 mod loop_store;
@@ -96,6 +97,13 @@ pub use sqlite_code_store::{CODE_SCHEMA, SqliteCodeStore};
 
 // Entity store for knowledge graph feature
 pub use entity_store::{ENTITY_SCHEMA, SqliteEntityStore};
+
+// Structural git-history index (EPIC cas-6212 / cas-7a21): commits, their
+// touched files, and the walker watermark.
+pub use history_store::{
+    HISTORY_SCHEMA, HISTORY_SCHEMA_STATEMENTS, HistoryCommit, HistoryCommitFile, HistoryIndexState,
+    HistoryStore, SOURCE_GIT, SqliteHistoryStore,
+};
 
 // Knowledge store for LLM-distilled repo prose (EPIC cas-7d31 / cas-cbf1):
 // markdown bodies on disk, index + content-hash source ledger in cas.db.

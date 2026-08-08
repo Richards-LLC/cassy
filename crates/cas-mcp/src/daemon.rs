@@ -122,6 +122,11 @@ pub struct EmbeddedDaemonConfig {
     pub code_index_interval_secs: u64,
     /// Debounce time for file watcher (milliseconds)
     pub code_debounce_ms: u64,
+    // === Structural git-history index (EPIC cas-6212 / cas-7a21) ===
+    /// Enable the background git-history indexing pass
+    pub index_history: bool,
+    /// git-history indexing interval (seconds)
+    pub history_index_interval_secs: u64,
 }
 
 impl Default for EmbeddedDaemonConfig {
@@ -143,6 +148,11 @@ impl Default for EmbeddedDaemonConfig {
             code_exclude_patterns: vec![],
             code_index_interval_secs: 60, // 1 minute
             code_debounce_ms: 500,        // 500ms
+            // git-history indexing: on by default. Unlike code indexing it
+            // needs no watcher, no parser and no config — a delta pass over a
+            // day's commits is bounded work (spec §4.3).
+            index_history: true,
+            history_index_interval_secs: 300, // 5 minutes (spec §4.3)
         }
     }
 }

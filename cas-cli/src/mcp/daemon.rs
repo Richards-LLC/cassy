@@ -434,6 +434,10 @@ impl EmbeddedDaemon {
         let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(30)); // Agent heartbeat every 30s
         let mut code_index_interval =
             tokio::time::interval(Duration::from_secs(self.config.code_index_interval_secs));
+        // Structural git-history index (EPIC cas-6212 / cas-7a21, spec §4.3).
+        let mut history_index_interval = tokio::time::interval(Duration::from_secs(
+            self.config.history_index_interval_secs.max(1),
+        ));
         // Proxy config hot-reload interval (no-op when mcp-proxy feature is disabled)
         let proxy_config_secs = if cfg!(feature = "mcp-proxy") {
             3
@@ -448,6 +452,7 @@ impl EmbeddedDaemon {
         maintenance_interval.tick().await;
         heartbeat_interval.tick().await;
         code_index_interval.tick().await;
+        history_index_interval.tick().await;
         proxy_config_interval.tick().await;
 
         // Check if agent was already registered directly (fallback path in SessionStart hook)
@@ -558,6 +563,24 @@ impl EmbeddedDaemon {
                     }
                 }
 
+                // Structural git-history indexing (EPIC cas-6212 / cas-7a21).
+                //
+                // Deliberately NOT gated on `activity.is_idle()`, unlike the
+                // code-index arm above. That gate is why `code_files` reads 0
+                // on a repo with thousands of commits: on a busy factory the
+                // daemon is never idle, so the job never runs (spec §4.3). A
+                // delta pass is bounded work — a `rev-list` plus two `git log`
+                // reads over the day's commits — so it is rate-limited by the
+                // interval instead of by idleness.
+                _ = history_index_interval.tick() => {
+                    if self.config.index_history {
+                        if let Err(e) = self.run_history_index_cycle().await {
+                            let mut status = self.status.write().await;
+                            status.last_error = Some(format!("History indexing failed: {e}"));
+                        }
+                    }
+                }
+
                 // Proxy config hot-reload - check .cas/proxy.toml for changes
                 _ = proxy_config_interval.tick() => {
                     #[cfg(feature = "mcp-proxy")]
@@ -621,6 +644,42 @@ impl EmbeddedDaemon {
         // daemon listening but unreachable (cas-eabe).
         if owns_socket.load(Ordering::SeqCst) {
             socket::cleanup_socket(&self.config.cas_root);
+        }
+
+        Ok(())
+    }
+
+    /// Run one structural git-history indexing pass (EPIC cas-6212 / cas-7a21).
+    ///
+    /// Backfills on first run, then walks only `watermark..HEAD`. Shells out to
+    /// git and writes SQLite, so it runs on the blocking pool. A repo-less or
+    /// git-less environment is a no-op, not an error: the daemon must keep
+    /// ticking for every other subsystem.
+    async fn run_history_index_cycle(&self) -> Result<(), CasError> {
+        let cas_root = self.config.cas_root.clone();
+
+        let outcome = tokio::task::spawn_blocking(move || {
+            let repo_root = match crate::history::repo_root_for(&cas_root) {
+                Ok(root) => root,
+                // Not a git repo — nothing to index, and nothing to complain
+                // about on every tick.
+                Err(_) => return Ok(None),
+            };
+            crate::history::run_index_pass(&cas_root, &repo_root).map(Some)
+        })
+        .await
+        .map_err(|e| CasError::Other(format!("Task join error: {e}")))?
+        .map_err(|e| CasError::Other(format!("History indexing failed: {e}")))?;
+
+        if let Some(outcome) = outcome {
+            if outcome.commits_indexed > 0 {
+                eprintln!(
+                    "[CAS] History indexing ({}): {} commits, {} file changes",
+                    outcome.mode.as_str(),
+                    outcome.commits_indexed,
+                    outcome.files_indexed,
+                );
+            }
         }
 
         Ok(())

@@ -11,10 +11,13 @@ Run this before committing the pair. Anything unchecked is a defect, not a nitpi
 
 ## 2. Information architecture
 
-- [ ] The conclusion is the first thing on the page.
+- [ ] The selected type's lead is the first thing on the page (conclusion for evaluative reports;
+      capability or system takeaway for explanatory reports).
 - [ ] The required sections for this report type are present, in the prescribed order.
-- [ ] An overview table appears before the detail.
+- [ ] An overview table appears before the detail when the selected type requires one.
 - [ ] The depth order matches the audience (executive: detail relegated, methodology last).
+- [ ] Executive explanatory reports do not invent a decision, ask, or KPI row that their selected type
+      does not require.
 
 ## 3. Semantic HTML
 
@@ -35,7 +38,11 @@ Run this before committing the pair. Anything unchecked is a defect, not a nitpi
 - [ ] Contrast ≥ 4.5:1 for text, ≥ 3:1 for graphical objects, in light and dark.
 - [ ] No meaning conveyed by color alone anywhere — status, variance, series, all labeled.
 - [ ] Every chart has `role="img"`, a title/`aria-label`, a text summary, and its numbers in a table.
+- [ ] Every system or journey diagram is legible at its rendered size, has labeled arrows, a text
+      alternative, and an explicit current-versus-planned boundary when either state is shown.
 - [ ] Keyboard-only pass reaches every control; focus is always visible.
+- [ ] A static diagram has an adjacent text equivalent; any interactive diagram is fully keyboard
+      operable, has visible focus, and does not hide the equivalent text.
 - [ ] Interactive widgets carry correct ARIA roles and state.
 
 ## 6. Interaction quality
@@ -62,6 +69,8 @@ Run this before committing the pair. Anything unchecked is a defect, not a nitpi
 
 - [ ] Print preview: every panel and `<details>` is expanded; nothing is hidden.
 - [ ] No clipped charts; no table split mid-row; headers repeat across pages.
+- [ ] System and journey diagrams remain legible in print, preserve labels and planned/current patterns,
+      and do not split from their text alternative.
 - [ ] Link targets are shown.
 - [ ] Prints legibly in grayscale — scenario and status remain distinguishable by fill/pattern/label.
 

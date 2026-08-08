@@ -12,12 +12,16 @@ relegated, and which words are allowed.
 
 | Audience | Leads with | Depth policy | Vocabulary |
 | --- | --- | --- | --- |
-| **Executive** | The decision or the single number that matters, in one sentence, above any scroll | One screen of substance; ≤5 KPI cards; at most one chart above the fold; everything else in expandable or lower sections; methodology is present but LAST | Plain business language. No tool names, no file paths, no method jargon in the top third |
+| **Executive** | The selected type's one-sentence lead: a decision/number for evaluative work, or a capability/system takeaway for explanatory work | One screen of substance; ≤5 KPI cards when the selected type calls for them; at most one chart or diagram above the fold; everything else in expandable or lower sections; methodology is present but LAST | Plain business language. No tool names, no file paths, no method jargon in the top third |
 | **Practitioner** | The verdict plus the evidence that establishes it | Full depth inline. Evidence tables, reproduction steps, and provenance are primary content, not appendices | Precise and technical. Symbol names, file:line, commands, versions |
 | **External** (client, partner, public) | The outcome and what it means for the reader | Full narrative depth, but internal mechanics abstracted to outcomes | No internal jargon, no ticket IDs, no team or agent names, no process narration |
 
 **Audience rewrites the top of the page, not the bottom.** Every audience's report still contains the
 evidence and the provenance — the executive version relegates them, it does not delete them.
+
+**Executive is an audience, not an automatic decision brief.** A product showcase or system explainer
+for executives leads with its capability or system takeaway; it does not require an ask, a decision,
+or KPI cards unless the selected type independently calls for them.
 
 ## The type axis
 
@@ -131,7 +135,54 @@ Mandatory encodings (invariant across every chart in the report):
   direction and pattern, not by color alone.
 - No 3-D, no truncated value axes on bar charts, no dual axes.
 
-### 8. Executive / C-suite brief
+### 8. Product / feature showcase
+
+Show what was built through the reader's experience, then prove that the capability is real. This is
+not a release log or a decision brief.
+
+1. `[R]` **Capability thesis** — what is newly possible for the reader, in one sentence, first.
+2. `[R]` **Product journey or capability map** — the reader path or grouped capabilities, with the
+   outcome at each step. This is the primary mandatory visual.
+3. `[R]` **What changed and why it matters** — capability-by-capability explanation in reader language.
+4. `[R]` **Capability-to-proof map** — a table pairing each capability with concrete proof (demo,
+   screenshot description, test, measured behavior, or source) and its reader outcome.
+5. `[R]` **Annotated experience walkthrough** — a concise, ordered walkthrough of the meaningful path.
+6. `[R]` **Scope and boundary** — label each capability **current**, **planned**, or **not included**;
+   never present planned work as available.
+7. `[R]` **Evidence and provenance** — where the proof came from and when it was observed.
+
+Mandatory visual: a product journey or capability map. The capability-to-proof table is mandatory
+evidence, not a substitute for the visual. No decision, ask, or KPI row is required solely because
+the audience is executive.
+
+### 9. System / architecture explainer
+
+Explain the operating system a reader is trying to understand, from inputs through outcomes. It is
+not an architecture decision record.
+
+1. `[R]` **System takeaway** — what the system does end to end, in one sentence, first.
+2. `[R]` **End-to-end system flow or loop** — above the fold: inputs, transformations, outputs, and
+   every labeled arrow. This is the primary mandatory visual.
+3. `[R]` **Inputs and outputs** — who or what enters the system, what leaves it, and the interface or
+   format at each boundary.
+4. `[R]` **Components and layers** — each component's responsibility, owner/system boundary, and
+   connections.
+5. `[R]` **Data lifecycle** — creation, validation, storage, retrieval, retention/deletion, and any
+   handoff to another system.
+6. `[R]` **Annotated walkthrough** — follow one representative input through the flow in order.
+7. `[R]` **Invariants and failure boundaries** — what must remain true, how failures are contained,
+   and what the system explicitly does not guarantee.
+8. `[R]` **Component map** — a visual grouping components/layers and their interfaces.
+9. `[R]` **Current versus planned boundary** — visibly mark planned components, interfaces, and flows;
+   do not connect them visually as though they already operate.
+10. `[R]` **Evidence and provenance** — source files, commands, traces, commits, or observations that
+    establish the explanation.
+
+Mandatory visuals: an end-to-end system flow or loop plus a component map. A system diagram is a
+reading aid only when arrows are labeled and its full meaning is available in text. No decision, ask,
+or KPI row is required solely because the audience is executive.
+
+### 10. Executive / C-suite brief
 
 Everything the executive audience rule demands, hardened into a type.
 
@@ -145,7 +196,7 @@ Everything the executive audience rule demands, hardened into a type.
 
 Everything above the fold must fit one screen at 1280×800 with no scroll.
 
-### 9. Board / stakeholder update
+### 11. Board / stakeholder update
 
 1. `[R]` **Where we are** — one paragraph, honest.
 2. `[R]` **Narrative arc** — where we were → what changed → where we are going. In that order.
@@ -157,7 +208,7 @@ Everything above the fold must fit one screen at 1280×800 with no scroll.
 Mandatory visual: the recurring KPI table with period-over-period trend. Consistency across editions
 is itself a requirement — same metrics, same order, same units.
 
-### 10. Client-facing deliverable
+### 12. Client-facing deliverable
 
 1. `[R]` **Executive summary** — outcome-first, in the client's vocabulary.
 2. `[R]` **Scope and period** — what was and was not covered.
@@ -169,7 +220,7 @@ Hygiene, non-negotiable: **no internal ticket IDs, no internal team or agent nam
 narration, no internal system codenames**. Neutral, unbranded styling. Provenance still exists — it
 lives in the markdown source, which is internal, not on the client's page.
 
-### 11. Research / market analysis
+### 13. Research / market analysis
 
 1. `[R]` **Thesis** — the claim, one sentence, with confidence stated.
 2. `[R]` **Sources table** — source, date, type, reliability. Up front, not buried.
@@ -185,4 +236,45 @@ Mandatory visual: the sources table. A claim whose citation is "general knowledg
 Pick the type by the **question the reader is asking**, not by the work that produced it. A mining
 analysis whose purpose is to pick a vendor is a decision brief with a metrics section, not a metrics
 report. When two types genuinely apply, use the primary type's section order and nest the secondary
-type's required sections inside it — never interleave two orders.
+type's required sections inside it — never interleave two orders. For a report that must both
+showcase a product and explain its mechanics, make **Product / feature showcase** primary: place the
+**System / architecture explainer** after the capability-to-proof map, using the explainer's full
+section order. Make the reverse choice only when the reader's primary question is how the system works;
+in that case, nest a concise capability-to-proof map inside the explainer's annotated walkthrough.
+
+## Reusable accessible system-flow pattern
+
+Use this compact, self-contained pattern for the required flow diagram. Replace the labels and text
+alternative with the report's real system; do not use it as decorative art. The diagram is static, so
+it introduces no keyboard interaction. If a report adds clickable nodes or controls, each must be
+reachable and operable by keyboard, with visible focus.
+
+```html
+<style>
+.flow { max-width: 48rem; border: 1px solid #555; padding: .75rem; }
+.flow svg { width: 100%; height: auto; }
+.flow .node { fill: #eef4ff; stroke: #174ea6; stroke-width: 2; }
+.flow .planned { fill: #fff; stroke-dasharray: 6 4; }
+@media print { .flow { break-inside: avoid; border-color: #000; } .flow .planned { fill: none; } }
+</style>
+<figure class="flow" aria-describedby="flow-summary">
+  <svg viewBox="0 0 720 160" role="img" aria-labelledby="flow-title flow-desc">
+    <title id="flow-title">Current request-processing flow</title>
+    <desc id="flow-desc">A request is validated, stored, then returned. A dashed planned analytics
+      component receives an optional copy after storage.</desc>
+    <defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8z"/></marker></defs>
+    <rect class="node" x="20" y="52" width="150" height="48" rx="6"/><text x="95" y="81" text-anchor="middle">Request</text>
+    <rect class="node" x="285" y="52" width="150" height="48" rx="6"/><text x="360" y="81" text-anchor="middle">Validate + store</text>
+    <rect class="node" x="550" y="52" width="150" height="48" rx="6"/><text x="625" y="81" text-anchor="middle">Response</text>
+    <path d="M170,76 H280 M435,76 H545" stroke="#174ea6" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="225" y="45" text-anchor="middle">valid request</text><text x="490" y="45" text-anchor="middle">stored result</text>
+    <rect class="node planned" x="285" y="118" width="150" height="30" rx="6"/><text x="360" y="138" text-anchor="middle">Planned analytics</text>
+    <path d="M360,100 V114" stroke="#174ea6" stroke-dasharray="6 4" marker-end="url(#arrow)"/><text x="447" y="135">optional copy (planned)</text>
+  </svg>
+  <figcaption id="flow-summary">Current path: request → validate and store → response. Planned path:
+    an optional post-storage copy to analytics; it is dashed and not part of the current system.</figcaption>
+  <details open><summary>Text alternative and boundary notes</summary><p>Validation rejects malformed
+    requests before storage. Storage is the current durability boundary. Analytics is planned, so no
+    current request depends on it.</p></details>
+</figure>
+```

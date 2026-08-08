@@ -516,7 +516,7 @@ impl FactoryDaemon {
         text: &str,
         summary: Option<&str>,
         color: Option<&str>,
-        worker_is_idle: bool,
+        wake: super::queue_and_events::WakeDecision,
         retract_task: Option<&str>,
     ) -> anyhow::Result<NudgeReport> {
         let primary_outcome = self
@@ -529,10 +529,14 @@ impl FactoryDaemon {
                 "primary delivery did not complete; no wake attempted",
             ));
         }
-        if !worker_is_idle {
+        if !wake.allowed {
             return Ok(NudgeReport::not_attempted(
                 primary_outcome,
-                "idle gate declined the wake for this pass",
+                // cas-9e81: name the signal that decided. The old fixed
+                // string ("idle gate declined the wake for this pass") was on
+                // 34 of 35 rows during the reported incident and told an
+                // operator nothing about which of six conditions vetoed.
+                &format!("wake gate declined this pass: {}", wake.reason),
             ));
         }
 
@@ -549,20 +553,21 @@ impl FactoryDaemon {
     /// PTY inject is the only way to create one for a Claude teammate parked at
     /// its prompt.
     ///
-    /// `worker_is_idle == false` means the wake decision vetoed this pass: the
-    /// row stays pending (the caller's `wake_deferred` bookkeeping is unchanged)
-    /// and a later poll retries on the re-nudge cadence.
+    /// A denied `wake` means the wake decision vetoed this pass: the row stays
+    /// pending (the caller's `wake_deferred` bookkeeping is unchanged) and a
+    /// later poll retries on the re-nudge cadence. Its `reason` is recorded so
+    /// the veto is diagnosable (cas-9e81).
     pub(crate) async fn nudge_pane_only(
         &self,
         target: &str,
         source: &str,
         text: &str,
-        worker_is_idle: bool,
+        wake: super::queue_and_events::WakeDecision,
     ) -> anyhow::Result<NudgeReport> {
-        if !worker_is_idle {
+        if !wake.allowed {
             return Ok(NudgeReport::not_attempted(
                 InjectOutcome::Delivered,
-                "idle gate declined the wake for this pass",
+                &format!("wake gate declined this pass: {}", wake.reason),
             ));
         }
         self.pty_nudge(target, source, text).await

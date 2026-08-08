@@ -9,6 +9,7 @@ mod claude;
 mod claude_md;
 mod codemap_cmd;
 mod history_cmd;
+mod index_cmd;
 mod knowledge_cmd;
 mod memory_migrate;
 mod purge_fixtures;
@@ -236,6 +237,10 @@ pub enum Commands {
     #[command(subcommand)]
     History(history_cmd::HistoryCommands),
 
+    /// Build local search indexes on demand (`cas index code`)
+    #[command(subcommand)]
+    Index(index_cmd::IndexCommands),
+
     /// Distilled project knowledge wiki (build/status/list)
     #[command(subcommand)]
     Knowledge(knowledge_cmd::KnowledgeCommands),
@@ -322,6 +327,7 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::ClaudeMd(_)
         | Commands::Codemap(_)
         | Commands::History(_)
+        | Commands::Index(_)
         | Commands::Knowledge(_)
         | Commands::MemoryMigrate(_)
         | Commands::PurgeTestFixtures(_)
@@ -504,6 +510,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::ClaudeMd(_) => "claude-md".to_string(),
         Commands::Codemap(_) => "codemap".to_string(),
         Commands::History(_) => "history".to_string(),
+        Commands::Index(_) => "index".to_string(),
         Commands::Knowledge(_) => "knowledge".to_string(),
         Commands::MemoryMigrate(_) => "memory-migrate".to_string(),
         Commands::PurgeTestFixtures(_) => "purge-test-fixtures".to_string(),
@@ -578,6 +585,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::ClaudeMd(args) => claude_md::execute(args, cli),
         Commands::Codemap(cmd) => codemap_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::History(cmd) => history_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
+        Commands::Index(cmd) => index_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::Knowledge(cmd) => knowledge_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::MemoryMigrate(args) => memory_migrate::execute(args, require_cas_root(cas_root)?),
         Commands::PurgeTestFixtures(args) => {

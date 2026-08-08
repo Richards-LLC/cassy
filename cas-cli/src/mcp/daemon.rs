@@ -553,7 +553,12 @@ impl EmbeddedDaemon {
                     self.send_agent_heartbeat().await;
                 }
 
-                // Code indexing - runs when idle and code watcher has pending files
+                // Code indexing - runs when idle and code watcher has pending files.
+                //
+                // cas-499c (operator ruling): `code.enabled` now defaults to true, but this
+                // `is_idle()` gate STAYS — automatic but polite. Catch-up therefore happens in
+                // quiet moments only, which is why `cas doctor` surfaces symbol-index lag and
+                // `cas index code` exists as the manual catch-up lever.
                 _ = code_index_interval.tick() => {
                     if self.code_watcher.is_some() && self.activity.is_idle() {
                         if let Err(e) = self.run_code_index_cycle().await {

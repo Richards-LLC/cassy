@@ -5,7 +5,11 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::config::Config;
-use crate::migration::{check_migrations, detector::get_schema_summary, run_migrations};
+use crate::migration::{
+    check_migrations,
+    detector::{SchemaSummary, get_schema_summary},
+    run_migrations,
+};
 use crate::store::{StoreType, detect_store_type, open_rule_store, open_store, open_task_store};
 use crate::types::RuleStatus;
 use crate::ui::components::Formatter;
@@ -39,6 +43,61 @@ enum CheckStatus {
     Ok,
     Warning,
     Error,
+}
+
+// A missing history table is not an empty index. Each table below is created
+// unconditionally by the current migration chain, so its absence means the
+// store is behind on schema and doctor must say so. In particular, older
+// installs without the symbol or epoch migrations should warn until their
+// migrations are applied; silently accepting them would make unsupported
+// history queries look merely quiet.
+const EXPECTED_TABLES: &[&str] = &[
+    "entries",
+    "tasks",
+    "rules",
+    "skills",
+    "agents",
+    "task_leases",
+    "history_commits",
+    "history_commit_files",
+    "history_index_state",
+    "history_docs",
+    "history_commit_symbols",
+    "history_epochs",
+];
+
+/// Pure schema verdict so the missing-table path is exercised directly in
+/// tests rather than inferred from a source-code string.
+fn schema_tables_check(summary: &SchemaSummary) -> Check {
+    let table_count = summary.tables.len();
+    let total_columns: usize = summary.tables.iter().map(|t| t.columns.len()).sum();
+    let total_rows: i64 = summary.tables.iter().map(|t| t.row_count).sum();
+    let missing_tables: Vec<&str> = EXPECTED_TABLES
+        .iter()
+        .filter(|table| !summary.tables.iter().any(|found| found.name == **table))
+        .copied()
+        .collect();
+
+    if missing_tables.is_empty() {
+        Check {
+            name: "tables".to_string(),
+            status: CheckStatus::Ok,
+            message: format!(
+                "{table_count} tables, {total_columns} columns, {total_rows} rows total"
+            ),
+        }
+    } else {
+        Check {
+            name: "tables".to_string(),
+            status: CheckStatus::Warning,
+            message: format!(
+                "{} tables ({} missing: {})",
+                table_count,
+                missing_tables.len(),
+                missing_tables.join(", ")
+            ),
+        }
+    }
 }
 
 pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
@@ -306,60 +365,16 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         }
     }
 
-    // Check 3b: Schema details (tables and columns)
-    if let Ok(summary) = get_schema_summary(&cas_root) {
-        let table_count = summary.tables.len();
-        let total_columns: usize = summary.tables.iter().map(|t| t.columns.len()).sum();
-        let total_rows: i64 = summary.tables.iter().map(|t| t.row_count).sum();
-
-        // Check for expected core tables
-        let expected_tables = [
-            "entries",
-            "tasks",
-            "rules",
-            "skills",
-            "agents",
-            "task_leases",
-            // Structural git-history index (EPIC cas-6212, spec §10.1). Listed
-            // because their ABSENCE is otherwise indistinguishable from an
-            // empty index: `action=history` degrades to "no results" either
-            // way, so a store that never ran the migrations would look merely
-            // quiet rather than broken. Every one of these is created
-            // unconditionally by a migration, so a missing entry means the
-            // store is behind on schema — which is exactly what this line is
-            // for.
-            "history_commits",
-            "history_commit_files",
-            "history_index_state",
-            "history_docs",
-            "history_commit_symbols",
-        ];
-        let missing_tables: Vec<&str> = expected_tables
-            .iter()
-            .filter(|t| !summary.tables.iter().any(|st| st.name == **t))
-            .copied()
-            .collect();
-
-        if missing_tables.is_empty() {
-            checks.push(Check {
-                name: "tables".to_string(),
-                status: CheckStatus::Ok,
-                message: format!(
-                    "{table_count} tables, {total_columns} columns, {total_rows} rows total"
-                ),
-            });
-        } else {
-            checks.push(Check {
-                name: "tables".to_string(),
-                status: CheckStatus::Warning,
-                message: format!(
-                    "{} tables ({} missing: {})",
-                    table_count,
-                    missing_tables.len(),
-                    missing_tables.join(", ")
-                ),
-            });
-        }
+    // Check 3b: Schema details (tables and columns). An unreadable schema is a
+    // warning, not a skipped check: silence here would look exactly like all
+    // required tables being present.
+    match get_schema_summary(&cas_root) {
+        Ok(summary) => checks.push(schema_tables_check(&summary)),
+        Err(error) => checks.push(Check {
+            name: "tables".to_string(),
+            status: CheckStatus::Warning,
+            message: format!("cannot check expected tables: {error}"),
+        }),
     }
 
     // Check 4: Store can be opened
@@ -2445,27 +2460,36 @@ mod tests {
         assert!(check.message.contains("partial:"), "{}", check.message);
     }
 
-    /// The history tables are guarded by name, so a store that never ran the
-    /// migrations is distinguishable from one with an empty index.
+    /// The table guard must actually warn, not merely contain the right names
+    /// in a source literal. Exercise the two history migrations most likely to
+    /// be absent on an older install, one at a time.
     #[test]
-    fn the_history_tables_are_in_the_expected_tables_guard() {
-        let source = include_str!("doctor.rs");
-        let guard = source
-            .split("let expected_tables = [")
-            .nth(1)
-            .expect("expected_tables literal");
-        let guard = guard.split("];").next().expect("guard body");
-        for table in [
-            "history_commits",
-            "history_commit_files",
-            "history_index_state",
-            "history_docs",
-            "history_commit_symbols",
-        ] {
+    fn missing_history_tables_produce_a_warning_that_names_each_table() {
+        use crate::migration::detector::TableInfo;
+
+        for missing in ["history_commit_symbols", "history_epochs"] {
+            let summary = SchemaSummary {
+                tables: EXPECTED_TABLES
+                    .iter()
+                    .filter(|table| **table != missing)
+                    .map(|table| TableInfo {
+                        name: (*table).to_string(),
+                        columns: vec![],
+                        row_count: 0,
+                    })
+                    .collect(),
+            };
+
+            let check = schema_tables_check(&summary);
             assert!(
-                guard.contains(&format!("\"{table}\"")),
-                "{table} missing from expected_tables — a store without it would look merely \
-                 empty rather than unmigrated"
+                matches!(check.status, CheckStatus::Warning),
+                "omitting {missing} did not warn: {}",
+                check.message
+            );
+            assert!(
+                check.message.contains(missing),
+                "warning did not name {missing}: {}",
+                check.message
             );
         }
     }

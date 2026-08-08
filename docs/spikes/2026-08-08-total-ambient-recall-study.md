@@ -12,6 +12,32 @@ CAS can provide useful ambient recall without ambient prompt bloat by keeping th
 
 ## 2. End-to-end system flow or loop
 
+<figure class="system-diagram" aria-describedby="recall-flow-summary">
+<svg viewBox="0 0 1080 360" role="img" aria-labelledby="recall-flow-title recall-flow-desc" preserveAspectRatio="xMidYMid meet">
+<title id="recall-flow-title">Bounded ambient recall and silent maintenance loop</title>
+<desc id="recall-flow-desc">A current prompt, task, role, and repository become one bounded query embedding. Planned namespace-isolated retrieval, fusion, conflict handling, novelty ledger, and token budget produce a compact evidence packet. A separate planned maintenance loop hashes changes, queues scoped units, embeds bounded batches, and switches model generations safely.</desc>
+<defs><marker id="flow-arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9z"/></marker></defs>
+<g class="current"><rect x="20" y="45" width="180" height="64" rx="8"/><text x="110" y="72" text-anchor="middle">Prompt + task + role</text><text x="110" y="94" text-anchor="middle">CURRENT INPUT</text></g>
+<g class="planned"><rect x="265" y="45" width="165" height="64" rx="8"/><text x="348" y="72" text-anchor="middle">Canonical query</text><text x="348" y="94" text-anchor="middle">PLANNED</text></g>
+<g class="planned"><rect x="495" y="45" width="165" height="64" rx="8"/><text x="578" y="72" text-anchor="middle">One embedding +</text><text x="578" y="94" text-anchor="middle">scoped fan-out</text></g>
+<g class="planned"><rect x="725" y="45" width="150" height="64" rx="8"/><text x="800" y="72" text-anchor="middle">Fuse + ledger</text><text x="800" y="94" text-anchor="middle">+ hard budget</text></g>
+<g class="planned"><rect x="935" y="45" width="125" height="64" rx="8"/><text x="998" y="72" text-anchor="middle">Evidence</text><text x="998" y="94" text-anchor="middle">packet</text></g>
+<path class="arrow" d="M200,77 H257"/><text x="229" y="64" text-anchor="middle">normalize</text>
+<path class="arrow planned-line" d="M430,77 H487"/><text x="459" y="64" text-anchor="middle">embed once</text>
+<path class="arrow planned-line" d="M660,77 H717"/><text x="689" y="64" text-anchor="middle">candidates</text>
+<path class="arrow planned-line" d="M875,77 H927"/><text x="901" y="64" text-anchor="middle">bounded</text>
+<g class="current"><rect x="20" y="230" width="180" height="64" rx="8"/><text x="110" y="257" text-anchor="middle">Content change</text><text x="110" y="279" text-anchor="middle">CURRENT SOURCES</text></g>
+<g class="planned"><rect x="265" y="230" width="165" height="64" rx="8"/><text x="348" y="257" text-anchor="middle">Hash + scoped</text><text x="348" y="279" text-anchor="middle">pending queue</text></g>
+<g class="current"><rect x="495" y="230" width="165" height="64" rx="8"/><text x="578" y="257" text-anchor="middle">Bounded batches</text><text x="578" y="279" text-anchor="middle">CURRENT CORE</text></g>
+<g class="planned"><rect x="725" y="230" width="150" height="64" rx="8"/><text x="800" y="257" text-anchor="middle">Shadow model</text><text x="800" y="279" text-anchor="middle">generation</text></g>
+<path class="arrow planned-line" d="M200,262 H257"/><text x="229" y="249" text-anchor="middle">changed hash</text>
+<path class="arrow planned-line" d="M430,262 H487"/><text x="459" y="249" text-anchor="middle">due units</text>
+<path class="arrow planned-line" d="M660,262 H717"/><text x="689" y="249" text-anchor="middle">validated vectors</text>
+<path class="loop planned-line" d="M800,294 C800,340 348,340 348,302"/><text x="578" y="334" text-anchor="middle">retry/backoff, freshness SLO, atomic generation switch</text>
+</svg>
+<figcaption id="recall-flow-summary"><strong>Current:</strong> authoritative inputs and the bounded embedding core. <strong>Planned (dashed):</strong> one-query orchestration, scoped fusion, ledger/budget injection, hash-aware scheduling, and shadow-generation rebuilds. Full bodies remain outside the packet until explicitly justified.</figcaption>
+</figure>
+
 ```text
 CURRENT EVENT                         PLANNED AMBIENT RECALL (outside prompt)                 BOUNDED MODEL INPUT
 prompt + task + role + repo  ->  canonical query text  ->  one query embedding  ->  namespace-isolated fan-out
@@ -258,6 +284,23 @@ Compare four ablations on the identical set: lexical-only; lexical + semantic; l
 
 ## 8. Component map
 
+<figure class="system-diagram" aria-describedby="component-map-summary">
+<svg viewBox="0 0 1080 430" role="img" aria-labelledby="component-map-title component-map-desc" preserveAspectRatio="xMidYMid meet">
+<title id="component-map-title">Ambient recall component ownership map</title>
+<desc id="component-map-desc">Current authoritative source stores feed current and planned indexes. A planned recall orchestrator produces bounded evidence for planned worker and supervisor role adapters. Planned observability measures freshness, cost, quality, token size, and leakage across every layer.</desc>
+<defs><marker id="map-arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9z"/></marker></defs>
+<g class="layer current"><rect x="25" y="25" width="1030" height="76" rx="8"/><text x="45" y="51">AUTHORITATIVE SOURCES — CURRENT</text><text x="45" y="79">memories/tasks/rules/skills · knowledge pages · git/provenance · source tree</text></g>
+<g class="layer mixed"><rect x="25" y="132" width="1030" height="76" rx="8"/><text x="45" y="158">INDEX &amp; MAINTENANCE — CURRENT CORE + PLANNED UNIFICATION</text><text x="45" y="186">lexical · structural/entity · namespaced vector generations · pending queues/ledgers</text></g>
+<g class="layer planned"><rect x="25" y="239" width="1030" height="76" rx="8"/><text x="45" y="265">RECALL ORCHESTRATOR — PLANNED</text><text x="45" y="293">query builder → scoped fan-out → fusion/conflicts → novelty ledger → hard budget</text></g>
+<g class="planned"><rect x="135" y="346" width="320" height="58" rx="8"/><text x="295" y="381" text-anchor="middle">Worker role adapter</text></g>
+<g class="planned"><rect x="625" y="346" width="320" height="58" rx="8"/><text x="785" y="381" text-anchor="middle">Supervisor role adapter</text></g>
+<path class="arrow" d="M540,101 V124"/><text x="555" y="119">IDs + revisions + scope</text>
+<path class="arrow planned-line" d="M540,208 V231"/><text x="555" y="226">compact candidates</text>
+<path class="arrow planned-line" d="M430,315 L340,340"/><path class="arrow planned-line" d="M650,315 L740,340"/>
+</svg>
+<figcaption id="component-map-summary">Source stores own truth and scope; indexes own rebuildable representations; the planned orchestrator owns selection and bounds; planned role adapters own relevance policy. Solid outlines are current, dashed outlines are planned, and the mixed index layer is explicitly labeled.</figcaption>
+</figure>
+
 ```text
 AUTHORITATIVE SOURCES (current)
   SQLite memories/tasks/rules/skills/specs | knowledge pages/files | git + provenance | source tree
@@ -293,16 +336,16 @@ Ownership boundaries are deliberate: source stores own truth and scope; indexers
 
 ### Planned mergeable implementation slices
 
-| Slice | Deliverable | Effort estimate | Cost gate | Quality gate |
-| --- | --- | ---: | --- | --- |
-| A. Recall event + query builder | redacted canonical query, role/task/entity fields, one-embedding cache | 2.0 engineer-days | exactly one embedding request/event cache miss; <= 768 query tokens | deterministic fixtures; secret/quoted-bulk exclusion |
-| B. Scoped retrieval adapters | common candidate schema for all six surfaces; namespace-first filters | 4.0 days | <= 20 candidates/channel/surface; no body loads | zero cross-scope leakage; surface contract tests |
-| C. Fusion + provenance/conflicts | RRF baseline, structural/temporal/entity bonuses, precedence and conflict pairs | 3.0 days | local fusion p95 <= 50 ms for 500 candidates | nDCG/MRR gates; no semantic override of binding exact match |
-| D. Packet budget + body pull | role ceilings, marginal-utility stop, omission counts, justified excerpt pull | 3.0 days | worker/supervisor p99 <= 2,000/3,000 default targets; hard 4,000/5,000 | 300k-token adversarial corpus remains below hard ceiling |
-| E. Session recall ledger | evidence revision cache, delta injection, bounded expiry | 2.0 days | <= 1 MB/session and O(1) evidence lookup | repeated injection <= 10%; restart loses no truth |
-| F. Maintenance generations | content hashes, queue metadata, backoff, per-surface SLO, shadow model switch | 4.0 days | 60 requests/tick; incremental units only; reported bytes/storage | fault injection, zero-vector/dim rejection, atomic generation switch |
-| G. Evaluation + telemetry | 160 labeled events, ablations, latency/token/cost/freshness histograms | 4.0 days | benchmark runs without provider calls when vectors are recorded | all retrieval, harmful/stale, latency and packet gates reported |
-| H. Role rollout | worker then supervisor adapters behind config, silent/shadow mode first | 3.0 days | default packet budgets above; kill switch | 1-week shadow telemetry, then canary gates before default-on |
+| Slice | Depends on | Deliverable | Effort estimate | Cost gate | Quality gate |
+| --- | --- | --- | ---: | --- | --- |
+| A. Recall event + query builder | none | redacted canonical query, role/task/entity fields, one-embedding cache | 2.0 engineer-days | exactly one embedding request/event cache miss; <= 768 query tokens | deterministic fixtures; secret/quoted-bulk exclusion |
+| B. Scoped retrieval adapters | A | common candidate schema for all six surfaces; namespace-first filters | 4.0 days | <= 20 candidates/channel/surface; no body loads | zero cross-scope leakage; surface contract tests |
+| C. Fusion + provenance/conflicts | B | RRF baseline, structural/temporal/entity bonuses, precedence and conflict pairs | 3.0 days | local fusion p95 <= 50 ms for 500 candidates | nDCG/MRR gates; no semantic override of binding exact match |
+| D. Packet budget + body pull | C | role ceilings, marginal-utility stop, omission counts, justified excerpt pull | 3.0 days | worker/supervisor p99 <= 2,000/3,000 default targets; hard 4,000/5,000 | 300k-token adversarial corpus remains below hard ceiling |
+| E. Session recall ledger | A, D | evidence revision cache, delta injection, bounded expiry | 2.0 days | <= 1 MB/session and O(1) evidence lookup | repeated injection <= 10%; restart loses no truth |
+| F. Maintenance generations | B | content hashes, queue metadata, backoff, per-surface SLO, shadow model switch | 4.0 days | 60 requests/tick; incremental units only; reported bytes/storage | fault injection, zero-vector/dim rejection, atomic generation switch |
+| G. Evaluation + telemetry | B–F | 160 labeled events, ablations, latency/token/cost/freshness histograms | 4.0 days | benchmark runs without provider calls when vectors are recorded | all retrieval, harmful/stale, latency and packet gates reported |
+| H. Role rollout | A–G | worker then supervisor adapters behind config, silent/shadow mode first | 3.0 days | default packet budgets above; kill switch | 1-week shadow telemetry, then canary gates before default-on |
 
 Do not combine these into one feature branch. Each slice has a falsifiable gate and can merge behind an off/shadow flag. Worker rollout comes first because its scope is narrower; supervisor rollout follows only after cross-task breadth does not breach prompt or harmful-injection gates.
 

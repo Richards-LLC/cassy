@@ -31,7 +31,9 @@
 //! unknown binary (every backfilled row — `daemon_instances` records no binary
 //! identity) can therefore **extend the MIXED window but never open a
 //! CLEAN-POST one**. That asymmetry is deliberate: unknown must cost evidence,
-//! not manufacture it.
+//! not manufacture it. A deleted/replaced executable is unknown by the same
+//! rule: metadata at its cleaned path belongs to the replacement file, not the
+//! process whose epoch is being classified.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -104,17 +106,21 @@ pub struct EpochBoundary {
     /// binary at least as new as the fix.
     pub fix_started_running: Option<DateTime<Utc>>,
     /// Start of the CLEAN-POST window: the last observed liveness of any epoch
-    /// that began before the fix started running. `None` for the same reason
+    /// not proven to carry the fix. `None` for the same reason
     /// `fix_started_running` is.
     pub clean_post_from: Option<DateTime<Utc>>,
-    /// Epochs that began before the fix and were still observed alive after it
-    /// — the processes that make the window MIXED.
-    pub overlapping_older_epochs: usize,
+    /// Epochs not known to carry the fix that were still observed alive after
+    /// the fix first started running — the processes that make the window MIXED.
+    pub overlapping_nonfixed_epochs: usize,
     /// Epochs considered at all (parseable `started_at`).
     pub epochs_considered: usize,
     /// Epochs skipped because their binary identity is unknown, so they could
     /// not be used to open a CLEAN-POST window. Reported, never hidden.
     pub epochs_without_binary_identity: usize,
+    /// Subset of `epochs_without_binary_identity` whose executable was
+    /// deleted/replaced under the running process. Its on-disk path and mtime
+    /// describe the replacement file and are never fixed-binary proof.
+    pub epochs_with_stale_executable_identity: usize,
 }
 
 impl EpochBoundary {
@@ -162,6 +168,7 @@ fn last_alive(epoch: &HistoryEpoch) -> Option<DateTime<Utc>> {
 pub fn boundary_for(epochs: &[HistoryEpoch], fix_built_at: DateTime<Utc>) -> EpochBoundary {
     let mut considered = 0usize;
     let mut unknown_binary = 0usize;
+    let mut stale_executable = 0usize;
     let mut fix_started: Option<DateTime<Utc>> = None;
 
     for epoch in epochs {
@@ -172,7 +179,10 @@ pub fn boundary_for(epochs: &[HistoryEpoch], fix_built_at: DateTime<Utc>) -> Epo
             continue;
         };
         considered += 1;
-        match epoch.binary_mtime.as_deref().and_then(parse) {
+        if epoch.exe_deleted {
+            stale_executable += 1;
+        }
+        match epoch.trusted_binary_mtime().and_then(parse) {
             Some(mtime) if mtime >= fix_built_at => {
                 fix_started = Some(match fix_started {
                     Some(existing) => existing.min(started),
@@ -188,25 +198,31 @@ pub fn boundary_for(epochs: &[HistoryEpoch], fix_built_at: DateTime<Utc>) -> Epo
         return EpochBoundary {
             fix_started_running: None,
             clean_post_from: None,
-            overlapping_older_epochs: 0,
+            overlapping_nonfixed_epochs: 0,
             epochs_considered: considered,
             epochs_without_binary_identity: unknown_binary,
+            epochs_with_stale_executable_identity: stale_executable,
         };
     };
 
-    // The tail of every epoch that began before the fix started running,
-    // whether or not we know which binary it was serving. An unknown-binary
-    // daemon that was alive into the window is exactly the cas-9d92 shape.
+    // The tail of every epoch not proven to run the fixed binary, whether it
+    // began before or after the first trusted fixed epoch. An unknown/stale
+    // daemon that starts later may still be an old binary and must delay the
+    // single conservative CLEAN-POST boundary rather than create a false gap.
     let mut clean_post_from = fix_started;
     let mut overlapping = 0usize;
     for epoch in epochs {
         if epoch.epoch_kind != EPOCH_KIND_DAEMON_START {
             continue;
         }
-        let Some(started) = parse(&epoch.started_at) else {
+        let Some(_) = parse(&epoch.started_at) else {
             continue;
         };
-        if started >= fix_started {
+        let carries_fix = epoch
+            .trusted_binary_mtime()
+            .and_then(parse)
+            .is_some_and(|mtime| mtime >= fix_built_at);
+        if carries_fix {
             continue;
         }
         let Some(alive_until) = last_alive(epoch) else {
@@ -221,9 +237,10 @@ pub fn boundary_for(epochs: &[HistoryEpoch], fix_built_at: DateTime<Utc>) -> Epo
     EpochBoundary {
         fix_started_running: Some(fix_started),
         clean_post_from: Some(clean_post_from),
-        overlapping_older_epochs: overlapping,
+        overlapping_nonfixed_epochs: overlapping,
         epochs_considered: considered,
         epochs_without_binary_identity: unknown_binary,
+        epochs_with_stale_executable_identity: stale_executable,
     }
 }
 
@@ -311,20 +328,25 @@ pub fn assess(
 ///
 /// `binary_mtime` is read from the file on disk; when the executable has been
 /// replaced or unlinked under us (`cargo install`, a release drop) the mtime
-/// describes the *new* file, so `exe_deleted` is recorded alongside it and the
-/// pair is read together — a stale flag with a fresh mtime is the signature of
-/// exactly the mixed-binary window this table exists to detect.
+/// describes the *new* file. `exe_deleted` therefore invalidates that mtime:
+/// stale processes are recorded with unknown binary identity and can never be
+/// used as fixed-binary proof.
 pub fn current_daemon_epoch(started_at: &str) -> HistoryEpoch {
     let identity = crate::mcp::socket::ExeIdentity::current();
+    let exe_deleted = identity.as_ref().is_some_and(|i| i.is_stale());
     let binary_path = identity
         .as_ref()
         .map(|i| i.path().to_string_lossy().to_string());
-    let binary_mtime = identity.as_ref().and_then(|i| {
-        std::fs::metadata(i.path())
-            .and_then(|m| m.modified())
-            .ok()
-            .map(|t| DateTime::<Utc>::from(t).to_rfc3339())
-    });
+    let binary_mtime = if exe_deleted {
+        None
+    } else {
+        identity.as_ref().and_then(|i| {
+            std::fs::metadata(i.path())
+                .and_then(|m| m.modified())
+                .ok()
+                .map(|t| DateTime::<Utc>::from(t).to_rfc3339())
+        })
+    };
 
     HistoryEpoch {
         id: 0,
@@ -337,7 +359,7 @@ pub fn current_daemon_epoch(started_at: &str) -> HistoryEpoch {
         // heartbeat still carries an honest "observed alive at" stamp.
         ended_at: Some(started_at.to_string()),
         pid: Some(std::process::id() as i64),
-        exe_deleted: identity.map(|i| i.is_stale()).unwrap_or(false),
+        exe_deleted,
         recorded_at: started_at.to_string(),
     }
 }
@@ -505,7 +527,7 @@ mod tests {
 
         assert_eq!(b.fix_started_running, Some(at("2026-08-07T21:02:26Z")));
         assert_eq!(b.clean_post_from, Some(at("2026-08-07T21:36:35Z")));
-        assert_eq!(b.overlapping_older_epochs, 1);
+        assert_eq!(b.overlapping_nonfixed_epochs, 1);
 
         assert_eq!(
             b.classify(at("2026-08-07T20:00:00Z")),
@@ -601,9 +623,65 @@ mod tests {
         let b = boundary_for(&epochs, at("2026-08-07T20:50:00Z"));
         assert!(b.fix_started_running.is_none());
         assert_eq!(b.epochs_without_binary_identity, 2);
+        assert_eq!(b.epochs_with_stale_executable_identity, 0);
         assert_eq!(
             assess(b, (0, 9_999), (0, 0), DEFAULT_SAMPLE_THRESHOLD).verdict,
             FixVerdict::FixedUnverified
+        );
+    }
+
+    /// Regression for cas-6a88: `/proc/self/exe` can say the running process's
+    /// executable was deleted while metadata at its cleaned path belongs to a
+    /// newly installed file. That replacement mtime must never prove the old
+    /// process contains the fix, even with an otherwise sufficient quiet log.
+    #[test]
+    fn deleted_executable_with_replacement_mtime_never_verifies_the_fix() {
+        let mut stale = epoch(
+            "2026-08-07T21:02:26Z",
+            Some("2026-08-08T03:00:00Z"),
+            Some("2026-08-07T20:55:00Z"),
+            222,
+        );
+        stale.exe_deleted = true;
+
+        let b = boundary_for(&[stale], at("2026-08-07T20:50:00Z"));
+        assert!(b.fix_started_running.is_none());
+        assert!(b.clean_post_from.is_none());
+        assert_eq!(b.epochs_without_binary_identity, 1);
+        assert_eq!(b.epochs_with_stale_executable_identity, 1);
+        let json = serde_json::to_value(&b).unwrap();
+        assert_eq!(json["epochs_with_stale_executable_identity"], 1);
+        assert_eq!(json["overlapping_nonfixed_epochs"], 0);
+        assert_eq!(
+            assess(b, (0, 100_000), (0, 0), DEFAULT_SAMPLE_THRESHOLD).verdict,
+            FixVerdict::FixedUnverified,
+            "replacement-file mtime plus a quiet sample must not yield FIXED-VERIFIED"
+        );
+    }
+
+    #[test]
+    fn later_unknown_executable_keeps_the_timeline_mixed() {
+        let fixed = epoch(
+            "2026-08-07T21:02:26Z",
+            Some("2026-08-08T03:00:00Z"),
+            Some("2026-08-07T20:55:00Z"),
+            222,
+        );
+        let mut unknown = epoch(
+            "2026-08-07T21:10:00Z",
+            Some("2026-08-07T22:15:00Z"),
+            Some("2026-08-08T00:00:00Z"),
+            333,
+        );
+        unknown.exe_deleted = true;
+
+        let b = boundary_for(&[fixed, unknown], at("2026-08-07T20:50:00Z"));
+        assert_eq!(b.fix_started_running, Some(at("2026-08-07T21:02:26Z")));
+        assert_eq!(b.clean_post_from, Some(at("2026-08-07T22:15:00Z")));
+        assert_eq!(b.overlapping_nonfixed_epochs, 1);
+        assert_eq!(
+            b.classify(at("2026-08-07T22:00:00Z")),
+            Some(EpochClass::Mixed)
         );
     }
 
@@ -622,7 +700,7 @@ mod tests {
         ];
         let b = boundary_for(&epochs, at("2026-08-07T20:50:00Z"));
         assert_eq!(b.clean_post_from, Some(at("2026-08-07T22:15:00Z")));
-        assert_eq!(b.overlapping_older_epochs, 1);
+        assert_eq!(b.overlapping_nonfixed_epochs, 1);
         assert_eq!(
             b.classify(at("2026-08-07T22:00:00Z")),
             Some(EpochClass::Mixed)
@@ -649,7 +727,7 @@ mod tests {
             Some(at("2026-08-07T21:02:26Z")),
             "a daemon last seen before the fix cannot make the window MIXED"
         );
-        assert_eq!(b.overlapping_older_epochs, 0);
+        assert_eq!(b.overlapping_nonfixed_epochs, 0);
     }
 
     #[test]

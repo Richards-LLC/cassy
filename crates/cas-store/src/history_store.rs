@@ -691,7 +691,9 @@ pub struct HistoryEpoch {
     pub binary_path: Option<String>,
     /// Executable mtime, RFC3339. This — not `version` — is what distinguishes
     /// two builds carrying the same `CARGO_PKG_VERSION`, which is the usual
-    /// shape during a release day.
+    /// shape during a release day. Always `None` when [`Self::exe_deleted`] is
+    /// true: metadata at that path belongs to the replacement file, not the
+    /// executable backing this process.
     pub binary_mtime: Option<String>,
     pub version: Option<String>,
     pub started_at: String,
@@ -703,6 +705,21 @@ pub struct HistoryEpoch {
     /// was replaced or removed under the running process.
     pub exe_deleted: bool,
     pub recorded_at: String,
+}
+
+impl HistoryEpoch {
+    /// Binary mtime that is safe to use as evidence about this process.
+    ///
+    /// Keep this guard at the model boundary as defense in depth for callers
+    /// holding rows written before storage normalized stale executable
+    /// identities to a NULL mtime.
+    pub fn trusted_binary_mtime(&self) -> Option<&str> {
+        if self.exe_deleted {
+            None
+        } else {
+            self.binary_mtime.as_deref()
+        }
+    }
 }
 
 /// What an epoch backfill pass actually found (spec §9 "historical rows are
@@ -2637,6 +2654,10 @@ impl HistoryStore for SqliteHistoryStore {
 
     fn record_epoch(&self, epoch: &HistoryEpoch) -> Result<i64> {
         let now = chrono::Utc::now().to_rfc3339();
+        // If the running executable was deleted/replaced, `binary_path` now
+        // names the replacement file and its mtime says nothing about the
+        // process being recorded. Never persist that mtime as proof.
+        let trusted_binary_mtime = epoch.trusted_binary_mtime();
         let mut conn = self.lock();
         let tx = conn.transaction()?;
 
@@ -2662,15 +2683,18 @@ impl HistoryStore for SqliteHistoryStore {
                 tx.execute(
                     "UPDATE history_epochs
                         SET binary_path = COALESCE(?2, binary_path),
-                            binary_mtime = COALESCE(?3, binary_mtime),
+                            binary_mtime = CASE
+                                WHEN exe_deleted != 0 OR ?6 != 0 THEN NULL
+                                ELSE COALESCE(?3, binary_mtime)
+                            END,
                             version = COALESCE(?4, version),
                             ended_at = MAX(COALESCE(?5, ''), COALESCE(ended_at, '')),
-                            exe_deleted = ?6
+                            exe_deleted = MAX(exe_deleted, ?6)
                       WHERE id = ?1",
                     params![
                         id,
                         epoch.binary_path,
-                        epoch.binary_mtime,
+                        trusted_binary_mtime,
                         epoch.version,
                         epoch.ended_at,
                         i64::from(epoch.exe_deleted),
@@ -2692,7 +2716,7 @@ impl HistoryStore for SqliteHistoryStore {
                     params![
                         epoch.epoch_kind,
                         epoch.binary_path,
-                        epoch.binary_mtime,
+                        trusted_binary_mtime,
                         epoch.version,
                         epoch.started_at,
                         epoch.ended_at,
@@ -2725,7 +2749,9 @@ impl HistoryStore for SqliteHistoryStore {
     fn list_epochs(&self, since: Option<&str>, limit: usize) -> Result<Vec<HistoryEpoch>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, epoch_kind, binary_path, binary_mtime, version, started_at,
+            "SELECT id, epoch_kind, binary_path,
+                    CASE WHEN exe_deleted != 0 THEN NULL ELSE binary_mtime END,
+                    version, started_at,
                     ended_at, pid, exe_deleted, recorded_at
                FROM history_epochs
               WHERE (?1 IS NULL OR datetime(started_at) >= datetime(?1))
@@ -3855,6 +3881,71 @@ mod tests {
         );
     }
 
+    #[test]
+    fn stale_executable_identity_clears_replacement_mtime_and_is_sticky() {
+        let (_t, store) = store();
+        let started = "2026-08-07T21:02:26Z";
+        let mut stale = epoch(started, 42);
+        stale.binary_mtime = Some("2026-08-08T00:00:00Z".into());
+        stale.exe_deleted = true;
+        store.record_epoch(&stale).unwrap();
+
+        let recorded = store.list_epochs(None, 10).unwrap().remove(0);
+        assert!(recorded.exe_deleted);
+        assert!(
+            recorded.binary_mtime.is_none(),
+            "the replacement file's fresh mtime must not survive storage"
+        );
+        let json = serde_json::to_value(&recorded).unwrap();
+        assert_eq!(json["binary_mtime"], serde_json::Value::Null);
+        assert_eq!(json["exe_deleted"], true);
+
+        // Once an executable is unlinked, a later refresh cannot make that
+        // same process identity current again or restore replacement metadata.
+        let mut refresh = epoch(started, 42);
+        refresh.binary_mtime = Some("2026-08-09T00:00:00Z".into());
+        store.record_epoch(&refresh).unwrap();
+        let refreshed = store.list_epochs(None, 10).unwrap().remove(0);
+        assert!(refreshed.exe_deleted);
+        assert!(refreshed.binary_mtime.is_none());
+
+        let conn = store.lock();
+        let raw: (Option<String>, i64) = conn
+            .query_row(
+                "SELECT binary_mtime, exe_deleted FROM history_epochs WHERE pid = 42",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(raw, (None, 1));
+    }
+
+    #[test]
+    fn stale_mtime_from_an_older_database_is_hidden_on_read() {
+        let (_t, store) = store();
+        let conn = store.lock();
+        conn.execute(
+            "INSERT INTO history_epochs (
+                 epoch_kind, binary_path, binary_mtime, version,
+                 started_at, ended_at, pid, exe_deleted, recorded_at
+             ) VALUES (?1, '/usr/local/bin/cas', ?2, '2.49.0', ?3, ?3, 42, 1, ?3)",
+            params![
+                EPOCH_KIND_DAEMON_START,
+                "2026-08-08T00:00:00Z",
+                "2026-08-07T21:02:26Z"
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let epoch = store.list_epochs(None, 10).unwrap().remove(0);
+        assert!(epoch.exe_deleted);
+        assert!(
+            epoch.binary_mtime.is_none(),
+            "legacy replacement metadata must not escape the storage boundary"
+        );
+    }
+
     /// AC(2): historical epochs come out of `daemon_instances`, twice safely.
     #[test]
     fn backfill_reads_daemon_instances_and_repeats_safely() {
@@ -3885,6 +3976,10 @@ mod tests {
         assert!(
             epochs[0].binary_mtime.is_none() && epochs[0].version.is_none(),
             "daemon_instances records no binary identity, and the backfill must not invent one"
+        );
+        assert!(
+            epochs.iter().all(|epoch| !epoch.exe_deleted),
+            "backfill must report identity as unknown, not invent a stale-executable observation"
         );
     }
 

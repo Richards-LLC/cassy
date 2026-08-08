@@ -359,14 +359,18 @@ fn execute_epochs(args: &EpochsArgs, cas_root: &Path) -> anyhow::Result<()> {
         return Ok(());
     }
     for e in &epochs {
+        let binary_identity = if e.exe_deleted {
+            "mtime unknown [running exe replaced/deleted]"
+        } else {
+            e.binary_mtime.as_deref().unwrap_or("mtime unknown")
+        };
         println!(
-            "{}  {}  pid {}  {}  binary {}{}",
+            "{}  {}  pid {}  {}  binary {}",
             e.started_at,
             e.ended_at.as_deref().unwrap_or("(never seen alive again)"),
             e.pid.map(|p| p.to_string()).unwrap_or_else(|| "?".into()),
             e.version.as_deref().unwrap_or("version unknown"),
-            e.binary_mtime.as_deref().unwrap_or("mtime unknown"),
-            if e.exe_deleted { "  [exe replaced/deleted]" } else { "" }
+            binary_identity,
         );
     }
     Ok(())
@@ -394,8 +398,8 @@ fn execute_verdict(args: &VerdictArgs, cas_root: &Path) -> anyhow::Result<()> {
         (Some(fix), Some(clean)) => {
             println!("  fix first observed running: {fix}");
             println!(
-                "  clean-post from:            {clean} ({} older daemon(s) overlapped)",
-                a.boundary.overlapping_older_epochs
+                "  clean-post from:            {clean} ({} non-fixed/unknown daemon(s) overlapped)",
+                a.boundary.overlapping_nonfixed_epochs
             );
         }
         _ => println!("  no epoch has been observed running the fixed binary"),
@@ -409,10 +413,11 @@ fn execute_verdict(args: &VerdictArgs, cas_root: &Path) -> anyhow::Result<()> {
         a.mixed_matches, a.mixed_sample
     );
     println!(
-        "  epochs: {} recorded, {} classifiable, {} with unknown binary",
+        "  epochs: {} recorded, {} considered, {} with unknown binary ({} stale/deleted executable)",
         response.epochs_recorded,
         a.boundary.epochs_considered,
-        a.boundary.epochs_without_binary_identity
+        a.boundary.epochs_without_binary_identity,
+        a.boundary.epochs_with_stale_executable_identity
     );
     Ok(())
 }

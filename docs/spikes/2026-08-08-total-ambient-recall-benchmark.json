@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "measured_at": "2026-08-08T18:00:00-04:00",
+  "repository_commit": "c9668ef5d8c2e8cd10125b189ab9ad8c26cb7947",
+  "client": "cas 2.53.0 (e081a30 2026-08-08)",
+  "isolation": "new private CAS root in worker worktree; live store not mutated",
+  "corpus": {
+    "commits": 2577,
+    "file_changes": 9763,
+    "changelog_docs": 54,
+    "noise_merges_skipped": 392,
+    "eligible_commits": 2185,
+    "eligible_docs": 54,
+    "eligible_units": 2239,
+    "commit_input_bytes": 1721865,
+    "doc_input_bytes": 170627,
+    "total_input_bytes": 1892492
+  },
+  "structural_backfill": {
+    "chunks": 6,
+    "elapsed_seconds": 2.33,
+    "max_rss_kib": 95104,
+    "sqlite_allocated_bytes_after_embedding": 10432512
+  },
+  "embedding": {
+    "model": "cas-embed-v1",
+    "dimensions": 1024,
+    "max_inputs_per_request": 32,
+    "successful_requests": 71,
+    "attempted_requests": 72,
+    "first_run": {
+      "embedded": 2016,
+      "skipped": 392,
+      "attempted_requests": 64,
+      "pending_after": 223,
+      "elapsed_seconds": 78.24,
+      "failure": "HTTP 503: Embedding provider timed out"
+    },
+    "retry": {
+      "embedded": 223,
+      "requests": 8,
+      "pending_after": 0,
+      "elapsed_seconds": 6.85,
+      "input_bytes": 386106,
+      "upstream_tls_bytes": 398722,
+      "downstream_tls_bytes": 1042303
+    },
+    "total_elapsed_with_failure_seconds": 85.09,
+    "no_failure_baseline_seconds": 56.0,
+    "downstream_tls_bytes": 10375671,
+    "modeled_full_upstream_tls_bytes": 1954434,
+    "modeled_total_wire_bytes": 12330000,
+    "raw_vector_bytes": 9170944,
+    "lmdb_data_bytes": 18636800,
+    "lmdb_amplification": 2.03216,
+    "pricing": null,
+    "pricing_note": "cas-embed-v1 client monetary pricing and billed token counts are not published; use the parameterized formula in the report"
+  },
+  "projection_parameters": {
+    "eligible_commit_ratio": 0.847885,
+    "input_bytes_per_eligible_commit": 788.039,
+    "input_bytes_per_doc": 3159.76,
+    "downstream_tls_bytes_per_unit": 4634.06,
+    "upstream_tls_bytes_per_input_byte": 1.03267,
+    "seconds_per_request": 0.788732,
+    "lmdb_to_raw_vector_amplification": 2.03216
+  }
+}

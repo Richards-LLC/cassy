@@ -28,7 +28,8 @@ A deliverable is a report when **all three** hold:
 
 Canonical cases: investigation/diagnostic write-ups, metrics and mining analyses, audits, decision
 briefs, comparisons and benchmarks, incident post-mortems, status/release summaries, financial
-reports, executive and board updates, client deliverables, research and market analyses.
+reports, executive and board updates, product and feature showcases, system explainers, client
+deliverables, research and market analyses.
 
 ## When HTML is NOT required
 
@@ -73,6 +74,15 @@ evidence and the method; an external reader gets the outcome with no internal vo
 The full matrix, with per-type required sections and mandatory visuals, is in
 `references/report-types.md`.
 
+### Explanatory routing
+
+Choose **Product / feature showcase** when the reader asks *what did we build, what can it do, and
+why is the experience compelling?* Choose **System / architecture explainer** when the reader asks
+*how does it work end to end, what moves through it, and where are its boundaries?* These are
+explanatory contracts, not disguised decision briefs: an executive audience does not add a required
+ask, decision, or KPI row. When both questions matter, make the showcase primary and nest the
+explainer after the capability-to-proof mapping, as `report-types.md` specifies.
+
 ## The invariant technical contract
 
 These hold for every type, every audience, every domain. Details and rationale in
@@ -105,6 +115,8 @@ their source:
   practitioner audience (hero verdict, evidence tables, timeline, inline SVG chart, provenance footer).
 - `references/examples/financial-quarterly-brief.html` — a financial report for an executive audience
   (KPI cards with variance, plan/actual/forecast encodings, variance-first bars, methodology last).
+- `references/report-types.md` — a compact, reusable semantic HTML/SVG system-flow pattern with a
+  visible text alternative and print treatment for explanatory reports.
 
 ## Sources
 

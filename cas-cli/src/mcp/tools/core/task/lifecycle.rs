@@ -835,7 +835,10 @@ impl CasCore {
         task.status = TaskStatus::InProgress;
         task.updated_at = chrono::Utc::now();
 
-        task_store.update(&task).map_err(|e| McpError {
+        // cas-ec74: `updated_at` is store-owned. Adopt the stamp the store
+        // actually persisted so the lifecycle occurrence below is derived from
+        // the same clock read as the stored row, not from a second one.
+        task.updated_at = task_store.update(&task).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to update: {e}")),
             data: None,

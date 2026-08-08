@@ -5,6 +5,7 @@ use crate::store::TaskStore;
 use crate::store::mock::id_counter::IdCounter;
 use crate::types::{Dependency, DependencyType, Task, TaskStatus, TaskType};
 use cas_store::{Result, StoreError};
+use chrono::{DateTime, Utc};
 
 /// In-memory mock implementation of the TaskStore trait.
 #[derive(Debug)]
@@ -98,14 +99,22 @@ impl TaskStore for MockTaskStore {
             .ok_or_else(|| StoreError::NotFound(id.to_string()))
     }
 
-    fn update(&self, task: &Task) -> Result<()> {
+    fn update(&self, task: &Task) -> Result<DateTime<Utc>> {
         self.check_error()?;
         let mut tasks = self.tasks.write().unwrap();
         if !tasks.contains_key(&task.id) {
             return Err(StoreError::NotFound(task.id.clone()));
         }
-        tasks.insert(task.id.clone(), task.clone());
-        Ok(())
+        // cas-ec74: mirror SqliteTaskStore exactly — `updated_at` is store-owned,
+        // so re-stamp from our own clock instead of honouring the caller. The
+        // mock used to persist `task.updated_at` verbatim, which meant no test
+        // written against it could ever observe (or catch) the production
+        // producer/consumer timestamp mismatch.
+        let now = Utc::now();
+        let mut stored = task.clone();
+        stored.updated_at = now;
+        tasks.insert(task.id.clone(), stored);
+        Ok(now)
     }
 
     fn delete(&self, id: &str) -> Result<()> {

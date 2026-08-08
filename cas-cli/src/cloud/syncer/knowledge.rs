@@ -140,6 +140,14 @@ pub struct KnowledgePullReport {
     pub locked_preserved: usize,
     /// Per-page failures (rel_path, message).
     pub errors: Vec<(String, String)>,
+    /// Rows refused at ingest because they do not belong to this project.
+    ///
+    /// Never silently dropped and never written: each one is counted here and
+    /// named in [`Self::refused_foreign_ids`], because a zero here is a claim
+    /// that the pull was clean and must be backed by a real check.
+    pub refused_foreign: usize,
+    /// The page ids refused above, for the operator-facing report.
+    pub refused_foreign_ids: Vec<String>,
 }
 
 /// Share scope for knowledge pages under the current cloud configuration.
@@ -211,7 +219,26 @@ impl CloudSyncer {
         }
 
         let count = records.len();
-        self.push_sub_batch(records, KNOWLEDGE_ENTITY, &token)?;
+        let response = self.push_sub_batch(records, KNOWLEDGE_ENTITY, &token)?;
+
+        // Read the refusal count instead of discarding the response. The
+        // knowledge push has no per-row queue to leave un-marked, so its only
+        // retry lever is the watermark: advancing it past a page the server
+        // REFUSED (its locked guard) means that page is never sent again until
+        // a human happens to edit it. Holding the mark makes the next run
+        // re-offer the same window — the same conservative choice the generic
+        // path makes when it leaves a sub-batch un-synced (push.rs).
+        let skipped = response.skipped_count_for(KNOWLEDGE_ENTITY);
+        if skipped > 0 {
+            warn!(
+                skipped,
+                batch_size = count,
+                "cloud refused {skipped} of {count} knowledge page(s); holding the push watermark \
+                 so they are re-offered next run"
+            );
+            return Ok(count.saturating_sub(skipped));
+        }
+
         let _ = self
             .queue()
             .set_metadata(LAST_PUSH_KEY, &Utc::now().to_rfc3339());
@@ -259,7 +286,12 @@ impl CloudSyncer {
         // Fail closed on an unresolvable project scope, exactly like the
         // canonical builder: without `project_id=` this would ask the server
         // for every project's knowledge pages (cas-2eb3 / cas-ed15).
-        let (url, _project_id) =
+        //
+        // The resolved id is KEPT, not discarded: it is the second line of
+        // defence below. Asking the server for one project's pages and then
+        // trusting whatever comes back is exactly the gap that let a foreign
+        // page overwrite a local one (cas-2cc5).
+        let (url, project_id) =
             super::pull::build_scoped_pull_url(&self.cloud_config.endpoint, &params)?;
 
         let response = ureq::get(&url)
@@ -289,6 +321,24 @@ impl CloudSyncer {
             .unwrap_or_default();
 
         for raw in incoming {
+            // FAIL CLOSED, BEFORE PARSING OR WRITING. A knowledge page is
+            // merged on `rel_path` (knowledge_store.rs) and written to both
+            // cas.db and disk, so a foreign page with a colliding path
+            // OVERWRITES the local one unless it happens to be locked — and
+            // afterwards it is unattributable, because `knowledge_pages` has
+            // no project column to audit. Detection after the fact cannot undo
+            // that; the only safe place to refuse is here.
+            if !super::pull::entity_matches_project(&raw, &project_id, "knowledge page") {
+                report.refused_foreign += 1;
+                report.refused_foreign_ids.push(
+                    raw.get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("<unknown>")
+                        .to_string(),
+                );
+                continue;
+            }
+
             let record: KnowledgePageRecord = match serde_json::from_value(raw) {
                 Ok(record) => record,
                 Err(e) => {
@@ -306,9 +356,16 @@ impl CloudSyncer {
             }
         }
 
-        let _ = self
-            .queue()
-            .set_metadata(LAST_PULL_KEY, &Utc::now().to_rfc3339());
+        // Advance the watermark to the SERVER's clock, not ours. Client
+        // wall-clock here meant any skew between this machine and the server
+        // silently widened or narrowed the next `since` window — rows created
+        // in the gap are never pulled again. The entity pull has always used
+        // the server value (pull.rs); knowledge now matches it. If the server
+        // sends no `pulled_at` the mark is left alone, so the next pull
+        // re-requests the same window rather than skipping it.
+        if let Some(pulled_at) = body.get("pulled_at").and_then(|v| v.as_str()) {
+            let _ = self.queue().set_metadata(LAST_PULL_KEY, pulled_at);
+        }
 
         Ok(report)
     }
@@ -562,6 +619,219 @@ mod tests {
         assert_eq!(
             landed, body,
             "the pulled body must be byte-identical to the pushed one"
+        );
+    }
+
+    /// The contamination case, end to end. A foreign page whose `rel_path`
+    /// COLLIDES with a local page is the dangerous one: pages merge on
+    /// rel_path and are written to both cas.db and disk, so before this guard
+    /// it silently overwrote the local body and left nothing to audit —
+    /// `knowledge_pages` has no project column.
+    #[tokio::test]
+    async fn a_foreign_project_page_is_refused_at_ingest_and_never_written() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Same rel_path as the seeded local page ("Build System"), different
+        // project. This is the overwrite that must not happen.
+        let mut foreign = remote_record("Build System", "# FOREIGN OVERWRITE", false);
+        foreign["id"] = serde_json::json!("cas-kn999");
+        foreign["project_canonical_id"] = serde_json::json!("github.com/someone-else/other-repo");
+        // A legitimate page in the same envelope must still land: refusing the
+        // foreign row must not become "drop the whole pull".
+        let mut legit = remote_record("Retrieval Pipeline", "# Retrieval\n\nlocal-project body", false);
+        legit["id"] = serde_json::json!("cas-kn902");
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(super::super::pull::PULL_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "knowledge_pages": [foreign, legit]
+            })))
+            .mount(&server)
+            .await;
+        let endpoint = server.uri();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        let (report, local_body, titles) = tokio::task::spawn_blocking(move || {
+            let store = seeded_store(&root);
+            let syncer = syncer(Some(&endpoint), &root);
+            let report = syncer.pull_knowledge_pages(&store).unwrap();
+            let local = store.get_page("cas-kn001").unwrap();
+            let body = store.read_body(&local.rel_path).unwrap();
+            let titles: Vec<String> = store
+                .list_pages()
+                .unwrap()
+                .into_iter()
+                .map(|p| p.title)
+                .collect();
+            (report, body, titles)
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            report.refused_foreign, 1,
+            "the foreign page must be counted, not silently dropped"
+        );
+        assert_eq!(
+            report.refused_foreign_ids,
+            vec!["cas-kn999".to_string()],
+            "the refusal must name the page, so the operator can act on it"
+        );
+        assert_eq!(
+            local_body, "# Build System\n\nZig linker.",
+            "the local body must be untouched — a foreign page must never overwrite it"
+        );
+        assert_eq!(
+            report.applied, 1,
+            "the legitimate page in the same envelope must still land"
+        );
+        assert!(
+            titles.contains(&"Retrieval Pipeline".to_string()),
+            "titles: {titles:?}"
+        );
+        assert!(
+            !titles.contains(&"FOREIGN".to_string()),
+            "no foreign page may reach the store: {titles:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_page_with_no_project_id_is_refused_rather_than_assumed_local() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mut unscoped = remote_record("Orphan Page", "# no scope", false);
+        unscoped["id"] = serde_json::json!("cas-kn998");
+        // Field absent entirely — an older server, or a bug. Fail closed.
+        unscoped.as_object_mut().unwrap().remove("project_canonical_id");
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(super::super::pull::PULL_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "knowledge_pages": [unscoped]
+            })))
+            .mount(&server)
+            .await;
+        let endpoint = server.uri();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        let (report, titles) = tokio::task::spawn_blocking(move || {
+            let store = seeded_store(&root);
+            let syncer = syncer(Some(&endpoint), &root);
+            let report = syncer.pull_knowledge_pages(&store).unwrap();
+            let titles: Vec<String> = store
+                .list_pages()
+                .unwrap()
+                .into_iter()
+                .map(|p| p.title)
+                .collect();
+            (report, titles)
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(report.refused_foreign, 1);
+        assert_eq!(report.applied, 0);
+        assert!(
+            !titles.contains(&"Orphan Page".to_string()),
+            "an unscoped row is foreign until proven otherwise: {titles:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_pull_watermark_comes_from_the_server_not_the_local_clock() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(super::super::pull::PULL_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "knowledge_pages": [],
+                "pulled_at": "2020-01-02T03:04:05Z"
+            })))
+            .mount(&server)
+            .await;
+        let endpoint = server.uri();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        let mark = tokio::task::spawn_blocking(move || {
+            let store = seeded_store(&root);
+            let queue = Arc::new(SyncQueue::open(&root).unwrap());
+            queue.init().unwrap();
+            let config = CloudConfig {
+                endpoint: endpoint.clone(),
+                token: Some("test-token".to_string()),
+                ..Default::default()
+            };
+            let syncer = CloudSyncer::new(queue.clone(), config, CloudSyncerConfig::default());
+            syncer.pull_knowledge_pages(&store).unwrap();
+            queue.get_metadata(LAST_PULL_KEY).unwrap()
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            mark.as_deref(),
+            Some("2020-01-02T03:04:05Z"),
+            "the server's pulled_at is authoritative; client wall-clock skew must not move the window"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_server_refused_push_does_not_advance_the_watermark() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/sync/push"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "skipped": { "knowledge_pages": 1 }
+            })))
+            .mount(&server)
+            .await;
+        let endpoint = server.uri();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        let (first, second, mark) = tokio::task::spawn_blocking(move || {
+            let store = seeded_store(&root);
+            let queue = Arc::new(SyncQueue::open(&root).unwrap());
+            queue.init().unwrap();
+            let config = CloudConfig {
+                endpoint: endpoint.clone(),
+                token: Some("test-token".to_string()),
+                ..Default::default()
+            };
+            let syncer = CloudSyncer::new(queue.clone(), config, CloudSyncerConfig::default());
+            let first = syncer.push_knowledge_pages(&store).unwrap();
+            // The page was refused, so the next run must offer it again.
+            let second = syncer.push_knowledge_pages(&store).unwrap();
+            (first, second, queue.get_metadata(LAST_PUSH_KEY).unwrap())
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(first, 0, "a refused page must not be counted as pushed");
+        assert_eq!(
+            second, 0,
+            "the page is re-offered and refused again — never silently abandoned"
+        );
+        assert!(
+            mark.is_none(),
+            "the watermark must NOT advance past a refused page, or it is never retried \
+             until a human edits it — got {mark:?}"
         );
     }
 

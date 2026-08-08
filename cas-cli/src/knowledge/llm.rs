@@ -123,6 +123,7 @@ impl LlmRunner for ClaudeCliRunner {
             .map_err(|error| LlmError::Failed(format!("capture stderr: {error}")))?;
 
         let mut command = Command::new(&self.binary);
+        crate::internal_llm::isolate_command(&mut command);
         command
             .arg("-p")
             .arg("--output-format")

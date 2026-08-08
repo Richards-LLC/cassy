@@ -10,6 +10,10 @@ use cas_mcp::types::TaskRequest;
 use rmcp::handler::server::wrapper::Parameters;
 use tempfile::TempDir;
 
+#[path = "../src/test_env_guard.rs"]
+mod test_env_guard;
+use test_env_guard::TestEnvGuard;
+
 fn task_request(value: serde_json::Value) -> TaskRequest {
     serde_json::from_value(value).expect("valid public task request")
 }
@@ -150,6 +154,14 @@ async fn update_to_closed(service: &CasService, task_id: &str) -> Result<(), Str
 
 #[tokio::test]
 async fn direct_update_to_closed_requires_the_task_types_verification_type() {
+    // This test exercises the verification-required branch. The factory
+    // harness is process-global and may be inherited from the test runner;
+    // a Codex supervisor bypasses epic verification before this boundary is
+    // reached. Pin both halves so the type-authority assertions are stable.
+    let _env = TestEnvGuard::with_vars(&[
+        ("CAS_FACTORY_WORKER_CLI", "claude"),
+        ("CAS_FACTORY_SUPERVISOR_CLI", "claude"),
+    ]);
     let root = TempDir::new().expect("temporary CAS root");
     let cas_root = init_cas_dir(root.path()).expect("initialize CAS");
     std::fs::write(
@@ -170,6 +182,23 @@ async fn direct_update_to_closed_requires_the_task_types_verification_type() {
     assert_eq!(durable_snapshot(&cas_root), before_wrong_exact);
     assert_eq!(
         task_store.get(&wrong_exact.id).unwrap().status,
+        TaskStatus::InProgress
+    );
+
+    let wrong_task_exact = add_task(&cas_root, "cas-task-wrong-exact", TaskType::Task);
+    add_exact_verdict(&cas_root, &wrong_task_exact.id, VerificationType::Epic);
+    let before_wrong_task_exact = durable_snapshot(&cas_root);
+    let error = update_to_closed(&service, &wrong_task_exact.id)
+        .await
+        .expect_err("an Epic verdict must not close a Task");
+    assert!(error.contains("VERIFICATION REQUIRED"), "{error}");
+    assert_eq!(
+        durable_snapshot(&cas_root),
+        before_wrong_task_exact,
+        "a mismatched Epic verdict must not mutate a Task close cycle"
+    );
+    assert_eq!(
+        task_store.get(&wrong_task_exact.id).unwrap().status,
         TaskStatus::InProgress
     );
 

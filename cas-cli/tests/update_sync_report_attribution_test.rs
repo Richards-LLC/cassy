@@ -145,6 +145,13 @@ fn codex_sync_reports_its_own_result_and_is_idempotent() {
     let project = temp.path();
     std::fs::create_dir_all(project.join(".codex")).unwrap();
 
+    // The field-report shape: the harness dir is enabled but has no skills/
+    // subtree at all.
+    assert!(
+        !project.join(".codex/skills").exists(),
+        "precondition: .codex/skills must be absent to reproduce the field shape"
+    );
+
     let first = cas_cmd(project)
         .current_dir(project)
         .args(["update", "--sync"])
@@ -187,4 +194,73 @@ fn codex_sync_reports_its_own_result_and_is_idempotent() {
         second_out.contains(".claude: built-ins up to date"),
         "second sync should report claude clean; output was:\n{second_out}"
     );
+
+    // The codex skills subtree was genuinely materialized, not just claimed.
+    assert!(
+        project.join(".codex/skills").is_dir(),
+        ".codex/skills should exist after a successful codex sync"
+    );
+}
+
+/// AC2's failure half: a harness dir that is enabled but cannot be written must
+/// fail loudly — a non-zero exit or an explicit failure line — and must never
+/// print an "updated N" success for that harness.
+#[test]
+#[cfg(unix)]
+fn unwritable_codex_destination_fails_loudly_instead_of_claiming_success() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new().unwrap();
+    init_project(&temp);
+    let project = temp.path();
+
+    // Enabled harness dir, no skills/ subtree, and no permission to create one.
+    let codex = project.join(".codex");
+    std::fs::create_dir_all(&codex).unwrap();
+    let original = std::fs::metadata(&codex).unwrap().permissions();
+    let mut readonly = original.clone();
+    readonly.set_mode(0o500); // r-x: traversable, not writable
+    std::fs::set_permissions(&codex, readonly).unwrap();
+
+    // Root (and some filesystems) ignore mode bits — the negative case cannot be
+    // staged there, so verify the precondition rather than assert a false pass.
+    if std::fs::create_dir(codex.join(".write-probe")).is_ok() {
+        let _ = std::fs::remove_dir(codex.join(".write-probe"));
+        std::fs::set_permissions(&codex, original).unwrap();
+        eprintln!("skipping: mode bits are not enforced here (root or permissive fs)");
+        return;
+    }
+
+    let output = cas_cmd(project)
+        .current_dir(project)
+        .args(["update", "--sync"])
+        .output()
+        .unwrap();
+
+    // Restore before asserting so TempDir cleanup always succeeds.
+    std::fs::set_permissions(&codex, original).unwrap();
+
+    let stdout = strip_ansi(&String::from_utf8_lossy(&output.stdout));
+    let stderr = strip_ansi(&String::from_utf8_lossy(&output.stderr));
+
+    assert!(
+        !stdout.contains(".codex: updated"),
+        "unwritable .codex must never be reported as updated; stdout was:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains(".codex: built-ins up to date"),
+        "unwritable .codex must not be reported as clean either; stdout was:\n{stdout}"
+    );
+    assert!(
+        !output.status.success(),
+        "an unwritable harness destination must exit non-zero; stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    // Nothing was claimed that does not exist.
+    for w in claimed_writes(&stdout) {
+        assert!(
+            project.join(&w).exists(),
+            "sync claimed `{w}` but it does not exist; stdout was:\n{stdout}"
+        );
+    }
 }

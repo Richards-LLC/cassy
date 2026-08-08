@@ -365,6 +365,16 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 /// thing that keeps the two corpora from being read as each other.
 pub const HISTORY_KEY_PREFIX: &str = "history:";
 
+/// Key prefix for semantic source-code vectors. Code vectors live in their
+/// own LMDB environment as well as carrying this prefix: the directory is the
+/// corpus boundary, while the prefix makes accidental cross-opening fail
+/// closed instead of returning a plausible-looking foreign document.
+pub const CODE_KEY_PREFIX: &str = "code:symbol:";
+
+pub fn code_symbol_key(symbol_id: &str) -> String {
+    format!("{CODE_KEY_PREFIX}{symbol_id}")
+}
+
 /// Vector key for a commit: `history:commit:{sha}`.
 pub fn history_commit_key(sha: &str) -> String {
     format!("{HISTORY_KEY_PREFIX}commit:{sha}")
@@ -383,17 +393,22 @@ pub fn history_doc_key(id: &str) -> String {
 /// prefix cannot provide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VectorNamespace {
-    /// Distilled knowledge pages — every key that is not a history key.
+    /// Distilled knowledge pages.
     Knowledge,
     /// Code history: commits and GitHub/CHANGELOG docs.
     History,
+    /// Current source-code symbols. Stored in an isolated LMDB environment.
+    Code,
 }
 
 impl VectorNamespace {
     pub fn contains(&self, id: &str) -> bool {
         match self {
             VectorNamespace::History => id.starts_with(HISTORY_KEY_PREFIX),
-            VectorNamespace::Knowledge => !id.starts_with(HISTORY_KEY_PREFIX),
+            VectorNamespace::Code => id.starts_with(CODE_KEY_PREFIX),
+            VectorNamespace::Knowledge => {
+                !id.starts_with(HISTORY_KEY_PREFIX) && !id.starts_with(CODE_KEY_PREFIX)
+            }
         }
     }
 }
@@ -432,6 +447,13 @@ impl KnowledgeVectorCache {
         cas_root.join("index").join("knowledge-vectors")
     }
 
+    /// Dedicated source-code vector environment. It is intentionally not a
+    /// sub-database or key range of the knowledge cache: opening/querying one
+    /// corpus can never enumerate the other.
+    pub fn code_cache_dir(cas_root: &Path) -> PathBuf {
+        cas_root.join("index").join("code-vectors")
+    }
+
     fn meta_path(dir: &Path) -> PathBuf {
         dir.join("embedding_meta.json")
     }
@@ -443,7 +465,25 @@ impl KnowledgeVectorCache {
     /// keeping them would silently corrupt ranking. Callers should re-mark
     /// pages pending when [`Self::reindexed`] is true.
     pub fn open(cas_root: &Path, meta: EmbeddingMeta) -> Result<Self, CasError> {
-        let dir = Self::cache_dir(cas_root);
+        Self::open_dir(Self::cache_dir(cas_root), meta)
+    }
+
+    pub fn open_code(cas_root: &Path, meta: EmbeddingMeta) -> Result<Self, CasError> {
+        Self::open_dir(Self::code_cache_dir(cas_root), meta)
+    }
+
+    /// Open an already-existing code cache using its persisted embedding
+    /// identity. Used only to retire deleted symbols while logged out; it
+    /// never creates storage and never performs a cloud call.
+    pub fn open_existing_code(cas_root: &Path) -> Result<Option<Self>, CasError> {
+        let dir = Self::code_cache_dir(cas_root);
+        let Some(meta) = Self::read_meta(&dir) else {
+            return Ok(None);
+        };
+        Self::open_dir(dir, meta).map(Some)
+    }
+
+    fn open_dir(dir: PathBuf, meta: EmbeddingMeta) -> Result<Self, CasError> {
         let mut reindexed = false;
 
         let mut envs = open_envs().lock().unwrap_or_else(|p| p.into_inner());
@@ -1123,7 +1163,11 @@ mod tests {
         let sizes = seen.lock().unwrap().clone();
         assert_eq!(
             sizes,
-            vec![MAX_EMBED_INPUTS_PER_REQUEST, MAX_EMBED_INPUTS_PER_REQUEST, 6],
+            vec![
+                MAX_EMBED_INPUTS_PER_REQUEST,
+                MAX_EMBED_INPUTS_PER_REQUEST,
+                6
+            ],
             "70 pages must go out as 32 + 32 + 6, never as one oversized request"
         );
         assert_eq!(report.requests, 3);
@@ -1175,7 +1219,10 @@ mod tests {
         assert_eq!(report.request_errors.len(), 1);
         assert!(report.request_errors[0].contains("400"));
         assert!(report.had_trouble(), "the run must not look successful");
-        assert!(!report.capability_absent, "a 400 is a failure, not a boundary");
+        assert!(
+            !report.capability_absent,
+            "a 400 is a failure, not a boundary"
+        );
         assert_eq!(report.pending_after, 40);
     }
 

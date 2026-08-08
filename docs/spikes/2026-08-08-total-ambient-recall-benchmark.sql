@@ -38,7 +38,6 @@ SELECT
         WHEN trim(coalesce(title, '')) <> '' THEN trim(title)
         ELSE trim(coalesce(body, '')) END AS blob))) AS doc_input_bytes
 FROM history_docs;
-
 SELECT
     page_count * page_size AS sqlite_allocated_bytes,
     freelist_count * page_size AS sqlite_free_bytes,
@@ -54,4 +53,3 @@ SELECT
     sum(pending_embedding) AS pending_docs,
     count(*) AS total_docs
 FROM history_docs;
-

@@ -1,9 +1,9 @@
 # Total ambient recall: bounded retrieval architecture and vector-ingestion economics
 
-**Date:** 2026-08-08  
-**Audience:** CAS retrieval and factory practitioners  
-**Report contract:** System / architecture explainer  
-**Repository commit measured:** `c9668ef5d8c2e8cd10125b189ab9ad8c26cb7947`  
+**Date:** 2026-08-08
+**Audience:** CAS retrieval and factory practitioners
+**Report contract:** System / architecture explainer
+**Repository commit measured:** `c9668ef5d8c2e8cd10125b189ab9ad8c26cb7947`
 **Confidence:** High for the measured CAS repository receipt and the architecture boundaries; medium for size projections, which scale today's corpus mix linearly.
 
 ## 1. System takeaway

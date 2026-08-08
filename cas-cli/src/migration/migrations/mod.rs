@@ -203,6 +203,7 @@ mod m224_history_commit_symbols;
 mod m225_commit_links_link_method;
 mod m226_knowledge_pages_add_attribution;
 mod m227_knowledge_page_tombstones;
+mod m228_history_epochs_create_table;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -435,6 +436,11 @@ pub const MIGRATIONS: &[Migration] = &[
     m225_commit_links_link_method::MIGRATION,
     m226_knowledge_pages_add_attribution::MIGRATION,
     m227_knowledge_page_tombstones::MIGRATION,
+    // Running-binary timeline behind the is-it-fixed verdict (EPIC cas-6212 /
+    // cas-8d2a, spec §9). Renumbered 224 → 226 → 228 as the parallel M3/M5
+    // and knowledge-store lanes claimed the earlier IDs; migration IDs are
+    // never reused.
+    m228_history_epochs_create_table::MIGRATION,
 ];
 
 #[cfg(test)]

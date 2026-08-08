@@ -28,7 +28,7 @@ use tracing::warn;
 use crate::cloud::get_project_canonical_id;
 use crate::cloud::syncer::{CloudSyncer, SyncResult};
 use crate::error::CasError;
-use cas_store::{IngestBatch, KnowledgePage, KnowledgeStore, PageWrite};
+use cas_store::{IngestBatch, KnowledgePage, KnowledgePageOrigin, KnowledgeStore, PageWrite};
 use cas_types::ShareScope;
 
 /// Metadata key holding the high-water mark for knowledge pushes.
@@ -128,6 +128,7 @@ impl KnowledgePageRecord {
     /// machine lives in *their* local cache, so this machine has to embed the
     /// page itself before the semantic channel can retrieve it.
     pub fn into_page_write(self) -> PageWrite {
+        let origin_project_id = self.project_canonical_id.clone();
         let mut page = KnowledgePage::new(self.id, self.page_type, self.title);
         // Trust the sender's canonical path rather than recomputing it: a
         // future change to the slug rules must not silently fork a page into
@@ -139,6 +140,8 @@ impl KnowledgePageRecord {
         page.created_at = self.created_at;
         page.updated_at = self.updated_at;
         page.pending_embedding = true;
+        page.origin = KnowledgePageOrigin::CloudPull;
+        page.origin_project_id = origin_project_id;
         PageWrite {
             page,
             body: self.body,
@@ -355,9 +358,9 @@ impl CloudSyncer {
             // merged on `rel_path` (knowledge_store.rs) and written to both
             // cas.db and disk, so a foreign page with a colliding path
             // OVERWRITES the local one unless it happens to be locked — and
-            // afterwards it is unattributable, because `knowledge_pages` has
-            // no project column to audit. Detection after the fact cannot undo
-            // that; the only safe place to refuse is here.
+            // durable attribution now lets doctor detect one after the fact,
+            // but detection cannot undo an overwrite; the only safe place to
+            // refuse is still here.
             if !super::pull::entity_matches_project(&raw, &project_id, "knowledge page") {
                 report.refused_foreign += 1;
                 report.refused_foreign_ids.push(
@@ -683,6 +686,10 @@ mod tests {
             .expect("push payload must be gzip");
         let payload: serde_json::Value = serde_json::from_slice(&raw).unwrap();
         let pushed = payload[KNOWLEDGE_ENTITY].as_array().unwrap()[0].clone();
+        let expected_origin_project_id = pushed["project_canonical_id"]
+            .as_str()
+            .expect("push wire row must carry its project identity")
+            .to_string();
         assert_eq!(
             pushed["body"].as_str().unwrap(),
             body,
@@ -702,14 +709,18 @@ mod tests {
 
         let pull_root = tempfile::tempdir().unwrap();
         let pull_path = pull_root.path().to_path_buf();
-        let landed = tokio::task::spawn_blocking(move || {
+        let (landed, origin, origin_project_id) = tokio::task::spawn_blocking(move || {
             let store = SqliteKnowledgeStore::open(&pull_path).unwrap();
             let syncer = syncer(Some(&pull_endpoint), &pull_path);
             let report = syncer.pull_knowledge_pages(&store).unwrap();
             assert_eq!(report.applied, 1, "errors: {:?}", report.errors);
             let page = store.get_page_by_rel_path("architecture/build-system.md");
             let page = page.unwrap().expect("rel_path identity must be preserved");
-            store.read_body(&page.rel_path).unwrap()
+            (
+                store.read_body(&page.rel_path).unwrap(),
+                page.origin,
+                page.origin_project_id,
+            )
         })
         .await
         .unwrap();
@@ -718,13 +729,20 @@ mod tests {
             landed, body,
             "the pulled body must be byte-identical to the pushed one"
         );
+        assert_eq!(origin, KnowledgePageOrigin::CloudPull);
+        assert_eq!(
+            origin_project_id.as_deref(),
+            Some(expected_origin_project_id.as_str()),
+            "pull provenance must retain the exact project id accepted by the ingest guard"
+        );
     }
 
     /// The contamination case, end to end. A foreign page whose `rel_path`
     /// COLLIDES with a local page is the dangerous one: pages merge on
     /// rel_path and are written to both cas.db and disk, so before this guard
-    /// it silently overwrote the local body and left nothing to audit —
-    /// `knowledge_pages` has no project column.
+    /// it silently overwrote the local body. Durable provenance gives doctor a
+    /// second line of defence, but cannot restore the body, so ingest must
+    /// still refuse before commit.
     #[tokio::test]
     async fn a_foreign_project_page_is_refused_at_ingest_and_never_written() {
         use wiremock::matchers::{method, path};

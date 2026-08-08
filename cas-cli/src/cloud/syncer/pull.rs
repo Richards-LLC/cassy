@@ -77,7 +77,7 @@ pub(crate) fn build_scoped_pull_url_with(
 /// The equality is deliberately byte-exact — see the protocol invariant in
 /// `docs/`/ARCHITECTURE and `canonical_id_equality_is_byte_exact_by_protocol`
 /// below. Normalizing here would silently merge two distinct projects.
-pub(super) fn entity_matches_project(
+pub(crate) fn entity_matches_project(
     raw: &serde_json::Value,
     current_project_id: &str,
     entity_kind: &str,

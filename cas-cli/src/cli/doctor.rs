@@ -780,7 +780,7 @@ fn output_foreign_rows_detail(
     let mut out = std::io::stdout();
     let mut fmt = Formatter::stdout(&mut out, theme);
 
-    fmt.subheading("cross-project task rows")?;
+    fmt.subheading("cross-project rows")?;
     fmt.write_muted(&"─".repeat(50))?;
     fmt.newline()?;
     fmt.write_muted(&format!(
@@ -855,6 +855,48 @@ fn output_foreign_rows_detail(
                 truncate(&c.local_title, 45),
                 c.other_project,
                 truncate(&c.other_title, 45)
+            ))?;
+            fmt.newline()?;
+        }
+    }
+
+    fmt.newline()?;
+    fmt.subheading("knowledge-page attribution")?;
+    fmt.write_muted(&format!(
+        "{} local page row(s) checked by durable origin + the cloud-pull project predicate",
+        report.local_knowledge_page_count
+    ))?;
+    fmt.newline()?;
+    if report.foreign_knowledge_pages.is_empty() {
+        fmt.success("no cloud-pulled pages attributed to another project")?;
+    } else {
+        fmt.warning(&format!(
+            "{} foreign cloud-pulled knowledge page(s)",
+            report.foreign_knowledge_pages.len()
+        ))?;
+        for page in &report.foreign_knowledge_pages {
+            fmt.write_raw(&format!(
+                "    [{}] {} ({}) → {}",
+                page.id,
+                truncate(&page.title, 55),
+                page.rel_path,
+                page.origin_project_id.as_deref().unwrap_or("<missing>")
+            ))?;
+            fmt.newline()?;
+        }
+    }
+    if !report.unattributed_knowledge_pages.is_empty() {
+        fmt.warning(&format!(
+            "{} knowledge page(s) have unauditable provenance",
+            report.unattributed_knowledge_pages.len()
+        ))?;
+        for page in &report.unattributed_knowledge_pages {
+            fmt.write_raw(&format!(
+                "    [{}] {} ({}) — {}",
+                page.id,
+                truncate(&page.title, 55),
+                page.rel_path,
+                page.reason
             ))?;
             fmt.newline()?;
         }

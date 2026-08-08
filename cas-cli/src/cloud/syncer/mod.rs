@@ -13,6 +13,7 @@ use crate::types::{Entry, Rule, Skill};
 mod knowledge;
 pub use knowledge::{KNOWLEDGE_ENTITY, KnowledgePageRecord, KnowledgePullReport, knowledge_share_scope};
 mod pull;
+pub(crate) use pull::entity_matches_project;
 mod push;
 mod team_push;
 

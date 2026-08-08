@@ -57,3 +57,4 @@ pub use syncer::{
     KnowledgePageRecord, KnowledgePullReport, SyncConflict, SyncResult, TeamMemoriesResponse,
     TeamProject, TeamProjectsResponse, knowledge_share_scope,
 };
+pub(crate) use syncer::entity_matches_project;

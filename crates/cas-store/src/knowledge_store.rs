@@ -64,6 +64,8 @@ CREATE TABLE IF NOT EXISTS knowledge_pages (
     snippet TEXT NOT NULL DEFAULT '',
     locked INTEGER NOT NULL DEFAULT 0,
     sources_json TEXT NOT NULL DEFAULT '[]',
+    origin TEXT NOT NULL DEFAULT 'local' CHECK (origin IN ('local', 'cloud_pull')),
+    origin_project_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     pending_embedding INTEGER NOT NULL DEFAULT 1
@@ -110,6 +112,8 @@ pub const KNOWLEDGE_SCHEMA_STATEMENTS: &[&str] = &[
         snippet TEXT NOT NULL DEFAULT '',
         locked INTEGER NOT NULL DEFAULT 0,
         sources_json TEXT NOT NULL DEFAULT '[]',
+        origin TEXT NOT NULL DEFAULT 'local' CHECK (origin IN ('local', 'cloud_pull')),
+        origin_project_id TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         pending_embedding INTEGER NOT NULL DEFAULT 1
@@ -136,6 +140,17 @@ pub const KNOWLEDGE_SCHEMA_STATEMENTS: &[&str] = &[
         content='',
         contentless_delete=1
     )",
+];
+
+/// Upgrade statements for stores created before page provenance was durable.
+///
+/// SQLite applies the `local` default to every existing row while adding the
+/// column. That is the only honest backfill: those pages predate cloud-pull
+/// attribution, and global knowledge stores have no project id to synthesize.
+pub const KNOWLEDGE_PAGE_ATTRIBUTION_STATEMENTS: &[&str] = &[
+    "ALTER TABLE knowledge_pages ADD COLUMN origin TEXT NOT NULL DEFAULT 'local'
+        CHECK (origin IN ('local', 'cloud_pull'))",
+    "ALTER TABLE knowledge_pages ADD COLUMN origin_project_id TEXT",
 ];
 
 // ── Hashing ─────────────────────────────────────────────────────────────
@@ -316,6 +331,13 @@ pub struct KnowledgePage {
     pub locked: bool,
     /// Source file paths this page was distilled from (provenance).
     pub sources: Vec<String>,
+    /// How this copy entered the local knowledge store.
+    pub origin: KnowledgePageOrigin,
+    /// Canonical project id asserted by the cloud row that produced this copy.
+    /// Local pages deliberately leave this empty: global knowledge stores have
+    /// no project identity, so inventing one during migration would be false
+    /// provenance.
+    pub origin_project_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     /// Whether the page still needs an embedding computed (cloud-gated, T5).
@@ -341,9 +363,43 @@ impl KnowledgePage {
             snippet: String::new(),
             locked: false,
             sources: Vec::new(),
+            origin: KnowledgePageOrigin::Local,
+            origin_project_id: None,
             created_at: now,
             updated_at: now,
             pending_embedding: true,
+        }
+    }
+}
+
+/// Durable provenance for a knowledge-page row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnowledgePageOrigin {
+    /// Created on this machine by distillation, migration, or a manual write.
+    Local,
+    /// Applied from the cloud knowledge-pull path.
+    CloudPull,
+}
+
+impl KnowledgePageOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::CloudPull => "cloud_pull",
+        }
+    }
+}
+
+impl FromStr for KnowledgePageOrigin {
+    type Err = StoreError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "local" => Ok(Self::Local),
+            "cloud_pull" => Ok(Self::CloudPull),
+            other => Err(StoreError::Parse(format!(
+                "invalid knowledge page origin '{other}'; expected local or cloud_pull"
+            ))),
         }
     }
 }
@@ -711,6 +767,17 @@ impl SqliteKnowledgeStore {
             snippet: row.get("snippet")?,
             locked: row.get::<_, i64>("locked")? != 0,
             sources: Self::parse_sources(&row.get::<_, String>("sources_json")?),
+            origin: row
+                .get::<_, String>("origin")?
+                .parse()
+                .map_err(|e: StoreError| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?,
+            origin_project_id: row.get("origin_project_id")?,
             created_at: Self::parse_datetime(&row.get::<_, String>("created_at")?),
             updated_at: Self::parse_datetime(&row.get::<_, String>("updated_at")?),
             pending_embedding: row.get::<_, i64>("pending_embedding")? != 0,
@@ -733,7 +800,8 @@ impl SqliteKnowledgeStore {
     }
 
     const PAGE_COLUMNS: &'static str = "id, page_type, title, rel_path, snippet, locked, \
-                                        sources_json, created_at, updated_at, pending_embedding";
+                                        sources_json, origin, origin_project_id, created_at, \
+                                        updated_at, pending_embedding";
 
     const SOURCE_COLUMNS: &'static str =
         "file_path, blake3, size, status, ingest_error, created_at, updated_at";
@@ -896,6 +964,27 @@ impl KnowledgeStore for SqliteKnowledgeStore {
                     "knowledge page id must not be empty".to_string(),
                 ));
             }
+            match write.page.origin {
+                KnowledgePageOrigin::Local if write.page.origin_project_id.is_some() => {
+                    return Err(StoreError::Parse(format!(
+                        "local knowledge page {} must not claim an origin project id",
+                        write.page.id
+                    )));
+                }
+                KnowledgePageOrigin::CloudPull
+                    if write
+                        .page
+                        .origin_project_id
+                        .as_deref()
+                        .is_none_or(str::is_empty) =>
+                {
+                    return Err(StoreError::Parse(format!(
+                        "cloud-pulled knowledge page {} requires an origin project id",
+                        write.page.id
+                    )));
+                }
+                _ => {}
+            }
         }
 
         // 2. Stage every body as a temp file with NO database lock held —
@@ -959,13 +1048,15 @@ impl KnowledgeStore for SqliteKnowledgeStore {
                 .query_row(
                     "INSERT INTO knowledge_pages
                         (id, page_type, title, rel_path, snippet, locked, sources_json,
-                         created_at, updated_at, pending_embedding)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                         origin, origin_project_id, created_at, updated_at, pending_embedding)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                      ON CONFLICT(rel_path) DO UPDATE SET
                         page_type = excluded.page_type,
                         title = excluded.title,
                         snippet = excluded.snippet,
                         sources_json = excluded.sources_json,
+                        origin = excluded.origin,
+                        origin_project_id = excluded.origin_project_id,
                         updated_at = excluded.updated_at,
                         pending_embedding = excluded.pending_embedding
                      WHERE knowledge_pages.locked = 0
@@ -978,6 +1069,8 @@ impl KnowledgeStore for SqliteKnowledgeStore {
                         page.snippet,
                         page.locked as i64,
                         sources_json,
+                        page.origin.as_str(),
+                        page.origin_project_id,
                         created,
                         updated,
                         page.pending_embedding as i64,
@@ -1523,11 +1616,33 @@ mod tests {
         let fetched = store.get_page(&p.id).unwrap();
         assert_eq!(fetched.title, "Build System");
         assert_eq!(fetched.sources, vec!["Cargo.toml".to_string()]);
+        assert_eq!(fetched.origin, KnowledgePageOrigin::Local);
+        assert_eq!(fetched.origin_project_id, None);
         assert!(fetched.pending_embedding);
         assert_eq!(store.list_pending_embedding(10).unwrap().len(), 1);
 
         let source = store.get_source("Cargo.toml").unwrap().unwrap();
         assert_eq!(source.status, SourceStatus::Ingested);
+    }
+
+    #[test]
+    fn cloud_pull_origin_requires_a_nonempty_project_identity() {
+        let (_temp, store) = store();
+        let mut p = page(&store, "architecture", "Remote", &[]);
+        p.origin = KnowledgePageOrigin::CloudPull;
+        let err = store
+            .commit_ingest(&IngestBatch {
+                pages: vec![PageWrite {
+                    page: p,
+                    body: "# Remote".to_string(),
+                }],
+                ..IngestBatch::default()
+            })
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("requires an origin project id"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

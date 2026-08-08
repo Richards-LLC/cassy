@@ -320,6 +320,19 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
             "skills",
             "agents",
             "task_leases",
+            // Structural git-history index (EPIC cas-6212, spec §10.1). Listed
+            // because their ABSENCE is otherwise indistinguishable from an
+            // empty index: `action=history` degrades to "no results" either
+            // way, so a store that never ran the migrations would look merely
+            // quiet rather than broken. Every one of these is created
+            // unconditionally by a migration, so a missing entry means the
+            // store is behind on schema — which is exactly what this line is
+            // for.
+            "history_commits",
+            "history_commit_files",
+            "history_index_state",
+            "history_docs",
+            "history_commit_symbols",
         ];
         let missing_tables: Vec<&str> = expected_tables
             .iter()
@@ -422,6 +435,16 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     checks.push(embedding_drain_check(gather_embedding_drain_state(
         &cas_root,
     )));
+
+    // Check 4d: the structural git-history index (EPIC cas-6212 / cas-35b8,
+    // spec §10.1 — "never silently stale").
+    //
+    // The index answers queries whether or not it is current, so staleness has
+    // no natural symptom: a thin result set from a week-old watermark looks
+    // exactly like a repository where nothing happened. This line is where that
+    // difference becomes visible, in commits AND seconds, alongside the
+    // measured provenance coverage the answers are only as good as.
+    checks.push(history_index_check(gather_history_index_state(&cas_root)));
 
     // Check 5: Config
     match Config::load(&cas_root) {
@@ -1292,6 +1315,297 @@ fn embedding_drain_check(state: EmbeddingDrainState) -> Check {
     }
 }
 
+/// What `cas doctor` needs to say something true about the structural
+/// git-history index (EPIC cas-6212 / cas-35b8, spec §10.1).
+///
+/// Gathered separately from the verdict so the verdict is a pure function of
+/// observed state: staleness can then be *seeded* in a test rather than waited
+/// for, which is the only way to assert "a stale index is loudly visible"
+/// without a test that sleeps.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct HistoryIndexHealth {
+    /// The read itself failed. Reported rather than skipped: an unreadable
+    /// health signal reads as health, which is the exact failure §10.1 exists
+    /// to prevent.
+    error: Option<String>,
+    /// `index_history` — whether the daemon arm runs at all.
+    enabled: bool,
+    /// Commits between the watermark and HEAD. `None` when the watermark is
+    /// unusable (never run, or no longer an ancestor of HEAD) — which is a
+    /// different fact from 0 and must not be rendered as "fresh".
+    lag_commits: Option<i64>,
+    /// Wall-clock age of the watermark commit relative to HEAD, in seconds.
+    /// `None` when it cannot be established honestly.
+    lag_seconds: Option<i64>,
+    /// False means the watermark is not on HEAD's ancestry — §10.2 row 3, a
+    /// re-run condition, never a silent gap.
+    watermark_is_ancestor: bool,
+    /// Whether the initial backfill ever finished.
+    backfill_complete: bool,
+    /// Has the git arm ever produced a watermark at all?
+    ever_indexed: bool,
+    indexed_commits: i64,
+    repo_commits: i64,
+    /// `(source, last_error)` for every ledger row carrying a failure — git,
+    /// github, changelog, embeddings. Ordered as gathered; the check names at
+    /// most three, per §10.1.
+    failing_sources: Vec<(String, String)>,
+    /// One daemon tick, read from the daemon's own default rather than
+    /// hardcoded, so a retuned interval cannot leave doctor asserting a
+    /// threshold the daemon does not use.
+    tick_interval_secs: u64,
+    /// M5's measured ledger (spec §10.1): the high-confidence figure and the
+    /// any-edge figure. Both, deliberately — publishing only the second makes
+    /// a substring-grade corpus look solved.
+    provenance_coverage_pct: Option<f64>,
+    provenance_any_coverage_pct: Option<f64>,
+    /// Why the coverage measurement is incomplete, when it is. Carried rather
+    /// than flattened to a bool because M5 sets this for *partial* measurement
+    /// too — a store that can read only some edges must not publish a number
+    /// that reads as complete.
+    provenance_unmeasurable_reason: Option<String>,
+}
+
+fn gather_history_index_state(cas_root: &Path) -> HistoryIndexHealth {
+    let tick_interval_secs = crate::mcp::daemon::EmbeddedDaemonConfig::default()
+        .history_index_interval_secs;
+    let enabled = crate::mcp::daemon::EmbeddedDaemonConfig::default().index_history;
+    let base = HistoryIndexHealth {
+        enabled,
+        tick_interval_secs,
+        ..Default::default()
+    };
+
+    let repo_root = match crate::history::repo_root_for(cas_root) {
+        Ok(root) => root,
+        Err(e) => {
+            return HistoryIndexHealth {
+                error: Some(e.to_string()),
+                ..base
+            };
+        }
+    };
+
+    let status = match crate::history::status(cas_root, &repo_root) {
+        Ok(status) => status,
+        Err(e) => {
+            return HistoryIndexHealth {
+                error: Some(e.to_string()),
+                ..base
+            };
+        }
+    };
+
+    // Every ledger row that carries a failure, named by source. `last_error` is
+    // the declared-boundary channel (§10.2 row 2): GitHub being absent is not a
+    // git-index failure, and conflating them would hide both.
+    let failing_sources: Vec<(String, String)> = [
+        ("git", status.state.as_ref()),
+        ("github", status.github_state.as_ref()),
+        ("changelog", status.changelog_state.as_ref()),
+    ]
+    .into_iter()
+    .filter_map(|(source, state)| {
+        state
+            .and_then(|s| s.last_error.clone())
+            .map(|err| (source.to_string(), err))
+    })
+    .collect();
+
+    // Wall-clock staleness: how far behind HEAD the watermark's commit sits.
+    // Only meaningful while the watermark is still on HEAD's ancestry — the
+    // same precondition `lag_commits` uses, applied to the clock.
+    let lag_seconds = match (
+        status.state.as_ref().and_then(|s| s.last_indexed_sha.as_ref()),
+        status.watermark_is_ancestor,
+    ) {
+        (Some(sha), true) => match (
+            crate::history::commit_epoch(&repo_root, sha),
+            crate::history::commit_epoch(&repo_root, &status.head_sha),
+        ) {
+            (Some(from), Some(to)) => Some((to - from).max(0)),
+            _ => None,
+        },
+        _ => None,
+    };
+
+    let coverage = cas_store::SqliteHistoryStore::open(cas_root)
+        .ok()
+        .and_then(|store| {
+            use cas_store::HistoryStore;
+            store.provenance_coverage(&status.repository).ok()
+        });
+
+    HistoryIndexHealth {
+        error: None,
+        lag_commits: status.lag_commits,
+        lag_seconds,
+        watermark_is_ancestor: status.watermark_is_ancestor,
+        backfill_complete: status
+            .state
+            .as_ref()
+            .is_some_and(|s| s.backfill_complete),
+        ever_indexed: status
+            .state
+            .as_ref()
+            .is_some_and(|s| s.last_indexed_sha.is_some()),
+        indexed_commits: status.indexed_commits,
+        repo_commits: status.repo_commits,
+        failing_sources,
+        provenance_coverage_pct: coverage.as_ref().and_then(|c| c.coverage_pct),
+        provenance_any_coverage_pct: coverage.as_ref().and_then(|c| c.any_coverage_pct),
+        provenance_unmeasurable_reason: match coverage.as_ref() {
+            Some(c) => c.unmeasurable_reason.clone(),
+            // No store at all is itself a reason, and a silent None here would
+            // render as a confident "0%".
+            None => Some("history store unreadable".to_string()),
+        },
+        ..base
+    }
+}
+
+/// The §10.1 verdict. Pure, so staleness is seeded rather than waited for.
+fn history_index_check(state: HistoryIndexHealth) -> Check {
+    let name = "code history index".to_string();
+
+    // Fail loud rather than silently reporting health — the same reason the
+    // supervisor-relay and delivery-retry checks above have this arm.
+    if let Some(error) = &state.error {
+        return Check {
+            name,
+            status: CheckStatus::Warning,
+            message: format!("cannot check code history index: {error}"),
+        };
+    }
+
+    if !state.enabled {
+        return Check {
+            name,
+            status: CheckStatus::Warning,
+            message: "code history indexing is disabled; `action=history` will keep returning \
+                      nothing and provenance cannot be measured"
+                .to_string(),
+        };
+    }
+
+    // Provenance is reported on every arm below, because a coverage figure is
+    // only honest next to the freshness of the index it was measured over.
+    let provenance = match (
+        state.provenance_coverage_pct,
+        state.provenance_any_coverage_pct,
+        &state.provenance_unmeasurable_reason,
+    ) {
+        // Both figures, always together. A partial-measurement reason is
+        // appended rather than suppressing the numbers: the figures are real,
+        // they just are not the whole picture, and saying so is the point.
+        (Some(high), Some(any), reason) => format!(
+            "; provenance {high:.1}% high-confidence, {any:.1}% any-edge{}",
+            reason
+                .as_deref()
+                .map(|r| format!(" (partial: {})", truncate(r, 60)))
+                .unwrap_or_default()
+        ),
+        (Some(high), None, _) => format!("; provenance {high:.1}% high-confidence"),
+        // Unmeasurable is NOT 0%. Rendering it as a number would invent a fact,
+        // which is the single dishonesty §10.1 names by hand.
+        (None, _, reason) => format!(
+            "; provenance coverage unmeasurable{}",
+            reason
+                .as_deref()
+                .map(|r| format!(" ({})", truncate(r, 60)))
+                .unwrap_or_default()
+        ),
+    };
+
+    // A named failure outranks staleness: it is usually the *reason* for the
+    // staleness, and summarising it as lag would bury the cause.
+    if !state.failing_sources.is_empty() {
+        let worst = state
+            .failing_sources
+            .iter()
+            .take(3)
+            .map(|(source, err)| format!("{source}: {}", truncate(err, 80)))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Check {
+            name,
+            status: CheckStatus::Warning,
+            message: format!(
+                "{} source(s) reporting errors — {worst}{provenance}",
+                state.failing_sources.len()
+            ),
+        };
+    }
+
+    if !state.ever_indexed {
+        return Check {
+            name,
+            status: CheckStatus::Warning,
+            message: format!(
+                "never indexed: 0 of {} commit(s) — run `cas history backfill`{provenance}",
+                state.repo_commits
+            ),
+        };
+    }
+
+    // §10.2 row 3. `lag_commits: None` means the watermark is no longer on
+    // HEAD's ancestry (history rewritten, or a branch switch). The declared
+    // behaviour is a re-run, and the one thing it must never be is invisible.
+    if !state.watermark_is_ancestor || state.lag_commits.is_none() {
+        return Check {
+            name,
+            status: CheckStatus::Warning,
+            message: format!(
+                "watermark is not an ancestor of HEAD — the indexed range and the current \
+                 branch have diverged, so lag is unknown rather than 0. The next pass \
+                 re-runs the backfill; run `cas history backfill` to close it \
+                 now{provenance}"
+            ),
+        };
+    }
+
+    if !state.backfill_complete {
+        return Check {
+            name,
+            status: CheckStatus::Warning,
+            message: format!(
+                "backfill incomplete: {} of {} commit(s) indexed{provenance}",
+                state.indexed_commits, state.repo_commits
+            ),
+        };
+    }
+
+    let lag_commits = state.lag_commits.unwrap_or(0);
+    let lag_secs = state.lag_seconds.unwrap_or(0);
+
+    // "Under one tick interval" is what separates an index that is *settling*
+    // from one that is *behind*. A non-zero lag younger than a tick is simply
+    // the window between commits arriving and the daemon's next pass.
+    if lag_commits > 0 && lag_secs >= state.tick_interval_secs as i64 {
+        return Check {
+            name,
+            status: CheckStatus::Warning,
+            message: format!(
+                "index is behind: {lag_commits} commit(s) and {} un-indexed, past the {}s \
+                 daemon tick. Run `cas history backfill` to catch up now{provenance}",
+                format_lag(lag_secs),
+                state.tick_interval_secs
+            ),
+        };
+    }
+
+    Check {
+        name,
+        status: CheckStatus::Ok,
+        message: format!(
+            "{} of {} commit(s) indexed, {lag_commits} behind ({}){provenance}",
+            state.indexed_commits,
+            state.repo_commits,
+            format_lag(lag_secs)
+        ),
+    }
+}
+
 fn format_lag(secs: i64) -> String {
     if secs == i64::MAX {
         return "never".to_string();
@@ -1904,6 +2218,256 @@ mod tests {
 
         let check = symbol_index_check(state, chrono::Utc::now());
         assert!(matches!(check.status, CheckStatus::Warning));
+    }
+
+    // ===================================================================
+    // Code history index check (EPIC cas-6212 / cas-35b8, spec §10.1)
+    //
+    // The verdict is a pure function of gathered state, so every staleness
+    // shape below is SEEDED rather than waited for. A test that slept for a
+    // tick interval to observe staleness would be the slowest test in the
+    // suite and would still only prove one of these arms.
+    // ===================================================================
+
+    /// The shape a healthy, caught-up index has. Each test below mutates one
+    /// field, so what it is actually asserting is unambiguous.
+    fn healthy_history() -> HistoryIndexHealth {
+        HistoryIndexHealth {
+            error: None,
+            enabled: true,
+            lag_commits: Some(0),
+            lag_seconds: Some(0),
+            watermark_is_ancestor: true,
+            backfill_complete: true,
+            ever_indexed: true,
+            indexed_commits: 2_478,
+            repo_commits: 2_478,
+            failing_sources: vec![],
+            tick_interval_secs: 300,
+            provenance_coverage_pct: Some(8.9),
+            provenance_any_coverage_pct: Some(23.1),
+            provenance_unmeasurable_reason: None,
+        }
+    }
+
+    /// AC1: lag is visible in BOTH commits and seconds, per §10.1.
+    #[test]
+    fn history_index_check_reports_lag_in_commits_and_seconds() {
+        let check = history_index_check(healthy_history());
+        assert!(matches!(check.status, CheckStatus::Ok), "{}", check.message);
+        assert!(check.message.contains("2478 of 2478"), "{}", check.message);
+        assert!(check.message.contains("0 behind"), "{}", check.message);
+    }
+
+    /// AC1, the load-bearing one: a stale index must be LOUD. Seeded two days
+    /// behind, well past the 300s tick.
+    #[test]
+    fn history_index_check_warns_loudly_on_a_seeded_stale_index() {
+        let check = history_index_check(HistoryIndexHealth {
+            lag_commits: Some(41),
+            lag_seconds: Some(2 * 24 * 60 * 60),
+            indexed_commits: 2_437,
+            ..healthy_history()
+        });
+        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        assert!(check.message.contains("41 commit(s)"), "{}", check.message);
+        assert!(check.message.contains("2d old"), "{}", check.message);
+        // The remedy is named, not implied.
+        assert!(
+            check.message.contains("cas history backfill"),
+            "{}",
+            check.message
+        );
+    }
+
+    /// The other half of that threshold: lag younger than one tick is the
+    /// daemon's normal window, not a fault. Without this, doctor would cry
+    /// wolf on every healthy repository between ticks.
+    #[test]
+    fn history_index_check_is_ok_while_lag_is_younger_than_one_tick() {
+        let check = history_index_check(HistoryIndexHealth {
+            lag_commits: Some(3),
+            lag_seconds: Some(90),
+            ..healthy_history()
+        });
+        assert!(matches!(check.status, CheckStatus::Ok), "{}", check.message);
+    }
+
+    /// §10.2 row 3, surfaced. `lag_commits: None` means the watermark left
+    /// HEAD's ancestry — the one thing that must never render as "0 behind".
+    #[test]
+    fn history_index_check_never_renders_a_diverged_watermark_as_fresh() {
+        let check = history_index_check(HistoryIndexHealth {
+            lag_commits: None,
+            lag_seconds: None,
+            watermark_is_ancestor: false,
+            ..healthy_history()
+        });
+        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        assert!(
+            check.message.contains("not an ancestor"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("unknown rather than 0"),
+            "lag must be declared unknown, not implied fresh: {}",
+            check.message
+        );
+    }
+
+    /// §10.2 row 2: a source-level failure outranks staleness, because it is
+    /// usually the cause. Top-3 offenders named, per §10.1.
+    #[test]
+    fn history_index_check_names_the_offending_sources() {
+        let check = history_index_check(HistoryIndexHealth {
+            failing_sources: vec![
+                ("github".to_string(), "gh: not authenticated".to_string()),
+                ("changelog".to_string(), "no CHANGELOG.md".to_string()),
+            ],
+            ..healthy_history()
+        });
+        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        assert!(check.message.contains("github"), "{}", check.message);
+        assert!(
+            check.message.contains("not authenticated"),
+            "the declared boundary must be quoted, not summarised: {}",
+            check.message
+        );
+        assert!(check.message.contains("changelog"), "{}", check.message);
+    }
+
+    /// An unreadable health signal reads as health. This arm is why the check
+    /// never silently skips.
+    #[test]
+    fn history_index_check_reports_read_errors_rather_than_skipping() {
+        let check = history_index_check(HistoryIndexHealth {
+            error: Some("no such table: history_commits".to_string()),
+            ..healthy_history()
+        });
+        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        assert!(
+            check
+                .message
+                .starts_with("cannot check code history index:"),
+            "{}",
+            check.message
+        );
+    }
+
+    #[test]
+    fn history_index_check_warns_when_never_indexed() {
+        let check = history_index_check(HistoryIndexHealth {
+            ever_indexed: false,
+            backfill_complete: false,
+            indexed_commits: 0,
+            lag_commits: None,
+            ..healthy_history()
+        });
+        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        assert!(check.message.contains("never indexed"), "{}", check.message);
+    }
+
+    #[test]
+    fn history_index_check_warns_while_the_backfill_is_incomplete() {
+        let check = history_index_check(HistoryIndexHealth {
+            backfill_complete: false,
+            indexed_commits: 1_200,
+            ..healthy_history()
+        });
+        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        assert!(
+            check.message.contains("backfill incomplete"),
+            "{}",
+            check.message
+        );
+        assert!(check.message.contains("1200 of 2478"), "{}", check.message);
+    }
+
+    /// §10.1's actual demand: BOTH coverage figures, on every arm. Reporting
+    /// only the any-edge number would make a substring-grade corpus look
+    /// solved, which is the specific dishonesty this milestone exists to stop.
+    #[test]
+    fn history_index_check_publishes_both_coverage_figures() {
+        let ok = history_index_check(healthy_history());
+        assert!(
+            ok.message.contains("8.9% high-confidence"),
+            "{}",
+            ok.message
+        );
+        assert!(ok.message.contains("23.1% any-edge"), "{}", ok.message);
+
+        // ...and on a warning arm too, where it would be easiest to drop.
+        let stale = history_index_check(HistoryIndexHealth {
+            lag_commits: Some(41),
+            lag_seconds: Some(2 * 24 * 60 * 60),
+            ..healthy_history()
+        });
+        assert!(
+            stale.message.contains("8.9% high-confidence"),
+            "coverage must survive the stale arm: {}",
+            stale.message
+        );
+    }
+
+    /// Unmeasurable is not 0%. A store that cannot read the edges must say so
+    /// rather than publish a confident number it did not measure.
+    #[test]
+    fn history_index_check_says_unmeasurable_rather_than_zero_percent() {
+        let check = history_index_check(HistoryIndexHealth {
+            provenance_coverage_pct: None,
+            provenance_any_coverage_pct: None,
+            provenance_unmeasurable_reason: Some("no tasks table".to_string()),
+            ..healthy_history()
+        });
+        assert!(
+            check.message.contains("unmeasurable"),
+            "{}",
+            check.message
+        );
+        assert!(check.message.contains("no tasks table"), "{}", check.message);
+        assert!(
+            !check.message.contains("0.0%"),
+            "unmeasurable must never render as a number: {}",
+            check.message
+        );
+    }
+
+    /// A partial measurement keeps its figures but must be labelled — the
+    /// distinction M5 introduced and this surface has to preserve.
+    #[test]
+    fn history_index_check_labels_a_partial_measurement() {
+        let check = history_index_check(HistoryIndexHealth {
+            provenance_unmeasurable_reason: Some("commit_links unreadable".to_string()),
+            ..healthy_history()
+        });
+        assert!(check.message.contains("8.9% high-confidence"), "{}", check.message);
+        assert!(check.message.contains("partial:"), "{}", check.message);
+    }
+
+    /// The history tables are guarded by name, so a store that never ran the
+    /// migrations is distinguishable from one with an empty index.
+    #[test]
+    fn the_history_tables_are_in_the_expected_tables_guard() {
+        let source = include_str!("doctor.rs");
+        let guard = source
+            .split("let expected_tables = [")
+            .nth(1)
+            .expect("expected_tables literal");
+        let guard = guard.split("];").next().expect("guard body");
+        for table in [
+            "history_commits",
+            "history_commit_files",
+            "history_index_state",
+            "history_docs",
+            "history_commit_symbols",
+        ] {
+            assert!(
+                guard.contains(&format!("\"{table}\"")),
+                "{table} missing from expected_tables — a store without it would look merely \
+                 empty rather than unmigrated"
+            );
+        }
     }
 }
 

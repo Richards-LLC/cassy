@@ -558,68 +558,30 @@ fn query_structural_history(
     parse_git_log_nul_output(&raw)
 }
 
-/// Parse NUL-delimited `git log --name-status -z` output.
+/// Map NUL-delimited `git log --name-status -z` output onto codemap changes.
 ///
-/// Format: status\0path\0 (repeated), with empty lines between commits.
-/// Only keeps A (added) and D (deleted) entries. Renames show as A+D
-/// because we pass --no-renames.
+/// The wire-format parsing lives in [`crate::git_log::parse_name_status_z`],
+/// shared with the structural git-history walker (cas-7a21) so there is exactly
+/// one NUL-safe parser in the tree. What stays here is codemap-specific policy:
+/// keep only A/D/R, and deduplicate across commits because the caller wants a
+/// set of drifted paths, not a per-commit log.
 fn parse_git_log_nul_output(raw: &str) -> Option<Vec<CodemapChange>> {
     let mut changes = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
-    // Split on NUL; entries come in pairs: status, path
-    let parts: Vec<&str> = raw.split('\0').collect();
-    let mut i = 0;
-
-    while i < parts.len() {
-        let status = parts[i].trim_matches(|c: char| c == '\n' || c == '\r');
-        if status.is_empty() {
-            i += 1;
+    for entry in crate::git_log::parse_name_status_z(raw) {
+        // Renames are requested as A+D via `--no-renames`; an R can still
+        // arrive from the mtime-fallback path, and is preserved as-is.
+        if !matches!(entry.status.as_str(), "A" | "D" | "R") {
             continue;
         }
-
-        // We need at least one more part for the path
-        if i + 1 >= parts.len() {
-            break;
+        if seen.insert(format!("{}:{}", entry.status, entry.path)) {
+            changes.push(CodemapChange {
+                change_type: entry.status,
+                path: entry.path,
+                old_path: None,
+            });
         }
-
-        let path = parts[i + 1].trim();
-        if path.is_empty() {
-            i += 2;
-            continue;
-        }
-
-        // Deduplicate (same file may appear in multiple commits)
-        let key = format!("{status}:{path}");
-        if !seen.contains(&key) {
-            seen.insert(key);
-            match status {
-                "A" => {
-                    changes.push(CodemapChange {
-                        change_type: "A".to_string(),
-                        path: path.to_string(),
-                        old_path: None,
-                    });
-                }
-                "D" => {
-                    changes.push(CodemapChange {
-                        change_type: "D".to_string(),
-                        path: path.to_string(),
-                        old_path: None,
-                    });
-                }
-                s if s.starts_with('R') => {
-                    changes.push(CodemapChange {
-                        change_type: "R".to_string(),
-                        path: path.to_string(),
-                        old_path: None,
-                    });
-                }
-                _ => {}
-            }
-        }
-
-        i += 2;
     }
 
     Some(changes)

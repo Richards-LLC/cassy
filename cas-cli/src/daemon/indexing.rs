@@ -496,6 +496,7 @@ pub fn index_code_files_with(
 /// durable coverage/HEAD receipt.
 pub fn reconcile_code_tree(
     files: &[PathBuf],
+    roots: &[PathBuf],
     cas_root: &Path,
     force: bool,
 ) -> Result<CodeIndexResult, CasError> {
@@ -506,6 +507,29 @@ pub fn reconcile_code_tree(
 
     let mut by_repo: std::collections::HashMap<String, (PathBuf, HashSet<String>)> =
         std::collections::HashMap::new();
+    // Seed repositories from scan roots, not only from eligible files. An
+    // empty eligible set is still an authoritative full-tree snapshot and
+    // must retire every previously indexed row for that repository.
+    for root in roots {
+        let identity_probe = if root.is_dir() {
+            root.join(".cas-reconciliation-root")
+        } else {
+            root.clone()
+        };
+        let (repo_root, repository) = resolve_repository(&identity_probe);
+        by_repo.entry(repository).or_insert_with(|| {
+            (
+                repo_root.unwrap_or_else(|| {
+                    if root.is_dir() {
+                        root.clone()
+                    } else {
+                        root.parent().unwrap_or(root).to_path_buf()
+                    }
+                }),
+                HashSet::new(),
+            )
+        });
+    }
     for file in files {
         let (root, repository) = resolve_repository(file);
         let file_id = code_store.generate_file_id_for(&repository, &file.to_string_lossy());
@@ -622,15 +646,17 @@ pub fn run_code_index_cycle(
         }
     }
 
+    let initial_reconcile = watcher.take_initial_reconcile();
     let pending_files = watcher.take_pending();
-    if !pending_files.is_empty() {
-        let index_result = if watcher.take_initial_reconcile() {
-            reconcile_code_tree(&pending_files, cas_root, false)?
+    if initial_reconcile || !pending_files.is_empty() {
+        let index_result = if initial_reconcile {
+            reconcile_code_tree(&pending_files, watcher.watch_paths(), cas_root, false)?
         } else {
             index_code_files(&pending_files, cas_root)?
         };
         result.files_indexed = index_result.files_indexed;
         result.symbols_indexed = index_result.symbols_indexed;
+        result.files_deleted += index_result.files_deleted;
         result.errors.extend(index_result.errors);
     }
 

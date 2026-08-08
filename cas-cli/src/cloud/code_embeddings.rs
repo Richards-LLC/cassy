@@ -123,14 +123,19 @@ pub fn embed_pending_code(
             let hash = hashes
                 .get(id)
                 .ok_or_else(|| format!("missing queued content hash for {id}"))?;
-            state
-                .mark_vectorized(id, hash)
-                .map_err(|e| e.to_string())
-                .and_then(|updated| {
-                    updated
-                        .then_some(())
-                        .ok_or_else(|| format!("symbol {id} changed while embedding"))
-                })
+            match state.mark_vectorized(id, hash).map_err(|e| e.to_string())? {
+                true => Ok(()),
+                false => {
+                    // `drain_units` publishes before invoking this guard. A
+                    // concurrent reparse can therefore reject the queued hash
+                    // after the old vector reached LMDB. Remove that exact
+                    // isolated code key so semantic lookup cannot observe it.
+                    cache
+                        .delete(&code_symbol_key(id))
+                        .map_err(|e| e.to_string())?;
+                    Err(format!("symbol {id} changed while embedding"))
+                }
+            }
         };
         drain_units(embedder, &cache, &units, limiter, &mut mark, &mut report);
     }
@@ -192,5 +197,130 @@ mod tests {
         assert!(text.contains("src/cache.rs"));
         assert!(text.contains("TTL expires"));
         assert!(text.contains("remove_expired"));
+    }
+
+    struct ChangeSymbolDuringEmbed {
+        root: std::path::PathBuf,
+        changed: CodeSymbol,
+    }
+
+    impl wiremock::Respond for ChangeSymbolDuringEmbed {
+        fn respond(&self, _request: &wiremock::Request) -> wiremock::ResponseTemplate {
+            let code = SqliteCodeStore::open(&self.root).expect("open code store in race");
+            code.add_symbol(&self.changed)
+                .expect("publish changed symbol in race");
+            SqliteCodeVectorStore::open(&self.root)
+                .expect("open vector state in race")
+                .sync_file_symbols(
+                    std::slice::from_ref(&self.changed),
+                    std::slice::from_ref(&self.changed.id),
+                )
+                .expect("re-arm changed symbol in race");
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "embeddings": [[1.0, 0.0]] }))
+        }
+    }
+
+    #[tokio::test]
+    async fn changed_hash_during_embed_leaves_no_stale_queryable_vector() {
+        use cas_code::CodeFile;
+        use wiremock::{Mock, MockServer, matchers::method, matchers::path};
+
+        let server = MockServer::start().await;
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().to_path_buf();
+        let now = Utc::now();
+        let file = CodeFile {
+            id: "file-1".into(),
+            path: "src/cache.rs".into(),
+            repository: "repo".into(),
+            language: Language::Rust,
+            size: 20,
+            line_count: 1,
+            commit_hash: None,
+            content_hash: "file-old".into(),
+            created: now,
+            updated: now,
+            scope: "project".into(),
+        };
+        let old = CodeSymbol {
+            id: "sym-1".into(),
+            qualified_name: "cache::value".into(),
+            name: "value".into(),
+            kind: SymbolKind::Function,
+            language: Language::Rust,
+            file_path: file.path.clone(),
+            file_id: file.id.clone(),
+            line_start: 1,
+            line_end: 1,
+            source: "fn value() -> u8 { 1 }".into(),
+            documentation: None,
+            signature: Some("fn value() -> u8".into()),
+            parent_id: None,
+            repository: file.repository.clone(),
+            commit_hash: None,
+            created: now,
+            updated: now,
+            content_hash: "symbol-old".into(),
+            scope: "project".into(),
+        };
+        let mut changed = old.clone();
+        changed.source = "fn value() -> u8 { 2 }".into();
+        changed.content_hash = "symbol-new".into();
+
+        let code = SqliteCodeStore::open(&root).unwrap();
+        code.add_file(&file).unwrap();
+        code.add_symbol(&old).unwrap();
+        let state = SqliteCodeVectorStore::open(&root).unwrap();
+        state
+            .sync_file_symbols(std::slice::from_ref(&old), &[])
+            .unwrap();
+
+        Mock::given(method("POST"))
+            .and(path("/api/embeddings"))
+            .respond_with(ChangeSymbolDuringEmbed {
+                root: root.clone(),
+                changed,
+            })
+            .mount(&server)
+            .await;
+        let endpoint = server.uri();
+
+        let (report, cached, pending, knowledge_cache_exists) =
+            tokio::task::spawn_blocking(move || {
+                let embedder =
+                    KnowledgeEmbedder::new(&endpoint, "test-token").with_model("test-code", 2);
+                let report = embed_pending_code(&root, &embedder, &RateLimiter::cloud(), 10)
+                    .expect("code drain");
+                let cache = KnowledgeVectorCache::open_code(&root, embedder.meta()).unwrap();
+                let cached = cache.get(&code_symbol_key("sym-1")).unwrap();
+                let pending = SqliteCodeVectorStore::open(&root)
+                    .unwrap()
+                    .list_pending(10)
+                    .unwrap();
+                (
+                    report,
+                    cached,
+                    pending,
+                    KnowledgeVectorCache::cache_dir(&root).exists(),
+                )
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(report.embedded, 0);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|(id, error)| id == "sym-1" && error.contains("changed while embedding"))
+        );
+        assert_eq!(cached, None, "stale old-hash vector remained queryable");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].content_hash, "symbol-new");
+        assert!(
+            !knowledge_cache_exists,
+            "code race touched the knowledge namespace"
+        );
     }
 }

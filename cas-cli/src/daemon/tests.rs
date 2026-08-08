@@ -519,7 +519,13 @@ fn full_tree_reconciliation_retires_files_deleted_while_daemon_was_stopped() {
     let old = repo.join("src/old.rs");
     std::fs::write(&old, "pub fn removed_symbol() {}\n").expect("old file");
 
-    reconcile_code_tree(std::slice::from_ref(&old), &cas_root, false).expect("initial scan");
+    reconcile_code_tree(
+        std::slice::from_ref(&old),
+        std::slice::from_ref(&repo),
+        &cas_root,
+        false,
+    )
+    .expect("initial scan");
     let store = crate::store::open_code_store(&cas_root).expect("code store");
     let removed = store
         .search_symbols("%removed_symbol%", None, None, 10)
@@ -545,8 +551,13 @@ fn full_tree_reconciliation_retires_files_deleted_while_daemon_was_stopped() {
     std::fs::remove_file(&old).expect("delete while stopped");
     let new = repo.join("src/new.rs");
     std::fs::write(&new, "pub fn surviving_symbol() {}\n").expect("new file");
-    let result = reconcile_code_tree(std::slice::from_ref(&new), &cas_root, false)
-        .expect("restart reconciliation");
+    let result = reconcile_code_tree(
+        std::slice::from_ref(&new),
+        std::slice::from_ref(&repo),
+        &cas_root,
+        false,
+    )
+    .expect("restart reconciliation");
 
     assert_eq!(result.files_deleted, 1);
     let files = store.list_files("reconcile-repo", None).expect("files");
@@ -580,5 +591,93 @@ fn full_tree_reconciliation_retires_files_deleted_while_daemon_was_stopped() {
     assert_eq!(scan.eligible_files, 1);
     assert_eq!(scan.indexed_files, 1);
     assert_eq!(scan.failed_files, 0);
+    assert_eq!(scan.last_error, None);
+}
+
+#[test]
+fn full_tree_reconciliation_retires_repository_when_eligible_set_becomes_empty() {
+    use crate::cloud::embeddings::{EmbeddingMeta, KnowledgeVectorCache, code_symbol_key};
+    use crate::daemon::indexing::{reconcile_code_tree, run_code_index_cycle};
+    use crate::daemon::{CodeWatcher, WatcherConfig};
+    use cas_search::Bm25Index;
+    use cas_store::SqliteCodeVectorStore;
+
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let repo = temp.path().join("empty-repo");
+    std::fs::create_dir_all(repo.join("src")).expect("src dir");
+    std::fs::create_dir_all(repo.join(".git")).expect("git marker");
+    let cas_root = repo.join(".cas");
+    std::fs::create_dir_all(&cas_root).expect("cas root");
+    let old = repo.join("src/old.rs");
+    std::fs::write(&old, "pub fn retired_with_last_file() {}\n").expect("old file");
+
+    reconcile_code_tree(
+        std::slice::from_ref(&old),
+        std::slice::from_ref(&repo),
+        &cas_root,
+        false,
+    )
+    .expect("initial scan");
+    let store = crate::store::open_code_store(&cas_root).expect("code store");
+    let removed = store
+        .search_symbols("%retired_with_last_file%", None, None, 10)
+        .expect("removed symbol before delete")
+        .pop()
+        .expect("removed symbol was initially indexed");
+    let vectors = SqliteCodeVectorStore::open(&cas_root).expect("vector state");
+    let cache =
+        KnowledgeVectorCache::open_code(&cas_root, EmbeddingMeta::new("test", "test-code", 2))
+            .expect("code vector cache");
+    cache
+        .put(&code_symbol_key(&removed.id), &[1.0, 0.0])
+        .expect("seed code vector");
+    assert!(
+        vectors
+            .mark_vectorized(&removed.id, &removed.content_hash)
+            .expect("mark vectorized")
+    );
+
+    std::fs::remove_file(&old).expect("delete last eligible file");
+    let watcher = CodeWatcher::new(WatcherConfig {
+        watch_paths: vec![repo.clone()],
+        extensions: vec!["rs".to_string()],
+        debounce_ms: 20,
+        ignore_patterns: Vec::new(),
+    });
+    watcher.seed_initial(Vec::new());
+    let result = run_code_index_cycle(&watcher, &cas_root).expect("empty startup reconciliation");
+
+    assert_eq!(result.files_deleted, 1);
+    assert!(
+        store
+            .list_files("empty-repo", None)
+            .expect("files")
+            .is_empty()
+    );
+    assert!(
+        store
+            .search_symbols("%retired_with_last_file%", None, None, 10)
+            .expect("symbols")
+            .is_empty(),
+        "last symbol survived SQLite reconciliation"
+    );
+    let bm25 = Bm25Index::open(&crate::daemon::indexing::code_index_dir(&cas_root))
+        .expect("reopen code bm25 after retirement");
+    assert!(!bm25.exists(&removed.id).expect("bm25 retirement"));
+    assert_eq!(
+        cache
+            .get(&code_symbol_key(&removed.id))
+            .expect("cached vector retirement"),
+        None
+    );
+    assert_eq!(vectors.stats().expect("vector stats").eligible, 0);
+    let scan = vectors
+        .index_state("empty-repo")
+        .expect("scan receipt")
+        .expect("recorded scan receipt");
+    assert_eq!(
+        (scan.eligible_files, scan.indexed_files, scan.failed_files),
+        (0, 0, 0)
+    );
     assert_eq!(scan.last_error, None);
 }

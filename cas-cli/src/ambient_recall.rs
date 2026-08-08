@@ -6,7 +6,7 @@
 //! outside the caller's project/team/private boundary before ranking.  Source
 //! bodies stay in their authoritative stores.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -14,6 +14,11 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OpenFlags, params_from_iter};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::cloud::embeddings::{
+    EmbeddingMeta, KnowledgeEmbedder, KnowledgeVectorCache, VectorNamespace, code_symbol_key,
+    cosine_similarity, history_commit_key, history_doc_key, is_zero_vector,
+};
 
 /// Marker set by every CAS-owned nested model invocation (cas-fa38).
 pub(crate) const INTERNAL_LLM_ENV: &str = crate::internal_llm::INTERNAL_LLM_ENV;
@@ -264,6 +269,79 @@ pub(crate) trait RecallRetriever {
     ) -> Vec<EvidenceCandidate>;
 }
 
+/// Narrow query-time seam: a recall event may ask the provider for one vector,
+/// then must reuse that exact vector for every compatible namespace.
+trait RecallQueryEmbedder {
+    fn meta(&self) -> EmbeddingMeta;
+    fn embed_query(&self, query: &str) -> Option<Vec<f32>>;
+}
+
+impl RecallQueryEmbedder for KnowledgeEmbedder {
+    fn meta(&self) -> EmbeddingMeta {
+        KnowledgeEmbedder::meta(self)
+    }
+
+    fn embed_query(&self, query: &str) -> Option<Vec<f32>> {
+        self.embed_batch(&[query.to_string()])
+            .ok()?
+            .into_iter()
+            .next()
+    }
+}
+
+/// Optional authenticated semantic channel for ambient recall.
+///
+/// Cache discovery happens before the provider call. Logged-out installs and
+/// authenticated installs with no compatible, populated cache therefore make
+/// zero HTTP calls and create no vector directories. Knowledge and history
+/// share one cache; code remains in its isolated cache. All three consume the
+/// same query vector.
+struct SemanticRecallRetriever {
+    db_path: PathBuf,
+    embedder: Box<dyn RecallQueryEmbedder>,
+    shared_cache: Option<KnowledgeVectorCache>,
+    code_cache: Option<KnowledgeVectorCache>,
+}
+
+impl SemanticRecallRetriever {
+    fn existing(cas_root: &Path, config: &crate::cloud::CloudConfig) -> Option<Self> {
+        let embedder = KnowledgeEmbedder::from_config(config)?;
+        Self::with_embedder(cas_root, Box::new(embedder))
+    }
+
+    fn with_embedder(cas_root: &Path, embedder: Box<dyn RecallQueryEmbedder>) -> Option<Self> {
+        let db_path = cas_root.join("cas.db");
+        if !db_path.is_file() {
+            return None;
+        }
+        let meta = embedder.meta();
+        let shared_cache = KnowledgeVectorCache::open_existing(cas_root)
+            .ok()
+            .flatten()
+            .filter(|cache| {
+                cache.meta() == &meta
+                    && (cache.count_in(VectorNamespace::Knowledge).unwrap_or(0)
+                        + cache.count_in(VectorNamespace::History).unwrap_or(0))
+                        > 0
+            });
+        let code_cache = KnowledgeVectorCache::open_existing_code_read_only(cas_root)
+            .ok()
+            .flatten()
+            .filter(|cache| {
+                cache.meta() == &meta && cache.count_in(VectorNamespace::Code).unwrap_or(0) > 0
+            });
+        if shared_cache.is_none() && code_cache.is_none() {
+            return None;
+        }
+        Some(Self {
+            db_path,
+            embedder,
+            shared_cache,
+            code_cache,
+        })
+    }
+}
+
 /// Bounded lexical/structural fallback over the already-existing project DB.
 ///
 /// It opens `cas.db` read-only, applies team/project predicates in SQL before
@@ -326,6 +404,211 @@ impl RecallRetriever for SqliteRecallRetriever {
         candidates.truncate(limit);
         candidates
     }
+}
+
+#[derive(Debug)]
+struct SemanticRow {
+    namespace: VectorNamespace,
+    vector_key: String,
+    row: LocalRow,
+}
+
+impl RecallRetriever for SemanticRecallRetriever {
+    fn retrieve(
+        &self,
+        query: &RecallQuery,
+        scope: &ScopeGate,
+        limit: usize,
+    ) -> Vec<EvidenceCandidate> {
+        if query.canonical.trim().is_empty() || limit == 0 {
+            return Vec::new();
+        }
+        // Exactly one provider request per recall event. The returned vector
+        // is then fanned out locally; namespace count never multiplies cost.
+        let Some(query_vector) = self.embedder.embed_query(&query.canonical) else {
+            return Vec::new();
+        };
+        let meta = self.embedder.meta();
+        if is_zero_vector(&query_vector) || query_vector.len() != meta.dims {
+            return Vec::new();
+        }
+
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let Ok(conn) = Connection::open_with_flags(&self.db_path, flags) else {
+            return Vec::new();
+        };
+        let terms = query_terms(&query.canonical);
+        let mut candidates = Vec::new();
+        for semantic in read_semantic_rows(&conn, scope) {
+            // Scope is resolved from the authoritative SQLite row before its
+            // vector is read or compared.
+            if !scope.allows(&semantic.row.scope) {
+                continue;
+            }
+            let cache = match semantic.namespace {
+                VectorNamespace::Knowledge | VectorNamespace::History => self.shared_cache.as_ref(),
+                VectorNamespace::Code => self.code_cache.as_ref(),
+            };
+            let Some(cache) = cache else { continue };
+            let Some(vector) = cache.get(&semantic.vector_key).ok().flatten() else {
+                continue;
+            };
+            let score = cosine_similarity(&query_vector, &vector);
+            if score <= 0.0 {
+                continue;
+            }
+            let mut candidate = local_candidate(semantic.row, query, &terms);
+            candidate.semantic_score = Some(f64::from(score));
+            candidate.relevance = candidate.lexical_score * 0.32
+                + f64::from(score) * 0.52
+                + candidate.structural_score * 0.24
+                + candidate.role_score;
+            candidate.why_relevant = if candidate.binding {
+                format!("exact binding + semantic match {:.3}", score)
+            } else if candidate.lexical_score > 0.0 {
+                format!("lexical + semantic match {:.3}", score)
+            } else {
+                format!("semantic match {:.3}", score)
+            };
+            candidates.push(candidate);
+        }
+        candidates.sort_by(|a, b| {
+            b.binding
+                .cmp(&a.binding)
+                .then_with(|| a.stale.cmp(&b.stale))
+                .then_with(|| b.relevance.total_cmp(&a.relevance))
+                .then_with(|| a.evidence_id.cmp(&b.evidence_id))
+        });
+        candidates.truncate(limit);
+        candidates
+    }
+}
+
+fn row_scope(raw: &str, project_id: &str) -> EvidenceScope {
+    if raw.eq_ignore_ascii_case("global") {
+        EvidenceScope::Global
+    } else if raw.eq_ignore_ascii_case("private") {
+        // These vector-bearing stores have no private-owner column. An empty
+        // owner deliberately fails the defense-in-depth ScopeGate check.
+        EvidenceScope::Private(String::new())
+    } else {
+        EvidenceScope::Project(project_id.to_string())
+    }
+}
+
+fn read_semantic_rows(conn: &Connection, scope: &ScopeGate) -> Vec<SemanticRow> {
+    let mut out = Vec::new();
+    if table_exists(conn, "knowledge_pages")
+        && let Ok(mut stmt) = conn.prepare(
+            "select id, substr(trim(title || ' ' || snippet || ' ' || page_type), 1, 480), \
+                    updated_at, rel_path from knowledge_pages \
+             where origin = 'local' or origin_project_id = ?1 order by id",
+        )
+        && let Ok(rows) = stmt.query_map([&scope.project_id], |row| {
+            let id: String = row.get(0)?;
+            Ok(SemanticRow {
+                namespace: VectorNamespace::Knowledge,
+                vector_key: id.clone(),
+                row: LocalRow {
+                    id,
+                    surface: EvidenceSurface::Knowledge,
+                    scope: EvidenceScope::Project(scope.project_id.clone()),
+                    snippet: row.get(1)?,
+                    revision: row.get(2)?,
+                    stale: false,
+                    body_available: true,
+                    locator: row.get(3)?,
+                },
+            })
+        })
+    {
+        out.extend(rows.filter_map(Result::ok));
+    }
+
+    if table_exists(conn, "history_commits")
+        && let Ok(mut stmt) = conn.prepare(
+            "select sha, substr(trim(subject || ' ' || coalesce(body, '')), 1, 480), \
+                    indexed_at, scope from history_commits order by sha",
+        )
+        && let Ok(rows) = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let raw_scope: String = row.get(3)?;
+            Ok(SemanticRow {
+                namespace: VectorNamespace::History,
+                vector_key: history_commit_key(&id),
+                row: LocalRow {
+                    locator: id.clone(),
+                    id,
+                    surface: EvidenceSurface::History,
+                    scope: row_scope(&raw_scope, &scope.project_id),
+                    snippet: row.get(1)?,
+                    revision: row.get(2)?,
+                    stale: false,
+                    body_available: true,
+                },
+            })
+        })
+    {
+        out.extend(rows.filter_map(Result::ok));
+    }
+
+    if table_exists(conn, "history_docs")
+        && let Ok(mut stmt) = conn.prepare(
+            "select id, substr(trim(coalesce(title, '') || ' ' || coalesce(body, '')), 1, 480), \
+                    coalesce(updated_at, fetched_at), coalesce(url, id), scope, state \
+             from history_docs order by id",
+        )
+        && let Ok(rows) = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let raw_scope: String = row.get(4)?;
+            let state: Option<String> = row.get(5)?;
+            Ok(SemanticRow {
+                namespace: VectorNamespace::History,
+                vector_key: history_doc_key(&id),
+                row: LocalRow {
+                    id,
+                    surface: EvidenceSurface::History,
+                    scope: row_scope(&raw_scope, &scope.project_id),
+                    snippet: row.get(1)?,
+                    revision: row.get(2)?,
+                    stale: state.as_deref() == Some("closed"),
+                    body_available: true,
+                    locator: row.get(3)?,
+                },
+            })
+        })
+    {
+        out.extend(rows.filter_map(Result::ok));
+    }
+
+    if table_exists(conn, "code_symbols")
+        && let Ok(mut stmt) = conn.prepare(
+            "select id, substr(trim(qualified_name || ' ' || name || ' ' || file_path || ' ' || \
+                    coalesce(documentation, '') || ' ' || coalesce(signature, '')), 1, 480), \
+                    content_hash, qualified_name, scope from code_symbols order by id",
+        )
+        && let Ok(rows) = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let raw_scope: String = row.get(4)?;
+            Ok(SemanticRow {
+                namespace: VectorNamespace::Code,
+                vector_key: code_symbol_key(&id),
+                row: LocalRow {
+                    id,
+                    surface: EvidenceSurface::Code,
+                    scope: row_scope(&raw_scope, &scope.project_id),
+                    snippet: row.get(1)?,
+                    revision: row.get(2)?,
+                    stale: false,
+                    body_available: true,
+                    locator: row.get(3)?,
+                },
+            })
+        })
+    {
+        out.extend(rows.filter_map(Result::ok));
+    }
+    out
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -693,7 +976,13 @@ pub(crate) fn build_ambient_recall_context(
     // opened. A malformed/oversized prompt therefore cannot expand DB work.
     let query = RecallQuery::build(&identity, &request)?;
     let retriever = SqliteRecallRetriever::existing(cas_root)?;
-    let candidates = retrieve_candidates(&identity, &request, &[&retriever])?;
+    let config = crate::cloud::CloudConfig::load_from_cas_dir(cas_root).unwrap_or_default();
+    let semantic = SemanticRecallRetriever::existing(cas_root, &config);
+    let mut retrievers: Vec<&dyn RecallRetriever> = vec![&retriever];
+    if let Some(semantic) = semantic.as_ref() {
+        retrievers.push(semantic);
+    }
+    let candidates = retrieve_candidates(&identity, &request, &retrievers)?;
     let ledger_file = ledger_path(cas_root, &identity.session_id);
     let mut ledger = RecallLedger::load(&ledger_file);
     let rendered = render_packet(&identity, &query, &candidates, &mut ledger);
@@ -702,7 +991,7 @@ pub(crate) fn build_ambient_recall_context(
             ledger.record(packet.query_hash.clone(), &injected);
             ledger.save(&ledger_file);
             eprintln!(
-                "cas: ambient recall injected {} local evidence card(s), omitted {}",
+                "cas: ambient recall injected {} evidence card(s), omitted {}",
                 packet.injected, packet.omitted
             );
             Some(packet)
@@ -1042,8 +1331,17 @@ pub(crate) fn retrieve_candidates(
         }
     }
 
-    let mut seen = HashSet::new();
-    candidates.retain(|candidate| seen.insert(candidate.canonical_key()));
+    let mut fused: HashMap<String, EvidenceCandidate> = HashMap::new();
+    for candidate in candidates {
+        let key = candidate.canonical_key();
+        match fused.get_mut(&key) {
+            Some(existing) => fuse_candidate(existing, candidate),
+            None => {
+                fused.insert(key, candidate);
+            }
+        }
+    }
+    let mut candidates: Vec<EvidenceCandidate> = fused.into_values().collect();
     candidates.sort_by(|a, b| {
         b.binding
             .cmp(&a.binding)
@@ -1056,6 +1354,36 @@ pub(crate) fn retrieve_candidates(
         candidates,
         rejected_scope,
     })
+}
+
+fn fuse_candidate(existing: &mut EvidenceCandidate, incoming: EvidenceCandidate) {
+    existing.lexical_score = existing.lexical_score.max(incoming.lexical_score);
+    existing.semantic_score = match (existing.semantic_score, incoming.semantic_score) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (value @ Some(_), None) | (None, value @ Some(_)) => value,
+        (None, None) => None,
+    };
+    existing.structural_score = existing.structural_score.max(incoming.structural_score);
+    existing.role_score = existing.role_score.max(incoming.role_score);
+    existing.binding |= incoming.binding;
+    existing.stale |= incoming.stale;
+    existing.body_available |= incoming.body_available;
+    if existing.conflict_key.is_none() {
+        existing.conflict_key = incoming.conflict_key;
+    }
+    let semantic = existing.semantic_score.unwrap_or(0.0);
+    existing.relevance = existing.lexical_score * 0.32
+        + semantic * 0.52
+        + existing.structural_score * 0.24
+        + existing.role_score;
+    existing.why_relevant = match (existing.lexical_score > 0.0, semantic > 0.0) {
+        (true, true) if existing.binding => {
+            format!("exact binding + lexical + semantic match {semantic:.3}")
+        }
+        (true, true) => format!("lexical + semantic match {semantic:.3}"),
+        (false, true) => format!("semantic match {semantic:.3}"),
+        _ => existing.why_relevant.clone(),
+    };
 }
 
 fn stable_values(values: &[String], cap: usize) -> Vec<String> {
@@ -1127,6 +1455,8 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
     use crate::test_support::TestEnvGuard;
@@ -1172,6 +1502,23 @@ mod tests {
     struct FixedRetriever {
         calls: Cell<usize>,
         rows: Vec<EvidenceCandidate>,
+    }
+
+    struct CountingEmbedder {
+        calls: Arc<AtomicUsize>,
+        meta: EmbeddingMeta,
+        vector: Vec<f32>,
+    }
+
+    impl RecallQueryEmbedder for CountingEmbedder {
+        fn meta(&self) -> EmbeddingMeta {
+            self.meta.clone()
+        }
+
+        fn embed_query(&self, _query: &str) -> Option<Vec<f32>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Some(self.vector.clone())
+        }
     }
 
     impl RecallRetriever for FixedRetriever {
@@ -1449,6 +1796,124 @@ mod tests {
     }
 
     #[test]
+    fn one_query_vector_fans_out_to_knowledge_history_and_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("cas.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            r#"
+            create table knowledge_pages (
+                id text primary key, title text, snippet text, page_type text,
+                rel_path text, updated_at text, origin text, origin_project_id text
+            );
+            create table history_commits (
+                sha text primary key, subject text, body text, indexed_at text, scope text
+            );
+            create table code_symbols (
+                id text primary key, qualified_name text, name text,
+                file_path text, documentation text, signature text,
+                scope text, content_hash text
+            );
+            insert into knowledge_pages values
+                ('cas-kn-sem', 'Lease recovery', 'revive an expired worker claim', 'guide',
+                 'guide/leases.md', 'r1', 'local', null);
+            insert into history_commits values
+                ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'repair expired claims',
+                 'restore ownership after a worker vanishes', 'r1', 'project');
+            insert into code_symbols values
+                ('sym-lease', 'lease::recover', 'recover', 'src/lease.rs',
+                 'revive an expired worker claim', 'fn recover()', 'project', 'r1'),
+                ('sym-private', 'secret::recover', 'recover', 'src/secret.rs',
+                 'private implementation', 'fn recover()', 'private', 'r1');
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let meta = EmbeddingMeta::new("cas-cloud", "ambient-test", 4);
+        let shared = KnowledgeVectorCache::open(dir.path(), meta.clone()).unwrap();
+        shared.put("cas-kn-sem", &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        shared
+            .put(
+                &history_commit_key("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                &[0.9, 0.1, 0.0, 0.0],
+            )
+            .unwrap();
+        let code = KnowledgeVectorCache::open_code(dir.path(), meta.clone()).unwrap();
+        code.put(&code_symbol_key("sym-lease"), &[0.8, 0.2, 0.0, 0.0])
+            .unwrap();
+        code.put(&code_symbol_key("sym-private"), &[1.0, 0.0, 0.0, 0.0])
+            .unwrap();
+        drop((shared, code));
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let retriever = SemanticRecallRetriever::with_embedder(
+            dir.path(),
+            Box::new(CountingEmbedder {
+                calls: Arc::clone(&calls),
+                meta,
+                vector: vec![1.0, 0.0, 0.0, 0.0],
+            }),
+        )
+        .unwrap();
+        let identity = identity(RecallRole::Worker);
+        let query = RecallQuery::build(
+            &identity,
+            &RecallRequest {
+                prompt: "recover ownership after a vanished worker".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let rows = retriever.retrieve(&query, &identity.scope_gate(), 12);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(rows.iter().any(|row| row.evidence_id == "cas-kn-sem"));
+        assert!(
+            rows.iter()
+                .any(|row| { row.evidence_id == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" })
+        );
+        assert!(rows.iter().any(|row| row.evidence_id == "sym-lease"));
+        assert!(!rows.iter().any(|row| row.evidence_id == "sym-private"));
+        assert!(rows.iter().all(|row| row.semantic_score.is_some()));
+    }
+
+    #[test]
+    fn lexical_and_semantic_duplicates_fuse_without_double_injection() {
+        let mut semantic = candidate("same", EvidenceScope::Project("project-a".into()));
+        semantic.lexical_score = 0.0;
+        semantic.semantic_score = Some(0.91);
+        semantic.relevance = 0.91;
+        let lexical = FixedRetriever {
+            calls: Cell::new(0),
+            rows: vec![candidate(
+                "same",
+                EvidenceScope::Project("project-a".into()),
+            )],
+        };
+        let vectors = FixedRetriever {
+            calls: Cell::new(0),
+            rows: vec![semantic],
+        };
+        let result = retrieve_candidates(
+            &identity(RecallRole::Worker),
+            &RecallRequest {
+                prompt: "same evidence from two channels".into(),
+                ..Default::default()
+            },
+            &[&lexical, &vectors],
+        )
+        .unwrap();
+        assert_eq!(result.candidates.len(), 1);
+        assert_eq!(result.candidates[0].lexical_score, 0.8);
+        assert_eq!(result.candidates[0].semantic_score, Some(0.91));
+        assert!(
+            result.candidates[0]
+                .why_relevant
+                .contains("lexical + semantic")
+        );
+    }
+
+    #[test]
     fn hook_runtime_injects_deltas_without_storing_cards_as_memories() {
         let project = tempfile::tempdir().unwrap();
         let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
@@ -1511,6 +1976,7 @@ mod tests {
         .unwrap();
         assert!(delta.full.contains("p-parser-memory"));
         assert!(!cas_root.join("index/code-vectors").exists());
+        assert!(!cas_root.join("index/knowledge-vectors").exists());
         assert_eq!(entries.list().unwrap().len(), before);
     }
 

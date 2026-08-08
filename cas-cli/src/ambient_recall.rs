@@ -7,9 +7,13 @@
 //! bodies stay in their authoritative stores.
 
 use std::collections::HashSet;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
+use rusqlite::{Connection, OpenFlags, params_from_iter};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Marker set by every CAS-owned nested model invocation (cas-fa38).
 pub(crate) const INTERNAL_LLM_ENV: &str = crate::internal_llm::INTERNAL_LLM_ENV;
@@ -260,10 +264,761 @@ pub(crate) trait RecallRetriever {
     ) -> Vec<EvidenceCandidate>;
 }
 
+/// Bounded lexical/structural fallback over the already-existing project DB.
+///
+/// It opens `cas.db` read-only, applies team/project predicates in SQL before
+/// text matching, never reads body/blob columns, and never touches Tantivy,
+/// LMDB, an embedding provider, or a network client.
+pub(crate) struct SqliteRecallRetriever {
+    db_path: PathBuf,
+}
+
+impl SqliteRecallRetriever {
+    pub(crate) fn existing(cas_root: &Path) -> Option<Self> {
+        let db_path = cas_root.join("cas.db");
+        db_path.is_file().then_some(Self { db_path })
+    }
+}
+
+#[derive(Debug)]
+struct LocalRow {
+    id: String,
+    surface: EvidenceSurface,
+    scope: EvidenceScope,
+    snippet: String,
+    revision: String,
+    stale: bool,
+    body_available: bool,
+    locator: String,
+}
+
+impl RecallRetriever for SqliteRecallRetriever {
+    fn retrieve(
+        &self,
+        query: &RecallQuery,
+        scope: &ScopeGate,
+        limit: usize,
+    ) -> Vec<EvidenceCandidate> {
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let Ok(conn) = Connection::open_with_flags(&self.db_path, flags) else {
+            return Vec::new();
+        };
+        let terms = query_terms(&query.canonical);
+        if terms.is_empty() {
+            return Vec::new();
+        }
+        let per_surface = limit.min(8).max(1);
+        let mut rows = Vec::new();
+        for spec in local_surface_specs() {
+            rows.extend(read_surface(&conn, spec, &terms, scope, per_surface));
+        }
+        let mut candidates: Vec<EvidenceCandidate> = rows
+            .into_iter()
+            .map(|row| local_candidate(row, query, &terms))
+            .collect();
+        candidates.sort_by(|a, b| {
+            b.binding
+                .cmp(&a.binding)
+                .then_with(|| a.stale.cmp(&b.stale))
+                .then_with(|| b.relevance.total_cmp(&a.relevance))
+                .then_with(|| a.evidence_id.cmp(&b.evidence_id))
+        });
+        candidates.truncate(limit);
+        candidates
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LocalSurfaceSpec {
+    table: &'static str,
+    surface: EvidenceSurface,
+    id: &'static str,
+    text: &'static str,
+    scope: &'static str,
+    team: &'static str,
+    share: &'static str,
+    revision: &'static str,
+    stale: &'static str,
+    body_available: bool,
+    locator: &'static str,
+    extra_scope_predicate: &'static str,
+}
+
+fn local_surface_specs() -> [LocalSurfaceSpec; 8] {
+    [
+        LocalSurfaceSpec {
+            table: "entries",
+            surface: EvidenceSurface::Memory,
+            id: "id",
+            text: "trim(coalesce(title, '') || ' ' || content)",
+            scope: "scope",
+            team: "team_id",
+            share: "share",
+            revision: "coalesce(updated_at, created)",
+            stale: "case when valid_until is not null and valid_until < datetime('now') then 1 else 0 end",
+            body_available: true,
+            locator: "id",
+            extra_scope_predicate: "archived = 0",
+        },
+        LocalSurfaceSpec {
+            table: "rules",
+            surface: EvidenceSurface::Rule,
+            id: "id",
+            text: "content",
+            scope: "scope",
+            team: "team_id",
+            share: "share",
+            revision: "created",
+            stale: "case when status in ('stale', 'retired') then 1 else 0 end",
+            body_available: true,
+            locator: "id",
+            extra_scope_predicate: "status != 'retired'",
+        },
+        LocalSurfaceSpec {
+            table: "tasks",
+            surface: EvidenceSurface::Task,
+            id: "id",
+            text: "trim(title || ' ' || description || ' ' || design || ' ' || notes)",
+            scope: "'project'",
+            team: "team_id",
+            share: "share",
+            revision: "updated_at",
+            stale: "case when status = 'closed' then 1 else 0 end",
+            body_available: true,
+            locator: "id",
+            extra_scope_predicate: "status not in ('deleted')",
+        },
+        LocalSurfaceSpec {
+            table: "skills",
+            surface: EvidenceSurface::Skill,
+            id: "id",
+            text: "trim(name || ' ' || description || ' ' || summary || ' ' || tags)",
+            scope: "case when id like 'g-%' then 'global' else 'project' end",
+            team: "team_id",
+            share: "share",
+            revision: "updated_at",
+            stale: "case when status != 'enabled' then 1 else 0 end",
+            body_available: true,
+            locator: "id",
+            extra_scope_predicate: "status = 'enabled'",
+        },
+        LocalSurfaceSpec {
+            table: "specs",
+            surface: EvidenceSurface::Spec,
+            id: "id",
+            text: "trim(title || ' ' || summary || ' ' || design_notes)",
+            scope: "scope",
+            team: "team_id",
+            share: "null",
+            revision: "updated_at",
+            stale: "case when status in ('superseded', 'rejected') then 1 else 0 end",
+            body_available: true,
+            locator: "id",
+            extra_scope_predicate: "status not in ('superseded', 'rejected')",
+        },
+        LocalSurfaceSpec {
+            table: "knowledge_pages",
+            surface: EvidenceSurface::Knowledge,
+            id: "id",
+            text: "trim(title || ' ' || snippet || ' ' || page_type)",
+            scope: "'project'",
+            team: "null",
+            share: "null",
+            revision: "updated_at",
+            stale: "0",
+            body_available: true,
+            locator: "rel_path",
+            extra_scope_predicate: "(origin = 'local' or origin_project_id = :project_id)",
+        },
+        LocalSurfaceSpec {
+            table: "history_commits",
+            surface: EvidenceSurface::History,
+            id: "sha",
+            text: "trim(subject || ' ' || coalesce(body, ''))",
+            scope: "scope",
+            team: "null",
+            share: "null",
+            revision: "indexed_at",
+            stale: "0",
+            body_available: true,
+            locator: "sha",
+            extra_scope_predicate: "1 = 1",
+        },
+        LocalSurfaceSpec {
+            table: "code_symbols",
+            surface: EvidenceSurface::Code,
+            id: "id",
+            text: "trim(qualified_name || ' ' || name || ' ' || file_path || ' ' || coalesce(documentation, '') || ' ' || coalesce(signature, ''))",
+            scope: "scope",
+            team: "null",
+            share: "null",
+            revision: "content_hash",
+            stale: "0",
+            body_available: true,
+            locator: "qualified_name",
+            extra_scope_predicate: "1 = 1",
+        },
+    ]
+}
+
+fn table_exists(conn: &Connection, table: &str) -> bool {
+    conn.query_row(
+        "select exists(select 1 from sqlite_master where type in ('table', 'view') and name = ?1)",
+        [table],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|value| value != 0)
+    .unwrap_or(false)
+}
+
+fn read_surface(
+    conn: &Connection,
+    spec: LocalSurfaceSpec,
+    terms: &[String],
+    scope: &ScopeGate,
+    limit: usize,
+) -> Vec<LocalRow> {
+    if !table_exists(conn, spec.table) {
+        return Vec::new();
+    }
+    let term_predicate = (0..terms.len())
+        .map(|index| format!("lower({}) like ?{}", spec.text, index + 1))
+        .collect::<Vec<_>>()
+        .join(" or ");
+    let team_index = terms.len() + 1;
+    let limit_index = terms.len() + 2;
+    let extra = spec
+        .extra_scope_predicate
+        .replace(":project_id", &format!("?{}", terms.len() + 3));
+    let sql = format!(
+        "select {}, {}, {}, {}, substr({}, 1, 480), {}, {}, {} from {} \
+         where ({}) and ({} is null or {} = ?{}) and coalesce({}, '') != 'private' \
+         and ({}) order by {} desc, {} asc limit ?{}",
+        spec.id,
+        spec.scope,
+        spec.team,
+        spec.share,
+        spec.text,
+        spec.revision,
+        spec.stale,
+        spec.locator,
+        spec.table,
+        spec.extra_scope_predicate
+            .replace(":project_id", &format!("?{}", terms.len() + 3)),
+        spec.team,
+        spec.team,
+        team_index,
+        spec.share,
+        term_predicate,
+        spec.revision,
+        spec.id,
+        limit_index,
+    );
+    let mut values: Vec<String> = terms.iter().map(|term| format!("%{term}%")).collect();
+    values.push(scope.team_id.clone().unwrap_or_default());
+    values.push(limit.to_string());
+    if extra.contains(&format!("?{}", terms.len() + 3)) {
+        values.push(scope.project_id.clone());
+    }
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return Vec::new();
+    };
+    let Ok(mapped) = stmt.query_map(params_from_iter(values.iter()), |row| {
+        let raw_scope: String = row.get(1)?;
+        let team_id: Option<String> = row.get(2)?;
+        let share: Option<String> = row.get(3)?;
+        let evidence_scope = if let Some(team_id) = team_id {
+            EvidenceScope::Team(team_id)
+        } else if raw_scope.eq_ignore_ascii_case("global") {
+            EvidenceScope::Global
+        } else if share.as_deref() == Some("private") {
+            EvidenceScope::Private(String::new())
+        } else {
+            EvidenceScope::Project(scope.project_id.clone())
+        };
+        Ok(LocalRow {
+            id: row.get(0)?,
+            surface: spec.surface,
+            scope: evidence_scope,
+            snippet: row.get(4)?,
+            revision: row.get(5)?,
+            stale: row.get::<_, i64>(6)? != 0,
+            body_available: spec.body_available,
+            locator: row.get(7)?,
+        })
+    }) else {
+        return Vec::new();
+    };
+    mapped.filter_map(Result::ok).collect()
+}
+
+fn query_terms(canonical: &str) -> Vec<String> {
+    const STOP: &[&str] = &[
+        "role",
+        "worker",
+        "supervisor",
+        "project",
+        "task",
+        "task_title",
+        "labels",
+        "files",
+        "symbols",
+        "decisions",
+        "already_seen",
+        "request",
+        "this",
+        "that",
+        "with",
+        "from",
+        "into",
+        "then",
+        "please",
+        "implement",
+    ];
+    let mut terms = Vec::new();
+    for raw in canonical
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')))
+    {
+        let term = raw.trim_matches(['-', '_', '/', '.']).to_ascii_lowercase();
+        if term.len() < 3 || STOP.contains(&term.as_str()) || terms.contains(&term) {
+            continue;
+        }
+        terms.push(term);
+        if terms.len() == 10 {
+            break;
+        }
+    }
+    terms
+}
+
+fn local_candidate(row: LocalRow, query: &RecallQuery, terms: &[String]) -> EvidenceCandidate {
+    let haystack = row.snippet.to_ascii_lowercase();
+    let matched: Vec<&str> = terms
+        .iter()
+        .filter(|term| haystack.contains(term.as_str()))
+        .map(String::as_str)
+        .collect();
+    let lexical = matched.len() as f64 / terms.len().max(1) as f64;
+    let binding = query.task_id.as_deref() == Some(row.id.as_str())
+        || query.files.iter().any(|file| haystack.contains(file))
+        || query.symbols.iter().any(|symbol| haystack.contains(symbol));
+    let role_score = match (query.role, row.surface) {
+        (RecallRole::Worker, EvidenceSurface::Code) => 0.24,
+        (RecallRole::Worker, EvidenceSurface::History) => 0.20,
+        (RecallRole::Worker, EvidenceSurface::Rule) => 0.16,
+        (RecallRole::Worker, EvidenceSurface::Memory) => 0.14,
+        (RecallRole::Supervisor, EvidenceSurface::Task) => 0.26,
+        (RecallRole::Supervisor, EvidenceSurface::Spec) => 0.22,
+        (RecallRole::Supervisor, EvidenceSurface::History) => 0.20,
+        (RecallRole::Supervisor, EvidenceSurface::Rule) => 0.14,
+        _ => 0.08,
+    };
+    let structural = if binding { 1.0 } else { 0.0 };
+    EvidenceCandidate {
+        evidence_id: row.id,
+        surface: row.surface,
+        scope: row.scope,
+        snippet: clean_scalar(&row.snippet, 480),
+        why_relevant: if binding {
+            "exact task/file/symbol binding".into()
+        } else {
+            format!("lexical match: {}", matched.join(","))
+        },
+        provenance: EvidenceProvenance {
+            source: "cas.db/read-only".into(),
+            locator: row.locator,
+            observed_at: None,
+            revision: clean_scalar(&row.revision, 96),
+        },
+        relevance: lexical * 0.66 + structural * 0.24 + role_score,
+        lexical_score: lexical,
+        semantic_score: None,
+        structural_score: structural,
+        role_score,
+        binding,
+        stale: row.stale,
+        conflict_key: None,
+        body_available: row.body_available,
+    }
+}
+
+/// Build one hook-facing ambient context segment. All failures degrade to no
+/// segment; diagnostic messages name only the rejected capability/boundary.
+pub(crate) fn build_ambient_recall_context(
+    input: &cas_core::hooks::types::HookInput,
+    cas_root: &Path,
+    prompt: Option<&str>,
+    session_start: bool,
+) -> Option<RecallPacket> {
+    if crate::internal_llm::is_internal_invocation() {
+        eprintln!("cas: ambient recall skipped (internal model identity)");
+        return None;
+    }
+    let role = input
+        .agent_role
+        .as_deref()
+        .and_then(RecallRole::parse)
+        .or_else(|| {
+            std::env::var("CAS_AGENT_ROLE")
+                .ok()
+                .as_deref()
+                .and_then(RecallRole::parse)
+        })?;
+    if !session_start && !meaningful_transition(prompt.unwrap_or_default()) {
+        return None;
+    }
+    let identity = RecallIdentity {
+        session_id: input.session_id.clone(),
+        agent_name: std::env::var("CAS_AGENT_NAME").unwrap_or_default(),
+        factory_session: std::env::var("CAS_FACTORY_SESSION").unwrap_or_default(),
+        role,
+        project_id: crate::cloud::resolve_canonical_id(cas_root).unwrap_or_default(),
+        team_id: crate::cloud::CloudConfig::load_from_cas_dir(cas_root)
+            .ok()
+            .and_then(|config| config.active_team_id()),
+        internal_llm: false,
+    };
+    if !identity.is_eligible() {
+        eprintln!("cas: ambient recall skipped (incomplete outer factory identity)");
+        return None;
+    }
+
+    let request = hook_request(
+        input,
+        cas_root,
+        &identity,
+        prompt.unwrap_or("session start"),
+    );
+    // Query construction and its caps are complete before the retriever is
+    // opened. A malformed/oversized prompt therefore cannot expand DB work.
+    let query = RecallQuery::build(&identity, &request)?;
+    let retriever = SqliteRecallRetriever::existing(cas_root)?;
+    let candidates = retrieve_candidates(&identity, &request, &[&retriever])?;
+    let ledger_file = ledger_path(cas_root, &identity.session_id);
+    let mut ledger = RecallLedger::load(&ledger_file);
+    let rendered = render_packet(&identity, &query, &candidates, &mut ledger);
+    match rendered {
+        Some((packet, injected)) => {
+            ledger.record(packet.query_hash.clone(), &injected);
+            ledger.save(&ledger_file);
+            eprintln!(
+                "cas: ambient recall injected {} local evidence card(s), omitted {}",
+                packet.injected, packet.omitted
+            );
+            Some(packet)
+        }
+        None => {
+            ledger.save(&ledger_file);
+            None
+        }
+    }
+}
+
+fn meaningful_transition(prompt: &str) -> bool {
+    let normalized = clean_scalar(prompt, 1_600).to_ascii_lowercase();
+    if normalized.len() < 12 {
+        return false;
+    }
+    !matches!(
+        normalized.as_str(),
+        "thanks" | "thank you" | "sounds good" | "continue" | "go ahead" | "okay, continue"
+    )
+}
+
+fn hook_request(
+    input: &cas_core::hooks::types::HookInput,
+    cas_root: &Path,
+    identity: &RecallIdentity,
+    prompt: &str,
+) -> RecallRequest {
+    let mut request = RecallRequest {
+        prompt: prompt.to_string(),
+        ..Default::default()
+    };
+    let db_path = cas_root.join("cas.db");
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let Ok(conn) = Connection::open_with_flags(db_path, flags) else {
+        return request;
+    };
+
+    if table_exists(&conn, "tasks") {
+        let role_predicate = match identity.role {
+            RecallRole::Worker => "and assignee = ?1",
+            RecallRole::Supervisor => "and (?1 is not null)",
+        };
+        let sql = format!(
+            "select id, title, labels, notes from tasks \
+             where status = 'in_progress' {role_predicate} \
+             order by case when task_type = 'epic' then 0 else 1 end, updated_at desc limit 1"
+        );
+        if let Ok((id, title, labels, notes)) =
+            conn.query_row(&sql, [&identity.agent_name], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+        {
+            request.task_id = Some(id);
+            request.task_title = Some(title);
+            request.task_labels = serde_json::from_str(&labels).unwrap_or_default();
+            request.recent_decisions = notes
+                .lines()
+                .rev()
+                .filter(|line| line.to_ascii_lowercase().contains("decision"))
+                .take(4)
+                .map(|line| clean_scalar(line, 240))
+                .collect();
+            request.recent_decisions.reverse();
+        }
+    }
+
+    if table_exists(&conn, "file_changes") {
+        if let Ok(mut stmt) = conn.prepare(
+            "select distinct file_path from file_changes where session_id = ?1 \
+             order by created_at desc limit 16",
+        ) {
+            if let Ok(rows) = stmt.query_map([&input.session_id], |row| row.get::<_, String>(0)) {
+                request.files = rows.filter_map(Result::ok).collect();
+            }
+        }
+    }
+    if table_exists(&conn, "code_symbols") {
+        let mut symbols = Vec::new();
+        for file in request.files.iter().take(8) {
+            if let Ok(mut stmt) = conn.prepare(
+                "select qualified_name from code_symbols where file_path = ?1 \
+                 order by line_start asc limit 2",
+            ) {
+                if let Ok(rows) = stmt.query_map([file], |row| row.get::<_, String>(0)) {
+                    symbols.extend(rows.filter_map(Result::ok));
+                }
+            }
+        }
+        request.symbols = stable_values(&symbols, 16);
+    }
+    request
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RecallCandidates {
     pub(crate) candidates: Vec<EvidenceCandidate>,
     pub(crate) rejected_scope: usize,
+}
+
+/// Disposable per-session state. It suppresses repeated prompt inflation; it
+/// is never an authoritative memory source and may be deleted at any time.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RecallLedger {
+    #[serde(default)]
+    last_query_hash: String,
+    #[serde(default)]
+    seen: Vec<SeenEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SeenEvidence {
+    evidence_id: String,
+    revision: String,
+}
+
+const LEDGER_ENTRY_CAP: usize = 128;
+const LEDGER_BYTE_CAP: usize = 32 * 1024;
+
+impl RecallLedger {
+    fn load(path: &Path) -> Self {
+        fs::read(path)
+            .ok()
+            .filter(|bytes| bytes.len() <= LEDGER_BYTE_CAP)
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    fn has_seen(&self, candidate: &EvidenceCandidate) -> bool {
+        self.seen.iter().any(|seen| {
+            seen.evidence_id == candidate.evidence_id
+                && seen.revision == candidate.provenance.revision
+        })
+    }
+
+    fn record(&mut self, query_hash: String, injected: &[EvidenceCandidate]) {
+        self.last_query_hash = query_hash;
+        for candidate in injected {
+            self.seen
+                .retain(|seen| seen.evidence_id != candidate.evidence_id);
+            self.seen.push(SeenEvidence {
+                evidence_id: candidate.evidence_id.clone(),
+                revision: candidate.provenance.revision.clone(),
+            });
+        }
+        if self.seen.len() > LEDGER_ENTRY_CAP {
+            self.seen.drain(..self.seen.len() - LEDGER_ENTRY_CAP);
+        }
+    }
+
+    fn save(&self, path: &Path) {
+        let Ok(bytes) = serde_json::to_vec(self) else {
+            return;
+        };
+        if bytes.len() > LEDGER_BYTE_CAP {
+            return;
+        }
+        let Some(parent) = path.parent() else {
+            return;
+        };
+        if fs::create_dir_all(parent).is_err() {
+            return;
+        }
+        let tmp = path.with_extension("tmp");
+        if fs::write(&tmp, bytes).is_ok() {
+            let _ = fs::rename(tmp, path);
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecallPacket {
+    pub(crate) full: String,
+    pub(crate) compact: String,
+    pub(crate) injected: usize,
+    pub(crate) omitted: usize,
+    pub(crate) query_hash: String,
+}
+
+/// Render only evidence not already injected at the same revision.
+///
+/// The byte budget is derived before candidates are visited, cards have fixed
+/// field caps, and the omission footer is reserved up front. This makes a
+/// 300k-item corpus indistinguishable from a small one at the prompt boundary.
+pub(crate) fn render_packet(
+    identity: &RecallIdentity,
+    query: &RecallQuery,
+    candidates: &RecallCandidates,
+    ledger: &mut RecallLedger,
+) -> Option<(RecallPacket, Vec<EvidenceCandidate>)> {
+    let policy = identity.role.policy();
+    let byte_budget = policy
+        .default_tokens
+        .min(policy.ceiling_tokens)
+        .min(policy.emergency_tokens)
+        .saturating_mul(4);
+    let query_hash = stable_hash(&query.canonical);
+    let delta: Vec<EvidenceCandidate> = candidates
+        .candidates
+        .iter()
+        .filter(|candidate| !ledger.has_seen(candidate))
+        .cloned()
+        .collect();
+    if delta.is_empty() {
+        ledger.last_query_hash = query_hash;
+        return None;
+    }
+
+    let header = format!(
+        "[ambient recall v1 role={} query={}]",
+        match identity.role {
+            RecallRole::Worker => "worker",
+            RecallRole::Supervisor => "supervisor",
+        },
+        &query_hash[..12]
+    );
+    let footer_reserve = 180usize;
+    let mut full = header.clone();
+    let mut injected = Vec::new();
+    let cap = policy.injection_cap.min(delta.len());
+    for candidate in delta.iter().take(cap) {
+        let card = render_card(candidate);
+        if full.len() + 1 + card.len() + footer_reserve > byte_budget {
+            break;
+        }
+        full.push('\n');
+        full.push_str(&card);
+        injected.push(candidate.clone());
+    }
+    if injected.is_empty() {
+        return None;
+    }
+
+    let omitted = delta.len().saturating_sub(injected.len());
+    full.push_str(&format!(
+        "\n[recall disclosure: injected={} omitted={} scope_rejected={} bodies=tool-pull-only]",
+        injected.len(),
+        omitted,
+        candidates.rejected_scope
+    ));
+    // The footer reserve is deliberately conservative, but keep the hard cap
+    // defense in depth if its fields ever grow.
+    if full.len() > byte_budget {
+        full = truncate_utf8(&full, byte_budget);
+    }
+    let compact = format!(
+        "[ambient recall: {} new evidence cards; {} omitted; run search for bodies]",
+        injected.len(),
+        omitted
+    );
+    Some((
+        RecallPacket {
+            full,
+            compact,
+            injected: injected.len(),
+            omitted,
+            query_hash,
+        },
+        injected,
+    ))
+}
+
+fn render_card(candidate: &EvidenceCandidate) -> String {
+    let flags = [
+        candidate.binding.then_some("binding"),
+        candidate.stale.then_some("STALE"),
+        candidate.conflict_key.as_deref().map(|_| "CONFLICT"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(",");
+    let flags = if flags.is_empty() {
+        String::new()
+    } else {
+        format!(" flags={flags}")
+    };
+    format!(
+        "- [{}] {:?} {} — {} | why={} | provenance={}:{}@{}{}{}",
+        clean_scalar(&candidate.evidence_id, 96),
+        candidate.surface,
+        clean_scalar(&candidate.snippet, 320),
+        if candidate.body_available {
+            "body available by tool"
+        } else {
+            "compact record"
+        },
+        clean_scalar(&candidate.why_relevant, 120),
+        clean_scalar(&candidate.provenance.source, 48),
+        clean_scalar(&candidate.provenance.locator, 120),
+        clean_scalar(&candidate.provenance.revision, 64),
+        flags,
+        candidate
+            .conflict_key
+            .as_deref()
+            .map(|key| format!(" conflict={}", clean_scalar(key, 80)))
+            .unwrap_or_default()
+    )
+}
+
+fn stable_hash(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+pub(crate) fn ledger_path(cas_root: &Path, session_id: &str) -> PathBuf {
+    cas_root
+        .join("cache")
+        .join("ambient-recall")
+        .join(format!("{}.json", &stable_hash(session_id)[..24]))
 }
 
 pub(crate) fn retrieve_candidates(
@@ -374,6 +1129,8 @@ mod tests {
     use std::cell::Cell;
 
     use super::*;
+    use crate::test_support::TestEnvGuard;
+    use crate::types::{Entry, Task, TaskStatus};
 
     fn identity(role: RecallRole) -> RecallIdentity {
         RecallIdentity {
@@ -533,5 +1290,246 @@ mod tests {
         assert_eq!(encoded["provenance"]["revision"], "r1");
         assert_eq!(encoded["body_available"], true);
         assert!(encoded.get("body").is_none());
+    }
+
+    #[test]
+    fn packet_is_bounded_discloses_truncation_and_never_contains_bodies() {
+        let identity = identity(RecallRole::Worker);
+        let query = RecallQuery::build(
+            &identity,
+            &RecallRequest {
+                prompt: "repair parser cache".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut rows = Vec::new();
+        // 5,000 x 600 characters is roughly a 750k-token source corpus. The
+        // renderer must pay only for the fixed candidate/card caps.
+        for index in 0..5_000 {
+            let mut row = candidate(&format!("memory-{index:06}"), EvidenceScope::Global);
+            row.snippet = "x".repeat(600);
+            row.relevance = 1.0 - (index as f64 / 1_000_000.0);
+            rows.push(row);
+        }
+        let candidates = RecallCandidates {
+            candidates: rows,
+            rejected_scope: 7,
+        };
+        let mut ledger = RecallLedger::default();
+        let (packet, injected) =
+            render_packet(&identity, &query, &candidates, &mut ledger).unwrap();
+        assert!(packet.full.len() <= identity.role.policy().default_tokens * 4);
+        assert!(packet.injected <= identity.role.policy().injection_cap);
+        assert_eq!(packet.omitted, 5_000 - packet.injected);
+        assert!(packet.full.contains("omitted=499"));
+        assert!(packet.full.contains("bodies=tool-pull-only"));
+        assert!(!packet.full.contains(&"x".repeat(1_000)));
+        ledger.record(packet.query_hash, &injected);
+        assert!(render_packet(&identity, &query, &candidates, &mut ledger).is_some());
+    }
+
+    #[test]
+    fn repeated_cards_are_deltas_and_changed_revisions_reappear() {
+        let identity = identity(RecallRole::Supervisor);
+        let query = RecallQuery::build(
+            &identity,
+            &RecallRequest {
+                prompt: "review merge invariant".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let first = candidate("decision-1", EvidenceScope::Project("project-a".into()));
+        let mut ledger = RecallLedger::default();
+        let candidates = RecallCandidates {
+            candidates: vec![first.clone()],
+            rejected_scope: 0,
+        };
+        let (packet, injected) =
+            render_packet(&identity, &query, &candidates, &mut ledger).unwrap();
+        ledger.record(packet.query_hash, &injected);
+        assert!(render_packet(&identity, &query, &candidates, &mut ledger).is_none());
+
+        let mut revised = first;
+        revised.provenance.revision = "r2".into();
+        revised.stale = true;
+        let changed = RecallCandidates {
+            candidates: vec![revised],
+            rejected_scope: 0,
+        };
+        let (packet, _) = render_packet(&identity, &query, &changed, &mut ledger).unwrap();
+        assert!(packet.full.contains("@r2"));
+        assert!(packet.full.contains("STALE"));
+    }
+
+    #[test]
+    fn ledger_is_bounded_and_loss_only_causes_safe_repetition() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = ledger_path(dir.path(), "session/../../secret");
+        assert_eq!(
+            path.parent().unwrap(),
+            dir.path().join("cache/ambient-recall")
+        );
+        let mut ledger = RecallLedger::default();
+        let rows: Vec<EvidenceCandidate> = (0..500)
+            .map(|index| candidate(&format!("m-{index}"), EvidenceScope::Global))
+            .collect();
+        ledger.record("query".into(), &rows);
+        ledger.save(&path);
+        let loaded = RecallLedger::load(&path);
+        assert_eq!(loaded.seen.len(), LEDGER_ENTRY_CAP);
+        assert!(fs::metadata(&path).unwrap().len() <= LEDGER_BYTE_CAP as u64);
+        fs::remove_file(&path).unwrap();
+        assert_eq!(RecallLedger::load(&path), RecallLedger::default());
+    }
+
+    #[test]
+    fn local_fallback_is_scope_safe_and_role_profiles_rank_differently() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("cas.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            r#"
+            create table entries (
+                id text primary key, title text, content text, scope text,
+                team_id text, share text, updated_at text, created text,
+                valid_until text, archived integer
+            );
+            create table tasks (
+                id text primary key, title text, description text, design text,
+                notes text, team_id text, share text, updated_at text, status text
+            );
+            create table code_symbols (
+                id text primary key, qualified_name text, name text,
+                file_path text, documentation text, signature text,
+                scope text, content_hash text
+            );
+            create table knowledge_pages (
+                id text primary key, title text, snippet text, page_type text,
+                rel_path text, updated_at text, origin text, origin_project_id text
+            );
+            insert into entries values
+                ('team-ok', '', 'parser cache failure mode', 'project', 'team-a', null, 'r2', 'r1', null, 0),
+                ('team-leak', '', 'parser cache failure mode', 'project', 'team-b', null, 'r2', 'r1', null, 0),
+                ('private-unowned', '', 'parser cache failure mode', 'project', null, 'private', 'r2', 'r1', null, 0);
+            insert into tasks values
+                ('cas-parser', 'parser cache task', '', '', '', null, null, 'r2', 'in_progress');
+            insert into code_symbols values
+                ('sym-parser', 'parser::cache', 'cache', 'src/parser.rs', 'parser cache failure mode', 'fn cache()', 'project', 'hash-1');
+            insert into knowledge_pages values
+                ('knowledge-leak', 'parser cache', 'foreign guidance', 'guide', 'guide/parser.md', 'r2', 'cloud_pull', 'project-b');
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let retriever = SqliteRecallRetriever::existing(dir.path()).unwrap();
+        let request = RecallRequest {
+            prompt: "parser cache failure".into(),
+            ..Default::default()
+        };
+        let worker = identity(RecallRole::Worker);
+        let worker_rows = retrieve_candidates(&worker, &request, &[&retriever]).unwrap();
+        let worker_ids: Vec<&str> = worker_rows
+            .candidates
+            .iter()
+            .map(|row| row.evidence_id.as_str())
+            .collect();
+        assert!(worker_ids.contains(&"team-ok"));
+        assert!(!worker_ids.contains(&"team-leak"));
+        assert!(!worker_ids.contains(&"private-unowned"));
+        assert!(!worker_ids.contains(&"knowledge-leak"));
+        assert_eq!(worker_ids[0], "sym-parser");
+
+        let supervisor = identity(RecallRole::Supervisor);
+        let supervisor_rows = retrieve_candidates(&supervisor, &request, &[&retriever]).unwrap();
+        assert_eq!(supervisor_rows.candidates[0].evidence_id, "cas-parser");
+        assert!(!dir.path().join("index/code-vectors").exists());
+    }
+
+    #[test]
+    fn hook_runtime_injects_deltas_without_storing_cards_as_memories() {
+        let project = tempfile::tempdir().unwrap();
+        let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_AGENT_NAME", Some("worker-one")),
+            ("CAS_FACTORY_SESSION", Some("factory-one")),
+            (crate::internal_llm::INTERNAL_LLM_ENV, None),
+        ]);
+        let entries = crate::store::open_store_local(&cas_root).unwrap();
+        let entry = Entry {
+            id: "p-parser-memory".into(),
+            title: Some("Parser cache failure".into()),
+            content: "Use deterministic cache keys when repairing the parser cache".into(),
+            ..Entry::default()
+        };
+        entries.add(&entry).unwrap();
+        let tasks = crate::store::open_task_store_local(&cas_root).unwrap();
+        let mut task = Task::new("cas-parser".into(), "Repair parser cache".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some("worker-one".into());
+        task.labels = vec!["parser".into(), "cache".into()];
+        tasks.add(&task).unwrap();
+        let input = cas_core::hooks::types::HookInput {
+            session_id: "outer-session".into(),
+            cwd: project.path().to_string_lossy().into_owned(),
+            agent_role: Some("worker".into()),
+            ..Default::default()
+        };
+        let before = entries.list().unwrap().len();
+        let first = build_ambient_recall_context(
+            &input,
+            &cas_root,
+            Some("Please repair the parser cache failure"),
+            false,
+        )
+        .unwrap();
+        assert!(first.full.contains("p-parser-memory"));
+        assert!(first.full.contains("provenance=cas.db/read-only"));
+        assert_eq!(entries.list().unwrap().len(), before);
+
+        let duplicate = build_ambient_recall_context(
+            &input,
+            &cas_root,
+            Some("Please repair the parser cache failure"),
+            false,
+        );
+        assert!(duplicate.is_none());
+        assert_eq!(entries.list().unwrap().len(), before);
+
+        let mut revised = entry;
+        revised.content.push_str(" after invalidation");
+        entries.update(&revised).unwrap();
+        let delta = build_ambient_recall_context(
+            &input,
+            &cas_root,
+            Some("Please repair the parser cache failure"),
+            false,
+        )
+        .unwrap();
+        assert!(delta.full.contains("p-parser-memory"));
+        assert!(!cas_root.join("index/code-vectors").exists());
+        assert_eq!(entries.list().unwrap().len(), before);
+    }
+
+    #[test]
+    fn irrelevant_prompt_transition_does_not_open_a_ledger() {
+        let project = tempfile::tempdir().unwrap();
+        let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_AGENT_NAME", Some("worker-one")),
+            ("CAS_FACTORY_SESSION", Some("factory-one")),
+            (crate::internal_llm::INTERNAL_LLM_ENV, None),
+        ]);
+        let input = cas_core::hooks::types::HookInput {
+            session_id: "short-session".into(),
+            agent_role: Some("worker".into()),
+            ..Default::default()
+        };
+        assert!(build_ambient_recall_context(&input, &cas_root, Some("thanks"), false).is_none());
+        assert!(!ledger_path(&cas_root, &input.session_id).exists());
     }
 }

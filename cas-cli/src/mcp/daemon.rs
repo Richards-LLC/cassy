@@ -37,6 +37,24 @@ use crate::store::{
 };
 use crate::types::{Agent, AgentRole};
 
+/// Longest the symbol index may go un-refreshed before the daemon stops waiting for an idle
+/// window and indexes anyway (cas-499c).
+///
+/// The original design hard-gated code indexing on `ActivityTracker::is_idle()`. On a busy
+/// factory daemon that window never arrives, so the job never fired and the symbol index stayed
+/// empty on every install that ever existed. This ceiling turns idleness from a *precondition*
+/// into a *preference*: quiet moments are still preferred, but politeness may only defer the
+/// work, never cancel it.
+pub(crate) const CODE_INDEX_MAX_STALENESS_SECS: u64 = 300;
+
+/// Should the code-index cycle run on this tick?
+///
+/// Idle-preferred with a max-staleness override. Extracted from the `select!` arm so the policy
+/// is testable without standing up a daemon.
+pub(crate) fn should_run_code_index(is_idle: bool, stale_for: Duration) -> bool {
+    is_idle || stale_for >= Duration::from_secs(CODE_INDEX_MAX_STALENESS_SECS)
+}
+
 pub(crate) fn apply_factory_worker_metadata(agent: &mut Agent, clone_path: Option<&str>) {
     if let Some(path) = clone_path {
         agent
@@ -434,6 +452,21 @@ impl EmbeddedDaemon {
         let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(30)); // Agent heartbeat every 30s
         let mut code_index_interval =
             tokio::time::interval(Duration::from_secs(self.config.code_index_interval_secs));
+        // Structural git-history index (EPIC cas-6212 / cas-7a21, spec §4.3).
+        let mut history_index_interval = tokio::time::interval(Duration::from_secs(
+            self.config.history_index_interval_secs.max(1),
+        ));
+        // GitHub + CHANGELOG docs (EPIC cas-6212 / cas-9a38, spec §8).
+        let mut history_docs_interval = tokio::time::interval(Duration::from_secs(
+            self.config.history_docs_interval_secs.max(1),
+        ));
+        // Automagic embedding drain (EPIC cas-6212 / cas-db6e, spec §4.4, §7).
+        let mut embed_drain_interval = tokio::time::interval(Duration::from_secs(
+            self.config.embed_drain_interval_secs.max(1),
+        ));
+        // cas-499c: the max-staleness half of the idle-preferred scheduler. Starts "now" so a
+        // freshly-started daemon still waits out one full ceiling before overriding idleness.
+        let mut last_code_index = tokio::time::Instant::now();
         // Proxy config hot-reload interval (no-op when mcp-proxy feature is disabled)
         let proxy_config_secs = if cfg!(feature = "mcp-proxy") {
             3
@@ -448,6 +481,9 @@ impl EmbeddedDaemon {
         maintenance_interval.tick().await;
         heartbeat_interval.tick().await;
         code_index_interval.tick().await;
+        history_index_interval.tick().await;
+        history_docs_interval.tick().await;
+        embed_drain_interval.tick().await;
         proxy_config_interval.tick().await;
 
         // Check if agent was already registered directly (fallback path in SessionStart hook)
@@ -548,12 +584,105 @@ impl EmbeddedDaemon {
                     self.send_agent_heartbeat().await;
                 }
 
-                // Code indexing - runs when idle and code watcher has pending files
+                // Code indexing - idle-PREFERRED, with a max-staleness override.
+                //
+                // cas-499c (operator ruling, amended): this used to be a hard `is_idle()` gate,
+                // and that gate is precisely why the symbol index had never run anywhere — a
+                // busy factory daemon is never idle, so the gated job never fired and
+                // `code_files` stayed at 0 forever. "Automatic but polite" must not degrade
+                // into "never runs".
+                //
+                // So: index whenever the daemon is idle (the polite path, unchanged), and if it
+                // has not managed an idle window for CODE_INDEX_MAX_STALENESS_SECS, index anyway.
+                // The ceiling is what converts politeness into a deferral rather than a refusal.
+                // `cas doctor` reports the resulting lag; `cas index code` forces it now.
                 _ = code_index_interval.tick() => {
-                    if self.code_watcher.is_some() && self.activity.is_idle() {
-                        if let Err(e) = self.run_code_index_cycle().await {
+                    if self.code_watcher.is_some() {
+                        let stale_for = last_code_index.elapsed();
+                        let is_idle = self.activity.is_idle();
+                        if should_run_code_index(is_idle, stale_for) {
+                            if !is_idle {
+                                eprintln!(
+                                    "[CAS] Code indexing: no idle window for {}s, indexing anyway \
+                                     (max staleness {CODE_INDEX_MAX_STALENESS_SECS}s)",
+                                    stale_for.as_secs()
+                                );
+                            }
+                            // Stamped regardless of outcome: a cycle that fails must not spin the
+                            // override every tick.
+                            last_code_index = tokio::time::Instant::now();
+                            if let Err(e) = self.run_code_index_cycle().await {
+                                let mut status = self.status.write().await;
+                                status.last_error = Some(format!("Code indexing failed: {e}"));
+                            }
+                        }
+                    }
+                }
+
+                // Structural git-history indexing (EPIC cas-6212 / cas-7a21).
+                //
+                // Not gated on `activity.is_idle()` at all (spec §4.3). Both
+                // arms are answering the same lesson from opposite ends: a hard
+                // idleness gate on a daemon that is never idle means the job
+                // never runs, which is why `code_files` read 0 on a repo with
+                // thousands of commits. The code-index arm above solves it with
+                // idle-preferred scheduling plus a max-staleness ceiling
+                // (cas-499c), because indexing every source file is expensive
+                // enough to be worth deferring. A history delta pass is not: it
+                // is a `rev-list` plus two `git log` reads over the day's
+                // commits, so it is cheap enough to be rate-limited by its
+                // interval alone and needs no politeness machinery.
+                _ = history_index_interval.tick() => {
+                    if self.config.index_history {
+                        if let Err(e) = self.run_history_index_cycle().await {
                             let mut status = self.status.write().await;
-                            status.last_error = Some(format!("Code indexing failed: {e}"));
+                            status.last_error = Some(format!("History indexing failed: {e}"));
+                        }
+                    }
+                }
+
+                // GitHub + CHANGELOG doc indexing (EPIC cas-6212 / cas-9a38).
+                //
+                // Ungated like the git arm above, but on a fifteen-minute
+                // interval rather than five: this half is bounded by a third
+                // party's rate limits and by how fast humans write issues, not
+                // by local work (spec §8). Absent `gh`, an unset `issues.repo`
+                // or a missing CHANGELOG are declared boundaries recorded on
+                // the ledger rows — they must never surface as a daemon error,
+                // or every repository without GitHub configured would report a
+                // permanently unhealthy daemon.
+                _ = history_docs_interval.tick() => {
+                    if self.config.index_history_docs {
+                        if let Err(e) = self.run_history_docs_cycle().await {
+                            let mut status = self.status.write().await;
+                            status.last_error = Some(format!("History doc indexing failed: {e}"));
+                        }
+                    }
+                }
+
+                // Automagic embedding drain (EPIC cas-6212 / cas-db6e, spec §4.4).
+                //
+                // Vectors used to be computed only inside `cas cloud sync`, which
+                // made "is my corpus embedded?" a question about whether a human
+                // had recently typed a command — and a 107-page knowledge backlog
+                // duly sat un-embedded until someone ran sync by hand. That manual
+                // step is the defect this arm removes.
+                //
+                // Ungated on idleness, for the reason the history arms are: a
+                // daemon in a busy factory is never idle, and a gate that never
+                // opens is indistinguishable from a feature that was never built.
+                // The work is bounded instead — DRAIN_BATCH units per tick, chunked
+                // at the endpoint's 32-input cap and paced under its 120 req/60 s
+                // limit — so ungated does not mean unbounded.
+                //
+                // Logged out, or an endpoint with no `/api/embeddings`, is a
+                // declared boundary: the drain returns capability_absent, creates
+                // no LMDB environment and makes no request.
+                _ = embed_drain_interval.tick() => {
+                    if self.config.embed_drain {
+                        if let Err(e) = self.run_embedding_drain_cycle().await {
+                            let mut status = self.status.write().await;
+                            status.last_error = Some(format!("Embedding drain failed: {e}"));
                         }
                     }
                 }
@@ -621,6 +750,168 @@ impl EmbeddedDaemon {
         // daemon listening but unreachable (cas-eabe).
         if owns_socket.load(Ordering::SeqCst) {
             socket::cleanup_socket(&self.config.cas_root);
+        }
+
+        Ok(())
+    }
+
+    /// Run one structural git-history indexing pass (EPIC cas-6212 / cas-7a21).
+    ///
+    /// Backfills on first run, then walks only `watermark..HEAD`. Shells out to
+    /// git and writes SQLite, so it runs on the blocking pool. A repo-less or
+    /// git-less environment is a no-op, not an error: the daemon must keep
+    /// ticking for every other subsystem.
+    async fn run_history_index_cycle(&self) -> Result<(), CasError> {
+        let cas_root = self.config.cas_root.clone();
+
+        let outcome = tokio::task::spawn_blocking(move || {
+            let repo_root = match crate::history::repo_root_for(&cas_root) {
+                Ok(root) => root,
+                // Not a git repo — nothing to index, and nothing to complain
+                // about on every tick.
+                Err(_) => return Ok::<_, anyhow::Error>(None),
+            };
+            let walked = crate::history::run_index_pass(&cas_root, &repo_root)?;
+
+            // The commit → session spine repair (EPIC cas-6212 / cas-519f,
+            // spec §5.3). It runs after indexing, on the same tick, but it is
+            // NOT gated on this pass having found commits: the pass is driven
+            // by "indexed commits with no link", so it also drains the backlog
+            // that existed before the repair did.
+            //
+            // A repair failure must not fail the index pass. Indexing is the
+            // load-bearing half — the query surface works without a spine, and
+            // it did for all of M4 — so a broken edge is reported and dropped
+            // rather than allowed to stop the walker on every tick.
+            let repaired = match crate::history::provenance::repair_commit_links(
+                &cas_root,
+                &repo_root,
+                crate::history::provenance::REPAIR_BATCH,
+            ) {
+                Ok(outcome) => Some(outcome),
+                Err(e) => {
+                    eprintln!("[CAS] History provenance repair failed: {e}");
+                    None
+                }
+            };
+            Ok::<_, anyhow::Error>(Some((walked, repaired)))
+        })
+        .await
+        .map_err(|e| CasError::Other(format!("Task join error: {e}")))?
+        .map_err(|e| CasError::Other(format!("History indexing failed: {e}")))?;
+
+        if let Some((outcome, repaired)) = outcome {
+            if outcome.commits_indexed > 0 {
+                eprintln!(
+                    "[CAS] History indexing ({}): {} commits, {} file changes",
+                    outcome.mode.as_str(),
+                    outcome.commits_indexed,
+                    outcome.files_indexed,
+                );
+            }
+            if let Some(repaired) = repaired {
+                if repaired.written > 0 {
+                    eprintln!(
+                        "[CAS] History provenance: {} commit link(s) reconstructed \
+                         ({} examined, {} with no session-bearing edge, {} ambiguous)",
+                        repaired.written,
+                        repaired.examined,
+                        repaired.no_session_edge,
+                        repaired.skipped_ambiguous,
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Run one GitHub + CHANGELOG doc indexing pass (EPIC cas-6212 / cas-9a38).
+    ///
+    /// Returns `Ok` for every *declared boundary* — no git repo, no `gh`, no
+    /// `issues.repo`, no CHANGELOG — because those are states of the world, not
+    /// daemon failures, and each has already been recorded on its own
+    /// `history_index_state` row where `cas history status` will report it
+    /// (spec §10.2). Only a local store failure reaches the caller.
+    async fn run_history_docs_cycle(&self) -> Result<(), CasError> {
+        let cas_root = self.config.cas_root.clone();
+
+        let outcome = tokio::task::spawn_blocking(move || {
+            let Ok(repo_root) = crate::history::repo_root_for(&cas_root) else {
+                return None;
+            };
+            let repo = crate::config::Config::load(&cas_root)
+                .unwrap_or_default()
+                .issues
+                .as_ref()
+                .and_then(|i| i.repo.clone())
+                .map(|r| r.trim().to_string())
+                .filter(|r| !r.is_empty());
+            Some(crate::history::run_docs_pass(
+                &cas_root,
+                &repo_root,
+                repo.as_deref(),
+                false,
+                true,
+                true,
+            ))
+        })
+        .await
+        .map_err(|e| CasError::Other(format!("Task join error: {e}")))?;
+
+        if let Some(outcome) = outcome
+            && let Some(Ok(fetch)) = &outcome.github
+            && fetch.docs_total() > 0
+        {
+            eprintln!(
+                "[CAS] History docs: {} issue(s), {} PR(s), {} comment(s)",
+                fetch.issues, fetch.pull_requests, fetch.comments,
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Drain every pending vector — knowledge pages AND code history — without
+    /// anyone having to run `cas cloud sync` (EPIC cas-6212 / cas-db6e).
+    ///
+    /// Problems are put where a human will find them: the drain's own report
+    /// fields, the `history_index_state('embeddings')` ledger row that
+    /// `cas doctor` reads, and `status.last_error`. Deliberately not a
+    /// `tracing::warn!` and nothing else — that is the shape that let cas-a924's
+    /// permanent `400` read as a cheerful "0 embedded" for weeks.
+    async fn run_embedding_drain_cycle(&self) -> Result<(), CasError> {
+        let cas_root = self.config.cas_root.clone();
+
+        let report = tokio::task::spawn_blocking(move || {
+            crate::cloud::drain_all_pending(&cas_root, crate::cloud::DRAIN_BATCH)
+        })
+        .await
+        .map_err(|e| CasError::Other(format!("Task join error: {e}")))??;
+
+        // No capability is a state of the installation, not news. Say nothing.
+        if report.capability_absent {
+            return Ok(());
+        }
+
+        if report.did_work() {
+            eprintln!(
+                "[CAS] Embedding drain: {} embedded ({} request(s), {} skipped), {} still pending",
+                report.embedded(),
+                report.requests(),
+                report.skipped(),
+                report.pending_after(),
+            );
+        }
+
+        let problems = report.problems();
+        if !problems.is_empty() {
+            let mut status = self.status.write().await;
+            status.last_error = Some(format!(
+                "Embedding drain: {} ({} unit(s) still awaiting a vector)",
+                problems.join("; "),
+                report.pending_after()
+            ));
         }
 
         Ok(())

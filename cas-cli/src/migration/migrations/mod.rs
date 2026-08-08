@@ -196,6 +196,11 @@ mod m217_spawn_queue_add_lifecycle_state;
 mod m218_prompt_queue_recipient_transport_create_table;
 mod m219_knowledge_store_create_tables;
 mod m220_prompt_queue_wake_observability;
+mod m221_history_index_create_tables;
+mod m222_history_docs_create_table;
+mod m223_history_commits_fts;
+mod m224_history_commit_symbols;
+mod m225_commit_links_link_method;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -410,6 +415,22 @@ pub const MIGRATIONS: &[Migration] = &[
     // ledger and contentless FTS5 body index (EPIC cas-7d31 / cas-cbf1).
     m219_knowledge_store_create_tables::MIGRATION,
     m220_prompt_queue_wake_observability::MIGRATION,
+    m221_history_index_create_tables::MIGRATION,
+    m222_history_docs_create_table::MIGRATION,
+    // Lexical (FTS5) half of the history query surface (EPIC cas-6212 /
+    // cas-7f40), separate from m221 so installs that already applied it are
+    // reached. Renumbered 222 → 223 when the M6 lane claimed 222 first; IDs
+    // are never reused, so the later lane moves.
+    m223_history_commits_fts::MIGRATION,
+    // Commit ↔ symbol mapping plus the history_commits.symbol_mapping verdict
+    // column (EPIC cas-6212 / cas-0562), separate from m221 for the same reason
+    // m223 is. Renumbered 222 → 224 after the M6 and M4 lanes claimed 222/223.
+    m224_history_commit_symbols::MIGRATION,
+    // Provenance link_method (EPIC cas-6212 / cas-519f, spec §5.3): the column
+    // that keeps a reconstructed commit link distinguishable from an observed
+    // one, now that the history indexer is a second writer of commit_links.
+    // Renumbered 224 → 225 after the M3 lane claimed 224.
+    m225_commit_links_link_method::MIGRATION,
 ];
 
 #[cfg(test)]

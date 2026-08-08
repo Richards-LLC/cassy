@@ -3,13 +3,12 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::bounded_process::{Deadline, run_command};
 use crate::config::Config;
+use crate::gh_graphql;
 
 const CACHE_VERSION: u8 = 1;
 const CACHE_FILE: &str = "github-issue-triage-cache.json";
@@ -42,16 +41,6 @@ struct IssueCache {
     fetched_at_unix_secs: u64,
     total_count: u64,
     issues: Vec<IssueSummary>,
-}
-
-#[derive(Deserialize)]
-struct GraphQlResponse {
-    data: Option<GraphQlData>,
-}
-
-#[derive(Deserialize)]
-struct GraphQlData {
-    repository: Option<GraphQlRepository>,
 }
 
 #[derive(Deserialize)]
@@ -96,18 +85,11 @@ pub(crate) fn build_session_start_banner_sized(
 
 fn configured_repo(config: &Config) -> Option<&str> {
     let repo = config.issues.as_ref()?.repo.as_deref()?.trim();
-    let (owner, name) = repo.split_once('/')?;
-    if name.contains('/') || !valid_repo_part(owner) || !valid_repo_part(name) {
-        return None;
-    }
+    // Validation lives in `gh_graphql` so the banner and the history indexer
+    // cannot drift on what counts as a legal `issues.repo` (spec §1.6: one
+    // source of the owner/name).
+    gh_graphql::split_repo(repo).ok()?;
     Some(repo)
-}
-
-fn valid_repo_part(part: &str) -> bool {
-    !part.is_empty()
-        && part
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 fn read_fresh_cache(path: &Path, repo: &str, now: u64) -> Option<IssueCache> {
@@ -116,29 +98,25 @@ fn read_fresh_cache(path: &Path, repo: &str, now: u64) -> Option<IssueCache> {
     (cache.version == CACHE_VERSION && cache.repo == repo && age <= CACHE_TTL_SECS).then_some(cache)
 }
 
+/// Fetch the banner's three-issue summary over the shared `gh api graphql`
+/// path (`gh_graphql`), keeping this handler's own one-second budget: the
+/// banner sits in a SessionStart critical path and must never make a session
+/// wait on the network.
 fn fetch_issues(repo: &str, now: u64) -> Option<IssueCache> {
-    let (owner, name) = repo.split_once('/')?;
-    let output = run_command(
-        Command::new("gh").args([
-            "api",
-            "graphql",
-            "-f",
-            &format!("query={ISSUE_QUERY}"),
-            "-F",
-            &format!("owner={owner}"),
-            "-F",
-            &format!("name={name}"),
-        ]),
-        Deadline::after(GH_TIMEOUT),
+    let (owner, name) = gh_graphql::split_repo(repo).ok()?;
+    let data = gh_graphql::run_graphql(
+        ISSUE_QUERY,
+        &[
+            ("owner", owner.to_string()),
+            ("name", name.to_string()),
+        ],
         GH_TIMEOUT,
     )
     .ok()?;
-    if !output.status.success() {
-        return None;
-    }
 
-    let response: GraphQlResponse = serde_json::from_slice(&output.stdout).ok()?;
-    let issues = response.data?.repository?.issues;
+    let repository: Option<GraphQlRepository> =
+        serde_json::from_value(data.get("repository")?.clone()).ok()?;
+    let issues = repository?.issues;
     Some(IssueCache {
         version: CACHE_VERSION,
         repo: repo.to_string(),

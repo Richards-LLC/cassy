@@ -702,44 +702,29 @@ fn structural_changes_since(
     )))
 }
 
+/// Map NUL-delimited `git log --name-status -z` output onto overview changes.
+///
+/// Wire-format parsing is [`crate::git_log::parse_name_status_z`], shared with
+/// codemap and the git-history walker (cas-7a21). Overview-specific policy kept
+/// here: only A/D survive (`--no-renames` at the call site means R never
+/// arrives), deduplicated across commits.
 fn parse_git_log_nul_output(raw: &str) -> Vec<ProjectOverviewChange> {
     let mut changes = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    let parts: Vec<&str> = raw.split('\0').collect();
-    let mut i = 0;
-    while i < parts.len() {
-        let status = parts[i].trim_matches(|c: char| c == '\n' || c == '\r');
-        if status.is_empty() {
-            i += 1;
+
+    for entry in crate::git_log::parse_name_status_z(raw) {
+        if !matches!(entry.status.as_str(), "A" | "D") {
             continue;
         }
-        if i + 1 >= parts.len() {
-            break;
-        }
-        let path = parts[i + 1].trim();
-        if path.is_empty() {
-            i += 2;
-            continue;
-        }
-        let ty = match status {
-            "A" => "A",
-            "D" => "D",
-            // `--no-renames` in structural_changes_since means R never appears here.
-            _ => {
-                i += 2;
-                continue;
-            }
-        };
-        let key = format!("{ty}:{path}");
-        if seen.insert(key) {
+        if seen.insert(format!("{}:{}", entry.status, entry.path)) {
             changes.push(ProjectOverviewChange {
-                change_type: ty.to_string(),
-                path: path.to_string(),
+                change_type: entry.status,
+                path: entry.path,
                 old_path: None,
             });
         }
-        i += 2;
     }
+
     changes
 }
 

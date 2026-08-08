@@ -69,7 +69,7 @@ pub use code_review::{
     ReviewerOutput, Severity as FindingSeverity, parse_review_outcome, parse_reviewer_output,
     review_outcome_shape_hint,
 };
-pub use commit_link::CommitLink;
+pub use commit_link::{CommitLink, LINK_METHOD_HOOK_OBSERVED};
 pub use delivery::{
     WorkerCompletionReceipt, WorkerCompletionReceiptInput, WorkerDeliveryEvent,
     WorkerDeliveryState, WorkerDeliveryTransaction,

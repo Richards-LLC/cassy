@@ -544,6 +544,20 @@ pub enum PendingReason {
     DroppedDeadSource,
     /// Terminal non-delivery: duplicate idle suppression.
     SuppressedIdle,
+    /// Terminal non-delivery by explicit dead-letter: the payload's premise
+    /// expired before transport, so it was withdrawn rather than delivered as
+    /// an instruction that is no longer true (cas-0147, GH #167).
+    ///
+    /// Split out of [`Self::SuppressedIdle`] because the conflation hid a
+    /// four-day outage. Every one of the 397 `suppressed_idle` rows in the
+    /// live queue came from premise expiry, not from idle chatter — 353 of
+    /// them were supervisor lifecycle relays (34 of 36 `task_awaiting_merge`,
+    /// 34 of 36 `task_close_rejected`) killed by an unpassable staleness test.
+    /// Read as "idle suppression" the whole class looked benign and quiet by
+    /// design, which is exactly why nobody went looking. A withdrawal is a
+    /// decision someone made about a payload; it must not share a name with
+    /// noise reduction.
+    SupersededStale,
     /// Terminal non-delivery: unknown/stale target abandoned.
     AbandonedUnknownTarget,
     /// Terminal non-delivery of a supervisor lifecycle WAKE relay that was
@@ -576,6 +590,7 @@ impl PendingReason {
             Self::AwaitingAck => "awaiting_ack",
             Self::DroppedDeadSource => "dropped_dead_source",
             Self::SuppressedIdle => "suppressed_idle",
+            Self::SupersededStale => "superseded_stale",
             Self::AbandonedUnknownTarget => "abandoned_unknown_target",
             Self::UndeliveredLifecycleRelay => "undelivered_lifecycle_relay",
             Self::PartialBroadcast => "partial_broadcast",
@@ -593,6 +608,7 @@ impl PendingReason {
             "awaiting_ack" => Some(Self::AwaitingAck),
             "dropped_dead_source" => Some(Self::DroppedDeadSource),
             "suppressed_idle" => Some(Self::SuppressedIdle),
+            "superseded_stale" => Some(Self::SupersededStale),
             "abandoned_unknown_target" => Some(Self::AbandonedUnknownTarget),
             "undelivered_lifecycle_relay" => Some(Self::UndeliveredLifecycleRelay),
             "partial_broadcast" => Some(Self::PartialBroadcast),
@@ -606,7 +622,7 @@ impl PendingReason {
         match self {
             Self::GatedNotReady | Self::TargetUnavailable => DeliveryStage::Gated,
             Self::DroppedDeadSource => DeliveryStage::Dropped,
-            Self::SuppressedIdle => DeliveryStage::Suppressed,
+            Self::SuppressedIdle | Self::SupersededStale => DeliveryStage::Suppressed,
             Self::AbandonedUnknownTarget | Self::UndeliveredLifecycleRelay => {
                 DeliveryStage::Abandoned
             }
@@ -656,6 +672,7 @@ impl PendingReason {
             // failed; the terminal stamp must not double-count it.
             Self::DroppedDeadSource
             | Self::SuppressedIdle
+            | Self::SupersededStale
             | Self::AbandonedUnknownTarget
             | Self::UndeliveredLifecycleRelay
             | Self::PartialBroadcast => false,
@@ -708,6 +725,18 @@ pub enum SurfacingSource {
     InboxPoll,
     /// The `UserPromptSubmit` hook injected the row into the recipient's turn.
     HookSurfaced,
+    /// The daemon's own transport (agent-teams inbox file or PTY injection)
+    /// put this row's content in front of this recipient (cas-b8ce, GH #176).
+    ///
+    /// WHY THIS VARIANT EXISTS: the receipt table used to be written by CAS's
+    /// two surfacing paths ONLY. Every message a Claude teammate actually
+    /// receives arrives over a different transport — `write_to_inbox` into the
+    /// agent-teams inbox file, or a PTY injection — and those stamped
+    /// `transport_delivered_at` while leaving the per-recipient receipt empty.
+    /// `poll_unseen_for_recipient` defines "unread" as "no receipt", so the
+    /// recipient's own `inbox_poll` re-served its entire already-actioned
+    /// history. Two transports, one ledger.
+    TransportDelivered,
 }
 
 impl SurfacingSource {
@@ -715,6 +744,7 @@ impl SurfacingSource {
         match self {
             Self::InboxPoll => "inbox_poll",
             Self::HookSurfaced => "hook_surfaced",
+            Self::TransportDelivered => "transport_delivered",
         }
     }
 
@@ -722,6 +752,7 @@ impl SurfacingSource {
         match s {
             "inbox_poll" => Some(Self::InboxPoll),
             "hook_surfaced" => Some(Self::HookSurfaced),
+            "transport_delivered" => Some(Self::TransportDelivered),
             _ => None,
         }
     }
@@ -1190,6 +1221,49 @@ pub trait PromptQueueStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>>;
 
+    /// Record that a transport OTHER than CAS's own surfacing paths put this
+    /// row's content in front of `recipient` (cas-b8ce, GH #176).
+    ///
+    /// # Why this exists
+    ///
+    /// `prompt_queue_recipient_seen` is the single ledger every "has this
+    /// recipient read it" question is answered from — most importantly
+    /// [`PromptQueueStore::poll_unseen_for_recipient`], whose predicate is
+    /// literally `seen.prompt_id IS NULL`. Until this method existed, that
+    /// ledger was written by two callers only: the `inbox_poll` drain and the
+    /// `UserPromptSubmit` hook. But the transport that actually delivers to a
+    /// Claude teammate is the agent-teams inbox file (`write_to_inbox`) or a
+    /// PTY injection, and those recorded delivery in `prompt_queue` columns
+    /// (`transport_delivered_at`, `processed_at`, `highest_stage`) that the
+    /// unread predicate does not consult. So a message could be delivered,
+    /// read, replied to and acted on, and still be re-served in full by the
+    /// recipient's next `inbox_poll` — GH #176's redelivery bursts.
+    ///
+    /// # Contract
+    ///
+    /// Callers must hold POSITIVE per-message evidence that THIS recipient
+    /// received THIS content — a completed PTY injection, or the harness
+    /// having taken the inbox copy with the pane then producing output. A
+    /// transport *attempt* is not evidence and must not call this: writing a
+    /// receipt for content nobody saw makes the message vanish from the only
+    /// view that would reveal it, which is the failure mode cas-ac7e
+    /// (GH #130) exists to prevent.
+    ///
+    /// Deliberately does NOT set `acked_at`. Delivery is not acknowledgment,
+    /// and the ack ladder (`explicit_ack` > `hook_surfaced` >
+    /// `inferred_from_reply`) stays exactly as cas-45c4 left it. This closes
+    /// the redelivery hole without inventing a new, weaker ack class.
+    ///
+    /// Idempotent (`INSERT OR IGNORE`): a re-observed delivery never moves an
+    /// existing receipt's timestamp, so reply-inference ordering
+    /// ([`reply_confirms_delivered_message`]) cannot be retroactively broken.
+    fn record_recipient_surfaced(
+        &self,
+        prompt_id: i64,
+        recipient: &str,
+        source: SurfacingSource,
+    ) -> Result<()>;
+
     /// Record what the daemon's wake nudge did for this row (cas-7a01).
     ///
     /// Best-effort observability: callers should not fail a delivery because
@@ -1389,7 +1463,21 @@ pub trait PromptQueueStore: Send + Sync {
     fn mark_dropped(&self, prompt_id: i64, detail: Option<&str>) -> Result<()>;
 
     /// Idle-message suppression: processed without transport success.
+    ///
+    /// Reserved for genuine noise reduction — a duplicate "standing by" the
+    /// recipient does not need. A payload withdrawn because its premise
+    /// expired is [`Self::mark_superseded`], not this (cas-0147, GH #167).
     fn mark_suppressed(&self, prompt_id: i64, detail: Option<&str>) -> Result<()>;
+
+    /// Explicit dead-letter for a payload whose premise expired before
+    /// transport (cas-0147, GH #167): processed, stage `Suppressed`, reason
+    /// [`PendingReason::SupersededStale`].
+    ///
+    /// `detail` is mandatory here and not `Option` on purpose. A row may only
+    /// reach a terminal non-delivered state by a dead-letter that says why;
+    /// "it was withdrawn, reason unrecorded" is the state this whole class of
+    /// bug hides in.
+    fn mark_superseded(&self, prompt_id: i64, detail: &str) -> Result<()>;
 
     /// Unknown-target abandon: processed without transport success.
     fn mark_abandoned(&self, prompt_id: i64, detail: Option<&str>) -> Result<()>;
@@ -2321,6 +2409,32 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             limit,
             SurfacingSource::HookSurfaced,
         )
+    }
+
+    fn record_recipient_surfaced(
+        &self,
+        prompt_id: i64,
+        recipient: &str,
+        source: SurfacingSource,
+    ) -> Result<()> {
+        if recipient.trim().is_empty() {
+            return Ok(());
+        }
+        crate::shared_db::with_write_retry(|| {
+            let conn = self.conn.lock().unwrap();
+            conn.execute(
+                "INSERT OR IGNORE INTO prompt_queue_recipient_seen
+                     (prompt_id, recipient, seen_at, source)
+                 VALUES (?, ?, ?, ?)",
+                params![
+                    prompt_id,
+                    recipient,
+                    Utc::now().to_rfc3339(),
+                    source.as_str()
+                ],
+            )?;
+            Ok(())
+        })
     }
 
     fn record_wake_attempt(
@@ -3300,6 +3414,25 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         })
     }
 
+    fn mark_superseded(&self, prompt_id: i64, detail: &str) -> Result<()> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = self.conn.lock().unwrap();
+            Self::atomic_stage_stamp(
+                &conn,
+                prompt_id,
+                DeliveryStage::Suppressed,
+                AtomicStampOpts {
+                    reason: Some(PendingReason::SupersededStale),
+                    detail: Some(detail),
+                    set_processed: true,
+                    broadcast_attempted: None,
+                    broadcast_succeeded: None,
+                    broadcast_failed: None,
+                },
+            )
+        })
+    }
+
     fn mark_abandoned(&self, prompt_id: i64, detail: Option<&str>) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
             let conn = self.conn.lock().unwrap();
@@ -3893,6 +4026,96 @@ mod tests {
         );
     }
 
+    /// cas-0147 (GH #167): a withdrawal is not idle-noise suppression.
+    ///
+    /// The two shared `suppressed_idle` for four days, which is how a total
+    /// outage of supervisor lifecycle relays hid inside a bucket everyone
+    /// reads as "benign dedup, working as intended". They must be separable by
+    /// the stored reason alone, without parsing the detail string.
+    #[test]
+    fn a_withdrawn_payload_is_not_filed_as_idle_chatter() {
+        let (_temp, store) = create_test_store();
+
+        let chatter = store
+            .enqueue("worker-a", "supervisor", "standing by")
+            .unwrap();
+        store
+            .mark_suppressed(chatter, Some("duplicate idle"))
+            .unwrap();
+
+        let withdrawn = store
+            .enqueue("lifecycle:3509", "supervisor", "<task-lifecycle ...>")
+            .unwrap();
+        store
+            .mark_superseded(
+                withdrawn,
+                "withdrawn before transport: cas-0147 left the status this notification announces",
+            )
+            .unwrap();
+
+        let idle = store.message_delivery_report(chatter).unwrap().unwrap();
+        let sup = store.message_delivery_report(withdrawn).unwrap().unwrap();
+
+        assert_eq!(idle.pending_reason, Some(PendingReason::SuppressedIdle));
+        assert_eq!(sup.pending_reason, Some(PendingReason::SupersededStale));
+        assert_ne!(
+            idle.pending_reason, sup.pending_reason,
+            "conflating these is the defect, not a naming preference"
+        );
+
+        // Both are terminal-without-transport, and both must remain so: this
+        // change is about honesty, not about resurrecting a dead payload.
+        assert_eq!(sup.stage, DeliveryStage::Suppressed);
+        assert!(sup.delivered_at.is_none());
+        assert_eq!(
+            sup.legacy_status,
+            MessageStatus::Delivered,
+            "processed_at must be set — the row is terminal, not in flight"
+        );
+    }
+
+    /// AC2: a terminal non-delivered row must be answerable for itself. The
+    /// dead-letter carries a reason AND a detail naming what expired — a
+    /// withdrawal with no recorded cause is the state this bug class lives in.
+    #[test]
+    fn the_dead_letter_records_why_the_row_died() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue("lifecycle:1", "supervisor", "<task-lifecycle ...>")
+            .unwrap();
+        store
+            .mark_superseded(
+                id,
+                "withdrawn before transport: cas-9d92 left awaiting_merge",
+            )
+            .unwrap();
+
+        let detail = store
+            .message_delivery_report(id)
+            .unwrap()
+            .unwrap()
+            .pending_detail
+            .expect(
+                "a dead-letter with no reason recorded is indistinguishable from a silent drop",
+            );
+        assert!(
+            detail.contains("cas-9d92"),
+            "must name what expired: {detail}"
+        );
+    }
+
+    /// A withdrawal is a policy decision, not a transport that refused the
+    /// handoff — it must not burn the row's retry budget (cas-d732 / cas-94a1).
+    #[test]
+    fn withdrawing_a_payload_does_not_spend_a_delivery_attempt() {
+        assert!(!PendingReason::SupersededStale.counts_as_delivery_attempt());
+        assert_eq!(
+            PendingReason::parse("superseded_stale"),
+            Some(PendingReason::SupersededStale),
+            "the reason must survive the round trip through the stored column"
+        );
+    }
+
     /// cas-ac7e (GH #130): stamp the legacy/inferred ack shape directly.
     ///
     /// Notification 7212 was acked `inferred_from_reply` by a daemon that
@@ -4129,6 +4352,137 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    /// cas-b8ce (GH #176) — THE REPRODUCTION.
+    ///
+    /// The live shape, from `cas.db` rows 8210/8215/8217 (zealous-fox-95) and
+    /// 8221/8223/8225/8229/8241 (nimble-gazelle-41): the daemon delivered each
+    /// row over the agent-teams inbox / PTY transport and stamped
+    /// `transport_delivered_at`. The recipient read them, acted on them and
+    /// replied. Fourteen minutes later its own `inbox_poll` handed the whole
+    /// burst straight back, every receipt stamped `source='inbox_poll'` at one
+    /// instant — because "unread" is `seen.prompt_id IS NULL` and the transport
+    /// that did the delivering wrote no receipt.
+    ///
+    /// Delivery over ANY transport must be terminal for the unread view.
+    #[test]
+    fn a_transport_delivered_row_is_not_re_served_by_the_recipients_own_poll() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue("supervisor", "zealous-fox-95", "Assignment: cas-5c50")
+            .unwrap();
+
+        // Exactly what the daemon did for 8210: hand it to the teams-inbox
+        // transport and record the handoff. No ack — the recipient had not
+        // called message_ack, which is the common case in production.
+        store
+            .record_recipient_surfaced(id, "zealous-fox-95", SurfacingSource::TransportDelivered)
+            .unwrap();
+        store.mark_transport_delivered(id).unwrap();
+
+        assert!(
+            store
+                .poll_unseen_for_recipient("zealous-fox-95", None, 20)
+                .unwrap()
+                .is_empty(),
+            "a row this recipient was already shown over the daemon's own \
+             transport must not come back from its inbox_poll — that is the \
+             GH #176 redelivery burst"
+        );
+        assert_eq!(
+            store
+                .count_unseen_for_recipient("zealous-fox-95", None)
+                .unwrap(),
+            0,
+            "the unread COUNT must agree with the drain, or worker_status \
+             reports phantom mail"
+        );
+    }
+
+    /// cas-b8ce — the receipt must not become a way to lose mail.
+    ///
+    /// cas-ac7e (GH #130) exists because a weak signal was allowed to erase a
+    /// message from the only view that would reveal it. A receipt written for
+    /// recipient A must therefore say nothing about recipient B, and must not
+    /// touch the row's ack state at all.
+    #[test]
+    fn a_transport_receipt_is_scoped_to_one_recipient_and_is_not_an_ack() {
+        let (_temp, store) = create_test_store();
+        let id = store.enqueue("supervisor", "all_workers", "standup").unwrap();
+        store
+            .record_recipient_surfaced(id, "worker-a", SurfacingSource::TransportDelivered)
+            .unwrap();
+
+        assert!(
+            store
+                .poll_unseen_for_recipient("worker-a", None, 20)
+                .unwrap()
+                .is_empty(),
+            "the receipted worker is done with this broadcast"
+        );
+        assert_eq!(
+            store
+                .poll_unseen_for_recipient("worker-b", None, 20)
+                .unwrap()
+                .iter()
+                .map(|p| p.id)
+                .collect::<Vec<_>>(),
+            vec![id],
+            "one worker's receipt must never hide a broadcast from a peer the \
+             daemon has not delivered to yet"
+        );
+        assert!(
+            store
+                .message_delivery_report(id)
+                .unwrap()
+                .unwrap()
+                .confirmed_at
+                .is_none(),
+            "delivery is not acknowledgment: a transport receipt must not \
+             fabricate an ack the recipient never gave"
+        );
+    }
+
+    /// cas-b8ce — idempotence. The daemon can observe the same delivery twice
+    /// (a re-poll of a row whose consume raced), and `reply_confirms_delivered_message`
+    /// compares the receipt instant against the reply instant — so a second
+    /// observation must NOT move the receipt forward, or an already-valid
+    /// reply-inference would be retroactively invalidated.
+    #[test]
+    fn a_repeated_transport_receipt_does_not_move_the_seen_instant() {
+        let (_temp, store) = create_test_store();
+        let id = store.enqueue("supervisor", "worker-1", "go").unwrap();
+        store
+            .record_recipient_surfaced(id, "worker-1", SurfacingSource::TransportDelivered)
+            .unwrap();
+        let first = recipient_seen_at(&store, id, "worker-1").expect("receipt must exist");
+
+        store
+            .record_recipient_surfaced(id, "worker-1", SurfacingSource::TransportDelivered)
+            .unwrap();
+        assert_eq!(
+            recipient_seen_at(&store, id, "worker-1"),
+            Some(first),
+            "INSERT OR IGNORE: a re-observed delivery must leave the original \
+             receipt instant untouched"
+        );
+    }
+
+    /// Read back the persisted receipt instant for one (message, recipient).
+    fn recipient_seen_at(
+        store: &SqlitePromptQueueStore,
+        prompt_id: i64,
+        recipient: &str,
+    ) -> Option<String> {
+        let conn = store.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT seen_at FROM prompt_queue_recipient_seen
+             WHERE prompt_id = ? AND recipient = ?",
+            params![prompt_id, recipient],
+            |row| row.get(0),
+        )
+        .ok()
     }
 
     /// Write the surfacing receipt an inbox drain would leave, at a chosen

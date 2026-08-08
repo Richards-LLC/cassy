@@ -542,10 +542,47 @@ pub(crate) struct PaneWakeState {
     /// How long the pane has produced no PTY output at all. `None` when there
     /// is no baseline yet (first observation of this pane).
     pub silent_for: Option<std::time::Duration>,
-    /// The recipient's transcript shows an outstanding tool call — it is
-    /// mid-turn, or blocked on an approval dialog, whatever the pane's silence
-    /// suggests. Read with the same helper `cas factory is-wedged` uses.
-    pub tool_call_in_flight: bool,
+    /// What the recipient's transcript says about an outstanding tool call.
+    /// Read with the same helper `cas factory is-wedged` uses.
+    pub tool_call: ToolCallEvidence,
+}
+
+/// cas-9e81: what the transcript actually told us about an in-flight tool
+/// call — three states, not two.
+///
+/// This used to be a plain `bool` where "we could not read a transcript at
+/// all" was folded into `true` (in flight). That conflation is what made the
+/// wake gate fail closed forever: `resolve_worker` returns
+/// `transcript_path: None` for every pane whose session was written under a
+/// non-default `CLAUDE_CONFIG_DIR`, so the daemon read "no telemetry" as
+/// "busy" and declined 34 of 35 wakes on a live fleet — the entire fleet, on
+/// every pass, with a message that named nothing.
+///
+/// Splitting `Unknown` out keeps the protective half honest (a transcript
+/// that really does show a pending call still vetoes) while making the
+/// no-evidence case *demotion* rather than *veto*: an unknown recipient is
+/// held to the conservative sustained-silence bar instead of being treated as
+/// permanently busy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolCallEvidence {
+    /// The transcript shows a tool call that has not come back — mid-turn, or
+    /// blocked on an approval dialog, whatever the pane's silence suggests.
+    InFlight,
+    /// The transcript was read and shows no outstanding call.
+    Idle,
+    /// No transcript could be read (unresolvable path, unknown agent, I/O
+    /// error). We know nothing either way.
+    Unknown,
+}
+
+impl ToolCallEvidence {
+    fn from_transcript(has_in_flight_call: bool) -> Self {
+        if has_in_flight_call {
+            Self::InFlight
+        } else {
+            Self::Idle
+        }
+    }
 }
 
 impl PaneWakeState {
@@ -558,12 +595,51 @@ impl PaneWakeState {
     /// blocked on an approval dialog is silent too, and the injected payload
     /// ends in a submit CR that would answer it.
     fn is_safe_to_type_into(self) -> bool {
-        !self.composer_dirty
-            && self.ready_for_injection
-            && !self.tool_call_in_flight
-            && self
-                .silent_for
-                .is_some_and(|silence| silence >= SILENCE_FOR_IDLE_RECIPIENT_WAKE)
+        self.veto_for_idle_recipient().is_none()
+    }
+
+    /// Why an idle-looking recipient's pane may not be typed into right now,
+    /// or `None` when it may (cas-9e81).
+    ///
+    /// Returning the reason instead of a bare `false` is the point: every
+    /// specimen on this task recorded the same contentless
+    /// "idle gate declined the wake for this pass", which named neither the
+    /// failing signal nor the recipient's state, so a fleet-wide 97% decline
+    /// rate looked exactly like normal busy-recipient protection.
+    fn veto_for_idle_recipient(self) -> Option<&'static str> {
+        if let Some(reason) = self.pane_typing_veto() {
+            return Some(reason);
+        }
+        match self.tool_call {
+            ToolCallEvidence::InFlight => Some("recipient has a tool call in flight"),
+            // Known-idle: the registry already supplied the "not working"
+            // half, so the pane only has to have settled.
+            ToolCallEvidence::Idle => self.silence_veto(SILENCE_FOR_IDLE_RECIPIENT_WAKE),
+            // No transcript evidence either way — hold this recipient to the
+            // conservative sustained-silence bar rather than vetoing forever.
+            ToolCallEvidence::Unknown => self
+                .silence_veto(SILENCE_FOR_ACTIVE_RECIPIENT_WAKE)
+                .map(|_| "no transcript evidence and the pane has not been silent long enough"),
+        }
+    }
+
+    /// Pane-level vetoes shared by both wake paths.
+    fn pane_typing_veto(self) -> Option<&'static str> {
+        if self.composer_dirty {
+            return Some("operator has an unsubmitted draft in the composer");
+        }
+        if !self.ready_for_injection {
+            return Some("pane is not ready for injection yet");
+        }
+        None
+    }
+
+    fn silence_veto(self, required: std::time::Duration) -> Option<&'static str> {
+        match self.silent_for {
+            None => Some("pane has no silence baseline yet"),
+            Some(silence) if silence < required => Some("pane has not been silent long enough"),
+            Some(_) => None,
+        }
     }
 
     /// cas-45c4 (GH #102): safe to type into the pane of a recipient the
@@ -579,12 +655,51 @@ impl PaneWakeState {
     ///   maximally wakeable — and the injected payload ends in a submit CR,
     ///   which would answer whatever that dialog has highlighted.
     fn is_safe_to_wake_an_active_looking_recipient(self) -> bool {
-        !self.composer_dirty
-            && self.ready_for_injection
-            && !self.tool_call_in_flight
-            && self
-                .silent_for
-                .is_some_and(|silence| silence >= SILENCE_FOR_ACTIVE_RECIPIENT_WAKE)
+        self.veto_for_active_looking_recipient().is_none()
+    }
+
+    /// Reasoned form of [`Self::is_safe_to_wake_an_active_looking_recipient`]
+    /// (cas-9e81).
+    ///
+    /// `Unknown` transcript evidence is NOT a veto here: this path already
+    /// demands 45s of unbroken PTY silence, which is the same bar the unknown
+    /// case is demoted to on the idle path. Only a transcript that positively
+    /// shows a pending call vetoes.
+    fn veto_for_active_looking_recipient(self) -> Option<&'static str> {
+        if let Some(reason) = self.pane_typing_veto() {
+            return Some(reason);
+        }
+        if self.tool_call == ToolCallEvidence::InFlight {
+            return Some("recipient has a tool call in flight");
+        }
+        self.silence_veto(SILENCE_FOR_ACTIVE_RECIPIENT_WAKE)
+    }
+}
+
+/// Whether a queued row may PTY-wake its recipient right now, and — always —
+/// why (cas-9e81).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WakeDecision {
+    pub allowed: bool,
+    /// Operator-facing explanation, persisted as the row's
+    /// `wake_attempt_detail` so `message_status` reports which signal
+    /// actually decided, not just that "the gate" did.
+    pub reason: &'static str,
+}
+
+impl WakeDecision {
+    fn allow(reason: &'static str) -> Self {
+        Self {
+            allowed: true,
+            reason,
+        }
+    }
+
+    fn deny(reason: &'static str) -> Self {
+        Self {
+            allowed: false,
+            reason,
+        }
     }
 }
 
@@ -730,6 +845,13 @@ const URGENT_WAKE_OBSERVE_WINDOW: std::time::Duration = std::time::Duration::fro
 pub(crate) struct UrgentWakeProbe {
     /// Pane the interrupt was aimed at (already name-normalised).
     pub(crate) pane: String,
+    /// cas-1a54: the ROW's `target`, which is not always [`Self::pane`] — a row
+    /// aimed at `supervisor` is injected into the generated supervisor pane
+    /// name. The receipt table is keyed by the name the recipient polls under
+    /// (`prompt_queue_recipient_seen.recipient`, matched against `q.target` in
+    /// `unseen_for_recipient_predicate`), so the consume arm must stamp the
+    /// target — a receipt written for the pane name would satisfy no reader.
+    pub(crate) target: String,
     /// The pane's cumulative PTY output byte count at inject time.
     pub(crate) bytes_at_inject: u64,
     /// When the inject completed.
@@ -950,7 +1072,7 @@ impl FactoryDaemon {
             return;
         }
         let now = std::time::Instant::now();
-        let verdicts: Vec<(i64, UrgentWakeOutcome, String)> = self
+        let verdicts: Vec<(i64, UrgentWakeOutcome, String, String)> = self
             .urgent_wake_probes
             .iter()
             .map(|(row_id, probe)| {
@@ -963,16 +1085,17 @@ impl FactoryDaemon {
                         URGENT_WAKE_OBSERVE_WINDOW,
                     ),
                     probe.pane.clone(),
+                    probe.target.clone(),
                 )
             })
             .collect();
 
-        for (row_id, outcome, pane) in verdicts {
+        for (row_id, outcome, pane, target) in verdicts {
             match urgent_probe_action(outcome) {
                 UrgentProbeAction::KeepProbing => {}
                 UrgentProbeAction::ConsumeRow => {
                     self.forget_row_delivery_state(row_id);
-                    if let Err(error) = queue.mark_transport_delivered(row_id) {
+                    if let Err(error) = Self::consume_urgent_wake_row(queue, row_id, &target) {
                         tracing::error!(
                             prompt_id = row_id,
                             %error,
@@ -1083,11 +1206,70 @@ impl FactoryDaemon {
             written.written_at.elapsed(),
             INBOX_DRAIN_TURN_WINDOW,
         );
+        // cas-c73d: the presence check must read the SAME tree the write went
+        // to. For a `config_dir`-spawned worker that is the recipient's own
+        // config dir; checking the daemon's tree there would report "no unread
+        // copy" for a row the recipient has not seen and consume it.
+        let recipient_view = self.recipient_teams_view(pane_target);
+        let teams = recipient_view.as_ref().unwrap_or(teams);
         deferred_inbox_outcome(
             true,
             teams.inbox_has_unread_copy(inbox_target, from, text),
             pane_turn,
         )
+    }
+
+    /// cas-b8ce (GH #176): stamp the per-recipient surfacing receipt for a row
+    /// this daemon's own transport put in front of `recipient`.
+    ///
+    /// Best-effort by design, like every other observability write on the
+    /// delivery path: a receipt that fails to persist costs a redelivery, and a
+    /// delivery failed over a receipt costs the message. The former is
+    /// recoverable and the latter is not, so this never propagates.
+    fn record_transport_receipt(
+        queue: &dyn cas_store::PromptQueueStore,
+        prompt_id: i64,
+        recipient: &str,
+    ) {
+        if let Err(error) = queue.record_recipient_surfaced(
+            prompt_id,
+            recipient,
+            cas_store::SurfacingSource::TransportDelivered,
+        ) {
+            tracing::debug!(
+                target: "cas::coordination",
+                message_id = prompt_id,
+                %recipient,
+                %error,
+                "cas-b8ce: could not persist the transport surfacing receipt — \
+                 the row may be re-served by the recipient's next inbox_poll"
+            );
+        }
+    }
+
+    /// cas-1a54: terminalize an urgent row whose wake the pane corroborated —
+    /// receipt first, then the transport stamp.
+    ///
+    /// This is the whole pairing the `ConsumeRow` arm of
+    /// [`Self::resolve_urgent_wake_probes`] performs, extracted so a test can
+    /// drive the ACTUAL code path instead of a hand-rolled copy of it. That
+    /// distinction matters here: the defect was a success arm that stamped
+    /// `mark_transport_delivered` and nothing else, and a test that re-writes
+    /// the intended pair itself cannot catch that — it would pass while the
+    /// arm stayed broken (exactly how this survived cas-b8ce).
+    ///
+    /// `recipient` must be the ROW's target, the name the recipient polls
+    /// under; see [`UrgentWakeProbe::target`]. The receipt is best-effort and
+    /// never propagates; only the stamp's failure is returned, preserving the
+    /// arm's original error behaviour.
+    fn consume_urgent_wake_row(
+        queue: &dyn cas_store::PromptQueueStore,
+        row_id: i64,
+        recipient: &str,
+    ) -> anyhow::Result<()> {
+        Self::record_transport_receipt(queue, row_id, recipient);
+        queue.mark_transport_delivered(row_id)?;
+        Ok(())
     }
 
     pub(super) async fn handle_mux_event(&mut self, event: cas_mux::MuxEvent) {
@@ -1596,8 +1778,6 @@ impl FactoryDaemon {
         pane: PaneWakeState,
         now: chrono::DateTime<chrono::Utc>,
     ) -> bool {
-        use crate::mcp::tools::core::task::lifecycle::supervisor_push::is_lifecycle_wake_source;
-
         // The source marker states intent, but `prompt_queue.source` is
         // caller-settable (`cas factory message --from …`, bridge POST
         // /message), so on its own it would let any client hand arbitrary text
@@ -1606,11 +1786,41 @@ impl FactoryDaemon {
         // `<task-lifecycle …>` or `<worker-died …>` envelope — which the
         // lifecycle emitter and orphan recovery are the only producers of —
         // qualifies (cas-3dcb).
-        pane_target == supervisor_name
-            && is_lifecycle_wake_source(source)
-            && crate::prompt_revalidation::is_supervisor_wake_envelope(prompt)
-            && pane.is_safe_to_type_into()
-            && Self::agent_signals_look_quiet(data, pane_target, now)
+        Self::supervisor_wake_decision(data, pane_target, supervisor_name, source, prompt, pane, now)
+            .allowed
+    }
+
+    /// Reasoned form of [`Self::supervisor_wake_is_eligible`] (cas-9e81).
+    fn supervisor_wake_decision(
+        data: &crate::ui::factory::director::DirectorData,
+        pane_target: &str,
+        supervisor_name: &str,
+        source: &str,
+        prompt: &str,
+        pane: PaneWakeState,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> WakeDecision {
+        use crate::mcp::tools::core::task::lifecycle::supervisor_push::is_lifecycle_wake_source;
+
+        if pane_target != supervisor_name {
+            return WakeDecision::deny("not the supervisor pane");
+        }
+        if !is_lifecycle_wake_source(source)
+            || !crate::prompt_revalidation::is_supervisor_wake_envelope(prompt)
+        {
+            // cas-dab2: ordinary supervisor traffic stays inbox-only by
+            // design. Say so, so it is not mistaken for a gate failure.
+            return WakeDecision::deny(
+                "supervisor rows wake the pane only for lifecycle/worker-death envelopes (cas-dab2)",
+            );
+        }
+        if let Some(reason) = pane.veto_for_idle_recipient() {
+            return WakeDecision::deny(reason);
+        }
+        if !Self::agent_signals_look_quiet(data, pane_target, now) {
+            return WakeDecision::deny("supervisor heartbeat and activity both look live");
+        }
+        WakeDecision::allow("supervisor pane is quiet and the row is a lifecycle wake")
     }
 
     /// Whether this delivery should also PTY-nudge the recipient's pane
@@ -1628,8 +1838,31 @@ impl FactoryDaemon {
         pane: PaneWakeState,
         now: chrono::DateTime<chrono::Utc>,
     ) -> bool {
+        Self::delivery_wake_decision(
+            data,
+            pane_target,
+            supervisor_name,
+            source,
+            prompt,
+            pane,
+            now,
+        )
+        .allowed
+    }
+
+    /// Reasoned form of [`Self::delivery_should_nudge_pane`] (cas-9e81) — the
+    /// decision the delivery path actually records.
+    fn delivery_wake_decision(
+        data: &crate::ui::factory::director::DirectorData,
+        pane_target: &str,
+        supervisor_name: &str,
+        source: &str,
+        prompt: &str,
+        pane: PaneWakeState,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> WakeDecision {
         if pane_target == supervisor_name {
-            return Self::supervisor_wake_is_eligible(
+            return Self::supervisor_wake_decision(
                 data,
                 pane_target,
                 supervisor_name,
@@ -1656,9 +1889,12 @@ impl FactoryDaemon {
         // So when the registry says "active", ask the pane and the transcript
         // instead — evidence that does track turns.
         if Self::target_looks_like_idle_worker(data, pane_target, supervisor_name, now) {
-            return pane.is_safe_to_type_into();
+            return match pane.veto_for_idle_recipient() {
+                Some(reason) => WakeDecision::deny(reason),
+                None => WakeDecision::allow("recipient is idle and its pane has settled"),
+            };
         }
-        Self::active_looking_recipient_is_parked(data, pane_target, supervisor_name, pane)
+        Self::active_looking_recipient_decision(data, pane_target, supervisor_name, pane)
     }
 
     /// cas-45c4: a recipient the agent registry currently calls active, but
@@ -1675,15 +1911,28 @@ impl FactoryDaemon {
         supervisor_name: &str,
         pane: PaneWakeState,
     ) -> bool {
+        Self::active_looking_recipient_decision(data, pane_target, supervisor_name, pane).allowed
+    }
+
+    /// Reasoned form of [`Self::active_looking_recipient_is_parked`] (cas-9e81).
+    fn active_looking_recipient_decision(
+        data: &crate::ui::factory::director::DirectorData,
+        pane_target: &str,
+        supervisor_name: &str,
+        pane: PaneWakeState,
+    ) -> WakeDecision {
         if pane_target == supervisor_name {
-            return false;
+            return WakeDecision::deny("supervisor pane is not an active-worker wake candidate");
         }
         // Unknown agents (mid-spawn) are not wake candidates: absence of a
         // registry row is not evidence the pane is parked.
         if !data.agents.iter().any(|a| a.name == pane_target) {
-            return false;
+            return WakeDecision::deny("recipient has no agent-registry row (mid-spawn?)");
         }
-        pane.is_safe_to_wake_an_active_looking_recipient()
+        match pane.veto_for_active_looking_recipient() {
+            Some(reason) => WakeDecision::deny(reason),
+            None => WakeDecision::allow("recipient looks active but its pane is parked at a prompt"),
+        }
     }
 
     /// Minimum settle floor between an urgent turn-break (Esc) and the
@@ -1787,7 +2036,7 @@ impl FactoryDaemon {
                 .pane_silent_since
                 .get(pane_target)
                 .map(|since| since.elapsed()),
-            tool_call_in_flight: self.recipient_has_tool_call_in_flight(pane_target),
+            tool_call: self.recipient_tool_call_evidence(pane_target),
         }
     }
 
@@ -1797,19 +2046,36 @@ impl FactoryDaemon {
     /// is-wedged` and the director's stall detector use, so the three cannot
     /// disagree about what "still working" means.
     ///
-    /// Unresolvable transcript → `true` (assume in flight). Absence of
-    /// telemetry is not permission to type into someone's pane; the message
-    /// still reaches the inbox and the recipient reads it at its own next turn.
-    fn recipient_has_tool_call_in_flight(&self, pane_target: &str) -> bool {
+    /// Unresolvable transcript → [`ToolCallEvidence::Unknown`] (cas-9e81).
+    ///
+    /// This used to return `true` ("assume in flight") on both unresolvable
+    /// arms, on the principle that absence of telemetry is not permission to
+    /// type into someone's pane. The principle is sound; folding it into the
+    /// same value as observed evidence was not. `resolve_worker` returns
+    /// `transcript_path: None` for every pane whose Claude session lives under
+    /// a non-default `CLAUDE_CONFIG_DIR`, so on a two-account factory this
+    /// arm fired for EVERY recipient on EVERY pass — a permanent fleet-wide
+    /// veto that was indistinguishable, in the logs and in `message_status`,
+    /// from ordinary busy-recipient protection. Note the neighbours already
+    /// disagreed with it: `classify_worker` maps a missing transcript to
+    /// `in_flight = false`, and `transcript_has_in_flight_tool_call` maps a
+    /// missing FILE to `false`.
+    ///
+    /// `Unknown` keeps the caution — it is held to the conservative
+    /// sustained-silence bar — without turning "we cannot see" into "it is
+    /// busy, forever".
+    fn recipient_tool_call_evidence(&self, pane_target: &str) -> ToolCallEvidence {
         let cas_root = self.app.cas_dir();
         let Ok(resolved) = crate::cli::factory::wedged::resolve_worker(cas_root, pane_target)
         else {
-            return true;
+            return ToolCallEvidence::Unknown;
         };
         let Some(path) = resolved.transcript_path.as_deref() else {
-            return true;
+            return ToolCallEvidence::Unknown;
         };
-        crate::cli::factory::wedged::transcript_has_in_flight_tool_call(path, resolved.cli)
+        ToolCallEvidence::from_transcript(
+            crate::cli::factory::wedged::transcript_has_in_flight_tool_call(path, resolved.cli),
+        )
     }
 
     /// Process prompt queue
@@ -2132,7 +2398,12 @@ impl FactoryDaemon {
                                 "cas-6eab: withheld a merge request whose premise no longer holds; \
                                  notified the worker instead"
                             );
-                            let _ = queue.mark_suppressed(queued.id, Some(&detail));
+                            // cas-0147 (GH #167): this is a withdrawal, not
+                            // idle-noise suppression — dead-letter it under a
+                            // name that says so. The worker has already been
+                            // told (the guidance enqueue above succeeded), so
+                            // the premise-expiry is recorded, not silent.
+                            let _ = queue.mark_superseded(queued.id, &detail);
                             continue;
                         }
                         Err(error) => {
@@ -2197,9 +2468,19 @@ impl FactoryDaemon {
                 ) {
                     LifecycleStaleOutcome::Deliver => {}
                     LifecycleStaleOutcome::SuppressDelivered { .. } => {
-                        let _ = queue.mark_suppressed(
+                        // cas-0147 (GH #167): this branch produced ALL 397
+                        // `suppressed_idle` rows in the live queue and every
+                        // one of them was a supervisor signal, not idle
+                        // chatter. The name is now the honest one, and the
+                        // detail says which task moved on — a terminal row has
+                        // to be answerable for itself.
+                        let _ = queue.mark_superseded(
                             queued.id,
-                            Some("task lifecycle occurrence no longer matches current task state"),
+                            &format!(
+                                "withdrawn before transport: {} left the status this \
+                                 notification announces",
+                                envelope.task_id
+                            ),
                         );
                         tracing::debug!(
                             prompt_id = queued.id,
@@ -2259,6 +2540,11 @@ impl FactoryDaemon {
             // is neither re-written nor consumed: it stays pending and retries a
             // PTY-nudge-only wake on the cadence below.
             let mut nudge_only = false;
+            // cas-5c50 (GH #166): set when this pass observed the row as
+            // drained-but-unsurfaced; the log line is emitted only if the
+            // re-nudge cadence gate then actually grants a re-offer, so the
+            // line count is O(retries) and not O(poll ticks).
+            let mut announce_drain_unsurfaced = false;
             match self.deferred_inbox_outcome_for(
                 queued.id,
                 target,
@@ -2267,6 +2553,14 @@ impl FactoryDaemon {
             ) {
                 DeferredInboxOutcome::HarnessConsumed => {
                     self.forget_row_delivery_state(queued.id);
+                    // cas-b8ce (GH #176): this arm is CAS's strongest evidence
+                    // that a NON-CAS transport surfaced the content — the
+                    // harness took our inbox copy AND the pane then produced
+                    // output. Write the per-recipient receipt so the row leaves
+                    // the recipient's unread set for good; stamping only
+                    // `transport_delivered` left it `seen.prompt_id IS NULL`,
+                    // and the recipient's next `inbox_poll` re-served it.
+                    Self::record_transport_receipt(&*queue, queued.id, &queued.target);
                     if let Err(error) = queue.mark_transport_delivered(queued.id) {
                         tracing::error!(
                             prompt_id = queued.id,
@@ -2331,16 +2625,17 @@ impl FactoryDaemon {
                     // try a PTY nudge — the only channel that creates a turn for
                     // a Claude teammate parked at its prompt.
                     nudge_only = true;
-                    tracing::info!(
-                        target: "cas::coordination",
-                        stage = "inbox_drain_unsurfaced",
-                        channel = "prompt_queue",
-                        message_id = queued.id,
-                        source = %queued.source,
-                        target_agent = %target,
-                        "cas-ef14: harness filed the inbox copy without taking a turn — retrying \
-                         as a pane nudge"
-                    );
+                    // cas-5c50 (GH #166): the announcement is DEFERRED to the
+                    // cadence gate below rather than emitted here. This arm is
+                    // re-entered on every ~100ms poll for as long as the row
+                    // stays drained-but-unsurfaced, so logging at this point
+                    // describes a poll tick, not a re-nudge — and the gate
+                    // immediately below usually declines the re-nudge. Message
+                    // 7953 wrote 16,604 identical lines in 30 flat minutes
+                    // (~9.2/s, terminated only by daemon shutdown) that way.
+                    // It is emitted on the gate's `LifecycleRedelivery::Deliver`
+                    // arm instead — grep `announce_drain_unsurfaced`.
+                    announce_drain_unsurfaced = true;
                 }
                 DeferredInboxOutcome::Deliver => {}
             }
@@ -2377,6 +2672,31 @@ impl FactoryDaemon {
                         .unwrap_or(0),
                 ) {
                     LifecycleRedelivery::Deliver => {
+                        // cas-5c50 (GH #166): a real re-offer is happening, so
+                        // now the cas-ef14 line describes something that
+                        // actually occurred. Bounded by construction — the gate
+                        // grants at most one Deliver per
+                        // LIFECYCLE_RENUDGE_INTERVAL and at most
+                        // LIFECYCLE_MAX_RENUDGE_ATTEMPTS of them in total.
+                        if announce_drain_unsurfaced {
+                            tracing::info!(
+                                target: "cas::coordination",
+                                stage = "inbox_drain_unsurfaced",
+                                channel = "prompt_queue",
+                                message_id = queued.id,
+                                source = %queued.source,
+                                target_agent = %target,
+                                attempt = self
+                                    .lifecycle_redelivery_counts
+                                    .get(&queued.id)
+                                    .copied()
+                                    .unwrap_or(0)
+                                    + 1,
+                                max_attempts = LIFECYCLE_MAX_RENUDGE_ATTEMPTS,
+                                "cas-ef14: harness filed the inbox copy without taking a turn — \
+                                 retrying as a pane nudge"
+                            );
+                        }
                         self.lifecycle_redelivery_attempts
                             .insert(queued.id, std::time::Instant::now());
                         // cas-7787: only a real (re)delivery burns budget —
@@ -2392,7 +2712,16 @@ impl FactoryDaemon {
                         let _ = queue.record_pending_reason(
                             queued.id,
                             cas_store::PendingReason::GatedNotReady,
-                            Some("lifecycle re-nudge cooldown — transition already delivered this interval"),
+                            // cas-9e81: cas-ceae widened this cadence from
+                            // supervisor lifecycle rows to ANY row already
+                            // written to an inbox, but the operator-facing
+                            // detail kept cas-d732's lifecycle-only wording —
+                            // so a plain assignment message reported itself as
+                            // gated by a "lifecycle" cooldown it had nothing
+                            // to do with. Same rule, honest label.
+                            Some(
+                                "re-nudge cooldown — this row was already delivered this interval",
+                            ),
                         );
                         tracing::debug!(
                             target: "cas::coordination",
@@ -2692,6 +3021,15 @@ impl FactoryDaemon {
                     match inject_result {
                         Ok(cas_mux::InjectOutcome::Delivered) => {
                             succeeded += 1;
+                            // cas-b8ce (GH #176): a broadcast's read state is
+                            // per-recipient by construction — `all_workers` is
+                            // exempt from every row-level ack filter
+                            // (NOT_ALREADY_CONSUMED_SQL), so the receipt table
+                            // is the ONLY thing that can retire it for a worker
+                            // that already received it. Without this write, one
+                            // broadcast is re-served to every worker on every
+                            // `inbox_poll`, forever.
+                            Self::record_transport_receipt(&*queue, queued.id, name);
                             tracing::info!("Injected to worker '{}'", name);
                             if let Some(ref store) = event_store {
                                 record_injection(
@@ -2829,6 +3167,7 @@ impl FactoryDaemon {
                             queued.id,
                             UrgentWakeProbe {
                                 pane: pane_target.clone(),
+                                target: queued.target.clone(),
                                 bytes_at_inject,
                                 injected_at: std::time::Instant::now(),
                             },
@@ -2872,8 +3211,10 @@ impl FactoryDaemon {
                     // would take a burst of back-to-back injects. The rows that
                     // lose the race stay pending and wake on later ticks.
                     let wake_slot_available = !supervisor_wake_sent;
-                    let worker_is_idle = wake_slot_available
-                        && Self::delivery_should_nudge_pane(
+                    // cas-9e81: keep the REASON, not just the verdict — it is
+                    // persisted as the row's wake_attempt_detail below.
+                    let wake_decision = if wake_slot_available {
+                        Self::delivery_wake_decision(
                             self.app.director_data(),
                             &pane_target,
                             self.app.supervisor_name(),
@@ -2881,7 +3222,23 @@ impl FactoryDaemon {
                             &queued.prompt,
                             pane_state,
                             chrono::Utc::now(),
+                        )
+                    } else {
+                        WakeDecision::deny(
+                            "no wake slot left this pass (a supervisor wake already fired)",
+                        )
+                    };
+                    let worker_is_idle = wake_decision.allowed;
+                    if !worker_is_idle {
+                        tracing::debug!(
+                            target: "cas::coordination",
+                            stage = "wake_gate_declined",
+                            message_id = queued.id,
+                            target_agent = %pane_target,
+                            reason = wake_decision.reason,
+                            "cas-9e81: wake gate declined this pass"
                         );
+                    }
                     // cas-f02b: a wake-eligible row that did NOT wake the pane
                     // must not be consumed — the inbox write alone is precisely
                     // the silent-stall this task fixes. Repeat inbox writes are
@@ -2926,7 +3283,7 @@ impl FactoryDaemon {
                             target,
                             &inbox_source,
                             &prompt_with_instructions,
-                            worker_is_idle,
+                            wake_decision,
                         )
                         .await
                     } else {
@@ -2936,7 +3293,7 @@ impl FactoryDaemon {
                             &prompt_with_instructions,
                             queued.summary.as_deref(),
                             None,
-                            worker_is_idle,
+                            wake_decision,
                             merge_request_task.as_deref(),
                         )
                         .await
@@ -3261,6 +3618,32 @@ impl FactoryDaemon {
                 // cas-d732: the row is consumed — its re-nudge clock is dead
                 // weight now, and leaving it would leak one entry per row.
                 self.forget_row_delivery_state(queued.id);
+                // cas-b8ce (GH #176): reaching this arm means the delivery was
+                // NOT wake-deferred and NOT awaiting an urgent wake probe — the
+                // content went into the recipient's turn over CAS's transport.
+                // Record the receipt against the ADDRESSED target (the key the
+                // recipient's own poll joins on), not the pane name, or the
+                // supervisor's `supervisor`/pane alias split leaves the row
+                // unread under the very alias that would fetch it.
+                //
+                // TRADE-OFF, stated deliberately: for a `TeamsInbox` recipient
+                // this arm's evidence is "the inbox write landed and the wake
+                // fired", not "the harness surfaced it" — so the receipt costs
+                // `inbox_poll` as a recovery path if the harness silently drops
+                // the copy. That is accepted for three reasons. (1) The bug this
+                // pairs against is OBSERVED (rows 8210/8215/8217 and
+                // 8221/8223/8225/8229/8241 re-served in full after being read,
+                // acted on and replied to); the recovery it costs is
+                // hypothetical. (2) Not writing the receipt here would leave the
+                // reported Claude-worker case unfixed, since that is precisely
+                // the channel those rows travelled. (3) The drop case keeps its
+                // own, stronger safety net: `message_status` still reports the
+                // row `delivered` with `confirmed_at` NULL and its undelivered
+                // clock running, and cas-ef14's drained-awaiting-wake machinery
+                // plus the re-nudge cadence still cover the deferred path. The
+                // recipient's unread view was never the right place to hide a
+                // delivery failure.
+                Self::record_transport_receipt(&*queue, queued.id, &queued.target);
                 // cas-2c5f: authoritative transport handoff only.
                 if let Err(e) = queue.mark_transport_delivered(queued.id) {
                     tracing::error!(
@@ -3698,6 +4081,14 @@ impl FactoryDaemon {
                                     );
                                 }
                             }
+                            // cas-c73d: a worker spawned with its own
+                            // `config_dir` reads the roster and its inbox from
+                            // THAT config dir. Provision the mirrored tree now,
+                            // at spawn, so the harness has a real team config
+                            // from its first turn (with none it invents a
+                            // phantom `team-lead` mailbox) instead of only when
+                            // the first message happens to arrive.
+                            let _ = self.recipient_teams_view(&name);
                             if self.app.record_enabled() {
                                 if let Err(e) = self.app.start_recording_for_pane(&name).await {
                                     tracing::error!(
@@ -5148,7 +5539,10 @@ mod tests {
         )
     }
 
-    use super::{PaneWakeState, SILENCE_FOR_ACTIVE_RECIPIENT_WAKE, SILENCE_FOR_IDLE_RECIPIENT_WAKE};
+    use super::{
+        PaneWakeState, SILENCE_FOR_ACTIVE_RECIPIENT_WAKE, SILENCE_FOR_IDLE_RECIPIENT_WAKE,
+        ToolCallEvidence,
+    };
 
     /// A pane that has been silent long enough to wake even a recipient the
     /// registry calls active, with no outstanding tool call.
@@ -5157,7 +5551,7 @@ mod tests {
             composer_dirty: false,
             ready_for_injection: true,
             silent_for: Some(SILENCE_FOR_ACTIVE_RECIPIENT_WAKE),
-            tool_call_in_flight: false,
+            tool_call: ToolCallEvidence::Idle,
         }
     }
 
@@ -5486,6 +5880,150 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // cas-5c50 (GH #166): a stuck row logs O(retries), not O(poll ticks)
+    // -----------------------------------------------------------------------
+
+    /// The measured incident, replayed on the real predicates.
+    ///
+    /// Message 7953 (source=director, target=clever-owl-55) wrote 16,604
+    /// `stage="inbox_drain_unsurfaced"` lines between 22:24:15Z and 22:54:20Z
+    /// on 2026-08-07 — a flat ~550/min (~9.2/s, i.e. the 100ms poll tick) that
+    /// never decayed and was ended only by the daemon shutting down 83ms after
+    /// the last line. It was 12.5% of every line the daemon wrote that day.
+    ///
+    /// The cause was ORDERING, not policy: the `DrainedAwaitingWake` arm
+    /// emitted its `tracing::info!` before the cas-d732/cas-ceae re-nudge
+    /// cadence gate ran, so the gate correctly declined the re-nudge and the
+    /// line was printed anyway. This asserts the two counts the fix separates:
+    /// the arm is still entered every tick (that is the daemon's job), but an
+    /// announcement now costs an actual re-offer.
+    /// Replay a row that is drained-but-unsurfaced on every poll and count the
+    /// `stage="inbox_drain_unsurfaced"` lines it would emit.
+    ///
+    /// `defer_to_cadence` switches the fix, following the `cas_ceae_guards`
+    /// idiom already used by [`replay_pending_inbox_row`]: `false` places the
+    /// announcement where the `DrainedAwaitingWake` arm used to emit it
+    /// (before the gate), `true` places it on the gate's `Deliver` arm. Both
+    /// arms of the same simulation, so the fix cannot be proven by a test that
+    /// would have passed anyway.
+    fn replay_drain_unsurfaced_announcements(
+        minutes: u64,
+        poll_ms: u64,
+        defer_to_cadence: bool,
+    ) -> usize {
+        let poll = std::time::Duration::from_millis(poll_ms);
+        let start = std::time::Instant::now();
+        let mut announcements = 0usize;
+        let mut attempts = 0u32;
+        let mut last_attempt: Option<std::time::Instant> = None;
+
+        for tick in 0..(minutes * 60 * 1000) / poll.as_millis() as u64 {
+            let now = start + poll * tick as u32;
+
+            // The row is re-selected and re-classified as drained-but-unsurfaced
+            // on every pass: the harness filed the inbox copy and the pane never
+            // spoke. This is the point the log line used to be emitted from.
+            if !defer_to_cadence {
+                announcements += 1;
+            }
+
+            // A row can only BE `DrainedAwaitingWake` if the daemon already
+            // wrote it to an inbox — `deferred_inbox_outcome_for` returns
+            // `Deliver` outright when `inbox_deferred_writes` has no entry — so
+            // the cadence gate always governs this path. The fix depends on that
+            // invariant (otherwise deferring the line would silence it), so it
+            // is asserted rather than assumed.
+            assert!(
+                row_needs_renudge_cadence(false, true, false),
+                "the re-nudge cadence must govern a drained-but-unsurfaced row"
+            );
+
+            match lifecycle_redelivery_decision(
+                false,
+                last_attempt,
+                now,
+                LIFECYCLE_RENUDGE_INTERVAL,
+                attempts,
+            ) {
+                LifecycleRedelivery::Deliver => {
+                    if defer_to_cadence {
+                        announcements += 1;
+                    }
+                    attempts += 1;
+                    last_attempt = Some(now);
+                }
+                LifecycleRedelivery::Cooldown => {}
+                LifecycleRedelivery::StopAcknowledged => panic!("nothing acked this row"),
+                LifecycleRedelivery::StopUndelivered => break,
+            }
+        }
+        announcements
+    }
+
+    #[test]
+    fn a_never_surfaced_row_logs_once_per_retry_not_once_per_poll() {
+        // The measured incident window: 30 minutes at the production 100ms poll.
+        let before = replay_drain_unsurfaced_announcements(30, 100, false);
+        let after = replay_drain_unsurfaced_announcements(30, 100, true);
+
+        assert_eq!(
+            after, LIFECYCLE_MAX_RENUDGE_ATTEMPTS as usize,
+            "post-fix a stuck row announces once per real retry and then stops"
+        );
+        assert!(
+            before > 11_000,
+            "pre-fix the line rides the poll tick for the row's whole life — got {before}, the \
+             same order as the 16,604 lines message 7953 actually wrote in this window"
+        );
+        assert!(
+            after * 500 < before,
+            "O(retries) must be orders of magnitude below O(poll ticks): {after} vs {before}"
+        );
+    }
+
+    /// The distinction is not "fewer lines", it is a different variable.
+    ///
+    /// Pre-fix the count is a function of the POLL INTERVAL — an implementation
+    /// detail no operator chose — so making the daemon more responsive makes
+    /// the logs proportionally worse. Post-fix it is a function of the RETRY
+    /// BUDGET, which is a deliberate policy number. Halving the poll interval
+    /// doubles the pre-fix count and leaves the post-fix count untouched.
+    #[test]
+    fn the_log_volume_stops_being_a_function_of_the_poll_interval() {
+        let slow_before = replay_drain_unsurfaced_announcements(30, 200, false);
+        let fast_before = replay_drain_unsurfaced_announcements(30, 100, false);
+        let slow_after = replay_drain_unsurfaced_announcements(30, 200, true);
+        let fast_after = replay_drain_unsurfaced_announcements(30, 100, true);
+
+        assert!(
+            fast_before >= slow_before * 2 - 2,
+            "pre-fix, halving the poll interval must roughly double the lines: \
+             {slow_before} -> {fast_before}"
+        );
+        assert_eq!(
+            slow_after, fast_after,
+            "post-fix the poll interval must not appear in the line count at all"
+        );
+        assert_eq!(fast_after, LIFECYCLE_MAX_RENUDGE_ATTEMPTS as usize);
+    }
+
+    /// The bound is not merely small — it is a CONSTANT. Doubling how long the
+    /// recipient stays stuck must not buy a single extra log line, which is
+    /// what makes the 464MB log day impossible rather than merely unlikely.
+    #[test]
+    fn the_log_bound_does_not_grow_with_how_long_a_row_stays_stuck() {
+        let half_hour = replay_drain_unsurfaced_announcements(30, 100, true);
+        let all_day = replay_drain_unsurfaced_announcements(24 * 60, 100, true);
+        assert_eq!(
+            half_hour, all_day,
+            "30 minutes and 24 hours of being stuck must cost the same {half_hour} lines — \
+             the bound is a constant, which is what makes the 464MB log day impossible \
+             rather than merely unlikely"
+        );
+        assert_eq!(half_hour, LIFECYCLE_MAX_RENUDGE_ATTEMPTS as usize);
+    }
+
     /// The bound must never pre-empt a real delivery: an acknowledged relay
     /// stops as acknowledged, and a relay inside its budget keeps its normal
     /// deliver/cooldown behaviour.
@@ -5587,6 +6125,172 @@ mod tests {
             ),
             LifecycleRedelivery::Cooldown,
             "the same row inside the interval is exactly what must be held back"
+        );
+    }
+
+    /// cas-b8ce (GH #176): the daemon's terminal-delivery decision and the
+    /// recipient's unread view must agree.
+    ///
+    /// The bug was that they could not: `mark_transport_delivered` writes only
+    /// `prompt_queue` columns, while `poll_unseen_for_recipient` answers from
+    /// `prompt_queue_recipient_seen`. A row could therefore be `delivered`
+    /// according to `message_status` and simultaneously unread according to the
+    /// recipient's own `inbox_poll`, which then handed it back — the observed
+    /// redelivery bursts.
+    ///
+    /// This pins the pairing at the daemon's own helper, so a future refactor
+    /// that drops the receipt write from a success arm fails here rather than
+    /// in production three releases later.
+    #[test]
+    fn a_terminally_delivered_row_leaves_the_recipients_unread_view() {
+        use cas_store::PromptQueueStore;
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        let id = store
+            .enqueue("supervisor", "zealous-fox-95", "Assignment: cas-5c50")
+            .unwrap();
+
+        assert_eq!(
+            store
+                .count_unseen_for_recipient("zealous-fox-95", None)
+                .unwrap(),
+            1,
+            "precondition: before delivery the row is genuinely unread"
+        );
+
+        // Exactly the pair the daemon's success arms now perform.
+        FactoryDaemon::record_transport_receipt(&store, id, "zealous-fox-95");
+        store.mark_transport_delivered(id).unwrap();
+
+        assert_eq!(
+            store
+                .count_unseen_for_recipient("zealous-fox-95", None)
+                .unwrap(),
+            0,
+            "a row the daemon reports as delivered must not still be unread — \
+             that contradiction IS the GH #176 redelivery"
+        );
+        assert!(
+            store
+                .poll_unseen_for_recipient("zealous-fox-95", None, 20)
+                .unwrap()
+                .is_empty(),
+            "the recipient's own inbox_poll must not re-serve it"
+        );
+    }
+
+    /// cas-1a54: the URGENT terminal arm was the one cas-b8ce missed.
+    ///
+    /// `resolve_urgent_wake_probes` → `UrgentProbeAction::ConsumeRow` stamped
+    /// `mark_transport_delivered` and stopped there, so an interrupt the
+    /// recipient demonstrably took (the pane produced output after the inject)
+    /// stayed `seen.prompt_id IS NULL` and remained redelivery-eligible by
+    /// `unseen_for_recipient_predicate`. Live specimen: notification 8480 — a
+    /// supervisor urgent interrupt to zen-merlin-47, delivered and acted on,
+    /// still eligible on the read-only replay.
+    ///
+    /// Drives `consume_urgent_wake_row`, which IS what that arm calls, so
+    /// deleting the receipt from the pairing fails here.
+    #[test]
+    fn an_urgent_row_consumed_on_an_observed_wake_leaves_the_unread_view_cas_1a54() {
+        use cas_store::PromptQueueStore;
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+
+        let consumed = store
+            .enqueue("supervisor", "zen-merlin-47", "urgent: drop what you are doing")
+            .unwrap();
+        // The vacuous-dedup guard (epic note 2026-08-07 23:19 item 2): a second
+        // row for the SAME recipient that is never consumed. Without it, a
+        // predicate that returned nothing for any reason — wrong recipient key,
+        // stale cutoff, session filter — would let the post-condition below
+        // pass while proving nothing. This row must still be eligible at the
+        // end, so the zero we assert is a real, targeted zero.
+        let untouched = store
+            .enqueue("supervisor", "zen-merlin-47", "a second, unconsumed urgent row")
+            .unwrap();
+
+        assert_eq!(
+            store.count_unseen_for_recipient("zen-merlin-47", None).unwrap(),
+            2,
+            "precondition: both urgent rows start genuinely unread"
+        );
+
+        // Exactly what the ConsumeRow arm runs when the pane corroborates.
+        FactoryDaemon::consume_urgent_wake_row(&store, consumed, "zen-merlin-47").unwrap();
+
+        // Counted BEFORE polling: `poll_unseen_for_recipient` records its own
+        // seen-receipts, so a count taken afterwards reads zero for reasons
+        // that have nothing to do with this fix.
+        assert_eq!(
+            store.count_unseen_for_recipient("zen-merlin-47", None).unwrap(),
+            1,
+            "exactly one row was retired, and the other is still owed"
+        );
+
+        let unseen_ids: Vec<i64> = store
+            .poll_unseen_for_recipient("zen-merlin-47", None, 20)
+            .unwrap()
+            .iter()
+            .map(|row| row.id)
+            .collect();
+        assert!(
+            !unseen_ids.contains(&consumed),
+            "an urgent row whose wake was observed must not be re-served — that \
+             contradiction IS the redelivery (notification 8480)"
+        );
+        assert_eq!(
+            unseen_ids,
+            vec![untouched],
+            "the unconsumed sibling must still be eligible: it proves the predicate \
+             is live and the assertion above is not vacuously satisfied"
+        );
+    }
+
+    /// cas-1a54: the receipt must be keyed by the ROW's target, not the pane
+    /// the interrupt was typed into.
+    ///
+    /// `resolve_urgent_wake_probes` only ever had the pane name to hand, and
+    /// for a row aimed at `supervisor` that is the generated supervisor pane
+    /// name. `unseen_for_recipient_predicate` joins
+    /// `prompt_queue_recipient_seen.recipient` against the polling name, so a
+    /// pane-keyed receipt would be silently inert — the row would look retired
+    /// in the receipt table and still be re-served. Hence
+    /// `UrgentWakeProbe::target`.
+    #[test]
+    fn the_urgent_receipt_is_keyed_by_row_target_not_pane_name_cas_1a54() {
+        use cas_store::PromptQueueStore;
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+
+        let pane_keyed = store
+            .enqueue("golden-badger-59", "supervisor", "urgent: merge request")
+            .unwrap();
+        FactoryDaemon::consume_urgent_wake_row(&store, pane_keyed, "bright-spider-29").unwrap();
+        assert_eq!(
+            store.count_unseen_for_recipient("supervisor", None).unwrap(),
+            1,
+            "a receipt written under the PANE name retires nothing — this is why the \
+             probe has to carry the row's target"
+        );
+
+        let target_keyed = store
+            .enqueue("golden-badger-59", "supervisor", "urgent: second merge request")
+            .unwrap();
+        FactoryDaemon::consume_urgent_wake_row(&store, target_keyed, "supervisor").unwrap();
+        let unseen: Vec<i64> = store
+            .poll_unseen_for_recipient("supervisor", None, 20)
+            .unwrap()
+            .iter()
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(
+            unseen,
+            vec![pane_keyed],
+            "only the target-keyed row is retired; the pane-keyed one stays eligible"
         );
     }
 
@@ -6027,7 +6731,7 @@ mod tests {
             ),
             (
                 PaneWakeState {
-                    tool_call_in_flight: true,
+                    tool_call: ToolCallEvidence::InFlight,
                     ..quiet_pane()
                 },
                 "an outstanding tool call means mid-turn or awaiting approval — the \
@@ -6054,6 +6758,233 @@ mod tests {
                 "{why}"
             );
         }
+    }
+
+    // ------------------------------------------------------------------
+    // cas-9e81 (GH #177): unreadable transcript evidence must not be a
+    // permanent veto.
+    //
+    // Live specimens: 34 of 35 post-restart rows recorded
+    // `nudge_not_attempted` / "idle gate declined the wake for this pass"
+    // across five different recipients, and the one wake that fired was a
+    // hand-sent urgent interrupt (which bypasses this gate entirely). The
+    // cause was not any pane signal: `resolve_worker` resolved
+    // `transcript_path = None` for every pane on this host, and the daemon
+    // folded "no transcript" into "tool call in flight".
+    // ------------------------------------------------------------------
+
+    /// The fresh-boot-worker shape: spawned with a pre-assigned task, three
+    /// messages waiting, no turn ever surfaced. Its transcript is unreadable
+    /// (written under another `CLAUDE_CONFIG_DIR`, or not yet flushed), so the
+    /// evidence is `Unknown` — which must DEMOTE it to the conservative
+    /// silence bar, not veto it forever.
+    #[test]
+    fn a_recipient_with_unreadable_transcript_evidence_is_still_woken_when_parked() {
+        let now = chrono::Utc::now();
+        let data = director_data_with(vec![
+            agent_summary("cosmic-bear-43", None, None, None),
+            agent_summary("warm-stork-30", None, None, None),
+        ]);
+        let unknown_evidence = PaneWakeState {
+            tool_call: ToolCallEvidence::Unknown,
+            ..quiet_pane()
+        };
+
+        let decision = FactoryDaemon::delivery_wake_decision(
+            &data,
+            "warm-stork-30",
+            "cosmic-bear-43",
+            "supervisor",
+            "Start cas-aecf",
+            unknown_evidence,
+            now,
+        );
+        assert!(
+            decision.allowed,
+            "a recipient parked at its prompt must be woken even when its transcript cannot \
+             be read — otherwise every pane on a non-default CLAUDE_CONFIG_DIR is deaf to \
+             everything except an urgent interrupt (got: {})",
+            decision.reason
+        );
+
+        // Same shape, but the pane has only just settled: unknown evidence is
+        // held to the 45s bar, not the 2s idle-path bar.
+        let just_settled = PaneWakeState {
+            silent_for: Some(SILENCE_FOR_IDLE_RECIPIENT_WAKE),
+            ..unknown_evidence
+        };
+        let decision = FactoryDaemon::delivery_wake_decision(
+            &data,
+            "warm-stork-30",
+            "cosmic-bear-43",
+            "supervisor",
+            "Start cas-aecf",
+            just_settled,
+            now,
+        );
+        assert!(
+            !decision.allowed,
+            "unknown evidence must still clear the conservative silence bar"
+        );
+        assert!(
+            decision.reason.contains("transcript"),
+            "the decline must name the missing evidence, got: {}",
+            decision.reason
+        );
+    }
+
+    /// The supervisor shape: a worker parked in `awaiting_merge` must be able
+    /// to wake the supervisor even when the supervisor's own transcript is
+    /// unreadable — specimen 3 was a supervisor that never surfaced a turn.
+    #[test]
+    fn a_supervisor_lifecycle_wake_survives_unreadable_transcript_evidence() {
+        use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
+            LifecycleTransition, lifecycle_prompt_source,
+        };
+        let now = chrono::Utc::now();
+        let data = director_data_with(vec![agent_summary("cosmic-bear-43", None, None, None)]);
+        let source = lifecycle_prompt_source(LifecycleTransition::AwaitingMerge, 41);
+
+        let decision = FactoryDaemon::delivery_wake_decision(
+            &data,
+            "cosmic-bear-43",
+            "cosmic-bear-43",
+            &source,
+            &awaiting_merge_payload("cas-9e81"),
+            PaneWakeState {
+                tool_call: ToolCallEvidence::Unknown,
+                ..quiet_pane()
+            },
+            now,
+        );
+        assert!(
+            decision.allowed,
+            "the merge wake must not depend on being able to read the supervisor's \
+             transcript (got: {})",
+            decision.reason
+        );
+    }
+
+    /// AC4: the gate's original purpose survives. Every signal that means
+    /// "this recipient is genuinely busy" still vetoes — including a
+    /// transcript that positively shows an outstanding tool call, which is
+    /// the approval-dialog case cas-45c4 added the check for.
+    #[test]
+    fn busy_recipient_protection_survives_the_tri_state_change() {
+        let now = chrono::Utc::now();
+        let data = director_data_with(vec![
+            agent_summary("cosmic-bear-43", None, None, None),
+            agent_summary("warm-stork-30", None, None, None),
+        ]);
+
+        for (state, why) in [
+            (
+                PaneWakeState {
+                    tool_call: ToolCallEvidence::InFlight,
+                    ..quiet_pane()
+                },
+                "an OBSERVED in-flight tool call still vetoes — the submit CR could answer \
+                 an approval dialog",
+            ),
+            (
+                PaneWakeState {
+                    tool_call: ToolCallEvidence::Unknown,
+                    silent_for: Some(std::time::Duration::from_secs(1)),
+                    ..quiet_pane()
+                },
+                "unknown evidence plus a pane that just emitted output is mid-turn",
+            ),
+            (
+                PaneWakeState {
+                    tool_call: ToolCallEvidence::Unknown,
+                    silent_for: None,
+                    ..quiet_pane()
+                },
+                "no silence baseline is not evidence of being parked",
+            ),
+            (
+                PaneWakeState {
+                    tool_call: ToolCallEvidence::Unknown,
+                    composer_dirty: true,
+                    ..quiet_pane()
+                },
+                "an operator's unsubmitted draft must never be typed over",
+            ),
+            (
+                PaneWakeState {
+                    tool_call: ToolCallEvidence::Unknown,
+                    ready_for_injection: false,
+                    ..quiet_pane()
+                },
+                "a pane still flushing startup output would swallow the message",
+            ),
+        ] {
+            let decision = FactoryDaemon::delivery_wake_decision(
+                &data,
+                "warm-stork-30",
+                "cosmic-bear-43",
+                "supervisor",
+                "context for your next step",
+                state,
+                now,
+            );
+            assert!(!decision.allowed, "{why}");
+            assert!(
+                !decision.reason.is_empty(),
+                "every decline must carry a reason ({why})"
+            );
+        }
+    }
+
+    /// cas-9e81: the reason is the deliverable. Every decline records which
+    /// signal decided, so a fleet-wide veto can never again look identical to
+    /// ordinary busy-recipient protection in `message_status`.
+    #[test]
+    fn each_veto_reports_a_distinct_reason() {
+        let now = chrono::Utc::now();
+        let data = director_data_with(vec![
+            agent_summary("cosmic-bear-43", None, None, None),
+            agent_summary("warm-stork-30", None, None, None),
+        ]);
+        let reasons: Vec<&str> = [
+            PaneWakeState {
+                composer_dirty: true,
+                ..quiet_pane()
+            },
+            PaneWakeState {
+                ready_for_injection: false,
+                ..quiet_pane()
+            },
+            PaneWakeState {
+                tool_call: ToolCallEvidence::InFlight,
+                ..quiet_pane()
+            },
+            PaneWakeState {
+                silent_for: Some(std::time::Duration::from_secs(1)),
+                ..quiet_pane()
+            },
+        ]
+        .into_iter()
+        .map(|state| {
+            FactoryDaemon::delivery_wake_decision(
+                &data,
+                "warm-stork-30",
+                "cosmic-bear-43",
+                "supervisor",
+                "hello",
+                state,
+                now,
+            )
+            .reason
+        })
+        .collect();
+
+        let unique: std::collections::HashSet<&&str> = reasons.iter().collect();
+        assert_eq!(
+            unique.len(),
+            reasons.len(),
+            "four different vetoes must not report the same string: {reasons:?}"
+        );
     }
 
     /// cas-45c4: an agent CAS has no registry row for (mid-spawn) is not a wake
@@ -6104,7 +7035,7 @@ mod tests {
             "supervisor",
             "your next task",
             PaneWakeState {
-                tool_call_in_flight: true,
+                tool_call: ToolCallEvidence::InFlight,
                 ..quiet_pane()
             },
             now,

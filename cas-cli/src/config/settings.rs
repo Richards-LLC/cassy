@@ -278,8 +278,12 @@ impl Default for FactoryConfig {
 /// Code indexing configuration for background code indexing
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeConfig {
-    /// Whether background code indexing is enabled
-    #[serde(default)]
+    /// Whether background code indexing is enabled.
+    ///
+    /// cas-499c (operator ruling): default **true**, no opt-in. The symbol index had never run
+    /// on any install because this defaulted to false, so `code_search` was permanently a stub.
+    /// Cost is bounded by the daemon's idleness gate, which is deliberately retained.
+    #[serde(default = "default_true")]
     pub enabled: bool,
 
     /// Paths to watch for code changes (relative to project root)
@@ -349,7 +353,8 @@ fn default_code_debounce() -> u64 {
 impl Default for CodeConfig {
     fn default() -> Self {
         Self {
-            enabled: false, // Opt-in for CPU-intensive feature
+            // cas-499c: on by default; the idle gate (mcp/daemon.rs) is what keeps it polite.
+            enabled: true,
             watch_paths: default_code_watch_paths(),
             exclude_patterns: default_code_exclude_patterns(),
             extensions: default_code_extensions(),
@@ -1557,5 +1562,34 @@ harness = "codex"
             None,
             "supervisor effort must stay None on empty config — stock is worker-only"
         );
+    }
+
+    /// cas-499c (operator ruling): the tree-sitter symbol index is ON by default. It had never
+    /// run on any install because this defaulted to false, so `code_search` was permanently a
+    /// stub. Flipping it back would silently re-disable the feature for every new install.
+    #[test]
+    fn code_config_is_enabled_by_default() {
+        assert!(CodeConfig::default().enabled);
+    }
+
+    /// A persisted config that omits `enabled` (or omits `[code]` entirely) must also resolve
+    /// to on — a `#[serde(default)]` on the bool would quietly resolve to false instead.
+    #[test]
+    fn code_config_enabled_defaults_on_when_absent_from_toml() {
+        let parsed: std::collections::HashMap<String, CodeConfig> =
+            toml::from_str("[code]\n").expect("valid toml");
+        assert!(
+            parsed.get("code").expect("section present").enabled,
+            "an empty [code] section must resolve enabled=true"
+        );
+
+        let with_other_keys: std::collections::HashMap<String, CodeConfig> =
+            toml::from_str("[code]\ndebounce_ms = 750\n").expect("valid toml");
+        assert!(with_other_keys.get("code").expect("section present").enabled);
+
+        // And an explicit opt-out is still honoured.
+        let opted_out: std::collections::HashMap<String, CodeConfig> =
+            toml::from_str("[code]\nenabled = false\n").expect("valid toml");
+        assert!(!opted_out.get("code").expect("section present").enabled);
     }
 }

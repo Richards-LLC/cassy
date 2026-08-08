@@ -403,6 +403,26 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         });
     }
 
+    // Check 4b: symbol index lag (cas-499c).
+    //
+    // The daemon only indexes code while it is idle (operator ruling: that gate stays), so on a
+    // busy machine catch-up can trail by days. Without a line here that lag is invisible and
+    // `code_search` returning thin results looks like a bug rather than a queue.
+    checks.push(symbol_index_check(
+        gather_symbol_index_state(&cas_root),
+        chrono::Utc::now(),
+    ));
+
+    // Check 4c: the embedding drain (EPIC cas-6212 / cas-db6e, M7).
+    //
+    // The drain runs on a daemon tick, so its failures have no command output to
+    // appear in. Without this line a drain that has been 400ing for a week looks
+    // exactly like one with nothing to do — which is the cas-a924 failure shape,
+    // rebuilt for a different corpus.
+    checks.push(embedding_drain_check(gather_embedding_drain_state(
+        &cas_root,
+    )));
+
     // Check 5: Config
     match Config::load(&cas_root) {
         Ok(config) => {
@@ -963,6 +983,289 @@ fn canonical_id_checks(
     checks
 }
 
+/// Observed state of the tree-sitter symbol index for the current project (cas-499c).
+#[derive(Debug, Clone, Default)]
+struct SymbolIndexState {
+    /// `code.enabled` as resolved from config (defaults to true since cas-499c).
+    enabled: bool,
+    /// Whether `<cas_root>/index/code` exists — i.e. whether `code_search` can answer at all.
+    searchable: bool,
+    /// Files indexed **for this repository**. Scoped, because "is my project searchable" is the
+    /// question being asked; a sibling repo's rows must not answer it.
+    files: usize,
+    /// Symbols in the store across every indexed repository. `CodeStore` has no per-repository
+    /// symbol count, so this is labelled as a total rather than silently implying scope it
+    /// does not have.
+    symbols: usize,
+    /// Newest `code_files.updated` for this repository: the catch-up watermark.
+    last_indexed: Option<chrono::DateTime<chrono::Utc>>,
+    /// Set when the state could not be read; reported instead of silently skipped.
+    error: Option<String>,
+}
+
+/// Anything older than this and the index is "behind" rather than merely "settling".
+const SYMBOL_INDEX_LAG_WARN_SECS: i64 = 24 * 60 * 60;
+
+fn gather_symbol_index_state(cas_root: &Path) -> SymbolIndexState {
+    let enabled = Config::load(cas_root)
+        .map(|config| config.code().enabled)
+        .unwrap_or(true);
+    let searchable = crate::hybrid_search::code::code_search_available(cas_root);
+
+    let project_root = cas_root.parent().unwrap_or(cas_root);
+    // Same derivation the indexer writes with, or the lookup would miss every row.
+    let (_repo_root, repository) = crate::daemon::indexing::resolve_repository(project_root);
+
+    let store = match crate::store::open_code_store(cas_root) {
+        Ok(store) => store,
+        Err(e) => {
+            return SymbolIndexState {
+                enabled,
+                searchable,
+                error: Some(e.to_string()),
+                ..Default::default()
+            };
+        }
+    };
+
+    let files = match store.list_files(&repository, None) {
+        Ok(files) => files,
+        Err(e) => {
+            return SymbolIndexState {
+                enabled,
+                searchable,
+                error: Some(e.to_string()),
+                ..Default::default()
+            };
+        }
+    };
+
+    SymbolIndexState {
+        enabled,
+        searchable,
+        files: files.len(),
+        symbols: store.count_symbols().unwrap_or(0),
+        last_indexed: files.iter().map(|file| file.updated).max(),
+        error: None,
+    }
+}
+
+fn symbol_index_check(state: SymbolIndexState, now: chrono::DateTime<chrono::Utc>) -> Check {
+    let name = "symbol index".to_string();
+
+    if let Some(error) = state.error {
+        return Check {
+            name,
+            status: CheckStatus::Warning,
+            message: format!("cannot check symbol index lag: {error}"),
+        };
+    }
+
+    if !state.enabled {
+        return Check {
+            name,
+            status: CheckStatus::Warning,
+            message: "code indexing is disabled (`cas config set code.enabled true`); \
+                      `code_search` will keep returning nothing"
+                .to_string(),
+        };
+    }
+
+    if state.files == 0 || !state.searchable {
+        return Check {
+            name,
+            status: CheckStatus::Warning,
+            message: format!(
+                "nothing indexed for this project ({} symbol(s) in the store across all \
+                 repositories){}. The daemon only indexes while idle — run `cas index code` to \
+                 catch up now.",
+                state.symbols,
+                if state.searchable {
+                    ""
+                } else {
+                    "; the code search index is missing"
+                }
+            ),
+        };
+    }
+
+    let lag_secs = state
+        .last_indexed
+        .map(|last| (now - last).num_seconds().max(0))
+        .unwrap_or(i64::MAX);
+
+    if lag_secs >= SYMBOL_INDEX_LAG_WARN_SECS {
+        Check {
+            name,
+            status: CheckStatus::Warning,
+            message: format!(
+                "symbol index is behind: {} file(s) from this project ({} symbol(s) stored in \
+                 total), newest entry {}. The daemon indexes only while idle — run \
+                 `cas index code` to catch up now.",
+                state.files,
+                state.symbols,
+                format_lag(lag_secs)
+            ),
+        }
+    } else {
+        Check {
+            name,
+            status: CheckStatus::Ok,
+            message: format!(
+                "{} file(s) from this project indexed ({} symbol(s) stored in total), newest \
+                 entry {}",
+                state.files,
+                state.symbols,
+                format_lag(lag_secs)
+            ),
+        }
+    }
+}
+
+/// What `cas doctor` needs to say something true about the embedding drain.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct EmbeddingDrainState {
+    /// Whether an embedder exists at all (i.e. the user is logged in). `false`
+    /// is a declared boundary, not a failure.
+    capability: bool,
+    /// Knowledge pages awaiting a vector.
+    pages_pending: usize,
+    /// History commits awaiting a vector.
+    commits_pending: i64,
+    /// History docs awaiting a vector.
+    docs_pending: i64,
+    /// `history_index_state('embeddings').last_error` — what the last tick hit.
+    last_error: Option<String>,
+    /// `history_index_state('embeddings').last_attempt_at` — evidence the arm
+    /// is running at all. `None` means it has never completed a pass, which is
+    /// a different fact from "there was nothing to do".
+    last_attempt: Option<String>,
+}
+
+impl EmbeddingDrainState {
+    fn total_pending(&self) -> i64 {
+        self.pages_pending as i64 + self.commits_pending + self.docs_pending
+    }
+}
+
+fn gather_embedding_drain_state(cas_root: &Path) -> EmbeddingDrainState {
+    use cas_store::{HistoryStore, KnowledgeStore, SOURCE_EMBEDDINGS};
+
+    let capability = crate::cloud::CloudConfig::load()
+        .map(|config| crate::cloud::KnowledgeEmbedder::from_config(&config).is_some())
+        .unwrap_or(false);
+
+    let pages_pending = cas_store::SqliteKnowledgeStore::open(cas_root)
+        .ok()
+        .and_then(|store| store.count_pending_embedding().ok())
+        .unwrap_or(0);
+
+    let mut state = EmbeddingDrainState {
+        capability,
+        pages_pending,
+        ..Default::default()
+    };
+
+    if let Ok(store) = cas_store::SqliteHistoryStore::open(cas_root) {
+        if let Ok((commits, docs)) = store.count_pending_embedding() {
+            state.commits_pending = commits;
+            state.docs_pending = docs;
+        }
+        if let Ok(repo_root) = crate::history::repo_root_for(cas_root) {
+            let repository = crate::history::repository_id(&repo_root);
+            if let Ok(Some(ledger)) = store.index_state(&repository, SOURCE_EMBEDDINGS) {
+                state.last_error = ledger.last_error;
+                state.last_attempt = ledger.last_attempt_at;
+            }
+        }
+    }
+
+    state
+}
+
+fn embedding_drain_check(state: EmbeddingDrainState) -> Check {
+    let name = "embedding drain".to_string();
+    let pending = state.total_pending();
+
+    // A real failure outranks everything else: it is the reason the queue is
+    // not moving, and it must never be summarised away as a backlog.
+    if let Some(error) = &state.last_error {
+        return Check {
+            name,
+            status: CheckStatus::Warning,
+            message: format!(
+                "last drain reported: {error} ({pending} unit(s) still awaiting a vector)"
+            ),
+        };
+    }
+
+    if !state.capability {
+        // Not logged in. A boundary of the installation, so this is only worth
+        // a warning when there is actually a queue going nowhere.
+        return Check {
+            name,
+            status: if pending > 0 {
+                CheckStatus::Warning
+            } else {
+                CheckStatus::Ok
+            },
+            message: if pending > 0 {
+                format!(
+                    "no cloud embedding capability (not logged in): {pending} unit(s) will stay \
+                     unembedded and semantic search stays absent"
+                )
+            } else {
+                "no cloud embedding capability (not logged in); nothing is queued".to_string()
+            },
+        };
+    }
+
+    if pending == 0 {
+        return Check {
+            name,
+            status: CheckStatus::Ok,
+            message: match &state.last_attempt {
+                Some(at) => format!("nothing pending (last drain {at})"),
+                None => "nothing pending".to_string(),
+            },
+        };
+    }
+
+    // A queue with a capability present and no error is the drain doing its
+    // job across ticks — say so, and say how deep it is.
+    Check {
+        name,
+        status: CheckStatus::Ok,
+        message: format!(
+            "{pending} unit(s) queued ({} page(s), {} commit(s), {} doc(s)); the daemon drains \
+             them on its tick{}",
+            state.pages_pending,
+            state.commits_pending,
+            state.docs_pending,
+            match &state.last_attempt {
+                Some(at) => format!(" — last drain {at}"),
+                None => " — no drain has completed yet".to_string(),
+            }
+        ),
+    }
+}
+
+fn format_lag(secs: i64) -> String {
+    if secs == i64::MAX {
+        return "never".to_string();
+    }
+    if secs < 60 {
+        return format!("{secs}s old");
+    }
+    if secs < 3600 {
+        return format!("{}m old", secs / 60);
+    }
+    if secs < 86_400 {
+        return format!("{}h old", secs / 3600);
+    }
+    format!("{}d old", secs / 86_400)
+}
+
 /// Helper around `cli::integrate::doctor::collect_reports` +
 /// `render_for_doctor`. Lifted out so it can be tested with a synthetic
 /// repo root that doesn't need a `.cas` parent.
@@ -1346,6 +1649,219 @@ mod tests {
             "got: {}",
             neon_row.message
         );
+    }
+
+    // ===== cas-499c: symbol index lag =====
+
+    fn healthy_state() -> SymbolIndexState {
+        SymbolIndexState {
+            enabled: true,
+            searchable: true,
+            files: 120,
+            symbols: 3_400,
+            last_indexed: None,
+            error: None,
+        }
+    }
+
+    /// A stale watermark must surface as a warning naming the catch-up command; before cas-499c
+    /// there was no line at all, so a symbol index days behind looked identical to a healthy one.
+    #[test]
+    fn symbol_index_check_warns_on_stale_watermark() {
+        let now = chrono::Utc::now();
+        let state = SymbolIndexState {
+            last_indexed: Some(now - chrono::Duration::days(6)),
+            ..healthy_state()
+        };
+
+        let check = symbol_index_check(state, now);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("behind"), "message: {}", check.message);
+        assert!(
+            check.message.contains("120 file(s) from this project"),
+            "message: {}",
+            check.message
+        );
+        assert!(check.message.contains("6d old"), "message: {}", check.message);
+        assert!(
+            check.message.contains("cas index code"),
+            "a lag warning must name the catch-up command: {}",
+            check.message
+        );
+    }
+
+    /// A freshly-indexed tree reports Ok with the counts, not a warning.
+    #[test]
+    fn symbol_index_check_ok_when_fresh() {
+        let now = chrono::Utc::now();
+        let state = SymbolIndexState {
+            last_indexed: Some(now - chrono::Duration::minutes(7)),
+            ..healthy_state()
+        };
+
+        let check = symbol_index_check(state, now);
+        assert!(matches!(check.status, CheckStatus::Ok), "message: {}", check.message);
+        assert!(
+            check.message.contains("120 file(s) from this project"),
+            "the count must be scoped to this project, not a bare global: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("3400 symbol(s) stored in total"),
+            "the symbol count is store-wide and must say so: {}",
+            check.message
+        );
+    }
+
+    /// Empty index and missing BM25 directory are the "never ran" case, not a silent pass.
+    #[test]
+    fn symbol_index_check_warns_when_never_indexed() {
+        let now = chrono::Utc::now();
+        let state = SymbolIndexState {
+            files: 0,
+            symbols: 0,
+            searchable: false,
+            ..healthy_state()
+        };
+
+        let check = symbol_index_check(state, now);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(
+            check.message.contains("nothing indexed for this project"),
+            "message: {}",
+            check.message
+        );
+        assert!(
+            check.message.contains("code search index is missing"),
+            "message: {}",
+            check.message
+        );
+        assert!(check.message.contains("cas index code"), "message: {}", check.message);
+    }
+
+    /// An explicit opt-out must be reported honestly rather than as a healthy index.
+    #[test]
+    fn symbol_index_check_warns_when_disabled() {
+        let now = chrono::Utc::now();
+        let state = SymbolIndexState {
+            enabled: false,
+            ..healthy_state()
+        };
+
+        let check = symbol_index_check(state, now);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("disabled"), "message: {}", check.message);
+    }
+
+    /// A store that cannot be read is a warning that says so — never a silent skip.
+    #[test]
+    fn symbol_index_check_reports_read_errors() {
+        let now = chrono::Utc::now();
+        let state = SymbolIndexState {
+            error: Some("database is locked".to_string()),
+            ..healthy_state()
+        };
+
+        let check = symbol_index_check(state, now);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("database is locked"), "message: {}", check.message);
+    }
+
+    /// A drain failure must reach the operator here (EPIC cas-6212 / cas-db6e).
+    /// The tick has no command output of its own, so if this line stays quiet a
+    /// permanently-failing drain is indistinguishable from an empty queue —
+    /// which is exactly the cas-a924 shape.
+    #[test]
+    fn embedding_drain_check_surfaces_the_last_failure() {
+        let check = embedding_drain_check(EmbeddingDrainState {
+            capability: true,
+            commits_pending: 40,
+            docs_pending: 2,
+            last_error: Some("history: Embedding request failed with status 429".to_string()),
+            ..Default::default()
+        });
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("429"), "message: {}", check.message);
+        assert!(check.message.contains("42"), "message: {}", check.message);
+    }
+
+    #[test]
+    fn embedding_drain_check_reports_a_queue_without_calling_it_broken() {
+        let check = embedding_drain_check(EmbeddingDrainState {
+            capability: true,
+            pages_pending: 3,
+            commits_pending: 100,
+            docs_pending: 7,
+            last_attempt: Some("2026-08-08T00:00:00Z".to_string()),
+            ..Default::default()
+        });
+        // A backlog with a working drain is progress, not a fault.
+        assert!(matches!(check.status, CheckStatus::Ok));
+        assert!(check.message.contains("110"), "message: {}", check.message);
+    }
+
+    #[test]
+    fn embedding_drain_check_calls_out_a_queue_with_no_capability() {
+        let stranded = embedding_drain_check(EmbeddingDrainState {
+            capability: false,
+            commits_pending: 5,
+            ..Default::default()
+        });
+        assert!(matches!(stranded.status, CheckStatus::Warning));
+        assert!(
+            stranded.message.contains("not logged in"),
+            "message: {}",
+            stranded.message
+        );
+
+        // Logged out with nothing queued is an ordinary, fully-supported state.
+        let idle = embedding_drain_check(EmbeddingDrainState {
+            capability: false,
+            ..Default::default()
+        });
+        assert!(matches!(idle.status, CheckStatus::Ok));
+    }
+
+    /// End-to-end over a real code store: a seeded stale `code_files.updated` row is what the
+    /// doctor line actually reads, so the gather step must find it.
+    #[test]
+    fn gather_symbol_index_state_reads_seeded_stale_watermark() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let repo = temp.path().join("seeded-repo");
+        fs::create_dir_all(repo.join(".git")).expect(".git dir");
+        let cas_root = repo.join(".cas");
+        fs::create_dir_all(&cas_root).expect("cas root");
+
+        let store = crate::store::open_code_store(&cas_root).expect("code store");
+        let stale = chrono::Utc::now() - chrono::Duration::days(9);
+        let path = repo.join("src/lib.rs").to_string_lossy().to_string();
+        let id = store.generate_file_id_for("seeded-repo", &path);
+        store
+            .add_file(&cas_code::CodeFile {
+                id,
+                path,
+                repository: "seeded-repo".to_string(),
+                language: cas_code::Language::Rust,
+                size: 42,
+                line_count: 3,
+                commit_hash: None,
+                content_hash: "deadbeef".to_string(),
+                created: stale,
+                updated: stale,
+                scope: "project".to_string(),
+            })
+            .expect("seed code file");
+
+        let state = gather_symbol_index_state(&cas_root);
+        assert_eq!(state.files, 1, "seeded row not found (repository derivation drift?)");
+        let last = state.last_indexed.expect("watermark");
+        assert!(
+            (last - stale).num_seconds().abs() <= 1,
+            "watermark {last} did not match the seeded {stale}"
+        );
+
+        let check = symbol_index_check(state, chrono::Utc::now());
+        assert!(matches!(check.status, CheckStatus::Warning));
     }
 }
 

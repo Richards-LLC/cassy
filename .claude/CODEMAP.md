@@ -6,8 +6,8 @@ Rust workspace (edition 2024, MSRV 1.85): one binary crate (`cas-cli`) + 16 libr
 ## Top-level layout
 - `cas-cli/` — binary crate `cas`; CLI subcommands, hooks, factory TUI, MCP server, bridge HTTP server, daemon
 - `crates/` — 16 workspace library crates (see Workspace section)
-- `docs/` — planning artifacts: `requests/` (BUG/FEATURE inbox + `completed/` archive; being retired in favour of GitHub Issues), `release-notes/`, `reports/` (durable incident/diagnosis writeups), `notes/`, `guides/`, `brainstorms/`, `ideation/`, `reviews/`, `spikes/`, `onboarding/`
-- `scripts/` — `release.sh`, `bump-release-version.sh`, `cas-install.sh`, `bootstrap-zig.sh`, `check-build-regression.sh`, `benchmark-build.sh`, `install-git-hooks.sh`, `worktree-boot.sh`, `provision-hetzner.sh`
+- `docs/` — planning artifacts: `requests/` (BUG/FEATURE inbox + `completed/` archive; being retired in favour of GitHub Issues), `release-notes/`, `reports/` (durable incident/diagnosis writeups), `specs/` (signed-off design specs, e.g. `2026-08-07-code-history-search.md`), `analysis/` (mining/measurement docs), `notes/`, `guides/`, `brainstorms/`, `ideation/`, `reviews/`, `spikes/`, `onboarding/`
+- `scripts/` — `release.sh`, `bump-release-version.sh`, `cas-install.sh`, `bootstrap-zig.sh`, `check-build-regression.sh`, `benchmark-build.sh`, `install-git-hooks.sh`, `worktree-boot.sh`, `provision-hetzner.sh`, `run-scoped-tests.sh` (silent-success guard: fails on 0-passed/no-harness-line/build-script panic; self-test `test-run-scoped-tests.sh`; also `make -C cas-cli test-scoped`)
 - `migration/` — one-shot cloud-move phase logs. Not active build infra (schema migrations live in `cas-cli/src/migration/`)
 - `homebrew/` — `cas.rb` formula + `update-formula.sh`
 - `slack-bridge/` — standalone Node/TS Slack relay service (own `package.json`)
@@ -80,7 +80,7 @@ Rust TUI over an in-process PTY mux (not tmux); `cas` with no subcommand launche
 - `hooks/handlers/handlers_events/` — SessionStart/PreToolUse gates, codemap + project-overview freshness, `attribution.rs` (PostToolUse commit attribution, writes task anchors)
 - `hooks/handlers/handlers_middle/` — post-tool, session-stop, session hygiene/WIP banner
 - `builtins/` + `builtins.rs` — embedded skills/agents/workflows and the sync gate. **Three harness trees ship**: `builtins/skills/` (Claude), `builtins/codex/`, `builtins/grok/` — each with its own `cas-supervisor`/`cas-worker` copies, registered as `{CLAUDE,CODEX,GROK}_BUILTIN_SKILLS`. Also `builtins/agents/`, `builtins/workflows/` (`cas-code-review.js`). A managed skill body owns its `references/` directory for sync purposes
-- `migration/migrations/` — numbered schema migrations `m1xx`–`m215`; recent: `m212_worker_delivery_transactions`, `m213_verification_proof_boundaries`, `m214_known_repo_bindings`, `m215_verifier_server_handoffs`. Pattern is nullable column + idempotent `detect`
+- `migration/migrations/` — numbered schema migrations `m1xx`–`m218`; recent: `m214_known_repo_bindings`, `m215_verifier_server_handoffs`, `m218` knowledge store. Pattern is nullable column + idempotent `detect`
 - `store/` — layered project+global store, `notifying_*`/`syncing_*` wrappers, `share_policy.rs`, `mock/`
 - `cloud/syncer/` — `pull.rs` (`sync_with_sessions` drains personal push, team queue, then pull), project-scoping guards, push envelope carrying `project_canonical_id`
 - `sync/`, `bridge/`, `daemon/` — builtin→`.claude/` sync, HTTP bridge, background maintenance
@@ -91,11 +91,13 @@ Rust TUI over an in-process PTY mux (not tmux); `cas` with no subcommand launche
 - `knowledge/` — distillation pass over `cas-store/knowledge_store.rs` (EPIC cas-7d31). `sources.rs` picks docs/key configs and synthesizes `code://<module>` summaries from indexed symbols; `chunk.rs` splits headings→paragraphs→hard slice with tail overlap; `prompt.rs` holds the two-stage prompts plus the role-isolation armor (untrusted content is neutralized and marker-quoted; `DistilledPage` has no path field, so a model-proposed path cannot be honored); `merge.rs` defines the provenance-tagged body fragments (`<!-- cas:sources [...] -->`) and the cost tiers (containment→union only / small page→rewrite / large page→append delta); `llm.rs` is the `LlmRunner` trait + `claude -p` runner + `ScriptedLlm` mock (its call count is the token meter); `pipeline.rs` runs the pass and repairs provenance and dangling wikilinks after a cascade delete. An unchanged repo short-circuits before any prompt is built
 - `telemetry/`, `tracing/`, `otel.rs`, `sentry.rs`, `logging.rs` — observability
 - `worktree/` — worktree creation, salvage, sweep, cleanup
-- `harness_policy.rs`, `agent_id.rs`, `duplicate_check.rs`, `error.rs`, `async_runtime.rs`
+- `harness_policy.rs` — shared harness identity policy: `inbox_aliases` (the ONE resolver both inbox readers use — supervisor answers to `[pane_name, "supervisor"]`) + `mirror_receipts_across_aliases`
+- `prompt_revalidation.rs` — delivery-time staleness gate for queued lifecycle prompts: staleness = "task left the announced status" plus a rewound-occurrence guard (`updated_at < occurrence`); the old exact-equality gate destroyed 98% of lifecycle signal (GH #167)
+- `agent_id.rs`, `duplicate_check.rs`, `error.rs`, `async_runtime.rs`
 
 ## crates — notable internals
 - `cas-store/src/agent_store/` — agents + task leases; `ops_task_leases.rs`, lease history (`reason` column since m207)
-- `cas-store/src/prompt_queue_store.rs` — prompt queue: enqueue, delivery stages, bounded retry/abandon, per-target progress
+- `cas-store/src/prompt_queue_store.rs` — prompt queue: enqueue, delivery stages, bounded retry/abandon, per-target progress; `prompt_queue_recipient_seen` surfacing receipts (transport delivery writes them — GH #176) + `SupersededStale` explicit dead-letter reason
 - `cas-store/src/sync_queue/queue_ops.rs` — sync queue upsert; `UNIQUE(entity_type, entity_id, team_id)` with ON CONFLICT resetting payload/created_at/retry_count/last_error (so `created_at` is last-touch, not first-enqueue)
 - `cas-store/src/task_store.rs` — tasks are scoped by **database location**, not a column; `Scope::Project` is hardcoded at read time (~:224) and carries no provenance
 - `cas-store/src/knowledge_store.rs` — distilled repo knowledge (m218): markdown bodies on disk under `.cas/knowledge/`, index + blake3 source ledger in cas.db, contentless FTS5 (`content=''`) so no column holds body prose. `commit_ingest` applies rows + index + ledger + tombstone cascade in ONE SQLite tx, with bodies staged/published via `BodyTransaction` so the filesystem rolls back with the DB. `locked=1` is user-sovereign (distillation can neither overwrite nor set it); `classify_sources` is pure
@@ -107,7 +109,7 @@ Rust TUI over an in-process PTY mux (not tmux); `cas` with no subcommand launche
 - `cas-mux/src/spec.rs` — `WorkerSpec { name, cli, model, effort }`, `Effort::as_claude_arg()` / `as_codex_config()`
 
 ## Cross-cutting
-- **Tests:** inline `#[cfg(test)] mod tests` per file, plus 59 integration files in `cas-cli/tests/` (factory, MCP tools, team cloud sync, bridge, search, code-review, hooks, proptest) with `common/` and `e2e/` helpers. Crate-level suites in `crates/*/tests/`. Recent additions: `pull_scoping_regression_test.rs`, `worktree_surface_test.rs`, `warning_hygiene_test.rs`.
+- **Tests:** inline `#[cfg(test)] mod tests` per file, plus 60 integration files in `cas-cli/tests/` (factory, MCP tools, team cloud sync, bridge, search, code-review, hooks, proptest) with `common/` and `e2e/` helpers. Crate-level suites in `crates/*/tests/`. Recent additions: `update_sync_report_attribution_test.rs`, `pull_scoping_regression_test.rs`, `worktree_surface_test.rs`. Scoped final-proof runs go through `scripts/run-scoped-tests.sh` (rule-173's mechanical half).
 - **Test env isolation:** ONE canonical guard — `TestEnvGuard` in `cas-cli/src/lib.rs` (`temp_home`, `with_vars`, `with_optional_vars`, `set`, `remove`, `set_current_dir`), serialized on a single lock and restoring via `Drop`. Do not add a second HOME/env helper.
 - **Real-process tests:** `#[ignore]`d and run explicitly (`-- --ignored`), e.g. `crates/cas-mux/tests/{idle_pty_injection_runtime,urgent_interrupt_codex_runtime,nonurgent_idle_codex_runtime}.rs` plus `{codex,grok}_factory_contract_runtime.rs`. They serialize across binaries via the file lock in `crates/cas-mux/tests/support/real_pty_serial.rs`; live-harness helpers in `tests/support/codex_live.rs`.
 - **Platform gating:** several `/proc`-based helpers are `#[cfg(target_os = "linux")]` and their callers with them — on macOS both compile out. Do not "clean up" a helper that looks dead on Darwin.

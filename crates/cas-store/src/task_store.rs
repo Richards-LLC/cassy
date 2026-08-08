@@ -134,6 +134,17 @@ impl SqliteTaskStore {
         serde_json::to_string(deliverables).unwrap_or_else(|_| "{}".to_string())
     }
 
+    /// Compare-and-swap reopen: rewrite the row only if it still carries
+    /// `expected_status` / `expected_updated_at`.
+    ///
+    /// cas-ec74: this is the ONE sanctioned exception to the store-owned
+    /// `updated_at` contract enforced by [`TaskStore::update`]. Here the
+    /// timestamp is an explicit optimistic-concurrency key, not a general write
+    /// path, so `task.updated_at` is written through verbatim and
+    /// `expected_updated_at` gates the write. Both sides of that equality are
+    /// persisted values (`expected_updated_at` is read back off a stored task),
+    /// so it never spans two clock reads the way the old occurrence comparison
+    /// did. Do not copy this pattern into new write paths.
     pub(crate) fn reopen_exact_with_conn(
         conn: &Connection,
         task: &Task,
@@ -560,9 +571,16 @@ impl TaskStore for SqliteTaskStore {
         .ok_or_else(|| StoreError::TaskNotFound(id.to_string()))
     }
 
-    fn update(&self, task: &Task) -> Result<()> {
+    fn update(&self, task: &Task) -> Result<DateTime<Utc>> {
         crate::shared_db::with_write_retry(|| {
             let conn = self.conn.lock().unwrap();
+
+            // cas-ec74: read the clock ONCE and return that same instant. The
+            // caller's `task.updated_at` is deliberately ignored (updated_at is
+            // store-owned), but the value we persist has to be observable or
+            // callers are forced to guess it with a second `Utc::now()` — which
+            // is exactly how lifecycle occurrences became unmatchable.
+            let now = Utc::now();
 
             // Combine the status read with the UPDATE: only SELECT the old status
             // when the new status differs from what's in the DB, avoiding the
@@ -617,7 +635,7 @@ impl TaskStore for SqliteTaskStore {
                 task.task_type.to_string(),
                 task.assignee,
                 Self::labels_to_string(&task.labels),
-                Utc::now().to_rfc3339(),
+                now.to_rfc3339(),
                 task.closed_at.map(|t| t.to_rfc3339()),
                 task.close_reason,
                 task.external_ref,
@@ -689,7 +707,7 @@ impl TaskStore for SqliteTaskStore {
                 }
             }
 
-            Ok(())
+            Ok(now)
         }) // with_write_retry
     }
 

@@ -1,12 +1,22 @@
-//! Hybrid search combining BM25, semantic, temporal, graph, and code search (Hindsight-inspired)
+//! Hybrid search combining BM25, semantic, temporal, graph, code, knowledge and
+//! git-history search (Hindsight-inspired)
 //!
-//! This module provides a 6-channel hybrid search:
+//! This module provides a 7-channel hybrid search:
 //! 1. BM25 (lexical) - traditional text matching
 //! 2. Semantic - embedding-based similarity
 //! 3. Temporal - time-aware retrieval using valid_from/valid_until
 //! 4. Graph - spreading activation over entity relationships
 //! 5. Code - semantic code search over indexed symbols
-//! 6. Reranking (optional) - ML-based score refinement
+//! 6. Knowledge - FTS over distilled project-knowledge pages
+//! 7. History - the structural git-history index (EPIC cas-6212, spec §6.2)
+//! Reranking (optional) - ML-based score refinement
+//!
+//! The history channel is deliberately a **channel here** rather than a ranker
+//! of its own. M6 (cas-7909) deleted a second, unrelated `HybridSearch` whose
+//! `semantic_score` was hardcoded `0.0`; a history-specific ranker would
+//! recreate that artifact, and it would not inherit the capability-honest
+//! weight renormalization in [`crate::hybrid_search::scorer`] that keeps a
+//! machine with no cloud login from scoring everything zero.
 
 use std::hash::{Hash, Hasher};
 use std::path::Path;
@@ -30,11 +40,37 @@ use crate::error::Result;
 use crate::store::EntityStore;
 use crate::types::Entry;
 use cas_search::CodeSearchOptions;
-use cas_store::{KnowledgeStore, SqliteKnowledgeStore};
+use cas_store::{
+    HistoryQuery, HistoryStore, KnowledgeStore, SqliteHistoryStore, SqliteKnowledgeStore,
+};
 
 /// How many activated entities the knowledge channel follows back into the
 /// page index. Each one costs an FTS query, so this bounds the fan-out.
 const GRAPH_LINK_SEEDS: usize = 5;
+
+/// Structural narrowing for the git-history channel (spec §6.1).
+///
+/// Separate from [`HistoryQuery`] because the ranker owns the text half: the
+/// query string comes from `base.query` (after temporal extraction), so a
+/// caller cannot accidentally search for one thing and rank another.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct HistoryFilter {
+    /// Repository identity, as produced by `crate::history::repository_id`.
+    pub repository: String,
+    /// Substring match against a commit's touched paths.
+    pub path: Option<String>,
+    /// Inclusive RFC3339 bounds on `committed_at`.
+    pub since: Option<String>,
+    pub until: Option<String>,
+    /// Merge commits are excluded by default (their message is `Merge branch
+    /// 'x'`, which is noise — spec §7.1).
+    pub include_merges: bool,
+    /// Restrict to this exact SHA set — how the `task_id` / `session_id`
+    /// filters reach SQL (EPIC cas-6212 / cas-519f). Applied *before* `LIMIT`,
+    /// so a task whose commits are not already in the top-k still answers.
+    /// `Some(empty)` legitimately matches nothing; `None` is no filter.
+    pub shas: Option<Vec<String>>,
+}
 
 /// Options specific to hybrid search
 #[derive(Debug, Clone)]
@@ -57,6 +93,14 @@ pub struct HybridSearchOptions {
     /// Enable the distilled-knowledge component (searches knowledge pages)
     pub enable_knowledge: bool,
 
+    /// Enable the git-history component (searches indexed commits)
+    pub enable_history: bool,
+
+    /// Structural narrowing for the history channel: path, time window, merge
+    /// handling. `repository` is required — the index is multi-repo and an
+    /// unqualified query would return another checkout's commits.
+    pub history_filter: Option<HistoryFilter>,
+
     /// Weight for BM25 score (0.0-1.0) - only used if use_adaptive_weights is false
     pub bm25_weight: f32,
 
@@ -78,6 +122,13 @@ pub struct HybridSearchOptions {
     /// IDs never collide with entry IDs, so knowledge hits are unioned into
     /// the result set at this weight.
     pub knowledge_weight: f32,
+
+    /// Weight for the git-history channel (0.0-1.0)
+    ///
+    /// Unioned rather than boosted, for the same reason as `knowledge_weight`:
+    /// commit SHAs never collide with entry IDs, so a multiplicative boost
+    /// would be a guaranteed no-op and commits could never surface at all.
+    pub history_weight: f32,
 
     /// Enable reranking of top results
     pub enable_rerank: bool,
@@ -113,12 +164,18 @@ impl Default for HybridSearchOptions {
             // different doc type and entry-only callers (the SessionStart
             // scorer) must not receive them.
             enable_knowledge: false,
+            // Same opt-in discipline as knowledge: commits are a different doc
+            // type, and entry-only callers (the SessionStart scorer) must not
+            // suddenly receive them.
+            enable_history: false,
+            history_filter: None,
             bm25_weight: 0.30, // Fallback weights (not used when adaptive is enabled)
             semantic_weight: 0.30,
             temporal_weight: 0.15,
             graph_weight: 0.15,
             code_weight: 0.10,      // Code search weight
             knowledge_weight: 0.25, // Distilled knowledge weight
+            history_weight: 0.25,   // Git-history weight
             enable_rerank: false,
             rerank_candidates: 10, // Reduced from 20 for better performance
             use_rrf: false,
@@ -141,6 +198,12 @@ impl HybridSearchOptions {
         self.enable_graph.hash(&mut hasher);
         self.enable_code.hash(&mut hasher);
         self.enable_knowledge.hash(&mut hasher);
+        self.enable_history.hash(&mut hasher);
+        // The history filter is part of the query, not a display option: two
+        // searches for the same words under different `path`/`since` filters
+        // have different answers, and hashing only the words would serve the
+        // first one's results to the second.
+        self.history_filter.hash(&mut hasher);
         self.enable_rerank.hash(&mut hasher);
         self.use_rrf.hash(&mut hasher);
         self.use_adaptive_weights.hash(&mut hasher);
@@ -151,6 +214,7 @@ impl HybridSearchOptions {
         self.graph_weight.to_bits().hash(&mut hasher);
         self.code_weight.to_bits().hash(&mut hasher);
         self.knowledge_weight.to_bits().hash(&mut hasher);
+        self.history_weight.to_bits().hash(&mut hasher);
         // Hash filter options
         for tag in &self.base.tags {
             tag.hash(&mut hasher);
@@ -184,6 +248,8 @@ pub struct HybridSearchResult {
     pub code_score: f64,
     /// Distilled-knowledge component score
     pub knowledge_score: f64,
+    /// Git-history component score
+    pub history_score: f64,
     /// Rerank score (if reranking enabled)
     pub rerank_score: Option<f64>,
 }
@@ -200,6 +266,7 @@ struct ChannelScores {
     graph: f64,
     code: f64,
     knowledge: f64,
+    history: f64,
 }
 
 impl From<HybridSearchResult> for SearchResult {
@@ -226,6 +293,8 @@ pub struct HybridSearch {
     code_search: Option<CasCodeSearch>,
     /// Distilled project knowledge (FTS over knowledge pages)
     knowledge_store: Option<Arc<dyn KnowledgeStore>>,
+    /// Structural git-history index (FTS over commit prose + path/time filters)
+    history_store: Option<Arc<dyn HistoryStore>>,
     /// Cloud-backed embedding channel (T5). `None` on any installation
     /// without cloud auth — see `hybrid_search::semantic`.
     semantic_channel: Option<Arc<SemanticChannel>>,
@@ -241,6 +310,7 @@ impl HybridSearch {
             graph_retriever: None,
             code_search: None,
             knowledge_store: None,
+            history_store: None,
             semantic_channel: None,
             cache: Arc::new(SearchCache::new()),
         }
@@ -253,6 +323,7 @@ impl HybridSearch {
             graph_retriever: None,
             code_search: None,
             knowledge_store: None,
+            history_store: None,
             semantic_channel: None,
             cache,
         }
@@ -265,6 +336,7 @@ impl HybridSearch {
             graph_retriever: Some(GraphRetriever::with_defaults(entity_store)),
             code_search: None,
             knowledge_store: None,
+            history_store: None,
             semantic_channel: None,
             cache: Arc::new(SearchCache::new()),
         }
@@ -281,6 +353,7 @@ impl HybridSearch {
             graph_retriever: Some(GraphRetriever::new(entity_store, graph_config)),
             code_search: None,
             knowledge_store: None,
+            history_store: None,
             semantic_channel: None,
             cache: Arc::new(SearchCache::new()),
         }
@@ -301,6 +374,7 @@ impl HybridSearch {
             graph_retriever: None, // Needs entity store to be set separately
             code_search: None,     // Needs code store to be set separately
             knowledge_store: None,  // Needs knowledge store to be set separately
+            history_store: None,    // Needs history store to be set separately
             semantic_channel: None, // Needs cloud auth; see set_semantic_channel
             cache: Arc::new(SearchCache::new()),
         })
@@ -366,6 +440,22 @@ impl HybridSearch {
     /// Whether the distilled-knowledge channel can return rows.
     pub fn has_knowledge_store(&self) -> bool {
         self.knowledge_store.is_some()
+    }
+
+    /// Attach the structural git-history store, enabling the history channel.
+    pub fn set_history_store(&mut self, store: Arc<dyn HistoryStore>) {
+        self.history_store = Some(store);
+    }
+
+    /// Open and attach the history store rooted at `cas_dir`.
+    pub fn set_history_store_from_path(&mut self, cas_dir: &StdPath) -> Result<()> {
+        self.history_store = Some(Arc::new(SqliteHistoryStore::open(cas_dir)?));
+        Ok(())
+    }
+
+    /// Whether the git-history channel can return rows.
+    pub fn has_history_store(&self) -> bool {
+        self.history_store.is_some()
     }
 
     /// Attach a cloud-backed semantic channel (T5).
@@ -530,6 +620,13 @@ impl HybridSearch {
             Vec::new()
         };
 
+        // 5c. Git-history search (if enabled and a store is attached)
+        let history_scores: Vec<(String, f64)> = if opts.enable_history {
+            self.history_scores(&search_query, opts)
+        } else {
+            Vec::new()
+        };
+
         // 6. Combine scores using the new scoring system
         let semantic_f64: Vec<(String, f64)> = semantic_scores
             .into_iter()
@@ -550,6 +647,9 @@ impl HybridSearch {
             }
             if !knowledge_scores.is_empty() {
                 rankings.push(knowledge_scores.clone());
+            }
+            if !history_scores.is_empty() {
+                rankings.push(history_scores.clone());
             }
             rrf_with_magnitude(&rankings, opts.rrf_k)
         } else {
@@ -617,6 +717,17 @@ impl HybridSearch {
                 combined.sort_by(|a, b| b.1.total_cmp(&a.1));
             }
 
+            // History unions in for the same reason knowledge does: a commit
+            // SHA is never an entry ID, so a multiplicative boost would match
+            // nothing and the channel would be inert — the precise failure
+            // §6.3 makes an acceptance gate.
+            if !history_scores.is_empty() && opts.history_weight > 0.0 {
+                for (id, score) in percentile_normalize(&history_scores, 90.0) {
+                    combined.push((id, (opts.history_weight as f64) * score));
+                }
+                combined.sort_by(|a, b| b.1.total_cmp(&a.1));
+            }
+
             combined
         };
 
@@ -648,6 +759,11 @@ impl HybridSearch {
         for (id, score) in &knowledge_scores {
             score_map.entry(id.clone()).or_default().knowledge = *score;
         }
+        let history_ids: std::collections::HashSet<&str> =
+            history_scores.iter().map(|(id, _)| id.as_str()).collect();
+        for (id, score) in &history_scores {
+            score_map.entry(id.clone()).or_default().history = *score;
+        }
 
         let mut results: Vec<HybridSearchResult> = combined
             .into_iter()
@@ -660,6 +776,8 @@ impl HybridSearch {
                 let channel_scores = score_map.get(&id).cloned().unwrap_or_default();
                 let doc_type = if knowledge_ids.contains(id.as_str()) {
                     DocType::KnowledgePage
+                } else if history_ids.contains(id.as_str()) {
+                    DocType::HistoryCommit
                 } else {
                     DocType::Entry
                 };
@@ -670,6 +788,7 @@ impl HybridSearch {
                     graph_score: channel_scores.graph,
                     code_score: channel_scores.code,
                     knowledge_score: channel_scores.knowledge,
+                    history_score: channel_scores.history,
                     doc_type,
                     id,
                     score,
@@ -822,6 +941,61 @@ impl HybridSearch {
         scores
     }
 
+    /// Retrieve indexed commits for a query (spec §6.2).
+    ///
+    /// Two modes, and the distinction is the whole design:
+    ///
+    /// 1. **With query text** — FTS5 BM25 over commit subject + body, narrowed
+    ///    by the structural filter. Ranked by relevance.
+    /// 2. **Without query text** — a purely structural question ("what touched
+    ///    this path in this window"), ranked by the `0.5^(days/30)` recency
+    ///    decay. This is not a degenerate case: §6.4's Q2 and Q3 *are* this
+    ///    mode, and they are the two queries the epic must answer on M1 data.
+    ///
+    /// Errors are swallowed to empty results, matching the knowledge channel:
+    /// an enrichment channel must never fail a search. What it must not do is
+    /// pretend — an absent store yields no rows, and the caller reports the
+    /// index status alongside (spec §6.5) rather than letting silence read as
+    /// "nothing ever happened here".
+    fn history_scores(&self, query: &str, opts: &HybridSearchOptions) -> Vec<(String, f64)> {
+        let Some(ref store) = self.history_store else {
+            return Vec::new();
+        };
+        // The repository is not optional: `history_commits` is multi-repo, and
+        // an unqualified query would rank another checkout's commits into this
+        // one's answer.
+        let Some(filter) = opts.history_filter.as_ref() else {
+            return Vec::new();
+        };
+        if opts.base.limit == 0 {
+            return Vec::new();
+        }
+
+        let text = (!query.trim().is_empty()).then(|| query.to_string());
+        let history_query = HistoryQuery {
+            repository: filter.repository.clone(),
+            text,
+            path: filter.path.clone(),
+            since: filter.since.clone(),
+            until: filter.until.clone(),
+            include_merges: filter.include_merges,
+            shas: filter.shas.clone(),
+            limit: opts.base.limit * 3,
+        };
+
+        let mut scores: Vec<(String, f64)> = store
+            .search_commits(&history_query)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|hit| (hit.commit.sha, hit.score))
+            .collect();
+
+        // Stable order for prompt-cache friendliness: score desc, then sha.
+        scores.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        scores.truncate(opts.base.limit * 3);
+        scores
+    }
+
     /// Perform semantic-only search.
     ///
     /// Cloud-only by design: the query is embedded through the cloud endpoint
@@ -943,6 +1117,7 @@ mod tests {
             rerank_score: Some(0.85),
             doc_type: DocType::Entry,
             knowledge_score: 0.0,
+            history_score: 0.0,
         };
 
         let search_result: SearchResult = hybrid.into();
@@ -1127,6 +1302,241 @@ mod tests {
             results.is_empty(),
             "knowledge pages leaked into a search that did not opt in"
         );
+    }
+
+    // ── Git-history channel (EPIC cas-6212 / cas-7f40, spec §6.2) ───────
+
+    /// A history store seeded with `(sha, subject, path, committed_at)` rows.
+    fn history_fixture(
+        commits: &[(&str, &str, &str, &str)],
+    ) -> (tempfile::TempDir, std::sync::Arc<dyn HistoryStore>) {
+        use cas_store::{HistoryCommit, HistoryCommitFile};
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = SqliteHistoryStore::open(temp.path()).expect("open history store");
+        let rows: Vec<HistoryCommit> = commits
+            .iter()
+            .map(|(sha, subject, _, at)| HistoryCommit {
+                sha: (*sha).to_string(),
+                short_sha: sha.chars().take(8).collect(),
+                committed_at: (*at).to_string(),
+                subject: (*subject).to_string(),
+                repository: "/repo".to_string(),
+                ..Default::default()
+            })
+            .collect();
+        let files: Vec<HistoryCommitFile> = commits
+            .iter()
+            .map(|(sha, _, path, _)| HistoryCommitFile {
+                sha: (*sha).to_string(),
+                file_path: (*path).to_string(),
+                change_type: "M".to_string(),
+                ..Default::default()
+            })
+            .collect();
+        let watermark = commits.last().map(|c| c.0).unwrap_or("").to_string();
+        store
+            .commit_batch("/repo", &rows, &files, &watermark, true)
+            .expect("commit batch");
+        (temp, std::sync::Arc::new(store))
+    }
+
+    fn search_with_history(
+        history: std::sync::Arc<dyn HistoryStore>,
+    ) -> (tempfile::TempDir, HybridSearch) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let index = SearchIndex::open(&temp.path().join("tantivy")).expect("open index");
+        let mut hybrid = HybridSearch::new(index);
+        hybrid.set_history_store(history);
+        (temp, hybrid)
+    }
+
+    fn history_opts(query: &str, filter: HistoryFilter) -> HybridSearchOptions {
+        HybridSearchOptions {
+            base: SearchOptions {
+                query: query.to_string(),
+                limit: 10,
+                ..Default::default()
+            },
+            enable_history: true,
+            history_filter: Some(filter),
+            enable_temporal: false,
+            enable_graph: false,
+            ..Default::default()
+        }
+    }
+
+    fn repo_filter() -> HistoryFilter {
+        HistoryFilter {
+            repository: "/repo".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_history_channel_surfaces_commits_no_entry_could_match() {
+        let (_ht, hs) = history_fixture(&[
+            (
+                &"a".repeat(40),
+                "fix the redelivery hot loop",
+                "src/delivery/retry.rs",
+                "2026-08-05T00:00:00Z",
+            ),
+            (
+                &"b".repeat(40),
+                "rename the pane widget",
+                "src/ui/pane.rs",
+                "2026-08-05T00:00:00Z",
+            ),
+        ]);
+        let (_it, hybrid) = search_with_history(hs);
+
+        // No entries at all: every hit must come from the history channel.
+        let results = hybrid
+            .search(&history_opts("redelivery", repo_filter()), &[])
+            .expect("search");
+
+        assert_eq!(results.len(), 1, "expected exactly the matching commit");
+        assert_eq!(results[0].id, "a".repeat(40));
+        assert_eq!(
+            results[0].doc_type,
+            DocType::HistoryCommit,
+            "commits must be typed as commits, not smuggled in as entries"
+        );
+        assert!(
+            results[0].history_score > 0.0,
+            "a sign error on SQLite's bm25() cost would show up here"
+        );
+    }
+
+    #[test]
+    fn the_history_channel_stays_silent_when_disabled() {
+        let (_ht, hs) = history_fixture(&[(
+            &"a".repeat(40),
+            "fix the redelivery hot loop",
+            "src/delivery/retry.rs",
+            "2026-08-05T00:00:00Z",
+        )]);
+        let (_it, hybrid) = search_with_history(hs);
+
+        let opts = HybridSearchOptions {
+            enable_history: false,
+            ..history_opts("redelivery", repo_filter())
+        };
+        assert!(
+            hybrid.search(&opts, &[]).expect("search").is_empty(),
+            "commits leaked into a search that did not opt in"
+        );
+    }
+
+    /// Q2/Q3's shape: no query text at all, just structure. A channel that
+    /// required a text query would answer "what changed here lately" with
+    /// nothing.
+    #[test]
+    fn a_structural_query_with_no_text_still_returns_commits() {
+        let (_ht, hs) = history_fixture(&[
+            (
+                &"a".repeat(40),
+                "delivery change",
+                "src/delivery/retry.rs",
+                "2026-08-05T00:00:00Z",
+            ),
+            (
+                &"b".repeat(40),
+                "ui change",
+                "src/ui/pane.rs",
+                "2026-08-05T00:00:00Z",
+            ),
+        ]);
+        let (_it, hybrid) = search_with_history(hs);
+
+        let results = hybrid
+            .search(
+                &history_opts(
+                    "",
+                    HistoryFilter {
+                        path: Some("src/delivery".to_string()),
+                        ..repo_filter()
+                    },
+                ),
+                &[],
+            )
+            .expect("search");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "a".repeat(40));
+    }
+
+    /// The index is multi-repo. Without a repository the channel must decline
+    /// rather than rank a different checkout's commits into this answer.
+    #[test]
+    fn the_history_channel_declines_without_a_repository_filter() {
+        let (_ht, hs) = history_fixture(&[(
+            &"a".repeat(40),
+            "redelivery fix",
+            "src/delivery/retry.rs",
+            "2026-08-05T00:00:00Z",
+        )]);
+        let (_it, hybrid) = search_with_history(hs);
+
+        let opts = HybridSearchOptions {
+            history_filter: None,
+            ..history_opts("redelivery", repo_filter())
+        };
+        assert!(hybrid.search(&opts, &[]).expect("search").is_empty());
+
+        // ...and a *different* repository must not match either.
+        let opts = history_opts(
+            "redelivery",
+            HistoryFilter {
+                repository: "/elsewhere".to_string(),
+                ..Default::default()
+            },
+        );
+        assert!(hybrid.search(&opts, &[]).expect("search").is_empty());
+    }
+
+    /// The cache key must carry the filter. Two searches for the same words
+    /// under different paths are different questions, and serving the first
+    /// one's answer to the second is a silent wrong answer.
+    #[test]
+    fn the_history_filter_participates_in_the_cache_key() {
+        let base = history_opts("change", repo_filter());
+        let narrowed = history_opts(
+            "change",
+            HistoryFilter {
+                path: Some("src/delivery".to_string()),
+                ..repo_filter()
+            },
+        );
+        assert_ne!(base.cache_key(), narrowed.cache_key());
+
+        let windowed = history_opts(
+            "change",
+            HistoryFilter {
+                since: Some("2026-08-01T00:00:00Z".to_string()),
+                ..repo_filter()
+            },
+        );
+        assert_ne!(base.cache_key(), windowed.cache_key());
+    }
+
+    /// End-to-end through the real ranker: a cached result must not be typed
+    /// as an entry on the second call.
+    #[test]
+    fn cached_history_results_keep_their_doc_type() {
+        let (_ht, hs) = history_fixture(&[(
+            &"a".repeat(40),
+            "redelivery fix",
+            "src/delivery/retry.rs",
+            "2026-08-05T00:00:00Z",
+        )]);
+        let (_it, hybrid) = search_with_history(hs);
+        let opts = history_opts("redelivery", repo_filter());
+
+        let first = hybrid.search(&opts, &[]).expect("search");
+        let second = hybrid.search(&opts, &[]).expect("search");
+        assert_eq!(first.len(), second.len());
+        assert_eq!(second[0].doc_type, DocType::HistoryCommit);
     }
 
     #[test]

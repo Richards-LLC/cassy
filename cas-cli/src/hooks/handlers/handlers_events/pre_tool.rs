@@ -278,6 +278,21 @@ pub fn handle_pre_tool_use(
     // ========================================================================
     // `is_factory_agent` already computed above for the hoisted
     // cas_root=None auto-approve check (cas-7f33).
+    if is_factory_agent {
+        // cas-7aa2 (GH #176): the auto-route below returns `allow`, so the
+        // harness's native SendMessage runs too and writes a second copy into
+        // THIS process's config-dir teams tree. When that tree is not the one
+        // the factory daemon delivers into (a worker spawned with an explicit
+        // `config_dir`), the copy is a dead letter that nothing consumes and
+        // retention never prunes. Sweep it inert here rather than in the
+        // auto-route itself: the native write happens AFTER the hook returns,
+        // so the only seam that can see it is a LATER hook invocation. This
+        // event fires on every intercepted tool call, so the stray is
+        // neutralised within a call or two of being written. Cheap: two stat()
+        // calls in the overwhelmingly common same-tree case, and a no-op
+        // whenever `config.json` says this IS the factory's tree.
+        reap_stranded_native_send_message_copies();
+    }
     if is_factory_agent && tool_name == "SendMessage" {
         return Ok(auto_route_send_message(
             input.tool_input.as_ref(),
@@ -1129,6 +1144,52 @@ fn with_test_verifier_handoff_secret<T>(secret: &[u8], f: impl FnOnce() -> T) ->
     result
 }
 
+/// cas-7aa2 (GH #176): make this agent's stranded native `SendMessage` copies
+/// inert.
+///
+/// Thin env-reading wrapper over
+/// [`crate::ui::factory::daemon::runtime::teams::reap_stranded_native_inbox_copies`]
+/// — see that function for the full mechanism. Resolves the inboxes this agent
+/// may legitimately be the reader of so the sweep never touches them: its pane
+/// name, plus the `supervisor` alias, which is the inbox file name the
+/// supervisor's own messages arrive under (its `CAS_AGENT_NAME` is the
+/// generated pane name, not `supervisor`).
+///
+/// Silent and infallible by construction: housekeeping must never fail a tool
+/// call.
+fn reap_stranded_native_send_message_copies() {
+    let Ok(session) = std::env::var("CAS_FACTORY_SESSION") else {
+        return;
+    };
+    let session = session.trim();
+    if session.is_empty() {
+        return;
+    }
+
+    let mut own_inbox_names: Vec<String> = Vec::new();
+    if let Ok(name) = std::env::var("CAS_AGENT_NAME") {
+        let name = name.trim();
+        if !name.is_empty() {
+            own_inbox_names.push(name.to_string());
+        }
+    }
+    if crate::harness_policy::is_supervisor_from_env() {
+        own_inbox_names.push("supervisor".to_string());
+    }
+
+    let reaped = crate::ui::factory::daemon::runtime::teams::reap_stranded_native_inbox_copies(
+        session,
+        &own_inbox_names,
+    );
+    if reaped > 0 {
+        info!(
+            session,
+            reaped,
+            "cas-7aa2: neutralised stranded native SendMessage copies in a non-factory teams tree"
+        );
+    }
+}
+
 /// Auto-route a factory-mode `SendMessage` tool call onto the CAS prompt
 /// queue so the message actually reaches its recipient, then return an
 /// `allow` + `additionalContext` success receipt (cas-73c8). Returning
@@ -1261,8 +1322,22 @@ fn auto_route_send_message(
     // `additionalContext` (visible to the model next to the tool result).
     // `permissionDecisionReason` is user-facing only on allow.
     //
-    // Native SendMessage may also run after allow; inbox content-dedupe
-    // (teams write_to_inbox) suppresses an identical second write.
+    // Native SendMessage also runs after allow, writing its own copy into THIS
+    // process's config-dir teams tree. Two cases, and the old comment here
+    // claimed both were covered by one mechanism — cas-7aa2 (GH #176) found
+    // that only the first is:
+    //   - Same tree as the daemon (the common case): covered. The daemon
+    //     delivers `queued.prompt` verbatim (`queue_and_events.rs`:
+    //     `let prompt_with_instructions = queued.prompt.clone();`) under the
+    //     same sender name, so the two rows are byte-identical and the
+    //     `(from, text)` guard in `teams::write_to_inbox_impl` collapses them.
+    //   - Different tree (worker spawned with an explicit `config_dir`): NOT
+    //     covered, and never was. `TeamsManager` only ever looks in the
+    //     daemon's own tree, so it cannot see — let alone dedupe — a row in
+    //     another config dir. That copy is a dead letter: no reader, and
+    //     retention deliberately never prunes unread rows.
+    // `reap_stranded_native_send_message_copies` (called from the factory
+    // branch of this handler) makes those cross-tree strays inert.
     let receipt = format!(
         "✅ AUTO-ROUTED via CAS coordination (message id {message_id}).\n\n\
          Message delivered to `{target}`. DO NOT retry this SendMessage call.\n\n\

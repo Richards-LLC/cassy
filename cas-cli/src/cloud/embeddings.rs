@@ -156,6 +156,11 @@ pub struct EmbedReport {
     /// pages beyond this run's `limit`. This is the number that must drain to
     /// zero across runs; it is the honest measure of coverage.
     pub pending_after: usize,
+    /// Units deliberately excluded from embedding and retired from the queue
+    /// without a vector — merge commits whose whole message is
+    /// `Merge branch 'x'` (spec §7.1, §12 Q5). Counted rather than silent, so
+    /// "embedded + skipped < listed" is always explainable.
+    pub skipped: usize,
 }
 
 impl EmbedReport {
@@ -354,6 +359,45 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot / (norm_a.sqrt() * norm_b.sqrt())
 }
 
+/// Key prefix for every code-history vector (spec §4.4).
+///
+/// History and knowledge vectors live in ONE LMDB env; this prefix is the only
+/// thing that keeps the two corpora from being read as each other.
+pub const HISTORY_KEY_PREFIX: &str = "history:";
+
+/// Vector key for a commit: `history:commit:{sha}`.
+pub fn history_commit_key(sha: &str) -> String {
+    format!("{HISTORY_KEY_PREFIX}commit:{sha}")
+}
+
+/// Vector key for a GitHub/CHANGELOG doc: `history:doc:{id}`.
+pub fn history_doc_key(id: &str) -> String {
+    format!("{HISTORY_KEY_PREFIX}doc:{id}")
+}
+
+/// Which corpus a cached vector belongs to.
+///
+/// Deliberately a closed enum over one shared env rather than two envs: LMDB
+/// refuses a double-open in a process (see [`OPEN_ENVS`]), so a second
+/// environment would add a failure mode without adding isolation that a key
+/// prefix cannot provide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorNamespace {
+    /// Distilled knowledge pages — every key that is not a history key.
+    Knowledge,
+    /// Code history: commits and GitHub/CHANGELOG docs.
+    History,
+}
+
+impl VectorNamespace {
+    pub fn contains(&self, id: &str) -> bool {
+        match self {
+            VectorNamespace::History => id.starts_with(HISTORY_KEY_PREFIX),
+            VectorNamespace::Knowledge => !id.starts_with(HISTORY_KEY_PREFIX),
+        }
+    }
+}
+
 /// Local vector cache for knowledge pages, tagged with the embedding space it
 /// belongs to.
 ///
@@ -499,6 +543,19 @@ impl KnowledgeVectorCache {
             .map_err(|e| CasError::Other(format!("Failed to count cached embeddings: {e}")))
     }
 
+    /// Cached vectors belonging to one namespace.
+    ///
+    /// The raw [`Self::count`] answers "how big is the env", which stopped
+    /// being the same question as "does the knowledge channel have anything to
+    /// return" the moment history vectors moved in beside it (spec §4.4).
+    pub fn count_in(&self, namespace: VectorNamespace) -> Result<usize, CasError> {
+        let ids = self
+            .store
+            .list_ids()
+            .map_err(|e| CasError::Other(format!("Failed to list cached embeddings: {e}")))?;
+        Ok(ids.iter().filter(|id| namespace.contains(id)).count())
+    }
+
     pub fn delete(&self, id: &str) -> Result<(), CasError> {
         self.store
             .delete(id)
@@ -512,6 +569,24 @@ impl KnowledgeVectorCache {
     /// and a distilled-knowledge corpus is pages, not millions of rows. Ties
     /// break on id so results are stable across runs.
     pub fn nearest(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>, CasError> {
+        self.nearest_in(VectorNamespace::Knowledge, query, k)
+    }
+
+    /// Brute-force kNN restricted to one namespace.
+    ///
+    /// The restriction is load-bearing, not hygiene. Knowledge pages and code
+    /// history share one LMDB env (spec §4.4 — a second env would be a second
+    /// double-open failure mode for no benefit), and the knowledge channel
+    /// resolves every id it gets back as a page id. Without this filter a
+    /// `history:commit:{sha}` hit would come back as a page that does not
+    /// exist, and the better the commit matched the more certainly it would
+    /// displace a real page.
+    pub fn nearest_in(
+        &self,
+        namespace: VectorNamespace,
+        query: &[f32],
+        k: usize,
+    ) -> Result<Vec<(String, f32)>, CasError> {
         if is_zero_vector(query) || k == 0 {
             return Ok(Vec::new());
         }
@@ -522,6 +597,9 @@ impl KnowledgeVectorCache {
 
         let mut scored: Vec<(String, f32)> = Vec::with_capacity(ids.len());
         for id in ids {
+            if !namespace.contains(&id) {
+                continue;
+            }
             if let Some(vector) = self.get(&id)? {
                 let score = cosine_similarity(query, &vector);
                 if score > 0.0 {
@@ -586,15 +664,88 @@ pub fn embed_pending_pages(
         return Ok(report);
     }
 
-    let mut chunks = pages.chunks(MAX_EMBED_INPUTS_PER_REQUEST);
-    let mut halted = false;
-    for chunk in chunks.by_ref() {
-        let mut texts = Vec::with_capacity(chunk.len());
-        for page in chunk {
+    let units: Vec<EmbedUnit> = pages
+        .iter()
+        .map(|page| {
             let body = store.read_body(&page.rel_path).unwrap_or_default();
-            texts.push(page_embedding_text(page, &body));
-        }
+            // Key and id coincide for knowledge pages; history keys do not
+            // (spec §4.4 namespaces them), which is why the unit carries both.
+            EmbedUnit::new(
+                page.id.clone(),
+                page.id.clone(),
+                page_embedding_text(page, &body),
+            )
+        })
+        .collect();
 
+    let mut mark = |id: &str| store.mark_embedded(id).map_err(|e| e.to_string());
+    drain_units(
+        embedder,
+        cache,
+        &units,
+        &RateLimiter::cloud(),
+        &mut mark,
+        &mut report,
+    );
+
+    report.pending_after = count_pending(store)?;
+    Ok(report)
+}
+
+/// One thing to embed: where its vector is filed, which row to clear when the
+/// vector lands, and the text that gets sent.
+///
+/// The split between `key` and `id` is spec §4.4's namespacing: a knowledge
+/// page's vector is filed under its own id, while a commit's is filed under
+/// `history:commit:{sha}` in the *same* LMDB env. One store, two namespaces,
+/// and no second environment to double-open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbedUnit {
+    /// Vector-store key.
+    pub key: String,
+    /// Row identity handed back to the caller's `mark embedded` callback.
+    pub id: String,
+    /// The text sent to the provider.
+    pub text: String,
+}
+
+impl EmbedUnit {
+    pub fn new(key: impl Into<String>, id: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            id: id.into(),
+            text: text.into(),
+        }
+    }
+}
+
+/// The one chunked, rate-limited, failure-reporting drain.
+///
+/// Every corpus goes through this function — knowledge pages and code history
+/// alike — so there is exactly one place that knows the endpoint caps a request
+/// at [`MAX_EMBED_INPUTS_PER_REQUEST`] inputs, one place that stops rather than
+/// repeating a systemic failure per chunk, and one place that accounts for the
+/// units it did not attempt. A second copy of this loop is how the cas-a924
+/// defect (an un-chunked request that 400s forever, reported as "0 embedded")
+/// would come back for a different corpus.
+///
+/// `mark` is called only after the vector is safely cached; a row whose vector
+/// never landed keeps `pending_embedding = 1` and is retried next run.
+pub fn drain_units(
+    embedder: &KnowledgeEmbedder,
+    cache: &KnowledgeVectorCache,
+    units: &[EmbedUnit],
+    limiter: &RateLimiter,
+    mark: &mut dyn FnMut(&str) -> Result<(), String>,
+    report: &mut EmbedReport,
+) {
+    let mut chunks = units.chunks(MAX_EMBED_INPUTS_PER_REQUEST);
+    let mut halted = false;
+
+    for chunk in chunks.by_ref() {
+        let texts: Vec<String> = chunk.iter().map(|u| u.text.clone()).collect();
+
+        limiter.acquire();
         report.requests += 1;
         let vectors = match embedder.embed_batch(&texts) {
             Ok(vectors) => vectors,
@@ -602,7 +753,7 @@ pub fn embed_pending_pages(
                 // A request-level failure is systemic (auth, rate limit,
                 // capability, payload) — hammering the endpoint with the
                 // remaining chunks would only multiply it. Stop, and account
-                // for every page we did not attempt.
+                // for every unit we did not attempt.
                 if matches!(e, EmbedError::Unsupported(_)) {
                     report.capability_absent = true;
                 }
@@ -613,7 +764,7 @@ pub fn embed_pending_pages(
             }
         };
 
-        for (page, vector) in chunk.iter().zip(vectors.iter()) {
+        for (unit, vector) in chunk.iter().zip(vectors.iter()) {
             if is_zero_vector(vector) {
                 report.rejected_zero += 1;
                 continue;
@@ -622,22 +773,104 @@ pub fn embed_pending_pages(
                 report.rejected_dims += 1;
                 continue;
             }
-            match cache.put(&page.id, vector) {
-                Ok(()) => match store.mark_embedded(&page.id) {
+            match cache.put(&unit.key, vector) {
+                Ok(()) => match mark(&unit.id) {
                     Ok(()) => report.embedded += 1,
-                    Err(e) => report.errors.push((page.id.clone(), e.to_string())),
+                    Err(e) => report.errors.push((unit.id.clone(), e)),
                 },
-                Err(e) => report.errors.push((page.id.clone(), e.to_string())),
+                Err(e) => report.errors.push((unit.id.clone(), e.to_string())),
             }
         }
     }
 
     if halted {
-        report.deferred += chunks.map(<[KnowledgePage]>::len).sum::<usize>();
+        report.deferred += chunks.map(<[EmbedUnit]>::len).sum::<usize>();
+    }
+}
+
+/// Client-side pacing for the embedding endpoint.
+///
+/// The server allows [`RATE_LIMIT_REQUESTS`] requests per
+/// [`RATE_LIMIT_WINDOW_SECS`]; a full backfill of this repo is ~66 requests, so
+/// the cap is only reachable when several corpora drain at once or a large
+/// backlog clears in one tick. Pacing here rather than reacting to a 429 keeps
+/// the drain from converting a burst into a request-level failure that halts it
+/// — the halt is for *systemic* problems, and self-inflicted throttling is not
+/// one.
+///
+/// Sleeps only when the window is genuinely full: a run under the limit pays
+/// nothing, which is why the ordinary steady-state pass (2 requests/day per
+/// spec §7.2) never blocks.
+#[derive(Debug)]
+pub struct RateLimiter {
+    max_requests: usize,
+    window: Duration,
+    recent: Mutex<std::collections::VecDeque<std::time::Instant>>,
+}
+
+/// Server contract: requests allowed per [`RATE_LIMIT_WINDOW_SECS`].
+pub const RATE_LIMIT_REQUESTS: usize = 120;
+/// Server contract: the rate-limit window.
+pub const RATE_LIMIT_WINDOW_SECS: u64 = 60;
+
+impl RateLimiter {
+    /// The cloud endpoint's published limit: 120 requests / 60 s.
+    pub fn cloud() -> Self {
+        Self::new(
+            RATE_LIMIT_REQUESTS,
+            Duration::from_secs(RATE_LIMIT_WINDOW_SECS),
+        )
     }
 
-    report.pending_after = count_pending(store)?;
-    Ok(report)
+    pub fn new(max_requests: usize, window: Duration) -> Self {
+        Self {
+            max_requests,
+            window,
+            recent: Mutex::new(std::collections::VecDeque::new()),
+        }
+    }
+
+    /// Block until issuing one more request keeps the window under the cap.
+    pub fn acquire(&self) {
+        if self.max_requests == 0 {
+            return;
+        }
+        loop {
+            let wait = {
+                let mut recent = self.recent.lock().unwrap_or_else(|p| p.into_inner());
+                let now = std::time::Instant::now();
+                while recent
+                    .front()
+                    .is_some_and(|t| now.duration_since(*t) >= self.window)
+                {
+                    recent.pop_front();
+                }
+                if recent.len() < self.max_requests {
+                    recent.push_back(now);
+                    return;
+                }
+                // Full: wait out the oldest request in the window.
+                recent
+                    .front()
+                    .map(|t| self.window.saturating_sub(now.duration_since(*t)))
+                    .unwrap_or_default()
+            };
+            std::thread::sleep(wait.max(Duration::from_millis(1)));
+        }
+    }
+
+    /// Requests currently inside the window (tests and diagnostics).
+    pub fn in_window(&self) -> usize {
+        let mut recent = self.recent.lock().unwrap_or_else(|p| p.into_inner());
+        let now = std::time::Instant::now();
+        while recent
+            .front()
+            .is_some_and(|t| now.duration_since(*t) >= self.window)
+        {
+            recent.pop_front();
+        }
+        recent.len()
+    }
 }
 
 /// How many pages are still awaiting an embedding, store-wide.

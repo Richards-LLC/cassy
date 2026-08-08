@@ -561,7 +561,7 @@ pub(crate) fn emit_worker_final_git_state(
     let summary = format!(
         "checkpoint git-state: {} @ {} [{}] [{}] ahead:{} behind:{} PR:{}",
         gs.branch,
-        gs.head_sha,
+        crate::mcp::tools::service::factory_ops::head_sha_for_display(&gs.head_sha),
         dirty_tag,
         pushed_tag,
         gs.ahead,

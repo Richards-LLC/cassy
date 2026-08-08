@@ -1018,14 +1018,48 @@ impl CasService {
         // before this MCP response is handed back. That prevents concurrent
         // duplicate delivery, but a response lost after this point is not
         // replayed by a later poll. Daemon transport state remains independent.
-        let messages = queue
-            .poll_unseen_for_recipient(&recipient, factory_session.as_deref(), limit)
-            .map_err(|error| {
-                Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("Failed to poll recipient inbox: {error}"),
-                )
-        })?;
+        // cas-3bf1 (GH #176): poll every alias this agent answers to, not just
+        // its registered pane name. A supervisor answers to two, and rows
+        // addressed to the logical `supervisor` alias were previously
+        // UNREACHABLE from here — the unseen predicate matches
+        // `q.target = ?alias OR q.target = 'all_workers'`, and `supervisor` was
+        // never passed as an alias, so supervisor-addressed mail was visible
+        // only via the turn-start hook. Measured on the live queue before this
+        // change: 40 of 50 `supervisor`-addressed rows never receipted, against
+        // 15 of 59 for the pane name.
+        let aliases = crate::harness_policy::inbox_aliases(
+            &recipient,
+            registered_agent
+                .as_ref()
+                .is_some_and(|agent| agent.role == cas_types::AgentRole::Supervisor),
+        );
+        let mut messages: Vec<cas_store::QueuedPrompt> = Vec::new();
+        for alias in &aliases {
+            let remaining = limit.saturating_sub(messages.len());
+            if remaining == 0 {
+                break;
+            }
+            let found = queue
+                .poll_unseen_for_recipient(alias, factory_session.as_deref(), remaining)
+                .map_err(|error| {
+                    Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!("Failed to poll recipient inbox: {error}"),
+                    )
+                })?;
+            for row in found {
+                // A broadcast comes back from BOTH aliases; handing it to the
+                // caller twice in one response is the duplicate this task must
+                // not create while removing the cross-turn one.
+                if messages.iter().any(|existing| existing.id == row.id) {
+                    continue;
+                }
+                messages.push(row);
+            }
+        }
+        // Retire every polled row for the whole identity, so the turn-start
+        // hook does not re-inject what this poll just handed over.
+        crate::harness_policy::mirror_receipts_across_aliases(&*queue, &messages, &aliases);
 
         if messages.is_empty() {
             return Ok(Self::success(format!(

@@ -48,8 +48,7 @@ impl CloudSyncer {
         // Lowercased to match the server's `normalizeGitRemote` rule.
         let git_remote = crate::store::find_cas_root()
             .ok()
-            .and_then(|cas_root| crate::cloud::derive_canonical_id_from_git_remote(&cas_root))
-            .map(|remote| remote.to_lowercase());
+            .and_then(|cas_root| crate::cloud::normalized_git_remote_for_push(&cas_root));
 
         let has_deletes = !grouped.delete_entries.is_empty()
             || !grouped.delete_tasks.is_empty()

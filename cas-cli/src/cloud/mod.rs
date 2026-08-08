@@ -37,6 +37,7 @@ pub use config::{
     TeamInfo, canonical_id_from_cas_root, canonical_id_from_config_toml,
     derive_canonical_id_from_git_remote, detect_canonical_id_collisions, get_project_canonical_id,
     invalidate_cached_project_id, maybe_mark_personal_scope_notice,
+    normalized_git_remote_for_push,
     personal_scope_notice_for_configs, resolve_canonical_id, resolve_canonical_id_with_source,
     set_canonical_id_in_config_toml, should_adopt_canonical_id,
 };

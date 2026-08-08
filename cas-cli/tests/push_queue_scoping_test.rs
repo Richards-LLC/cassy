@@ -3,6 +3,7 @@
 mod common;
 
 use std::io::Read;
+use std::process::Command;
 use std::sync::Arc;
 
 use cas::cli::cloud::{CloudPushArgs, execute_push};
@@ -25,6 +26,25 @@ fn seed_project(root: &TempDir, endpoint: &str, canonical_id: &str) {
     )
     .unwrap();
     SyncQueue::open(root.path()).unwrap().init().unwrap();
+}
+
+fn set_origin(root: &TempDir, remote: &str) {
+    assert!(
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(root.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args(["remote", "add", "origin", remote])
+            .current_dir(root.path())
+            .status()
+            .unwrap()
+            .success()
+    );
 }
 
 fn enqueue(queue: &SyncQueue, kind: EntityType, id: &str, body_bytes: usize) {
@@ -107,9 +127,96 @@ async fn entries_only_push_is_root_and_project_bound() {
     let requests = server.received_requests().await.unwrap();
     let body = decode_gzip_json(&requests[0].body);
     assert_eq!(body["project_canonical_id"], "project-a");
+    assert!(
+        body.get("git_remote").is_none(),
+        "a root without an origin must preserve the legacy envelope shape"
+    );
     assert_eq!(body["entries"][0]["id"], "a-entry");
     assert!(body.get("tasks").is_none());
     assert_ne!(body["entries"][0]["id"], "b-entry");
+}
+
+/// cas-7719: the shared personal-envelope builder must send the same
+/// lowercased remote identity as team push for every supported URL form. Each
+/// input also exercises the direct-session envelope, so neither personal
+/// route can omit the additive field.
+#[tokio::test]
+async fn personal_push_envelopes_send_normalized_git_remote_for_all_supported_forms() {
+    let server = MockServer::start().await;
+    let remotes = [
+        (
+            "https://GitHub.com/Acme/Widget.git",
+            "github.com/acme/widget",
+        ),
+        (
+            "http://GitLab.example.com/Group/Widget/",
+            "gitlab.example.com/group/widget",
+        ),
+        (
+            "ssh://git@GitHub.com/Acme/Widget.git",
+            "github.com/acme/widget",
+        ),
+        ("git@GitHub.com:Acme/Widget.git", "github.com/acme/widget"),
+    ];
+    Mock::given(method("POST"))
+        .and(path("/api/sync/push"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .expect((remotes.len() * 2) as u64)
+        .mount(&server)
+        .await;
+
+    for (index, (remote, _expected)) in remotes.iter().enumerate() {
+        let root = TempDir::new().unwrap();
+        seed_project(&root, &server.uri(), "same-canonical-id");
+        set_origin(&root, remote);
+        let queue = Arc::new(SyncQueue::open(root.path()).unwrap());
+        enqueue(&queue, EntityType::Entry, &format!("entry-{index}"), 8);
+
+        let mut config = CloudConfig::default();
+        config.endpoint = server.uri();
+        config.token = Some("test-token".to_string());
+        let syncer = CloudSyncer::new_for_project(
+            queue,
+            config,
+            CloudSyncerConfig::default(),
+            "same-canonical-id".to_string(),
+            root.path(),
+        );
+        let session = cas::types::Session::new(
+            format!("personal-remote-{index}"),
+            root.path().display().to_string(),
+            None,
+        );
+        tokio::task::spawn_blocking(move || syncer.push_with_sessions(&[session]))
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), remotes.len() * 2);
+    for (expected_remote, expected_count) in remotes.iter().map(|(_, expected)| *expected).fold(
+        std::collections::BTreeMap::new(),
+        |mut counts, remote| {
+            *counts.entry(remote).or_insert(0usize) += 2;
+            counts
+        },
+    ) {
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| decode_gzip_json(&request.body))
+                .filter(|body| body["git_remote"] == expected_remote)
+                .count(),
+            expected_count,
+            "both queued and session envelopes must carry {expected_remote}"
+        );
+    }
+    for request in requests {
+        let body = decode_gzip_json(&request.body);
+        assert_eq!(body["project_canonical_id"], "same-canonical-id");
+        assert!(body.get("entries").is_some() || body.get("sessions").is_some());
+    }
 }
 
 #[tokio::test]
@@ -170,6 +277,7 @@ fn dry_run_plans_apply_scope_before_the_batch_limit() {
             ..Default::default()
         },
         "planned-project".to_string(),
+        root.path(),
     );
 
     let entries = syncer.plan_push(PushScope::EntriesOnly).unwrap();
@@ -220,6 +328,7 @@ async fn personal_requests_respect_the_exact_serialized_byte_budget() {
             ..Default::default()
         },
         "byte-budget-project".to_string(),
+        root.path(),
     );
     let result = tokio::task::spawn_blocking(move || syncer.push())
         .await

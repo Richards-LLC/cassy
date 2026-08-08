@@ -1690,6 +1690,7 @@ pub fn execute_push(args: &CloudPushArgs, cli: &Cli, cas_root: &Path) -> anyhow:
         config,
         CloudSyncerConfig::default(),
         project_id.clone(),
+        cas_root,
     );
     let plan = syncer.plan_push(scope)?;
 

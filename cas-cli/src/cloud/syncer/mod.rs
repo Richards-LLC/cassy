@@ -287,6 +287,9 @@ pub struct CloudSyncer {
     /// Explicit project scope for callers that already own a concrete CAS
     /// root. Legacy callers leave this unset and retain cwd-based resolution.
     push_project_canonical_id: Option<String>,
+    /// Optional normalized `origin` identity sent with personal pushes.
+    /// Missing/non-git remotes deliberately remain absent from the envelope.
+    personal_push_git_remote: Option<String>,
 }
 
 impl CloudSyncer {
@@ -296,11 +299,15 @@ impl CloudSyncer {
         cloud_config: CloudConfig,
         config: CloudSyncerConfig,
     ) -> Self {
+        let personal_push_git_remote = crate::store::find_cas_root()
+            .ok()
+            .and_then(|cas_root| crate::cloud::normalized_git_remote_for_push(&cas_root));
         Self {
             config,
             queue,
             cloud_config,
             push_project_canonical_id: None,
+            personal_push_git_remote,
         }
     }
 
@@ -311,12 +318,14 @@ impl CloudSyncer {
         cloud_config: CloudConfig,
         config: CloudSyncerConfig,
         project_canonical_id: String,
+        cas_root: &std::path::Path,
     ) -> Self {
         Self {
             config,
             queue,
             cloud_config,
             push_project_canonical_id: Some(project_canonical_id),
+            personal_push_git_remote: crate::cloud::normalized_git_remote_for_push(cas_root),
         }
     }
 

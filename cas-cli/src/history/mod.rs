@@ -52,6 +52,7 @@ use crate::git_log::{parse_name_status_z, parse_numstat_z};
 
 pub mod changelog;
 pub mod github;
+pub mod provenance;
 pub mod refs;
 
 /// Commits per transaction during backfill (spec §4.2 rule 4).

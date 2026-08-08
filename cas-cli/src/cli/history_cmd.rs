@@ -23,6 +23,21 @@ pub enum HistoryCommands {
     Status(StatusArgs),
     /// Search indexed commits by text, path and time window
     Search(SearchArgs),
+    /// Reconstruct missing commit → session links from the populated
+    /// provenance edges (spec §5.3). Never overwrites a link the PostToolUse
+    /// hook observed directly.
+    RepairLinks(RepairLinksArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct RepairLinksArgs {
+    /// Commits to examine in this pass
+    #[arg(long, default_value_t = crate::history::provenance::REPAIR_BATCH)]
+    pub limit: usize,
+
+    /// Keep repairing until a pass finds nothing left to do
+    #[arg(long)]
+    pub all: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -55,9 +70,18 @@ pub struct SearchArgs {
     #[arg(long)]
     pub include_merges: bool,
 
-    /// Ask for provenance (not supported until M5; declared in the response)
+    /// Resolve each commit's task/session edges with their link method and
+    /// confidence (spec §5.2)
     #[arg(long)]
     pub include_provenance: bool,
+
+    /// Only commits attributable to this task
+    #[arg(long)]
+    pub task_id: Option<String>,
+
+    /// Only commits attributable to this session
+    #[arg(long)]
+    pub session_id: Option<String>,
 
     /// Maximum commits to return
     #[arg(long, default_value_t = 10)]
@@ -111,7 +135,51 @@ pub fn execute(
         HistoryCommands::Docs(args) => execute_docs(args, cas_root),
         HistoryCommands::Status(args) => execute_status(args, cas_root),
         HistoryCommands::Search(args) => execute_search(args, cas_root),
+        HistoryCommands::RepairLinks(args) => execute_repair_links(args, cas_root),
     }
+}
+
+/// `cas history repair-links` (EPIC cas-6212 / cas-519f, spec §5.3).
+fn execute_repair_links(args: &RepairLinksArgs, cas_root: &Path) -> anyhow::Result<()> {
+    let repo_root = history::repo_root_for(cas_root)?;
+    let started = std::time::Instant::now();
+
+    let mut total = history::provenance::RepairOutcome::default();
+    // The work list is "indexed commits with no link", and a commit no edge can
+    // resolve never leaves it. So `--all` walks the list with an offset that
+    // advances by however many rows STAYED unlinked, rather than restarting
+    // from the top and stalling on the unresolvable head.
+    let mut offset = 0usize;
+    loop {
+        let pass = history::provenance::repair_commit_links_from(
+            cas_root, &repo_root, args.limit, offset,
+        )?;
+        total.examined += pass.examined;
+        total.written += pass.written;
+        total.no_session_edge += pass.no_session_edge;
+        total.skipped_ambiguous += pass.skipped_ambiguous;
+        total.already_present += pass.already_present;
+        offset += pass.examined - pass.written;
+        // A short pass means the end of the list, not a barren stretch of it.
+        if !args.all || pass.is_noop() || pass.examined < args.limit.max(1) {
+            break;
+        }
+    }
+
+    println!(
+        "examined {} unlinked commit(s); reconstructed {} link(s) in {:.1}s",
+        total.examined,
+        total.written,
+        started.elapsed().as_secs_f64()
+    );
+    // Every skip is named. A pass that reports only what it wrote reads as
+    // "the rest were fine", when in fact most commits simply have no edge that
+    // names a session — which is the measured state of this corpus, not a bug.
+    println!(
+        "  no session-bearing edge  {}\n             ambiguous prefix (skipped, never guessed)  {}\n             already linked (raced a direct observation)  {}",
+        total.no_session_edge, total.skipped_ambiguous, total.already_present
+    );
+    Ok(())
 }
 
 fn execute_search(args: &SearchArgs, cas_root: &Path) -> anyhow::Result<()> {
@@ -123,8 +191,8 @@ fn execute_search(args: &SearchArgs, cas_root: &Path) -> anyhow::Result<()> {
         since: args.since.clone(),
         until: args.until.clone(),
         kind: args.kind.clone(),
-        task_id: None,
-        session_id: None,
+        task_id: args.task_id.clone(),
+        session_id: args.session_id.clone(),
         limit: args.limit,
         include_provenance: args.include_provenance,
         include_merges: args.include_merges,
@@ -146,6 +214,20 @@ fn execute_search(args: &SearchArgs, cas_root: &Path) -> anyhow::Result<()> {
             println!(
                 "no commits are indexed for {} — run `cas history backfill`",
                 response.repository
+            );
+        } else if let Some(n) = response.filters.identity_filter_matched.filter(|n| *n > 0) {
+            // The identity filter DID resolve; something else emptied the
+            // answer. Saying "no commits matched" here would report the task or
+            // session as having shipped nothing, which is a different and
+            // wrong claim. The usual culprit is the default merge exclusion.
+            println!(
+                "the task/session filter resolved to {n} commit(s), but no result survived the \
+                 other filters{}",
+                if response.filters.include_merges {
+                    ""
+                } else {
+                    " — merge commits are excluded by default; retry with --include-merges"
+                }
             );
         } else {
             println!("no commits matched");
@@ -171,6 +253,7 @@ fn execute_search(args: &SearchArgs, cas_root: &Path) -> anyhow::Result<()> {
         if file_overflow(hit.files.len(), 5) > 0 {
             println!("    … {} more file(s)", file_overflow(hit.files.len(), 5));
         }
+        print_provenance(hit);
     }
 
     if !response.co_changed_files.is_empty() {
@@ -194,11 +277,16 @@ fn execute_search(args: &SearchArgs, cas_root: &Path) -> anyhow::Result<()> {
             "incomplete"
         }
     );
-    match status.provenance_coverage_pct {
-        Some(pct) => println!(
-            "provenance: NOT SUPPORTED (M5) — measured high-confidence coverage {pct:.1}%"
+    match (status.provenance_coverage_pct, status.provenance_any_coverage_pct) {
+        // Both numbers, always. A single figure cannot distinguish an exact
+        // commit→task edge from a substring coincidence, and spec §10.1 asks
+        // for the split precisely so the debt stays visible.
+        (Some(high), Some(any)) => println!(
+            "provenance: supported — {high:.1}% of indexed commits on the exact edge, \
+             {any:.1}% on any populated edge"
         ),
-        None => println!("provenance: NOT SUPPORTED (M5) — coverage not measurable here"),
+        (Some(high), None) => println!("provenance: supported — {high:.1}% high-confidence"),
+        _ => println!("provenance: supported — coverage not measurable here"),
     }
     if let Some(err) = &status.last_error {
         println!("last error: {err}");
@@ -208,6 +296,54 @@ fn execute_search(args: &SearchArgs, cas_root: &Path) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Render one commit's provenance edges, or the stated reason it has none.
+///
+/// The reason is printed, not swallowed: §6.4 Q3 requires an unlinked commit to
+/// appear in the answer, and a blank where the provenance should be is
+/// indistinguishable from a rendering bug.
+fn print_provenance(hit: &history::search::HistoryHit) {
+    let Some(edges) = &hit.provenance else {
+        return;
+    };
+    if edges.is_empty() {
+        if let Some(reason) = &hit.provenance_reason {
+            println!("    provenance: none — {reason}");
+        }
+        return;
+    }
+    for edge in edges {
+        let who = [
+            edge.task_id.as_deref().map(|t| format!("task {t}")),
+            edge.session_id.as_deref().map(|s| format!("session {s}")),
+            edge.agent_id.as_deref().map(|a| format!("agent {a}")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(", ");
+        println!(
+            "    provenance: {} ({}) {}{}",
+            edge.link_method,
+            edge.confidence,
+            if who.is_empty() { "—" } else { &who },
+            if edge.ambiguous {
+                format!(
+                    " ⚠ prefix {} is ambiguous across {} indexed commit(s): {}",
+                    edge.matched_prefix.as_deref().unwrap_or("?"),
+                    edge.ambiguous_candidates.len(),
+                    edge.ambiguous_candidates
+                        .iter()
+                        .map(|s| s.chars().take(8).collect::<String>())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+            } else {
+                String::new()
+            }
+        );
+    }
 }
 
 fn file_overflow(total: usize, shown: usize) -> usize {
@@ -328,6 +464,25 @@ fn execute_backfill(args: &BackfillArgs, cas_root: &Path) -> anyhow::Result<()> 
         println!(
             "watermark was not an ancestor of HEAD (rebase/force-push); ran a full re-backfill"
         );
+    }
+
+    // The daemon runs the spine repair on the same tick as the index pass
+    // (spec §5.3), so the CLI does too — otherwise `cas history backfill` and
+    // the daemon leave the database in two different states and only one of
+    // them is the one anybody tests.
+    match history::provenance::repair_commit_links(
+        cas_root,
+        &repo_root,
+        history::provenance::REPAIR_BATCH,
+    ) {
+        Ok(repair) if repair.written > 0 => println!(
+            "provenance: reconstructed {} commit link(s) from {} unlinked commit(s) examined",
+            repair.written, repair.examined
+        ),
+        Ok(_) => {}
+        // A repair failure must not make the index pass look failed: indexing
+        // is the load-bearing half and the query surface works without a spine.
+        Err(e) => println!("provenance repair skipped: {e}"),
     }
 
     match outcome.mode {

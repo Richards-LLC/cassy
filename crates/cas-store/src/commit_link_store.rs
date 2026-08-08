@@ -17,7 +17,18 @@ fn lock_error<T>(_: std::sync::PoisonError<T>) -> StoreError {
     StoreError::Other("lock poisoned".to_string())
 }
 
-/// Schema for commit_links table (also defined in migration m143)
+/// `(files_changed, prompt_ids)` as JSON, shared by every writer so the two
+/// insert paths cannot disagree about the encoding.
+fn serialize_arrays(link: &CommitLink) -> Result<(String, String)> {
+    let files_changed = serde_json::to_string(&link.files_changed)
+        .map_err(|e| StoreError::Other(format!("Failed to serialize files_changed: {e}")))?;
+    let prompt_ids = serde_json::to_string(&link.prompt_ids)
+        .map_err(|e| StoreError::Other(format!("Failed to serialize prompt_ids: {e}")))?;
+    Ok((files_changed, prompt_ids))
+}
+
+/// Schema for commit_links table (also defined in migration m143; the
+/// `link_method` column arrived with m224 — EPIC cas-6212 / cas-519f).
 pub const COMMIT_LINK_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS commit_links (
     commit_hash TEXT PRIMARY KEY,
@@ -29,13 +40,23 @@ CREATE TABLE IF NOT EXISTS commit_links (
     prompt_ids TEXT NOT NULL,
     committed_at TEXT NOT NULL,
     author TEXT NOT NULL,
-    scope TEXT NOT NULL DEFAULT 'project'
+    scope TEXT NOT NULL DEFAULT 'project',
+    link_method TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_commit_links_session ON commit_links(session_id);
 CREATE INDEX IF NOT EXISTS idx_commit_links_branch ON commit_links(branch);
 CREATE INDEX IF NOT EXISTS idx_commit_links_committed ON commit_links(committed_at DESC);
 "#;
+
+/// Add `link_method` to a `commit_links` table created before M5.
+///
+/// Kept as its own constant, and applied by `m224` rather than appended to
+/// `m143`: m143 already reports "applied" on every live database, so a
+/// statement appended to it would be invisible to exactly the installs that
+/// have commit links to describe.
+pub const COMMIT_LINK_LINK_METHOD_STATEMENTS: &[&str] =
+    &["ALTER TABLE commit_links ADD COLUMN link_method TEXT"];
 
 /// Trait for commit link storage operations
 pub trait CommitLinkStore: Send + Sync {
@@ -44,6 +65,16 @@ pub trait CommitLinkStore: Send + Sync {
 
     /// Add a new commit link
     fn add(&self, link: &CommitLink) -> Result<()>;
+
+    /// Write a link the history indexer *reconstructed*, without ever
+    /// overwriting one that was observed (EPIC cas-6212 / cas-519f, spec §5.3).
+    ///
+    /// Returns `true` when a row was written, `false` when one already existed.
+    /// [`Self::add`] is `INSERT OR REPLACE`, which is right for an observation
+    /// — the hook has better information than whatever is on disk — and exactly
+    /// wrong for a reconstruction, which would then be able to demote a
+    /// directly-observed link to a guess.
+    fn add_reconstructed(&self, link: &CommitLink) -> Result<bool>;
 
     /// Get a commit link by hash
     fn get(&self, commit_hash: &str) -> Result<Option<CommitLink>>;
@@ -106,29 +137,45 @@ impl SqliteCommitLinkStore {
             committed_at: parse_datetime(&committed_at_str),
             author: row.get("author")?,
             scope: scope_str.parse().unwrap_or(Scope::Project),
+            link_method: row.get("link_method")?,
         })
     }
+
+    /// The column list every read shares. Enumerated in one place because
+    /// M5 added a column and four `SELECT`s had to learn about it; a fifth one
+    /// added later must not be able to silently miss it.
+    const COLUMNS: &'static str = "commit_hash, session_id, agent_id, branch, message, \
+         files_changed, prompt_ids, committed_at, author, scope, link_method";
 }
 
 impl CommitLinkStore for SqliteCommitLinkStore {
     fn init(&self) -> Result<()> {
         let conn = self.conn.lock().map_err(lock_error)?;
         conn.execute_batch(COMMIT_LINK_SCHEMA)?;
+        // `CREATE TABLE IF NOT EXISTS` is a no-op on a database whose
+        // commit_links predates M5, so the new column would be missing on every
+        // store opened outside the migration runner (hooks, tests, tools). The
+        // failure that produces is not a nice one — every read errors on an
+        // unknown column — so the column is reconciled here as well.
+        let has_method: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('commit_links') WHERE name = 'link_method'")?
+            .exists([])?;
+        if !has_method {
+            for sql in COMMIT_LINK_LINK_METHOD_STATEMENTS {
+                conn.execute(sql, [])?;
+            }
+        }
         Ok(())
     }
 
     fn add(&self, link: &CommitLink) -> Result<()> {
         let conn = self.conn.lock().map_err(lock_error)?;
-
-        let files_changed_json = serde_json::to_string(&link.files_changed)
-            .map_err(|e| StoreError::Other(format!("Failed to serialize files_changed: {e}")))?;
-        let prompt_ids_json = serde_json::to_string(&link.prompt_ids)
-            .map_err(|e| StoreError::Other(format!("Failed to serialize prompt_ids: {e}")))?;
+        let (files_changed_json, prompt_ids_json) = serialize_arrays(link)?;
 
         conn.execute(
             "INSERT OR REPLACE INTO commit_links
-             (commit_hash, session_id, agent_id, branch, message, files_changed, prompt_ids, committed_at, author, scope)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             (commit_hash, session_id, agent_id, branch, message, files_changed, prompt_ids, committed_at, author, scope, link_method)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 link.commit_hash,
                 link.session_id,
@@ -140,19 +187,48 @@ impl CommitLinkStore for SqliteCommitLinkStore {
                 link.committed_at.to_rfc3339(),
                 link.author,
                 link.scope.to_string(),
+                link.link_method,
             ],
         )?;
 
         Ok(())
     }
 
+    fn add_reconstructed(&self, link: &CommitLink) -> Result<bool> {
+        let conn = self.conn.lock().map_err(lock_error)?;
+        let (files_changed_json, prompt_ids_json) = serialize_arrays(link)?;
+
+        let written = conn.execute(
+            "INSERT INTO commit_links
+             (commit_hash, session_id, agent_id, branch, message, files_changed, prompt_ids, committed_at, author, scope, link_method)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(commit_hash) DO NOTHING",
+            params![
+                link.commit_hash,
+                link.session_id,
+                link.agent_id,
+                link.branch,
+                link.message,
+                files_changed_json,
+                prompt_ids_json,
+                link.committed_at.to_rfc3339(),
+                link.author,
+                link.scope.to_string(),
+                link.link_method,
+            ],
+        )?;
+
+        Ok(written > 0)
+    }
+
     fn get(&self, commit_hash: &str) -> Result<Option<CommitLink>> {
         let conn = self.conn.lock().map_err(lock_error)?;
 
         let mut stmt = conn.prepare_cached(
-            "SELECT commit_hash, session_id, agent_id, branch, message, files_changed, prompt_ids, committed_at, author, scope
-             FROM commit_links
-             WHERE commit_hash = ?1",
+            &format!(
+                "SELECT {cols} FROM commit_links WHERE commit_hash = ?1",
+                cols = Self::COLUMNS
+            ),
         )?;
 
         let link = stmt
@@ -166,11 +242,11 @@ impl CommitLinkStore for SqliteCommitLinkStore {
         let conn = self.conn.lock().map_err(lock_error)?;
 
         let mut stmt = conn.prepare_cached(
-            "SELECT commit_hash, session_id, agent_id, branch, message, files_changed, prompt_ids, committed_at, author, scope
-             FROM commit_links
-             WHERE session_id = ?1
-             ORDER BY committed_at DESC
-             LIMIT ?2",
+            &format!(
+                "SELECT {cols} FROM commit_links
+                  WHERE session_id = ?1 ORDER BY committed_at DESC LIMIT ?2",
+                cols = Self::COLUMNS
+            ),
         )?;
 
         let links = stmt
@@ -185,11 +261,11 @@ impl CommitLinkStore for SqliteCommitLinkStore {
         let conn = self.conn.lock().map_err(lock_error)?;
 
         let mut stmt = conn.prepare_cached(
-            "SELECT commit_hash, session_id, agent_id, branch, message, files_changed, prompt_ids, committed_at, author, scope
-             FROM commit_links
-             WHERE branch = ?1
-             ORDER BY committed_at DESC
-             LIMIT ?2",
+            &format!(
+                "SELECT {cols} FROM commit_links
+                  WHERE branch = ?1 ORDER BY committed_at DESC LIMIT ?2",
+                cols = Self::COLUMNS
+            ),
         )?;
 
         let links = stmt
@@ -204,10 +280,10 @@ impl CommitLinkStore for SqliteCommitLinkStore {
         let conn = self.conn.lock().map_err(lock_error)?;
 
         let mut stmt = conn.prepare_cached(
-            "SELECT commit_hash, session_id, agent_id, branch, message, files_changed, prompt_ids, committed_at, author, scope
-             FROM commit_links
-             ORDER BY committed_at DESC
-             LIMIT ?1",
+            &format!(
+                "SELECT {cols} FROM commit_links ORDER BY committed_at DESC LIMIT ?1",
+                cols = Self::COLUMNS
+            ),
         )?;
 
         let links = stmt
@@ -222,11 +298,15 @@ impl CommitLinkStore for SqliteCommitLinkStore {
         let conn = self.conn.lock().map_err(lock_error)?;
 
         let mut stmt = conn.prepare_cached(
-            "SELECT cl.commit_hash, cl.session_id, cl.agent_id, cl.branch, cl.message, cl.files_changed, cl.prompt_ids, cl.committed_at, cl.author, cl.scope
-             FROM commit_links cl, json_each(cl.files_changed) je
-             WHERE je.value = ?1
-             ORDER BY cl.committed_at DESC
-             LIMIT ?2",
+            &format!(
+                "SELECT {cols} FROM commit_links cl, json_each(cl.files_changed) je
+                  WHERE je.value = ?1 ORDER BY cl.committed_at DESC LIMIT ?2",
+                cols = Self::COLUMNS
+                    .split(", ")
+                    .map(|c| format!("cl.{c}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         )?;
 
         let links = stmt
@@ -280,8 +360,8 @@ pub fn add_commit_link_with_conn(
 
     conn.execute(
         "INSERT OR REPLACE INTO commit_links
-         (commit_hash, session_id, agent_id, branch, message, files_changed, prompt_ids, committed_at, author, scope)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+         (commit_hash, session_id, agent_id, branch, message, files_changed, prompt_ids, committed_at, author, scope, link_method)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             link.commit_hash,
             link.session_id,
@@ -293,6 +373,7 @@ pub fn add_commit_link_with_conn(
             link.committed_at.to_rfc3339(),
             link.author,
             link.scope.to_string(),
+            link.link_method,
         ],
     )?;
 

@@ -737,15 +737,38 @@ impl EmbeddedDaemon {
                 Ok(root) => root,
                 // Not a git repo — nothing to index, and nothing to complain
                 // about on every tick.
-                Err(_) => return Ok(None),
+                Err(_) => return Ok::<_, anyhow::Error>(None),
             };
-            crate::history::run_index_pass(&cas_root, &repo_root).map(Some)
+            let walked = crate::history::run_index_pass(&cas_root, &repo_root)?;
+
+            // The commit → session spine repair (EPIC cas-6212 / cas-519f,
+            // spec §5.3). It runs after indexing, on the same tick, but it is
+            // NOT gated on this pass having found commits: the pass is driven
+            // by "indexed commits with no link", so it also drains the backlog
+            // that existed before the repair did.
+            //
+            // A repair failure must not fail the index pass. Indexing is the
+            // load-bearing half — the query surface works without a spine, and
+            // it did for all of M4 — so a broken edge is reported and dropped
+            // rather than allowed to stop the walker on every tick.
+            let repaired = match crate::history::provenance::repair_commit_links(
+                &cas_root,
+                &repo_root,
+                crate::history::provenance::REPAIR_BATCH,
+            ) {
+                Ok(outcome) => Some(outcome),
+                Err(e) => {
+                    eprintln!("[CAS] History provenance repair failed: {e}");
+                    None
+                }
+            };
+            Ok::<_, anyhow::Error>(Some((walked, repaired)))
         })
         .await
         .map_err(|e| CasError::Other(format!("Task join error: {e}")))?
         .map_err(|e| CasError::Other(format!("History indexing failed: {e}")))?;
 
-        if let Some(outcome) = outcome {
+        if let Some((outcome, repaired)) = outcome {
             if outcome.commits_indexed > 0 {
                 eprintln!(
                     "[CAS] History indexing ({}): {} commits, {} file changes",
@@ -753,6 +776,18 @@ impl EmbeddedDaemon {
                     outcome.commits_indexed,
                     outcome.files_indexed,
                 );
+            }
+            if let Some(repaired) = repaired {
+                if repaired.written > 0 {
+                    eprintln!(
+                        "[CAS] History provenance: {} commit link(s) reconstructed \
+                         ({} examined, {} with no session-bearing edge, {} ambiguous)",
+                        repaired.written,
+                        repaired.examined,
+                        repaired.no_session_edge,
+                        repaired.skipped_ambiguous,
+                    );
+                }
             }
         }
 

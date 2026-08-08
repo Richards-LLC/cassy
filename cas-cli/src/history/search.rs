@@ -18,12 +18,23 @@
 //!
 //! # What this surface will not pretend
 //!
-//! M4 ships on M1 data: commits and their touched files. It does **not** have
-//! symbols (M3), GitHub issues/PRs (M6), the provenance join (M5) or embeddings
-//! (M7). Rather than silently dropping filters it cannot honour, every request
-//! for one of those comes back in [`HistorySearchResponse::unsupported`] with
-//! the milestone that lands it. A filter that is quietly ignored produces a
-//! result set that looks like an answer and is not.
+//! This surface ships on M1 + M5 data: commits, their touched files, and the
+//! provenance edges §5.2 resolves over. It does **not** have symbols (M3) or
+//! embeddings (M7). Rather than silently dropping filters it cannot honour,
+//! every request for one of those comes back in
+//! [`HistorySearchResponse::unsupported`] with the milestone that lands it. A
+//! filter that is quietly ignored produces a result set that looks like an
+//! answer and is not.
+//!
+//! # Provenance, since M5 (cas-519f)
+//!
+//! `include_provenance`, `task_id` and `session_id` are answered rather than
+//! declared. What has *not* changed is the honesty contract around them:
+//! `index_status` still reports measured coverage rather than a capability
+//! claim, a commit with no populated edge is returned carrying its stated
+//! reason instead of being dropped (§6.4 Q3), and an ambiguous abbreviated-SHA
+//! edge comes back with every commit it could mean rather than a silently
+//! chosen one (§5.2).
 
 use std::path::Path;
 
@@ -33,7 +44,8 @@ use serde::Serialize;
 use crate::history;
 use crate::hybrid_search::{DocType, HistoryFilter, HybridSearch, HybridSearchOptions};
 use cas_store::{
-    CoChangedFile, HistoryCommitFile, HistoryStore, SOURCE_GIT, SqliteHistoryStore,
+    CoChangedFile, CommitProvenance, HistoryCommitFile, HistoryStore, SOURCE_GIT,
+    SqliteHistoryStore,
 };
 
 /// How many co-change rows Q7 reports. Bounded because the tail of a co-change
@@ -90,8 +102,17 @@ pub struct IndexStatus {
     /// high-confidence provenance edge (spec §10.1). `null` when unmeasurable.
     pub provenance_coverage_pct: Option<f64>,
     pub provenance_high_confidence_links: Option<i64>,
-    /// **Always false in M4.** The provenance join is M5 (spec §5.3); this
-    /// field exists so no caller has to infer support from a coverage number.
+    /// Commits reachable through **any** populated edge, including the
+    /// medium/low-confidence ones. Reported beside the high-confidence figure,
+    /// never instead of it (spec §10.1: publish both, split by confidence).
+    pub provenance_any_coverage_pct: Option<f64>,
+    pub provenance_any_confidence_links: Option<i64>,
+    /// Commits reachable per `link_method` — the breakdown that distinguishes
+    /// "the anchor edge is growing" from "the text edge is matching loosely".
+    pub provenance_by_method: Vec<(String, i64)>,
+    /// True since M5 (cas-519f). It stays an explicit field rather than
+    /// something a caller infers from a coverage number: coverage is ~9% on
+    /// this repository, and "supported" and "complete" are not the same claim.
     pub provenance_supported: bool,
     pub provenance_note: String,
     /// Whether embedding recall over history is live. False until M7 ships the
@@ -117,10 +138,12 @@ pub struct HistoryHit {
     pub body: Option<String>,
     pub is_merge: bool,
     pub files: Vec<FileChange>,
-    /// Always `null` in M4. Carried rather than omitted so the shape does not
-    /// change when M5 fills it in, and so its emptiness is visible.
-    pub provenance: Option<serde_json::Value>,
-    /// Why `provenance` is null, when it was asked for.
+    /// The resolved edges for this commit (spec §5.2), strongest first.
+    /// `None` when the caller did not ask; `Some([])` when it asked and this
+    /// commit has no populated edge — which is a real answer, not a gap, and is
+    /// why [`Self::provenance_reason`] is filled in that case.
+    pub provenance: Option<Vec<ProvenanceEdge>>,
+    /// Why `provenance` is empty, when it is.
     pub provenance_reason: Option<String>,
 }
 
@@ -141,6 +164,48 @@ impl From<HistoryCommitFile> for FileChange {
             old_path: f.old_path,
             insertions: f.insertions,
             deletions: f.deletions,
+        }
+    }
+}
+
+/// One provenance edge as the surfaces render it.
+///
+/// A flattened view of `cas_store::ProvenanceLink`: the store owns the
+/// resolution, this owns the wire shape, so the JSON contract cannot drift
+/// every time the resolver grows a field.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ProvenanceEdge {
+    /// Which edge produced this link, named rather than inferred (spec §5.3).
+    pub link_method: String,
+    pub confidence: String,
+    pub task_id: Option<String>,
+    pub task_title: Option<String>,
+    pub session_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub observed_at: Option<String>,
+    /// The abbreviation this edge carried, when it carried one — so a reader
+    /// can weigh the join instead of trusting it.
+    pub matched_prefix: Option<String>,
+    /// True when `matched_prefix` matches more than one indexed commit. The
+    /// edge is still returned (spec §5.2 forbids silently picking a winner).
+    pub ambiguous: bool,
+    /// Every commit the prefix could have meant, when it is ambiguous.
+    pub ambiguous_candidates: Vec<String>,
+}
+
+impl From<cas_store::ProvenanceLink> for ProvenanceEdge {
+    fn from(l: cas_store::ProvenanceLink) -> Self {
+        Self {
+            link_method: l.link_method,
+            confidence: l.confidence.as_str().to_string(),
+            task_id: l.task_id,
+            task_title: l.task_title,
+            session_id: l.session_id,
+            agent_id: l.agent_id,
+            observed_at: l.observed_at,
+            matched_prefix: l.matched_prefix,
+            ambiguous: l.ambiguous,
+            ambiguous_candidates: l.ambiguous_candidates,
         }
     }
 }
@@ -183,6 +248,17 @@ pub struct AppliedFilters {
     pub since: Option<String>,
     pub until: Option<String>,
     pub include_merges: bool,
+    /// How many commits `task_id` / `session_id` resolved to, before the other
+    /// filters ran. `None` when neither was given.
+    ///
+    /// This exists because of a real, measured trap: on the live corpus a
+    /// session's only linked commit is often a **merge**, and merges are
+    /// excluded by default (§7.1). Without this number the response says
+    /// "no commits matched", which is indistinguishable from "that session
+    /// produced nothing" — when in fact the filter resolved fine and a
+    /// different filter dropped the result. Reporting the resolved count keeps
+    /// the two apart.
+    pub identity_filter_matched: Option<usize>,
     pub limit: usize,
 }
 
@@ -266,26 +342,10 @@ pub fn unsupported_for(req: &HistorySearchRequest) -> Vec<Unsupported> {
         }
     }
 
-    if req.task_id.is_some() || req.session_id.is_some() {
-        out.push(Unsupported {
-            feature: "task_id / session_id filter".into(),
-            reason: "filtering commits by the task or session that produced them needs the \
-                     commit→task→session join, which is not resolved yet"
-                .into(),
-            lands_in: "M5".into(),
-        });
-    }
-
-    if req.include_provenance {
-        out.push(Unsupported {
-            feature: "include_provenance".into(),
-            reason: "provenance resolution is not implemented; index_status reports the \
-                     measured coverage of the one high-confidence edge instead, so the \
-                     size of the gap is visible rather than guessed"
-                .into(),
-            lands_in: "M5".into(),
-        });
-    }
+    // `task_id`, `session_id` and `include_provenance` are answered as of M5
+    // (cas-519f) and are deliberately absent from this list. They are not
+    // silently supported either: `index_status.provenance_supported` states it,
+    // and every unresolved commit carries its own `provenance_reason`.
 
     out
 }
@@ -308,12 +368,22 @@ pub fn run(cas_root: &Path, req: &HistorySearchRequest) -> Result<HistorySearchR
         .iter()
         .any(|u| u.feature.starts_with("kind="));
 
+    // The store is opened before the ranker because the task/session filters
+    // are resolved through it: they narrow the candidate SHA set *in SQL*,
+    // before LIMIT. Post-filtering a ranked page would answer "what did this
+    // task ship" with whatever of it happened to reach the top-k, and with
+    // nothing at all whenever none of it did.
+    let store = SqliteHistoryStore::open(cas_root)?;
+    let shas = resolve_identity_filter(&store, &repository, req)?;
+    let identity_filter_matched = shas.as_ref().map(Vec::len);
+
     let filter = HistoryFilter {
         repository: repository.clone(),
         path: req.path.clone(),
         since: since.clone(),
         until: until.clone(),
         include_merges: req.include_merges,
+        shas,
     };
 
     // ONE ranker, constructed once (spec §1.2's "extend, do not clone").
@@ -346,7 +416,23 @@ pub fn run(cas_root: &Path, req: &HistorySearchRequest) -> Result<HistorySearchR
 
     // Hydrate the ranked SHAs back into full commits. The ranker returns ids
     // and scores; the store owns the rows.
-    let store = SqliteHistoryStore::open(cas_root)?;
+    //
+    // Provenance is resolved for the WHOLE page in one call rather than per
+    // hit: `events` is ~978 K rows with no index on `event_type`, so the
+    // per-commit form would scan it once per result.
+    let mut provenance: std::collections::HashMap<String, CommitProvenance> = if req
+        .include_provenance
+    {
+        let page: Vec<String> = ranked
+            .iter()
+            .filter(|r| r.doc_type == DocType::HistoryCommit)
+            .map(|r| r.id.clone())
+            .collect();
+        store.resolve_provenance(&repository, &page)?
+    } else {
+        std::collections::HashMap::new()
+    };
+
     let mut results = Vec::with_capacity(ranked.len());
     for ranked_hit in ranked.iter().filter(|r| r.doc_type == DocType::HistoryCommit) {
         let Some(hydrated) = store.commit_hit_by_sha(&ranked_hit.id)? else {
@@ -355,6 +441,7 @@ pub fn run(cas_root: &Path, req: &HistorySearchRequest) -> Result<HistorySearchR
             continue;
         };
         let commit = hydrated.commit;
+        let resolved = provenance.remove(&commit.sha);
         // Narrow the file list to what the path filter asked about — the whole
         // diff of an unrelated 200-file commit is noise in a path query.
         let files: Vec<HistoryCommitFile> = match &req.path {
@@ -380,12 +467,12 @@ pub fn run(cas_root: &Path, req: &HistorySearchRequest) -> Result<HistorySearchR
             body: commit.body,
             is_merge: commit.is_merge,
             files: files.into_iter().map(FileChange::from).collect(),
-            provenance: None,
-            provenance_reason: req.include_provenance.then(|| {
-                "provenance resolution lands in M5; index_status.provenance_coverage_pct \
-                 reports the measured reach of the one high-confidence edge"
-                    .to_string()
-            }),
+            provenance: resolved
+                .as_ref()
+                .map(|p| p.links.iter().cloned().map(ProvenanceEdge::from).collect()),
+            // Q3's requirement in one field: a commit with no edge is RETURNED,
+            // carrying the reason it has none, never dropped from the answer.
+            provenance_reason: resolved.and_then(|p| p.reason),
             sha: commit.sha,
         });
     }
@@ -408,6 +495,7 @@ pub fn run(cas_root: &Path, req: &HistorySearchRequest) -> Result<HistorySearchR
             since,
             until,
             include_merges: req.include_merges,
+            identity_filter_matched,
             limit,
         },
         count: results.len(),
@@ -415,6 +503,41 @@ pub fn run(cas_root: &Path, req: &HistorySearchRequest) -> Result<HistorySearchR
         co_changed_files,
         index_status: index_status(cas_root, &repo_root, &repository, &store)?,
         unsupported,
+    })
+}
+
+/// Resolve `task_id` / `session_id` into the SHA set they name (spec §6.1).
+///
+/// Returns `None` when neither filter was given. Returns `Some(empty)` when one
+/// was given and resolved to nothing — which correctly matches no commits.
+/// Collapsing that case to `None` would answer "commits from task X" with every
+/// commit in the repository, which is the single worst way for a filter to fail.
+///
+/// Both filters together intersect: asking for a task *and* a session means
+/// commits that satisfy both, not either.
+fn resolve_identity_filter(
+    store: &SqliteHistoryStore,
+    repository: &str,
+    req: &HistorySearchRequest,
+) -> Result<Option<Vec<String>>> {
+    let by_task = req
+        .task_id
+        .as_deref()
+        .map(|id| store.shas_for_task(repository, id))
+        .transpose()?;
+    let by_session = req
+        .session_id
+        .as_deref()
+        .map(|id| store.shas_for_session(repository, id))
+        .transpose()?;
+
+    Ok(match (by_task, by_session) {
+        (None, None) => None,
+        (Some(shas), None) | (None, Some(shas)) => Some(shas),
+        (Some(task), Some(session)) => {
+            let session: std::collections::HashSet<String> = session.into_iter().collect();
+            Some(task.into_iter().filter(|s| session.contains(s)).collect())
+        }
     })
 }
 
@@ -454,22 +577,29 @@ fn index_status(
         repo_commits: status.repo_commits,
         provenance_coverage_pct: coverage.coverage_pct,
         provenance_high_confidence_links: coverage.high_confidence_linked,
-        provenance_supported: false,
+        provenance_any_coverage_pct: coverage.any_coverage_pct,
+        provenance_any_confidence_links: coverage.any_confidence_linked,
+        provenance_by_method: coverage.by_method.clone(),
+        provenance_supported: true,
         provenance_note: match &coverage.unmeasurable_reason {
             Some(reason) => format!(
-                "provenance resolution is NOT SUPPORTED until M5 (spec §5.3); \
-                 coverage is unmeasurable here: {reason}"
+                "provenance resolution is supported (M5, spec §5.2); coverage is only \
+                 partially measurable here: {reason}"
             ),
             None => format!(
-                "provenance resolution is NOT SUPPORTED until M5 (spec §5.3). The figure \
-                 above is the measured reach of the only exact commit→task edge that is \
-                 populated today (tasks.deliverables.factory_branch_anchor, {} of {} \
-                 indexed commits); it is a debt marker, not a capability",
+                "provenance resolution is supported (M5, spec §5.2). Coverage is MEASURED, \
+                 not claimed: {} of {} indexed commits carry the exact commit→task edge \
+                 (tasks.deliverables.factory_branch_anchor), {} carry any populated edge. \
+                 Commits with no edge are returned with a stated reason rather than dropped",
                 coverage
                     .high_confidence_linked
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| "unknown".into()),
                 coverage.total_commits,
+                coverage
+                    .any_confidence_linked
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "unknown".into()),
             ),
         },
         semantic_available: false,
@@ -542,29 +672,34 @@ mod tests {
         let all = unsupported_for(&HistorySearchRequest {
             symbol: Some("blame_impl".into()),
             kind: Some("issue".into()),
-            task_id: Some("cas-1234".into()),
-            include_provenance: true,
             ..req()
         });
         let milestones: Vec<&str> = all.iter().map(|u| u.lands_in.as_str()).collect();
         assert!(milestones.contains(&"M3"), "symbol filter undeclared");
         assert!(milestones.contains(&"M6"), "kind filter undeclared");
-        assert!(milestones.contains(&"M5"), "provenance undeclared");
         assert!(
             all.iter().all(|u| !u.reason.is_empty()),
             "a declaration with no reason is not an explanation"
         );
     }
 
-    /// session_id alone must declare too — an easy branch to get wrong when
-    /// task_id is the one being tested.
+    /// The M5 (cas-519f) inverse of the test above: the three filters that used
+    /// to be declared unsupported are now answered, and must NOT be declared —
+    /// a stale declaration tells a caller not to ask for something that works.
+    ///
+    /// This is the assertion that fails if someone reverts the resolver but
+    /// leaves the surface claiming support, or vice versa.
     #[test]
-    fn session_id_alone_declares_the_provenance_gap() {
+    fn provenance_filters_are_answered_and_no_longer_declared_unsupported() {
         let all = unsupported_for(&HistorySearchRequest {
+            task_id: Some("cas-1234".into()),
             session_id: Some("s-1".into()),
+            include_provenance: true,
             ..req()
         });
-        assert_eq!(all.len(), 1);
-        assert_eq!(all[0].lands_in, "M5");
+        assert!(
+            all.is_empty(),
+            "provenance filters are supported since M5; declaring them is now the lie: {all:?}"
+        );
     }
 }

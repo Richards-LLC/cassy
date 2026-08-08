@@ -40,6 +40,8 @@ use tempfile::TempDir;
 /// A repository with a known, asserted-on history.
 struct Fixture {
     _temp: TempDir,
+    repo: std::path::PathBuf,
+    cas_root: std::path::PathBuf,
     service: CasService,
 }
 
@@ -106,12 +108,72 @@ impl Fixture {
             "fixture history did not index as expected"
         );
 
-        let core = CasCore::with_daemon(cas_root, None, None);
+        let core = CasCore::with_daemon(cas_root.clone(), None, None);
         core.set_agent_id_for_testing("history-search-test".to_string());
         Self {
             _temp: temp,
+            repo,
+            cas_root,
             service: CasService::new(core, None),
         }
+    }
+
+    /// The full SHA of the commit whose subject is `subject`.
+    fn sha_of(&self, subject: &str) -> String {
+        let out = Command::new("git")
+            .args(["log", "--format=%H %s"])
+            .current_dir(&self.repo)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find(|l| l.contains(subject))
+            .unwrap_or_else(|| panic!("no commit with subject {subject:?}"))
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_string()
+    }
+
+    fn db(&self) -> rusqlite::Connection {
+        rusqlite::Connection::open(self.cas_root.join("cas.db")).unwrap()
+    }
+
+    /// Seed the exact commit→task edge (`tasks.deliverables.factory_branch_anchor`).
+    fn seed_anchor(&self, task_id: &str, sha: &str) {
+        self.db()
+            .execute(
+                "UPDATE tasks SET deliverables = json_object('factory_branch_anchor', ?2)
+                  WHERE id = ?1",
+                rusqlite::params![task_id, sha],
+            )
+            .unwrap();
+    }
+
+    fn insert_task(&self, task_id: &str, title: &str) {
+        self.db()
+            .execute(
+                "INSERT INTO tasks (id, title, status, priority, task_type, created_at, updated_at)
+                 VALUES (?1, ?2, 'closed', 2, 'task', '2026-08-08T00:00:00Z', '2026-08-08T00:00:00Z')",
+                rusqlite::params![task_id, title],
+            )
+            .unwrap();
+    }
+
+    /// Seed a `worker_git_commit` event carrying an abbreviated head_sha of the
+    /// given width — the §5.2 edge, at whatever dynamic width git produced.
+    fn seed_worker_event(&self, sha: &str, width: usize, session: &str) {
+        self.db()
+            .execute(
+                "INSERT INTO events (event_type, entity_type, entity_id, summary, metadata, created_at, session_id)
+                 VALUES ('worker_git_commit', 'worker', 'fixture-worker', 'final git state', ?1,
+                         '2026-08-08T01:00:00Z', ?2)",
+                rusqlite::params![
+                    format!(r#"{{"branch":"main","head_sha":"{}"}}"#, &sha[..width]),
+                    session
+                ],
+            )
+            .unwrap();
     }
 
     /// Drive the real MCP dispatch and parse its JSON response.
@@ -227,11 +289,19 @@ async fn q3_every_commit_touching_a_path_with_honest_provenance() {
 
     assert_eq!(response["count"], 2);
     for hit in response["results"].as_array().unwrap() {
-        // Commits are not dropped for lacking provenance (spec §6.4 Q3).
-        assert!(hit["provenance"].is_null());
+        // Spec §6.4 Q3's load-bearing requirement: a commit with NO populated
+        // edge is still in the answer, carrying the reason it has none. This
+        // fixture seeds no edges, so every hit exercises exactly that path.
         assert!(
-            hit["provenance_reason"].as_str().unwrap().contains("M5"),
-            "a null provenance with no reason is indistinguishable from a bug"
+            hit["provenance"].as_array().unwrap().is_empty(),
+            "an unlinked commit must be returned with an empty edge list"
+        );
+        assert!(
+            hit["provenance_reason"]
+                .as_str()
+                .unwrap()
+                .contains("no populated edge"),
+            "an empty provenance with no reason is indistinguishable from a bug: {hit}"
         );
         // Files are narrowed to the queried path.
         for file in hit["files"].as_array().unwrap() {
@@ -246,17 +316,24 @@ async fn q3_every_commit_touching_a_path_with_honest_provenance() {
 
     let status = &response["index_status"];
     assert_eq!(
-        status["provenance_supported"], false,
-        "M4 must never advertise provenance as supported"
+        status["provenance_supported"], true,
+        "M5 (cas-519f) resolves provenance; the surface must say so"
     );
-    assert!(status["provenance_note"].as_str().unwrap().contains("M5"));
-
-    let declared = response["unsupported"].as_array().unwrap();
+    // Supported is not the same claim as complete: the coverage numbers are
+    // still measured and still reported, split by confidence (spec §10.1).
     assert!(
-        declared
+        status["provenance_coverage_pct"].is_number(),
+        "coverage must be measured even when it is 0: {status}"
+    );
+    assert!(status["provenance_any_coverage_pct"].is_number());
+
+    assert!(
+        response["unsupported"]
+            .as_array()
+            .unwrap()
             .iter()
-            .any(|u| u["feature"] == "include_provenance" && u["lands_in"] == "M5"),
-        "asking for provenance must be answered with a declaration, not silence"
+            .all(|u| u["feature"] != "include_provenance"),
+        "a supported filter must not be declared unsupported"
     );
 }
 
@@ -416,4 +493,267 @@ async fn a_malformed_time_bound_is_an_error_not_a_wider_search() {
     .unwrap();
     let err = fx.service.search(Parameters(req)).await;
     assert!(err.is_err(), "an unparseable window was silently accepted");
+}
+
+// =========================================================================
+// M5 — provenance join through the production path (cas-519f, spec §5)
+// =========================================================================
+
+/// §6.4 Q3, now with a populated edge: the exact `factory_branch_anchor` join
+/// resolves the task through the REAL MCP dispatch, carrying its link method
+/// and confidence.
+///
+/// The §6.3 argument applies unchanged here: a unit test on the resolver would
+/// pass even if `run()` never called it.
+#[tokio::test]
+async fn the_exact_anchor_edge_resolves_through_the_production_path() {
+    let fx = Fixture::new();
+    let sha = fx.sha_of("add exponential backoff to the drain");
+    fx.insert_task("cas-fixture-1", "the task that shipped the backoff");
+    fx.seed_anchor("cas-fixture-1", &sha);
+
+    let response = fx
+        .history(serde_json::json!({
+            "action": "history",
+            "path": "src/delivery/retry.rs",
+            "include_provenance": true,
+        }))
+        .await;
+
+    let hit = response["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["sha"] == sha)
+        .expect("the anchored commit is in the answer");
+    let edges = hit["provenance"].as_array().unwrap();
+    assert_eq!(edges.len(), 1, "{edges:?}");
+    assert_eq!(edges[0]["link_method"], "factory_branch_anchor");
+    assert_eq!(edges[0]["confidence"], "high");
+    assert_eq!(edges[0]["task_id"], "cas-fixture-1");
+    assert_eq!(edges[0]["ambiguous"], false);
+
+    // The other commit in the same answer has no edge — and is still returned
+    // with its reason, in the same response. Both halves of Q3 at once.
+    let unlinked = response["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["sha"] != sha)
+        .expect("the unanchored commit is not dropped");
+    assert!(unlinked["provenance"].as_array().unwrap().is_empty());
+    assert!(unlinked["provenance_reason"].is_string());
+
+    // Coverage is measured, not asserted: 1 of 3 indexed commits.
+    let status = &response["index_status"];
+    assert_eq!(status["provenance_high_confidence_links"], 1);
+    assert!(
+        (status["provenance_coverage_pct"].as_f64().unwrap() - 33.33).abs() < 0.1,
+        "coverage must reflect the seeded reality: {status}"
+    );
+}
+
+/// §5.2 consequence 1, through production: a 7-char abbreviation resolves.
+///
+/// This is the width `sha[0..8]` silently drops, and 594 of the 1,018 usable
+/// rows on the live database carry it.
+#[tokio::test]
+async fn a_seven_char_worker_event_prefix_resolves_through_the_production_path() {
+    let fx = Fixture::new();
+    let sha = fx.sha_of("widen the transcript pane");
+    fx.seed_worker_event(&sha, 7, "session-seven");
+
+    let response = fx
+        .history(serde_json::json!({
+            "action": "history",
+            "path": "src/ui/pane.rs",
+            "include_provenance": true,
+        }))
+        .await;
+
+    let hit = &response["results"].as_array().unwrap()[0];
+    assert_eq!(hit["sha"], sha);
+    let edge = &hit["provenance"].as_array().unwrap()[0];
+    assert_eq!(edge["link_method"], "worker_git_commit_prefix");
+    assert_eq!(edge["session_id"], "session-seven");
+    assert_eq!(edge["confidence"], "high", "unique prefix, no collision");
+    assert_eq!(edge["ambiguous"], false);
+    assert_eq!(
+        edge["matched_prefix"].as_str().unwrap().len(),
+        7,
+        "the join must report the width it actually matched on"
+    );
+}
+
+/// The `task_id` filter narrows to the task's commits, in SQL, before LIMIT —
+/// and an unknown task returns nothing rather than everything.
+///
+/// The second half is the one worth the test: a filter that fails open is worse
+/// than a filter that does not exist, because the answer still looks scoped.
+#[tokio::test]
+async fn the_task_id_filter_narrows_and_fails_closed() {
+    let fx = Fixture::new();
+    let sha = fx.sha_of("stop re-emitting on every poll tick");
+    fx.insert_task("cas-fixture-2", "the poll-tick task");
+    fx.seed_anchor("cas-fixture-2", &sha);
+
+    let scoped = fx
+        .history(serde_json::json!({
+            "action": "history",
+            "task_id": "cas-fixture-2",
+            "include_provenance": true,
+        }))
+        .await;
+    assert_eq!(scoped["count"], 1, "{scoped}");
+    assert_eq!(scoped["results"][0]["sha"], sha);
+
+    let unknown = fx
+        .history(serde_json::json!({
+            "action": "history",
+            "task_id": "cas-does-not-exist",
+        }))
+        .await;
+    assert_eq!(
+        unknown["count"], 0,
+        "an unresolvable task filter must match nothing, never widen to all commits"
+    );
+}
+
+/// The session filter resolves through `events.worker_git_commit`, which is the
+/// only edge that carries a session id at all.
+#[tokio::test]
+async fn the_session_id_filter_resolves_through_the_worker_event_edge() {
+    let fx = Fixture::new();
+    let sha = fx.sha_of("widen the transcript pane");
+    fx.seed_worker_event(&sha, 8, "session-abc");
+
+    let scoped = fx
+        .history(serde_json::json!({
+            "action": "history",
+            "session_id": "session-abc",
+        }))
+        .await;
+    assert_eq!(scoped["count"], 1, "{scoped}");
+    assert_eq!(scoped["results"][0]["sha"], sha);
+
+    let unknown = fx
+        .history(serde_json::json!({
+            "action": "history",
+            "session_id": "session-nobody",
+        }))
+        .await;
+    assert_eq!(unknown["count"], 0);
+}
+
+/// AC3 through the production path: the indexer repairs `commit_links` for a
+/// commit the PostToolUse hook never saw, and the repaired spine then shows up
+/// as a provenance edge on the query surface.
+///
+/// This is the end-to-end shape of spec §5.3 — the empty spine filling itself
+/// from the index rather than from a harness-specific hook.
+#[tokio::test]
+async fn the_indexer_repairs_the_commit_links_spine_and_the_surface_sees_it() {
+    let fx = Fixture::new();
+    let sha = fx.sha_of("widen the transcript pane");
+    fx.seed_worker_event(&sha, 8, "session-repair");
+
+    let before: i64 = fx
+        .db()
+        .query_row("SELECT COUNT(*) FROM commit_links", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(before, 0, "the spine starts empty, as it is on the live DB");
+
+    let outcome = cas::history::provenance::repair_commit_links(&fx.cas_root, &fx.repo, 100)
+        .expect("repair pass");
+    assert_eq!(outcome.examined, 3, "{outcome:?}");
+    assert_eq!(outcome.written, 1, "{outcome:?}");
+    assert_eq!(
+        outcome.no_session_edge, 2,
+        "the two commits with no event must be counted, not silently skipped"
+    );
+
+    let (session, method): (String, Option<String>) = fx
+        .db()
+        .query_row(
+            "SELECT session_id, link_method FROM commit_links WHERE commit_hash = ?1",
+            rusqlite::params![sha],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(session, "session-repair");
+    assert_eq!(
+        method.as_deref(),
+        Some("indexer_worker_git_commit"),
+        "a reconstructed link must be stamped as reconstructed (spec §5.3)"
+    );
+
+    // And the repaired row is now visible to the query surface, at MEDIUM —
+    // it lives in the same table as an observation but does not claim to be one.
+    let response = fx
+        .history(serde_json::json!({
+            "action": "history",
+            "path": "src/ui/pane.rs",
+            "include_provenance": true,
+        }))
+        .await;
+    let edges = response["results"][0]["provenance"].as_array().unwrap();
+    let spine = edges
+        .iter()
+        .find(|e| e["link_method"] == "indexer_worker_git_commit")
+        .unwrap_or_else(|| panic!("the repaired spine row is not surfaced: {edges:?}"));
+    assert_eq!(spine["confidence"], "medium");
+    assert_eq!(spine["session_id"], "session-repair");
+}
+
+/// The measured trap this assertion exists for: on the live corpus a session's
+/// only linked commit is frequently a **merge**, and merges are excluded by
+/// default (§7.1). "no commits matched" would then report that the session
+/// shipped nothing — a different and wrong claim from "the filter resolved, and
+/// another filter emptied the answer".
+#[tokio::test]
+async fn a_filter_that_resolved_but_returned_nothing_says_which_it_was() {
+    let fx = Fixture::new();
+    // A merge commit, linked to a session, on top of the fixture history.
+    git(&fx.repo, &["checkout", "-q", "-b", "side", "HEAD~1"]);
+    commit(&fx.repo, "src/side.rs", "fn side() {}\n", "side work");
+    git(&fx.repo, &["checkout", "-q", "main"]);
+    git(&fx.repo, &["merge", "--no-ff", "-q", "side", "-m", "merge side"]);
+    cas::history::run_index_pass(&fx.cas_root, &fx.repo).expect("delta pass");
+
+    let merge_sha = fx.sha_of("merge side");
+    fx.seed_worker_event(&merge_sha, 8, "session-merge-only");
+
+    let default = fx
+        .history(serde_json::json!({
+            "action": "history",
+            "session_id": "session-merge-only",
+        }))
+        .await;
+    assert_eq!(default["count"], 0, "merges are excluded by default");
+    assert_eq!(
+        default["filters"]["identity_filter_matched"], 1,
+        "the response must show the filter RESOLVED, so an empty answer is not \
+         mistaken for 'this session produced nothing': {default}"
+    );
+
+    // And an identity filter that genuinely resolves to nothing reports zero,
+    // which is the honest distinction the field exists to make.
+    let unknown = fx
+        .history(serde_json::json!({
+            "action": "history",
+            "session_id": "session-nobody",
+        }))
+        .await;
+    assert_eq!(unknown["filters"]["identity_filter_matched"], 0);
+
+    // With merges included, the same filter answers.
+    let with_merges = fx
+        .history(serde_json::json!({
+            "action": "history",
+            "session_id": "session-merge-only",
+            "include_merges": true,
+        }))
+        .await;
+    assert_eq!(with_merges["count"], 1, "{with_merges}");
+    assert_eq!(with_merges["results"][0]["sha"], merge_sha);
 }

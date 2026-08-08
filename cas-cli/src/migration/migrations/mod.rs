@@ -199,6 +199,7 @@ mod m220_prompt_queue_wake_observability;
 mod m221_history_index_create_tables;
 mod m222_history_docs_create_table;
 mod m223_history_commits_fts;
+mod m224_commit_links_link_method;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -420,6 +421,10 @@ pub const MIGRATIONS: &[Migration] = &[
     // reached. Renumbered 222 → 223 when the M6 lane claimed 222 first; IDs
     // are never reused, so the later lane moves.
     m223_history_commits_fts::MIGRATION,
+    // Provenance link_method (EPIC cas-6212 / cas-519f, spec §5.3): the column
+    // that keeps a reconstructed commit link distinguishable from an observed
+    // one, now that the history indexer is a second writer of commit_links.
+    m224_commit_links_link_method::MIGRATION,
 ];
 
 #[cfg(test)]

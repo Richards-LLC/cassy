@@ -68,7 +68,7 @@ fn execute_code(args: &IndexCodeArgs, cli: &Cli, cas_root: &Path) -> anyhow::Res
         files.truncate(args.max_files);
     }
 
-    if files.is_empty() {
+    if files.is_empty() && !args.paths.is_empty() {
         if cli.json {
             println!(
                 "{}",
@@ -87,7 +87,7 @@ fn execute_code(args: &IndexCodeArgs, cli: &Cli, cas_root: &Path) -> anyhow::Res
 
     let started = Instant::now();
     let result = if args.paths.is_empty() {
-        reconcile_code_tree(&files, cas_root, args.force)?
+        reconcile_code_tree(&files, &roots, cas_root, args.force)?
     } else {
         index_code_files_with(&files, cas_root, args.force)?
     };

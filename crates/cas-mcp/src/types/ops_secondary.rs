@@ -233,7 +233,7 @@ pub struct SearchContextRequest {
 
     /// Request provenance on history results
     #[schemars(
-        description = "Request commit provenance (which task/session/prompt produced it). Not supported yet; index_status reports the measured coverage of the one populated edge instead."
+        description = "Resolve which task/session produced each commit, with the link method and confidence per edge. Coverage is partial and measured (index_status reports it); commits with no populated edge are returned with a stated reason rather than dropped."
     )]
     #[serde(default)]
     pub include_provenance: Option<bool>,

@@ -28,6 +28,7 @@
 //! Nothing here shells out to git; the walker owns that (`cas-cli/src/history`).
 //! This module is storage only, so it stays testable without a repo on disk.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -35,6 +36,12 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
+use crate::history_provenance::{
+    CandidateClass, CommitProvenance, EdgeHealth, FULL_SHA_LEN, LINK_METHOD_FACTORY_ANCHOR,
+    LINK_METHOD_HOOK_OBSERVED, LINK_METHOD_TASK_NOTE, LINK_METHOD_WORKER_EVENT_EXACT,
+    LINK_METHOD_WORKER_EVENT_PREFIX, LinkConfidence, ProvenanceLink, candidate_matches,
+    classify_candidate,
+};
 use crate::shared_db;
 
 /// Canonical DDL for the history subsystem, in `execute_batch` form.
@@ -497,6 +504,18 @@ pub struct HistoryQuery {
     /// their whole message (spec §7.1), so they are noise in a text search.
     /// Off by default; callers asking a structural question can turn them on.
     pub include_merges: bool,
+    /// Restrict the answer to this exact SHA set (EPIC cas-6212 / cas-519f).
+    ///
+    /// This is how the `task_id` / `session_id` filters are honoured: the
+    /// provenance resolver produces the SHA set, and it is applied **in SQL,
+    /// before `LIMIT`**. Post-filtering the ranked page instead would silently
+    /// return fewer than `limit` results — or none — whenever the task's commits
+    /// were not already in the top-k, which reads as "that task shipped
+    /// nothing".
+    ///
+    /// `Some(empty)` means "the filter resolved to no commits" and correctly
+    /// matches nothing; `None` means "no filter".
+    pub shas: Option<Vec<String>>,
     pub limit: usize,
 }
 
@@ -529,9 +548,14 @@ pub struct CoChangedFile {
 /// Measured provenance reach, split by confidence (spec §10.1).
 ///
 /// This type deliberately cannot express "provenance works". It reports how
-/// many commits carry the one high-confidence edge that exists today and
-/// nothing else, because until M5 nothing else does exist.
-#[derive(Debug, Clone, PartialEq)]
+/// many commits carry each edge that is populated, and what each edge had to
+/// throw away to say so.
+///
+/// M5 (cas-519f) widened it from one number to a ledger. A single percentage
+/// cannot distinguish "the edge is thin" from "the edge is broken", and §5.2's
+/// own 10× correction happened precisely because a row class had never been
+/// re-counted.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProvenanceCoverage {
     /// Commits indexed for the repository — the denominator.
     pub total_commits: i64,
@@ -544,8 +568,41 @@ pub struct ProvenanceCoverage {
     /// are different facts and collapsing them is the dishonesty this field
     /// exists to prevent.
     pub coverage_pct: Option<f64>,
+    /// Commits reachable through **any** populated edge, including the
+    /// medium/low-confidence ones. Reported beside the high-confidence figure
+    /// rather than instead of it — spec §10.1 asks for both numbers, split by
+    /// confidence, so the debt stays visible even as the weaker edges fill in.
+    pub any_confidence_linked: Option<i64>,
+    pub any_coverage_pct: Option<f64>,
+    /// Commits reachable per `link_method`, method-ascending. The breakdown a
+    /// reader needs to tell "the anchor edge is growing" from "the text edge is
+    /// matching more loosely".
+    pub by_method: Vec<(String, i64)>,
+    /// Per-edge usable/excluded counts (spec §5.2's row classes made queryable).
+    pub edges: Vec<EdgeHealth>,
     /// Why the measurement could not be taken, when it could not.
     pub unmeasurable_reason: Option<String>,
+}
+
+/// How many indexed commits an ambiguity probe will name. Two is enough to
+/// *decide* ambiguity; the extra room exists so the answer can say "at least
+/// five" rather than implying it enumerated a colliding set it never counted.
+const AMBIGUITY_PROBE_LIMIT: usize = 5;
+
+/// Upper bound on the edges reported for a single commit.
+///
+/// An ambiguous 7-char prefix can be carried by dozens of events from different
+/// sessions, and a caller reading a page of ten commits does not need a hundred
+/// near-identical edges. Truncation is never silent: the count that was dropped
+/// is stated in [`CommitProvenance::reason`].
+const MAX_LINKS_PER_COMMIT: usize = 20;
+
+/// A usable `worker_git_commit` row, already classified.
+struct WorkerCommitEvent {
+    head_sha: String,
+    session_id: Option<String>,
+    agent_id: Option<String>,
+    created_at: Option<String>,
 }
 
 /// Storage for the structural git-history index.
@@ -614,6 +671,50 @@ pub trait HistoryStore: Send + Sync {
 
     /// Measured provenance reach for the repository (spec §10.1).
     fn provenance_coverage(&self, repository: &str) -> Result<ProvenanceCoverage>;
+
+    /// Resolve `commit → task / session` provenance for a batch of SHAs
+    /// (spec §5.2 — EPIC cas-6212 / cas-519f).
+    ///
+    /// **Batch, deliberately.** `events` is ~978 K rows on the live database
+    /// with no index on `event_type` (only `created_at` and
+    /// `(entity_type, entity_id)`), so the per-commit form of this query would
+    /// full-scan a million rows once per result. One scan serves the whole
+    /// page.
+    ///
+    /// Every requested SHA appears in the result. A commit with no populated
+    /// edge comes back with an empty `links` and a stated `reason` — §5.2's
+    /// "never a silent empty", and §6.4 Q3's explicit requirement that unlinked
+    /// commits are returned rather than dropped.
+    fn resolve_provenance(
+        &self,
+        repository: &str,
+        shas: &[String],
+    ) -> Result<HashMap<String, CommitProvenance>>;
+
+    /// Indexed commits attributable to a task, strongest edge first
+    /// (the `task_id` filter, spec §6.1).
+    fn shas_for_task(&self, repository: &str, task_id: &str) -> Result<Vec<String>>;
+
+    /// Indexed commits attributable to a session (the `session_id` filter).
+    fn shas_for_session(&self, repository: &str, session_id: &str) -> Result<Vec<String>>;
+
+    /// Indexed commits that carry no `commit_links` row yet — the work list for
+    /// the spine repair (spec §5.3). Newest first, so a bounded pass repairs the
+    /// commits most likely to be asked about.
+    ///
+    /// `offset` exists because most commits on this corpus will *never* get a
+    /// link: 89.7% of `worker_git_commit` rows carry no SHA, and the anchor edge
+    /// names a task rather than a session. Without it a "repair everything" loop
+    /// re-reads the same unresolvable head of the list on every pass and
+    /// advances only by the number of links it wrote — which on real data means
+    /// it stops long before reaching the older commits. The caller advances the
+    /// offset by the number of rows that *stayed* unlinked.
+    fn commits_without_links(
+        &self,
+        repository: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<String>>;
 
     /// Write a batch of docs and the `(repository, source)` watermark in ONE
     /// transaction — the same rule `commit_batch` enforces for git (spec §4.2
@@ -848,8 +949,149 @@ impl SqliteHistoryStore {
                    OR f.old_path LIKE '%' || ?{idx} || '%'))"
             ));
             params.push(path.clone());
+            idx += 1;
+        }
+        if let Some(shas) = &query.shas {
+            if shas.is_empty() {
+                // The filter resolved to nothing. `AND 0` is the honest
+                // encoding: an empty `IN ()` is a syntax error, and skipping
+                // the clause would widen "commits from this task" to "every
+                // commit", which is the worst possible failure for a filter.
+                sql.push_str(" AND 0");
+            } else {
+                let placeholders = (idx..idx + shas.len())
+                    .map(|i| format!("?{i}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                sql.push_str(&format!(" AND c.sha IN ({placeholders})"));
+                params.extend(shas.iter().cloned());
+            }
         }
         (sql, params)
+    }
+
+    /// Is `name` a real table in this database?
+    ///
+    /// Every provenance edge lives in another subsystem's table. A store opened
+    /// without them is legitimate (a fresh project; the history tables under
+    /// test), and the difference between "this edge is empty" and "this edge
+    /// cannot be read here" is exactly the difference §10.1 refuses to collapse.
+    fn table_exists(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            params![name],
+            |row| row.get(0),
+        )
+    }
+
+    /// Every usable `metadata.head_sha` from `events.worker_git_commit`, with
+    /// the row classes it had to exclude counted rather than dropped.
+    ///
+    /// ONE scan. `events` carries ~978 K rows on the live database and has no
+    /// index on `event_type` (`event_store.rs` creates only `created_at` and
+    /// `(entity_type, entity_id)`), so this is the expensive part of provenance
+    /// and it is paid once per call, never once per commit.
+    fn worker_commit_events(conn: &Connection) -> rusqlite::Result<(Vec<WorkerCommitEvent>, EdgeHealth)> {
+        let mut health = EdgeHealth {
+            edge: LINK_METHOD_WORKER_EVENT_PREFIX.to_string(),
+            ..Default::default()
+        };
+        let mut stmt = conn.prepare(
+            "SELECT json_extract(metadata, '$.head_sha') AS head_sha,
+                    COALESCE(session_id, '') AS session_id,
+                    COALESCE(entity_id, '')  AS entity_id,
+                    created_at
+               FROM events
+              WHERE event_type = 'worker_git_commit'",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, Option<String>>("head_sha")?,
+                row.get::<_, String>("session_id")?,
+                row.get::<_, String>("entity_id")?,
+                row.get::<_, Option<String>>("created_at")?,
+            ))
+        })?;
+
+        let mut events = Vec::new();
+        for row in rows {
+            let (head_sha, session_id, entity_id, created_at) = row?;
+            let Some(head_sha) = head_sha else {
+                health.excluded_absent += 1;
+                continue;
+            };
+            match classify_candidate(&head_sha) {
+                CandidateClass::Exact | CandidateClass::Prefix => {}
+                CandidateClass::Stub => {
+                    health.excluded_stub += 1;
+                    continue;
+                }
+                CandidateClass::TooShort | CandidateClass::Invalid => {
+                    health.excluded_unusable += 1;
+                    continue;
+                }
+            }
+            health.usable_rows += 1;
+            events.push(WorkerCommitEvent {
+                head_sha: head_sha.trim().to_string(),
+                session_id: (!session_id.is_empty()).then_some(session_id),
+                agent_id: (!entity_id.is_empty()).then_some(entity_id),
+                created_at,
+            });
+        }
+
+        let distinct: std::collections::HashSet<&str> =
+            events.iter().map(|e| e.head_sha.as_str()).collect();
+        health.distinct_identifiers = distinct.len() as i64;
+        Ok((events, health))
+    }
+
+    /// Indexed commits a prefix matches, bounded. Used to decide ambiguity —
+    /// which is a *measured* property of this repository's index, never inferred
+    /// from the prefix's length.
+    fn commits_matching_prefix(
+        conn: &Connection,
+        repository: &str,
+        prefix: &str,
+    ) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = conn.prepare_cached(
+            "SELECT sha FROM history_commits
+              WHERE repository = ?1 AND sha LIKE ?2 || '%'
+              LIMIT ?3",
+        )?;
+        stmt.query_map(
+            params![repository, prefix, AMBIGUITY_PROBE_LIMIT as i64],
+            |row| row.get(0),
+        )?
+        .collect()
+    }
+
+    /// Full 40-char object names mentioned in a blob of free text.
+    ///
+    /// Used for the `tasks.notes` edge in the *task → commits* direction, where
+    /// the note is the haystack. Only full SHAs are extracted: an 8-char hex run
+    /// in prose is as likely to be a timestamp fragment as a commit, and this
+    /// direction has no second edge to cross-check it against.
+    fn full_shas_in(text: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let bytes: Vec<char> = text.chars().collect();
+        let mut i = 0;
+        while i < bytes.len() {
+            if !bytes[i].is_ascii_hexdigit() {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < bytes.len() && bytes[i].is_ascii_hexdigit() {
+                i += 1;
+            }
+            if i - start == FULL_SHA_LEN {
+                out.push(bytes[start..i].iter().collect::<String>().to_lowercase());
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
     }
 
     fn state_from_row(row: &rusqlite::Row) -> rusqlite::Result<HistoryIndexState> {
@@ -1301,45 +1543,550 @@ impl HistoryStore for SqliteHistoryStore {
             |row| row.get(0),
         )?;
 
-        // The edge lives in another subsystem's table. A store that has never
+        // The edges live in other subsystems' tables. A store that has never
         // seen a task is a legitimate state (a fresh project, or the history
         // tables opened standalone in a test), so its absence is reported as
         // "not measurable" rather than as 0% — which would read as a finding.
-        let has_tasks: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tasks')",
-            [],
-            |row| row.get(0),
-        )?;
-        if !has_tasks {
+        let has_tasks = Self::table_exists(&conn, "tasks")?;
+        let has_events = Self::table_exists(&conn, "events")?;
+        let has_links = Self::table_exists(&conn, "commit_links")?;
+        if !has_tasks && !has_events && !has_links {
             return Ok(ProvenanceCoverage {
                 total_commits,
-                high_confidence_linked: None,
-                coverage_pct: None,
                 unmeasurable_reason: Some(
-                    "no tasks table in this store: the factory_branch_anchor edge cannot be read"
+                    "no tasks, events or commit_links table in this store: no provenance edge \
+                     can be read here"
                         .to_string(),
                 ),
+                ..Default::default()
             });
         }
 
-        let linked: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM history_commits c
-              WHERE c.repository = ?1
-                AND EXISTS (
-                    SELECT 1 FROM tasks t
-                     WHERE json_extract(t.deliverables, '$.factory_branch_anchor') = c.sha
-                )",
-            params![repository],
-            |row| row.get(0),
-        )?;
+        let mut by_method: Vec<(String, i64)> = Vec::new();
+        let mut edges: Vec<EdgeHealth> = Vec::new();
+        let mut linked_any: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut high_confidence: Option<i64> = None;
+
+        // --- Edge 1: the exact anchor. The high-confidence figure IS this one.
+        if has_tasks {
+            let mut stmt = conn.prepare(
+                "SELECT c.sha FROM history_commits c
+                  WHERE c.repository = ?1
+                    AND EXISTS (
+                        SELECT 1 FROM tasks t
+                         WHERE json_extract(t.deliverables, '$.factory_branch_anchor') = c.sha
+                    )",
+            )?;
+            let anchored: Vec<String> = stmt
+                .query_map(params![repository], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            let anchor_total: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM tasks
+                  WHERE json_extract(deliverables, '$.factory_branch_anchor') IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )?;
+            let anchor_distinct: i64 = conn.query_row(
+                "SELECT COUNT(DISTINCT json_extract(deliverables, '$.factory_branch_anchor'))
+                   FROM tasks
+                  WHERE json_extract(deliverables, '$.factory_branch_anchor') IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )?;
+            high_confidence = Some(anchored.len() as i64);
+            by_method.push((LINK_METHOD_FACTORY_ANCHOR.to_string(), anchored.len() as i64));
+            edges.push(EdgeHealth {
+                edge: LINK_METHOD_FACTORY_ANCHOR.to_string(),
+                usable_rows: anchor_total,
+                distinct_identifiers: anchor_distinct,
+                ..Default::default()
+            });
+            linked_any.extend(anchored);
+        }
+
+        // --- Edge 2: the variable-width event prefixes.
+        //
+        // Matched in memory rather than in SQL. The alternative — a correlated
+        // `LIKE` over `history_commits` × the event rows — is a cross product,
+        // and the memory here is bounded by the number of *indexed commits*
+        // (~2.5 K on this repo, ~100 KB of SHA text), which the index already
+        // holds row-for-row anyway.
+        if has_events {
+            let (events, health) = Self::worker_commit_events(&conn)?;
+            let mut by_len: HashMap<usize, std::collections::HashSet<String>> = HashMap::new();
+            for event in &events {
+                by_len
+                    .entry(event.head_sha.len())
+                    .or_default()
+                    .insert(event.head_sha.to_lowercase());
+            }
+
+            let mut stmt =
+                conn.prepare("SELECT sha FROM history_commits WHERE repository = ?1")?;
+            let all_shas: Vec<String> = stmt
+                .query_map(params![repository], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+
+            let mut matched = 0i64;
+            for sha in &all_shas {
+                let lower = sha.to_lowercase();
+                let hit = by_len
+                    .iter()
+                    .any(|(len, set)| lower.len() >= *len && set.contains(&lower[..*len]));
+                if hit {
+                    matched += 1;
+                    linked_any.insert(sha.clone());
+                }
+            }
+            by_method.push((LINK_METHOD_WORKER_EVENT_PREFIX.to_string(), matched));
+            edges.push(health);
+        }
+
+        // --- Edge 3: the repaired spine itself.
+        if has_links {
+            let mut stmt = conn.prepare(
+                "SELECT c.sha FROM history_commits c
+                  JOIN commit_links l ON l.commit_hash = c.sha
+                 WHERE c.repository = ?1",
+            )?;
+            let linked: Vec<String> = stmt
+                .query_map(params![repository], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            let total_links: i64 =
+                conn.query_row("SELECT COUNT(*) FROM commit_links", [], |row| row.get(0))?;
+            by_method.push(("commit_links".to_string(), linked.len() as i64));
+            edges.push(EdgeHealth {
+                edge: "commit_links".to_string(),
+                usable_rows: total_links,
+                distinct_identifiers: total_links,
+                ..Default::default()
+            });
+            linked_any.extend(linked);
+        }
+
+        by_method.sort();
+        let any_linked = linked_any.len() as i64;
+        let pct = |n: i64| (total_commits > 0).then(|| n as f64 * 100.0 / total_commits as f64);
 
         Ok(ProvenanceCoverage {
             total_commits,
-            high_confidence_linked: Some(linked),
-            coverage_pct: (total_commits > 0)
-                .then(|| linked as f64 * 100.0 / total_commits as f64),
-            unmeasurable_reason: None,
+            coverage_pct: high_confidence.and_then(pct),
+            high_confidence_linked: high_confidence,
+            any_confidence_linked: Some(any_linked),
+            any_coverage_pct: pct(any_linked),
+            by_method,
+            edges,
+            // The `tasks.notes` text edge is deliberately NOT counted here, and
+            // saying so is part of the measurement. Counting it means a
+            // `LIKE '%…%'` of every commit against every task's free-text notes
+            // — O(commits × tasks × note length) with no index available — and
+            // it is the one edge whose matches are substring coincidences as
+            // often as they are provenance. It stays available per-commit in
+            // `resolve_provenance`, at medium confidence, where a reader can
+            // judge it; it does not inflate a headline percentage.
+            unmeasurable_reason: (!has_tasks || !has_events || !has_links).then(|| {
+                let mut missing = Vec::new();
+                if !has_tasks {
+                    missing.push("tasks");
+                }
+                if !has_events {
+                    missing.push("events");
+                }
+                if !has_links {
+                    missing.push("commit_links");
+                }
+                format!(
+                    "partial measurement: {} not present in this store, so the edge(s) it \
+                     carries are absent from these counts",
+                    missing.join(", ")
+                )
+            }),
         })
+    }
+
+    fn resolve_provenance(
+        &self,
+        repository: &str,
+        shas: &[String],
+    ) -> Result<HashMap<String, CommitProvenance>> {
+        let mut out: HashMap<String, CommitProvenance> = shas
+            .iter()
+            .map(|sha| {
+                (
+                    sha.clone(),
+                    CommitProvenance {
+                        sha: sha.clone(),
+                        links: Vec::new(),
+                        reason: None,
+                    },
+                )
+            })
+            .collect();
+        if shas.is_empty() {
+            return Ok(out);
+        }
+
+        let conn = self.lock();
+        let has_tasks = Self::table_exists(&conn, "tasks")?;
+        let has_events = Self::table_exists(&conn, "events")?;
+        let has_links = Self::table_exists(&conn, "commit_links")?;
+
+        // --- Edge: an existing commit_links row. Strongest when it was
+        // OBSERVED (the PostToolUse hook watched the commit happen); merely
+        // reconstructed rows carry the indexer's own link_method and are
+        // reported at medium, so §5.3's "never confused with an observed one"
+        // holds at read time and not only at write time.
+        if has_links {
+            let has_method = conn
+                .prepare("SELECT 1 FROM pragma_table_info('commit_links') WHERE name = 'link_method'")?
+                .exists([])?;
+            let sql = if has_method {
+                "SELECT commit_hash, session_id, agent_id, committed_at, link_method
+                   FROM commit_links WHERE commit_hash = ?1"
+            } else {
+                "SELECT commit_hash, session_id, agent_id, committed_at, NULL AS link_method
+                   FROM commit_links WHERE commit_hash = ?1"
+            };
+            let mut stmt = conn.prepare(sql)?;
+            for sha in shas {
+                let row = stmt
+                    .query_row(params![sha], |row| {
+                        Ok((
+                            row.get::<_, String>("session_id")?,
+                            row.get::<_, String>("agent_id")?,
+                            row.get::<_, Option<String>>("committed_at")?,
+                            row.get::<_, Option<String>>("link_method")?,
+                        ))
+                    })
+                    .optional()?;
+                let Some((session_id, agent_id, committed_at, link_method)) = row else {
+                    continue;
+                };
+                // A row written before `link_method` existed is legacy hook
+                // output: that path was the ONLY writer until this milestone.
+                let method =
+                    link_method.unwrap_or_else(|| LINK_METHOD_HOOK_OBSERVED.to_string());
+                let confidence = if method == LINK_METHOD_HOOK_OBSERVED {
+                    LinkConfidence::High
+                } else {
+                    LinkConfidence::Medium
+                };
+                if let Some(entry) = out.get_mut(sha) {
+                    entry.links.push(ProvenanceLink {
+                        link_method: method,
+                        confidence,
+                        task_id: None,
+                        task_title: None,
+                        session_id: (!session_id.is_empty()).then_some(session_id),
+                        agent_id: (!agent_id.is_empty()).then_some(agent_id),
+                        observed_at: committed_at,
+                        matched_prefix: None,
+                        ambiguous: false,
+                        ambiguous_candidates: Vec::new(),
+                    });
+                }
+            }
+        }
+
+        // --- Edge: the exact factory anchor (high confidence, no guard needed).
+        if has_tasks {
+            let mut stmt = conn.prepare(
+                "SELECT id, title, updated_at, assignee FROM tasks
+                  WHERE json_extract(deliverables, '$.factory_branch_anchor') = ?1",
+            )?;
+            for sha in shas {
+                let rows = stmt.query_map(params![sha], |row| {
+                    Ok((
+                        row.get::<_, String>("id")?,
+                        row.get::<_, Option<String>>("title")?,
+                        row.get::<_, Option<String>>("updated_at")?,
+                        row.get::<_, Option<String>>("assignee")?,
+                    ))
+                })?;
+                for row in rows {
+                    let (id, title, updated_at, assignee) = row?;
+                    if let Some(entry) = out.get_mut(sha) {
+                        entry.links.push(ProvenanceLink {
+                            link_method: LINK_METHOD_FACTORY_ANCHOR.to_string(),
+                            confidence: LinkConfidence::High,
+                            task_id: Some(id),
+                            task_title: title,
+                            session_id: None,
+                            agent_id: assignee,
+                            observed_at: updated_at,
+                            matched_prefix: None,
+                            ambiguous: false,
+                            ambiguous_candidates: Vec::new(),
+                        });
+                    }
+                }
+            }
+        }
+
+        // --- Edge: the variable-width worker_git_commit prefixes (§5.2).
+        if has_events {
+            let (events, _health) = Self::worker_commit_events(&conn)?;
+            let mut ambiguity: HashMap<String, Vec<String>> = HashMap::new();
+            // (sha, method, prefix, session) — one worker emits the same
+            // session/head_sha pair on every session-stop, and a page of ten
+            // commits does not need forty copies of the same edge.
+            let mut seen: std::collections::HashSet<(String, String, String)> =
+                std::collections::HashSet::new();
+
+            for event in &events {
+                let exact = classify_candidate(&event.head_sha) == CandidateClass::Exact;
+                for sha in shas {
+                    if !candidate_matches(&event.head_sha, sha) {
+                        continue;
+                    }
+                    let key = (
+                        sha.clone(),
+                        event.head_sha.to_lowercase(),
+                        event.session_id.clone().unwrap_or_default(),
+                    );
+                    if !seen.insert(key) {
+                        continue;
+                    }
+                    // Ambiguity is asked of the index, once per prefix.
+                    let candidates = if exact {
+                        Vec::new()
+                    } else {
+                        match ambiguity.get(&event.head_sha) {
+                            Some(c) => c.clone(),
+                            None => {
+                                let found = Self::commits_matching_prefix(
+                                    &conn,
+                                    repository,
+                                    &event.head_sha,
+                                )?;
+                                ambiguity.insert(event.head_sha.clone(), found.clone());
+                                found
+                            }
+                        }
+                    };
+                    let ambiguous = candidates.len() > 1;
+                    if let Some(entry) = out.get_mut(sha) {
+                        entry.links.push(ProvenanceLink {
+                            link_method: if exact {
+                                LINK_METHOD_WORKER_EVENT_EXACT.to_string()
+                            } else {
+                                LINK_METHOD_WORKER_EVENT_PREFIX.to_string()
+                            },
+                            // An ambiguous prefix is still returned — §5.2
+                            // forbids silently picking a winner — but it is not
+                            // allowed to look as good as an exact match.
+                            confidence: match (exact, ambiguous) {
+                                (true, _) => LinkConfidence::High,
+                                (false, false) => LinkConfidence::High,
+                                (false, true) => LinkConfidence::Low,
+                            },
+                            task_id: None,
+                            task_title: None,
+                            session_id: event.session_id.clone(),
+                            agent_id: event.agent_id.clone(),
+                            observed_at: event.created_at.clone(),
+                            matched_prefix: Some(event.head_sha.clone()),
+                            ambiguous,
+                            ambiguous_candidates: if ambiguous { candidates } else { Vec::new() },
+                        });
+                    }
+                }
+            }
+        }
+
+        // --- Edge: the free-text close receipt in tasks.notes (medium).
+        if has_tasks {
+            let mut stmt = conn.prepare(
+                "SELECT id, title, updated_at, assignee FROM tasks
+                  WHERE notes LIKE '%' || ?1 || '%' LIMIT ?2",
+            )?;
+            for sha in shas {
+                if sha.len() < FULL_SHA_LEN {
+                    continue;
+                }
+                // The abbreviation, not the full SHA: close receipts quote both
+                // forms, and the short one is a superstring test that catches
+                // the long one too.
+                let probe = &sha[..8];
+                let already: std::collections::HashSet<String> = out
+                    .get(sha)
+                    .map(|p| p.links.iter().filter_map(|l| l.task_id.clone()).collect())
+                    .unwrap_or_default();
+                let rows = stmt.query_map(params![probe, MAX_LINKS_PER_COMMIT as i64], |row| {
+                    Ok((
+                        row.get::<_, String>("id")?,
+                        row.get::<_, Option<String>>("title")?,
+                        row.get::<_, Option<String>>("updated_at")?,
+                        row.get::<_, Option<String>>("assignee")?,
+                    ))
+                })?;
+                for row in rows {
+                    let (id, title, updated_at, assignee) = row?;
+                    // The anchor edge already named this task exactly; a
+                    // substring hit on the same task adds no information and
+                    // would pad the answer with fake corroboration.
+                    if already.contains(&id) {
+                        continue;
+                    }
+                    if let Some(entry) = out.get_mut(sha) {
+                        entry.links.push(ProvenanceLink {
+                            link_method: LINK_METHOD_TASK_NOTE.to_string(),
+                            confidence: LinkConfidence::Medium,
+                            task_id: Some(id),
+                            task_title: title,
+                            session_id: None,
+                            agent_id: assignee,
+                            observed_at: updated_at,
+                            matched_prefix: Some(probe.to_string()),
+                            ambiguous: false,
+                            ambiguous_candidates: Vec::new(),
+                        });
+                    }
+                }
+            }
+        }
+
+        for provenance in out.values_mut() {
+            // Strongest first, then stable by method so two runs agree.
+            provenance.links.sort_by(|a, b| {
+                b.confidence
+                    .cmp(&a.confidence)
+                    .then_with(|| a.link_method.cmp(&b.link_method))
+                    .then_with(|| a.task_id.cmp(&b.task_id))
+                    .then_with(|| a.session_id.cmp(&b.session_id))
+            });
+            if provenance.links.len() > MAX_LINKS_PER_COMMIT {
+                let dropped = provenance.links.len() - MAX_LINKS_PER_COMMIT;
+                provenance.links.truncate(MAX_LINKS_PER_COMMIT);
+                provenance.reason = Some(format!(
+                    "{MAX_LINKS_PER_COMMIT} strongest edges shown; {dropped} weaker edge(s) omitted"
+                ));
+            } else if provenance.links.is_empty() {
+                provenance.reason = Some(match (has_tasks, has_events, has_links) {
+                    (false, false, false) => "no provenance edge is readable in this store \
+                         (no tasks, events or commit_links table)"
+                        .to_string(),
+                    _ => "no populated edge: this commit carries no factory anchor, no \
+                          worker_git_commit event, no close-note mention and no commit_links row"
+                        .to_string(),
+                });
+            }
+        }
+
+        Ok(out)
+    }
+
+    fn shas_for_task(&self, repository: &str, task_id: &str) -> Result<Vec<String>> {
+        let conn = self.lock();
+        if !Self::table_exists(&conn, "tasks")? {
+            return Ok(Vec::new());
+        }
+        let row = conn
+            .query_row(
+                "SELECT COALESCE(json_extract(deliverables, '$.factory_branch_anchor'), ''),
+                        COALESCE(notes, '')
+                   FROM tasks WHERE id = ?1",
+                params![task_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let Some((anchor, notes)) = row else {
+            return Ok(Vec::new());
+        };
+
+        let mut candidates = Self::full_shas_in(&notes);
+        if !anchor.is_empty() {
+            candidates.push(anchor.to_lowercase());
+        }
+        candidates.sort();
+        candidates.dedup();
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Only SHAs this repository has actually indexed: a note can quote a
+        // commit from another repo, and returning it would filter the answer
+        // down to a commit the index cannot describe.
+        let mut stmt = conn.prepare_cached(
+            "SELECT sha FROM history_commits WHERE repository = ?1 AND sha = ?2",
+        )?;
+        let mut out = Vec::new();
+        for candidate in candidates {
+            if let Some(sha) = stmt
+                .query_row(params![repository, candidate], |row| row.get::<_, String>(0))
+                .optional()?
+            {
+                out.push(sha);
+            }
+        }
+        Ok(out)
+    }
+
+    fn shas_for_session(&self, repository: &str, session_id: &str) -> Result<Vec<String>> {
+        let conn = self.lock();
+        let mut out: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        if Self::table_exists(&conn, "commit_links")? {
+            let mut stmt = conn.prepare(
+                "SELECT c.sha FROM history_commits c
+                   JOIN commit_links l ON l.commit_hash = c.sha
+                  WHERE c.repository = ?1 AND l.session_id = ?2",
+            )?;
+            let rows: Vec<String> = stmt
+                .query_map(params![repository, session_id], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            out.extend(rows);
+        }
+
+        if Self::table_exists(&conn, "events")? {
+            let mut stmt = conn.prepare(
+                "SELECT json_extract(metadata, '$.head_sha') AS head_sha
+                   FROM events
+                  WHERE event_type = 'worker_git_commit' AND session_id = ?1",
+            )?;
+            let prefixes: Vec<Option<String>> = stmt
+                .query_map(params![session_id], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            for prefix in prefixes.into_iter().flatten() {
+                match classify_candidate(&prefix) {
+                    CandidateClass::Exact | CandidateClass::Prefix => {}
+                    _ => continue,
+                }
+                // An ambiguous prefix widens the filter rather than narrowing
+                // it to a guess: every commit it could mean is included, which
+                // is the honest reading of "commits this session may have made".
+                out.extend(Self::commits_matching_prefix(&conn, repository, &prefix)?);
+            }
+        }
+
+        let mut out: Vec<String> = out.into_iter().collect();
+        out.sort();
+        Ok(out)
+    }
+
+    fn commits_without_links(
+        &self,
+        repository: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<String>> {
+        let conn = self.lock();
+        if !Self::table_exists(&conn, "commit_links")? {
+            return Ok(Vec::new());
+        }
+        let mut stmt = conn.prepare(
+            "SELECT c.sha FROM history_commits c
+              WHERE c.repository = ?1
+                AND NOT EXISTS (SELECT 1 FROM commit_links l WHERE l.commit_hash = c.sha)
+              ORDER BY c.committed_at DESC, c.sha
+              LIMIT ?2 OFFSET ?3",
+        )?;
+        let rows = stmt
+            .query_map(params![repository, limit as i64, offset as i64], |row| {
+                row.get(0)
+            })?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(rows)
     }
 
     fn upsert_docs(
@@ -1710,6 +2457,7 @@ impl HistoryStore for SqliteHistoryStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::history_provenance::LINK_METHOD_INDEXER_WORKER_EVENT;
     use tempfile::TempDir;
 
     fn store() -> (TempDir, SqliteHistoryStore) {
@@ -2623,7 +3371,17 @@ mod tests {
         assert_eq!(cov.total_commits, 2);
         assert_eq!(cov.high_confidence_linked, Some(1));
         assert_eq!(cov.coverage_pct, Some(50.0));
-        assert!(cov.unmeasurable_reason.is_none());
+        // M5 (cas-519f): the anchor edge is readable but `events` and
+        // `commit_links` are not, so the measurement is PARTIAL and says so.
+        // Reporting it as complete would let a store that can only see one of
+        // three edges publish a number that reads as the whole picture.
+        let reason = cov.unmeasurable_reason.expect("partial measurement declared");
+        assert!(reason.contains("events"), "{reason}");
+        assert!(reason.contains("commit_links"), "{reason}");
+        assert_eq!(
+            cov.by_method,
+            vec![(LINK_METHOD_FACTORY_ANCHOR.to_string(), 1)]
+        );
     }
 
     #[test]
@@ -2955,4 +3713,505 @@ mod tests {
         assert_eq!(SymbolMapping::from_str("nonsense"), None);
     }
 
+    // ===================================================================
+    // Provenance resolution (EPIC cas-6212 / cas-519f, spec §5.2)
+    // ===================================================================
+
+    /// The `events` / `tasks` / `commit_links` tables the resolver reads from
+    /// other subsystems. Created explicitly per test so each one states exactly
+    /// which edges it is exercising — a fixture that always creates all three
+    /// would hide which edge produced a result.
+    fn create_events_table(store: &SqliteHistoryStore) {
+        store
+            .lock()
+            .execute_batch(
+                "CREATE TABLE events (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     event_type TEXT NOT NULL,
+                     entity_type TEXT NOT NULL,
+                     entity_id TEXT NOT NULL,
+                     summary TEXT NOT NULL,
+                     metadata TEXT,
+                     created_at TEXT NOT NULL,
+                     session_id TEXT
+                 );",
+            )
+            .unwrap();
+    }
+
+    fn emit_worker_git_commit(store: &SqliteHistoryStore, head_sha: &str, session: &str) {
+        store
+            .lock()
+            .execute(
+                "INSERT INTO events (event_type, entity_type, entity_id, summary, metadata, created_at, session_id)
+                 VALUES ('worker_git_commit', 'worker', 'worker-1', 'final git state', ?1, '2026-08-08T01:00:00Z', ?2)",
+                params![
+                    format!(r#"{{"branch":"factory/w","head_sha":"{head_sha}"}}"#),
+                    session
+                ],
+            )
+            .unwrap();
+    }
+
+    fn index(store: &SqliteHistoryStore, shas: &[&str]) {
+        let commits: Vec<HistoryCommit> = shas.iter().map(|s| commit(s)).collect();
+        let last = shas.last().unwrap();
+        store
+            .commit_batch("/repo", &commits, &[], last, true)
+            .unwrap();
+    }
+
+    /// §5.2 consequence 1, end to end: the join must use the event's OWN width.
+    /// A 7-char row and an 8-char row describe the same commit and both must
+    /// resolve — `sha[0..8]` would drop the 594 seven-char rows the live corpus
+    /// actually contains.
+    #[test]
+    fn prefix_matching_resolves_seven_eight_and_forty_char_widths() {
+        let (_t, store) = store();
+        let sha = "1234567abcdef0123456789abcdef0123456789a";
+        index(&store, &[sha]);
+        create_events_table(&store);
+        emit_worker_git_commit(&store, &sha[..7], "session-7");
+        emit_worker_git_commit(&store, &sha[..8], "session-8");
+        emit_worker_git_commit(&store, sha, "session-40");
+
+        let resolved = store
+            .resolve_provenance("/repo", &[sha.to_string()])
+            .unwrap();
+        let p = resolved.get(sha).expect("the requested sha is always present");
+
+        let sessions: Vec<&str> = p
+            .links
+            .iter()
+            .filter_map(|l| l.session_id.as_deref())
+            .collect();
+        assert!(sessions.contains(&"session-7"), "7-char width dropped: {p:?}");
+        assert!(sessions.contains(&"session-8"), "8-char width dropped: {p:?}");
+        assert!(sessions.contains(&"session-40"), "40-char width dropped: {p:?}");
+
+        // The full-width row is an EXACT match and must be labelled as one, not
+        // run through the prefix path with its collision guard.
+        let exact = p
+            .links
+            .iter()
+            .find(|l| l.session_id.as_deref() == Some("session-40"))
+            .unwrap();
+        assert_eq!(exact.link_method, LINK_METHOD_WORKER_EVENT_EXACT);
+        assert_eq!(exact.confidence, LinkConfidence::High);
+        assert!(!exact.ambiguous);
+
+        let seven = p
+            .links
+            .iter()
+            .find(|l| l.session_id.as_deref() == Some("session-7"))
+            .unwrap();
+        assert_eq!(seven.link_method, LINK_METHOD_WORKER_EVENT_PREFIX);
+        assert_eq!(seven.matched_prefix.as_deref(), Some(&sha[..7]));
+    }
+
+    /// The ambiguity test §5.2 says must exist, at the width where the
+    /// collision probability is ~1.1% rather than theoretical: two indexed
+    /// commits sharing a 7-char prefix. BOTH candidates are returned and the
+    /// edge is downgraded — the resolver never picks a winner.
+    #[test]
+    fn an_ambiguous_seven_char_prefix_returns_every_candidate_and_never_guesses() {
+        let (_t, store) = store();
+        let a = "7777777aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let b = "7777777bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        index(&store, &[a, b]);
+        create_events_table(&store);
+        emit_worker_git_commit(&store, "7777777", "session-ambiguous");
+
+        let resolved = store
+            .resolve_provenance("/repo", &[a.to_string(), b.to_string()])
+            .unwrap();
+
+        for sha in [a, b] {
+            let p = resolved.get(sha).unwrap();
+            let link = p
+                .links
+                .iter()
+                .find(|l| l.link_method == LINK_METHOD_WORKER_EVENT_PREFIX)
+                .unwrap_or_else(|| panic!("{sha} lost its prefix edge: {p:?}"));
+            assert!(link.ambiguous, "a colliding prefix must be flagged: {link:?}");
+            assert_eq!(
+                link.confidence,
+                LinkConfidence::Low,
+                "an ambiguous edge must not read as good as an exact one"
+            );
+            let mut candidates = link.ambiguous_candidates.clone();
+            candidates.sort();
+            assert_eq!(
+                candidates,
+                vec![a.to_string(), b.to_string()],
+                "every commit the prefix could mean must be returned"
+            );
+        }
+    }
+
+    /// An 8-char prefix that happens to be unique in THIS index is not
+    /// ambiguous, even though 8-char prefixes can collide in general. Ambiguity
+    /// is measured against the corpus, never inferred from width.
+    #[test]
+    fn ambiguity_is_measured_against_the_index_not_guessed_from_width() {
+        let (_t, store) = store();
+        let a = "8888888aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let b = "8888888baaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        index(&store, &[a, b]);
+        create_events_table(&store);
+        // 8 chars distinguishes them; 7 would not.
+        emit_worker_git_commit(&store, &a[..8], "session-unique");
+
+        let resolved = store.resolve_provenance("/repo", &[a.to_string(), b.to_string()]).unwrap();
+        let link = resolved.get(a).unwrap().links.first().cloned().unwrap();
+        assert!(!link.ambiguous);
+        assert_eq!(link.confidence, LinkConfidence::High);
+        // ...and the sibling commit is untouched by an edge that is not its own.
+        assert!(resolved.get(b).unwrap().links.is_empty());
+    }
+
+    /// §5.2 consequence 2: the `'?'` sentinel is a declared degradation, not a
+    /// SHA. It must never resolve, and it must be COUNTED so the 46 rows
+    /// carrying it stay visible instead of looking like a coverage gap.
+    #[test]
+    fn the_stub_and_the_empty_rows_are_excluded_and_counted() {
+        let (_t, store) = store();
+        let sha = "9999999aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        index(&store, &[sha]);
+        create_events_table(&store);
+        emit_worker_git_commit(&store, "?", "session-stub");
+        emit_worker_git_commit(&store, "999", "session-tooshort");
+        store
+            .lock()
+            .execute(
+                "INSERT INTO events (event_type, entity_type, entity_id, summary, metadata, created_at, session_id)
+                 VALUES ('worker_git_commit', 'worker', 'w', 's', NULL, '2026-08-08T01:00:00Z', 'session-null')",
+                [],
+            )
+            .unwrap();
+
+        let resolved = store.resolve_provenance("/repo", &[sha.to_string()]).unwrap();
+        let p = resolved.get(sha).unwrap();
+        assert!(p.links.is_empty(), "no usable edge existed: {p:?}");
+        assert!(
+            p.reason.as_deref().unwrap_or_default().contains("no populated edge"),
+            "an unresolved commit must say why: {p:?}"
+        );
+
+        let cov = store.provenance_coverage("/repo").unwrap();
+        let edge = cov
+            .edges
+            .iter()
+            .find(|e| e.edge == LINK_METHOD_WORKER_EVENT_PREFIX)
+            .expect("the event edge is reported even when it contributes nothing");
+        assert_eq!(edge.usable_rows, 0);
+        assert_eq!(edge.excluded_stub, 1, "the '?' stub must be counted, not dropped");
+        assert_eq!(edge.excluded_absent, 1, "the NULL-metadata class must be counted");
+        assert_eq!(edge.excluded_unusable, 1, "the too-short class must be counted");
+    }
+
+    /// §6.4 Q3: a commit with no edge is part of the answer, carrying its
+    /// reason. Dropping it would turn "we cannot attribute this" into "this
+    /// commit does not exist".
+    #[test]
+    fn a_commit_with_no_edge_is_returned_with_a_reason_never_omitted() {
+        let (_t, store) = store();
+        let a = "aaaaaaa1111111111111111111111111111111aa";
+        index(&store, &[a]);
+
+        let resolved = store.resolve_provenance("/repo", &[a.to_string()]).unwrap();
+        assert_eq!(resolved.len(), 1, "every requested sha must be present");
+        let p = &resolved[a];
+        assert!(p.links.is_empty());
+        assert!(p.reason.is_some());
+        assert!(p.best().is_none());
+    }
+
+    /// The exact anchor edge names a TASK, and does so at high confidence with
+    /// no prefix arithmetic anywhere near it.
+    #[test]
+    fn the_factory_anchor_edge_resolves_a_task_at_high_confidence() {
+        let (_t, store) = store();
+        let sha = "abcdef01234567890123456789012345678901ab";
+        index(&store, &[sha]);
+        {
+            let conn = store.lock();
+            conn.execute_batch(
+                "CREATE TABLE tasks (
+                     id TEXT PRIMARY KEY, title TEXT, notes TEXT, updated_at TEXT,
+                     assignee TEXT, deliverables TEXT NOT NULL DEFAULT '{}');",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO tasks (id, title, updated_at, assignee, deliverables)
+                 VALUES ('cas-519f', 'M5 provenance', '2026-08-08T00:00:00Z', 'worker-1',
+                         json_object('factory_branch_anchor', ?1))",
+                params![sha],
+            )
+            .unwrap();
+        }
+
+        let resolved = store.resolve_provenance("/repo", &[sha.to_string()]).unwrap();
+        let link = resolved[sha].best().cloned().unwrap();
+        assert_eq!(link.link_method, LINK_METHOD_FACTORY_ANCHOR);
+        assert_eq!(link.confidence, LinkConfidence::High);
+        assert_eq!(link.task_id.as_deref(), Some("cas-519f"));
+        assert_eq!(link.task_title.as_deref(), Some("M5 provenance"));
+        assert!(link.matched_prefix.is_none(), "an exact edge has no prefix to report");
+
+        // And the same edge answers the task_id filter.
+        assert_eq!(
+            store.shas_for_task("/repo", "cas-519f").unwrap(),
+            vec![sha.to_string()]
+        );
+    }
+
+    /// A close-note mention is evidence, but it is a substring of free text, so
+    /// it can never outrank an exact edge — and it must not duplicate one.
+    #[test]
+    fn the_note_edge_is_medium_and_never_duplicates_the_anchor() {
+        let (_t, store) = store();
+        let anchored = "beef000000000000000000000000000000000001";
+        let mentioned = "beef000000000000000000000000000000000002";
+        index(&store, &[anchored, mentioned]);
+        {
+            let conn = store.lock();
+            conn.execute_batch(
+                "CREATE TABLE tasks (
+                     id TEXT PRIMARY KEY, title TEXT, notes TEXT, updated_at TEXT,
+                     assignee TEXT, deliverables TEXT NOT NULL DEFAULT '{}');",
+            )
+            .unwrap();
+            // One task both anchors `anchored` AND mentions both SHAs in prose.
+            conn.execute(
+                "INSERT INTO tasks (id, title, notes, updated_at, assignee, deliverables)
+                 VALUES ('cas-1', 't', ?1, '2026-08-08T00:00:00Z', 'w',
+                         json_object('factory_branch_anchor', ?2))",
+                params![
+                    format!("resolved to full commit {anchored}; see also {mentioned}"),
+                    anchored
+                ],
+            )
+            .unwrap();
+        }
+
+        let resolved = store
+            .resolve_provenance("/repo", &[anchored.to_string(), mentioned.to_string()])
+            .unwrap();
+
+        // The anchored commit gets ONE link, not an anchor plus a redundant
+        // text hit on the same task: fake corroboration is still fake.
+        let a = &resolved[anchored];
+        assert_eq!(a.links.len(), 1, "{a:?}");
+        assert_eq!(a.links[0].link_method, LINK_METHOD_FACTORY_ANCHOR);
+
+        let m = &resolved[mentioned];
+        assert_eq!(m.links.len(), 1, "{m:?}");
+        assert_eq!(m.links[0].link_method, LINK_METHOD_TASK_NOTE);
+        assert_eq!(m.links[0].confidence, LinkConfidence::Medium);
+    }
+
+    /// The `shas` filter must narrow in SQL. `Some(empty)` means "this filter
+    /// matched nothing", and the one thing it must never do is widen back out
+    /// to every commit.
+    #[test]
+    fn an_empty_sha_filter_matches_nothing_rather_than_everything() {
+        let (_t, store) = store();
+        let a = "a".repeat(40);
+        let b = "b".repeat(40);
+        index(&store, &[&a, &b]);
+
+        let none = store
+            .search_commits(&HistoryQuery {
+                repository: "/repo".into(),
+                shas: Some(Vec::new()),
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(none.is_empty(), "an empty allowlist must match nothing");
+
+        let one = store
+            .search_commits(&HistoryQuery {
+                repository: "/repo".into(),
+                shas: Some(vec![a.clone()]),
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].commit.sha, a);
+
+        // And it composes with the other filters rather than replacing them.
+        let with_text = store
+            .search_commits(&HistoryQuery {
+                repository: "/repo".into(),
+                text: Some("subject".into()),
+                shas: Some(vec![b.clone()]),
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(with_text.len(), 1);
+        assert_eq!(with_text[0].commit.sha, b);
+    }
+
+    /// The session filter widens across an ambiguous prefix instead of
+    /// narrowing to a guess: "commits this session may have made" is the honest
+    /// reading of ambiguous evidence.
+    #[test]
+    fn the_session_filter_resolves_through_events_and_keeps_ambiguity_inclusive() {
+        let (_t, store) = store();
+        let a = "5555555aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let b = "5555555bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        index(&store, &[a, b]);
+        create_events_table(&store);
+        emit_worker_git_commit(&store, "5555555", "session-x");
+
+        let mut shas = store.shas_for_session("/repo", "session-x").unwrap();
+        shas.sort();
+        assert_eq!(shas, vec![a.to_string(), b.to_string()]);
+        assert!(store.shas_for_session("/repo", "session-none").unwrap().is_empty());
+    }
+
+    /// The repair work list is "indexed commits with no link", so a commit that
+    /// already has one drops off it — which is what makes the pass idempotent
+    /// and safe to run on every daemon tick.
+    #[test]
+    fn commits_without_links_is_the_repair_work_list() {
+        let (_t, store) = store();
+        let a = "a".repeat(40);
+        let b = "b".repeat(40);
+        index(&store, &[&a, &b]);
+        assert!(
+            store.commits_without_links("/repo", 10, 0).unwrap().is_empty(),
+            "with no commit_links table there is no spine to repair"
+        );
+
+        store
+            .lock()
+            .execute_batch(crate::commit_link_store::COMMIT_LINK_SCHEMA)
+            .unwrap();
+        let mut pending = store.commits_without_links("/repo", 10, 0).unwrap();
+        pending.sort();
+        assert_eq!(pending, vec![a.clone(), b.clone()]);
+        // The offset is what lets a "repair everything" loop step past commits
+        // that will never resolve, instead of re-reading them forever.
+        assert_eq!(store.commits_without_links("/repo", 10, 2).unwrap().len(), 0);
+        assert_eq!(store.commits_without_links("/repo", 1, 1).unwrap().len(), 1);
+
+        store
+            .lock()
+            .execute(
+                "INSERT INTO commit_links (commit_hash, session_id, agent_id, branch, message,
+                     files_changed, prompt_ids, committed_at, author, scope, link_method)
+                 VALUES (?1, 's', 'a', 'main', 'm', '[]', '[]', '2026-08-08T00:00:00Z', 'x', 'project', 'hook_observed')",
+                params![a],
+            )
+            .unwrap();
+        assert_eq!(store.commits_without_links("/repo", 10, 0).unwrap(), vec![b]);
+    }
+
+    /// A `commit_links` row written before M5 has no `link_method`. It must be
+    /// read as the observation it was — the hook was the only writer then — and
+    /// not as an unknown or a reconstruction.
+    #[test]
+    fn a_legacy_link_row_reads_as_an_observation() {
+        let (_t, store) = store();
+        let a = "a".repeat(40);
+        index(&store, &[&a]);
+        store
+            .lock()
+            .execute_batch(crate::commit_link_store::COMMIT_LINK_SCHEMA)
+            .unwrap();
+        store
+            .lock()
+            .execute(
+                "INSERT INTO commit_links (commit_hash, session_id, agent_id, branch, message,
+                     files_changed, prompt_ids, committed_at, author, scope)
+                 VALUES (?1, 'legacy-session', 'legacy-agent', 'main', 'm', '[]', '[]',
+                         '2026-08-08T00:00:00Z', 'x', 'project')",
+                params![a],
+            )
+            .unwrap();
+
+        let resolved = store.resolve_provenance("/repo", &[a.clone()]).unwrap();
+        let link = resolved[&a].best().cloned().unwrap();
+        assert_eq!(link.link_method, LINK_METHOD_HOOK_OBSERVED);
+        assert_eq!(link.confidence, LinkConfidence::High);
+        assert_eq!(link.session_id.as_deref(), Some("legacy-session"));
+    }
+
+    /// A reconstructed row is reported at MEDIUM even though it lives in the
+    /// same table as an observation — the whole point of `link_method`.
+    #[test]
+    fn a_reconstructed_link_row_never_reports_as_an_observation() {
+        let (_t, store) = store();
+        let a = "a".repeat(40);
+        index(&store, &[&a]);
+        store
+            .lock()
+            .execute_batch(crate::commit_link_store::COMMIT_LINK_SCHEMA)
+            .unwrap();
+        store
+            .lock()
+            .execute(
+                "INSERT INTO commit_links (commit_hash, session_id, agent_id, branch, message,
+                     files_changed, prompt_ids, committed_at, author, scope, link_method)
+                 VALUES (?1, 's', 'a', 'main', 'm', '[]', '[]', '2026-08-08T00:00:00Z', 'x',
+                         'project', ?2)",
+                params![a, LINK_METHOD_INDEXER_WORKER_EVENT],
+            )
+            .unwrap();
+
+        let resolved = store.resolve_provenance("/repo", &[a.clone()]).unwrap();
+        let link = resolved[&a].best().cloned().unwrap();
+        assert_eq!(link.link_method, LINK_METHOD_INDEXER_WORKER_EVENT);
+        assert_eq!(link.confidence, LinkConfidence::Medium);
+    }
+
+    /// Coverage must report both figures split by confidence (spec §10.1), and
+    /// the per-method breakdown that makes the split auditable.
+    #[test]
+    fn coverage_reports_high_and_any_confidence_separately() {
+        let (_t, store) = store();
+        let anchored = "1111111aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let evented = "2222222bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let orphan = "3333333ccccccccccccccccccccccccccccccccc";
+        index(&store, &[anchored, evented, orphan]);
+        create_events_table(&store);
+        emit_worker_git_commit(&store, &evented[..8], "session-1");
+        {
+            let conn = store.lock();
+            conn.execute_batch(
+                "CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT, notes TEXT,
+                     updated_at TEXT, assignee TEXT, deliverables TEXT NOT NULL DEFAULT '{}');",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO tasks (id, deliverables)
+                 VALUES ('cas-1', json_object('factory_branch_anchor', ?1))",
+                params![anchored],
+            )
+            .unwrap();
+        }
+
+        let cov = store.provenance_coverage("/repo").unwrap();
+        assert_eq!(cov.total_commits, 3);
+        // High confidence counts ONLY the exact edge...
+        assert_eq!(cov.high_confidence_linked, Some(1));
+        // ...while "any edge" adds the prefix one. Publishing only the second
+        // number would make a substring-grade corpus look solved.
+        assert_eq!(cov.any_confidence_linked, Some(2));
+        assert!((cov.coverage_pct.unwrap() - 33.33).abs() < 0.1, "{cov:?}");
+        assert!((cov.any_coverage_pct.unwrap() - 66.66).abs() < 0.1, "{cov:?}");
+        assert!(
+            cov.by_method
+                .contains(&(LINK_METHOD_FACTORY_ANCHOR.to_string(), 1))
+        );
+        assert!(
+            cov.by_method
+                .contains(&(LINK_METHOD_WORKER_EVENT_PREFIX.to_string(), 1))
+        );
+    }
 }

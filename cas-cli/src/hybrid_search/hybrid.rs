@@ -65,6 +65,11 @@ pub struct HistoryFilter {
     /// Merge commits are excluded by default (their message is `Merge branch
     /// 'x'`, which is noise — spec §7.1).
     pub include_merges: bool,
+    /// Restrict to this exact SHA set — how the `task_id` / `session_id`
+    /// filters reach SQL (EPIC cas-6212 / cas-519f). Applied *before* `LIMIT`,
+    /// so a task whose commits are not already in the top-k still answers.
+    /// `Some(empty)` legitimately matches nothing; `None` is no filter.
+    pub shas: Option<Vec<String>>,
 }
 
 /// Options specific to hybrid search
@@ -974,6 +979,7 @@ impl HybridSearch {
             since: filter.since.clone(),
             until: filter.until.clone(),
             include_merges: filter.include_merges,
+            shas: filter.shas.clone(),
             limit: opts.base.limit * 3,
         };
 

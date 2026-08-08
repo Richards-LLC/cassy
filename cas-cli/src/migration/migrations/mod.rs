@@ -200,6 +200,7 @@ mod m221_history_index_create_tables;
 mod m222_history_docs_create_table;
 mod m223_history_commits_fts;
 mod m224_history_commit_symbols;
+mod m225_commit_links_link_method;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -425,6 +426,11 @@ pub const MIGRATIONS: &[Migration] = &[
     // column (EPIC cas-6212 / cas-0562), separate from m221 for the same reason
     // m223 is. Renumbered 222 → 224 after the M6 and M4 lanes claimed 222/223.
     m224_history_commit_symbols::MIGRATION,
+    // Provenance link_method (EPIC cas-6212 / cas-519f, spec §5.3): the column
+    // that keeps a reconstructed commit link distinguishable from an observed
+    // one, now that the history indexer is a second writer of commit_links.
+    // Renumbered 224 → 225 after the M3 lane claimed 224.
+    m225_commit_links_link_method::MIGRATION,
 ];
 
 #[cfg(test)]

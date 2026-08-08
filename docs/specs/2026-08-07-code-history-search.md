@@ -2,8 +2,9 @@
 
 - **Task:** cas-7ad6 (design-first; implementation split out after sign-off)
 - **Evidence dependency:** cas-9d92 (Phase 1 + Phase 2, merged to `main` as `f710fc3d`, report `docs/analysis/2026-08-07-comm-efficiency-mining.md`)
-- **Status:** DRAFT — awaiting supervisor/operator sign-off (AC6)
-- **Date:** 2026-08-07
+- **Status:** DRAFT, independently verified — awaiting supervisor/operator sign-off (AC6)
+- **Date:** drafted 2026-08-07; claims re-verified and corrected 2026-08-08
+- **Provenance:** drafted by `proud-gazelle-50`; independently re-measured, corrected and landed by `wise-merlin-89`. The verification pass re-ran every DB count and resolved every §1 `file:line` against the tree; §5.2 and the items marked **[CORRECTED 2026-08-08]** are where the draft and reality diverged.
 
 ---
 
@@ -17,11 +18,19 @@ The goal is to let CAS answer, as a query, *"when and why did this change, and i
 |---|---|---|
 | `commit_links` | the commit ↔ session ↔ prompt spine | **0** |
 | `prompts` | session provenance | **1** |
-| `file_changes.commit_hash` | ties an edit to the commit that shipped it | **0 of 7,760** |
-| `file_changes.prompt_id` | ties an edit to the prompt that caused it | **1 of 7,760** |
+| `file_changes.commit_hash` | ties an edit to the commit that shipped it | **0 of 7,799** |
+| `file_changes.prompt_id` | ties an edit to the prompt that caused it | **1 of 7,799** |
 | `code_files` / `code_symbols` | the tree-sitter symbol index to "reuse" | **0 / 0** |
 
 Method: read-only `sqlite3 'file:/home/pippenz/Petrastella/cas-src/.cas/cas.db?immutable=1'`. Zero writes to live `.cas/`, per the cas-9d92 discipline.
+
+> **Independent re-verification, 2026-08-08 (cas-7ad6, second worker).** Every row count in this
+> table was re-measured against the live DB and every `file:line` in §1 was resolved against the
+> current tree. All findings above **hold**; two claims elsewhere in the draft did **not** and are
+> corrected in place — see §5.2, which was overstating the strength of the fallback provenance
+> edge by roughly 10×. Corrections are marked **[CORRECTED 2026-08-08]** so the delta is auditable
+> rather than silently absorbed. Counts throughout are refreshed to the 2026-08-08 measurement;
+> none of the refreshes change a conclusion.
 
 So the honest framing is: **this feature is two features, and the second one is worthless without the first.** Structural git/PR/issue indexing (§4) is straightforward and cheap. The provenance join (§5) requires first *repairing* capture paths that exist in code but do not fire. A spec that quietly assumed those tables were populated would ship a search surface that returns `is_ai_generated: false` for every line and calls it an answer — which is exactly the cas-9d92 Phase-1 failure mode ("inferring a missing mechanism from missing data without reading the code"), inverted.
 
@@ -42,9 +51,9 @@ All citations are `file:line` against this worktree.
 - `code_files.commit_hash` and `code_symbols.commit_hash` columns **exist and are always written `None`** (`cas-cli/src/daemon/indexing.rs:131`). That is the natural place to hang a git watermark and costs no migration.
 
 **Defects found in this surface that the spec must route around or fix:**
-1. Nothing writes the Tantivy code index. `SearchIndex::index_code_symbol` / `index_code_symbols` (`cas-cli/src/hybrid_search/search_index_impl.rs:421`, `:457`) have **zero non-test callers**, so `.cas/index/code` is never created, so `code_search_available` (`cas-cli/src/hybrid_search/code.rs:70-73`) always fails and `code_search` returns a stub telling the user to run a command that does not exist (`agent_search_system/code.rs:58` advertises `cas index code`; nothing in `cas-cli/src/cli/` registers it).
+1. Nothing writes the Tantivy code index. `SearchIndex::index_code_symbol` / `index_code_symbols` (`cas-cli/src/hybrid_search/search_index_impl.rs:421`, `:457`) have **zero callers of any kind — not even tests** (`grep -rn index_code_symbol --include=*.rs` returns only the two definitions), so `.cas/index/code` is never created, so `code_search_available` (`cas-cli/src/hybrid_search/code.rs:70-73`) always fails and `code_search` returns a stub telling the user to run a command that does not exist (`agent_search_system/code.rs:58` advertises `cas index code`; nothing in `cas-cli/src/cli/` registers it).
 2. `repository` is derived from the file's **parent directory name** (`indexing.rs:102-106`), not the repo root, which defeats the intent of `UNIQUE(repository, path)`.
-3. `CodeConfig.enabled` defaults **false** (`cas-cli/src/config/settings.rs:286`) and the daemon tick only fires when `self.activity.is_idle()` (`cas-cli/src/mcp/daemon.rs:552`), so on a busy factory it may never run.
+3. `CodeConfig.enabled` defaults **false** — declared `#[serde(default)]` on a `bool` at `cas-cli/src/config/settings.rs:282-283` — and the daemon tick only fires when `self.activity.is_idle()` (`cas-cli/src/mcp/daemon.rs:552`), so on a busy factory it may never run.
 
 ### 1.2 Hybrid search — EXTEND, do not clone
 
@@ -52,7 +61,7 @@ All citations are `file:line` against this worktree.
 
 The reusable jewel is **capability-honest weighting**: `ChannelCapabilities` (`cas-cli/src/hybrid_search/scorer.rs:146-187`) plus `SearchWeights::for_capabilities` (`scorer.rs:258-279`), which zeroes dead channels and redistributes their mass so live weights always sum to 1.0, falling back to BM25-only. A history channel that cannot embed (no cloud login) therefore degrades correctly *for free* — provided it is registered as a channel rather than implemented as a parallel ranker.
 
-**Hard constraint from M6 (cas-7909).** `docs/migration/cas-b129-m6-legacy-decommission-survey.md` records that M6 **deleted** `crates/cas-search/src/hybrid.rs` and its integration test specifically because it was a *second, unrelated `HybridSearch`* whose `semantic_score` was hardcoded `0.0`. Building a new history-specific ranker would recreate the exact artifact that task just removed. **This spec forbids a new ranker.** It also inherits M6's open items: `mcp__cas__search` never reaches knowledge pages today (chain ends at `hybrid_search/search_index_query.rs:229`, BM25-only, never constructing `HybridSearch`), and every `HybridSearch` constructor sets `knowledge_store: None` (`hybrid.rs:242,252,264,278,304`). A history channel wired the same way would be equally inert — see §6.3.
+**Hard constraint from M6 (cas-7909).** `docs/migration/cas-b129-m6-legacy-decommission-survey.md` records that M6 **deleted** `crates/cas-search/src/hybrid.rs` and its integration test specifically because it was a *second, unrelated `HybridSearch`* whose `semantic_score` was hardcoded `0.0`. Building a new history-specific ranker would recreate the exact artifact that task just removed. **This spec forbids a new ranker.** It also inherits M6's open items: `mcp__cas__search` never reaches knowledge pages today (chain ends at `hybrid_search/search_index_query.rs:229`, BM25-only, never constructing `HybridSearch`), and every `HybridSearch` constructor sets `knowledge_store: None` (`hybrid.rs:243,255,267,283,303`). A history channel wired the same way would be equally inert — see §6.3.
 
 ### 1.3 Embeddings — REUSE; cloud-only, and that is a design constraint
 
@@ -115,27 +124,35 @@ Nothing in this feature re-implements an existing capability. The only genuinely
 
 ## 2. Evidence base — measured corpus (AC3 inputs)
 
-Measured on this worktree, `2026-08-07`:
+Measured on this worktree. Values re-measured `2026-08-08`; where the figure moved since the
+`2026-08-07` draft the original is shown in parentheses. **No refresh changes a conclusion** — the
+cost model (§7) is unaffected at this granularity.
 
 | Quantity | Value | How measured |
 |---|---|---|
-| Commits (all) | **2,440** | `git rev-list --count HEAD` |
-| — non-merge | 1,649 | `git log --no-merges` |
-| — merge | 791 | `git log --merges` |
-| History span | 2026-03-11 → 2026-08-07 (~150 days) | first/last commit date |
-| Commit message text (all) | **1,666,723 bytes** | `git log --format='%s%n%b' \| wc -c` |
-| — non-merge only | 1,482,142 bytes | as above with `--no-merges` |
+| Commits (all) | **2,444** (was 2,440) | `git rev-list --count HEAD` |
+| — non-merge | 1,651 (was 1,649) | `git rev-list --count --no-merges HEAD` |
+| — merge | 793 (was 791) | `git rev-list --count --merges HEAD` |
+| History span | 2026-03-11 → 2026-08-08 (~150 days) | first/last commit date |
+| Commit message text (all) | **1,671,393 bytes** (was 1,666,723) | `git log --format='%s%n%b' \| wc -c` |
+| — non-merge only | 1,486,733 bytes (was 1,482,142) | as above with `--no-merges` |
 | Mean subject length | 71.8 chars | `awk` over `%s` |
-| (commit, file) pairs, non-merge | **9,479** | `git log --no-merges --name-only` |
+| (commit, file) pairs, non-merge | **9,489** (was 9,479) | `git log --no-merges --name-only` |
 | Distinct files ever touched | 3,727 | `git log --name-only \| sort -u` |
 | Tags | 80 | `git tag \| wc -l` |
-| CHANGELOG | 151,352 bytes / 948 lines | `wc -lc CHANGELOG.md` |
+| CHANGELOG | 158,882 bytes / 969 lines (was 151,352 / 948) | `wc -lc CHANGELOG.md` |
 | GitHub issues (all states) | **116** (259,219 bytes title+body) | `gh issue list --state all` |
 | Issue comments | 198 | `gh issue list --json comments` |
 | Pull requests (all states) | **57** | `gh pr list --state all` |
 | Recent velocity | ~80 commits/day (883 over 11 active days, 2026-07-27..08-07) | `git log --since=14.days` |
 
-Live-DB context for the storage decision (§7.3): `cas.db` is **435 MB**, dominated by `events` at **977,847 rows** (`supervisor_injected` alone = 748,002). Also present: `file_changes` 7,760, `task_lease_history` 2,216, `sessions` 607, `verifications` 591, `tasks` 1,482 (1,358 closed).
+Live-DB context for the storage decision (§7.3): `cas.db` is **456 MB** (was 435 MB), dominated by
+`events` at **978,013 rows** (`supervisor_injected` alone = 748,094). Also present: `file_changes`
+7,799, `task_lease_history` 2,235, `sessions` 617, `tasks` 1,484.
+
+The `cas.db` growth of ~21 MB in under a day is itself a data point for §7.3: this feature's entire
+proposed footprint (~8 MB) is smaller than one day of ambient `events` growth, which is the
+strongest available argument that the sidecar-vs-same-db question is not worth agonising over.
 
 ---
 
@@ -196,7 +213,7 @@ Rules, each with its reason:
 ### 4.3 Scheduling (brief item 1)
 
 - **Primary: daemon tick.** New `tokio::select!` arm beside `daemon.rs:552-559`, default interval **300s**.
-- **Not gated on `is_idle()`.** The existing code-index arm is (`daemon.rs:552`), and the measured consequence is `code_files = 0` on a repo with 2,440 commits — on a busy factory the daemon is never idle, so the job never runs. A delta pass over ~80 commits/day is bounded work; it should be rate-limited, not idleness-gated. This is a deliberate divergence from the neighbouring code path, made because the neighbouring code path demonstrably never fires.
+- **Not gated on `is_idle()`.** The existing code-index arm is (`daemon.rs:552`), and the measured consequence is `code_files = 0` on a repo with 2,444 commits — on a busy factory the daemon is never idle, so the job never runs. A delta pass over ~80 commits/day is bounded work; it should be rate-limited, not idleness-gated. This is a deliberate divergence from the neighbouring code path, made because the neighbouring code path demonstrably never fires.
 - **Secondary: opportunistic drain.** The PostToolUse `git commit` detector (`attribution.rs:169`) appends the new SHA to a pending file, following the codemap template (`codemap.rs:37`). The daemon drains it. This is an optimisation for freshness; correctness never depends on it, because §4.2's `rev-list` from the watermark catches anything the hook missed.
 - **No git hook is installed.** CAS installs only a `pre-commit` guard today; adding `post-commit`/`post-merge` would collide with per-worktree private hooks dirs (`teams.rs:1510`) and with the factory's shared-hooks path (`:1406`). Rejected as not worth the blast radius.
 
@@ -217,20 +234,68 @@ The brief's join is `commit → task commit_receipt → close/decision notes →
 
 - `commit_links` **0 rows** — the commit↔session↔prompt edge does not exist.
 - `prompts` **1 row**.
-- `file_changes` 7,760 rows, **0** with `commit_hash`, **1** with `prompt_id`.
+- `file_changes` 7,799 rows, **0** with `commit_hash`, **1** with `prompt_id`.
 - `commit_receipt` **is not a column**. It is a request-only field (`cas-cli/src/mcp/tools/types/task.rs:229`) resolved at `close_ops.rs:7292` and persisted **as free text** in `tasks.notes` via `append_close_decision_note` (`close_ops.rs:7470`). Only **18** tasks carry the `"resolved to full commit"` string.
 
 Why `commit_links` is empty is worth stating because it constrains the fix: `detect_and_link_git_commit` (`attribution.rs:169`) fires only from the **PostToolUse Bash hook** on a recognised `git commit` command (`is_git_commit_command`, `:606`), and takes an early return for non-Claude harnesses whose `tool_response` is a bare string. In a factory running mixed harnesses, most commits never reach it.
 
 ### 5.2 What is actually populated, and the join this spec uses instead
 
-| Edge | Rows | Caveat |
+| Edge | Usable rows | Caveat |
 |---|---|---|
-| `tasks.deliverables` → `factory_branch_anchor` | **226** full SHAs, all distinct | written at commit time by `attribution.rs:515`; cleared on reopen (`task_store.rs:590`) |
-| `events` where `event_type='worker_git_commit'` | **10,279** | `session_id` populated; **`head_sha` is abbreviated to 8 chars** (`crates/cas-factory/src/director.rs:343`) |
-| `tasks.notes` close decisions | 18 | free text, substring-matched |
-| `task_lease_history` | 2,216 | who held the task when |
-| `sessions` | 607 | `cwd`, `branch`, `worktree_id`, `outcome` |
+| `tasks.deliverables` → `factory_branch_anchor` | **229** full SHAs, all distinct | written at commit time by `attribution.rs:515`; cleared on reopen (`task_store.rs:590`) |
+| `events` where `event_type='worker_git_commit'` | **984** of 10,298 rows — see below | `session_id` 100% populated, but the SHA is usually absent and is a **variable-width** prefix when present |
+| `tasks.notes` close decisions | 19 | free text, substring-matched |
+| `task_lease_history` | 2,235 | who held the task when |
+| `sessions` | 617 | `cwd`, `branch`, `worktree_id`, `outcome` |
+
+**[CORRECTED 2026-08-08] The `worker_git_commit` edge is ~10× weaker than the 2026-08-07 draft
+claimed, and its key is not the shape the draft assumed.** The draft presented it as "10,279 rows,
+`head_sha` abbreviated to 8 chars (`crates/cas-factory/src/director.rs:343`)". Re-measurement:
+
+| `worker_git_commit` row class | Count |
+|---|---|
+| `metadata` **entirely NULL** — no SHA at all | **9,268** (90.0%) |
+| usable, `head_sha` **7 chars** | 594 |
+| usable, `head_sha` **8 chars** | 390 |
+| `head_sha = '?'` (documented degradation stub, `factory_ops.rs:6185`) | 46 |
+| **total** | **10,298** |
+
+Usable: **984 rows / 474 distinct SHA prefixes.** Both of the draft's specifics were wrong:
+
+- **The cited emission site is not one.** `director.rs:343` is `EventType::WorkerGitCommit` appearing
+  inside a `worker_activity_types` array used to pick a worker's latest activity for the TUI — it
+  reads the event, it does not write it. The actual writer is `emit_worker_final_git_state`
+  (`cas-cli/src/hooks/handlers/handlers_middle/session_stop/mod.rs:528`, emitting at `:589`), whose
+  payload comes from `collect_worker_git_status` (`cas-cli/src/mcp/tools/service/factory_ops.rs:6015`).
+- **The width is not fixed at 8.** That function computes the SHA as
+  `run_git(worktree_path, &["rev-parse", "--short", "HEAD"])` (`factory_ops.rs:6021`). `--short` uses
+  git's *dynamic* abbreviation length, which grows with object count — it returns 8 in this repo
+  today and returned 7 earlier in its history, which is exactly the 594/390 split above. Any
+  implementation that slices `sha[0..8]` will silently fail to match the 594 seven-char rows.
+
+Three consequences the implementation must carry:
+
+1. **Match by variable-length prefix, not a fixed slice.** The join predicate is
+   `history_commits.sha LIKE event_head_sha || '%'` with the event's own length, never
+   `substr(sha,1,8) = head_sha`.
+2. **Exclude the `'?'` stub explicitly.** It is a legitimate "git status unavailable" sentinel, not a
+   SHA; treating it as one would match nothing and look like a coverage gap rather than a
+   degradation signal.
+3. **The collision guard needs recomputing for 28 bits, not 32.** A 7-char prefix is 28 bits: for
+   2,444 commits the any-collision probability is `1 - exp(-2444² / 2·2²⁸)` ≈ **1.1%**, roughly
+   **16× the 0.07%** the draft computed for the 8-char case (that 8-char figure is itself correct).
+   This does not change the design — §5.2's rule was already "return all matches with
+   `ambiguous: true`, never silently pick the first" — but it moves ambiguity from a theoretical
+   footnote to something a test must actually cover, and it means the guard is load-bearing rather
+   than defensive.
+
+**This strengthens rather than weakens the spec's thesis.** The draft's §0 argument is that the
+provenance join is a schema without data; the fallback edge it proposed instead turns out to be 90%
+empty too. The `factory_branch_anchor` edge (229 full, exact, unambiguous SHAs) is therefore the
+*only* high-confidence provenance edge that exists today, and §10.1's `provenance_coverage_pct`
+(~9%) is close to the true ceiling until M5 lands — not a number that the `worker_git_commit`
+fallback was ever going to rescue. M5 (§5.3) is correspondingly more important, not less.
 
 **Design decision: the join is resolved at query time over these populated edges, into a `history_commit_provenance` view, with per-edge confidence — not by assuming `commit_links`.**
 
@@ -242,13 +307,24 @@ commit.sha
   └── none   → provenance: null, reason: "no populated edge"              (never a silent empty)
 ```
 
-The 8-char prefix join needs a guard. 2,440 commits over an 8-hex-char (32-bit) space gives a birthday collision probability of roughly `1 - exp(-2440² / 2·2³²)` ≈ **0.07%** today — acceptable now, but it grows with the square of history size. Rule: the prefix join must `SELECT` all matches and **return them all with `ambiguous: true`** when more than one full SHA matches, never silently pick the first. `history_commits.short_sha` is indexed precisely to make this cheap.
+The prefix join needs a guard, and **[CORRECTED 2026-08-08]** the guard must be sized for the
+*shortest* prefix in the corpus, not the longest. 2,444 commits over an 8-hex-char (32-bit) space
+gives a birthday collision probability of roughly `1 - exp(-2444² / 2·2³²)` ≈ **0.07%**; over the
+7-char (28-bit) space that 594 of the 984 usable rows actually use, it is `1 - exp(-2444² / 2·2²⁸)`
+≈ **1.1%**. Both grow with the square of history size. Rule: the prefix join must `SELECT` all
+matches and **return them all with `ambiguous: true`** when more than one full SHA matches, never
+silently pick the first — and it must match on the event's own prefix length rather than a fixed
+slice. `history_commits.short_sha` is indexed precisely to make this cheap; because the stored
+width is dynamic, the index is on the prefix column with `LIKE prefix || '%'` semantics rather than
+an equality join against a hardcoded `substr(sha,1,8)`.
 
 ### 5.3 The repair, stated as a dependency not a wish
 
 Two of this feature's headline queries (§6.4 Q4, Q6) are only as good as the provenance edges. Milestone **M5** (§11) repairs `commit_links` population by moving the commit→session link off the harness-specific Bash-hook path and onto the daemon indexer itself: when the indexer ingests a commit, it resolves the session by joining `committed_at` + `branch` against `sessions` and `events.worker_git_commit`, and writes a `commit_links` row with an explicit `link_method` so a reconstructed link is never confused with an observed one.
 
 M5 is **optional for shipping M1–M4** and mandatory before any claim that CAS can answer "which prompt caused this line". Until M5 lands, the query surface must report `provenance_coverage` as a measured percentage (§10), not omit the field.
+
+**[CORRECTED 2026-08-08] M5's priority is raised by §5.2's re-measurement.** The draft could argue M5 was deferrable because a 10,279-row fallback edge would carry most queries in the meantime. That edge is 984 usable rows. There is no interim substitute for the repair: without M5, provenance answers rest on 229 exact anchors, and Q4 in particular should be regarded as *not yet supported* rather than merely degraded. Recommendation to sign-off (§12 Q1) is unchanged — keep M5 in the epic — but it should be sequenced as early as its dependencies allow rather than treated as a tail milestone.
 
 ---
 
@@ -274,7 +350,7 @@ Because the channel registers through `ChannelCapabilities` (`scorer.rs:146`), a
 
 ### 6.3 Wiring risk, called out explicitly
 
-M6's survey records that the knowledge channel is **inert in production**: every `HybridSearch` constructor passes `knowledge_store: None` (`hybrid.rs:242,252,264,278,304`), `enable_knowledge` defaults `false` (`:115`), and the sole production construction site (`cas-cli/src/hooks/scorer.rs:32,:38`) sets neither — so `knowledge_weight: 0.25` does nothing. A history channel added the same way would be equally dead.
+M6's survey records that the knowledge channel is **inert in production**: every `HybridSearch` constructor passes `knowledge_store: None` (`hybrid.rs:243,255,267,283,303`), `enable_knowledge` defaults `false` (`:115`), and the sole production construction site (`cas-cli/src/hooks/scorer.rs:32,:38`) sets neither — so `knowledge_weight: 0.25` does nothing. A history channel added the same way would be equally dead.
 
 **Acceptance gate for M4:** an integration test must assert that the *production* construction path returns a history result for a known commit — not merely that the channel returns results when hand-constructed in a unit test. Without that gate this feature ships inert and looks fine.
 
@@ -314,11 +390,11 @@ Every response carries an `index_status` block: `{last_indexed_sha, lag_commits,
 
 ### 7.1 Backfill — one-time, for this repo
 
-Embeddable units: 1,649 non-merge commits + 116 issues + 198 comments + 57 PRs + ~80 CHANGELOG release sections ≈ **2,100 units**. (Merge commits are indexed structurally but not embedded — their messages are `Merge branch 'x'`, which is noise. This drops 791 units, 32% of commits, for zero recall loss.)
+Embeddable units: 1,651 non-merge commits + 116 issues + 198 comments + 57 PRs + ~80 CHANGELOG release sections ≈ **2,100 units**. (Merge commits are indexed structurally but not embedded — their messages are `Merge branch 'x'`, which is noise. This drops 791 units, 32% of commits, for zero recall loss.)
 
 - **Text volume:** ~1.48 MB commit messages + 0.26 MB issue bodies + ~0.15 MB CHANGELOG + comments ≈ **~1.9 MB ≈ ~480 K tokens**.
 - **Requests:** 2,100 ÷ 32 per batch = **~66 requests**.
-- **Wall clock at the 120 req/60s limit:** floor of **~33 seconds**; realistically **60–120 s** including HTTP round-trips at a 30 s timeout ceiling. Structural git parsing of 2,440 commits (`git log --numstat`, one pass) adds **~5–15 s**.
+- **Wall clock at the 120 req/60s limit:** floor of **~33 seconds**; realistically **60–120 s** including HTTP round-trips at a 30 s timeout ceiling. Structural git parsing of 2,444 commits (`git log --numstat`, one pass) adds **~5–15 s**.
 - **Conclusion: full backfill of this repo's entire history is a sub-two-minute, ~66-request operation.** This is the finding that makes the feature viable; it is also why chunked resumability (§4.2 rule 4) is cheap insurance rather than a burden.
 
 ### 7.2 Steady-state delta — per day
@@ -330,7 +406,7 @@ Cost is therefore **negligible in steady state** and dominated entirely by the o
 ### 7.3 Storage
 
 - **Vectors:** 2,100 × 1024 dims × 4 bytes = **8.6 MB**, plus LMDB overhead ≈ **~11 MB**. Grows ~0.25 MB/day. The LMDB env is already sized at 10 GB (`lmdb_store.rs:39`).
-- **SQLite rows:** `history_commits` 2,440 (with bodies ≈ 1.7 MB) + `history_commit_files` 9,479 + `history_commit_symbols` ~15–20 K (estimated at ~2 symbols per changed file) + `history_docs` ~450 (~0.4 MB) ≈ **~5–8 MB including indexes**.
+- **SQLite rows:** `history_commits` 2,444 (with bodies ≈ 1.7 MB) + `history_commit_files` 9,489 + `history_commit_symbols` ~15–20 K (estimated at ~2 symbols per changed file) + `history_docs` ~450 (~0.4 MB) ≈ **~5–8 MB including indexes**.
 - **Decision: same `cas.db`, not a sidecar.** `cas.db` is 435 MB and 977,847 of its rows are `events` (748,002 of them a single event type). Adding ~30 K rows and ~8 MB is **under 2% growth** and well inside the noise of the existing events table. A sidecar DB would buy nothing and would cost cross-database joins on exactly the task/session joins that are this feature's entire point (§5). If `cas.db` size becomes a problem, the correct fix is `events` retention, not this table set.
 - **Retention:** none in v1. Commit history is bounded by the repo and does not grow without bound relative to the repo itself; at ~0.25 MB/day of vectors, a year is ~90 MB. Revisit if a consuming repo has >50 K commits — recorded as an open question (§12).
 
@@ -389,7 +465,7 @@ The `INSUFFICIENT-POST-FIX-DATA` verdict is not a hedge; it is the direct encodi
 - Every query response carries `index_status` (§6.5). A stale index answers *and says how stale*, in commits and seconds.
 - **New `cas doctor` check, "code history index"**, following the `doctor.rs:259-306` pattern exactly: `Ok` when lag is under one tick interval and `backfill_complete = 1`; `Warning` with the top-3 offending sources when lag exceeds it, when `last_error` is set, or when backfill is incomplete; `Warning "cannot check code history index: {e}"` on store-open failure — never a silent skip.
 - New tables added to `expected_tables` (`doctor.rs:316`).
-- `provenance_coverage_pct` is computed and reported, not assumed. Today it would read **~9%** (226 anchored SHAs of 2,440 commits). Publishing that number is the point: it makes §5.3's repair a visible, measurable debt rather than an invisible one.
+- `provenance_coverage_pct` is computed and reported, not assumed. Today it would read **~9%** (229 anchored SHAs of 2,444 commits) on the high-confidence edge alone. **[CORRECTED 2026-08-08]** The draft implied the `worker_git_commit` edge would lift this substantially; §5.2's re-measurement shows it contributes at most 474 distinct prefixes, 90% of that event class carrying no SHA at all — so realistic total coverage is bounded well under 30% even counting medium-confidence edges, and the *high*-confidence figure stays ~9% until M5. Publishing both numbers, split by confidence, is the point: it makes §5.3's repair a visible, measurable debt rather than an invisible one.
 
 ### 10.2 Failure modes and their declared behaviour
 
@@ -421,7 +497,7 @@ Each milestone is independently landable and independently useful. Estimates are
 | **M2** | Revive the symbol index | Register `cas index code` (closes the advertised-but-absent command, `code.rs:58`); wire `SearchIndex::index_code_symbols` (batch form) from the indexer so `.cas/index/code` exists; fix `repository` derivation (`indexing.rs:102-106`); populate `commit_hash`; decide `CodeConfig.enabled` default and the `is_idle()` gate | 2 | — (parallel to M1) |
 | **M3** | Symbol mapping | `history_commit_symbols`; changed-line-range ↔ symbol-range intersection; `symbol_mapping = absent` degradation | 1.5 | M1, M2 |
 | **M4** | Query surface | `action=history` + `cas history search`; 7th channel in `hybrid_search/hybrid.rs`; `DocType::HistoryCommit/HistoryDoc`; `index_status` contract; **production-path integration test (§6.3 gate)** | 2 | M1 |
-| **M5** | Provenance join + repair | `history_commit_provenance` resolution over the populated edges (§5.2) with `link_method`/`confidence`; ambiguous-prefix guard; repair `commit_links` population from the daemon indexer with explicit `link_method` | 2.5 | M1, M4 |
+| **M5** | Provenance join + repair | `history_commit_provenance` resolution over the populated edges (§5.2) with `link_method`/`confidence`; **variable-width** prefix matching (`LIKE prefix \|\| '%'`, never `sha[0..8]`) with the `'?'` stub excluded and an ambiguity test at 7 chars; repair `commit_links` population from the daemon indexer with explicit `link_method` | 2.5 | M1, M4 |
 | **M6** | GitHub + CHANGELOG docs | `history_docs`; extend `issue_triage.rs:119` GraphQL incrementally; CHANGELOG release-section parser; PR↔commit refs | 1.5 | M1 |
 | **M7** | Embeddings | `pending_embedding` drain reusing `KnowledgeEmbedder`; `history:*` LMDB key namespace; capability registration | 1.5 | M1, M4, M6 |
 | **M8** | Binary epochs + verdicts | `history_epochs`; daemon-start recording; `daemon_instances`/`events` backfill; three-valued classifier; Q6 verdict logic incl. `INSUFFICIENT-POST-FIX-DATA` | 2 | M1, M4 |
@@ -441,6 +517,13 @@ Each milestone is independently landable and independently useful. Estimates are
 4. **Retention beyond this repo's scale.** No retention is proposed for ≤50 K commits. A consuming repo with 500 K commits would need ~2 GB of vectors. Defer, or design the cap now?
 5. **Merge-commit exclusion from embedding** (32% of commits, §7.1). Squash-merge workflows put real content in merge commits; this repo does not. Should the exclusion be heuristic (skip only `^Merge (branch|pull request)`) rather than structural?
 
+6. **[ADDED 2026-08-08] Is ~9% high-confidence provenance coverage enough to ship the provenance half at all?** §5.2's correction removes the fallback edge that made a pre-M5 interim story plausible. Two honest options, and this is a product call rather than a technical one:
+   **(a)** Ship M1+M4 as a pure code-history surface, present provenance as explicitly unsupported until M5, and file M5 as prerequisite work — the query surface never advertises a capability it cannot deliver.
+   **(b)** Make M5 a blocking phase-0 so the feature launches with the differentiator working.
+   Recommendation: **(a)**. It matches the "minimum useful slice" already identified in §11 (M1+M4 answers Q2, Q3, Q7 with no provenance dependency), it gets a working surface in front of users sooner, and it keeps the honesty contract intact via `provenance_coverage_pct`. (b) front-loads 2.5 sessions of repair before anything is demonstrable, which is the shape that tends not to land.
+
+7. **[ADDED 2026-08-08] Should `emit_worker_final_git_state` record the full 40-char SHA?** 90% of `worker_git_commit` rows carry no SHA at all and the rest carry a dynamic-width abbreviation (§5.2). Writing the full SHA at `factory_ops.rs:6021` (`rev-parse HEAD` rather than `rev-parse --short HEAD`) is a roughly one-line change that would make every *future* row an exact-match edge and retire the collision guard for new data. It does not fix the 90%-NULL problem or backfill history, so it is not a substitute for M5 — but it is cheap enough that it may be worth doing independently of this epic, and the decision belongs with whoever owns that emitter.
+
 ---
 
 ## 13. Acceptance-criteria trace
@@ -452,4 +535,12 @@ Each milestone is independently landable and independently useful. Estimates are
 | 3 — cost model with real numbers | §7 (backfill ~66 requests / <2 min / ~11 MB; delta ~2 requests/day), inputs measured in §2 |
 | 4 — query surface, ≥6 examples incl. binary-epoch | §6.4 (eight queries; Q6 is the binary-epoch one, logic in §9) |
 | 5 — implementation plan, independently landable, estimated | §11 (9 milestones, ~16 sessions, dependency order + minimum useful slice) |
-| 6 — supervisor sign-off before implementation tasks are filed | **PENDING** — §12 lists the five decisions needed |
+| 6 — supervisor sign-off before implementation tasks are filed | **PENDING** — §12 lists the seven decisions needed |
+
+**Verification trace (2026-08-08).** AC1 requires each design choice to carry evidence. That
+obligation was tested rather than assumed: all live-DB counts were re-measured read-only, and 18
+`file:line` citations were sampled and resolved against the tree, of which 17 matched exactly.
+Corrections applied: `settings.rs:286`→`:282-283`; `hybrid.rs` `knowledge_store: None` line list;
+`index_code_symbol[s]` has zero callers including tests (draft understated); §2 counts refreshed;
+and the two substantive §5.2 errors (fallback-edge volume and SHA width/emission site). The
+`[CORRECTED 2026-08-08]` markers exist so a reviewer can audit the delta instead of re-deriving it.

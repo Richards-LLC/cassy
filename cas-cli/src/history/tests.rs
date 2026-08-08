@@ -685,3 +685,152 @@ mod symbol_mapping {
         assert_eq!(counts.get("not_applicable"), Some(&1));
     }
 }
+
+/// Spec §10.2 — the failure-mode table, made executable (EPIC cas-6212 /
+/// cas-35b8, M9).
+///
+/// The table declares a behaviour per failure. A declared behaviour with no
+/// test is a promise, not a contract, so each row is asserted somewhere and
+/// this map says where. Rows already covered by the milestone that introduced
+/// them are named rather than duplicated — a second copy of an existing
+/// assertion adds no coverage and hides which one is authoritative.
+///
+/// | § 10.2 row | asserted by |
+/// |---|---|
+/// | No cloud login → `semantic_available: false` | `history_search_production_path_test::every_response_carries_the_index_status_contract` (M4), through the real MCP dispatch |
+/// | `gh` missing/unauthenticated → `history_index_state('github').last_error` set **and surfaced** | `a_github_failure_is_recorded_and_surfaced_not_swallowed` (below) |
+/// | Watermark not an ancestor of HEAD → backfill re-run | `watermark_off_the_branch_forces_rebackfill` (M1) + `doctor::history_index_check_never_renders_a_diverged_watermark_as_fresh` (M9) |
+/// | Partial batch failure → watermark not advanced, batch retried | `a_failed_batch_advances_nothing` (below) + `interrupted_backfill_resumes_from_watermark` (M1, the retry half) |
+/// | `code_symbols` empty → `symbol_mapping = absent` | `symbol_mapping::an_unindexed_file_records_absent_rather_than_an_empty_success` (M3) |
+/// | Ambiguous SHA prefix → all matches with `ambiguous: true` | `cas_store::history_store` provenance tests + `history_search_production_path_test::a_seven_char_worker_event_prefix_resolves_through_the_production_path` (M5) |
+mod failure_modes {
+    use super::*;
+
+    /// §10.2 row 2. GitHub being absent is a *declared boundary*, not a git
+    /// failure: the git half must keep indexing, and the boundary must be
+    /// legible afterwards rather than swallowed into a silent empty doc index.
+    #[test]
+    fn a_github_failure_is_recorded_and_surfaced_not_swallowed() {
+        let f = Fixture::new();
+        f.commit_file("a.rs", "1\n", "one");
+        f.pass();
+
+        let repository = repository_id(&f.repo);
+        let store = f.store();
+        store
+            .record_attempt(
+                &repository,
+                cas_store::SOURCE_GITHUB,
+                Some("gh: not authenticated"),
+            )
+            .unwrap();
+
+        // Recorded on the GitHub ledger...
+        let gh = store
+            .index_state(&repository, cas_store::SOURCE_GITHUB)
+            .unwrap()
+            .expect("github ledger row");
+        assert_eq!(gh.last_error.as_deref(), Some("gh: not authenticated"));
+
+        // ...without contaminating the git ledger, which kept working.
+        let git = store
+            .index_state(&repository, cas_store::SOURCE_GIT)
+            .unwrap()
+            .expect("git ledger row");
+        assert!(
+            git.last_error.is_none(),
+            "a GitHub boundary must not be reported as a git-index failure"
+        );
+
+        // ...and surfaced on the status struct every reader goes through.
+        let status = crate::history::status(&f.cas_root, &f.repo).unwrap();
+        assert_eq!(
+            status
+                .github_state
+                .as_ref()
+                .and_then(|s| s.last_error.as_deref()),
+            Some("gh: not authenticated"),
+            "the boundary was recorded but never surfaced — the shape §10.2 forbids"
+        );
+        assert_eq!(status.indexed_commits, 1, "the git half must keep indexing");
+    }
+
+    /// §10.2 row 4. The watermark and the rows it vouches for move together or
+    /// not at all. If a batch could fail *after* advancing the watermark, the
+    /// skipped commits would never be revisited — a permanent hole that every
+    /// later pass would report as success.
+    #[test]
+    fn a_failed_batch_advances_nothing() {
+        let f = Fixture::new();
+        let first = f.commit_file("a.rs", "1\n", "one");
+        f.pass();
+
+        let repository = repository_id(&f.repo);
+        let before = f.state();
+        assert_eq!(before.last_indexed_sha.as_deref(), Some(first.as_str()));
+        let (commits_before, _) = f.counts();
+
+        let second = f.commit_file("b.rs", "2\n", "two");
+
+        // Fault injection: remove the table the second half of the batch writes
+        // to, so the insert fails *after* the commit rows have gone in. This is
+        // the interleaving that a non-transactional writer would get wrong.
+        //
+        // The store is opened BEFORE the drop on purpose: `open` runs the
+        // schema DDL (`CREATE TABLE IF NOT EXISTS`), so acquiring it afterwards
+        // would quietly recreate the table and the fault would never fire —
+        // the test would then pass while proving nothing.
+        let store = f.store();
+        {
+            let conn = rusqlite::Connection::open(f.cas_root.join("cas.db")).unwrap();
+            conn.execute_batch("DROP TABLE history_commit_files").unwrap();
+        }
+
+        let meta = git_log_over(
+            &f.repo,
+            &[second.clone()],
+            &[],
+            "--format=\u{1}%H\u{1f}%P\u{1f}%an\u{1f}%ae\u{1f}%aI\u{1f}%cI\u{1f}%D\u{1f}%s\u{1f}%b",
+        )
+        .unwrap();
+        let commits = parse_commit_records(&meta, &repository);
+        let changes = vec![cas_store::HistoryCommitFile {
+            sha: second.clone(),
+            file_path: "b.rs".to_string(),
+            change_type: "A".to_string(),
+            old_path: None,
+            insertions: Some(1),
+            deletions: Some(0),
+        }];
+
+        let result = store.commit_batch(&repository, &commits, &changes, &second, true);
+        assert!(result.is_err(), "the seeded fault did not make the batch fail");
+
+        // The watermark is exactly where it was: the failed batch is still
+        // owed, so the next pass re-walks it.
+        let after = store
+            .index_state(&repository, cas_store::SOURCE_GIT)
+            .unwrap()
+            .expect("git ledger row");
+        assert_eq!(
+            after.last_indexed_sha.as_deref(),
+            Some(first.as_str()),
+            "watermark advanced past a batch that failed — those commits would never be revisited"
+        );
+        // And the commit rows rolled back with it, so the index never claims a
+        // commit whose file mapping was lost.
+        let indexed: i64 = {
+            let conn = rusqlite::Connection::open(f.cas_root.join("cas.db")).unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM history_commits WHERE repository = ?1",
+                [&repository],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            indexed, commits_before,
+            "commit rows survived a rolled-back batch"
+        );
+    }
+}

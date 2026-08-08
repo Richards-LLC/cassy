@@ -20,9 +20,6 @@ use crate::cloud::embeddings::{
     cosine_similarity, history_commit_key, history_doc_key, is_zero_vector,
 };
 
-/// Marker set by every CAS-owned nested model invocation (cas-fa38).
-pub(crate) const INTERNAL_LLM_ENV: &str = crate::internal_llm::INTERNAL_LLM_ENV;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RecallRole {
@@ -1655,7 +1652,7 @@ mod tests {
             .is_none()
         );
         assert_eq!(retriever.calls.get(), 0);
-        assert_eq!(INTERNAL_LLM_ENV, "CAS_INTERNAL_LLM");
+        assert_eq!(crate::internal_llm::INTERNAL_LLM_ENV, "CAS_INTERNAL_LLM");
     }
 
     #[test]

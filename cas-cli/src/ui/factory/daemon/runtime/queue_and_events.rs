@@ -1090,6 +1090,34 @@ impl FactoryDaemon {
         )
     }
 
+    /// cas-b8ce (GH #176): stamp the per-recipient surfacing receipt for a row
+    /// this daemon's own transport put in front of `recipient`.
+    ///
+    /// Best-effort by design, like every other observability write on the
+    /// delivery path: a receipt that fails to persist costs a redelivery, and a
+    /// delivery failed over a receipt costs the message. The former is
+    /// recoverable and the latter is not, so this never propagates.
+    fn record_transport_receipt(
+        queue: &dyn cas_store::PromptQueueStore,
+        prompt_id: i64,
+        recipient: &str,
+    ) {
+        if let Err(error) = queue.record_recipient_surfaced(
+            prompt_id,
+            recipient,
+            cas_store::SurfacingSource::TransportDelivered,
+        ) {
+            tracing::debug!(
+                target: "cas::coordination",
+                message_id = prompt_id,
+                %recipient,
+                %error,
+                "cas-b8ce: could not persist the transport surfacing receipt — \
+                 the row may be re-served by the recipient's next inbox_poll"
+            );
+        }
+    }
+
     pub(super) async fn handle_mux_event(&mut self, event: cas_mux::MuxEvent) {
         match event {
             cas_mux::MuxEvent::PaneOutput { pane_id, data } => {
@@ -2132,7 +2160,12 @@ impl FactoryDaemon {
                                 "cas-6eab: withheld a merge request whose premise no longer holds; \
                                  notified the worker instead"
                             );
-                            let _ = queue.mark_suppressed(queued.id, Some(&detail));
+                            // cas-0147 (GH #167): this is a withdrawal, not
+                            // idle-noise suppression — dead-letter it under a
+                            // name that says so. The worker has already been
+                            // told (the guidance enqueue above succeeded), so
+                            // the premise-expiry is recorded, not silent.
+                            let _ = queue.mark_superseded(queued.id, &detail);
                             continue;
                         }
                         Err(error) => {
@@ -2197,9 +2230,19 @@ impl FactoryDaemon {
                 ) {
                     LifecycleStaleOutcome::Deliver => {}
                     LifecycleStaleOutcome::SuppressDelivered { .. } => {
-                        let _ = queue.mark_suppressed(
+                        // cas-0147 (GH #167): this branch produced ALL 397
+                        // `suppressed_idle` rows in the live queue and every
+                        // one of them was a supervisor signal, not idle
+                        // chatter. The name is now the honest one, and the
+                        // detail says which task moved on — a terminal row has
+                        // to be answerable for itself.
+                        let _ = queue.mark_superseded(
                             queued.id,
-                            Some("task lifecycle occurrence no longer matches current task state"),
+                            &format!(
+                                "withdrawn before transport: {} left the status this \
+                                 notification announces",
+                                envelope.task_id
+                            ),
                         );
                         tracing::debug!(
                             prompt_id = queued.id,
@@ -2259,6 +2302,11 @@ impl FactoryDaemon {
             // is neither re-written nor consumed: it stays pending and retries a
             // PTY-nudge-only wake on the cadence below.
             let mut nudge_only = false;
+            // cas-5c50 (GH #166): set when this pass observed the row as
+            // drained-but-unsurfaced; the log line is emitted only if the
+            // re-nudge cadence gate then actually grants a re-offer, so the
+            // line count is O(retries) and not O(poll ticks).
+            let mut announce_drain_unsurfaced = false;
             match self.deferred_inbox_outcome_for(
                 queued.id,
                 target,
@@ -2267,6 +2315,14 @@ impl FactoryDaemon {
             ) {
                 DeferredInboxOutcome::HarnessConsumed => {
                     self.forget_row_delivery_state(queued.id);
+                    // cas-b8ce (GH #176): this arm is CAS's strongest evidence
+                    // that a NON-CAS transport surfaced the content — the
+                    // harness took our inbox copy AND the pane then produced
+                    // output. Write the per-recipient receipt so the row leaves
+                    // the recipient's unread set for good; stamping only
+                    // `transport_delivered` left it `seen.prompt_id IS NULL`,
+                    // and the recipient's next `inbox_poll` re-served it.
+                    Self::record_transport_receipt(&*queue, queued.id, &queued.target);
                     if let Err(error) = queue.mark_transport_delivered(queued.id) {
                         tracing::error!(
                             prompt_id = queued.id,
@@ -2331,16 +2387,17 @@ impl FactoryDaemon {
                     // try a PTY nudge — the only channel that creates a turn for
                     // a Claude teammate parked at its prompt.
                     nudge_only = true;
-                    tracing::info!(
-                        target: "cas::coordination",
-                        stage = "inbox_drain_unsurfaced",
-                        channel = "prompt_queue",
-                        message_id = queued.id,
-                        source = %queued.source,
-                        target_agent = %target,
-                        "cas-ef14: harness filed the inbox copy without taking a turn — retrying \
-                         as a pane nudge"
-                    );
+                    // cas-5c50 (GH #166): the announcement is DEFERRED to the
+                    // cadence gate below rather than emitted here. This arm is
+                    // re-entered on every ~100ms poll for as long as the row
+                    // stays drained-but-unsurfaced, so logging at this point
+                    // describes a poll tick, not a re-nudge — and the gate
+                    // immediately below usually declines the re-nudge. Message
+                    // 7953 wrote 16,604 identical lines in 30 flat minutes
+                    // (~9.2/s, terminated only by daemon shutdown) that way.
+                    // It is emitted on the gate's `LifecycleRedelivery::Deliver`
+                    // arm instead — grep `announce_drain_unsurfaced`.
+                    announce_drain_unsurfaced = true;
                 }
                 DeferredInboxOutcome::Deliver => {}
             }
@@ -2377,6 +2434,31 @@ impl FactoryDaemon {
                         .unwrap_or(0),
                 ) {
                     LifecycleRedelivery::Deliver => {
+                        // cas-5c50 (GH #166): a real re-offer is happening, so
+                        // now the cas-ef14 line describes something that
+                        // actually occurred. Bounded by construction — the gate
+                        // grants at most one Deliver per
+                        // LIFECYCLE_RENUDGE_INTERVAL and at most
+                        // LIFECYCLE_MAX_RENUDGE_ATTEMPTS of them in total.
+                        if announce_drain_unsurfaced {
+                            tracing::info!(
+                                target: "cas::coordination",
+                                stage = "inbox_drain_unsurfaced",
+                                channel = "prompt_queue",
+                                message_id = queued.id,
+                                source = %queued.source,
+                                target_agent = %target,
+                                attempt = self
+                                    .lifecycle_redelivery_counts
+                                    .get(&queued.id)
+                                    .copied()
+                                    .unwrap_or(0)
+                                    + 1,
+                                max_attempts = LIFECYCLE_MAX_RENUDGE_ATTEMPTS,
+                                "cas-ef14: harness filed the inbox copy without taking a turn — \
+                                 retrying as a pane nudge"
+                            );
+                        }
                         self.lifecycle_redelivery_attempts
                             .insert(queued.id, std::time::Instant::now());
                         // cas-7787: only a real (re)delivery burns budget —
@@ -2692,6 +2774,15 @@ impl FactoryDaemon {
                     match inject_result {
                         Ok(cas_mux::InjectOutcome::Delivered) => {
                             succeeded += 1;
+                            // cas-b8ce (GH #176): a broadcast's read state is
+                            // per-recipient by construction — `all_workers` is
+                            // exempt from every row-level ack filter
+                            // (NOT_ALREADY_CONSUMED_SQL), so the receipt table
+                            // is the ONLY thing that can retire it for a worker
+                            // that already received it. Without this write, one
+                            // broadcast is re-served to every worker on every
+                            // `inbox_poll`, forever.
+                            Self::record_transport_receipt(&*queue, queued.id, name);
                             tracing::info!("Injected to worker '{}'", name);
                             if let Some(ref store) = event_store {
                                 record_injection(
@@ -3261,6 +3352,32 @@ impl FactoryDaemon {
                 // cas-d732: the row is consumed — its re-nudge clock is dead
                 // weight now, and leaving it would leak one entry per row.
                 self.forget_row_delivery_state(queued.id);
+                // cas-b8ce (GH #176): reaching this arm means the delivery was
+                // NOT wake-deferred and NOT awaiting an urgent wake probe — the
+                // content went into the recipient's turn over CAS's transport.
+                // Record the receipt against the ADDRESSED target (the key the
+                // recipient's own poll joins on), not the pane name, or the
+                // supervisor's `supervisor`/pane alias split leaves the row
+                // unread under the very alias that would fetch it.
+                //
+                // TRADE-OFF, stated deliberately: for a `TeamsInbox` recipient
+                // this arm's evidence is "the inbox write landed and the wake
+                // fired", not "the harness surfaced it" — so the receipt costs
+                // `inbox_poll` as a recovery path if the harness silently drops
+                // the copy. That is accepted for three reasons. (1) The bug this
+                // pairs against is OBSERVED (rows 8210/8215/8217 and
+                // 8221/8223/8225/8229/8241 re-served in full after being read,
+                // acted on and replied to); the recovery it costs is
+                // hypothetical. (2) Not writing the receipt here would leave the
+                // reported Claude-worker case unfixed, since that is precisely
+                // the channel those rows travelled. (3) The drop case keeps its
+                // own, stronger safety net: `message_status` still reports the
+                // row `delivered` with `confirmed_at` NULL and its undelivered
+                // clock running, and cas-ef14's drained-awaiting-wake machinery
+                // plus the re-nudge cadence still cover the deferred path. The
+                // recipient's unread view was never the right place to hide a
+                // delivery failure.
+                Self::record_transport_receipt(&*queue, queued.id, &queued.target);
                 // cas-2c5f: authoritative transport handoff only.
                 if let Err(e) = queue.mark_transport_delivered(queued.id) {
                     tracing::error!(
@@ -5486,6 +5603,150 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // cas-5c50 (GH #166): a stuck row logs O(retries), not O(poll ticks)
+    // -----------------------------------------------------------------------
+
+    /// The measured incident, replayed on the real predicates.
+    ///
+    /// Message 7953 (source=director, target=clever-owl-55) wrote 16,604
+    /// `stage="inbox_drain_unsurfaced"` lines between 22:24:15Z and 22:54:20Z
+    /// on 2026-08-07 — a flat ~550/min (~9.2/s, i.e. the 100ms poll tick) that
+    /// never decayed and was ended only by the daemon shutting down 83ms after
+    /// the last line. It was 12.5% of every line the daemon wrote that day.
+    ///
+    /// The cause was ORDERING, not policy: the `DrainedAwaitingWake` arm
+    /// emitted its `tracing::info!` before the cas-d732/cas-ceae re-nudge
+    /// cadence gate ran, so the gate correctly declined the re-nudge and the
+    /// line was printed anyway. This asserts the two counts the fix separates:
+    /// the arm is still entered every tick (that is the daemon's job), but an
+    /// announcement now costs an actual re-offer.
+    /// Replay a row that is drained-but-unsurfaced on every poll and count the
+    /// `stage="inbox_drain_unsurfaced"` lines it would emit.
+    ///
+    /// `defer_to_cadence` switches the fix, following the `cas_ceae_guards`
+    /// idiom already used by [`replay_pending_inbox_row`]: `false` places the
+    /// announcement where the `DrainedAwaitingWake` arm used to emit it
+    /// (before the gate), `true` places it on the gate's `Deliver` arm. Both
+    /// arms of the same simulation, so the fix cannot be proven by a test that
+    /// would have passed anyway.
+    fn replay_drain_unsurfaced_announcements(
+        minutes: u64,
+        poll_ms: u64,
+        defer_to_cadence: bool,
+    ) -> usize {
+        let poll = std::time::Duration::from_millis(poll_ms);
+        let start = std::time::Instant::now();
+        let mut announcements = 0usize;
+        let mut attempts = 0u32;
+        let mut last_attempt: Option<std::time::Instant> = None;
+
+        for tick in 0..(minutes * 60 * 1000) / poll.as_millis() as u64 {
+            let now = start + poll * tick as u32;
+
+            // The row is re-selected and re-classified as drained-but-unsurfaced
+            // on every pass: the harness filed the inbox copy and the pane never
+            // spoke. This is the point the log line used to be emitted from.
+            if !defer_to_cadence {
+                announcements += 1;
+            }
+
+            // A row can only BE `DrainedAwaitingWake` if the daemon already
+            // wrote it to an inbox — `deferred_inbox_outcome_for` returns
+            // `Deliver` outright when `inbox_deferred_writes` has no entry — so
+            // the cadence gate always governs this path. The fix depends on that
+            // invariant (otherwise deferring the line would silence it), so it
+            // is asserted rather than assumed.
+            assert!(
+                row_needs_renudge_cadence(false, true, false),
+                "the re-nudge cadence must govern a drained-but-unsurfaced row"
+            );
+
+            match lifecycle_redelivery_decision(
+                false,
+                last_attempt,
+                now,
+                LIFECYCLE_RENUDGE_INTERVAL,
+                attempts,
+            ) {
+                LifecycleRedelivery::Deliver => {
+                    if defer_to_cadence {
+                        announcements += 1;
+                    }
+                    attempts += 1;
+                    last_attempt = Some(now);
+                }
+                LifecycleRedelivery::Cooldown => {}
+                LifecycleRedelivery::StopAcknowledged => panic!("nothing acked this row"),
+                LifecycleRedelivery::StopUndelivered => break,
+            }
+        }
+        announcements
+    }
+
+    #[test]
+    fn a_never_surfaced_row_logs_once_per_retry_not_once_per_poll() {
+        // The measured incident window: 30 minutes at the production 100ms poll.
+        let before = replay_drain_unsurfaced_announcements(30, 100, false);
+        let after = replay_drain_unsurfaced_announcements(30, 100, true);
+
+        assert_eq!(
+            after, LIFECYCLE_MAX_RENUDGE_ATTEMPTS as usize,
+            "post-fix a stuck row announces once per real retry and then stops"
+        );
+        assert!(
+            before > 11_000,
+            "pre-fix the line rides the poll tick for the row's whole life — got {before}, the \
+             same order as the 16,604 lines message 7953 actually wrote in this window"
+        );
+        assert!(
+            after * 500 < before,
+            "O(retries) must be orders of magnitude below O(poll ticks): {after} vs {before}"
+        );
+    }
+
+    /// The distinction is not "fewer lines", it is a different variable.
+    ///
+    /// Pre-fix the count is a function of the POLL INTERVAL — an implementation
+    /// detail no operator chose — so making the daemon more responsive makes
+    /// the logs proportionally worse. Post-fix it is a function of the RETRY
+    /// BUDGET, which is a deliberate policy number. Halving the poll interval
+    /// doubles the pre-fix count and leaves the post-fix count untouched.
+    #[test]
+    fn the_log_volume_stops_being_a_function_of_the_poll_interval() {
+        let slow_before = replay_drain_unsurfaced_announcements(30, 200, false);
+        let fast_before = replay_drain_unsurfaced_announcements(30, 100, false);
+        let slow_after = replay_drain_unsurfaced_announcements(30, 200, true);
+        let fast_after = replay_drain_unsurfaced_announcements(30, 100, true);
+
+        assert!(
+            fast_before >= slow_before * 2 - 2,
+            "pre-fix, halving the poll interval must roughly double the lines: \
+             {slow_before} -> {fast_before}"
+        );
+        assert_eq!(
+            slow_after, fast_after,
+            "post-fix the poll interval must not appear in the line count at all"
+        );
+        assert_eq!(fast_after, LIFECYCLE_MAX_RENUDGE_ATTEMPTS as usize);
+    }
+
+    /// The bound is not merely small — it is a CONSTANT. Doubling how long the
+    /// recipient stays stuck must not buy a single extra log line, which is
+    /// what makes the 464MB log day impossible rather than merely unlikely.
+    #[test]
+    fn the_log_bound_does_not_grow_with_how_long_a_row_stays_stuck() {
+        let half_hour = replay_drain_unsurfaced_announcements(30, 100, true);
+        let all_day = replay_drain_unsurfaced_announcements(24 * 60, 100, true);
+        assert_eq!(
+            half_hour, all_day,
+            "30 minutes and 24 hours of being stuck must cost the same {half_hour} lines — \
+             the bound is a constant, which is what makes the 464MB log day impossible \
+             rather than merely unlikely"
+        );
+        assert_eq!(half_hour, LIFECYCLE_MAX_RENUDGE_ATTEMPTS as usize);
+    }
+
     /// The bound must never pre-empt a real delivery: an acknowledged relay
     /// stops as acknowledged, and a relay inside its budget keeps its normal
     /// deliver/cooldown behaviour.
@@ -5587,6 +5848,58 @@ mod tests {
             ),
             LifecycleRedelivery::Cooldown,
             "the same row inside the interval is exactly what must be held back"
+        );
+    }
+
+    /// cas-b8ce (GH #176): the daemon's terminal-delivery decision and the
+    /// recipient's unread view must agree.
+    ///
+    /// The bug was that they could not: `mark_transport_delivered` writes only
+    /// `prompt_queue` columns, while `poll_unseen_for_recipient` answers from
+    /// `prompt_queue_recipient_seen`. A row could therefore be `delivered`
+    /// according to `message_status` and simultaneously unread according to the
+    /// recipient's own `inbox_poll`, which then handed it back — the observed
+    /// redelivery bursts.
+    ///
+    /// This pins the pairing at the daemon's own helper, so a future refactor
+    /// that drops the receipt write from a success arm fails here rather than
+    /// in production three releases later.
+    #[test]
+    fn a_terminally_delivered_row_leaves_the_recipients_unread_view() {
+        use cas_store::PromptQueueStore;
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        let id = store
+            .enqueue("supervisor", "zealous-fox-95", "Assignment: cas-5c50")
+            .unwrap();
+
+        assert_eq!(
+            store
+                .count_unseen_for_recipient("zealous-fox-95", None)
+                .unwrap(),
+            1,
+            "precondition: before delivery the row is genuinely unread"
+        );
+
+        // Exactly the pair the daemon's success arms now perform.
+        FactoryDaemon::record_transport_receipt(&store, id, "zealous-fox-95");
+        store.mark_transport_delivered(id).unwrap();
+
+        assert_eq!(
+            store
+                .count_unseen_for_recipient("zealous-fox-95", None)
+                .unwrap(),
+            0,
+            "a row the daemon reports as delivered must not still be unread — \
+             that contradiction IS the GH #176 redelivery"
+        );
+        assert!(
+            store
+                .poll_unseen_for_recipient("zealous-fox-95", None, 20)
+                .unwrap()
+                .is_empty(),
+            "the recipient's own inbox_poll must not re-serve it"
         );
     }
 

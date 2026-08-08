@@ -107,6 +107,91 @@ pub fn is_factory_agent(input: &HookInput) -> bool {
     resolve_role(input).is_some()
 }
 
+/// The logical alias every factory addresses its supervisor by, regardless of
+/// which pane name that supervisor happens to have been spawned with.
+pub const SUPERVISOR_ALIAS: &str = "supervisor";
+
+/// Every queue-recipient name one factory agent answers to (cas-3bf1, GH #176).
+///
+/// # Why this is shared rather than local to each caller
+///
+/// A worker answers to exactly one name. A supervisor answers to TWO: its pane
+/// name (`warm-jaguar-96`) and the logical `supervisor` alias the rest of the
+/// factory addresses it by. Those are two distinct recipient keys in
+/// `prompt_queue.target` AND two distinct keys in
+/// `prompt_queue_recipient_seen.recipient` — so "has this recipient read it"
+/// is only answerable against the FULL set.
+///
+/// The two readers had drifted apart, which is the bug this exists to end: the
+/// turn-start hook resolved both aliases while the MCP `inbox_poll` resolved
+/// only the registered pane name. The consequences were asymmetric and both
+/// bad. A row addressed to `supervisor` was invisible to the supervisor's own
+/// `inbox_poll` entirely (the unseen predicate matches
+/// `q.target = ?alias OR q.target = 'all_workers'`, and `supervisor` was never
+/// passed as an alias) — measured on the live queue at 40 of 50
+/// `supervisor`-addressed rows never receipted, against 15 of 59 for the pane
+/// name. And a row retired under one alias kept no receipt under the other, so
+/// the transport that did not write it would surface it again.
+///
+/// Every reader and every receipt writer must go through this function so the
+/// two can never drift again.
+pub fn inbox_aliases(agent_name: &str, is_supervisor: bool) -> Vec<String> {
+    let mut aliases = Vec::new();
+    let trimmed = agent_name.trim();
+    if !trimmed.is_empty() {
+        aliases.push(trimmed.to_string());
+    }
+    if is_supervisor && !aliases.iter().any(|a| a == SUPERVISOR_ALIAS) {
+        aliases.push(SUPERVISOR_ALIAS.to_string());
+    }
+    aliases
+}
+
+/// Write the surfacing receipt for every alias this recipient answers to
+/// (cas-3bf1, GH #176).
+///
+/// A drain writes a receipt only under the alias it queried. That is complete
+/// for a worker (one alias) and incomplete for a supervisor (two), because
+/// `prompt_queue_recipient_seen` is keyed on the literal recipient string — so
+/// a row retired under `warm-jaguar-96` stays unread under `supervisor`, and
+/// whichever reader did not write it surfaces the row again on a later turn.
+/// The in-turn duplicate guards in the two readers only cover duplicates
+/// WITHIN one turn; nothing covered the cross-turn case.
+///
+/// `all_workers` broadcasts are the sharpest case — they are exempt from every
+/// row-level ack filter, so this table is the ONLY thing that can ever retire
+/// one — but the live queue shows the same stranding on directed rows.
+///
+/// Best-effort, matching the receipt writes on the daemon side: a receipt that
+/// fails to persist costs a redelivery, which is recoverable, whereas failing
+/// the surfacing would cost the message, which is not.
+pub fn mirror_receipts_across_aliases(
+    queue: &dyn cas_store::PromptQueueStore,
+    rows: &[cas_store::QueuedPrompt],
+    aliases: &[String],
+) {
+    if aliases.len() < 2 {
+        return;
+    }
+    for row in rows {
+        for alias in aliases {
+            if let Err(error) = queue.record_recipient_surfaced(
+                row.id,
+                alias,
+                cas_store::SurfacingSource::TransportDelivered,
+            ) {
+                tracing::debug!(
+                    target: "cas::coordination",
+                    message_id = row.id,
+                    %alias,
+                    %error,
+                    "cas-3bf1: could not mirror the surfacing receipt across the alias set"
+                );
+            }
+        }
+    }
+}
+
 /// Factory verification matrix.
 ///
 /// - Subtasks: required only when worker harness supports subagents.
@@ -234,6 +319,146 @@ pub fn own_harness_from_env() -> SupervisorCli {
 /// the real reader correctly.
 pub fn own_tool_prefix() -> &'static str {
     own_harness_from_env().capabilities().tool_prefix
+}
+
+#[cfg(test)]
+mod alias_receipt_tests {
+    use super::*;
+    use cas_store::{PromptQueueStore, SqlitePromptQueueStore};
+
+    fn store() -> (tempfile::TempDir, SqlitePromptQueueStore) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        (temp, store)
+    }
+
+    /// A worker answers to one name; a supervisor to its pane name AND the
+    /// logical alias the whole factory addresses it by.
+    #[test]
+    fn a_supervisor_answers_to_both_its_pane_name_and_the_logical_alias() {
+        assert_eq!(inbox_aliases("brave-fox-53", false), vec!["brave-fox-53"]);
+        assert_eq!(
+            inbox_aliases("warm-jaguar-96", true),
+            vec!["warm-jaguar-96", "supervisor"]
+        );
+        // A supervisor literally NAMED `supervisor` must not get it twice —
+        // duplicate aliases would double-poll and double-render every row.
+        assert_eq!(inbox_aliases("supervisor", true), vec!["supervisor"]);
+        assert!(inbox_aliases("   ", false).is_empty());
+    }
+
+    /// cas-3bf1 (GH #176) AC1 — THE REPRODUCTION.
+    ///
+    /// A broadcast surfaced under alias A must not re-inject when the other
+    /// reader polls under alias B. `all_workers` rows are exempt from every
+    /// row-level ack filter, so the receipt table is the only thing that can
+    /// retire one — and before the fix the receipt landed under exactly one
+    /// alias.
+    #[test]
+    fn a_broadcast_surfaced_under_one_alias_does_not_re_inject_under_the_other() {
+        let (_temp, store) = store();
+        let id = store.enqueue("director", "all_workers", "all hands").unwrap();
+        let aliases = inbox_aliases("warm-jaguar-96", true);
+
+        // The pane-alias reader surfaces it and retires the whole identity.
+        let surfaced = store
+            .poll_unseen_for_recipient("warm-jaguar-96", None, 10)
+            .unwrap();
+        assert_eq!(surfaced.len(), 1, "precondition: the broadcast is unread");
+        mirror_receipts_across_aliases(&store, &surfaced, &aliases);
+
+        assert!(
+            store
+                .poll_unseen_for_recipient("supervisor", None, 10)
+                .unwrap()
+                .is_empty(),
+            "a broadcast already shown to this supervisor must not come back \
+             under its other alias — that is the cross-turn re-injection"
+        );
+        assert_eq!(id, surfaced[0].id);
+    }
+
+    /// The reverse direction, which needs no SURFACE_LIMIT interaction: a row
+    /// retired by the `supervisor`-alias reader must not re-inject for the
+    /// pane-alias reader.
+    #[test]
+    fn the_alias_retirement_is_symmetric() {
+        let (_temp, store) = store();
+        store.enqueue("director", "all_workers", "all hands").unwrap();
+        let aliases = inbox_aliases("warm-jaguar-96", true);
+
+        let surfaced = store
+            .poll_unseen_for_recipient("supervisor", None, 10)
+            .unwrap();
+        mirror_receipts_across_aliases(&store, &surfaced, &aliases);
+
+        assert!(
+            store
+                .poll_unseen_for_recipient("warm-jaguar-96", None, 10)
+                .unwrap()
+                .is_empty(),
+            "retirement must not depend on which alias happened to fetch it"
+        );
+    }
+
+    /// AC2 — directed-message behaviour is unchanged, and one agent's identity
+    /// must never retire another agent's mail. This is the guard that keeps the
+    /// fix from becoming a message-loss bug.
+    #[test]
+    fn mirroring_never_reaches_beyond_this_recipients_identity() {
+        let (_temp, store) = store();
+        let mine = store.enqueue("supervisor", "worker-a", "yours").unwrap();
+        store.enqueue("supervisor", "worker-b", "theirs").unwrap();
+
+        let surfaced = store
+            .poll_unseen_for_recipient("worker-a", None, 10)
+            .unwrap();
+        assert_eq!(surfaced.len(), 1);
+        assert_eq!(surfaced[0].id, mine);
+        // A worker has ONE alias, so mirroring is a no-op by construction.
+        mirror_receipts_across_aliases(&store, &surfaced, &inbox_aliases("worker-a", false));
+
+        assert_eq!(
+            store
+                .poll_unseen_for_recipient("worker-b", None, 10)
+                .unwrap()
+                .len(),
+            1,
+            "worker-b's directed mail must be untouched by worker-a's drain"
+        );
+    }
+
+    /// The visibility half of the bug, measured on the live queue at 40 of 50
+    /// `supervisor`-addressed rows never receipted: a row addressed to the
+    /// logical alias was unreachable from a reader that only knew the pane
+    /// name, because the predicate matches `q.target = ?alias OR 'all_workers'`.
+    #[test]
+    fn a_supervisor_addressed_row_is_reachable_from_the_alias_set() {
+        let (_temp, store) = store();
+        let id = store
+            .enqueue("worker-1", "supervisor", "merge request")
+            .unwrap();
+
+        assert!(
+            store
+                .poll_unseen_for_recipient("warm-jaguar-96", None, 10)
+                .unwrap()
+                .is_empty(),
+            "precondition: the pane name alone cannot see supervisor-addressed mail"
+        );
+
+        let found: Vec<i64> = inbox_aliases("warm-jaguar-96", true)
+            .iter()
+            .flat_map(|alias| store.poll_unseen_for_recipient(alias, None, 10).unwrap())
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(
+            found,
+            vec![id],
+            "polling the full alias set must reach supervisor-addressed mail"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use crate::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue};
 use crate::store::share_policy::{eligible_for_team_task, resolve_team_id};
 use crate::store::{Result, TaskStore};
@@ -116,15 +117,15 @@ impl TaskStore for SyncingTaskStore {
         self.inner.get(id)
     }
 
-    fn update(&self, task: &Task) -> Result<()> {
-        self.inner.update(task)?;
+    fn update(&self, task: &Task) -> Result<DateTime<Utc>> {
+        let persisted_at = self.inner.update(task)?;
         // The inner store may enforce transition invariants while persisting
         // (for example, clearing a prior close-cycle branch anchor when a
         // Closed task returns to work). Queue the canonical stored row so a
         // stale caller-owned value cannot be synced back over that invariant.
         let persisted = self.inner.get(&task.id)?;
         self.queue_upsert(&persisted);
-        Ok(())
+        Ok(persisted_at)
     }
 
     fn delete(&self, id: &str) -> Result<()> {

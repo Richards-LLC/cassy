@@ -695,7 +695,7 @@ pub(crate) fn assign_task_to_new_worker(
     updated.assignee = Some(worker_name.to_string());
     updated.updated_at = chrono::Utc::now();
     match store.update(&updated) {
-        Ok(()) => {
+        Ok(_) => {
             tracing::info!(
                 task_id,
                 worker_name,
@@ -791,7 +791,7 @@ fn release_worker_task_bindings_tasks_only(
         t.assignee = None;
         t.updated_at = chrono::Utc::now();
         match task_store.update(&t) {
-            Ok(()) => {
+            Ok(_) => {
                 released += 1;
                 tracing::info!(
                     task_id = %t.id,

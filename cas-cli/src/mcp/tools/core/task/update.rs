@@ -1222,7 +1222,12 @@ impl CasCore {
                 data: None,
             })?;
         } else {
-            task_store.update(&task).map_err(|e| McpError {
+            // cas-ec74: adopt the store-owned stamp so the lifecycle occurrence
+            // pushed below matches the persisted row. (The `reopening_closed`
+            // branch above goes through `reopen_exact_with_conn`, which writes
+            // `task.updated_at` through verbatim as its optimistic-concurrency
+            // key, so its occurrence is already consistent.)
+            task.updated_at = task_store.update(&task).map_err(|e| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
                 message: Cow::from(format!("Failed to update: {e}")),
                 data: None,

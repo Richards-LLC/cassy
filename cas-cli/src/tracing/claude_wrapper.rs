@@ -31,7 +31,7 @@ use crate::tracing::dev_tracer::DevTracer;
 /// "extraction", "hook_summary").
 pub async fn traced_prompt(
     prompt: &str,
-    options: QueryOptions,
+    mut options: QueryOptions,
     caller: &str,
 ) -> Result<ResultMessage, claude_rs::Error> {
     let timer = TraceTimer::new();
@@ -39,6 +39,10 @@ pub async fn traced_prompt(
     // Extract model from options if possible (we'll use a default if not)
     let model = "claude"; // QueryOptions doesn't expose model getter easily
 
+    options
+        .env
+        .get_or_insert_with(Default::default)
+        .extend(crate::internal_llm::sdk_environment());
     let result = claude_rs::prompt(prompt, options).await;
 
     let duration_ms = timer.elapsed_ms();
@@ -88,12 +92,16 @@ pub async fn traced_prompt(
 /// Use this when you know the model name and want it recorded accurately.
 pub async fn traced_prompt_with_model(
     prompt: &str,
-    options: QueryOptions,
+    mut options: QueryOptions,
     model: &str,
     caller: &str,
 ) -> Result<ResultMessage, claude_rs::Error> {
     let timer = TraceTimer::new();
 
+    options
+        .env
+        .get_or_insert_with(Default::default)
+        .extend(crate::internal_llm::sdk_environment());
     let result = claude_rs::prompt(prompt, options).await;
 
     let duration_ms = timer.elapsed_ms();

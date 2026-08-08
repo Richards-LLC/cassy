@@ -29,6 +29,25 @@ fn bool_prop(value: bool) -> &'static str {
     if value { "true" } else { "false" }
 }
 
+fn worker_registry_rows_for_shutdown<'a>(
+    agents: &'a [cas_types::Agent],
+    name: &str,
+    factory_session: Option<&str>,
+) -> Vec<&'a cas_types::Agent> {
+    let mut matching: Vec<_> = agents
+        .iter()
+        .filter(|agent| {
+            agent.name == name
+                && agent.role == cas_types::AgentRole::Worker
+                && factory_session.is_none_or(|session| {
+                    agent.factory_session.as_deref() == Some(session)
+                })
+        })
+        .collect();
+    matching.sort_by_key(|agent| agent.registered_at);
+    matching
+}
+
 /// Resolve the current worker harness from the live on-disk `LlmConfig`.
 ///
 /// Exists as a standalone function so unit tests can verify the on-disk
@@ -1371,7 +1390,12 @@ impl FactoryApp {
         // instead of silently leaving stale idle agents in director panels.
         let agent_store = open_agent_store(self.cas_dir())?;
         let agents = agent_store.list(None)?;
-        let agent = agents.iter().find(|a| a.name == name).ok_or_else(|| {
+        let matching_agents = worker_registry_rows_for_shutdown(
+            &agents,
+            name,
+            self.factory_session.as_deref(),
+        );
+        let agent = matching_agents.first().copied().ok_or_else(|| {
             let known_workers: Vec<String> = agents
                 .iter()
                 .filter(|a| a.role == cas_types::AgentRole::Worker)
@@ -1395,18 +1419,28 @@ impl FactoryApp {
         let has_open_tasks = worker_has_open_tasks(&cas_dir, name)
             || worker_has_open_tasks(&cas_dir, &agent_id);
 
-        if let Err(e) = agent_store.graceful_shutdown(&agent.id) {
-            // Best effort fallback to stale state for consistency, but still surface original failure.
-            let fallback = agent_store.mark_stale(&agent.id);
+        // Retire every same-name row in this factory session. Older builds
+        // allowed nested headless Claude calls to register child session IDs
+        // under the parent worker name; shutting down only `.find()` left the
+        // remaining rows fresh/Active after the pane and worktree were gone.
+        let mut retirement_failures = Vec::new();
+        for matching in &matching_agents {
+            if let Err(error) = agent_store.graceful_shutdown(&matching.id) {
+                let fallback = agent_store.mark_stale(&matching.id);
+                retirement_failures.push(format!(
+                    "{}: {error} (fallback: {})",
+                    matching.id,
+                    match fallback {
+                        Ok(()) => "marked stale".to_string(),
+                        Err(mark_error) => format!("failed: {mark_error}"),
+                    }
+                ));
+            }
+        }
+        if !retirement_failures.is_empty() {
             anyhow::bail!(
-                "Failed to gracefully shutdown worker '{}' (agent_id={}): {}. Fallback mark_stale: {}",
-                name,
-                agent.id,
-                e,
-                match fallback {
-                    Ok(()) => "ok".to_string(),
-                    Err(mark_err) => format!("failed ({mark_err})"),
-                }
+                "Failed to retire all CAS identities for worker '{name}': {}",
+                retirement_failures.join("; ")
             );
         }
 
@@ -2883,6 +2917,31 @@ mod tests {
         t.assignee = assignee.map(str::to_string);
         t.status = status;
         t
+    }
+
+    #[test]
+    fn targeted_shutdown_selects_every_same_session_duplicate_identity() {
+        let worker = |id: &str, session: &str| {
+            let mut agent = cas_types::Agent::new(id.into(), "knowledge-worker".into());
+            agent.role = cas_types::AgentRole::Worker;
+            agent.factory_session = Some(session.into());
+            agent
+        };
+        let rows = vec![
+            worker("parent", "factory-a"),
+            worker("nested-1", "factory-a"),
+            worker("nested-2", "factory-a"),
+            worker("other-factory", "factory-b"),
+        ];
+
+        let selected =
+            worker_registry_rows_for_shutdown(&rows, "knowledge-worker", Some("factory-a"));
+        let ids: std::collections::HashSet<_> =
+            selected.iter().map(|agent| agent.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            std::collections::HashSet::from(["parent", "nested-1", "nested-2"])
+        );
     }
 
     #[test]

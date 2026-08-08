@@ -74,6 +74,7 @@ fn test_agent_crud() {
 
     // Unregister
     store.unregister("agent-test").unwrap();
+    store.unregister("agent-test").unwrap();
     assert!(store.get("agent-test").is_err());
 }
 

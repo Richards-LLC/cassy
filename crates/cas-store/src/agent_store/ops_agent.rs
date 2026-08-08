@@ -185,7 +185,11 @@ impl SqliteAgentStore {
 
             let rows = tx.execute("DELETE FROM agents WHERE id = ?", params![id])?;
             if rows == 0 {
-                return Err(StoreError::NotFound(format!("Agent not found: {id}")));
+                // SessionEnd, MCP shutdown, and factory teardown can all race
+                // to retire the same identity. Repeating unregister is a
+                // successful no-op and must not emit another activity event.
+                tx.commit()?;
+                return Ok(());
             }
 
             // Record event for sidecar activity feed (use name if available, else id)

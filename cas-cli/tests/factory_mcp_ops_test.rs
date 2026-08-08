@@ -1795,6 +1795,47 @@ async fn test_worker_status_shows_agents() {
     assert!(text.contains("effort: high"), "Should show effort: {text}");
 }
 
+/// cas-fa38: a headless knowledge-build child used to inherit the parent
+/// worker name/factory session and create another Active row. Even after the
+/// worktree disappeared, every row rendered independently with a fresh-looking
+/// heartbeat. Status must expose one authoritative identity.
+#[tokio::test]
+async fn test_worker_status_dedupes_nested_identity_with_missing_worktree() {
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-fa38")]);
+    let env = FactoryTestEnv::new();
+    let missing = env.cas_root.join("worktrees/knowledge-worker");
+    let store = env.agent_store();
+
+    let mut parent = Agent::new("parent-factory-id".into(), "knowledge-worker".into());
+    parent.role = AgentRole::Worker;
+    parent.factory_session = Some("session-fa38".into());
+    parent.registered_at = chrono::Utc::now() - chrono::Duration::minutes(1);
+    parent
+        .metadata
+        .insert("clone_path".into(), missing.to_string_lossy().into_owned());
+    store.register(&parent).unwrap();
+
+    let mut nested = parent.clone();
+    nested.id = "nested-knowledge-id".into();
+    nested.cc_session_id = Some("nested-transcript-id".into());
+    nested.registered_at = chrono::Utc::now();
+    store.register(&nested).unwrap();
+
+    let text = get_text(
+        &env.service
+            .factory(Parameters(factory_req("worker_status")))
+            .await
+            .expect("worker_status"),
+    );
+    assert!(text.contains("Workers (1)"), "{text}");
+    assert_eq!(text.matches("• knowledge-worker").count(), 1, "{text}");
+    assert!(
+        text.contains("Filtered duplicate factory registration(s): 1"),
+        "{text}"
+    );
+    assert!(text.contains("[missing-worktree]"), "{text}");
+}
+
 /// cas-e728 (GH #105) defect 1 — stale task attribution.
 ///
 /// A lease is a fixed-duration row that nothing renews and that not every

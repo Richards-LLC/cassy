@@ -47,6 +47,48 @@ fn short_session(session_id: &str) -> &str {
     &session_id[..8.min(session_id.len())]
 }
 
+/// Collapse accidental duplicate registrations for one logical factory
+/// identity. The first harness registration is authoritative while it is
+/// alive; a later live registration wins only when the original process is
+/// gone (legitimate same-name respawn).
+fn dedupe_authoritative_agents(
+    agents: Vec<cas_types::Agent>,
+) -> (Vec<cas_types::Agent>, usize) {
+    let original_len = agents.len();
+    let mut by_identity = std::collections::BTreeMap::<
+        (Option<String>, String, String),
+        cas_types::Agent,
+    >::new();
+
+    for candidate in agents {
+        let key = (
+            candidate.factory_session.clone(),
+            candidate.role.to_string(),
+            candidate.name.clone(),
+        );
+        match by_identity.get_mut(&key) {
+            None => {
+                by_identity.insert(key, candidate);
+            }
+            Some(current) => {
+                let candidate_alive = agent_process_is_alive(&candidate);
+                let current_alive = agent_process_is_alive(current);
+                let candidate_wins = (candidate_alive && !current_alive)
+                    || (candidate_alive == current_alive
+                        && candidate.registered_at < current.registered_at);
+                if candidate_wins {
+                    *current = candidate;
+                }
+            }
+        }
+    }
+
+    let mut deduped: Vec<_> = by_identity.into_values().collect();
+    deduped.sort_by_key(|agent| agent.registered_at);
+    let removed = original_len.saturating_sub(deduped.len());
+    (deduped, removed)
+}
+
 fn worker_effort_from_agent(agent: &cas_types::Agent) -> Option<cas_mux::Effort> {
     agent
         .metadata
@@ -1400,6 +1442,7 @@ impl CasService {
             .into_iter()
             .filter(|a| a.visible_to_factory_session(factory_session.as_deref()))
             .collect();
+        let (agents, duplicate_registrations_filtered) = dedupe_authoritative_agents(agents);
 
         // cas-2e81: always surface recently-died-while-leased even when the
         // Active roster is empty — "None active" must not hide a mid-P0 crash.
@@ -1454,6 +1497,11 @@ impl CasService {
         let owned = supervisor_owned_workers();
         let mut output = String::from("Worker Status\n=============\n\n");
         output.push_str(&undelivered_section);
+        if duplicate_registrations_filtered > 0 {
+            output.push_str(&format!(
+                "Filtered duplicate factory registration(s): {duplicate_registrations_filtered}\n\n"
+            ));
+        }
 
         // cas-d165 (Finding 2): assignees of currently InProgress tasks,
         // resolved ONCE for the whole roster. `has_in_progress_task` below
@@ -6681,6 +6729,29 @@ mod spawn_lifecycle_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_status_identity_dedupe_keeps_one_authoritative_factory_row() {
+        let mut parent = cas_types::Agent::new("parent-session".into(), "worker-one".into());
+        parent.role = cas_types::AgentRole::Worker;
+        parent.factory_session = Some("factory-a".into());
+        parent.registered_at = chrono::Utc::now() - chrono::Duration::minutes(2);
+
+        let mut nested = parent.clone();
+        nested.id = "nested-knowledge-session".into();
+        nested.cc_session_id = Some("nested-transcript".into());
+        nested.registered_at = chrono::Utc::now();
+
+        let mut other = cas_types::Agent::new("other-session".into(), "worker-two".into());
+        other.role = cas_types::AgentRole::Worker;
+        other.factory_session = Some("factory-a".into());
+
+        let (rows, removed) = dedupe_authoritative_agents(vec![nested, other, parent]);
+        assert_eq!(removed, 1);
+        assert_eq!(rows.len(), 2);
+        let worker_one = rows.iter().find(|row| row.name == "worker-one").unwrap();
+        assert_eq!(worker_one.id, "parent-session");
+    }
 
     #[cfg(target_os = "linux")]
     struct SyntheticProcessGroup {

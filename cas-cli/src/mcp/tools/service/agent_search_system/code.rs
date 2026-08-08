@@ -79,7 +79,10 @@ impl CasService {
             language,
             include_source: req.include_source.unwrap_or(false),
             min_score: 0.0,
-            semantic: false,
+            // Capability-gated by `CasCodeSearch`: logged-out installs keep
+            // this request entirely local while authenticated installs merge
+            // the isolated code-vector channel with BM25.
+            semantic: true,
         };
 
         let results = code_search.search(&opts).map_err(|e| {

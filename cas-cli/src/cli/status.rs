@@ -38,6 +38,38 @@ pub fn execute(args: &StatusArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<
     } else {
         (0, 0)
     };
+    let project_root = cas_root.parent().unwrap_or(std::path::Path::new("."));
+    let (repo_root, repository) = crate::daemon::indexing::resolve_repository(project_root);
+    let vector_store = cas_store::SqliteCodeVectorStore::open(cas_root).ok();
+    let code_vectors = vector_store
+        .as_ref()
+        .and_then(|store| store.stats().ok())
+        .unwrap_or_default();
+    let code_scan = vector_store
+        .as_ref()
+        .and_then(|store| store.index_state(&repository).ok().flatten());
+    let current_head = repo_root
+        .as_deref()
+        .and_then(crate::daemon::indexing::head_commit);
+    let head_lag = code_scan.as_ref().and_then(|scan| {
+        current_head
+            .as_ref()
+            .zip(scan.last_head.as_ref())
+            .map(|(current, indexed)| current != indexed)
+    });
+    let eligible_files = code_scan
+        .as_ref()
+        .map(|scan| scan.eligible_files)
+        .unwrap_or(0);
+    let indexed_files = code_scan
+        .as_ref()
+        .map(|scan| scan.indexed_files)
+        .unwrap_or(0);
+    let failed_files = code_scan
+        .as_ref()
+        .map(|scan| scan.failed_files)
+        .unwrap_or(0);
+    let file_lag = eligible_files.saturating_sub(indexed_files);
 
     let total_entries = entries.len();
     let total_archived = archived.len();
@@ -47,7 +79,6 @@ pub fn execute(args: &StatusArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<
     let high_value = entries.iter().filter(|e| e.feedback_score() > 0).count();
 
     // Count proven rules
-    let project_root = cas_root.parent().unwrap_or(std::path::Path::new("."));
     let syncer = Syncer::new(
         project_root.join(&config.sync.target),
         config.sync.min_helpful,
@@ -63,6 +94,21 @@ pub fn execute(args: &StatusArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<
             "proven_rules": proven_rules,
             "code_files": code_files,
             "code_symbols": code_symbols,
+            "code_index": {
+                "repository": repository,
+                "eligible_files": eligible_files,
+                "indexed_files": indexed_files,
+                "failed_files": failed_files,
+                "file_lag": file_lag,
+                "last_head": code_scan.as_ref().and_then(|scan| scan.last_head.clone()),
+                "head_lag": head_lag,
+                "last_scan_at": code_scan.as_ref().map(|scan| scan.last_scan_at.clone()),
+                "last_error": code_scan.as_ref().and_then(|scan| scan.last_error.clone()),
+                "vector_eligible": code_vectors.eligible,
+                "vectorized": code_vectors.vectorized,
+                "pending": code_vectors.pending,
+                "failed": code_vectors.failed,
+            },
             "sync_enabled": config.sync.enabled && !Config::is_sync_disabled()
         });
         println!("{}", serde_json::to_string(&status)?);
@@ -84,6 +130,27 @@ pub fn execute(args: &StatusArgs, cli: &Cli, cas_root: &Path) -> anyhow::Result<
             fmt.field(
                 "  Code",
                 &format!("{code_files} files, {code_symbols} symbols"),
+            )?;
+            fmt.field(
+                "  Code coverage",
+                &format!(
+                    "{indexed_files}/{eligible_files} files, {file_lag} lagging, {failed_files} failed, HEAD {}",
+                    match head_lag {
+                        Some(true) => "behind",
+                        Some(false) => "current",
+                        None => "unknown",
+                    }
+                ),
+            )?;
+            fmt.field(
+                "  Code vectors",
+                &format!(
+                    "{}/{} vectorized, {} pending, {} failed",
+                    code_vectors.vectorized,
+                    code_vectors.eligible,
+                    code_vectors.pending,
+                    code_vectors.failed
+                ),
             )?;
         }
         fmt.newline()?;

@@ -284,6 +284,69 @@ fn bench_symbol_id_generation(c: &mut Criterion) {
     group.finish();
 }
 
+/// Fixed labeled semantic-code set used for both recall and warm/cold latency.
+/// The labels are intentionally conceptual rather than identifier-overlap:
+/// expiry cleanup, retry/backoff, and permission enforcement occupy orthogonal
+/// directions so a wrong top-1 is an observable recall regression.
+fn bench_code_vector_lookup(c: &mut Criterion) {
+    use cas::cloud::embeddings::{
+        EmbeddingMeta, KnowledgeVectorCache, VectorNamespace, code_symbol_key,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let meta = EmbeddingMeta::new("benchmark", "fixed-code-eval-v1", 4);
+    let cache = KnowledgeVectorCache::open_code(temp.path(), meta).unwrap();
+    for (id, vector) in [
+        ("expiry_cleanup", [1.0, 0.0, 0.0, 0.0]),
+        ("retry_backoff", [0.0, 1.0, 0.0, 0.0]),
+        ("permission_guard", [0.0, 0.0, 1.0, 0.0]),
+    ] {
+        cache.put(&code_symbol_key(id), &vector).unwrap();
+    }
+    let labeled = [
+        ([0.98, 0.02, 0.0, 0.0], "expiry_cleanup"),
+        ([0.0, 0.97, 0.03, 0.0], "retry_backoff"),
+        ([0.01, 0.0, 0.99, 0.0], "permission_guard"),
+    ];
+    let recalled = labeled
+        .iter()
+        .filter(|(query, expected)| {
+            cache
+                .nearest_in(VectorNamespace::Code, query, 1)
+                .unwrap()
+                .first()
+                .is_some_and(|(id, _)| id == &code_symbol_key(expected))
+        })
+        .count();
+    assert_eq!(recalled, labeled.len(), "fixed semantic recall@1 regressed");
+
+    c.bench_function("code_vector_lookup/warm_fixed_recall_at_1", |b| {
+        b.iter(|| {
+            for (query, _) in &labeled {
+                black_box(
+                    cache
+                        .nearest_in(VectorNamespace::Code, black_box(query), 1)
+                        .unwrap(),
+                );
+            }
+        })
+    });
+    c.bench_function("code_vector_lookup/cold_open_and_fixed_recall_at_1", |b| {
+        b.iter(|| {
+            let reopened = KnowledgeVectorCache::open_existing_code(temp.path())
+                .unwrap()
+                .unwrap();
+            for (query, _) in &labeled {
+                black_box(
+                    reopened
+                        .nearest_in(VectorNamespace::Code, black_box(query), 1)
+                        .unwrap(),
+                );
+            }
+        })
+    });
+}
+
 criterion_group!(
     benches,
     bench_chunking,
@@ -291,6 +354,7 @@ criterion_group!(
     bench_bm25_prep,
     bench_content_hashing,
     bench_symbol_id_generation,
+    bench_code_vector_lookup,
 );
 
 criterion_main!(benches);

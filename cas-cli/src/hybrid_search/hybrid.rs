@@ -374,8 +374,8 @@ impl HybridSearch {
 
         Ok(Self {
             bm25_index,
-            graph_retriever: None, // Needs entity store to be set separately
-            code_search: None,     // Needs code store to be set separately
+            graph_retriever: None,  // Needs entity store to be set separately
+            code_search: None,      // Needs code store to be set separately
             knowledge_store: None,  // Needs knowledge store to be set separately
             history_store: None,    // Needs history store to be set separately
             semantic_channel: None, // Needs cloud auth; see set_semantic_channel
@@ -601,6 +601,7 @@ impl HybridSearch {
                 let code_opts = CodeSearchOptions {
                     query: search_query.clone(),
                     limit: opts.base.limit * 3,
+                    semantic: true,
                     ..Default::default()
                 };
                 code_search

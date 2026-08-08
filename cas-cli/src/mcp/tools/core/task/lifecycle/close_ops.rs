@@ -872,13 +872,17 @@ impl CasCore {
             format!("{}\n\n{}", parked.notes, audit)
         };
 
-        if let Err(e) = task_store.update(&parked) {
-            tracing::warn!(
-                task_id = %task.id,
-                error = %e,
-                "failed to park task awaiting merge after close rejection"
-            );
-        } else {
+        match task_store.update(&parked) {
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.id,
+                    error = %e,
+                    "failed to park task awaiting merge after close rejection"
+                );
+            }
+            // cas-ec74: `updated_at` is store-owned; derive the occurrence from
+            // the stamp the store persisted, not from the pre-write value.
+            Ok(persisted_at) => {
             // cas-062d / cas-17e4: durable outbox for AwaitingMerge + close-rejected.
             let actor = self.get_agent_id().unwrap_or_else(|_| "unknown".into());
             let actor_name = self
@@ -887,7 +891,7 @@ impl CasCore {
                 .and_then(|s| s.get(&actor).ok())
                 .map(|a| a.name)
                 .unwrap_or_else(|| actor.clone());
-            let occurrence = super::supervisor_push::occurrence_from_updated_at(parked.updated_at);
+            let occurrence = super::supervisor_push::occurrence_from_updated_at(persisted_at);
             if let Err(e) = self.push_task_lifecycle(
                 &task.id,
                 &task.title,
@@ -919,6 +923,7 @@ impl CasCore {
                     error = %e,
                     "supervisor lifecycle push failed after close rejection (task remains AwaitingMerge; replay outbox)"
                 );
+            }
             }
         }
 
@@ -3354,7 +3359,9 @@ impl CasCore {
             }
         }
 
-        task_store.update(&task).map_err(|e| McpError {
+        // cas-ec74: adopt the store-owned stamp so the Closed occurrence below
+        // matches the persisted row instead of a second clock read.
+        task.updated_at = task_store.update(&task).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to update: {e}")),
             data: None,
@@ -3447,13 +3454,12 @@ impl CasCore {
                         dependent_task.notes =
                             format!("{}\n\n{}", dependent_task.notes, unblock_note);
                     }
-                    if task_store.update(&dependent_task).is_ok() {
+                    if let Ok(persisted_at) = task_store.update(&dependent_task) {
                         // cas-062d / cas-17e4: ready/reopened outbox for auto-unblocked dependents.
                         let dep_id = dependent_task.id.clone();
                         let dep_title = dependent_task.title.clone();
-                        let occurrence = super::supervisor_push::occurrence_from_updated_at(
-                            dependent_task.updated_at,
-                        );
+                        let occurrence =
+                            super::supervisor_push::occurrence_from_updated_at(persisted_at);
                         let actor = self
                             .get_agent_id()
                             .ok()
@@ -4037,7 +4043,11 @@ impl CasCore {
                     .map(|a| a.name)
             })
             .unwrap_or_else(|| "unknown".into());
-        let occurrence = super::supervisor_push::occurrence_from_updated_at(task.updated_at);
+        // cas-ec74: the two atomic reopen paths below write `task.updated_at`
+        // through verbatim (it is their optimistic-concurrency key), so this
+        // occurrence is correct for them. The plain `update()` path re-stamps
+        // from the store clock, so that branch refreshes both below.
+        let mut occurrence = super::supervisor_push::occurrence_from_updated_at(task.updated_at);
         let lifecycle_outbox = if old_status == TaskStatus::Closed {
             let agent_store = self.open_agent_store().map_err(|error| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
@@ -4106,11 +4116,12 @@ impl CasCore {
                 data: None,
             })?;
         } else {
-            task_store.update(&task).map_err(|e| McpError {
+            task.updated_at = task_store.update(&task).map_err(|e| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
                 message: Cow::from(format!("Failed to update: {e}")),
                 data: None,
             })?;
+            occurrence = super::supervisor_push::occurrence_from_updated_at(task.updated_at);
         }
 
         // cas-062d / cas-17e4: ready/reopened outbox after successful reopen.

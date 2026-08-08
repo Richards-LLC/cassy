@@ -60,17 +60,12 @@ const SURFACE_LIMIT: usize = 10;
 /// time). Surfacing only the pane name would leave every supervisor-addressed
 /// message — which is nearly all of them — invisible.
 fn recipient_aliases(input: &HookInput) -> Vec<String> {
-    let mut aliases: Vec<String> = Vec::new();
-    if let Ok(name) = std::env::var("CAS_AGENT_NAME") {
-        let name = name.trim().to_string();
-        if !name.is_empty() {
-            aliases.push(name);
-        }
-    }
-    if crate::harness_policy::is_supervisor(input) && !aliases.iter().any(|a| a == "supervisor") {
-        aliases.push("supervisor".to_string());
-    }
-    aliases
+    // cas-3bf1 (GH #176): delegated to the shared resolver so this hook and the
+    // MCP `inbox_poll` can never again disagree about who a supervisor is.
+    crate::harness_policy::inbox_aliases(
+        &std::env::var("CAS_AGENT_NAME").unwrap_or_default(),
+        crate::harness_policy::is_supervisor(input),
+    )
 }
 
 fn factory_session() -> Option<String> {
@@ -132,6 +127,12 @@ pub fn surface_factory_inbox(cas_root: Option<&Path>, input: &HookInput) -> Opti
     if rows.is_empty() {
         return None;
     }
+    // cas-3bf1 (GH #176): a surfacing retires the row for the WHOLE identity,
+    // not just the alias that happened to fetch it. Without this, a row drained
+    // under `warm-jaguar-96` keeps no receipt under `supervisor`, so the other
+    // reader re-injects it on a later turn — and the in-turn dedupe above only
+    // covers duplicates WITHIN one turn, never across them.
+    crate::harness_policy::mirror_receipts_across_aliases(&*queue, &rows, &aliases);
     Some(render_surfaced(&rows))
 }
 

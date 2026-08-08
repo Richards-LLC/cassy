@@ -448,8 +448,23 @@ pub trait TaskStore: Send + Sync {
     /// Get a task by ID
     fn get(&self, id: &str) -> Result<Task>;
 
-    /// Update an existing task
-    fn update(&self, task: &Task) -> Result<()>;
+    /// Update an existing task.
+    ///
+    /// `updated_at` is **store-owned**: the store stamps it from its own clock
+    /// and the caller's `task.updated_at` is ignored on this path. The stamp
+    /// that was actually persisted is returned so callers never have to guess
+    /// it with a second clock read.
+    ///
+    /// cas-ec74: deriving a lifecycle-notification occurrence from
+    /// `task.updated_at` after calling `update()` compares two different clock
+    /// reads and can never match the stored row. Derive it from this return
+    /// value instead (see `supervisor_push::occurrence_from_updated_at`).
+    ///
+    /// The one sanctioned exception is
+    /// `SqliteTaskStore::reopen_exact_with_conn`, where a caller-supplied
+    /// timestamp is an explicit optimistic-concurrency key rather than a
+    /// general write path.
+    fn update(&self, task: &Task) -> Result<DateTime<Utc>>;
 
     /// Delete a task
     fn delete(&self, id: &str) -> Result<()>;

@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use crate::config::NotificationConfig;
 use crate::notifications::{NotificationEvent, get_global_notifier};
 use crate::store::{Result, TaskStore};
@@ -96,13 +97,13 @@ impl TaskStore for NotifyingTaskStore {
         self.inner.get(id)
     }
 
-    fn update(&self, task: &Task) -> Result<()> {
+    fn update(&self, task: &Task) -> Result<DateTime<Utc>> {
         // Get old status for transition detection
         let old_status = self.inner.get(&task.id).ok().map(|t| t.status);
 
-        self.inner.update(task)?;
+        let persisted_at = self.inner.update(task)?;
         self.notify_updated(task, old_status);
-        Ok(())
+        Ok(persisted_at)
     }
 
     fn delete(&self, id: &str) -> Result<()> {

@@ -35,6 +35,22 @@ use cas_types::ShareScope;
 const LAST_PUSH_KEY: &str = "last_knowledge_push_at";
 /// Metadata key holding the high-water mark for knowledge pulls.
 const LAST_PULL_KEY: &str = "last_knowledge_pull_at";
+/// Canonical project id used by the last knowledge push the server accepted.
+///
+/// Recorded so the starvation detector can name BOTH ids when pulls go quiet:
+/// "we push as X and pull as Y" is the actionable form of the warning.
+const LAST_PUSH_PROJECT_KEY: &str = "last_knowledge_push_project_id";
+/// Count of consecutive knowledge pulls that returned a completely empty
+/// envelope.
+const EMPTY_PULL_STREAK_KEY: &str = "knowledge_empty_pull_streak";
+
+/// Consecutive empty pulls tolerated before we say something.
+///
+/// Not 1: an empty envelope is the NORMAL steady state once a project is fully
+/// synced and nobody has written a page since. The signal is only meaningful
+/// when it persists *and* we have evidence there should be something there —
+/// hence the paired "a push was accepted" condition below.
+const EMPTY_PULL_STREAK_THRESHOLD: u32 = 5;
 /// Entity-type key used in the push payload and the pull response.
 pub const KNOWLEDGE_ENTITY: &str = "knowledge_pages";
 
@@ -148,6 +164,10 @@ pub struct KnowledgePullReport {
     pub refused_foreign: usize,
     /// The page ids refused above, for the operator-facing report.
     pub refused_foreign_ids: Vec<String>,
+    /// Set when pulls have been persistently empty while pushes are being
+    /// accepted — the signature of a project-id divergence, which presents as
+    /// silence rather than as an error. See [`CloudSyncer::pull_knowledge_pages`].
+    pub starvation_warning: Option<String>,
 }
 
 /// Share scope for knowledge pages under the current cloud configuration.
@@ -242,6 +262,13 @@ impl CloudSyncer {
         let _ = self
             .queue()
             .set_metadata(LAST_PUSH_KEY, &Utc::now().to_rfc3339());
+        // Record WHICH project id the server accepted pages under. If pulls
+        // later go silent, this is half of the evidence that names the cause.
+        if let Some(project_id) = get_project_canonical_id() {
+            let _ = self
+                .queue()
+                .set_metadata(LAST_PUSH_PROJECT_KEY, &project_id);
+        }
         Ok(count)
     }
 
@@ -319,6 +346,9 @@ impl CloudSyncer {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
+        // Empty BEFORE any client-side filtering: rows we refused still prove
+        // the read channel works, and must not be read as starvation.
+        let envelope_was_empty = incoming.is_empty();
 
         for raw in incoming {
             // FAIL CLOSED, BEFORE PARSING OR WRITING. A knowledge page is
@@ -367,7 +397,75 @@ impl CloudSyncer {
             let _ = self.queue().set_metadata(LAST_PULL_KEY, pulled_at);
         }
 
+        report.starvation_warning = self.check_pull_starvation(envelope_was_empty, &project_id);
+
         Ok(report)
+    }
+
+    /// Detect the failure mode that has no error to report: **silent
+    /// starvation**.
+    ///
+    /// The server filters pulls on the project id the client *sends*. If rows
+    /// were ever stored under a different canonical id than the one we send —
+    /// and `resolveCanonicalProject` can legitimately return one, which is the
+    /// point of its alias and conflict branches — we do not receive foreign
+    /// rows to reject. We receive an **empty envelope, forever**, and both
+    /// sides consider the sync successful. Nothing throws, nothing logs, and
+    /// the account looks synced while nothing arrives.
+    ///
+    /// So the detector infers it from a shape rather than an error: pulls
+    /// persistently empty *while pushes are being accepted*. Either condition
+    /// alone is unremarkable — an empty pull is the normal steady state, and a
+    /// successful push says nothing about the read path — but together they
+    /// describe a channel that only works in one direction, which is exactly
+    /// what an id divergence looks like from here.
+    ///
+    /// Deliberately advisory: it names both ids and stops. The client cannot
+    /// tell a divergence from "genuinely nothing new for a while", so escalating
+    /// to an error would eventually cry wolf at every quiet project.
+    fn check_pull_starvation(&self, envelope_was_empty: bool, pull_project_id: &str) -> Option<String> {
+        if !envelope_was_empty {
+            let _ = self.queue().set_metadata(EMPTY_PULL_STREAK_KEY, "0");
+            return None;
+        }
+
+        let streak = self
+            .queue()
+            .get_metadata(EMPTY_PULL_STREAK_KEY)
+            .ok()
+            .flatten()
+            .and_then(|raw| raw.parse::<u32>().ok())
+            .unwrap_or(0)
+            .saturating_add(1);
+        let _ = self
+            .queue()
+            .set_metadata(EMPTY_PULL_STREAK_KEY, &streak.to_string());
+
+        if streak < EMPTY_PULL_STREAK_THRESHOLD {
+            return None;
+        }
+        // Without an accepted push on record there is no evidence anything
+        // should be coming back, and a quiet project is not a bug.
+        let pushed_as = self
+            .queue()
+            .get_metadata(LAST_PUSH_PROJECT_KEY)
+            .ok()
+            .flatten()?;
+
+        let mismatch = if pushed_as == pull_project_id {
+            "The ids match locally, so the divergence (if any) is server-side: rows may be \
+             stored under a canonical id different from the one this client sends."
+        } else {
+            "THESE IDS DIFFER — that is the likely cause: pages are being stored under one \
+             project and requested under another."
+        };
+        Some(format!(
+            "{streak} consecutive knowledge pulls returned nothing while pushes are being \
+             accepted. Pushing as '{pushed_as}', pulling as '{pull_project_id}'. {mismatch} \
+             A project-id divergence does not surface as an error — it presents exactly like \
+             this, as silence. Check the canonical id pin before assuming there is simply \
+             nothing new."
+        ))
     }
 
     /// Apply one incoming page. `Ok(false)` means the local copy is locked and
@@ -832,6 +930,111 @@ mod tests {
             mark.is_none(),
             "the watermark must NOT advance past a refused page, or it is never retried \
              until a human edits it — got {mark:?}"
+        );
+    }
+
+    /// Starvation has no error to catch — it presents as a successful, quiet
+    /// sync. This pins the inference: persistently empty pulls WHILE pushes
+    /// are accepted, and the warning must name both ids.
+    #[tokio::test]
+    async fn persistently_empty_pulls_after_an_accepted_push_warn_about_id_divergence() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/sync/push"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(super::super::pull::PULL_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "knowledge_pages": []
+            })))
+            .mount(&server)
+            .await;
+        let endpoint = server.uri();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        let (early, at_threshold) = tokio::task::spawn_blocking(move || {
+            let store = seeded_store(&root);
+            let syncer = syncer(Some(&endpoint), &root);
+            // A push the server accepts: this is the evidence that the write
+            // channel works, without which silence means nothing.
+            assert_eq!(syncer.push_knowledge_pages(&store).unwrap(), 1);
+
+            let mut early = None;
+            for _ in 1..EMPTY_PULL_STREAK_THRESHOLD {
+                early = syncer.pull_knowledge_pages(&store).unwrap().starvation_warning;
+            }
+            let at_threshold = syncer.pull_knowledge_pages(&store).unwrap().starvation_warning;
+            (early, at_threshold)
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            early.is_none(),
+            "a few empty pulls are the normal steady state and must stay quiet — got {early:?}"
+        );
+        let warning = at_threshold.expect("the streak must eventually be reported");
+        assert!(
+            warning.contains("Pushing as") && warning.contains("pulling as"),
+            "the warning must name BOTH ids or it is not actionable: {warning}"
+        );
+        assert!(
+            warning.contains("does not surface as an error"),
+            "the warning must explain why nothing else caught this: {warning}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_empty_pull_clears_the_starvation_streak() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/sync/push"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        // Rows arrive — even though this one is refused as foreign, the read
+        // channel demonstrably works, so it must NOT count as starvation.
+        let mut foreign = remote_record("Foreign", "# foreign", false);
+        foreign["id"] = serde_json::json!("cas-kn997");
+        foreign["project_canonical_id"] = serde_json::json!("github.com/other/repo");
+        Mock::given(method("GET"))
+            .and(path(super::super::pull::PULL_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "knowledge_pages": [foreign]
+            })))
+            .mount(&server)
+            .await;
+        let endpoint = server.uri();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        let warnings = tokio::task::spawn_blocking(move || {
+            let store = seeded_store(&root);
+            let syncer = syncer(Some(&endpoint), &root);
+            syncer.push_knowledge_pages(&store).unwrap();
+            let mut warnings = Vec::new();
+            for _ in 0..(EMPTY_PULL_STREAK_THRESHOLD + 2) {
+                warnings.push(syncer.pull_knowledge_pages(&store).unwrap().starvation_warning);
+            }
+            warnings
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            warnings.iter().all(|w| w.is_none()),
+            "rows arriving — even refused ones — prove the read channel works: {warnings:?}"
         );
     }
 

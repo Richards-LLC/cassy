@@ -1226,6 +1226,7 @@ pub(crate) fn sync_project_knowledge(cli: &Cli, cas_root: &Path) -> anyhow::Resu
                     "locked_preserved": pulled.locked_preserved,
                     "refused_foreign": pulled.refused_foreign,
                     "refused_foreign_ids": pulled.refused_foreign_ids,
+                    "starvation_warning": pulled.starvation_warning,
                     "embedded": embedded,
                     "embed_requests": embed_requests,
                     "awaiting_embedding": awaiting,
@@ -1240,6 +1241,11 @@ pub(crate) fn sync_project_knowledge(cli: &Cli, cas_root: &Path) -> anyhow::Resu
                 "  Knowledge: {pushed} pushed, {} pulled, {embedded} embedded",
                 pulled.applied
             );
+        }
+        // The failure mode with no error attached — say it out loud or it is
+        // indistinguishable from a quiet, healthy project.
+        if let Some(warning) = &pulled.starvation_warning {
+            eprintln!("  Knowledge: POSSIBLE SYNC STARVATION — {warning}");
         }
         // A refusal is never a silent drop: it is a contamination attempt the
         // operator needs to see, named, with the ids involved.

@@ -536,6 +536,68 @@ mod large_artifact_staging_tests {
             "Stage large artifacts (>1GB) in /mnt/datacube/staging — /tmp is tmpfs on this host."
         ));
     }
+
+    /// Production-shape regression for cas-066a: the real worker guidance,
+    /// CAS task/memory/search reminder, factory identity, and host/runtime
+    /// banners must fit below the 12 KiB harness boundary with enough margin
+    /// for representative identifier growth. Optional listings may degrade;
+    /// these protected semantics may not.
+    #[test]
+    fn worker_session_start_protected_context_has_hard_limit_margin() {
+        const HARD_LIMIT: usize = 12_288;
+        const REQUIRED_MARGIN: usize = 800;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = staging_env("worker");
+        env.set(
+            "CAS_AGENT_NAME",
+            "worker-with-a-representative-long-factory-name",
+        );
+        env.set(
+            "CAS_AGENT_ID",
+            "codex-worker-with-a-representative-long-session-identity",
+        );
+        env.set("CAS_FACTORY_SESSION", "representative-factory-session");
+
+        let input = HookInput {
+            session_id: "7d3511aa-9cf5-44d8-921d-0289bd66fe0a".to_string(),
+            cwd: tmp.path().to_string_lossy().into_owned(),
+            hook_event_name: "SessionStart".to_string(),
+            permission_mode: Some("default".to_string()),
+            ..HookInput::default()
+        };
+        let context = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+
+        assert!(
+            context.len() <= HARD_LIMIT - REQUIRED_MARGIN,
+            "worker SessionStart protected context is {} bytes; require at least \
+             {REQUIRED_MARGIN}B margin below the {HARD_LIMIT}B harness limit",
+            context.len()
+        );
+
+        let prefix = crate::harness_policy::own_tool_prefix();
+        for required in [
+            "## 📋 CAS Context",
+            &format!("`{prefix}task`"),
+            &format!("`{prefix}memory`"),
+            &format!("`{prefix}search`"),
+            "**You**: worker-with-a-representative-long-factory-name (worker)",
+            "# Factory Worker",
+            "Never self-dispatch",
+            "One task at a time",
+            "Scope is frozen",
+            "Honor non-goals and layer boundaries",
+            "Never block the pane",
+            "Checkpoint, never compact",
+            "verification required",
+            "MERGE REQUIRED",
+        ] {
+            assert!(
+                context.contains(required),
+                "worker SessionStart lost mandatory protected guidance: {required:?}"
+            );
+        }
+    }
 }
 
 // ─── Session title computation (cas-ae09) ─────────────────────────────────

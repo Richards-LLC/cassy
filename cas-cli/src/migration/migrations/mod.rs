@@ -204,6 +204,7 @@ mod m225_commit_links_link_method;
 mod m226_knowledge_pages_add_attribution;
 mod m227_knowledge_page_tombstones;
 mod m228_history_epochs_create_table;
+mod m229_code_vector_state;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -441,6 +442,7 @@ pub const MIGRATIONS: &[Migration] = &[
     // and knowledge-store lanes claimed the earlier IDs; migration IDs are
     // never reused.
     m228_history_epochs_create_table::MIGRATION,
+    m229_code_vector_state::MIGRATION,
 ];
 
 #[cfg(test)]

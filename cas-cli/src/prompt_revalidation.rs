@@ -375,25 +375,45 @@ pub(crate) fn revalidate_lifecycle_prompt(
             task_id: envelope.task_id,
         };
     }
-    // cas-f02b (GH #101): occurrence equality is the right staleness test for a
-    // transient transition — it distinguishes one Open→InProgress cycle from
-    // the next. It is the WRONG test for a state the task is still sitting in.
-    // A parked task keeps accruing writes while it waits (e.g.
-    // `mark_awaiting_merge_conflicted` on a worker's close retry bumps
-    // `updated_at`), and every one of those would have made the park's own
-    // notification look stale and dropped it before transport — silently
-    // reproducing the stall this notification exists to prevent. While the task
-    // is still IN the state the envelope describes, the signal is still true.
-    if current_status.is_parked_awaiting_supervisor() {
-        return LifecyclePromptDecision::Deliver;
-    }
-    if current_updated_at == envelope.occurrence {
-        LifecyclePromptDecision::Deliver
-    } else {
-        LifecyclePromptDecision::SuppressStale {
+    // cas-f02b (GH #101) carved out parked states from the equality test below
+    // because a parked task keeps accruing writes while it waits. cas-0147
+    // (GH #167) measured what the equality test did to every OTHER state and
+    // found the carve-out was not a special case — the test was unpassable.
+    //
+    // Occurrence identity is derived from the caller's `task.updated_at`
+    // (`occurrence_from_updated_at`, set at `lifecycle.rs` before the write),
+    // but `TaskStore::update` re-stamps `updated_at = Utc::now()` inside the
+    // UPDATE and discards the caller's value. Two clock reads means the two
+    // timestamps are NEVER equal, so `current_updated_at == occurrence` was
+    // false even when revalidated microseconds after the write it describes.
+    // Measured on the live queue: of 389 suppressed rows joinable to their
+    // task, ZERO matched exactly, 379 had an occurrence strictly earlier than
+    // the persisted `updated_at`, and 97 differed only below the millisecond
+    // (e.g. cas-0147's own `task_started`: occurrence 00:25:48.953756486 vs
+    // updated_at 00:25:48.953778358 — 21.9 microseconds apart). The result was
+    // a four-day outage in which 353 of 361 supervisor lifecycle relays —
+    // including 34 of 36 `task_awaiting_merge` and 34 of 36
+    // `task_close_rejected` — were destroyed before transport.
+    //
+    // So staleness is the status question and only the status question, which
+    // is the one already answered above: while the task is still IN the state
+    // the envelope announces, the signal is still true, whatever else has been
+    // written to the task since. The cost of relaxing this is at worst one
+    // duplicate FYI when a task re-enters the same status while an older
+    // notification is still queued; the cost of keeping it was near-total
+    // signal loss. This module's stated policy is to fail toward noise.
+    //
+    // `current_updated_at` stays load-bearing for the one thing it can still
+    // decide soundly: a task whose persisted state PREDATES the occurrence the
+    // envelope claims cannot have produced that occurrence — the row describes
+    // a write that is not in this task's history (replayed, rewound, or
+    // addressed to a recycled id). That is genuinely stale.
+    if current_updated_at < envelope.occurrence {
+        return LifecyclePromptDecision::SuppressStale {
             task_id: envelope.task_id,
-        }
+        };
     }
+    LifecyclePromptDecision::Deliver
 }
 
 #[cfg(test)]
@@ -564,22 +584,110 @@ mod tests {
         ));
     }
 
-    /// Transient transitions keep the strict occurrence test — one
-    /// Open→InProgress cycle must not be confirmed by the next one's write.
-    #[test]
-    fn transient_transitions_still_require_matching_occurrence() {
-        let occurrence = Utc.with_ymd_and_hms(2026, 8, 6, 2, 10, 0).unwrap();
-        let prompt = format!(
-            "<task-lifecycle transition=\"task_started\" task_id=\"cas-x\" old=\"open\" \
+    fn started_prompt(task_id: &str, occurrence: DateTime<Utc>) -> String {
+        format!(
+            "<task-lifecycle transition=\"task_started\" task_id=\"{task_id}\" old=\"open\" \
              new=\"in_progress\" actor=\"w\" notification_id=\"1\" occurrence=\"{}\">\n\
              </task-lifecycle>",
             occurrence.to_rfc3339()
+        )
+    }
+
+    /// cas-0147 (GH #167) — THE REGRESSION GUARD, replayed from the live row.
+    ///
+    /// This test used to assert the opposite (`transient_transitions_still_
+    /// require_matching_occurrence`). That assertion encoded the defect: it
+    /// was written believing a `task_started` row could ever be revalidated
+    /// with `updated_at == occurrence`, and it never can, because the
+    /// occurrence is formatted from the caller's `task.updated_at` while
+    /// `TaskStore::update` re-stamps the column from a second `Utc::now()`.
+    ///
+    /// The numbers below are cas-0147's own `task_started` row, copied from
+    /// the live queue: 21.9 microseconds of drift between the notification and
+    /// the task it describes. Under the old test's rule that row — and 353 of
+    /// its 361 siblings across four days — was destroyed before transport.
+    #[test]
+    fn a_microsecond_of_clock_drift_no_longer_destroys_the_notification() {
+        let occurrence = Utc
+            .with_ymd_and_hms(2026, 8, 8, 0, 25, 48)
+            .unwrap()
+            .checked_add_signed(chrono::Duration::nanoseconds(953_756_486))
+            .expect("occurrence");
+        let persisted = Utc
+            .with_ymd_and_hms(2026, 8, 8, 0, 25, 48)
+            .unwrap()
+            .checked_add_signed(chrono::Duration::nanoseconds(953_778_358))
+            .expect("persisted updated_at");
+        assert_ne!(
+            occurrence, persisted,
+            "the two clock reads are the whole defect — if they ever compare \
+             equal this test has stopped reproducing it"
         );
+
+        assert_eq!(
+            revalidate_lifecycle_prompt(
+                &started_prompt("cas-0147", occurrence),
+                TaskStatus::InProgress,
+                persisted,
+            ),
+            LifecyclePromptDecision::Deliver,
+            "a notification revalidated 22 microseconds after the write it \
+             describes is not stale"
+        );
+    }
+
+    /// AC1 in its corrected form: the reason a row died was never that the
+    /// recipient was idle, it was that every later write to the task disowned
+    /// the notification. A row must stay deliverable across an idle stretch —
+    /// re-offered on each poll — for as long as the task is still in the state
+    /// it announces, so that it lands whenever the recipient next takes a turn.
+    #[test]
+    fn a_row_stays_deliverable_while_the_recipient_is_idle_and_the_task_accrues_writes() {
+        let occurrence = Utc.with_ymd_and_hms(2026, 8, 6, 2, 10, 0).unwrap();
+        let prompt = started_prompt("cas-x", occurrence);
+
+        // Every poll of a 15-minute idle stretch, with the task picking up
+        // unrelated writes (progress notes, lease renewals, dependency edits)
+        // the whole time. Not one of them may retire the row.
+        for minutes in [0, 1, 5, 15, 60] {
+            assert_eq!(
+                revalidate_lifecycle_prompt(
+                    &prompt,
+                    TaskStatus::InProgress,
+                    occurrence + chrono::Duration::minutes(minutes),
+                ),
+                LifecyclePromptDecision::Deliver,
+                "poll at +{minutes}m retired a notification whose premise still holds"
+            );
+        }
+    }
+
+    /// The relaxation is not unconditional. `current_updated_at` still decides
+    /// one case soundly: a task whose persisted state PREDATES the occurrence
+    /// cannot have produced it, so that row describes a write which is not in
+    /// this task's history.
+    #[test]
+    fn an_occurrence_from_the_future_of_the_task_is_still_stale() {
+        let occurrence = Utc.with_ymd_and_hms(2026, 8, 6, 2, 10, 0).unwrap();
         assert!(matches!(
             revalidate_lifecycle_prompt(
-                &prompt,
+                &started_prompt("cas-x", occurrence),
                 TaskStatus::InProgress,
-                occurrence + chrono::Duration::seconds(5)
+                occurrence - chrono::Duration::seconds(1),
+            ),
+            LifecyclePromptDecision::SuppressStale { .. }
+        ));
+    }
+
+    /// The status gate is what carries staleness now, so it must still bite.
+    #[test]
+    fn leaving_the_announced_status_is_still_stale() {
+        let occurrence = Utc.with_ymd_and_hms(2026, 8, 6, 2, 10, 0).unwrap();
+        assert!(matches!(
+            revalidate_lifecycle_prompt(
+                &started_prompt("cas-x", occurrence),
+                TaskStatus::Closed,
+                occurrence + chrono::Duration::seconds(5),
             ),
             LifecyclePromptDecision::SuppressStale { .. }
         ));

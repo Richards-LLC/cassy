@@ -544,6 +544,20 @@ pub enum PendingReason {
     DroppedDeadSource,
     /// Terminal non-delivery: duplicate idle suppression.
     SuppressedIdle,
+    /// Terminal non-delivery by explicit dead-letter: the payload's premise
+    /// expired before transport, so it was withdrawn rather than delivered as
+    /// an instruction that is no longer true (cas-0147, GH #167).
+    ///
+    /// Split out of [`Self::SuppressedIdle`] because the conflation hid a
+    /// four-day outage. Every one of the 397 `suppressed_idle` rows in the
+    /// live queue came from premise expiry, not from idle chatter — 353 of
+    /// them were supervisor lifecycle relays (34 of 36 `task_awaiting_merge`,
+    /// 34 of 36 `task_close_rejected`) killed by an unpassable staleness test.
+    /// Read as "idle suppression" the whole class looked benign and quiet by
+    /// design, which is exactly why nobody went looking. A withdrawal is a
+    /// decision someone made about a payload; it must not share a name with
+    /// noise reduction.
+    SupersededStale,
     /// Terminal non-delivery: unknown/stale target abandoned.
     AbandonedUnknownTarget,
     /// Terminal non-delivery of a supervisor lifecycle WAKE relay that was
@@ -576,6 +590,7 @@ impl PendingReason {
             Self::AwaitingAck => "awaiting_ack",
             Self::DroppedDeadSource => "dropped_dead_source",
             Self::SuppressedIdle => "suppressed_idle",
+            Self::SupersededStale => "superseded_stale",
             Self::AbandonedUnknownTarget => "abandoned_unknown_target",
             Self::UndeliveredLifecycleRelay => "undelivered_lifecycle_relay",
             Self::PartialBroadcast => "partial_broadcast",
@@ -593,6 +608,7 @@ impl PendingReason {
             "awaiting_ack" => Some(Self::AwaitingAck),
             "dropped_dead_source" => Some(Self::DroppedDeadSource),
             "suppressed_idle" => Some(Self::SuppressedIdle),
+            "superseded_stale" => Some(Self::SupersededStale),
             "abandoned_unknown_target" => Some(Self::AbandonedUnknownTarget),
             "undelivered_lifecycle_relay" => Some(Self::UndeliveredLifecycleRelay),
             "partial_broadcast" => Some(Self::PartialBroadcast),
@@ -606,7 +622,7 @@ impl PendingReason {
         match self {
             Self::GatedNotReady | Self::TargetUnavailable => DeliveryStage::Gated,
             Self::DroppedDeadSource => DeliveryStage::Dropped,
-            Self::SuppressedIdle => DeliveryStage::Suppressed,
+            Self::SuppressedIdle | Self::SupersededStale => DeliveryStage::Suppressed,
             Self::AbandonedUnknownTarget | Self::UndeliveredLifecycleRelay => {
                 DeliveryStage::Abandoned
             }
@@ -656,6 +672,7 @@ impl PendingReason {
             // failed; the terminal stamp must not double-count it.
             Self::DroppedDeadSource
             | Self::SuppressedIdle
+            | Self::SupersededStale
             | Self::AbandonedUnknownTarget
             | Self::UndeliveredLifecycleRelay
             | Self::PartialBroadcast => false,
@@ -1389,7 +1406,21 @@ pub trait PromptQueueStore: Send + Sync {
     fn mark_dropped(&self, prompt_id: i64, detail: Option<&str>) -> Result<()>;
 
     /// Idle-message suppression: processed without transport success.
+    ///
+    /// Reserved for genuine noise reduction — a duplicate "standing by" the
+    /// recipient does not need. A payload withdrawn because its premise
+    /// expired is [`Self::mark_superseded`], not this (cas-0147, GH #167).
     fn mark_suppressed(&self, prompt_id: i64, detail: Option<&str>) -> Result<()>;
+
+    /// Explicit dead-letter for a payload whose premise expired before
+    /// transport (cas-0147, GH #167): processed, stage `Suppressed`, reason
+    /// [`PendingReason::SupersededStale`].
+    ///
+    /// `detail` is mandatory here and not `Option` on purpose. A row may only
+    /// reach a terminal non-delivered state by a dead-letter that says why;
+    /// "it was withdrawn, reason unrecorded" is the state this whole class of
+    /// bug hides in.
+    fn mark_superseded(&self, prompt_id: i64, detail: &str) -> Result<()>;
 
     /// Unknown-target abandon: processed without transport success.
     fn mark_abandoned(&self, prompt_id: i64, detail: Option<&str>) -> Result<()>;
@@ -3300,6 +3331,25 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         })
     }
 
+    fn mark_superseded(&self, prompt_id: i64, detail: &str) -> Result<()> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = self.conn.lock().unwrap();
+            Self::atomic_stage_stamp(
+                &conn,
+                prompt_id,
+                DeliveryStage::Suppressed,
+                AtomicStampOpts {
+                    reason: Some(PendingReason::SupersededStale),
+                    detail: Some(detail),
+                    set_processed: true,
+                    broadcast_attempted: None,
+                    broadcast_succeeded: None,
+                    broadcast_failed: None,
+                },
+            )
+        })
+    }
+
     fn mark_abandoned(&self, prompt_id: i64, detail: Option<&str>) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
             let conn = self.conn.lock().unwrap();
@@ -3890,6 +3940,96 @@ mod tests {
         assert!(
             reported[0].processed_at.is_some(),
             "the row is terminal, not in flight"
+        );
+    }
+
+    /// cas-0147 (GH #167): a withdrawal is not idle-noise suppression.
+    ///
+    /// The two shared `suppressed_idle` for four days, which is how a total
+    /// outage of supervisor lifecycle relays hid inside a bucket everyone
+    /// reads as "benign dedup, working as intended". They must be separable by
+    /// the stored reason alone, without parsing the detail string.
+    #[test]
+    fn a_withdrawn_payload_is_not_filed_as_idle_chatter() {
+        let (_temp, store) = create_test_store();
+
+        let chatter = store
+            .enqueue("worker-a", "supervisor", "standing by")
+            .unwrap();
+        store
+            .mark_suppressed(chatter, Some("duplicate idle"))
+            .unwrap();
+
+        let withdrawn = store
+            .enqueue("lifecycle:3509", "supervisor", "<task-lifecycle ...>")
+            .unwrap();
+        store
+            .mark_superseded(
+                withdrawn,
+                "withdrawn before transport: cas-0147 left the status this notification announces",
+            )
+            .unwrap();
+
+        let idle = store.message_delivery_report(chatter).unwrap().unwrap();
+        let sup = store.message_delivery_report(withdrawn).unwrap().unwrap();
+
+        assert_eq!(idle.pending_reason, Some(PendingReason::SuppressedIdle));
+        assert_eq!(sup.pending_reason, Some(PendingReason::SupersededStale));
+        assert_ne!(
+            idle.pending_reason, sup.pending_reason,
+            "conflating these is the defect, not a naming preference"
+        );
+
+        // Both are terminal-without-transport, and both must remain so: this
+        // change is about honesty, not about resurrecting a dead payload.
+        assert_eq!(sup.stage, DeliveryStage::Suppressed);
+        assert!(sup.delivered_at.is_none());
+        assert_eq!(
+            sup.legacy_status,
+            MessageStatus::Delivered,
+            "processed_at must be set — the row is terminal, not in flight"
+        );
+    }
+
+    /// AC2: a terminal non-delivered row must be answerable for itself. The
+    /// dead-letter carries a reason AND a detail naming what expired — a
+    /// withdrawal with no recorded cause is the state this bug class lives in.
+    #[test]
+    fn the_dead_letter_records_why_the_row_died() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .enqueue("lifecycle:1", "supervisor", "<task-lifecycle ...>")
+            .unwrap();
+        store
+            .mark_superseded(
+                id,
+                "withdrawn before transport: cas-9d92 left awaiting_merge",
+            )
+            .unwrap();
+
+        let detail = store
+            .message_delivery_report(id)
+            .unwrap()
+            .unwrap()
+            .pending_detail
+            .expect(
+                "a dead-letter with no reason recorded is indistinguishable from a silent drop",
+            );
+        assert!(
+            detail.contains("cas-9d92"),
+            "must name what expired: {detail}"
+        );
+    }
+
+    /// A withdrawal is a policy decision, not a transport that refused the
+    /// handoff — it must not burn the row's retry budget (cas-d732 / cas-94a1).
+    #[test]
+    fn withdrawing_a_payload_does_not_spend_a_delivery_attempt() {
+        assert!(!PendingReason::SupersededStale.counts_as_delivery_attempt());
+        assert_eq!(
+            PendingReason::parse("superseded_stale"),
+            Some(PendingReason::SupersededStale),
+            "the reason must survive the round trip through the stored column"
         );
     }
 

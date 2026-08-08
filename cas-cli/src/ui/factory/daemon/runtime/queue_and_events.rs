@@ -2132,7 +2132,12 @@ impl FactoryDaemon {
                                 "cas-6eab: withheld a merge request whose premise no longer holds; \
                                  notified the worker instead"
                             );
-                            let _ = queue.mark_suppressed(queued.id, Some(&detail));
+                            // cas-0147 (GH #167): this is a withdrawal, not
+                            // idle-noise suppression — dead-letter it under a
+                            // name that says so. The worker has already been
+                            // told (the guidance enqueue above succeeded), so
+                            // the premise-expiry is recorded, not silent.
+                            let _ = queue.mark_superseded(queued.id, &detail);
                             continue;
                         }
                         Err(error) => {
@@ -2197,9 +2202,19 @@ impl FactoryDaemon {
                 ) {
                     LifecycleStaleOutcome::Deliver => {}
                     LifecycleStaleOutcome::SuppressDelivered { .. } => {
-                        let _ = queue.mark_suppressed(
+                        // cas-0147 (GH #167): this branch produced ALL 397
+                        // `suppressed_idle` rows in the live queue and every
+                        // one of them was a supervisor signal, not idle
+                        // chatter. The name is now the honest one, and the
+                        // detail says which task moved on — a terminal row has
+                        // to be answerable for itself.
+                        let _ = queue.mark_superseded(
                             queued.id,
-                            Some("task lifecycle occurrence no longer matches current task state"),
+                            &format!(
+                                "withdrawn before transport: {} left the status this \
+                                 notification announces",
+                                envelope.task_id
+                            ),
                         );
                         tracing::debug!(
                             prompt_id = queued.id,

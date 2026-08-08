@@ -37,6 +37,24 @@ use crate::store::{
 };
 use crate::types::{Agent, AgentRole};
 
+/// Longest the symbol index may go un-refreshed before the daemon stops waiting for an idle
+/// window and indexes anyway (cas-499c).
+///
+/// The original design hard-gated code indexing on `ActivityTracker::is_idle()`. On a busy
+/// factory daemon that window never arrives, so the job never fired and the symbol index stayed
+/// empty on every install that ever existed. This ceiling turns idleness from a *precondition*
+/// into a *preference*: quiet moments are still preferred, but politeness may only defer the
+/// work, never cancel it.
+pub(crate) const CODE_INDEX_MAX_STALENESS_SECS: u64 = 300;
+
+/// Should the code-index cycle run on this tick?
+///
+/// Idle-preferred with a max-staleness override. Extracted from the `select!` arm so the policy
+/// is testable without standing up a daemon.
+pub(crate) fn should_run_code_index(is_idle: bool, stale_for: Duration) -> bool {
+    is_idle || stale_for >= Duration::from_secs(CODE_INDEX_MAX_STALENESS_SECS)
+}
+
 pub(crate) fn apply_factory_worker_metadata(agent: &mut Agent, clone_path: Option<&str>) {
     if let Some(path) = clone_path {
         agent
@@ -438,6 +456,9 @@ impl EmbeddedDaemon {
         let mut history_index_interval = tokio::time::interval(Duration::from_secs(
             self.config.history_index_interval_secs.max(1),
         ));
+        // cas-499c: the max-staleness half of the idle-preferred scheduler. Starts "now" so a
+        // freshly-started daemon still waits out one full ceiling before overriding idleness.
+        let mut last_code_index = tokio::time::Instant::now();
         // Proxy config hot-reload interval (no-op when mcp-proxy feature is disabled)
         let proxy_config_secs = if cfg!(feature = "mcp-proxy") {
             3
@@ -553,30 +574,54 @@ impl EmbeddedDaemon {
                     self.send_agent_heartbeat().await;
                 }
 
-                // Code indexing - runs when idle and code watcher has pending files.
+                // Code indexing - idle-PREFERRED, with a max-staleness override.
                 //
-                // cas-499c (operator ruling): `code.enabled` now defaults to true, but this
-                // `is_idle()` gate STAYS — automatic but polite. Catch-up therefore happens in
-                // quiet moments only, which is why `cas doctor` surfaces symbol-index lag and
-                // `cas index code` exists as the manual catch-up lever.
+                // cas-499c (operator ruling, amended): this used to be a hard `is_idle()` gate,
+                // and that gate is precisely why the symbol index had never run anywhere — a
+                // busy factory daemon is never idle, so the gated job never fired and
+                // `code_files` stayed at 0 forever. "Automatic but polite" must not degrade
+                // into "never runs".
+                //
+                // So: index whenever the daemon is idle (the polite path, unchanged), and if it
+                // has not managed an idle window for CODE_INDEX_MAX_STALENESS_SECS, index anyway.
+                // The ceiling is what converts politeness into a deferral rather than a refusal.
+                // `cas doctor` reports the resulting lag; `cas index code` forces it now.
                 _ = code_index_interval.tick() => {
-                    if self.code_watcher.is_some() && self.activity.is_idle() {
-                        if let Err(e) = self.run_code_index_cycle().await {
-                            let mut status = self.status.write().await;
-                            status.last_error = Some(format!("Code indexing failed: {e}"));
+                    if self.code_watcher.is_some() {
+                        let stale_for = last_code_index.elapsed();
+                        let is_idle = self.activity.is_idle();
+                        if should_run_code_index(is_idle, stale_for) {
+                            if !is_idle {
+                                eprintln!(
+                                    "[CAS] Code indexing: no idle window for {}s, indexing anyway \
+                                     (max staleness {CODE_INDEX_MAX_STALENESS_SECS}s)",
+                                    stale_for.as_secs()
+                                );
+                            }
+                            // Stamped regardless of outcome: a cycle that fails must not spin the
+                            // override every tick.
+                            last_code_index = tokio::time::Instant::now();
+                            if let Err(e) = self.run_code_index_cycle().await {
+                                let mut status = self.status.write().await;
+                                status.last_error = Some(format!("Code indexing failed: {e}"));
+                            }
                         }
                     }
                 }
 
                 // Structural git-history indexing (EPIC cas-6212 / cas-7a21).
                 //
-                // Deliberately NOT gated on `activity.is_idle()`, unlike the
-                // code-index arm above. That gate is why `code_files` reads 0
-                // on a repo with thousands of commits: on a busy factory the
-                // daemon is never idle, so the job never runs (spec §4.3). A
-                // delta pass is bounded work — a `rev-list` plus two `git log`
-                // reads over the day's commits — so it is rate-limited by the
-                // interval instead of by idleness.
+                // Not gated on `activity.is_idle()` at all (spec §4.3). Both
+                // arms are answering the same lesson from opposite ends: a hard
+                // idleness gate on a daemon that is never idle means the job
+                // never runs, which is why `code_files` read 0 on a repo with
+                // thousands of commits. The code-index arm above solves it with
+                // idle-preferred scheduling plus a max-staleness ceiling
+                // (cas-499c), because indexing every source file is expensive
+                // enough to be worth deferring. A history delta pass is not: it
+                // is a `rev-list` plus two `git log` reads over the day's
+                // commits, so it is cheap enough to be rate-limited by its
+                // interval alone and needs no politeness machinery.
                 _ = history_index_interval.tick() => {
                     if self.config.index_history {
                         if let Err(e) = self.run_history_index_cycle().await {

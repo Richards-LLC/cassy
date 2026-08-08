@@ -16,8 +16,26 @@ pub enum HistoryCommands {
     /// Index commits into the history tables (full backfill, or a delta from
     /// the watermark when one exists)
     Backfill(BackfillArgs),
+    /// Index GitHub issues/PRs/comments and CHANGELOG release sections
+    /// (incremental; absent GitHub data is a declared boundary, not a failure)
+    Docs(DocsArgs),
     /// Report the watermark, indexed counts and lag without indexing anything
     Status(StatusArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct DocsArgs {
+    /// Index GitHub only (default: both sources)
+    #[arg(long)]
+    pub github: bool,
+
+    /// Index the CHANGELOG only (default: both sources)
+    #[arg(long)]
+    pub changelog: bool,
+
+    /// Ignore the GitHub cursor and re-fetch every issue and pull request
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -45,8 +63,89 @@ pub fn execute(
 ) -> anyhow::Result<()> {
     match command {
         HistoryCommands::Backfill(args) => execute_backfill(args, cas_root),
+        HistoryCommands::Docs(args) => execute_docs(args, cas_root),
         HistoryCommands::Status(args) => execute_status(args, cas_root),
     }
+}
+
+/// Which sources a `cas history docs` invocation asked for. Neither flag means
+/// both — the common case is "index whatever is available".
+fn requested_sources(args: &DocsArgs) -> (bool, bool) {
+    match (args.github, args.changelog) {
+        (false, false) => (true, true),
+        (github, changelog) => (github, changelog),
+    }
+}
+
+fn execute_docs(args: &DocsArgs, cas_root: &Path) -> anyhow::Result<()> {
+    let repo_root = history::repo_root_for(cas_root)?;
+    let config = crate::config::Config::load(cas_root).unwrap_or_default();
+    let repo = config
+        .issues
+        .as_ref()
+        .and_then(|i| i.repo.as_deref())
+        .map(str::trim)
+        .filter(|r| !r.is_empty());
+
+    let (want_github, want_changelog) = requested_sources(args);
+    let started = std::time::Instant::now();
+    let outcome = history::run_docs_pass(
+        cas_root,
+        &repo_root,
+        repo,
+        args.force,
+        want_github,
+        want_changelog,
+    );
+
+    if let Some(github) = &outcome.github {
+        match github {
+            Ok(fetch) => {
+                println!(
+                    "github {}: {} issue(s), {} pull request(s), {} comment(s) over {} page(s)",
+                    if fetch.is_backfill() { "backfill" } else { "delta" },
+                    fetch.issues,
+                    fetch.pull_requests,
+                    fetch.comments,
+                    fetch.pages,
+                );
+                if let Some(cursor) = &fetch.cursor {
+                    println!("                cursor now {cursor}");
+                }
+                // Both of these mean the index is knowingly incomplete. Saying
+                // so is the whole of spec §10.1: a partial pass that prints
+                // only its successes reads as a complete one.
+                if fetch.comments_truncated > 0 {
+                    println!(
+                        "                {} thread(s) had more comments than one page; \
+                         those threads are indexed partially",
+                        fetch.comments_truncated
+                    );
+                }
+                if fetch.page_limit_hit {
+                    println!(
+                        "                page limit reached — the next pass resumes from the cursor"
+                    );
+                }
+            }
+            Err(boundary) => println!("github unavailable: {boundary}"),
+        }
+    }
+
+    if want_changelog {
+        match (&outcome.changelog_sections, &outcome.changelog_error) {
+            (_, Some(error)) => println!("changelog failed: {error}"),
+            (Some(count), _) => println!("changelog: {count} release section(s)"),
+            (None, None) => println!("changelog unavailable: no CHANGELOG in the repository root"),
+        }
+    }
+
+    println!("elapsed {:.1}s", started.elapsed().as_secs_f64());
+
+    // A boundary is not an error exit: the point of §10.2 is that an absent
+    // source is a reported state, and `cas history docs` on a machine with no
+    // `gh` must not look like a broken command.
+    Ok(())
 }
 
 fn execute_backfill(args: &BackfillArgs, cas_root: &Path) -> anyhow::Result<()> {
@@ -132,6 +231,14 @@ fn execute_status(args: &StatusArgs, cas_root: &Path) -> anyhow::Result<()> {
             "last_indexed_at": s.state.as_ref().and_then(|st| st.last_indexed_at.clone()),
             "last_attempt_at": s.state.as_ref().and_then(|st| st.last_attempt_at.clone()),
             "last_error": s.state.as_ref().and_then(|st| st.last_error.clone()),
+            "docs": {
+                "counts": s.doc_counts.iter()
+                    .map(|(kind, count)| (kind.clone(), serde_json::json!(count)))
+                    .collect::<serde_json::Map<String, serde_json::Value>>(),
+                "pending_embedding": s.docs_pending_embedding,
+                "github": source_json(s.github_state.as_ref()),
+                "changelog": source_json(s.changelog_state.as_ref()),
+            },
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
@@ -171,5 +278,56 @@ fn execute_status(args: &StatusArgs, cas_root: &Path) -> anyhow::Result<()> {
         println!("  status          never indexed — run `cas history backfill`");
     }
 
+    print_docs(&s);
     Ok(())
+}
+
+fn source_json(state: Option<&cas_store::HistoryIndexState>) -> serde_json::Value {
+    match state {
+        // `null` rather than an object of nulls: "this source has never run" and
+        // "it ran and found nothing" must stay distinguishable in the JSON too.
+        None => serde_json::Value::Null,
+        Some(state) => serde_json::json!({
+            "cursor": state.last_indexed_at,
+            "last_attempt_at": state.last_attempt_at,
+            "last_error": state.last_error,
+            "items_indexed": state.items_indexed,
+            "backfill_complete": state.backfill_complete,
+        }),
+    }
+}
+
+/// The doc half of `cas history status` (M6).
+fn print_docs(s: &history::HistoryStatus) {
+    println!("  docs");
+    if s.doc_counts.is_empty() {
+        println!("    indexed       none — run `cas history docs`");
+    } else {
+        let rendered = s
+            .doc_counts
+            .iter()
+            .map(|(kind, count)| format!("{count} {kind}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("    indexed       {rendered}");
+        println!("    pending embed {}", s.docs_pending_embedding);
+    }
+
+    for (label, state) in [
+        ("github", s.github_state.as_ref()),
+        ("changelog", s.changelog_state.as_ref()),
+    ] {
+        match state {
+            None => println!("    {label:<13} never run"),
+            Some(state) => {
+                let cursor = state.last_indexed_at.as_deref().unwrap_or("none");
+                println!("    {label:<13} cursor {cursor}, {} item(s)", state.items_indexed);
+                // The declared boundary, printed where an operator will see it
+                // rather than only in the JSON (spec §10.2).
+                if let Some(error) = &state.last_error {
+                    println!("                  unavailable: {error}");
+                }
+            }
+        }
+    }
 }

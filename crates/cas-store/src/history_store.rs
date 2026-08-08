@@ -1,12 +1,17 @@
-//! Structural git-history index (EPIC cas-6212 / cas-7a21, spec §4).
+//! Structural git-history index (EPIC cas-6212 / cas-7a21 + cas-0562, spec §4).
 //!
-//! Three tables, all project-scoped:
+//! Five tables, all project-scoped:
 //!
 //! - `history_commits` — one row per commit (subject/body/author/timestamps).
 //! - `history_commit_files` — the structural diff mapping, one row per
 //!   `(commit, file)` pair. Diffs are indexed *structurally*: which files a
 //!   commit touched and how much, never the hunk text (spec §3, which makes
 //!   this a privacy property as well as a cost one).
+//! - `history_commit_symbols` — the symbol overlap (M3, spec §4.1): which
+//!   symbols a commit's changed line ranges actually intersect. Written only
+//!   where the symbol index has data; where it has none, the commit records
+//!   [`SymbolMapping::Absent`] instead, so "not indexed yet" can never be read
+//!   as "touched nothing" (spec §10.2).
 //! - `history_docs` — GitHub issues/PRs/comments and CHANGELOG release
 //!   sections, one row per embeddable text unit (spec §4.1, §8; cas-9a38).
 //! - `history_index_state` — the watermark plus the honesty ledger, one row per
@@ -49,7 +54,8 @@ CREATE TABLE IF NOT EXISTS history_commits (
     repository TEXT NOT NULL,
     pending_embedding INTEGER NOT NULL DEFAULT 1,
     indexed_at TEXT NOT NULL,
-    scope TEXT NOT NULL DEFAULT 'project'
+    scope TEXT NOT NULL DEFAULT 'project',
+    symbol_mapping TEXT NOT NULL DEFAULT 'pending'
 );
 
 CREATE INDEX IF NOT EXISTS idx_history_commits_committed_at
@@ -84,6 +90,17 @@ CREATE TABLE IF NOT EXISTS history_index_state (
     PRIMARY KEY (repository, source)
 );
 
+CREATE TABLE IF NOT EXISTS history_commit_symbols (
+    sha TEXT NOT NULL REFERENCES history_commits(sha) ON DELETE CASCADE,
+    symbol_id TEXT NOT NULL,
+    qualified_name TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    PRIMARY KEY (sha, symbol_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_history_commit_symbols_qualified_name
+    ON history_commit_symbols(qualified_name);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS history_commits_fts USING fts5(
     sha UNINDEXED,
     subject,
@@ -113,7 +130,8 @@ pub const HISTORY_SCHEMA_STATEMENTS: &[&str] = &[
         repository TEXT NOT NULL,
         pending_embedding INTEGER NOT NULL DEFAULT 1,
         indexed_at TEXT NOT NULL,
-        scope TEXT NOT NULL DEFAULT 'project'
+        scope TEXT NOT NULL DEFAULT 'project',
+        symbol_mapping TEXT NOT NULL DEFAULT 'pending'
     )",
     "CREATE INDEX IF NOT EXISTS idx_history_commits_committed_at
         ON history_commits(committed_at DESC)",
@@ -132,6 +150,15 @@ pub const HISTORY_SCHEMA_STATEMENTS: &[&str] = &[
     )",
     "CREATE INDEX IF NOT EXISTS idx_history_commit_files_path
         ON history_commit_files(file_path)",
+    "CREATE TABLE IF NOT EXISTS history_commit_symbols (
+        sha TEXT NOT NULL REFERENCES history_commits(sha) ON DELETE CASCADE,
+        symbol_id TEXT NOT NULL,
+        qualified_name TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        PRIMARY KEY (sha, symbol_id)
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_history_commit_symbols_qualified_name
+        ON history_commit_symbols(qualified_name)",
     "CREATE TABLE IF NOT EXISTS history_index_state (
         repository TEXT NOT NULL,
         source TEXT NOT NULL,
@@ -313,6 +340,100 @@ pub struct HistoryCommitFile {
     /// different facts and the index should not conflate them.
     pub insertions: Option<i64>,
     pub deletions: Option<i64>,
+}
+
+/// One `(commit, symbol)` overlap row — a symbol whose line range intersects a
+/// line range the commit changed (spec §4.1).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HistoryCommitSymbol {
+    pub sha: String,
+    /// `code_symbols.id`, so the row stays joinable to the live symbol index.
+    pub symbol_id: String,
+    pub qualified_name: String,
+    /// Repo-relative path, matching `history_commit_files.file_path` rather
+    /// than `code_symbols.file_path` (which is absolute — see the walker's
+    /// bridging note). History rows stay portable across checkouts.
+    pub file_path: String,
+}
+
+/// A symbol's line span as the symbol index currently holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolRange {
+    pub symbol_id: String,
+    pub qualified_name: String,
+    /// 1-based, inclusive, matching `code_symbols`.
+    pub line_start: i64,
+    pub line_end: i64,
+}
+
+/// What the symbol mapper was able to conclude for one commit.
+///
+/// The two values the spec names are [`Absent`](SymbolMapping::Absent) and
+/// [`None_`](SymbolMapping::None_), and the distinction between them is the
+/// whole point (spec §10.2): "the symbol index has no data for these files" and
+/// "the symbol index has data and nothing overlapped" are different facts, and
+/// collapsing them turns index lag into a silent empty result.
+///
+/// [`Partial`](SymbolMapping::Partial) and
+/// [`NotApplicable`](SymbolMapping::NotApplicable) extend that pair rather than
+/// replacing it, because a two-value enum forces two more lies: a commit that
+/// touched ten files of which three are indexed has to claim one state for all
+/// ten, and a docs-only commit would report `absent` — reading as index lag
+/// when nothing about it was ever indexable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SymbolMapping {
+    /// Never attempted. The default for rows the M1 walker wrote.
+    Pending,
+    /// At least one overlap recorded; every eligible file was indexed.
+    Mapped,
+    /// Some eligible files were indexed, some were not. Overlaps for the
+    /// indexed ones are recorded; the rest are honestly incomplete.
+    Partial,
+    /// Eligible files exist and **none** of them is in the symbol index. The
+    /// spec §10.2 degradation state: answer "I cannot tell you", not "nothing".
+    Absent,
+    /// Every eligible file was indexed and nothing overlapped. A real,
+    /// trustworthy zero — e.g. a change to an import block or a top-level
+    /// comment that lies outside every symbol span.
+    None_,
+    /// The commit changed no indexable file at all (docs, config, binaries, or
+    /// a merge commit with no first-parent diff). Not lag; nothing to map.
+    NotApplicable,
+}
+
+impl SymbolMapping {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SymbolMapping::Pending => "pending",
+            SymbolMapping::Mapped => "mapped",
+            SymbolMapping::Partial => "partial",
+            SymbolMapping::Absent => "absent",
+            SymbolMapping::None_ => "none",
+            SymbolMapping::NotApplicable => "not_applicable",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        Some(match value {
+            "pending" => SymbolMapping::Pending,
+            "mapped" => SymbolMapping::Mapped,
+            "partial" => SymbolMapping::Partial,
+            "absent" => SymbolMapping::Absent,
+            "none" => SymbolMapping::None_,
+            "not_applicable" => SymbolMapping::NotApplicable,
+            _ => return None,
+        })
+    }
+
+    /// Whether a later pass should retry this commit. `absent`/`partial` are
+    /// *provisional* — they describe the symbol index's coverage at the moment
+    /// of mapping, and M2 keeps catching up, so they must not be terminal.
+    pub fn is_retryable(self) -> bool {
+        matches!(
+            self,
+            SymbolMapping::Pending | SymbolMapping::Absent | SymbolMapping::Partial
+        )
+    }
 }
 
 /// One embeddable text unit from GitHub or the CHANGELOG (spec §4.1, §8).
@@ -563,6 +684,54 @@ pub trait HistoryStore: Send + Sync {
     /// comparable, so the cache is dropped and the whole corpus must be
     /// recomputed — not just the rows that happened to be pending.
     fn mark_all_pending_embedding(&self) -> Result<()>;
+
+    // ---- M3: symbol mapping (cas-0562, spec §4.1) ----
+
+    /// Commits whose symbol mapping is still worth attempting, oldest first.
+    ///
+    /// Returns `pending`, `absent` and `partial` commits — see
+    /// [`SymbolMapping::is_retryable`] for why the latter two are not terminal.
+    fn commits_awaiting_symbol_mapping(
+        &self,
+        repository: &str,
+        limit: usize,
+    ) -> Result<Vec<String>>;
+
+    /// The symbol index's view of one file, keyed the way **M2** keys it:
+    /// `repo_name` is the repository *directory name* and `abs_path` is an
+    /// absolute path (`daemon/indexing.rs`). The history tables key on the repo
+    /// *root path* and repo-*relative* file paths, so the walker bridges.
+    ///
+    /// `Ok(None)` means the symbol index has never seen the file — the
+    /// [`SymbolMapping::Absent`] signal. `Ok(Some(vec![]))` means it parsed the
+    /// file and found no symbols, which is a genuine zero and must not be
+    /// reported as lag.
+    fn symbol_ranges_for_file(
+        &self,
+        repo_name: &str,
+        abs_path: &str,
+    ) -> Result<Option<Vec<SymbolRange>>>;
+
+    /// Write the overlap rows for a batch of commits and stamp each commit's
+    /// `symbol_mapping`, in **one** transaction.
+    ///
+    /// Same contract as [`HistoryStore::commit_batch`] and for the same reason:
+    /// a commit stamped `mapped` whose symbol rows did not land would be a row
+    /// that is both "mapped" and empty, with nothing to reconcile it. Existing
+    /// rows for each listed commit are cleared first, so a re-map after the
+    /// symbol index catches up replaces rather than accumulates.
+    fn record_symbol_mapping(
+        &self,
+        mappings: &[(String, SymbolMapping)],
+        symbols: &[HistoryCommitSymbol],
+    ) -> Result<usize>;
+
+    /// `symbol_mapping` value → commit count, for a repository. The honesty
+    /// surface: `absent` being large is exactly the thing that must be visible.
+    fn symbol_mapping_counts(&self, repository: &str) -> Result<Vec<(String, i64)>>;
+
+    /// Overlap rows recorded for one commit.
+    fn symbols_for_commit(&self, sha: &str) -> Result<Vec<HistoryCommitSymbol>>;
 }
 
 /// SQLite-backed [`HistoryStore`] sharing the process-wide `cas.db` connection.
@@ -721,6 +890,22 @@ impl HistoryStore for SqliteHistoryStore {
         let conn = self.lock();
         conn.execute_batch(HISTORY_SCHEMA)?;
         conn.execute_batch(HISTORY_DOCS_SCHEMA)?;
+
+        // `CREATE TABLE IF NOT EXISTS` is a no-op on a store that M1 already
+        // created, so M3's added column needs its own idempotent ALTER. The
+        // numbered migration (m224) does this too; doing it here as well keeps
+        // the store self-sufficient for any path that opens it before the
+        // migration runner has had a turn, rather than failing on a missing
+        // column at query time.
+        let has_column = conn
+            .prepare("SELECT 1 FROM pragma_table_info('history_commits') WHERE name = 'symbol_mapping'")?
+            .exists([])?;
+        if !has_column {
+            conn.execute_batch(
+                "ALTER TABLE history_commits
+                     ADD COLUMN symbol_mapping TEXT NOT NULL DEFAULT 'pending'",
+            )?;
+        }
         Ok(())
     }
 
@@ -1365,6 +1550,160 @@ impl HistoryStore for SqliteHistoryStore {
         tx.execute("UPDATE history_docs SET pending_embedding = 1", [])?;
         tx.commit()?;
         Ok(())
+    }
+
+    fn commits_awaiting_symbol_mapping(
+        &self,
+        repository: &str,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        let conn = self.lock();
+        // Oldest first, matching the walker's topological order, so a bounded
+        // pass makes monotonic progress instead of re-chewing the same tail.
+        let mut stmt = conn.prepare(
+            "SELECT sha FROM history_commits
+              WHERE repository = ?1
+                AND symbol_mapping IN ('pending', 'absent', 'partial')
+              ORDER BY committed_at ASC
+              LIMIT ?2",
+        )?;
+        let shas = stmt
+            .query_map(params![repository, limit as i64], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(shas)
+    }
+
+    fn symbol_ranges_for_file(
+        &self,
+        repo_name: &str,
+        abs_path: &str,
+    ) -> Result<Option<Vec<SymbolRange>>> {
+        let conn = self.lock();
+
+        // The symbol index is a *separate* subsystem (M2) that may never have
+        // been initialised in this store. A missing table is the strongest
+        // possible form of "no data for this file", so it degrades to the same
+        // Absent signal rather than erroring the whole mapping pass.
+        let code_tables: bool = conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'code_files'
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        if !code_tables {
+            return Ok(None);
+        }
+
+        // `SqliteCodeStore` normalizes on write — an absolute path loses its
+        // leading `/` before it is stored — so the probe must be normalized
+        // through the SAME function, not merely "similarly". Comparing the raw
+        // path here matched nothing at all and reported every file as absent,
+        // which the honesty rule would then have dutifully reported as index
+        // lag forever.
+        let abs_path = crate::SqliteCodeStore::normalize_path(abs_path);
+
+        // Presence in `code_files` — not in `code_symbols` — is the "M2 has
+        // seen this file" signal. Keying absence on `code_symbols` (as spec
+        // §4.1 words it) would report a file that genuinely parsed to zero
+        // symbols as permanently un-indexed, i.e. as lag that never clears.
+        let seen: bool = conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM code_files WHERE repository = ?1 AND path = ?2
+             )",
+            params![repo_name, abs_path],
+            |row| row.get(0),
+        )?;
+        if !seen {
+            return Ok(None);
+        }
+
+        let mut stmt = conn.prepare(
+            "SELECT id, qualified_name, line_start, line_end
+               FROM code_symbols
+              WHERE repository = ?1 AND file_path = ?2",
+        )?;
+        let ranges = stmt
+            .query_map(params![repo_name, abs_path], |row| {
+                Ok(SymbolRange {
+                    symbol_id: row.get(0)?,
+                    qualified_name: row.get(1)?,
+                    line_start: row.get(2)?,
+                    line_end: row.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(Some(ranges))
+    }
+
+    fn record_symbol_mapping(
+        &self,
+        mappings: &[(String, SymbolMapping)],
+        symbols: &[HistoryCommitSymbol],
+    ) -> Result<usize> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+
+        {
+            let mut clear = tx.prepare("DELETE FROM history_commit_symbols WHERE sha = ?1")?;
+            let mut stamp =
+                tx.prepare("UPDATE history_commits SET symbol_mapping = ?2 WHERE sha = ?1")?;
+            for (sha, mapping) in mappings {
+                clear.execute(params![sha])?;
+                stamp.execute(params![sha, mapping.as_str()])?;
+            }
+        }
+
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO history_commit_symbols (sha, symbol_id, qualified_name, file_path)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(sha, symbol_id) DO UPDATE SET
+                     qualified_name = excluded.qualified_name,
+                     file_path = excluded.file_path",
+            )?;
+            for s in symbols {
+                stmt.execute(params![s.sha, s.symbol_id, s.qualified_name, s.file_path])?;
+            }
+        }
+
+        tx.commit()?;
+        Ok(symbols.len())
+    }
+
+    fn symbol_mapping_counts(&self, repository: &str) -> Result<Vec<(String, i64)>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT symbol_mapping, COUNT(*) FROM history_commits
+              WHERE repository = ?1
+              GROUP BY symbol_mapping
+              ORDER BY symbol_mapping",
+        )?;
+        let counts = stmt
+            .query_map(params![repository], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(counts)
+    }
+
+    fn symbols_for_commit(&self, sha: &str) -> Result<Vec<HistoryCommitSymbol>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT sha, symbol_id, qualified_name, file_path
+               FROM history_commit_symbols
+              WHERE sha = ?1
+              ORDER BY qualified_name",
+        )?;
+        let rows = stmt
+            .query_map(params![sha], |row| {
+                Ok(HistoryCommitSymbol {
+                    sha: row.get(0)?,
+                    symbol_id: row.get(1)?,
+                    qualified_name: row.get(2)?,
+                    file_path: row.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 }
 
@@ -2313,4 +2652,307 @@ mod tests {
             .unwrap();
         assert_eq!(old.as_deref(), Some("old/path.rs"));
     }
+
+    // ---- M3: symbol mapping (cas-0562) ----
+
+    /// Create the two M2 tables this store reads through, so the symbol-mapping
+    /// tests exercise the real join rather than a stand-in.
+    fn with_code_tables(store: &SqliteHistoryStore) {
+        let conn = store.lock();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS code_files (
+                 id TEXT PRIMARY KEY, path TEXT NOT NULL, repository TEXT NOT NULL,
+                 language TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0,
+                 line_count INTEGER NOT NULL DEFAULT 0, commit_hash TEXT,
+                 content_hash TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL,
+                 scope TEXT NOT NULL DEFAULT 'project', UNIQUE(repository, path)
+             );
+             CREATE TABLE IF NOT EXISTS code_symbols (
+                 id TEXT PRIMARY KEY, qualified_name TEXT NOT NULL, name TEXT NOT NULL,
+                 kind TEXT NOT NULL, language TEXT NOT NULL, file_path TEXT NOT NULL,
+                 file_id TEXT NOT NULL, line_start INTEGER NOT NULL, line_end INTEGER NOT NULL,
+                 source TEXT NOT NULL, documentation TEXT, signature TEXT, parent_id TEXT,
+                 repository TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL,
+                 commit_hash TEXT, content_hash TEXT NOT NULL, scope TEXT NOT NULL DEFAULT 'project'
+             );",
+        )
+        .unwrap();
+    }
+
+    /// Seeds the *normalized* form, because that is what `SqliteCodeStore`
+    /// writes. Seeding the raw path would make these tests pass against a
+    /// lookup that cannot work in production.
+    fn seed_code_file(store: &SqliteHistoryStore, repo: &str, path: &str) {
+        let path = &crate::SqliteCodeStore::normalize_path(path);
+        let conn = store.lock();
+        conn.execute(
+            "INSERT INTO code_files (id, path, repository, language, content_hash, created, updated)
+             VALUES (?1, ?2, ?3, 'rust', 'h', 'now', 'now')",
+            params![format!("{repo}:{path}"), path, repo],
+        )
+        .unwrap();
+    }
+
+    fn seed_symbol(
+        store: &SqliteHistoryStore,
+        repo: &str,
+        path: &str,
+        id: &str,
+        name: &str,
+        start: i64,
+        end: i64,
+    ) {
+        let path = &crate::SqliteCodeStore::normalize_path(path);
+        let conn = store.lock();
+        conn.execute(
+            "INSERT INTO code_symbols (
+                 id, qualified_name, name, kind, language, file_path, file_id,
+                 line_start, line_end, source, repository, created, updated, content_hash
+             ) VALUES (?1, ?2, ?2, 'function', 'rust', ?3, 'f', ?4, ?5, 'src', ?6, 'now', 'now', 'h')",
+            params![id, name, path, start, end, repo],
+        )
+        .unwrap();
+    }
+
+    /// The whole symbol subsystem may not exist in a store. That is the
+    /// strongest form of "no data", and must degrade to Absent rather than
+    /// erroring out the mapping pass.
+    #[test]
+    fn symbol_ranges_are_absent_when_the_code_tables_do_not_exist() {
+        let (_t, store) = store();
+        assert_eq!(store.symbol_ranges_for_file("repo", "/repo/a.rs").unwrap(), None);
+    }
+
+    #[test]
+    fn symbol_ranges_are_absent_for_a_file_the_index_has_not_seen() {
+        let (_t, store) = store();
+        with_code_tables(&store);
+        seed_code_file(&store, "repo", "/repo/known.rs");
+        assert_eq!(
+            store.symbol_ranges_for_file("repo", "/repo/unknown.rs").unwrap(),
+            None
+        );
+    }
+
+    /// The refinement over spec §4.1's wording: a parsed file with zero symbols
+    /// is *covered*, and reporting it as absent would be permanent false lag.
+    #[test]
+    fn an_indexed_file_with_no_symbols_reads_as_covered_not_absent() {
+        let (_t, store) = store();
+        with_code_tables(&store);
+        seed_code_file(&store, "repo", "/repo/empty.rs");
+        assert_eq!(
+            store.symbol_ranges_for_file("repo", "/repo/empty.rs").unwrap(),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn symbol_ranges_are_scoped_to_the_repository() {
+        let (_t, store) = store();
+        with_code_tables(&store);
+        seed_code_file(&store, "repo", "/repo/a.rs");
+        seed_symbol(&store, "repo", "/repo/a.rs", "s1", "a::one", 1, 5);
+        seed_code_file(&store, "other", "/other/a.rs");
+        seed_symbol(&store, "other", "/other/a.rs", "s2", "a::two", 1, 5);
+
+        let ranges = store.symbol_ranges_for_file("repo", "/repo/a.rs").unwrap().unwrap();
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].qualified_name, "a::one");
+    }
+
+    #[test]
+    fn record_symbol_mapping_writes_rows_and_stamps_the_verdict() {
+        let (_t, store) = store();
+        let a = "a".repeat(40);
+        store.commit_batch("/repo", &[commit(&a)], &[], &a, true).unwrap();
+
+        let rows = vec![HistoryCommitSymbol {
+            sha: a.clone(),
+            symbol_id: "s1".into(),
+            qualified_name: "lib::alpha".into(),
+            file_path: "src/lib.rs".into(),
+        }];
+        store
+            .record_symbol_mapping(&[(a.clone(), SymbolMapping::Mapped)], &rows)
+            .unwrap();
+
+        let stored = store.symbols_for_commit(&a).unwrap();
+        assert_eq!(stored, rows);
+        assert_eq!(
+            store.symbol_mapping_counts("/repo").unwrap(),
+            vec![("mapped".to_string(), 1)]
+        );
+    }
+
+    /// Re-mapping after the symbol index catches up must REPLACE the previous
+    /// answer. Accumulating would leave a commit carrying symbols from a stale
+    /// parse alongside the current ones, with nothing to tell them apart.
+    #[test]
+    fn remapping_replaces_the_previous_answer() {
+        let (_t, store) = store();
+        let a = "a".repeat(40);
+        store.commit_batch("/repo", &[commit(&a)], &[], &a, true).unwrap();
+
+        store
+            .record_symbol_mapping(
+                &[(a.clone(), SymbolMapping::Mapped)],
+                &[HistoryCommitSymbol {
+                    sha: a.clone(),
+                    symbol_id: "stale".into(),
+                    qualified_name: "lib::gone".into(),
+                    file_path: "src/lib.rs".into(),
+                }],
+            )
+            .unwrap();
+        store
+            .record_symbol_mapping(
+                &[(a.clone(), SymbolMapping::Mapped)],
+                &[HistoryCommitSymbol {
+                    sha: a.clone(),
+                    symbol_id: "fresh".into(),
+                    qualified_name: "lib::current".into(),
+                    file_path: "src/lib.rs".into(),
+                }],
+            )
+            .unwrap();
+
+        let stored = store.symbols_for_commit(&a).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].symbol_id, "fresh");
+    }
+
+    /// `absent` and `partial` are provisional — the symbol index keeps catching
+    /// up — so they must come back for another pass. `mapped` and `none` are
+    /// settled and must not, or every pass would re-chew the whole corpus.
+    #[test]
+    fn only_retryable_verdicts_come_back_for_another_pass() {
+        let (_t, store) = store();
+        let shas: Vec<String> = ["a", "b", "c", "d", "e"]
+            .iter()
+            .map(|c| c.repeat(40))
+            .collect();
+        for sha in &shas {
+            store.commit_batch("/repo", &[commit(sha)], &[], sha, true).unwrap();
+        }
+        store
+            .record_symbol_mapping(
+                &[
+                    (shas[0].clone(), SymbolMapping::Mapped),
+                    (shas[1].clone(), SymbolMapping::None_),
+                    (shas[2].clone(), SymbolMapping::Absent),
+                    (shas[3].clone(), SymbolMapping::Partial),
+                    (shas[4].clone(), SymbolMapping::NotApplicable),
+                ],
+                &[],
+            )
+            .unwrap();
+
+        let awaiting = store.commits_awaiting_symbol_mapping("/repo", 100).unwrap();
+        assert_eq!(awaiting.len(), 2);
+        assert!(awaiting.contains(&shas[2]));
+        assert!(awaiting.contains(&shas[3]));
+    }
+
+    /// Commits M1 wrote before M3 existed must be queued, not silently treated
+    /// as "already mapped, found nothing".
+    #[test]
+    fn commits_default_to_pending_and_are_queued() {
+        let (_t, store) = store();
+        let a = "a".repeat(40);
+        store.commit_batch("/repo", &[commit(&a)], &[], &a, true).unwrap();
+        assert_eq!(
+            store.symbol_mapping_counts("/repo").unwrap(),
+            vec![("pending".to_string(), 1)]
+        );
+        assert_eq!(
+            store.commits_awaiting_symbol_mapping("/repo", 100).unwrap(),
+            vec![a]
+        );
+    }
+
+    /// A delta pass legitimately re-upserts a commit it has already seen. That
+    /// must not discard a mapping verdict and send the commit round again.
+    #[test]
+    fn reindexing_a_commit_preserves_its_mapping_verdict() {
+        let (_t, store) = store();
+        let a = "a".repeat(40);
+        store.commit_batch("/repo", &[commit(&a)], &[], &a, true).unwrap();
+        store
+            .record_symbol_mapping(&[(a.clone(), SymbolMapping::None_)], &[])
+            .unwrap();
+
+        store.commit_batch("/repo", &[commit(&a)], &[], &a, true).unwrap();
+
+        assert_eq!(
+            store.symbol_mapping_counts("/repo").unwrap(),
+            vec![("none".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn awaiting_respects_the_limit_and_repository_scope() {
+        let (_t, store) = store();
+        for c in ["a", "b", "c"] {
+            let sha = c.repeat(40);
+            store.commit_batch("/repo", &[commit(&sha)], &[], &sha, true).unwrap();
+        }
+        let mut elsewhere = commit(&"z".repeat(40));
+        elsewhere.repository = "/elsewhere".into();
+        store
+            .commit_batch("/elsewhere", &[elsewhere], &[], &"z".repeat(40), true)
+            .unwrap();
+
+        assert_eq!(store.commits_awaiting_symbol_mapping("/repo", 2).unwrap().len(), 2);
+        assert_eq!(
+            store.commits_awaiting_symbol_mapping("/elsewhere", 10).unwrap().len(),
+            1
+        );
+    }
+
+    /// The join that silently matched nothing until `normalize_path` was
+    /// applied to the probe: callers hold an absolute path, the store holds it
+    /// without its leading slash.
+    #[test]
+    fn an_absolute_probe_matches_the_normalized_stored_path() {
+        let (_t, store) = store();
+        with_code_tables(&store);
+
+        // Written exactly as `SqliteCodeStore::add_file` would write it.
+        {
+            let conn = store.lock();
+            conn.execute(
+                "INSERT INTO code_files (id, path, repository, language, content_hash, created, updated)
+                 VALUES ('f', 'repo/src/lib.rs', 'repo', 'rust', 'h', 'now', 'now')",
+                [],
+            )
+            .unwrap();
+        }
+
+        assert!(
+            store
+                .symbol_ranges_for_file("repo", "/repo/src/lib.rs")
+                .unwrap()
+                .is_some(),
+            "an absolute probe must resolve against the normalized stored path"
+        );
+    }
+
+    /// Every enum value must survive a round trip through the column, or a
+    /// verdict written by one release becomes unreadable to the next.
+    #[test]
+    fn every_mapping_value_round_trips_through_its_string_form() {
+        for mapping in [
+            SymbolMapping::Pending,
+            SymbolMapping::Mapped,
+            SymbolMapping::Partial,
+            SymbolMapping::Absent,
+            SymbolMapping::None_,
+            SymbolMapping::NotApplicable,
+        ] {
+            assert_eq!(SymbolMapping::from_str(mapping.as_str()), Some(mapping));
+        }
+        assert_eq!(SymbolMapping::from_str("nonsense"), None);
+    }
+
 }

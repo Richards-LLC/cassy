@@ -127,6 +127,13 @@ pub struct EmbeddedDaemonConfig {
     pub index_history: bool,
     /// git-history indexing interval (seconds)
     pub history_index_interval_secs: u64,
+    // === GitHub + CHANGELOG docs (EPIC cas-6212 / cas-9a38) ===
+    /// Enable the background GitHub/CHANGELOG doc indexing pass
+    pub index_history_docs: bool,
+    /// Doc indexing interval (seconds). Deliberately much longer than the git
+    /// interval: this half depends on a third party's rate limits, and issue
+    /// bodies change far more slowly than commits arrive (spec §8).
+    pub history_docs_interval_secs: u64,
 }
 
 impl Default for EmbeddedDaemonConfig {
@@ -153,6 +160,13 @@ impl Default for EmbeddedDaemonConfig {
             // day's commits is bounded work (spec §4.3).
             index_history: true,
             history_index_interval_secs: 300, // 5 minutes (spec §4.3)
+            // Docs: on by default, but 15 minutes rather than 5. Spec §8's
+            // arithmetic — ~96 filtered queries/day against a 5,000 point/hour
+            // budget — is what makes "on by default" defensible here. A repo
+            // with no `gh` and no CHANGELOG records two boundaries and costs
+            // nothing further.
+            index_history_docs: true,
+            history_docs_interval_secs: 900, // 15 minutes (spec §8)
         }
     }
 }

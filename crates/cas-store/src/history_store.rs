@@ -2879,6 +2879,9 @@ mod tests {
             body: Some("body".into()),
             branch_hint: Some("main".into()),
             repository: "/repo".into(),
+            // Test commits have not passed through M3's mapper. Keep this
+            // fixture intentionally retryable, as a freshly indexed commit is.
+            symbol_mapping: "pending".into(),
         }
     }
 

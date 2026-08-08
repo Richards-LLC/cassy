@@ -1325,6 +1325,7 @@ mod tests {
                 committed_at: (*at).to_string(),
                 subject: (*subject).to_string(),
                 repository: "/repo".to_string(),
+                symbol_mapping: "pending".to_string(),
                 ..Default::default()
             })
             .collect();

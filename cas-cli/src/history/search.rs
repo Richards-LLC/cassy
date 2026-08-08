@@ -92,8 +92,9 @@ pub struct IndexStatus {
     /// Commits between the watermark and HEAD; `null` when the watermark is
     /// missing or no longer an ancestor of HEAD.
     pub lag_commits: Option<i64>,
-    /// Wall-clock seconds between the watermark commit and HEAD. Same `null`
-    /// discipline: an unknown lag is never rendered as 0.
+    /// Wall-clock seconds since the last successful index observation while
+    /// commits are pending. Same `null` discipline: an unknown lag is never
+    /// rendered as 0.
     pub lag_seconds: Option<i64>,
     pub backfill_complete: bool,
     pub indexed_commits: i64,
@@ -264,6 +265,9 @@ pub struct AppliedFilters {
     /// different filter dropped the result. Reporting the resolved count keeps
     /// the two apart.
     pub identity_filter_matched: Option<usize>,
+    /// Maximum number of pending/absent/partial rows admitted behind exact
+    /// mapped symbol hits. Present only for a symbol-filtered query.
+    pub symbol_uncertain_limit: Option<usize>,
     pub limit: usize,
 }
 
@@ -493,6 +497,10 @@ pub fn run(cas_root: &Path, req: &HistorySearchRequest) -> Result<HistorySearchR
             until,
             include_merges: req.include_merges,
             identity_filter_matched,
+            symbol_uncertain_limit: req
+                .symbol
+                .as_ref()
+                .map(|_| cas_store::HISTORY_SYMBOL_UNCERTAIN_LIMIT),
             limit,
         },
         count: results.len(),
@@ -549,18 +557,7 @@ fn index_status(
     let state = store.index_state(repository, SOURCE_GIT)?;
     let watermark = state.as_ref().and_then(|s| s.last_indexed_sha.clone());
 
-    // Only meaningful while the watermark is still on HEAD's ancestry — the
-    // same precondition `lag_commits` uses, applied to the clock.
-    let lag_seconds = match (&watermark, status.watermark_is_ancestor) {
-        (Some(sha), true) => match (
-            history::commit_epoch(repo_root, sha),
-            history::commit_epoch(repo_root, &status.head_sha),
-        ) {
-            (Some(from), Some(to)) => Some((to - from).max(0)),
-            _ => None,
-        },
-        _ => None,
-    };
+    let lag_seconds = status.lag_age_seconds_at(chrono::Utc::now());
 
     let coverage = store.provenance_coverage(repository)?;
 

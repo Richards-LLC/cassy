@@ -810,6 +810,7 @@ fn execute_status(args: &StatusArgs, cas_root: &Path) -> anyhow::Result<()> {
         .lag_commits
         .map(|l| l.to_string())
         .unwrap_or_else(|| "unknown".to_string());
+    let lag_seconds = s.lag_age_seconds_at(chrono::Utc::now());
 
     if args.json {
         let payload = serde_json::json!({
@@ -822,6 +823,7 @@ fn execute_status(args: &StatusArgs, cas_root: &Path) -> anyhow::Result<()> {
             "indexed_commit_file_pairs": s.indexed_pairs,
             "repo_commits": s.repo_commits,
             "lag_commits": s.lag_commits,
+            "lag_seconds": lag_seconds,
             "current": s.is_current(),
             "last_indexed_at": s.state.as_ref().and_then(|st| st.last_indexed_at.clone()),
             "last_attempt_at": s.state.as_ref().and_then(|st| st.last_attempt_at.clone()),
@@ -854,7 +856,12 @@ fn execute_status(args: &StatusArgs, cas_root: &Path) -> anyhow::Result<()> {
         s.indexed_commits, s.repo_commits
     );
     println!("  file changes    {}", s.indexed_pairs);
-    println!("  lag             {lag} commit(s) behind HEAD");
+    println!(
+        "  lag             {lag} commit(s) behind HEAD ({})",
+        lag_seconds
+            .map(|seconds| format!("{seconds}s old"))
+            .unwrap_or_else(|| "age unknown".to_string())
+    );
     println!(
         "  backfill        {}",
         if backfill_complete {

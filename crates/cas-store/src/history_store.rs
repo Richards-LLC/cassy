@@ -368,6 +368,11 @@ pub const SOURCE_CHANGELOG: &str = "changelog";
 /// end.
 pub const SOURCE_EMBEDDINGS: &str = "embeddings";
 
+/// Maximum number of incompletely mapped commits admitted to one
+/// symbol-filtered result set. They are useful as explicit uncertainty, but an
+/// unbounded uncertain tail can both swamp callers and hide exact mapped hits.
+pub const HISTORY_SYMBOL_UNCERTAIN_LIMIT: usize = 10;
+
 /// `history_docs.doc_kind` values. These are the id prefixes too
 /// (`gh:issue:116`, `gh:pr:57`, `gh:comment:<id>`, `changelog:v2.49.0`).
 pub const DOC_KIND_ISSUE: &str = "issue";
@@ -1571,6 +1576,15 @@ impl HistoryStore for SqliteHistoryStore {
             return Ok(Vec::new());
         }
 
+        // Every mapped candidate admitted by `filter_sql` has an exact symbol
+        // row. Put that certain tier ahead of pending/absent/partial rows
+        // before LIMIT; recency and FTS relevance only order within a tier.
+        let certainty_order = query
+            .symbol
+            .as_ref()
+            .map(|_| "CASE WHEN c.symbol_mapping = 'mapped' THEN 0 ELSE 1 END, ")
+            .unwrap_or_default();
+
         let (sql, values) = match &text_expr {
             Some(expr) => {
                 let (filter, filter_params) = Self::filter_sql(query, 3);
@@ -1588,7 +1602,7 @@ impl HistoryStore for SqliteHistoryStore {
                            JOIN history_commits c ON c.sha = history_commits_fts.sha
                           WHERE history_commits_fts MATCH ?1
                             AND c.repository = ?2{filter}
-                          ORDER BY score
+                          ORDER BY {certainty_order}score
                           LIMIT ?{limit_idx}",
                         cols = Self::COMMIT_COLUMNS,
                     ),
@@ -1606,7 +1620,7 @@ impl HistoryStore for SqliteHistoryStore {
                         "SELECT {cols}, 0.0 AS score
                            FROM history_commits c
                           WHERE c.repository = ?1{filter}
-                          ORDER BY c.committed_at DESC, c.sha
+                          ORDER BY {certainty_order}c.committed_at DESC, c.sha
                           LIMIT ?{limit_idx}",
                         cols = Self::COMMIT_COLUMNS,
                     ),
@@ -1663,6 +1677,33 @@ impl HistoryStore for SqliteHistoryStore {
                 score,
                 recency,
                 files,
+            });
+        }
+        if query.symbol.is_some() {
+            // The hybrid layer sorts this score again. Preserve the SQL
+            // certainty tier across that second ranking step, then retain a
+            // small, explicit tail of unknowns rather than either hiding them
+            // or returning an unbounded maybe-list.
+            let uncertain_max = hits
+                .iter()
+                .filter(|hit| hit.commit.symbol_mapping != "mapped")
+                .map(|hit| hit.score)
+                .fold(0.0_f64, f64::max);
+            for hit in &mut hits {
+                if hit.commit.symbol_mapping == "mapped" {
+                    hit.score += uncertain_max + 1.0;
+                }
+            }
+            let mut uncertain = 0;
+            hits.retain(|hit| {
+                if hit.commit.symbol_mapping == "mapped" {
+                    true
+                } else if uncertain < HISTORY_SYMBOL_UNCERTAIN_LIMIT {
+                    uncertain += 1;
+                    true
+                } else {
+                    false
+                }
             });
         }
         Ok(hits)

@@ -1437,8 +1437,8 @@ struct HistoryIndexHealth {
     /// unusable (never run, or no longer an ancestor of HEAD) — which is a
     /// different fact from 0 and must not be rendered as "fresh".
     lag_commits: Option<i64>,
-    /// Wall-clock age of the watermark commit relative to HEAD, in seconds.
-    /// `None` when it cannot be established honestly.
+    /// Wall-clock age since the last successful index observation while a
+    /// non-zero lag exists. `None` when it cannot be established honestly.
     lag_seconds: Option<i64>,
     /// False means the watermark is not on HEAD's ancestry — §10.2 row 3, a
     /// re-run condition, never a silent gap.
@@ -1470,6 +1470,13 @@ struct HistoryIndexHealth {
 }
 
 fn gather_history_index_state(cas_root: &Path) -> HistoryIndexHealth {
+    gather_history_index_state_at(cas_root, chrono::Utc::now())
+}
+
+fn gather_history_index_state_at(
+    cas_root: &Path,
+    now: chrono::DateTime<chrono::Utc>,
+) -> HistoryIndexHealth {
     let tick_interval_secs =
         crate::mcp::daemon::EmbeddedDaemonConfig::default().history_index_interval_secs;
     let enabled = crate::mcp::daemon::EmbeddedDaemonConfig::default().index_history;
@@ -1515,25 +1522,7 @@ fn gather_history_index_state(cas_root: &Path) -> HistoryIndexHealth {
     })
     .collect();
 
-    // Wall-clock staleness: how far behind HEAD the watermark's commit sits.
-    // Only meaningful while the watermark is still on HEAD's ancestry — the
-    // same precondition `lag_commits` uses, applied to the clock.
-    let lag_seconds = match (
-        status
-            .state
-            .as_ref()
-            .and_then(|s| s.last_indexed_sha.as_ref()),
-        status.watermark_is_ancestor,
-    ) {
-        (Some(sha), true) => match (
-            crate::history::commit_epoch(&repo_root, sha),
-            crate::history::commit_epoch(&repo_root, &status.head_sha),
-        ) {
-            (Some(from), Some(to)) => Some((to - from).max(0)),
-            _ => None,
-        },
-        _ => None,
-    };
+    let lag_seconds = status.lag_age_seconds_at(now);
 
     let coverage = cas_store::SqliteHistoryStore::open(cas_root)
         .ok()
@@ -1679,7 +1668,17 @@ fn history_index_check(state: HistoryIndexHealth) -> Check {
     }
 
     let lag_commits = state.lag_commits.unwrap_or(0);
-    let lag_secs = state.lag_seconds.unwrap_or(0);
+    let Some(lag_secs) = state.lag_seconds else {
+        return Check {
+            name,
+            status: CheckStatus::Warning,
+            message: format!(
+                "index is behind: {lag_commits} commit(s), but the last successful observation \
+                 time is unknown rather than fresh. Run `cas history backfill` to catch up \
+                 now{provenance}"
+            ),
+        };
+    };
 
     // "Under one tick interval" is what separates an index that is *settling*
     // from one that is *behind*. A non-zero lag younger than a tick is simply
@@ -2457,6 +2456,72 @@ mod tests {
             ..healthy_history()
         });
         assert!(matches!(check.status, CheckStatus::Ok), "{}", check.message);
+    }
+
+    /// Production gather regression: close commit timestamps, but an index
+    /// observation two days old. Unknown ledger timestamps must remain loud.
+    #[test]
+    fn doctor_ages_nonzero_history_lag_from_the_last_successful_observation() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let repo = temp.path().join("history-lag-repo");
+        fs::create_dir_all(&repo).expect("repo dir");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "fixture@example.com"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        fs::write(repo.join("first.rs"), "fn first() {}\n").expect("first file");
+        git(&["add", "first.rs"]);
+        git(&["commit", "-m", "first"]);
+
+        let cas_root = crate::store::init_cas_dir(&repo).expect("cas root");
+        crate::history::run_index_pass(&cas_root, &repo).expect("initial history index");
+        let now = chrono::Utc::now();
+        let stale = (now - chrono::Duration::days(2)).to_rfc3339();
+        rusqlite::Connection::open(cas_root.join("cas.db"))
+            .expect("history db")
+            .execute(
+                "UPDATE history_index_state
+                    SET last_indexed_at = ?1, last_attempt_at = ?1
+                  WHERE source = 'git'",
+                [&stale],
+            )
+            .expect("seed stale successful observation");
+        fs::write(repo.join("second.rs"), "fn second() {}\n").expect("second file");
+        git(&["add", "second.rs"]);
+        git(&["commit", "-m", "second"]);
+
+        let state = gather_history_index_state_at(&cas_root, now);
+        assert_eq!(state.lag_commits, Some(1));
+        assert!(state.lag_seconds.unwrap() >= 2 * 24 * 60 * 60 - 5);
+        assert!(matches!(history_index_check(state).status, CheckStatus::Warning));
+
+        rusqlite::Connection::open(cas_root.join("cas.db"))
+            .expect("history db")
+            .execute(
+                "UPDATE history_index_state
+                    SET last_indexed_at = NULL, last_attempt_at = NULL
+                  WHERE source = 'git'",
+                [],
+            )
+            .expect("remove unknown observation");
+        let unknown = gather_history_index_state_at(&cas_root, now);
+        assert_eq!(unknown.lag_commits, Some(1));
+        assert_eq!(unknown.lag_seconds, None);
+        let check = history_index_check(unknown);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("unknown rather than fresh"), "{}", check.message);
     }
 
     /// §10.2 row 3, surfaced. `lag_commits: None` means the watermark left

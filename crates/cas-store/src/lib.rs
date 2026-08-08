@@ -112,10 +112,10 @@ pub use history_store::{
     EPOCH_KIND_BINARY_INSTALL, EPOCH_KIND_DAEMON_LAST_HEARTBEAT, EPOCH_KIND_DAEMON_START,
     EpochBackfill, HISTORY_DOCS_SCHEMA, HISTORY_DOCS_SCHEMA_STATEMENTS, HISTORY_EPOCHS_SCHEMA,
     HISTORY_EPOCHS_SCHEMA_STATEMENTS, HISTORY_FTS_STATEMENTS, HISTORY_SCHEMA,
-    HISTORY_SCHEMA_STATEMENTS, HistoryCommit, HistoryCommitFile, HistoryCommitHit,
-    HistoryCommitSymbol, HistoryDoc, HistoryEpoch, HistoryIndexState, HistoryQuery, HistoryStore,
-    ObservationCounts, ProvenanceCoverage, SOURCE_CHANGELOG, SOURCE_EMBEDDINGS, SOURCE_GIT,
-    SOURCE_GITHUB, SqliteHistoryStore, SymbolMapping, SymbolRange,
+    HISTORY_SCHEMA_STATEMENTS, HISTORY_SYMBOL_UNCERTAIN_LIMIT, HistoryCommit, HistoryCommitFile,
+    HistoryCommitHit, HistoryCommitSymbol, HistoryDoc, HistoryEpoch, HistoryIndexState,
+    HistoryQuery, HistoryStore, ObservationCounts, ProvenanceCoverage, SOURCE_CHANGELOG,
+    SOURCE_EMBEDDINGS, SOURCE_GIT, SOURCE_GITHUB, SqliteHistoryStore, SymbolMapping, SymbolRange,
 };
 
 // Commit → task / session provenance resolution (EPIC cas-6212 / cas-519f,

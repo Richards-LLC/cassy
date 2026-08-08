@@ -136,6 +136,47 @@ async fn entries_only_push_is_root_and_project_bound() {
     assert_ne!(body["entries"][0]["id"], "b-entry");
 }
 
+#[tokio::test]
+async fn personal_push_omits_team_id_even_when_the_project_has_an_active_team() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/sync/push"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let root = TempDir::new().unwrap();
+    seed_project(&root, &server.uri(), "personal-project");
+    let queue = Arc::new(SyncQueue::open(root.path()).unwrap());
+    enqueue(&queue, EntityType::Entry, "personal-entry", 8);
+
+    let mut config = CloudConfig::default();
+    config.endpoint = server.uri();
+    config.token = Some("test-token".to_string());
+    config.team_id = Some("active-team-must-not-scope-personal-push".to_string());
+    let syncer = CloudSyncer::new_for_project(
+        queue,
+        config,
+        CloudSyncerConfig::default(),
+        "personal-project".to_string(),
+        root.path(),
+    );
+    tokio::task::spawn_blocking(move || syncer.push())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    let body = decode_gzip_json(&requests[0].body);
+    assert_eq!(body["project_canonical_id"], "personal-project");
+    assert_eq!(body["entries"][0]["id"], "personal-entry");
+    assert!(
+        body.get("team_id").is_none(),
+        "the personal push path must remain account-scoped — got {body}"
+    );
+}
+
 /// cas-7719: the shared personal-envelope builder must send the same
 /// lowercased remote identity as team push for every supported URL form. Each
 /// input also exercises the direct-session envelope, so neither personal

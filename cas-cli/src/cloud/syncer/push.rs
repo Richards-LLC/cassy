@@ -507,15 +507,28 @@ impl CloudSyncer {
         entity_type: &str,
         values: Vec<serde_json::Value>,
     ) -> Result<serde_json::Map<String, serde_json::Value>, CasError> {
-        self.build_personal_push_payload_fields([(entity_type.to_string(), values)])
+        self.build_push_payload_fields([(entity_type.to_string(), values)], None)
     }
 
-    /// Build the common personal envelope around one or more entity arrays.
-    /// Knowledge-page deletes share the normal push endpoint with page records,
-    /// so they need this rather than a second route or copied auth/scope logic.
-    pub(super) fn build_personal_push_payload_fields<I>(
+    /// Build the shared envelope for knowledge pages. The caller passes the
+    /// already-resolved active team so the page visibility decision and the
+    /// optional top-level wire scope cannot consult different configuration
+    /// fields. `None` preserves private knowledge pushes.
+    pub(super) fn build_team_scoped_push_payload_fields<I>(
         &self,
         fields: I,
+        team_id: Option<&str>,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, CasError>
+    where
+        I: IntoIterator<Item = (String, Vec<serde_json::Value>)>,
+    {
+        self.build_push_payload_fields(fields, team_id)
+    }
+
+    fn build_push_payload_fields<I>(
+        &self,
+        fields: I,
+        team_id: Option<&str>,
     ) -> Result<serde_json::Map<String, serde_json::Value>, CasError>
     where
         I: IntoIterator<Item = (String, Vec<serde_json::Value>)>,
@@ -524,7 +537,7 @@ impl CloudSyncer {
         for (entity_type, values) in fields {
             payload.insert(entity_type, serde_json::Value::Array(values));
         }
-        if let Some(team_id) = &self.cloud_config.team_id {
+        if let Some(team_id) = team_id {
             payload.insert("team_id".to_string(), serde_json::json!(team_id));
         }
         payload.insert(

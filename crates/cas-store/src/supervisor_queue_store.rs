@@ -145,6 +145,13 @@ pub trait SupervisorQueueStore: Send + Sync {
     /// Look up a notification by transition_key (repair / tests).
     fn get_by_transition_key(&self, transition_key: &str) -> Result<Option<SupervisorNotification>>;
 
+    /// Look up one durable notification by its public notification ID.
+    ///
+    /// Lifecycle prompt envelopes expose this ID (not the linked
+    /// `prompt_queue.id`), so acknowledgement surfaces use this lookup before
+    /// cascading confirmation to the prompt outbox row.
+    fn get(&self, notification_id: i64) -> Result<Option<SupervisorNotification>>;
+
     /// List lifecycle outbox rows awaiting prompt delivery (cas-ecff).
     ///
     /// Returns `task_lifecycle` notifications with a transition_key and
@@ -345,6 +352,22 @@ impl SupervisorQueueStore for SqliteSupervisorQueueStore {
              LIMIT 1",
         )?;
         let mut rows = stmt.query(params![transition_key])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(Self::notification_from_row(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    fn get(&self, notification_id: i64) -> Result<Option<SupervisorNotification>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, supervisor_id, event_type, payload, priority, created_at, processed_at,
+                    transition_key, prompt_delivered_at
+             FROM supervisor_queue
+             WHERE id = ?
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![notification_id])?;
         match rows.next()? {
             Some(row) => Ok(Some(Self::notification_from_row(row)?)),
             None => Ok(None),

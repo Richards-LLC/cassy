@@ -211,6 +211,16 @@ pub(crate) struct WorkerDiedEnvelope {
     pub worker_name: String,
     /// Death-incident identity — one incident yields one notice (cas-3dcb).
     pub incident: String,
+    /// Durable `supervisor_queue.id` exposed to the recipient.
+    pub notification_id: i64,
+    /// Every registration UUID represented by this relay/batch.
+    pub forensic_worker_ids: Vec<String>,
+    /// Every durable notification represented by this relay/batch.
+    pub coalesced_notification_ids: Vec<i64>,
+    /// Tasks actually held when this registration died.
+    pub held_tasks: Vec<String>,
+    /// Tasks parked back to Open by orphan recovery.
+    pub recovered_tasks: Vec<String>,
 }
 
 /// Render a worker-death relay for PTY injection into the supervisor's session.
@@ -242,8 +252,72 @@ pub(crate) fn format_worker_died_relay(
          Parked back to Open: {recovered}\n\
          These tasks are unattended. Re-assign them or respawn a worker; \
          `coordination action=worker_status` shows the current fleet.\n\
+         Acknowledge this relay with `coordination action=message_ack \
+         notification_id={notification_id}`. (`queue_ack` accepts the same durable ID.)\n\
          </worker-died>"
     )
+}
+
+/// Render one bounded summary for duplicate registry rows that expired without
+/// holding or parking any task. The first notification remains the actionable
+/// durable row; the rest are retained here as forensic identities and marked
+/// coalesced in their two queue lanes before transport.
+pub(crate) fn format_coalesced_worker_died_relay(
+    worker_name: &str,
+    worker_ids: &[String],
+    incidents: &[String],
+    notification_ids: &[i64],
+) -> Option<String> {
+    let worker_id = worker_ids.first()?;
+    let incident = incidents.first()?;
+    let notification_id = *notification_ids.first()?;
+    Some(format!(
+        "<worker-died worker_id=\"{worker_id}\" worker_name=\"{worker_name}\" \
+         incident=\"{incident}\" notification_id=\"{notification_id}\" \
+         coalesced_count=\"{}\">\n\
+         Worker {worker_name} had {} duplicate registry rows expire.\n\
+         No tasks were held or parked; no reassignment is required.\n\
+         Forensic worker IDs: {}\n\
+         Coalesced durable notification IDs: {}\n\
+         Acknowledge this batch with `coordination action=message_ack \
+         notification_id={notification_id}`. (`queue_ack` accepts the same durable ID.)\n\
+         </worker-died>",
+        worker_ids.len(),
+        worker_ids.len(),
+        worker_ids.join(", "),
+        notification_ids
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", "),
+    ))
+}
+
+fn worker_died_task_line(prompt: &str, prefix: &str) -> Vec<String> {
+    let Some(value) = prompt
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix(prefix))
+    else {
+        return Vec::new();
+    };
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("none") || value.is_empty() {
+        return Vec::new();
+    }
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn worker_died_i64_line(prompt: &str, prefix: &str) -> Vec<i64> {
+    worker_died_task_line(prompt, prefix)
+        .into_iter()
+        .filter_map(|value| value.parse().ok())
+        .collect()
 }
 
 /// Parse a worker-death relay envelope, if this prompt is one.
@@ -253,10 +327,26 @@ pub(crate) fn parse_worker_died_envelope(prompt: &str) -> Option<WorkerDiedEnvel
     if !tag.starts_with(WORKER_DIED_ENVELOPE_OPEN) {
         return None;
     }
+    let worker_id = xml_attribute(tag, "worker_id")?.to_string();
+    let notification_id = xml_attribute(tag, "notification_id")?.parse().ok()?;
+    let mut forensic_worker_ids = worker_died_task_line(prompt, "Forensic worker IDs:");
+    if forensic_worker_ids.is_empty() {
+        forensic_worker_ids.push(worker_id.clone());
+    }
+    let mut coalesced_notification_ids =
+        worker_died_i64_line(prompt, "Coalesced durable notification IDs:");
+    if coalesced_notification_ids.is_empty() {
+        coalesced_notification_ids.push(notification_id);
+    }
     Some(WorkerDiedEnvelope {
-        worker_id: xml_attribute(tag, "worker_id")?.to_string(),
+        worker_id,
         worker_name: xml_attribute(tag, "worker_name")?.to_string(),
         incident: xml_attribute(tag, "incident")?.to_string(),
+        notification_id,
+        forensic_worker_ids,
+        coalesced_notification_ids,
+        held_tasks: worker_died_task_line(prompt, "Held at death:"),
+        recovered_tasks: worker_died_task_line(prompt, "Parked back to Open:"),
     })
 }
 

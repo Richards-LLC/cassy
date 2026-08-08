@@ -1,5 +1,56 @@
 use crate::mcp::tools::service::imports::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LinkedLifecycleAck {
+    pub durable_notification_id: i64,
+    pub prompt_id: Option<i64>,
+}
+
+/// Acknowledge a lifecycle/death notification through both durable queue
+/// identities. The public ID printed in lifecycle envelopes belongs to
+/// `supervisor_queue`; daemon redelivery is driven by a linked prompt row with
+/// a different autoincrement sequence. Both `message_ack` and `queue_ack` call
+/// this bridge so the documented ID cannot confirm an unrelated numeric row.
+pub(crate) fn acknowledge_linked_lifecycle_notification(
+    cas_root: &std::path::Path,
+    notification_id: i64,
+) -> Result<Option<LinkedLifecycleAck>, String> {
+
+    let supervisor_queue = crate::store::open_supervisor_queue_store(cas_root)
+        .map_err(|error| format!("open supervisor queue: {error}"))?;
+    let Some(notification) = supervisor_queue
+        .get(notification_id)
+        .map_err(|error| format!("lookup durable notification: {error}"))?
+    else {
+        return Ok(None);
+    };
+    let dedupe_key = match notification.event_type.as_str() {
+        "task_lifecycle" => {
+            crate::mcp::tools::core::task::lifecycle::supervisor_push::lifecycle_prompt_dedupe_key(
+                notification_id,
+            )
+        }
+        "worker_died" => format!("worker-died-outbox:{notification_id}"),
+        _ => return Ok(None),
+    };
+
+    if notification.processed_at.is_none() {
+        supervisor_queue
+            .ack(notification_id)
+            .map_err(|error| format!("ack durable notification: {error}"))?;
+    }
+    let prompt_queue = crate::store::open_prompt_queue_store(cas_root)
+        .map_err(|error| format!("open prompt queue: {error}"))?;
+    let prompt_id = prompt_queue
+        .ack_by_dedupe_key(&dedupe_key)
+        .map_err(|error| format!("ack linked prompt: {error}"))?;
+
+    Ok(Some(LinkedLifecycleAck {
+        durable_notification_id: notification_id,
+        prompt_id,
+    }))
+}
+
 impl CasService {
     pub(in crate::mcp::tools::service) async fn queue_notify(
         &self,
@@ -166,14 +217,33 @@ impl CasService {
         &self,
         req: AgentRequest,
     ) -> Result<CallToolResult, McpError> {
-        use crate::store::open_supervisor_queue_store;
-
         let notification_id = req.notification_id.ok_or_else(|| {
             Self::error(
                 ErrorCode::INVALID_PARAMS,
-                "notification_id required for queue_ack",
+                "notification_id required for queue_ack (lifecycle relay IDs also confirm the linked message delivery row)",
             )
         })?;
+
+        if let Some(linked) =
+            acknowledge_linked_lifecycle_notification(&self.inner.cas_root, notification_id)
+                .map_err(|error| {
+                    Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!("Failed to acknowledge linked lifecycle notification: {error}"),
+                    )
+                })?
+        {
+            return Ok(Self::success(format!(
+                "Lifecycle notification {} acknowledged across durable and prompt queues{}",
+                linked.durable_notification_id,
+                linked
+                    .prompt_id
+                    .map(|id| format!(" (linked message_id: {id})"))
+                    .unwrap_or_else(|| " (linked prompt already terminal or absent)".to_string())
+            )));
+        }
+
+        use crate::store::open_supervisor_queue_store;
 
         let queue = open_supervisor_queue_store(&self.inner.cas_root).map_err(|error| {
             Self::error(
@@ -192,5 +262,96 @@ impl CasService {
         Ok(Self::success(format!(
             "Notification {notification_id} acknowledged"
         )))
+    }
+}
+
+#[cfg(test)]
+mod cas_20ac_ack_tests {
+    use super::*;
+    use crate::store::{
+        NotificationPriority, open_prompt_queue_store, open_supervisor_queue_store,
+    };
+    use cas_store::EnqueueIdempotentResult;
+
+    /// The embedded durable ID and the prompt row ID intentionally diverge.
+    /// Acknowledging the exact visible notification must confirm BOTH lanes,
+    /// never an unrelated prompt with a coincident numeric ID.
+    #[test]
+    fn visible_lifecycle_notification_id_acks_its_linked_prompt() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prompt_queue = open_prompt_queue_store(temp.path()).expect("prompt queue");
+        let supervisor_queue =
+            open_supervisor_queue_store(temp.path()).expect("supervisor queue");
+
+        // Force the two table sequences apart and leave prompt id=1 unrelated.
+        let unrelated = prompt_queue
+            .enqueue("worker", "supervisor", "unrelated ordinary message")
+            .expect("unrelated prompt");
+        assert_eq!(unrelated, 1);
+        let durable_id = supervisor_queue
+            .notify(
+                "supervisor-id",
+                "worker_died",
+                "{}",
+                NotificationPriority::Critical,
+            )
+            .expect("durable notice");
+        assert_eq!(durable_id, 1);
+        let linked_prompt_id = match prompt_queue
+            .enqueue_idempotent(
+                "lifecycle-wake:worker-died:1",
+                "supervisor",
+                "<worker-died worker_id=\"w\" worker_name=\"lost\" incident=\"i\" notification_id=\"1\">\nHeld at death: none\nParked back to Open: none\n</worker-died>",
+                None,
+                Some("worker died: lost"),
+                Some(NotificationPriority::Critical),
+                "worker-died-outbox:1",
+            )
+            .expect("linked prompt")
+        {
+            EnqueueIdempotentResult::Created(id)
+            | EnqueueIdempotentResult::AlreadyExists(id) => id,
+        };
+        assert_eq!(linked_prompt_id, 2);
+
+        let ack = acknowledge_linked_lifecycle_notification(temp.path(), durable_id)
+            .expect("ack bridge")
+            .expect("lifecycle row");
+        assert_eq!(ack.prompt_id, Some(linked_prompt_id));
+        assert!(
+            supervisor_queue
+                .get(durable_id)
+                .expect("lookup")
+                .expect("row")
+                .processed_at
+                .is_some()
+        );
+
+        let unrelated_report = prompt_queue
+            .message_delivery_report(unrelated)
+            .expect("unrelated report")
+            .expect("unrelated row");
+        assert!(
+            unrelated_report.confirmed_at.is_none(),
+            "numeric collision must not acknowledge the unrelated prompt"
+        );
+        let linked_report = prompt_queue
+            .message_delivery_report(linked_prompt_id)
+            .expect("linked report")
+            .expect("linked row");
+        assert!(
+            linked_report.confirmed_at.is_some(),
+            "linked lifecycle prompt must be terminal after message_ack/queue_ack"
+        );
+        assert_eq!(
+            linked_report.confirmation_source,
+            cas_store::ConfirmationSource::ExplicitAck
+        );
+
+        // Shared helper is idempotent, matching both public ACK actions.
+        let repeated = acknowledge_linked_lifecycle_notification(temp.path(), durable_id)
+            .expect("repeat ack")
+            .expect("lifecycle row");
+        assert_eq!(repeated.prompt_id, Some(linked_prompt_id));
     }
 }

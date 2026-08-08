@@ -27,6 +27,14 @@ use crate::store::{
 };
 use cas_store::{NotifyIdempotentResult, PromptQueueStore, SupervisorQueueStore};
 
+/// Maximum pending worker-death relays examined in one daemon pass.
+///
+/// This is deliberately much larger than the ordinary ten-row delivery batch:
+/// duplicate registry cleanup must collapse before it can monopolize turns,
+/// while the finite cap keeps one malformed queue from creating an unbounded
+/// allocation on the hot path.
+pub(crate) const WORKER_DEATH_COALESCE_SCAN_LIMIT: usize = 4_096;
+
 /// Summary of a single recovery pass.
 #[derive(Debug, Default, Clone)]
 pub struct OrphanRecoverySummary {
@@ -410,6 +418,127 @@ fn deliver_worker_died_notice(
     }
 }
 
+/// Result of coalescing task-free duplicate worker-death relays.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WorkerDeathCoalesceReport {
+    /// Logical no-action incident families replaced by a batch.
+    pub families: usize,
+    /// Duplicate prompt/durable rows made terminal behind their canonical row.
+    pub duplicates: usize,
+}
+
+/// Collapse pending no-action deaths for duplicate registrations of one
+/// logical factory worker before any of them reaches the supervisor turn.
+///
+/// A death holding or parking even one task is never eligible: those failures
+/// remain separate, critical, actionable relays. Task-free deaths group by
+/// target, factory session and logical worker name. The canonical prompt lists
+/// every registration UUID and durable notification ID for forensics; sibling
+/// prompt rows are suppressed and sibling durable rows are processed so both
+/// `message_*` and `queue_*` views expose one batch.
+pub(crate) fn coalesce_pending_worker_deaths(
+    prompt_queue: &dyn PromptQueueStore,
+    supervisor_queue: Option<&dyn SupervisorQueueStore>,
+    rows: &[cas_store::QueuedPrompt],
+) -> Result<WorkerDeathCoalesceReport, cas_store::StoreError> {
+    use std::collections::BTreeMap;
+
+    type FamilyKey = (String, Option<String>, String);
+    let mut families: BTreeMap<
+        FamilyKey,
+        Vec<(
+            cas_store::QueuedPrompt,
+            crate::prompt_revalidation::WorkerDiedEnvelope,
+        )>,
+    > = BTreeMap::new();
+
+    for row in rows {
+        let Some(envelope) = crate::prompt_revalidation::parse_worker_died_envelope(&row.prompt)
+        else {
+            continue;
+        };
+        if !envelope.held_tasks.is_empty() || !envelope.recovered_tasks.is_empty() {
+            continue;
+        }
+        families
+            .entry((
+                row.target.clone(),
+                row.factory_session.clone(),
+                envelope.worker_name.clone(),
+            ))
+            .or_default()
+            .push((row.clone(), envelope));
+    }
+
+    let mut report = WorkerDeathCoalesceReport::default();
+    for ((_target, _session, worker_name), mut family) in families {
+        if family.len() < 2 {
+            continue;
+        }
+        family.sort_by_key(|(row, _)| row.id);
+        let (canonical, canonical_envelope) = &family[0];
+        let mut worker_ids = family
+            .iter()
+            .flat_map(|(_, envelope)| envelope.forensic_worker_ids.clone())
+            .collect::<Vec<_>>();
+        worker_ids.sort();
+        worker_ids.dedup();
+        let incidents = family
+            .iter()
+            .map(|(_, envelope)| envelope.incident.clone())
+            .collect::<Vec<_>>();
+        let mut notification_ids = family
+            .iter()
+            .flat_map(|(_, envelope)| envelope.coalesced_notification_ids.clone())
+            .collect::<Vec<_>>();
+        notification_ids.sort_unstable();
+        notification_ids.dedup();
+        // The visible notification ID must identify the canonical prompt row's
+        // dedupe key. The two queues have independent sequences, so sorting
+        // durable IDs can otherwise expose a suppressed sibling's ID and make
+        // message_ack leave the canonical replay row pending.
+        notification_ids.retain(|id| *id != canonical_envelope.notification_id);
+        notification_ids.insert(0, canonical_envelope.notification_id);
+        let Some(prompt) = crate::prompt_revalidation::format_coalesced_worker_died_relay(
+            &worker_name,
+            &worker_ids,
+            &incidents,
+            &notification_ids,
+        ) else {
+            continue;
+        };
+        let summary = format!(
+            "worker died: {worker_name} ({} duplicate no-task registrations)",
+            family.len()
+        );
+
+        // Do not retire siblings unless the canonical row was safely rewritten.
+        if !prompt_queue.rewrite_pending(canonical.id, &prompt, Some(&summary))? {
+            continue;
+        }
+
+        for (duplicate, envelope) in family.iter().skip(1) {
+            prompt_queue.mark_suppressed(
+                duplicate.id,
+                Some(&format!(
+                    "coalesced into worker-death batch prompt {} for logical worker {}",
+                    canonical.id, worker_name
+                )),
+            )?;
+            if let Some(queue) = supervisor_queue
+                && let Ok(Some(durable)) = queue.get(envelope.notification_id)
+                && durable.processed_at.is_none()
+            {
+                let _ = queue.ack(envelope.notification_id);
+            }
+            report.duplicates += 1;
+        }
+        report.families += 1;
+    }
+
+    Ok(report)
+}
+
 /// Format the "Recently died while leased" section for worker_status.
 ///
 /// Pulls recent WorkerDied events (last `window_secs`) and any still-stale
@@ -573,14 +702,21 @@ mod cas_3dcb_death_relay_tests {
         }
 
         fn emit(&self, agent: &Agent) {
+            self.emit_summary(
+                agent,
+                OrphanRecoverySummary {
+                    held_task_ids: vec!["cas-held1".to_string()],
+                    recovered_task_ids: vec!["cas-held1".to_string()],
+                },
+            );
+        }
+
+        fn emit_summary(&self, agent: &Agent, summary: OrphanRecoverySummary) {
             emit_worker_died_signals(
                 &self.cas_root,
                 self.agent_store.as_ref(),
                 agent,
-                &OrphanRecoverySummary {
-                    held_task_ids: vec!["cas-held1".to_string()],
-                    recovered_task_ids: vec!["cas-held1".to_string()],
-                },
+                &summary,
                 "daemon maintenance: heartbeat stale",
             );
         }
@@ -745,5 +881,185 @@ mod cas_3dcb_death_relay_tests {
             1,
             "the parent fallback must fire exactly once, not once per tick"
         );
+    }
+
+    /// cas-20ac live shape: duplicate nested registrations for one logical
+    /// worker all expire in one cleanup pass. None held work, so thirty
+    /// critical rows must become one explicit no-action forensic batch across
+    /// both queue views before the director can inject them.
+    #[test]
+    fn thirty_duplicate_no_task_deaths_coalesce_to_one_bounded_batch() {
+        let fixture = Fixture::new();
+        let mut worker_ids = Vec::new();
+        for _ in 0..30 {
+            let worker = fixture.dead_worker("lt-codemap-refresh", 900);
+            worker_ids.push(worker.id.clone());
+            fixture.emit_summary(&worker, OrphanRecoverySummary::default());
+        }
+
+        let prompt_queue = open_prompt_queue_store(&fixture.cas_root).expect("prompt queue");
+        let supervisor_queue =
+            open_supervisor_queue_store(&fixture.cas_root).expect("supervisor queue");
+        let before = fixture.prompt_relays();
+        assert_eq!(before.len(), 30, "fixture must reproduce the flood first");
+
+        let report = coalesce_pending_worker_deaths(
+            prompt_queue.as_ref(),
+            Some(supervisor_queue.as_ref()),
+            &before,
+        )
+        .expect("coalesce");
+        assert_eq!(
+            report,
+            WorkerDeathCoalesceReport {
+                families: 1,
+                duplicates: 29
+            }
+        );
+
+        let after = fixture.prompt_relays();
+        assert_eq!(after.len(), 1, "one logical worker must inject one turn");
+        let batch = &after[0].prompt;
+        assert!(batch.contains("30 duplicate registry rows expire"));
+        assert!(batch.contains("No tasks were held or parked"));
+        for worker_id in worker_ids {
+            assert!(
+                batch.contains(&worker_id),
+                "forensic registration ID missing from batch: {worker_id}"
+            );
+        }
+        assert_eq!(
+            fixture.durable_notices(),
+            1,
+            "queue_poll/queue_peek must see the same single batch, not 30 rows"
+        );
+    }
+
+    /// The durable and prompt queues use independent sequences. A coalesced
+    /// batch must expose the durable ID linked to the canonical prompt, even
+    /// when durable notification order and prompt insertion order disagree.
+    #[test]
+    fn coalesced_batch_ack_id_always_points_to_the_canonical_prompt() {
+        let fixture = Fixture::new();
+        let prompt_queue = open_prompt_queue_store(&fixture.cas_root).expect("prompt queue");
+        let supervisor_queue =
+            open_supervisor_queue_store(&fixture.cas_root).expect("supervisor queue");
+
+        let durable_one = supervisor_queue
+            .notify(
+                &fixture.supervisor_id,
+                "worker_died",
+                "{}",
+                NotificationPriority::Critical,
+            )
+            .expect("durable one");
+        let durable_two = supervisor_queue
+            .notify(
+                &fixture.supervisor_id,
+                "worker_died",
+                "{}",
+                NotificationPriority::Critical,
+            )
+            .expect("durable two");
+
+        // Reverse the durable order in prompt_queue: durable_two owns the
+        // canonical (lowest prompt ID), while durable_one is the sibling.
+        for (worker_id, incident, notification_id) in [
+            ("registration-two", "incident-two", durable_two),
+            ("registration-one", "incident-one", durable_one),
+        ] {
+            prompt_queue
+                .enqueue_idempotent(
+                    &format!("lifecycle-wake:worker-died:{notification_id}"),
+                    "supervisor",
+                    &crate::prompt_revalidation::format_worker_died_relay(
+                        worker_id,
+                        "logical-worker",
+                        incident,
+                        "stale registration",
+                        &[],
+                        &[],
+                        notification_id,
+                    ),
+                    None,
+                    Some("worker died: logical-worker"),
+                    Some(NotificationPriority::Critical),
+                    &format!("worker-died-outbox:{notification_id}"),
+                )
+                .expect("prompt relay");
+        }
+
+        let before = fixture.prompt_relays();
+        coalesce_pending_worker_deaths(
+            prompt_queue.as_ref(),
+            Some(supervisor_queue.as_ref()),
+            &before,
+        )
+        .expect("coalesce");
+
+        let canonical = fixture.prompt_relays();
+        assert_eq!(canonical.len(), 1);
+        let envelope = crate::prompt_revalidation::parse_worker_died_envelope(&canonical[0].prompt)
+            .expect("batch envelope");
+        assert_eq!(
+            envelope.notification_id, durable_two,
+            "the visible ACK ID must resolve to the canonical prompt's dedupe key"
+        );
+
+        prompt_queue
+            .ack_by_dedupe_key(&format!(
+                "worker-died-outbox:{}",
+                envelope.notification_id
+            ))
+            .expect("ack canonical dedupe key")
+            .expect("canonical prompt");
+        let replay = prompt_queue
+            .poll_unseen_for_recipient("supervisor", None, 10)
+            .expect("replay poll");
+        assert!(
+            replay.iter().all(|row| row.id != canonical[0].id),
+            "acknowledging the visible batch ID must prevent canonical replay: {replay:?}"
+        );
+    }
+
+    /// Task-bearing deaths are actionable incidents, not registry noise. Even
+    /// when names match, different held tasks must retain separate urgent rows.
+    #[test]
+    fn distinct_task_holding_deaths_are_never_coalesced() {
+        let fixture = Fixture::new();
+        let first = fixture.dead_worker("logical-worker", 900);
+        let second = fixture.dead_worker("logical-worker", 901);
+        fixture.emit_summary(
+            &first,
+            OrphanRecoverySummary {
+                held_task_ids: vec!["cas-task-a".to_string()],
+                recovered_task_ids: vec!["cas-task-a".to_string()],
+            },
+        );
+        fixture.emit_summary(
+            &second,
+            OrphanRecoverySummary {
+                held_task_ids: vec!["cas-task-b".to_string()],
+                recovered_task_ids: vec!["cas-task-b".to_string()],
+            },
+        );
+
+        let prompt_queue = open_prompt_queue_store(&fixture.cas_root).expect("prompt queue");
+        let supervisor_queue =
+            open_supervisor_queue_store(&fixture.cas_root).expect("supervisor queue");
+        let before = fixture.prompt_relays();
+        let report = coalesce_pending_worker_deaths(
+            prompt_queue.as_ref(),
+            Some(supervisor_queue.as_ref()),
+            &before,
+        )
+        .expect("coalesce");
+
+        assert_eq!(report, WorkerDeathCoalesceReport::default());
+        let after = fixture.prompt_relays();
+        assert_eq!(after.len(), 2);
+        assert!(after.iter().any(|row| row.prompt.contains("cas-task-a")));
+        assert!(after.iter().any(|row| row.prompt.contains("cas-task-b")));
+        assert_eq!(fixture.durable_notices(), 2);
     }
 }

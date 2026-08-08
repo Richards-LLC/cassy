@@ -1196,9 +1196,33 @@ impl CasService {
         let notification_id = req.notification_id.ok_or_else(|| {
             Self::error(
                 ErrorCode::INVALID_PARAMS,
-                "notification_id required for message_ack (the prompt queue message ID)",
+                "notification_id required for message_ack (ordinary prompt message ID, or the durable notification ID printed in a lifecycle relay)",
             )
         })?;
+
+        // cas-20ac: lifecycle envelopes print supervisor_queue IDs, not
+        // prompt_queue IDs. Resolve that lane first; blindly acking the same
+        // integer in prompt_queue can confirm an unrelated row while the
+        // lifecycle relay remains pending and is injected again.
+        if let Some(linked) = super::supervisor_queue::acknowledge_linked_lifecycle_notification(
+            &self.inner.cas_root,
+            notification_id,
+        )
+        .map_err(|error| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to acknowledge linked lifecycle notification: {error}"),
+            )
+        })? {
+            return Ok(Self::success(format!(
+                "Lifecycle message {} acknowledged across durable and prompt queues{}; exact-notification redelivery is now terminal.",
+                linked.durable_notification_id,
+                linked
+                    .prompt_id
+                    .map(|id| format!(" (linked message_id: {id})"))
+                    .unwrap_or_else(|| " (linked prompt already terminal or absent)".to_string())
+            )));
+        }
 
         let queue = open_prompt_queue_store(&self.inner.cas_root).map_err(|error| {
             Self::error(

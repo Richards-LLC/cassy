@@ -10,9 +10,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use crate::{Result, StoreError};
 use crate::recording_store::capture_message_event;
 use crate::supervisor_queue_store::NotificationPriority;
+use crate::{Result, StoreError};
 
 /// Retry policy for daemon-owned prompt delivery.
 ///
@@ -892,7 +892,6 @@ impl std::fmt::Display for ConfirmationSource {
     }
 }
 
-
 /// Stage-based delivery report for one prompt_queue message (cas-2c5f).
 ///
 /// Additive to legacy [`MessageStatus`]. The store returns wake/reaction as
@@ -1387,6 +1386,20 @@ pub trait PromptQueueStore: Send + Sync {
     /// Acknowledge receipt of a prompt (target agent confirms delivery)
     fn ack(&self, prompt_id: i64) -> Result<()>;
 
+    /// Acknowledge the prompt outbox row identified by `dedupe_key`.
+    ///
+    /// Lifecycle envelopes expose their durable supervisor notification ID,
+    /// while the daemon redelivers a separate prompt row. This lookup bridges
+    /// those identities without assuming the two SQLite sequences coincide.
+    /// Returns the linked prompt ID when present.
+    fn ack_by_dedupe_key(&self, dedupe_key: &str) -> Result<Option<i64>>;
+
+    /// Rewrite a not-yet-terminal prompt before its first bounded delivery.
+    ///
+    /// Used to replace a family of task-free duplicate worker-death relays
+    /// with one forensic batch. Delivered/acknowledged rows are never changed.
+    fn rewrite_pending(&self, prompt_id: i64, prompt: &str, summary: Option<&str>) -> Result<bool>;
+
     /// Confirm delivered messages that the current recipient demonstrably
     /// consumed by sending a response back to one of `sender_aliases`.
     ///
@@ -1491,8 +1504,7 @@ pub trait PromptQueueStore: Send + Sync {
     /// changes is that it terminates as a recorded FAILURE instead of a benign
     /// suppression, so [`PromptQueueStore::list_undelivered_lifecycle_relays`]
     /// can surface it and the factory stops mistaking silence for success.
-    fn mark_undelivered_lifecycle_relay(&self, prompt_id: i64, detail: Option<&str>)
-    -> Result<()>;
+    fn mark_undelivered_lifecycle_relay(&self, prompt_id: i64, detail: Option<&str>) -> Result<()>;
 
     /// Pending rows that have burned at least `min_attempts` transport
     /// attempts, worst first (cas-94a1, GH #169).
@@ -2078,14 +2090,17 @@ impl SqlitePromptQueueStore {
         let (predicate, params) = Self::unseen_for_recipient_predicate(recipient, factory_session);
         let sql = format!("SELECT COUNT(*), MIN(q.created_at) {predicate}");
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let (count, oldest): (i64, Option<String>) = conn.query_row(
-            &sql,
-            rusqlite::params_from_iter(param_refs),
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
+        let (count, oldest): (i64, Option<String>) =
+            conn.query_row(&sql, rusqlite::params_from_iter(param_refs), |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?;
         let oldest_age = oldest
             .and_then(|created| DateTime::parse_from_rfc3339(&created).ok())
-            .map(|created| (Utc::now() - created.with_timezone(&Utc)).num_seconds().max(0));
+            .map(|created| {
+                (Utc::now() - created.with_timezone(&Utc))
+                    .num_seconds()
+                    .max(0)
+            });
         Ok((usize::try_from(count).unwrap_or(0), oldest_age))
     }
 }
@@ -2228,13 +2243,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                            AND transport_delivered_at >= ?
                          ORDER BY transport_delivered_at DESC, id DESC
                          LIMIT 1",
-                        params![
-                            source,
-                            target,
-                            prompt,
-                            factory_session,
-                            duplicate_cutoff
-                        ],
+                        params![source, target, prompt, factory_session, duplicate_cutoff],
                         |row| row.get::<_, i64>(0),
                     )
                     .optional()?;
@@ -2827,6 +2836,52 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             // rows_affected == 0 means either not found or already acked — both idempotent
             Ok(())
         }) // with_write_retry
+    }
+
+    fn ack_by_dedupe_key(&self, dedupe_key: &str) -> Result<Option<i64>> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = self.conn.lock().unwrap();
+            let prompt_id = conn
+                .query_row(
+                    "SELECT id FROM prompt_queue WHERE dedupe_key = ? LIMIT 1",
+                    params![dedupe_key],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?;
+            let Some(prompt_id) = prompt_id else {
+                return Ok(None);
+            };
+
+            let now = Utc::now().to_rfc3339();
+            let _ = Self::atomic_stage_stamp(
+                &conn,
+                prompt_id,
+                DeliveryStage::Confirmed,
+                AtomicStampOpts::clear_reason(),
+            );
+            conn.execute(
+                "UPDATE prompt_queue SET acked_at = ?, acked_via = 'explicit_ack' \
+                 WHERE id = ? AND acked_at IS NULL",
+                params![now, prompt_id],
+            )?;
+            Ok(Some(prompt_id))
+        })
+    }
+
+    fn rewrite_pending(&self, prompt_id: i64, prompt: &str, summary: Option<&str>) -> Result<bool> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = self.conn.lock().unwrap();
+            let changed = conn.execute(
+                "UPDATE prompt_queue
+                 SET prompt = ?, summary = ?
+                 WHERE id = ?
+                   AND processed_at IS NULL
+                   AND acked_at IS NULL
+                   AND (highest_stage IS NULL OR highest_stage IN ('queued', 'selected'))",
+                params![prompt, summary, prompt_id],
+            )?;
+            Ok(changed > 0)
+        })
     }
 
     fn ack_delivered_for_recipient(
@@ -3452,11 +3507,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         })
     }
 
-    fn mark_undelivered_lifecycle_relay(
-        &self,
-        prompt_id: i64,
-        detail: Option<&str>,
-    ) -> Result<()> {
+    fn mark_undelivered_lifecycle_relay(&self, prompt_id: i64, detail: Option<&str>) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
             let conn = self.conn.lock().unwrap();
             Self::atomic_stage_stamp(
@@ -3500,9 +3551,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 summary: row.get(3)?,
                 delivery_attempts: row.get(4)?,
                 reason: reason.as_deref().and_then(PendingReason::parse),
-                first_attempt_at: first_attempt_at
-                    .as_deref()
-                    .and_then(Self::parse_datetime),
+                first_attempt_at: first_attempt_at.as_deref().and_then(Self::parse_datetime),
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -3973,9 +4022,18 @@ mod tests {
 
         // Ordinary chatter suppression — not a lifecycle wake, not a failure.
         let chatter = store
-            .enqueue_full("worker-a", "supervisor", "standing by", Some("sess"), None, None)
+            .enqueue_full(
+                "worker-a",
+                "supervisor",
+                "standing by",
+                Some("sess"),
+                None,
+                None,
+            )
             .unwrap();
-        store.mark_suppressed(chatter, Some("duplicate idle")).unwrap();
+        store
+            .mark_suppressed(chatter, Some("duplicate idle"))
+            .unwrap();
 
         let reported = store.list_undelivered_lifecycle_relays(10).unwrap();
         assert_eq!(
@@ -4187,9 +4245,7 @@ mod tests {
         );
         assert_eq!(
             recipient_transport_stamp(&store, id, "fast-cobra-90"),
-            report
-                .recipient_transport_at
-                .map(|at| at.to_rfc3339()),
+            report.recipient_transport_at.map(|at| at.to_rfc3339()),
             "the reported stamp must be the stored one"
         );
 
@@ -4409,7 +4465,9 @@ mod tests {
     #[test]
     fn a_transport_receipt_is_scoped_to_one_recipient_and_is_not_an_ack() {
         let (_temp, store) = create_test_store();
-        let id = store.enqueue("supervisor", "all_workers", "standup").unwrap();
+        let id = store
+            .enqueue("supervisor", "all_workers", "standup")
+            .unwrap();
         store
             .record_recipient_surfaced(id, "worker-a", SurfacingSource::TransportDelivered)
             .unwrap();
@@ -5420,7 +5478,13 @@ mod tests {
 
         // This is exactly the call process_prompt_queue makes: all live
         // targets for the session, limit=10 (queue_and_events.rs:308).
-        let targets = &["supervisor", "all_workers", "director", "active-worker", "stuck-target"];
+        let targets = &[
+            "supervisor",
+            "all_workers",
+            "director",
+            "active-worker",
+            "stuck-target",
+        ];
         let peeked = store
             .peek_for_targets(targets, Some("session-a"), limit)
             .unwrap();
@@ -5550,9 +5614,8 @@ mod tests {
             conn.execute(
                 "UPDATE prompt_queue SET created_at = ? WHERE id = ?",
                 params![
-                    (Utc::now()
-                        - chrono::Duration::seconds(PROMPT_RETRY_MAX_AGE_SECS + 1))
-                    .to_rfc3339(),
+                    (Utc::now() - chrono::Duration::seconds(PROMPT_RETRY_MAX_AGE_SECS + 1))
+                        .to_rfc3339(),
                     poison
                 ],
             )
@@ -6148,7 +6211,9 @@ mod tests {
         store.init().unwrap();
 
         // A row delivered AFTER the upgrade gets the stamp...
-        let fresh = store.enqueue("supervisor", "worker-1", "post-upgrade").unwrap();
+        let fresh = store
+            .enqueue("supervisor", "worker-1", "post-upgrade")
+            .unwrap();
         store.mark_transport_delivered(fresh).unwrap();
         assert!(
             recipient_transport_stamp(&store, fresh, "worker-1").is_some(),
@@ -6203,7 +6268,9 @@ mod tests {
         stamp_ack_via(&store, id, Some("inferred_from_reply"));
 
         assert_eq!(
-            store.count_unseen_for_recipient("supervisor", None).unwrap(),
+            store
+                .count_unseen_for_recipient("supervisor", None)
+                .unwrap(),
             1,
             "the unread count must see exactly what the drain would return"
         );
@@ -6983,9 +7050,9 @@ mod tests {
         store.mark_transport_delivered(first).unwrap();
         {
             let conn = store.conn.lock().unwrap();
-            let stale_delivered_at =
-                (Utc::now() - chrono::Duration::seconds(PROMPT_DUPLICATE_WINDOW_SECS + 1))
-                    .to_rfc3339();
+            let stale_delivered_at = (Utc::now()
+                - chrono::Duration::seconds(PROMPT_DUPLICATE_WINDOW_SECS + 1))
+            .to_rfc3339();
             conn.execute(
                 "UPDATE prompt_queue SET transport_delivered_at = ? WHERE id = ?",
                 params![stale_delivered_at, first],
@@ -7029,9 +7096,7 @@ mod tests {
             sql: &str,
             values: &[&dyn rusqlite::ToSql],
         ) -> String {
-            let mut stmt = conn
-                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
-                .unwrap();
+            let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
             stmt.query_map(rusqlite::params_from_iter(values.iter().copied()), |row| {
                 row.get::<_, String>(3)
             })
@@ -8002,12 +8067,18 @@ mod tests {
     fn a_later_non_attempt_cannot_erase_a_recorded_wake() {
         let (_temp, store) = create_test_store();
         let id = store.enqueue("supervisor", "worker-a", "work").unwrap();
-        store.record_wake_attempt(id, WakeAttempt::Fired, None).unwrap();
+        store
+            .record_wake_attempt(id, WakeAttempt::Fired, None)
+            .unwrap();
         store
             .record_wake_attempt(id, WakeAttempt::NotAttempted, Some("gate declined"))
             .unwrap();
         assert_eq!(
-            store.message_delivery_report(id).unwrap().unwrap().wake_attempt,
+            store
+                .message_delivery_report(id)
+                .unwrap()
+                .unwrap()
+                .wake_attempt,
             WakeAttempt::Fired
         );
     }
@@ -8017,12 +8088,18 @@ mod tests {
     fn a_failure_after_a_fire_is_recorded() {
         let (_temp, store) = create_test_store();
         let id = store.enqueue("supervisor", "worker-a", "work").unwrap();
-        store.record_wake_attempt(id, WakeAttempt::Fired, None).unwrap();
+        store
+            .record_wake_attempt(id, WakeAttempt::Fired, None)
+            .unwrap();
         store
             .record_wake_attempt(id, WakeAttempt::Failed, Some("pane gone"))
             .unwrap();
         assert_eq!(
-            store.message_delivery_report(id).unwrap().unwrap().wake_attempt,
+            store
+                .message_delivery_report(id)
+                .unwrap()
+                .unwrap()
+                .wake_attempt,
             WakeAttempt::Failed
         );
     }
@@ -8044,7 +8121,12 @@ mod tests {
 
         // The supervisor's message lands seconds later.
         let id = store
-            .enqueue_with_session("supervisor", "ready-cheetah-71", "start cas-7a01", "session")
+            .enqueue_with_session(
+                "supervisor",
+                "ready-cheetah-71",
+                "start cas-7a01",
+                "session",
+            )
             .unwrap();
 
         // The worker takes its next turn.
@@ -8154,7 +8236,11 @@ mod tests {
         let total = ids.len();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), total, "the same row was injected twice in one turn");
+        assert_eq!(
+            ids.len(),
+            total,
+            "the same row was injected twice in one turn"
+        );
         assert_eq!(total, 5);
     }
 
@@ -8165,13 +8251,20 @@ mod tests {
     fn surfacing_and_polling_select_the_same_rows() {
         let (_temp, store) = create_test_store();
         let abandoned = store.enqueue("supervisor", "worker-a", "stale").unwrap();
-        store.mark_abandoned(abandoned, Some("target gone")).unwrap();
-        let live = store.enqueue("supervisor", "worker-a", "real work").unwrap();
+        store
+            .mark_abandoned(abandoned, Some("target gone"))
+            .unwrap();
+        let live = store
+            .enqueue("supervisor", "worker-a", "real work")
+            .unwrap();
 
         let surfaced = store
             .surface_unseen_for_recipient("worker-a", None, 10)
             .unwrap();
-        assert_eq!(surfaced.iter().map(|r| r.id).collect::<Vec<_>>(), vec![live]);
+        assert_eq!(
+            surfaced.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![live]
+        );
     }
 
     /// A broadcast has one row and many recipients. One agent's turn must not
@@ -8456,16 +8549,14 @@ mod cas_94a1_delivery_attempts_tests {
     #[test]
     fn n_real_attempts_increment_the_counter_n_times() {
         let (_temp, store) = create_test_store();
-        let id = store.enqueue("supervisor", "worker-a", "do the thing").unwrap();
+        let id = store
+            .enqueue("supervisor", "worker-a", "do the thing")
+            .unwrap();
         assert_eq!(attempts_of(&store, id), 0);
 
         for expected in 1..=5 {
             store
-                .record_pending_reason(
-                    id,
-                    PendingReason::AdapterRetryable,
-                    Some("inject failed"),
-                )
+                .record_pending_reason(id, PendingReason::AdapterRetryable, Some("inject failed"))
                 .unwrap();
             assert_eq!(
                 attempts_of(&store, id),
@@ -8485,7 +8576,9 @@ mod cas_94a1_delivery_attempts_tests {
     #[test]
     fn policy_withholds_do_not_burn_the_budget() {
         let (_temp, store) = create_test_store();
-        let id = store.enqueue("supervisor", "worker-a", "held back").unwrap();
+        let id = store
+            .enqueue("supervisor", "worker-a", "held back")
+            .unwrap();
 
         for reason in [
             PendingReason::GatedNotReady,
@@ -8494,7 +8587,9 @@ mod cas_94a1_delivery_attempts_tests {
             PendingReason::NoIntendedRecipients,
             PendingReason::AwaitingAck,
         ] {
-            store.record_pending_reason(id, reason, Some("withheld")).unwrap();
+            store
+                .record_pending_reason(id, reason, Some("withheld"))
+                .unwrap();
         }
 
         assert_eq!(
@@ -8530,12 +8625,18 @@ mod cas_94a1_delivery_attempts_tests {
             "a terminal outcome records the death, not another attempt"
         );
 
-        let other = store.enqueue("supervisor", "worker-b", "also doomed").unwrap();
+        let other = store
+            .enqueue("supervisor", "worker-b", "also doomed")
+            .unwrap();
         store
             .record_pending_reason(other, PendingReason::AdapterRetryable, Some("failed"))
             .unwrap();
         store
-            .record_pending_reason(other, PendingReason::AbandonedUnknownTarget, Some("terminal"))
+            .record_pending_reason(
+                other,
+                PendingReason::AbandonedUnknownTarget,
+                Some("terminal"),
+            )
             .unwrap();
         assert_eq!(attempts_of(&store, other), 1);
     }
@@ -8552,7 +8653,10 @@ mod cas_94a1_delivery_attempts_tests {
             .unwrap();
 
         let report = store.message_delivery_report(id).unwrap().unwrap();
-        assert_eq!(report.pending_reason, Some(PendingReason::TargetUnavailable));
+        assert_eq!(
+            report.pending_reason,
+            Some(PendingReason::TargetUnavailable)
+        );
         assert_eq!(
             attempts_of(&store, id),
             1,
@@ -8565,8 +8669,12 @@ mod cas_94a1_delivery_attempts_tests {
     fn most_retried_pending_reports_worst_first() {
         let (_temp, store) = create_test_store();
         let quiet = store.enqueue("supervisor", "worker-a", "fine").unwrap();
-        let bad = store.enqueue("supervisor", "worker-b", "struggling").unwrap();
-        let worst = store.enqueue("supervisor", "worker-c", "unreachable").unwrap();
+        let bad = store
+            .enqueue("supervisor", "worker-b", "struggling")
+            .unwrap();
+        let worst = store
+            .enqueue("supervisor", "worker-c", "unreachable")
+            .unwrap();
 
         for _ in 0..3 {
             store
@@ -8615,8 +8723,14 @@ mod cas_94a1_delivery_attempts_tests {
     /// added without someone deciding whether it spends an attempt.
     #[test]
     fn classifier_names_exactly_the_transport_spending_reasons() {
-        for reason in [PendingReason::AdapterRetryable, PendingReason::TargetUnavailable] {
-            assert!(reason.counts_as_delivery_attempt(), "{reason} spends an attempt");
+        for reason in [
+            PendingReason::AdapterRetryable,
+            PendingReason::TargetUnavailable,
+        ] {
+            assert!(
+                reason.counts_as_delivery_attempt(),
+                "{reason} spends an attempt"
+            );
         }
         for reason in [
             PendingReason::GatedNotReady,

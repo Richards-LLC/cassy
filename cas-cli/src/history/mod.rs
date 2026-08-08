@@ -349,6 +349,10 @@ fn parse_commit_records(raw: &str, repository: &str) -> Vec<HistoryCommit> {
             body: non_empty(&body),
             branch_hint: non_empty(decoration),
             repository: repository.to_string(),
+            // M3 has not mapped a freshly indexed commit yet. Keeping the
+            // explicit pending verdict lets a symbol query return it as
+            // unknown instead of claiming it did not touch the symbol.
+            symbol_mapping: "pending".to_string(),
         });
     }
     commits

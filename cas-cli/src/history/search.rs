@@ -18,9 +18,9 @@
 //!
 //! # What this surface will not pretend
 //!
-//! This surface ships on M1 + M5 data: commits, their touched files, and the
-//! provenance edges §5.2 resolves over. It does **not** have symbols (M3) or
-//! embeddings (M7). Rather than silently dropping filters it cannot honour,
+//! This surface ships on M1 + M5 data: commits, their touched files, M3 symbol
+//! overlap rows, and the provenance edges §5.2 resolves over. It does **not**
+//! have embeddings (M7). Rather than silently dropping filters it cannot honour,
 //! every request for one of those comes back in
 //! [`HistorySearchResponse::unsupported`] with the milestone that lands it. A
 //! filter that is quietly ignored produces a result set that looks like an
@@ -137,6 +137,10 @@ pub struct HistoryHit {
     pub subject: String,
     pub body: Option<String>,
     pub is_merge: bool,
+    /// M3's verdict for this commit. A symbol-filtered answer includes
+    /// `pending`, `absent`, and `partial` rows as explicitly uncertain rather
+    /// than silently treating index lag as a non-match.
+    pub symbol_mapping: String,
     pub files: Vec<FileChange>,
     /// The resolved edges for this commit (spec §5.2), strongest first.
     /// `None` when the caller did not ask; `Some([])` when it asked and this
@@ -245,6 +249,7 @@ pub struct HistorySearchResponse {
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct AppliedFilters {
     pub path: Option<String>,
+    pub symbol: Option<String>,
     pub since: Option<String>,
     pub until: Option<String>,
     pub include_merges: bool,
@@ -317,17 +322,6 @@ pub fn parse_time_bound(raw: &str) -> Result<String> {
 pub fn unsupported_for(req: &HistorySearchRequest) -> Vec<Unsupported> {
     let mut out = Vec::new();
 
-    if req.symbol.is_some() {
-        out.push(Unsupported {
-            feature: "symbol filter".into(),
-            reason: "history_commit_symbols is not populated: the changed-line-range \
-                     ↔ symbol-range intersection is not built yet, so a symbol filter \
-                     would match nothing and read as 'this symbol was never touched'"
-                .into(),
-            lands_in: "M3".into(),
-        });
-    }
-
     // `kind` narrows the doc class. Only commits exist today.
     if let Some(kind) = req.kind.as_deref() {
         let kind = kind.trim().to_lowercase();
@@ -380,6 +374,7 @@ pub fn run(cas_root: &Path, req: &HistorySearchRequest) -> Result<HistorySearchR
     let filter = HistoryFilter {
         repository: repository.clone(),
         path: req.path.clone(),
+        symbol: req.symbol.clone(),
         since: since.clone(),
         until: until.clone(),
         include_merges: req.include_merges,
@@ -466,6 +461,7 @@ pub fn run(cas_root: &Path, req: &HistorySearchRequest) -> Result<HistorySearchR
             subject: commit.subject,
             body: commit.body,
             is_merge: commit.is_merge,
+            symbol_mapping: commit.symbol_mapping,
             files: files.into_iter().map(FileChange::from).collect(),
             provenance: resolved
                 .as_ref()
@@ -492,6 +488,7 @@ pub fn run(cas_root: &Path, req: &HistorySearchRequest) -> Result<HistorySearchR
         repository: repository.clone(),
         filters: AppliedFilters {
             path: req.path.clone(),
+            symbol: req.symbol.clone(),
             since,
             until,
             include_merges: req.include_merges,
@@ -670,16 +667,28 @@ mod tests {
     #[test]
     fn every_unavailable_capability_is_declared_with_its_milestone() {
         let all = unsupported_for(&HistorySearchRequest {
-            symbol: Some("blame_impl".into()),
             kind: Some("issue".into()),
             ..req()
         });
         let milestones: Vec<&str> = all.iter().map(|u| u.lands_in.as_str()).collect();
-        assert!(milestones.contains(&"M3"), "symbol filter undeclared");
         assert!(milestones.contains(&"M6"), "kind filter undeclared");
         assert!(
             all.iter().all(|u| !u.reason.is_empty()),
             "a declaration with no reason is not an explanation"
+        );
+    }
+
+    /// M3's rows are populated, so declaring this request unavailable is now
+    /// the lie. The production-path fixture exercises the actual SQL join.
+    #[test]
+    fn symbol_filter_is_answered_and_not_declared_unsupported() {
+        let all = unsupported_for(&HistorySearchRequest {
+            symbol: Some("crate::retry".into()),
+            ..req()
+        });
+        assert!(
+            all.iter().all(|u| u.feature != "symbol filter"),
+            "M3 is live; the filter must not retain a stale boundary: {all:?}"
         );
     }
 

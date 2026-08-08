@@ -394,6 +394,10 @@ pub struct HistoryCommit {
     pub body: Option<String>,
     pub branch_hint: Option<String>,
     pub repository: String,
+    /// How completely M3 could map this commit's changed files to symbols.
+    /// `absent`, `pending`, and `partial` mean a symbol-filtered query cannot
+    /// prove that the commit did not touch its requested symbol.
+    pub symbol_mapping: String,
 }
 
 /// One `(commit, file)` structural-diff row.
@@ -559,6 +563,11 @@ pub struct HistoryQuery {
     /// Substring match against `history_commit_files.file_path`. A commit
     /// matches when *any* of its touched paths contains this.
     pub path: Option<String>,
+    /// Exact qualified symbol name recorded by M3 in
+    /// `history_commit_symbols`. Rows whose mapping is incomplete are also
+    /// returned so the caller can report uncertainty rather than manufacture a
+    /// false negative.
+    pub symbol: Option<String>,
     /// Inclusive lower bound on `committed_at` (RFC3339).
     pub since: Option<String>,
     /// Inclusive upper bound on `committed_at` (RFC3339).
@@ -1032,7 +1041,7 @@ impl SqliteHistoryStore {
     /// join cannot shift positions under the reader.
     const COMMIT_COLUMNS: &'static str = "c.sha, c.short_sha, c.parent_shas, c.is_merge, \
          c.author_name, c.author_email, c.authored_at, c.committed_at, c.subject, c.body, \
-         c.branch_hint, c.repository";
+         c.branch_hint, c.repository, c.symbol_mapping";
 
     fn commit_from_row(row: &rusqlite::Row) -> rusqlite::Result<HistoryCommit> {
         let parents: String = row.get("parent_shas")?;
@@ -1049,6 +1058,7 @@ impl SqliteHistoryStore {
             body: row.get("body")?,
             branch_hint: row.get("branch_hint")?,
             repository: row.get("repository")?,
+            symbol_mapping: row.get("symbol_mapping")?,
         })
     }
 
@@ -1106,6 +1116,20 @@ impl SqliteHistoryStore {
                    OR f.old_path LIKE '%' || ?{idx} || '%'))"
             ));
             params.push(path.clone());
+            idx += 1;
+        }
+        if let Some(symbol) = &query.symbol {
+            // A symbol row is positive evidence, but an incomplete M3 verdict
+            // is not negative evidence. Excluding `pending`, `absent`, or
+            // `partial` commits here would turn index lag into a confident
+            // claim that the named symbol was never touched. Return those rows
+            // with their verdict; `history::search` serializes it per hit.
+            sql.push_str(&format!(
+                " AND (c.symbol_mapping IN ('pending', 'absent', 'partial') \
+                   OR EXISTS (SELECT 1 FROM history_commit_symbols s \
+                              WHERE s.sha = c.sha AND s.qualified_name = ?{idx}))"
+            ));
+            params.push(symbol.clone());
             idx += 1;
         }
         if let Some(shas) = &query.shas {

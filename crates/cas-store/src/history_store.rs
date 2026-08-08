@@ -288,7 +288,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_history_epochs_identity
 "#;
 
 /// Statement-level form of [`HISTORY_EPOCHS_SCHEMA`] for the migration runner.
-/// Keep in lockstep; `m224`'s shape-drift test fails on any divergence.
+/// Keep in lockstep; `m226`'s shape-drift test fails on any divergence.
 pub const HISTORY_EPOCHS_SCHEMA_STATEMENTS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS history_epochs (
         id INTEGER PRIMARY KEY,

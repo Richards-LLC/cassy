@@ -7,12 +7,15 @@
 //!
 //! Separate from `m221` for the same reason `m223` is: `m221` has already run
 //! on live databases and its `detect` predicate would short-circuit, so a table
-//! folded into it would never reach those installs.
+//! folded into it would never reach those installs. Numbered **226** per the
+//! epic's migration ledger (222=M6, 223=M4, 224=M3, 225=M5, 226 freed when M7
+//! turned out to need no migration); IDs are never reused, so a lane that lands
+//! later takes the higher number.
 
 use crate::migration::{Migration, Subsystem};
 
 pub const MIGRATION: Migration = Migration {
-    id: 224,
+    id: 226,
     name: "history_epochs_create_table",
     subsystem: Subsystem::Code,
     description:
@@ -148,7 +151,7 @@ mod tests {
 
     /// Additive over an `m221` database: the M1 rows must survive.
     #[test]
-    fn m224_is_additive_over_an_m221_database() {
+    fn m226_is_additive_over_an_m221_database() {
         let conn = Connection::open_in_memory().unwrap();
         for sql in super::super::m221_history_index_create_tables::MIGRATION.up {
             conn.execute(sql, []).unwrap();

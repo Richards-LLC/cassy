@@ -516,6 +516,9 @@ impl CloudSyncer {
             "project_canonical_id".to_string(),
             serde_json::json!(self.personal_push_project_id()?),
         );
+        if let Some(git_remote) = &self.personal_push_git_remote {
+            payload.insert("git_remote".to_string(), serde_json::json!(git_remote));
+        }
         Self::insert_client_version(&mut payload);
         Ok(payload)
     }

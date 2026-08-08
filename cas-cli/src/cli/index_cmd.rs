@@ -173,4 +173,21 @@ mod tests {
         let files = collect_source_files(&[file.clone()], &["rs".to_string()], &[]);
         assert_eq!(files, vec![file]);
     }
+
+    #[test]
+    fn collect_source_files_excludes_configured_but_unsupported_extensions() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let supported = temp.path().join("lib.rs");
+        let unsupported = temp.path().join("App.swift");
+        std::fs::write(&supported, "pub fn supported() {}").unwrap();
+        std::fs::write(&unsupported, "func unsupported() {}").unwrap();
+
+        let files = collect_source_files(
+            &[temp.path().to_path_buf()],
+            &["rs".to_string(), "swift".to_string()],
+            &[],
+        );
+
+        assert_eq!(files, vec![supported]);
+    }
 }

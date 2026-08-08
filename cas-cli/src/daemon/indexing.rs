@@ -164,10 +164,19 @@ pub(crate) fn collect_source_files(
 }
 
 fn is_wanted(path: &Path, wanted: &HashSet<String>) -> bool {
-    path.extension()
+    let Some(extension) = path
+        .extension()
         .and_then(|value| value.to_str())
-        .map(|value| wanted.contains(&value.to_lowercase()))
-        .unwrap_or(false)
+        .map(str::to_lowercase)
+    else {
+        return false;
+    };
+
+    wanted.contains(&extension)
+        && !matches!(
+            cas_code::Language::from_extension(&extension),
+            cas_code::Language::Unknown
+        )
 }
 
 /// Publish parsed symbols to the code BM25 index and retire deleted ones.

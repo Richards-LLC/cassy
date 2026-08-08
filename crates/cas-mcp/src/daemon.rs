@@ -122,6 +122,24 @@ pub struct EmbeddedDaemonConfig {
     pub code_index_interval_secs: u64,
     /// Debounce time for file watcher (milliseconds)
     pub code_debounce_ms: u64,
+    // === Structural git-history index (EPIC cas-6212 / cas-7a21) ===
+    /// Enable the background git-history indexing pass
+    pub index_history: bool,
+    /// git-history indexing interval (seconds)
+    pub history_index_interval_secs: u64,
+    // === GitHub + CHANGELOG docs (EPIC cas-6212 / cas-9a38) ===
+    /// Enable the background GitHub/CHANGELOG doc indexing pass
+    pub index_history_docs: bool,
+    /// Doc indexing interval (seconds). Deliberately much longer than the git
+    /// interval: this half depends on a third party's rate limits, and issue
+    /// bodies change far more slowly than commits arrive (spec §8).
+    pub history_docs_interval_secs: u64,
+    // === Automagic embedding drain (EPIC cas-6212 / cas-db6e) ===
+    /// Enable the background drain that embeds pending knowledge pages and
+    /// code-history units without anyone running `cas cloud sync`.
+    pub embed_drain: bool,
+    /// Embedding drain interval (seconds).
+    pub embed_drain_interval_secs: u64,
 }
 
 impl Default for EmbeddedDaemonConfig {
@@ -143,6 +161,27 @@ impl Default for EmbeddedDaemonConfig {
             code_exclude_patterns: vec![],
             code_index_interval_secs: 60, // 1 minute
             code_debounce_ms: 500,        // 500ms
+            // git-history indexing: on by default. Unlike code indexing it
+            // needs no watcher, no parser and no config — a delta pass over a
+            // day's commits is bounded work (spec §4.3).
+            index_history: true,
+            history_index_interval_secs: 300, // 5 minutes (spec §4.3)
+            // Docs: on by default, but 15 minutes rather than 5. Spec §8's
+            // arithmetic — ~96 filtered queries/day against a 5,000 point/hour
+            // budget — is what makes "on by default" defensible here. A repo
+            // with no `gh` and no CHANGELOG records two boundaries and costs
+            // nothing further.
+            index_history_docs: true,
+            history_docs_interval_secs: 900, // 15 minutes (spec §8)
+            // On by default and gated by nothing but the capability itself: a
+            // logged-out install makes no request and creates no vector store,
+            // and a logged-in one should never need a human to type `cas cloud
+            // sync` before its own corpus is searchable. 300 s matches the git
+            // history arm — new commits become embeddable within a tick of
+            // being indexed, and a full backfill (~2,100 units, spec §7.1)
+            // clears in about five ticks rather than one burst.
+            embed_drain: true,
+            embed_drain_interval_secs: 300,
         }
     }
 }

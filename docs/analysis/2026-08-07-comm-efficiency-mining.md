@@ -869,3 +869,187 @@ The rebuilt binary was fed Claude's real wire shape — `{"hook_event_name":"Use
 That is the acceptance condition for GH #165: a message consumed by a worker gains `acked_via`
 within one turn. The unreconciled pair is no longer the 100% steady state, which is the precondition
 #166 and #167 were blocked on.
+
+---
+
+## PHASE 4 ADDENDUM — 2026-08-08, the F2 hot loop re-measured (cas-5c50, GH #166)
+
+Phase 1's F2 finding was that a single pending row emitted a `delivered` + `wake_deferred` log pair
+on **every poll tick** without transitioning: message 7070 logged `stage="delivered"` 55,868 times
+in ~57 minutes while its row carried `transport_delivered_at = NULL` and ended `abandoned`. The
+label half was corrected by cas-7787. This addendum re-measures the **loop** half.
+
+### The epoch had to be established before any count meant anything
+
+The ticket flagged the last observed burst as falling in a mixed-binary epoch, and that caution was
+warranted — my first candidate for "the loop is still live" turned out to be pre-fix code.
+
+Marker used: cas-7787 introduced the stage string `inbox_write_pending_turn`. Its **first**
+appearance in `.cas/logs/cas-2026-08-07.log` is `22:58:06Z`, from the daemon that started
+`22:56:36Z`. Every line before that boundary came from a binary without cas-7787.
+
+| epoch start (daemon) | contains cas-7787 | notes |
+|---|---|---|
+| … 21:31:50Z | no | message 7953's burst lives here |
+| 22:56:36Z | yes | ~1h24m, 44,560 lines |
+| 00:23:57Z (v2.51.0, `b89288d`) | yes | current fleet |
+
+### Pre-fix epoch — the loop, characterised
+
+Full-day stage census of `cas-2026-08-07.log` (137,887 lines):
+
+| stage | lines |
+|---|---|
+| `inbox_drain_unsurfaced` | **17,195** |
+| `delivered` | 840 |
+| `wake_deferred` | 486 |
+| `inbox_drained` | 295 |
+| `inbox_write_pending_turn` | 85 |
+
+The `delivered` family is down to ~1,400 lines across a whole day — cas-7787 worked. But 12.5% of
+every line the daemon wrote that day is a single stage, and 16,604 of those 17,195 lines belong to
+**one message**: id 7953, `source=director`, `target=clever-owl-55`, from `22:24:15Z` to
+`22:54:20Z`. The per-minute profile is flat — 412, 538, 549, 541, 529, 562, … 557, 537, 551, 194 —
+≈9.2 lines/second, i.e. the 100ms poll tick, with no decay across thirty minutes.
+
+**What ended it: nothing in CAS.** The last line is `22:54:20.707Z`; the next line in the file is
+`22:54:20.790Z  Supervisor exited with code None, shutting down`. The loop was terminated by an
+unrelated process exit — no argument from code required.
+
+*Precision, because the first draft of this addendum overstated it and a regression test caught the
+overstatement:* on that binary the loop was genuinely unbounded, because the retry budget did not
+exist yet. On **current** code the row is terminated by `LIFECYCLE_MAX_RENUDGE_ATTEMPTS` after ~20
+minutes, so the pre-fix cost of one stuck row is ~11,400 lines rather than infinite. That is still
+570x the number of things that actually happened, and several concurrently-stuck rows is the shape
+that produced a 464MB log day — but "unbounded" was the wrong word and is withdrawn.
+
+Note the re-offer *policy* was never the problem. The same row's actual re-deliveries were perfectly
+regular at one per 60 seconds (49 of them, `22:05`→`22:54`). The cadence gate was doing its job; the
+log line simply was not behind it. (Those 49 exceed the 20-attempt budget only because
+`LIFECYCLE_MAX_RENUDGE_ATTEMPTS` did not exist in that binary — an epoch artefact, not a live bug.)
+
+### Post-fix epochs — measured, with the caveat stated
+
+| epoch | lines | `inbox_drain_unsurfaced` | max lines for any one `message_id` |
+|---|---|---|---|
+| 22:56:36Z → 00:20:32Z | 44,560 | **0** | 1 |
+| 00:23:57Z → now (v2.51.0) | 572 | **0** | 1 |
+
+In both windows `wake_deferred` and `inbox_drained` counts match exactly (73/73 and 16/16): every
+deferred write was subsequently drained. **No row ever got stuck.**
+
+That is a real result — post-GH #165 the loop's fuel is gone, which is the causal chain the epic
+predicted — but it is *not* a bound. Zero occurrences with zero stuck rows measures the absence of
+the input, not the presence of a limit. The defect was still in the source, and would fire the
+moment one row went unsurfaced (a wedged pane, or a harness that files an inbox copy without
+surfacing it — the cas-ef14 / GH #139 condition, which is not hypothetical). So this was closed by
+fixing it, not by declaring it measured-resolved.
+
+### Root cause and fix
+
+`cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs`. The `DeferredInboxOutcome::DrainedAwaitingWake`
+arm emitted its `tracing::info!` **before** falling through to the cas-d732 / cas-ceae re-nudge
+cadence gate. So the gate correctly declined the re-nudge and the line was printed anyway — an
+ordering bug, the same species as the cas-7787 defect (a log line that does not correspond to a
+state transition) relocated one match arm over.
+
+The announcement now rides the gate's `Deliver` arm — the only place a re-offer actually happens —
+and carries `attempt` / `max_attempts`. Line count per stuck row goes from O(poll ticks) to
+O(retries), bounded at `LIFECYCLE_MAX_RENUDGE_ATTEMPTS` = 20. The gate itself was left alone: its
+re-offer policy was already correct, and rewriting a working gate to fix a misplaced log line would
+have been the wrong repair.
+
+The sharper statement of what changed: the line count used to be a function of the **poll interval**
+— an implementation detail nobody chose, so making the daemon more responsive made the logs
+proportionally worse — and is now a function of the **retry budget**, which is a deliberate policy
+number. Pinned by `the_log_volume_stops_being_a_function_of_the_poll_interval`, which halves the
+poll interval and asserts the pre-fix count roughly doubles while the post-fix count does not move.
+
+---
+
+# Addendum — Finding 3 was the right alarm on the wrong gate (cas-0147, GH #167)
+
+F3 above reads: *"Idle-gate silently discards messages — 356 dropped, 100% never delivered."* The
+count and the 100% were correct. The attribution was not, and following it would have produced a
+fix in code that never touched a single one of those rows.
+
+## What the rows actually say
+
+Every `suppressed_idle` row in the live queue carries the same detail string:
+
+    SELECT last_pending_detail, COUNT(*), SUM(transport_delivered_at IS NULL)
+    FROM prompt_queue WHERE last_pending_reason='suppressed_idle' GROUP BY 1;
+    -- task lifecycle occurrence no longer matches current task state | 397 | 397
+
+One call site, not four. That is `LifecycleStaleOutcome::SuppressDelivered` in the daemon's queue
+loop. Zero rows came from the duplicate-idle rate limiter, and the `"idle gate declined the wake"`
+path named in the unified-root-cause table (instance 3) does not terminate rows at all — it leaves
+them pending and retries on the next poll. F3's "the gate is a drop, not a defer" was aimed at a
+gate that already defers.
+
+## What the losses were
+
+    SELECT transition, COUNT(*), suppressed, delivered   -- since 2026-08-04
+    task_started        168  166   2
+    task_closed         114  112   2
+    task_close_rejected  36   34   2
+    task_awaiting_merge  36   34   2
+    task_ready            7    7   0
+
+Not chatter. 98% of every lifecycle signal the factory sends its supervisor, for four days —
+including the parked-lane and rejected-close notices whose absence made a human the transport for
+finished work.
+
+## Root cause
+
+`revalidate_lifecycle_prompt` gated delivery on `current_updated_at == envelope.occurrence`. The
+occurrence is formatted from the caller's `task.updated_at`; `TaskStore::update` then re-stamps
+that column from a second `Utc::now()` and discards the caller's value. Two clock reads, so the
+equality is unreachable — the gate was closed for every row that ever reached it.
+
+Over the 389 suppressed rows joinable to their task: **0** exact matches, 379 with the occurrence
+strictly earlier than the persisted `updated_at`, and 97 differing only below the millisecond.
+cas-0147's own `task_started` missed by **21.9 microseconds** (occurrence
+`00:25:48.953756486`, persisted `00:25:48.953778358`).
+
+This also explains F2 without a bisect: the undelivered-rate step from 1–3% to 34.8% opens on
+2026-08-04, and the staleness gate landed 08-03.
+
+## Method note
+
+F3's inference chain was reason-string → gate name → fix proposal, with no step that read a detail
+column or joined a row to its task. Both intermediate links were wrong and the conclusion still
+looked well-evidenced, because the count it rested on was real. A reason string names the writer's
+belief about a row; it is not evidence of which code path wrote it. The join is cheap — one
+`GROUP BY last_pending_detail` would have redirected the whole finding.
+
+## AC3 — post-fix measurement
+
+The fix is in the daemon binary, so the count can only be re-measured after a supervised fleet
+release. It is deliberately NOT claimed here.
+
+Baseline to beat, frozen at 2026-08-08T00:26 UTC: **397 rows, 397 undelivered, 397 of them
+lifecycle relays.**
+
+Post-release, over one live session:
+
+    SELECT COUNT(*) FROM prompt_queue
+    WHERE last_pending_reason='suppressed_idle' AND transport_delivered_at IS NULL
+      AND created_at > '<release timestamp>';
+    -- expected: 0 lifecycle rows; any row here is now genuine idle chatter and must have
+    --           a "duplicate idle message rate-limited" detail
+
+    SELECT COUNT(*) FROM prompt_queue
+    WHERE last_pending_reason='superseded_stale' AND created_at > '<release timestamp>';
+    -- expected: small and non-zero — genuine premise expiry still withdraws payloads, but it
+    --           now says so under its own name instead of borrowing the idle bucket
+
+The two queries are the point of the split: after this change, "withheld noise" and "withdrew a
+payload" can never again be counted as the same event.
+
+## Still open, not fixed here
+
+`TaskStore::update` ignoring the caller's `updated_at` is left in place. Any future occurrence
+identity derived from that field is unmatchable for the same reason, so this is a live trap rather
+than a closed one — it is simply not safely fixable inside this task, because honouring the
+caller's value would change behaviour at every call site that leaves the field stale.

@@ -1350,17 +1350,22 @@ impl Pane {
                 tokio::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(settle_ms)).await;
                     let mut guard = writer.lock().await;
-                    if let Err(e) = guard.write_all(b"\r").and_then(|()| guard.flush()) {
-                        tracing::warn!(
-                            target: "cas::coordination",
-                            stage = "inject_submit_failed",
-                            target_agent = %pane_id,
-                            error = %e,
-                            "injected payload was written but its submit CR failed — the text is \
-                             sitting unsubmitted in the pane composer and no turn started"
-                        );
+                    match guard.write_all(b"\r").and_then(|()| guard.flush()) {
+                        Ok(()) => {
+                            submit_pending.store(false, std::sync::atomic::Ordering::Release);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "cas::coordination",
+                                stage = "inject_submit_failed",
+                                target_agent = %pane_id,
+                                error = %e,
+                                "injected payload was written but its submit CR failed — the text is \
+                                 sitting unsubmitted in the pane composer and no turn started; later \
+                                 injections remain deferred until this pane is replaced"
+                            );
+                        }
                     }
-                    submit_pending.store(false, std::sync::atomic::Ordering::Release);
                 });
                 self.clear_composer_dirty();
                 // Inject submits a prompt → turn is in flight (cas-7f6f).
@@ -1422,6 +1427,20 @@ impl Pane {
     pub(crate) fn inject_submit_pending(&self) -> bool {
         self.inject_submit_pending
             .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn replace_pty_writer_for_test(
+        &self,
+        writer: Box<dyn std::io::Write + Send>,
+    ) -> Result<()> {
+        match &self.backend {
+            PaneBackend::Pty(pty) => {
+                *pty.writer_handle().lock().await = writer;
+                Ok(())
+            }
+            PaneBackend::None => Err(Error::pty("Pane has no backend")),
+        }
     }
 
     fn mark_composer_dirty(&self) {

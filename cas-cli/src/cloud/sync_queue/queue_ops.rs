@@ -68,19 +68,44 @@ impl SyncQueue {
 
     /// Get pending items for sync (personal items only, team_id = '').
     pub fn pending(&self, limit: usize, max_retries: i32) -> Result<Vec<QueuedSync>, CasError> {
+        self.pending_for_entity_type(None, limit, max_retries)
+    }
+
+    /// Get pending personal items for one entity type.
+    ///
+    /// The entity predicate is applied before `LIMIT`, so a scoped push cannot
+    /// be starved by older rows of another type at the head of the queue.
+    /// `None` preserves the normal all-entity FIFO ordering. Knowledge pages
+    /// are excluded from this generic queue path because they use their own
+    /// watermark protocol in `syncer::knowledge`.
+    pub fn pending_for_entity_type(
+        &self,
+        entity_type: Option<EntityType>,
+        limit: usize,
+        max_retries: i32,
+    ) -> Result<Vec<QueuedSync>, CasError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             r#"
             SELECT id, entity_type, entity_id, operation, payload, team_id, created_at, retry_count, last_error
             FROM sync_queue
             WHERE retry_count < ?1 AND (team_id IS NULL OR team_id = '')
+              AND entity_type != 'knowledge_page'
+              AND (?3 IS NULL OR entity_type = ?3)
             ORDER BY created_at ASC
             LIMIT ?2
             "#,
         )?;
 
         let items = stmt
-            .query_map(params![max_retries, limit as i64], Self::map_row)?
+            .query_map(
+                params![
+                    max_retries,
+                    limit as i64,
+                    entity_type.map(|kind| kind.as_str())
+                ],
+                Self::map_row,
+            )?
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(items)

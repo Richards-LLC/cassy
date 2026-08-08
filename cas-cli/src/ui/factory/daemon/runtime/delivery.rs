@@ -317,7 +317,98 @@ pub(crate) fn frame_pty_payload(harness: SupervisorCli, source: &str, text: &str
     }
 }
 
+/// cas-c73d (GH #177): which Claude config dir does this worker's harness run
+/// under, if not the daemon's?
+///
+/// Pure mirror of the resolution [`cas_mux::Mux::add_worker`] applies when it
+/// builds the PTY env: an explicit `config_dir` wins, else the config dir of
+/// the supervisor that requested the spawn, else no override at all. Keeping it
+/// a separate function (rather than inlining the match) is what lets a test pin
+/// the precedence against the spawn path without a live daemon — if the two
+/// ever disagree, the daemon writes inbox rows into a tree the PTY was not
+/// launched with, which is precisely the bug.
+/// A RELATIVE value is deliberately rejected: the PTY passes it to the worker
+/// verbatim (`push_claude_config_dir_env`, cas-pty), so Claude Code resolves it
+/// against the worker's cwd — its worktree — while this daemon would resolve it
+/// against `$HOME` (`claude_config_dir_from`, cas-5b96 semantics). Two
+/// different trees is the bug, so we decline to guess and keep writing into the
+/// daemon's own tree, which is no worse than the pre-fix behaviour and stays
+/// visible to the retract sweeps.
+pub(crate) fn recipient_config_dir(spec: &cas_mux::WorkerSpec) -> Option<String> {
+    let raw = spec
+        .config_dir
+        .clone()
+        .or_else(|| spec.requester_config_dir.clone())?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if !trimmed.starts_with('~') && !std::path::Path::new(trimmed).is_absolute() {
+        tracing::warn!(
+            target: "cas::coordination",
+            config_dir = %trimmed,
+            "cas-c73d: relative CLAUDE_CONFIG_DIR resolves differently for the worker's \
+             harness than for this daemon — not redirecting inbox delivery"
+        );
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
 impl FactoryDaemon {
+    /// cas-c73d (GH #177): the Agent-Teams tree the RECIPIENT's harness really
+    /// reads, when that is not the daemon's own.
+    ///
+    /// A worker spawned with `config_dir` (`spawn_queue.worker_spec.config_dir`
+    /// — the two-account Slack route) runs `claude` with a different
+    /// `CLAUDE_CONFIG_DIR`, and Claude Code only polls
+    /// `$CLAUDE_CONFIG_DIR/teams/{team}/inboxes/{self}.json`. `self.teams` is
+    /// rooted at the DAEMON's config dir, so every normal delivery to such a
+    /// worker was written where nothing reads — the observed "worker boots
+    /// deaf, only an urgent PTY interrupt lands" failure.
+    ///
+    /// The resolution order mirrors [`cas_mux::Mux::add_worker`] exactly
+    /// (explicit `config_dir`, else the requesting supervisor's) so the tree we
+    /// write to is the one the PTY was actually launched with. Returns `None`
+    /// — meaning "use `self.teams` unchanged" — for the supervisor, for
+    /// workers with no override, for a config dir that resolves to the daemon's
+    /// own tree, and if provisioning the mirror fails (a write into the
+    /// daemon's tree is no worse than today's behaviour and keeps the row's
+    /// retract tags where the sweeps can see them).
+    pub(crate) fn recipient_teams_view(
+        &self,
+        pane_target: &str,
+    ) -> Option<super::teams::TeamsManager> {
+        let primary = self.teams.as_ref()?;
+        if pane_target == self.app.supervisor_name() {
+            return None;
+        }
+        let spec = self.app.mux.effective_worker_spec(pane_target, None);
+        let config_dir = recipient_config_dir(&spec)?;
+        let view = primary.view_for_config_dir(Some(&config_dir))?;
+        if let Err(error) = view.provision_mirror_from(primary, pane_target) {
+            tracing::warn!(
+                target: "cas::coordination",
+                worker = %pane_target,
+                config_dir = %config_dir,
+                %error,
+                "cas-c73d: could not provision the recipient's teams tree — \
+                 falling back to the daemon's own tree for this write"
+            );
+            return None;
+        }
+        tracing::debug!(
+            target: "cas::coordination",
+            stage = "recipient_tree_resolved",
+            channel = "teams_inbox",
+            worker = %pane_target,
+            config_dir = %config_dir,
+            path = %view.teams_dir().display(),
+            "cas-c73d: delivering into the recipient's own config-dir teams tree"
+        );
+        Some(view)
+    }
+
     /// cas-ae6d (GH #100): should this director prompt be parked on the durable
     /// `prompt_queue` instead of injected directly this tick?
     ///
@@ -423,10 +514,14 @@ impl FactoryDaemon {
         match choose_channel(harness, teams_active) {
             DeliveryChannel::TeamsInbox => {
                 // Safe: TeamsInbox is only chosen when teams_active, i.e. teams.is_some().
-                let teams = self
+                let primary = self
                     .teams
                     .as_ref()
                     .expect("TeamsInbox channel requires active teams");
+                // cas-c73d: a `config_dir`-spawned worker polls a tree in ITS
+                // config dir, not the daemon's. Write where the reader looks.
+                let recipient_view = self.recipient_teams_view(pane_target);
+                let teams = recipient_view.as_ref().unwrap_or(primary);
                 match (retract_worker, retract_task, retract_epic) {
                     (Some(worker), _, _) => teams.write_to_inbox_for_worker_idle(
                         inbox_target,
@@ -516,7 +611,7 @@ impl FactoryDaemon {
         text: &str,
         summary: Option<&str>,
         color: Option<&str>,
-        worker_is_idle: bool,
+        wake: super::queue_and_events::WakeDecision,
         retract_task: Option<&str>,
     ) -> anyhow::Result<NudgeReport> {
         let primary_outcome = self
@@ -529,10 +624,14 @@ impl FactoryDaemon {
                 "primary delivery did not complete; no wake attempted",
             ));
         }
-        if !worker_is_idle {
+        if !wake.allowed {
             return Ok(NudgeReport::not_attempted(
                 primary_outcome,
-                "idle gate declined the wake for this pass",
+                // cas-9e81: name the signal that decided. The old fixed
+                // string ("idle gate declined the wake for this pass") was on
+                // 34 of 35 rows during the reported incident and told an
+                // operator nothing about which of six conditions vetoed.
+                &format!("wake gate declined this pass: {}", wake.reason),
             ));
         }
 
@@ -549,20 +648,21 @@ impl FactoryDaemon {
     /// PTY inject is the only way to create one for a Claude teammate parked at
     /// its prompt.
     ///
-    /// `worker_is_idle == false` means the wake decision vetoed this pass: the
-    /// row stays pending (the caller's `wake_deferred` bookkeeping is unchanged)
-    /// and a later poll retries on the re-nudge cadence.
+    /// A denied `wake` means the wake decision vetoed this pass: the row stays
+    /// pending (the caller's `wake_deferred` bookkeeping is unchanged) and a
+    /// later poll retries on the re-nudge cadence. Its `reason` is recorded so
+    /// the veto is diagnosable (cas-9e81).
     pub(crate) async fn nudge_pane_only(
         &self,
         target: &str,
         source: &str,
         text: &str,
-        worker_is_idle: bool,
+        wake: super::queue_and_events::WakeDecision,
     ) -> anyhow::Result<NudgeReport> {
-        if !worker_is_idle {
+        if !wake.allowed {
             return Ok(NudgeReport::not_attempted(
                 InjectOutcome::Delivered,
-                "idle gate declined the wake for this pass",
+                &format!("wake gate declined this pass: {}", wake.reason),
             ));
         }
         self.pty_nudge(target, source, text).await
@@ -1045,6 +1145,72 @@ mod tests {
                 !idle_nudge_applies(channel),
                 "an idle Codex worker already got the message over the PTY; a nudge \
                  would type it a second time (teams_active={teams_active})"
+            );
+        }
+    }
+
+    /// cas-c73d (GH #177): the config dir the daemon resolves for a recipient
+    /// must be the one its PTY was launched with, or inbox writes go to a tree
+    /// nothing reads. Precedence is pinned against `Mux::add_worker` here
+    /// (explicit wins over the requesting supervisor's) AND exercised through
+    /// the real `build_add_worker_config` env below, so the two cannot drift.
+    #[test]
+    fn recipient_config_dir_matches_the_spawn_env_precedence_cas_c73d() {
+        let spec = |explicit: Option<&str>, requester: Option<&str>| cas_mux::WorkerSpec {
+            config_dir: explicit.map(str::to_string),
+            requester_config_dir: requester.map(str::to_string),
+            ..cas_mux::WorkerSpec::builtin_default()
+        };
+
+        assert_eq!(recipient_config_dir(&spec(None, None)), None);
+        assert_eq!(
+            recipient_config_dir(&spec(Some("~/.claude"), Some("/home/u/.claude-alt"))),
+            Some("~/.claude".to_string()),
+            "an explicit config_dir wins — this is the live spawn_queue id=605 shape"
+        );
+        assert_eq!(
+            recipient_config_dir(&spec(None, Some("/home/u/.claude-alt"))),
+            Some("/home/u/.claude-alt".to_string()),
+            "with no explicit override the worker inherits the requesting supervisor's account"
+        );
+
+        assert_eq!(
+            recipient_config_dir(&spec(Some("relative-dir"), None)),
+            None,
+            "a relative config dir resolves against the worker's cwd in the PTY and against \
+             $HOME here — declining to redirect is the only safe answer"
+        );
+
+        // The value must resolve to the SAME directory the PTY was launched
+        // with, for every spelling we do accept. Both sides expand `~` from the
+        // process HOME, so this half runs under the crate-wide env lock — a
+        // concurrent HOME-mutating test would otherwise compare two different
+        // homes and fail for a reason that has nothing to do with the contract.
+        let guard = crate::test_support::TestEnvGuard::temp_home();
+        let home = guard.home().to_path_buf();
+        let mux = cas_mux::Mux::new(24, 80);
+        for raw in ["~/.claude", "/srv/claude-cfg"] {
+            let config = mux.build_add_worker_config(
+                "zen-merlin-47",
+                std::path::PathBuf::from("/tmp"),
+                None,
+                "supervisor",
+                None,
+                Some(spec(Some(raw), Some("/home/u/.claude-alt"))),
+            );
+            let pty_dir = config
+                .env
+                .iter()
+                .find(|(k, _)| k == "CLAUDE_CONFIG_DIR")
+                .map(|(_, v)| std::path::PathBuf::from(v))
+                .expect("worker PTY carries CLAUDE_CONFIG_DIR");
+            let resolved = crate::ui::factory::daemon::runtime::teams::claude_config_dir_from(
+                &home,
+                recipient_config_dir(&spec(Some(raw), None)).as_deref(),
+            );
+            assert_eq!(
+                resolved, pty_dir,
+                "the daemon must resolve {raw} to the same tree the PTY runs under"
             );
         }
     }

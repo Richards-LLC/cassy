@@ -230,6 +230,14 @@ pub fn derive_canonical_id_from_git_remote(cas_root: &Path) -> Option<String> {
     normalize_git_remote_url(raw.trim())
 }
 
+/// Resolve `origin` to the normalized, lowercased wire identity used by both
+/// team and personal push requests. The underlying URL normalizer preserves
+/// case for response comparison, while the cloud resolver treats remotes
+/// case-insensitively on the wire.
+pub fn normalized_git_remote_for_push(cas_root: &Path) -> Option<String> {
+    derive_canonical_id_from_git_remote(cas_root).map(|remote| remote.to_lowercase())
+}
+
 /// Normalize a git remote URL to `<host>/<owner>/<repo>` form.
 ///
 /// Recognized inputs:

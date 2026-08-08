@@ -1,4 +1,4 @@
-//! Read-only detection of cross-project ("foreign") task rows (cas-fc6fa, GH #133).
+//! Read-only detection of cross-project ("foreign") task and knowledge-page rows.
 //!
 //! # Why this exists
 //!
@@ -40,6 +40,11 @@
 //!
 //! This module never writes: every database (including the local one) is opened
 //! `SQLITE_OPEN_READ_ONLY`.
+//!
+//! Knowledge pages do not need the peer/evidence heuristic: m226 gives them a
+//! durable local-vs-cloud-pull origin and the exact project id accepted from the
+//! wire. Their audit reuses the cloud ingest predicate so pre-write refusal and
+//! post-write detection cannot drift on project identity.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -90,6 +95,36 @@ pub struct DbSnapshot {
     pub tasks: Vec<TaskRow>,
     /// Task ids with local-activity evidence in this database.
     pub worked_task_ids: BTreeSet<String>,
+    /// Knowledge pages carry direct provenance, unlike legacy task rows.
+    pub knowledge_pages: Vec<KnowledgePageAttributionRow>,
+}
+
+/// Durable attribution columns read from one knowledge-page row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgePageAttributionRow {
+    pub id: String,
+    pub title: String,
+    pub rel_path: String,
+    pub origin: String,
+    pub origin_project_id: Option<String>,
+}
+
+/// A cloud-pulled page whose asserted project fails the sync ingest predicate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignKnowledgePage {
+    pub id: String,
+    pub title: String,
+    pub rel_path: String,
+    pub origin_project_id: Option<String>,
+}
+
+/// A page whose provenance cannot be audited (legacy or malformed schema data).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnattributedKnowledgePage {
+    pub id: String,
+    pub title: String,
+    pub rel_path: String,
+    pub reason: String,
 }
 
 /// A local row attributed to another project.
@@ -146,6 +181,9 @@ pub struct ForeignRowReport {
     /// Rows also present in a peer database but worked *here* — native, listed
     /// only so the totals add up.
     pub locally_worked_replicas: usize,
+    pub local_knowledge_page_count: usize,
+    pub foreign_knowledge_pages: Vec<ForeignKnowledgePage>,
+    pub unattributed_knowledge_pages: Vec<UnattributedKnowledgePage>,
 }
 
 impl ForeignRowReport {
@@ -166,7 +204,10 @@ impl ForeignRowReport {
     }
 
     pub fn is_clean(&self) -> bool {
-        self.foreign.is_empty() && self.unattributed.is_empty()
+        self.foreign.is_empty()
+            && self.unattributed.is_empty()
+            && self.foreign_knowledge_pages.is_empty()
+            && self.unattributed_knowledge_pages.is_empty()
     }
 
     /// Distinct projects the foreign rows are attributed to, sorted.
@@ -187,21 +228,44 @@ impl ForeignRowReport {
         if self.peers_compared.is_empty() {
             // Still not a bare "clean": nothing was compared, and if databases
             // existed but could not be opened, that is the reason — not health.
-            return format!(
-                "0 project DB(s) compared ({} local task row(s), {} DB(s) unreadable) — nothing was checked for contamination",
+            let mut summary = format!(
+                "0 project DB(s) compared ({} local task row(s), {} DB(s) unreadable) — task replication was not checked",
                 self.local_task_count,
                 self.peers_unreadable.len(),
             );
+            if self.foreign_knowledge_pages.is_empty()
+                && self.unattributed_knowledge_pages.is_empty()
+            {
+                summary.push_str(&format!(
+                    "; 0 foreign knowledge page(s): {} attributed page(s) checked",
+                    self.local_knowledge_page_count
+                ));
+            } else {
+                if !self.foreign_knowledge_pages.is_empty() {
+                    summary.push_str(&format!(
+                        "; {} foreign cloud-pulled knowledge page(s)",
+                        self.foreign_knowledge_pages.len()
+                    ));
+                }
+                if !self.unattributed_knowledge_pages.is_empty() {
+                    summary.push_str(&format!(
+                        "; {} knowledge page(s) whose provenance cannot be audited",
+                        self.unattributed_knowledge_pages.len()
+                    ));
+                }
+            }
+            return summary;
         }
         if self.is_clean() {
             // The honest zero: a bare "clean" is indistinguishable from a scan
             // that compared nothing. Always say what was actually covered —
             // rows scanned, peers compared, peers that could not be read.
             return format!(
-                "0 foreign task row(s): {} local row(s) compared against {} project DB(s) on (id,title), {} DB(s) unreadable",
+                "0 foreign task row(s): {} local row(s) compared against {} project DB(s) on (id,title), {} DB(s) unreadable; 0 foreign knowledge page(s): {} attributed page(s) checked",
                 self.local_task_count,
                 self.peers_compared.len(),
                 self.peers_unreadable.len(),
+                self.local_knowledge_page_count,
             );
         }
         let mut parts = Vec::new();
@@ -220,6 +284,18 @@ impl ForeignRowReport {
                 "{} replicated row(s) whose home project cannot be established ({} not closed)",
                 self.unattributed.len(),
                 self.unattributed_open(),
+            ));
+        }
+        if !self.foreign_knowledge_pages.is_empty() {
+            parts.push(format!(
+                "{} foreign cloud-pulled knowledge page(s)",
+                self.foreign_knowledge_pages.len()
+            ));
+        }
+        if !self.unattributed_knowledge_pages.is_empty() {
+            parts.push(format!(
+                "{} knowledge page(s) whose provenance cannot be audited",
+                self.unattributed_knowledge_pages.len()
             ));
         }
         parts.join("; ")
@@ -242,6 +318,13 @@ different real task in another project, so deleting by id alone destroys live wo
             text.push_str(
                 " Any hand-written cleanup must match on (id, title) — 4-hex task ids collide \
 across projects, so deleting by id alone destroys live work.",
+            );
+        }
+        if !self.foreign_knowledge_pages.is_empty() || !self.unattributed_knowledge_pages.is_empty()
+        {
+            text.push_str(
+                " Knowledge pages are attributed independently: inspect the named rel_path and \
+origin_project_id before removing a page, then re-run a scoped pull and this audit.",
             );
         }
         text
@@ -319,6 +402,25 @@ across projects, so deleting by id alone destroys live work.",
                 "rows": collisions,
             },
             "locally_worked_replicas": self.locally_worked_replicas,
+            "knowledge_pages": {
+                "local_count": self.local_knowledge_page_count,
+                "foreign_total": self.foreign_knowledge_pages.len(),
+                "foreign_rows": self.foreign_knowledge_pages.iter().map(|page| serde_json::json!({
+                    "id": page.id,
+                    "title": page.title,
+                    "rel_path": page.rel_path,
+                    "origin": "cloud_pull",
+                    "origin_project_id": page.origin_project_id,
+                })).collect::<Vec<_>>(),
+                "unattributed_total": self.unattributed_knowledge_pages.len(),
+                "unattributed_rows": self.unattributed_knowledge_pages.iter().map(|page| serde_json::json!({
+                    "id": page.id,
+                    "title": page.title,
+                    "rel_path": page.rel_path,
+                    "reason": page.reason,
+                })).collect::<Vec<_>>(),
+                "identity_predicate": "byte-exact project_canonical_id/project_id match (shared with cloud pull ingest)",
+            },
             "clean": self.is_clean(),
             "remediation": self.remediation(),
         })
@@ -344,6 +446,7 @@ pub fn classify(local: &DbSnapshot, peers: &[DbSnapshot]) -> ForeignRowReport {
         local_project: local.project.clone(),
         local_task_count: local.tasks.len(),
         peers_compared: peers.iter().map(|p| p.project.clone()).collect(),
+        local_knowledge_page_count: local.knowledge_pages.len(),
         ..Default::default()
     };
     // Deduplicate collisions: the same (id, other project, other title) pair can
@@ -427,6 +530,61 @@ pub fn classify(local: &DbSnapshot, peers: &[DbSnapshot]) -> ForeignRowReport {
     report
 }
 
+/// Add direct knowledge-page attribution to a task-replica report.
+///
+/// `entity_matches_project` is intentionally the same byte-exact, fail-closed
+/// predicate used before cloud-pull ingest. Doctor must never grow a parallel
+/// interpretation of project identity that disagrees with the write guard.
+pub fn classify_knowledge_pages(
+    report: &mut ForeignRowReport,
+    pages: &[KnowledgePageAttributionRow],
+    current_project_id: Option<&str>,
+) {
+    for page in pages {
+        match page.origin.as_str() {
+            "local" => {}
+            "cloud_pull" => {
+                let Some(current_project_id) = current_project_id else {
+                    report
+                        .unattributed_knowledge_pages
+                        .push(UnattributedKnowledgePage {
+                            id: page.id.clone(),
+                            title: page.title.clone(),
+                            rel_path: page.rel_path.clone(),
+                            reason: "current project canonical id could not be resolved"
+                                .to_string(),
+                        });
+                    continue;
+                };
+                let raw = serde_json::json!({
+                    "id": page.id,
+                    "project_canonical_id": page.origin_project_id,
+                });
+                if !crate::cloud::entity_matches_project(
+                    &raw,
+                    current_project_id,
+                    "knowledge page attribution",
+                ) {
+                    report.foreign_knowledge_pages.push(ForeignKnowledgePage {
+                        id: page.id.clone(),
+                        title: page.title.clone(),
+                        rel_path: page.rel_path.clone(),
+                        origin_project_id: page.origin_project_id.clone(),
+                    });
+                }
+            }
+            other => report
+                .unattributed_knowledge_pages
+                .push(UnattributedKnowledgePage {
+                    id: page.id.clone(),
+                    title: page.title.clone(),
+                    rel_path: page.rel_path.clone(),
+                    reason: format!("unknown origin '{other}'"),
+                }),
+        }
+    }
+}
+
 /// Open a project database read-only and reduce it to a [`DbSnapshot`].
 ///
 /// Read-only by construction: `SQLITE_OPEN_READ_ONLY` without `CREATE`, so a
@@ -471,11 +629,45 @@ pub fn read_snapshot(db_path: &Path, project: &str) -> anyhow::Result<DbSnapshot
         }
     }
 
+    let has_knowledge_pages: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='knowledge_pages')",
+        [],
+        |row| row.get(0),
+    )?;
+    let mut knowledge_pages = Vec::new();
+    if has_knowledge_pages {
+        let has_attribution: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('knowledge_pages') WHERE name='origin')
+             AND EXISTS(SELECT 1 FROM pragma_table_info('knowledge_pages') WHERE name='origin_project_id')",
+            [],
+            |row| row.get(0),
+        )?;
+        let sql = if has_attribution {
+            "SELECT id, title, rel_path, origin, origin_project_id FROM knowledge_pages"
+        } else {
+            "SELECT id, title, rel_path, 'legacy_unattributed', NULL FROM knowledge_pages"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map([], |row| {
+            Ok(KnowledgePageAttributionRow {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                rel_path: row.get(2)?,
+                origin: row.get(3)?,
+                origin_project_id: row.get(4)?,
+            })
+        })?;
+        for row in rows {
+            knowledge_pages.push(row?);
+        }
+    }
+
     Ok(DbSnapshot {
         project: project.to_string(),
         db_path: db_path.to_path_buf(),
         tasks,
         worked_task_ids,
+        knowledge_pages,
     })
 }
 
@@ -579,6 +771,8 @@ pub fn scan(cas_root: &Path) -> anyhow::Result<ForeignRowReport> {
     peers.sort_by(|a, b| a.project.cmp(&b.project));
 
     let mut report = classify(&local, &peers);
+    let project_id = crate::cloud::resolve_canonical_id(cas_root);
+    classify_knowledge_pages(&mut report, &local.knowledge_pages, project_id.as_deref());
     report.peers_unreadable = unreadable;
     Ok(report)
 }
@@ -586,6 +780,25 @@ pub fn scan(cas_root: &Path) -> anyhow::Result<ForeignRowReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn attributed_fixture() -> (tempfile::TempDir, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("cas.db");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL);
+             CREATE TABLE knowledge_pages (
+                 id TEXT PRIMARY KEY,
+                 title TEXT NOT NULL,
+                 rel_path TEXT NOT NULL,
+                 origin TEXT NOT NULL,
+                 origin_project_id TEXT
+             )",
+        )
+        .unwrap();
+        drop(conn);
+        (temp, db)
+    }
 
     fn task(id: &str, title: &str, closed: bool) -> TaskRow {
         TaskRow {
@@ -601,7 +814,79 @@ mod tests {
             db_path: PathBuf::from(format!("/tmp/{project}/.cas/cas.db")),
             tasks,
             worked_task_ids: worked.iter().map(|s| s.to_string()).collect(),
+            knowledge_pages: Vec::new(),
         }
+    }
+
+    #[test]
+    fn seeded_foreign_cloud_page_is_detected_post_hoc_with_shared_identity_predicate() {
+        let (_temp, db) = attributed_fixture();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO knowledge_pages (id, title, rel_path, origin, origin_project_id)
+             VALUES (?1, ?2, ?3, 'cloud_pull', ?4)",
+            rusqlite::params![
+                "cas-kn999",
+                "Foreign architecture",
+                "architecture/foreign.md",
+                "github.com/other/project"
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let local = read_snapshot(&db, "local").unwrap();
+        let mut report = classify(&local, &[]);
+        classify_knowledge_pages(
+            &mut report,
+            &local.knowledge_pages,
+            Some("github.com/local/project"),
+        );
+
+        assert_eq!(report.local_knowledge_page_count, 1);
+        assert_eq!(report.foreign_knowledge_pages.len(), 1);
+        assert_eq!(report.foreign_knowledge_pages[0].id, "cas-kn999");
+        assert!(!report.is_clean());
+        assert!(
+            report
+                .summary()
+                .contains("foreign cloud-pulled knowledge page")
+        );
+    }
+
+    #[test]
+    fn live_shaped_local_backfill_reports_zero_foreign_pages() {
+        let (_temp, db) = attributed_fixture();
+        let mut conn = rusqlite::Connection::open(&db).unwrap();
+        let tx = conn.transaction().unwrap();
+        for index in 1..=107 {
+            tx.execute(
+                "INSERT INTO knowledge_pages (id, title, rel_path, origin, origin_project_id)
+                 VALUES (?1, ?2, ?3, 'local', NULL)",
+                rusqlite::params![
+                    format!("cas-kn{index:03}"),
+                    format!("Local page {index}"),
+                    format!("guide/local-page-{index}.md")
+                ],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+        drop(conn);
+
+        let local = read_snapshot(&db, "local").unwrap();
+        let mut report = classify(&local, &[]);
+        classify_knowledge_pages(
+            &mut report,
+            &local.knowledge_pages,
+            Some("github.com/local/project"),
+        );
+
+        assert_eq!(report.local_knowledge_page_count, 107);
+        assert!(report.foreign_knowledge_pages.is_empty());
+        assert!(report.unattributed_knowledge_pages.is_empty());
+        assert!(report.is_clean());
+        assert!(report.summary().contains("107 attributed page(s) checked"));
     }
 
     /// AC2: the measured failure mode — two real, different tasks sharing a
@@ -800,7 +1085,7 @@ mod tests {
 
     /// A machine with a single project must not read as "checked and clean".
     #[test]
-    fn a_scan_with_no_peers_says_nothing_was_checked_cas_fc6fa() {
+    fn a_scan_with_no_peers_distinguishes_task_and_page_coverage_cas_fc6fa() {
         let local = snapshot("cas-src", vec![task("cas-dddd", "Only here", false)], &[]);
 
         let report = classify(&local, &[]);
@@ -808,10 +1093,8 @@ mod tests {
         assert!(report.is_clean());
         let summary = report.summary();
         assert!(summary.contains("0 project DB(s) compared"), "{summary}");
-        assert!(
-            summary.contains("nothing was checked for contamination"),
-            "{summary}"
-        );
+        assert!(summary.contains("task replication was not checked"), "{summary}");
+        assert!(summary.contains("0 attributed page(s) checked"), "{summary}");
     }
 
     /// Same folder name in two places must not collapse into one accusation.

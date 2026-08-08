@@ -50,6 +50,7 @@ Binary lives in `cas-cli`; everything else is a library consumed by it. Release 
 - `cli/update/`, `cli/hook/`, `cli/hook_tests/` — `cas update` atomic rewrite of `managed_by:cas` files; hook install/inspect + golden-JSON tests
 - `cli/codemap_cmd.rs`, `cli/project_overview_cmd.rs` — freshness-gate subcommands
 - `cli/knowledge_cmd.rs` — `cas knowledge build|status|list|search|read`; `--dry-run` classifies against the ledger without prompting, committing, or writing a ledger row; `read` accepts a page id or a rel_path
+- `cli/history_cmd.rs` — `cas history index|search|status|docs|repair-provenance`; one CLI rendering layer over the history walker/search services
 - `cli/{doctor,status,list,queue,open,known_repos,memory,mcp_cmd,bridge,changelog,claude_md,auth,device}.rs`
 
 ## cas-cli/src/mcp — MCP server
@@ -65,6 +66,7 @@ Tool dispatch for `mcp__cas__*`; each call is panic-isolated via `tokio::spawn` 
 - `tools/service/factory_ops.rs` — `worker_status`, `worker_activity`, `spawn_workers`, `epic_status`, `focus_epic`; Codex rollout resolution + activity/in-flight/context signals
 - `tools/service/harness_observation.rs` — artifact-backed turn observations; asymmetric evidence model (Codex turn_id correlation vs Claude inbox-only)
 - `tools/service/agent_search_system/message.rs` — `message` / `message_status` and delivery-report formatting
+- `tools/service/agent_search_system/history.rs` — MCP history search adapter; calls the same production history-search path as the CLI
 - `tools/service/{agent_liveness,orphan_recovery,factory_remind,pattern_ops,spec_ops,worktree_verification_team_ops}.rs`, `panic_catch.rs`
 
 ## cas-cli/src/ui/factory — factory TUI
@@ -87,6 +89,7 @@ Rust TUI over an in-process PTY mux (not tmux); `cas` with no subcommand launche
 - `extraction/`, `consolidation/`, `hybrid_search/`, `rules/` — memory pipeline. `hybrid_search/scorer.rs` carries `ChannelCapabilities`: weight tables are an *ideal* allocation, so `SearchWeights::for_capabilities` zeroes channels that cannot fire and redistributes their mass proportionally over the live ones (local embeddings are gone, so `semantic` is dead and Conceptual would otherwise leak 0.60 of its weight). `hybrid_search/hybrid.rs` adds the knowledge channel: FTS over `knowledge_pages` plus entity-graph link expansion, **unioned** into results rather than applied as a boost, because page ids never collide with entry ids (a boost would be a no-op). Off by default (`enable_knowledge`)
 - `cloud/embeddings.rs` — capability-gated cloud embeddings (T5). `KnowledgeEmbedder::from_config` returns `None` when logged out — the gate: no HTTP, and no LMDB environment created under `.cas/index/knowledge-vectors/`. The cache is tagged `{provider, model, dims}` and wipes itself + re-arms every page (`mark_all_pending_embedding`) when the model changes; zero vectors are refused so a soft-failing provider cannot poison ranking. kNN is brute-force cosine on purpose: `LmdbVectorStore::search` returns an error by design (KV store, not an ANN index). A process-wide env registry keeps the sync path and the search path from double-opening the same LMDB
 - `cloud/syncer/knowledge.rs` — knowledge pages over the existing `/api/sync` push/pull. Incremental by `updated_at` high-water mark; pages arrive `pending_embedding=1` (a teammate's vector is in a teammate's cache); the `locked` bit is transmitted and honoured on arrival because `commit_ingest`'s `WHERE locked = 0` guard applies to a teammate's copy exactly as it does to distillation. Applied one page at a time so a single bad page cannot abort the pull
+- `cloud/embed_drain.rs` — daemon-tick embedding drain for knowledge pages and indexed history; shares rate-limited `drain_units` work with the cloud embedder
 - `hybrid_search/semantic.rs` — the semantic channel. `has_semantic()` is true only when a cloud embedder is attached AND vectors are cached: a configured-but-empty channel still reports false, so `ChannelCapabilities` never allocates weight to a channel that can only return nothing. Query embedding failures degrade to empty results, not errors
 - `knowledge/` — distillation pass over `cas-store/knowledge_store.rs` (EPIC cas-7d31). `sources.rs` picks docs/key configs and synthesizes `code://<module>` summaries from indexed symbols; `chunk.rs` splits headings→paragraphs→hard slice with tail overlap; `prompt.rs` holds the two-stage prompts plus the role-isolation armor (untrusted content is neutralized and marker-quoted; `DistilledPage` has no path field, so a model-proposed path cannot be honored); `merge.rs` defines the provenance-tagged body fragments (`<!-- cas:sources [...] -->`) and the cost tiers (containment→union only / small page→rewrite / large page→append delta); `llm.rs` is the `LlmRunner` trait + `claude -p` runner + `ScriptedLlm` mock (its call count is the token meter); `pipeline.rs` runs the pass and repairs provenance and dangling wikilinks after a cascade delete. An unchanged repo short-circuits before any prompt is built
 - `telemetry/`, `tracing/`, `otel.rs`, `sentry.rs`, `logging.rs` — observability
@@ -95,12 +98,21 @@ Rust TUI over an in-process PTY mux (not tmux); `cas` with no subcommand launche
 - `prompt_revalidation.rs` — delivery-time staleness gate for queued lifecycle prompts: staleness = "task left the announced status" plus a rewound-occurrence guard (`updated_at < occurrence`); the old exact-equality gate destroyed 98% of lifecycle signal (GH #167)
 - `agent_id.rs`, `duplicate_check.rs`, `error.rs`, `async_runtime.rs`
 
+## cas-cli/src/history — repository history index
+`history/mod.rs` walks Git incrementally using a transactional SHA watermark; `cli/history_cmd.rs` and MCP expose the same data.
+- `history/search.rs` — FTS-backed commit/file/document search with measured index freshness and optional provenance resolution
+- `history/symbols.rs` — maps indexed file changes to code symbols for symbol-scoped history queries
+- `history/provenance.rs` — repairs missing `commit_links` from task/event evidence while distinguishing reconstructed from observed links
+- `history/{github,changelog,refs}.rs` — GitHub/changelog ingestion and cross-reference parsing for history documents
+- `migration/migrations/m222_history_docs_create_table.rs`, `m224_history_commit_symbols.rs`, `m225_commit_links_link_method.rs` — additive schema changes for history docs, symbol mappings, and provenance-edge method
+
 ## crates — notable internals
 - `cas-store/src/agent_store/` — agents + task leases; `ops_task_leases.rs`, lease history (`reason` column since m207)
 - `cas-store/src/prompt_queue_store.rs` — prompt queue: enqueue, delivery stages, bounded retry/abandon, per-target progress; `prompt_queue_recipient_seen` surfacing receipts (transport delivery writes them — GH #176) + `SupersededStale` explicit dead-letter reason
 - `cas-store/src/sync_queue/queue_ops.rs` — sync queue upsert; `UNIQUE(entity_type, entity_id, team_id)` with ON CONFLICT resetting payload/created_at/retry_count/last_error (so `created_at` is last-touch, not first-enqueue)
 - `cas-store/src/task_store.rs` — tasks are scoped by **database location**, not a column; `Scope::Project` is hardcoded at read time (~:224) and carries no provenance
 - `cas-store/src/knowledge_store.rs` — distilled repo knowledge (m218): markdown bodies on disk under `.cas/knowledge/`, index + blake3 source ledger in cas.db, contentless FTS5 (`content=''`) so no column holds body prose. `commit_ingest` applies rows + index + ledger + tombstone cascade in ONE SQLite tx, with bodies staged/published via `BodyTransaction` so the filesystem rolls back with the DB. `locked=1` is user-sovereign (distillation can neither overwrite nor set it); `classify_sources` is pure
+- `cas-store/src/{history_store,history_provenance,fts_query}.rs` — history-index schema/queries, provenance-link constants, and shared FTS query parsing
 - `cas-store/src/{event_store,code_store,entity_store,file_change_store,layered,mock}.rs`
 - `cas-factory/src/spec_resolver.rs` — multi-layer worker/supervisor spec cascade + `apply_codex_fallback` (Codex→Claude, no reverse)
 - `cas-factory/src/probe.rs` — Codex availability probe (`codex --version` + `~/.codex/auth.json`)

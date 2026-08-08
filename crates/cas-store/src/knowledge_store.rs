@@ -78,6 +78,20 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_pages_type
 CREATE INDEX IF NOT EXISTS idx_knowledge_pages_pending_embedding
     ON knowledge_pages(updated_at) WHERE pending_embedding = 1;
 
+-- Durable deletion ledger for cloud knowledge-page tombstones.  A tombstone
+-- survives the local row it removed, so an old page record cannot revive it
+-- on a later pull. `locally_authored` decides whether this client must emit
+-- it; pulled tombstones are protection state only and are never echoed back.
+CREATE TABLE IF NOT EXISTS knowledge_page_tombstones (
+    id TEXT PRIMARY KEY,
+    deleted_at TEXT NOT NULL,
+    locally_authored INTEGER NOT NULL DEFAULT 0,
+    pushed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_page_tombstones_pending_push
+    ON knowledge_page_tombstones(deleted_at)
+    WHERE locally_authored = 1 AND pushed_at IS NULL;
+
 CREATE TABLE IF NOT EXISTS knowledge_sources (
     file_path TEXT PRIMARY KEY,
     blake3 TEXT NOT NULL,
@@ -124,6 +138,15 @@ pub const KNOWLEDGE_SCHEMA_STATEMENTS: &[&str] = &[
         ON knowledge_pages(page_type)",
     "CREATE INDEX IF NOT EXISTS idx_knowledge_pages_pending_embedding
         ON knowledge_pages(updated_at) WHERE pending_embedding = 1",
+    "CREATE TABLE IF NOT EXISTS knowledge_page_tombstones (
+        id TEXT PRIMARY KEY,
+        deleted_at TEXT NOT NULL,
+        locally_authored INTEGER NOT NULL DEFAULT 0,
+        pushed_at TEXT
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_knowledge_page_tombstones_pending_push
+        ON knowledge_page_tombstones(deleted_at)
+        WHERE locally_authored = 1 AND pushed_at IS NULL",
     "CREATE TABLE IF NOT EXISTS knowledge_sources (
         file_path TEXT PRIMARY KEY,
         blake3 TEXT NOT NULL,
@@ -151,6 +174,22 @@ pub const KNOWLEDGE_PAGE_ATTRIBUTION_STATEMENTS: &[&str] = &[
     "ALTER TABLE knowledge_pages ADD COLUMN origin TEXT NOT NULL DEFAULT 'local'
         CHECK (origin IN ('local', 'cloud_pull'))",
     "ALTER TABLE knowledge_pages ADD COLUMN origin_project_id TEXT",
+];
+
+/// Durable tombstone ledger for knowledge-page cloud deletes.
+///
+/// Kept separate from [`KNOWLEDGE_SCHEMA_STATEMENTS`] because installs that
+/// already ran m219 need a numbered migration to gain this new table.
+pub const KNOWLEDGE_PAGE_TOMBSTONE_STATEMENTS: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS knowledge_page_tombstones (
+        id TEXT PRIMARY KEY,
+        deleted_at TEXT NOT NULL,
+        locally_authored INTEGER NOT NULL DEFAULT 0,
+        pushed_at TEXT
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_knowledge_page_tombstones_pending_push
+        ON knowledge_page_tombstones(deleted_at)
+        WHERE locally_authored = 1 AND pushed_at IS NULL",
 ];
 
 // ── Hashing ─────────────────────────────────────────────────────────────
@@ -442,6 +481,29 @@ pub struct IngestReport {
     pub sources_tombstoned: usize,
     /// Page IDs cascade-deleted because their last source was tombstoned.
     pub cascade_deleted_page_ids: Vec<String>,
+    /// Page IDs refused because a durable local or remote tombstone already
+    /// exists. This is the no-resurrection guard for stale page records.
+    pub tombstoned_skipped_page_ids: Vec<String>,
+}
+
+/// A durable knowledge-page deletion record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgePageTombstone {
+    pub id: String,
+    pub deleted_at: DateTime<Utc>,
+    /// True only when this machine deleted the page and must send the
+    /// tombstone to the cloud. Pulled tombstones remain local guard state.
+    pub locally_authored: bool,
+}
+
+/// Result of applying an incoming tombstone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TombstoneApplyOutcome {
+    /// The local row (if any) was deleted and the tombstone guard recorded.
+    Applied,
+    /// A locally locked page was deliberately retained. The tombstone guard
+    /// is still recorded so an older page record cannot revive elsewhere.
+    LockedPreserved,
 }
 
 /// A full-text search hit.
@@ -698,6 +760,24 @@ pub trait KnowledgeStore: Send + Sync {
 
     /// Delete a page: row, FTS entry and body file.
     fn delete_page(&self, id: &str) -> Result<()>;
+
+    /// Tombstones this machine authored but has not yet sent to the cloud.
+    fn list_pending_page_tombstones(&self) -> Result<Vec<KnowledgePageTombstone>>;
+
+    /// Mark the listed local tombstones as delivered after their push request
+    /// succeeded. The tombstone itself remains as a no-resurrection guard.
+    fn mark_page_tombstones_pushed(&self, ids: &[String]) -> Result<()>;
+
+    /// Apply one remote tombstone. A locked page is never deleted here;
+    /// deleting it later requires explicit local operator action.
+    fn apply_remote_page_tombstone(
+        &self,
+        id: &str,
+        deleted_at: DateTime<Utc>,
+    ) -> Result<TombstoneApplyOutcome>;
+
+    /// Whether a durable tombstone blocks an incoming page record.
+    fn is_page_tombstoned(&self, id: &str) -> Result<bool>;
 
     /// Full-text search across title + snippet + body.
     fn search(&self, query: &str, limit: usize) -> Result<Vec<KnowledgeHit>>;
@@ -1018,6 +1098,20 @@ impl KnowledgeStore for SqliteKnowledgeStore {
         for (write, temp, final_path) in &staged {
             let page = &write.page;
 
+            // A tombstone is stronger than an old page record. This check is
+            // inside the write transaction (rather than only in cloud pull)
+            // so every producer — including a stale local process — gets the
+            // same no-resurrection rule.
+            let tombstoned: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM knowledge_page_tombstones WHERE id = ?1)",
+                params![page.id],
+                |row| row.get(0),
+            )?;
+            if tombstoned {
+                report.tombstoned_skipped_page_ids.push(page.id.clone());
+                continue;
+            }
+
             // A page id that already belongs to a DIFFERENT path would abort
             // the pass on the UNIQUE(id) constraint with an opaque SQLite
             // error. Fail fast and say which pair collided instead.
@@ -1149,6 +1243,17 @@ impl KnowledgeStore for SqliteKnowledgeStore {
                 // A locked page keeps its row AND its body even when its last
                 // source dies — the user owns it now, not the distiller.
                 if sources.is_empty() && locked == 0 {
+                    let deleted_at = Utc::now().to_rfc3339();
+                    tx.execute(
+                        "INSERT INTO knowledge_page_tombstones
+                            (id, deleted_at, locally_authored, pushed_at)
+                         VALUES (?1, ?2, 1, NULL)
+                         ON CONFLICT(id) DO UPDATE SET
+                            deleted_at = excluded.deleted_at,
+                            locally_authored = 1,
+                            pushed_at = NULL",
+                        params![page_id, deleted_at],
+                    )?;
                     tx.execute(
                         "DELETE FROM knowledge_pages WHERE row_id = ?1",
                         params![row_id],
@@ -1307,6 +1412,16 @@ impl KnowledgeStore for SqliteKnowledgeStore {
             )));
         };
         tx.execute(
+            "INSERT INTO knowledge_page_tombstones
+                (id, deleted_at, locally_authored, pushed_at)
+             VALUES (?1, ?2, 1, NULL)
+             ON CONFLICT(id) DO UPDATE SET
+                deleted_at = excluded.deleted_at,
+                locally_authored = 1,
+                pushed_at = NULL",
+            params![id, Utc::now().to_rfc3339()],
+        )?;
+        tx.execute(
             "DELETE FROM knowledge_pages WHERE row_id = ?1",
             params![row_id],
         )?;
@@ -1320,6 +1435,121 @@ impl KnowledgeStore for SqliteKnowledgeStore {
             let _ = std::fs::remove_file(path);
         }
         Ok(())
+    }
+
+    fn list_pending_page_tombstones(&self) -> Result<Vec<KnowledgePageTombstone>> {
+        let conn = self.lock();
+        let mut statement = conn.prepare(
+            "SELECT id, deleted_at, locally_authored
+             FROM knowledge_page_tombstones
+             WHERE locally_authored = 1 AND pushed_at IS NULL
+             ORDER BY deleted_at, id",
+        )?;
+        statement
+            .query_map([], |row| {
+                let deleted_at: String = row.get(1)?;
+                let deleted_at = DateTime::parse_from_rfc3339(&deleted_at)
+                    .map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?
+                    .with_timezone(&Utc);
+                Ok(KnowledgePageTombstone {
+                    id: row.get(0)?,
+                    deleted_at,
+                    locally_authored: row.get::<_, i64>(2)? != 0,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StoreError::Database)
+    }
+
+    fn mark_page_tombstones_pushed(&self, ids: &[String]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let conn = self.lock();
+        let tx = ImmediateTx::new(&conn).map_err(StoreError::Database)?;
+        let pushed_at = Utc::now().to_rfc3339();
+        for id in ids {
+            tx.execute(
+                "UPDATE knowledge_page_tombstones
+                 SET pushed_at = ?1
+                 WHERE id = ?2 AND locally_authored = 1 AND pushed_at IS NULL",
+                params![pushed_at, id],
+            )?;
+        }
+        tx.commit().map_err(StoreError::Database)
+    }
+
+    fn apply_remote_page_tombstone(
+        &self,
+        id: &str,
+        deleted_at: DateTime<Utc>,
+    ) -> Result<TombstoneApplyOutcome> {
+        let conn = self.lock();
+        let tx = ImmediateTx::new(&conn).map_err(StoreError::Database)?;
+        let page: Option<(i64, String, i64)> = tx
+            .query_row(
+                "SELECT row_id, rel_path, locked FROM knowledge_pages WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+
+        // Preserve local authorship/push state if this machine already emitted
+        // the deletion; a server echo must never turn a local tombstone into a
+        // remote-only one. Retain the newest timestamp for auditability.
+        let deleted_at = deleted_at.to_rfc3339();
+        tx.execute(
+            "INSERT INTO knowledge_page_tombstones
+                (id, deleted_at, locally_authored, pushed_at)
+             VALUES (?1, ?2, 0, NULL)
+             ON CONFLICT(id) DO UPDATE SET
+                deleted_at = CASE
+                    WHEN excluded.deleted_at > knowledge_page_tombstones.deleted_at
+                    THEN excluded.deleted_at
+                    ELSE knowledge_page_tombstones.deleted_at
+                END",
+            params![id, deleted_at],
+        )?;
+
+        let outcome = match page {
+            Some((_row_id, _rel_path, locked)) if locked != 0 => {
+                TombstoneApplyOutcome::LockedPreserved
+            }
+            Some((row_id, rel_path, _)) => {
+                tx.execute(
+                    "DELETE FROM knowledge_pages WHERE row_id = ?1",
+                    params![row_id],
+                )?;
+                tx.execute(
+                    "DELETE FROM knowledge_pages_fts WHERE rowid = ?1",
+                    params![row_id],
+                )?;
+                tx.commit().map_err(StoreError::Database)?;
+                if let Ok(path) = self.body_path(&rel_path) {
+                    let _ = std::fs::remove_file(path);
+                }
+                return Ok(TombstoneApplyOutcome::Applied);
+            }
+            None => TombstoneApplyOutcome::Applied,
+        };
+        tx.commit().map_err(StoreError::Database)?;
+        Ok(outcome)
+    }
+
+    fn is_page_tombstoned(&self, id: &str) -> Result<bool> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM knowledge_page_tombstones WHERE id = ?1)",
+            params![id],
+            |row| row.get(0),
+        )
+        .map_err(StoreError::Database)
     }
 
     fn search(&self, query: &str, limit: usize) -> Result<Vec<KnowledgeHit>> {
@@ -1770,7 +2000,10 @@ mod tests {
         let q = |s: &str| SqliteKnowledgeStore::fts_query(s);
 
         // The regression itself: terms are ORed, never space-joined (AND).
-        assert_eq!(q("cargo build tests check").unwrap(), "\"cargo\" OR \"build\" OR \"tests\" OR \"check\"");
+        assert_eq!(
+            q("cargo build tests check").unwrap(),
+            "\"cargo\" OR \"build\" OR \"tests\" OR \"check\""
+        );
 
         // Single term is unchanged.
         assert_eq!(q("widget").unwrap(), "\"widget\"");
@@ -1787,7 +2020,10 @@ mod tests {
         assert_eq!(q("\"Quality-Gates\"").unwrap(), "\"quality gates\"");
 
         // An unterminated quote is a phrase to end of input, not an error.
-        assert_eq!(q("open \"quality gates").unwrap(), "\"open\" OR \"quality gates\"");
+        assert_eq!(
+            q("open \"quality gates").unwrap(),
+            "\"open\" OR \"quality gates\""
+        );
 
         // Nothing but punctuation yields no expression at all, which `search`
         // maps to an empty result set rather than an FTS5 syntax error.
@@ -1856,7 +2092,10 @@ mod tests {
         // cargo", so the phrase must match nothing even though both words are
         // individually present.
         assert!(
-            store.search("\"verification cargo\"", 10).unwrap().is_empty(),
+            store
+                .search("\"verification cargo\"", 10)
+                .unwrap()
+                .is_empty(),
             "explicitly quoted phrases must not degrade into an OR of their words"
         );
 
@@ -2688,6 +2927,112 @@ mod tests {
         assert!(!body_path.exists(), "delete_page must unlink the body");
         assert!(store.search("body", 10).unwrap().is_empty());
         assert!(store.delete_page("cas-knmissing").is_err());
+    }
+
+    #[test]
+    fn local_delete_creates_a_pending_tombstone_that_survives_the_page() {
+        let (_temp, store) = store();
+        let p = page(&store, "subsystem", "Doomed", &["src/x.rs"]);
+        store
+            .commit_ingest(&IngestBatch {
+                pages: vec![PageWrite {
+                    page: p.clone(),
+                    body: "body".to_string(),
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+
+        store.delete_page(&p.id).unwrap();
+        assert!(store.get_page(&p.id).is_err());
+        let pending = store.list_pending_page_tombstones().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, p.id);
+        assert!(pending[0].locally_authored);
+
+        store.mark_page_tombstones_pushed(&[p.id.clone()]).unwrap();
+        assert!(store.list_pending_page_tombstones().unwrap().is_empty());
+        assert!(
+            store.is_page_tombstoned(&p.id).unwrap(),
+            "delivery must not discard the durable no-resurrection guard"
+        );
+    }
+
+    #[test]
+    fn cascade_delete_creates_a_pending_tombstone() {
+        let (_temp, store) = store();
+        let p = page(&store, "subsystem", "Only Source", &["src/gone.rs"]);
+        store
+            .commit_ingest(&IngestBatch {
+                pages: vec![PageWrite {
+                    page: p.clone(),
+                    body: "body".to_string(),
+                }],
+                sources: vec![SourceOutcome {
+                    file_path: "src/gone.rs".to_string(),
+                    blake3: "abc".to_string(),
+                    size: 1,
+                    status: SourceStatus::Ingested,
+                    ingest_error: None,
+                }],
+                tombstones: Vec::new(),
+            })
+            .unwrap();
+
+        let report = store
+            .commit_ingest(&IngestBatch {
+                tombstones: vec!["src/gone.rs".to_string()],
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(report.cascade_deleted_page_ids, vec![p.id.clone()]);
+        assert_eq!(
+            store
+                .list_pending_page_tombstones()
+                .unwrap()
+                .into_iter()
+                .map(|t| t.id)
+                .collect::<Vec<_>>(),
+            vec![p.id.clone()]
+        );
+    }
+
+    #[test]
+    fn remote_tombstone_spares_a_locked_page_but_blocks_its_stale_record() {
+        let (_temp, store) = store();
+        let p = page(&store, "subsystem", "Human Page", &["src/x.rs"]);
+        store
+            .commit_ingest(&IngestBatch {
+                pages: vec![PageWrite {
+                    page: p.clone(),
+                    body: "human body".to_string(),
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+        store.set_locked(&p.id, true).unwrap();
+
+        assert_eq!(
+            store
+                .apply_remote_page_tombstone(&p.id, Utc::now())
+                .unwrap(),
+            TombstoneApplyOutcome::LockedPreserved
+        );
+        assert_eq!(store.read_body(&p.rel_path).unwrap(), "human body");
+        assert!(store.is_page_tombstoned(&p.id).unwrap());
+
+        let stale = PageWrite {
+            page: p.clone(),
+            body: "stale remote body".to_string(),
+        };
+        let report = store
+            .commit_ingest(&IngestBatch {
+                pages: vec![stale],
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(report.tombstoned_skipped_page_ids, vec![p.id]);
+        assert_eq!(store.read_body(&p.rel_path).unwrap(), "human body");
     }
 
     #[test]

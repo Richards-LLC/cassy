@@ -107,7 +107,7 @@ Rules that keep that boundary honest:
 
 **What page sync does NOT cover** (boundaries by construction, not gaps to paper over):
 
-- **There is no page delete over sync.** The generic `DELETE /api/sync/{type}/{id}` route accepts `knowledge_page`, but the server keeps no tombstone for it: it removes only the caller's own row, records nothing, and cross-row dedupe can re-deliver the same page on the very next pull. Building delete on that route would produce a resurrection loop that looks like a client bug. Deletion stays local until the server has tombstones.
+- **Knowledge-page delete uses tombstones, never the generic DELETE route.** A local or provenance-cascade delete writes a durable ledger row and emits `{ id, deleted_at }` under `knowledge_tombstones` in the normal push envelope. Pull applies tombstones before page records, retains the guard after delivery, and therefore refuses any stale page record with the same id rather than resurrecting it. Every pulled tombstone is project-scoped before it can touch disk. A locally locked page is preserved with its body; only explicit local operator action may delete it. The generic `DELETE /api/sync/{type}/{id}` path remains unsuitable for `knowledge_page` because it cannot provide those retention, scope, lock, or no-resurrection guarantees.
 - **Account- and global-scope pages have no wire identity.** `project_id` is `NOT NULL` server-side and the client fails closed without a canonical id, so a page outside a project simply does not sync.
 
 ### Key Patterns

@@ -507,8 +507,23 @@ impl CloudSyncer {
         entity_type: &str,
         values: Vec<serde_json::Value>,
     ) -> Result<serde_json::Map<String, serde_json::Value>, CasError> {
+        self.build_personal_push_payload_fields([(entity_type.to_string(), values)])
+    }
+
+    /// Build the common personal envelope around one or more entity arrays.
+    /// Knowledge-page deletes share the normal push endpoint with page records,
+    /// so they need this rather than a second route or copied auth/scope logic.
+    pub(super) fn build_personal_push_payload_fields<I>(
+        &self,
+        fields: I,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, CasError>
+    where
+        I: IntoIterator<Item = (String, Vec<serde_json::Value>)>,
+    {
         let mut payload = serde_json::Map::new();
-        payload.insert(entity_type.to_string(), serde_json::Value::Array(values));
+        for (entity_type, values) in fields {
+            payload.insert(entity_type, serde_json::Value::Array(values));
+        }
         if let Some(team_id) = &self.cloud_config.team_id {
             payload.insert("team_id".to_string(), serde_json::json!(team_id));
         }
@@ -571,9 +586,19 @@ impl CloudSyncer {
         entity_type: &str,
         token: &str,
     ) -> Result<PushResponse, CasError> {
-        let push_url = format!("{}/api/sync/push", self.cloud_config.endpoint);
-
         let payload = self.build_personal_push_payload(entity_type, values)?;
+        self.push_personal_payload(payload, token)
+    }
+
+    /// Push an already-built personal envelope with the normal retry, gzip,
+    /// and response parsing policy. Multi-key envelopes (knowledge pages plus
+    /// tombstones) use the same transport contract as queued entities.
+    pub(super) fn push_personal_payload(
+        &self,
+        payload: serde_json::Map<String, serde_json::Value>,
+        token: &str,
+    ) -> Result<PushResponse, CasError> {
+        let push_url = format!("{}/api/sync/push", self.cloud_config.endpoint);
 
         // Serialize and compress the payload
         let json_bytes = serde_json::to_vec(&payload)

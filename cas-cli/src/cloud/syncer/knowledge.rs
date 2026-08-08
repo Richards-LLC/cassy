@@ -28,7 +28,10 @@ use tracing::warn;
 use crate::cloud::get_project_canonical_id;
 use crate::cloud::syncer::{CloudSyncer, SyncResult};
 use crate::error::CasError;
-use cas_store::{IngestBatch, KnowledgePage, KnowledgePageOrigin, KnowledgeStore, PageWrite};
+use cas_store::{
+    IngestBatch, KnowledgePage, KnowledgePageOrigin, KnowledgeStore, PageWrite,
+    TombstoneApplyOutcome,
+};
 use cas_types::ShareScope;
 
 /// Metadata key holding the high-water mark for knowledge pushes.
@@ -53,6 +56,9 @@ const EMPTY_PULL_STREAK_KEY: &str = "knowledge_empty_pull_streak";
 const EMPTY_PULL_STREAK_THRESHOLD: u32 = 5;
 /// Entity-type key used in the push payload and the pull response.
 pub const KNOWLEDGE_ENTITY: &str = "knowledge_pages";
+/// Companion key in the existing knowledge push/pull envelope. Tombstones are
+/// separate from page records because the page row and body no longer exist.
+pub const KNOWLEDGE_TOMBSTONE_ENTITY: &str = "knowledge_tombstones";
 
 /// Percent-encode a query-string *value*.
 ///
@@ -149,6 +155,17 @@ impl KnowledgePageRecord {
     }
 }
 
+/// Wire shape for a knowledge-page deletion.
+///
+/// The enclosing push envelope supplies the project/team scope. Pull records
+/// additionally carry that scope at the raw JSON level and are checked before
+/// this type is deserialized or applied.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KnowledgePageTombstoneRecord {
+    pub id: String,
+    pub deleted_at: DateTime<Utc>,
+}
+
 /// Outcome of a knowledge pull.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KnowledgePullReport {
@@ -157,6 +174,15 @@ pub struct KnowledgePullReport {
     /// Pages the local store refused to overwrite because the local copy is
     /// locked. Not an error — this is user sovereignty working.
     pub locked_preserved: usize,
+    /// Incoming tombstones that deleted a local page (or established a guard
+    /// for a page not currently present).
+    pub tombstones_applied: usize,
+    /// Tombstones that deliberately did not delete a locally locked page.
+    pub tombstones_locked_preserved: usize,
+    /// Page records refused because a tombstone was already applied. This is
+    /// surfaced rather than silently ignored because it proves stale data was
+    /// actively prevented from resurrecting a deleted page.
+    pub tombstoned_pages_refused: usize,
     /// Per-page failures (rel_path, message).
     pub errors: Vec<(String, String)>,
     /// Rows refused at ingest because they do not belong to this project.
@@ -215,6 +241,9 @@ impl CloudSyncer {
         let pages = store
             .list_pages()
             .map_err(|e| CasError::Other(format!("Failed to list knowledge pages: {e}")))?;
+        let tombstones = store
+            .list_pending_page_tombstones()
+            .map_err(|e| CasError::Other(format!("Failed to list knowledge tombstones: {e}")))?;
 
         let mut records = Vec::new();
         for page in pages {
@@ -237,12 +266,21 @@ impl CloudSyncer {
             ))?);
         }
 
-        if records.is_empty() {
+        if records.is_empty() && tombstones.is_empty() {
             return Ok(0);
         }
 
         let count = records.len();
-        let response = self.push_sub_batch(records, KNOWLEDGE_ENTITY, &token)?;
+        let tombstone_ids: Vec<String> = tombstones.iter().map(|t| t.id.clone()).collect();
+        let tombstone_records = tombstones
+            .into_iter()
+            .map(|t| KnowledgePageTombstoneRecord {
+                id: t.id,
+                deleted_at: t.deleted_at,
+            })
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()?;
+        let response = self.push_knowledge_batch(records, tombstone_records, &token)?;
 
         // Read the refusal count instead of discarding the response. The
         // knowledge push has no per-row queue to leave un-marked, so its only
@@ -251,7 +289,8 @@ impl CloudSyncer {
         // a human happens to edit it. Holding the mark makes the next run
         // re-offer the same window — the same conservative choice the generic
         // path makes when it leaves a sub-batch un-synced (push.rs).
-        let skipped = response.skipped_count_for(KNOWLEDGE_ENTITY);
+        let skipped = response.skipped_count_for(KNOWLEDGE_ENTITY)
+            + response.skipped_count_for(KNOWLEDGE_TOMBSTONE_ENTITY);
         if skipped > 0 {
             warn!(
                 skipped,
@@ -261,6 +300,12 @@ impl CloudSyncer {
             );
             return Ok(count.saturating_sub(skipped));
         }
+
+        store
+            .mark_page_tombstones_pushed(&tombstone_ids)
+            .map_err(|e| {
+                CasError::Other(format!("Failed to mark knowledge tombstones pushed: {e}"))
+            })?;
 
         let _ = self
             .queue()
@@ -343,9 +388,46 @@ impl CloudSyncer {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
+        let incoming_tombstones = body
+            .get(KNOWLEDGE_TOMBSTONE_ENTITY)
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
         // Empty BEFORE any client-side filtering: rows we refused still prove
         // the read channel works, and must not be read as starvation.
-        let envelope_was_empty = incoming.is_empty();
+        let envelope_was_empty = incoming.is_empty() && incoming_tombstones.is_empty();
+
+        // Tombstones MUST win over pages in one envelope regardless of JSON
+        // key order. Establishing the durable guard first makes a stale page
+        // record in the same response harmless instead of resurrecting it.
+        for raw in incoming_tombstones {
+            if !super::pull::entity_matches_project(&raw, &project_id, "knowledge tombstone") {
+                report.refused_foreign += 1;
+                report.refused_foreign_ids.push(
+                    raw.get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("<unknown>")
+                        .to_string(),
+                );
+                continue;
+            }
+            let tombstone: KnowledgePageTombstoneRecord = match serde_json::from_value(raw) {
+                Ok(tombstone) => tombstone,
+                Err(e) => {
+                    report
+                        .errors
+                        .push((String::from("<unparseable tombstone>"), e.to_string()));
+                    continue;
+                }
+            };
+            match store
+                .apply_remote_page_tombstone(&tombstone.id, tombstone.deleted_at)
+                .map_err(|e| CasError::Other(format!("Failed to apply knowledge tombstone: {e}")))?
+            {
+                TombstoneApplyOutcome::Applied => report.tombstones_applied += 1,
+                TombstoneApplyOutcome::LockedPreserved => report.tombstones_locked_preserved += 1,
+            }
+        }
 
         for raw in incoming {
             // FAIL CLOSED, BEFORE PARSING OR WRITING. A knowledge page is
@@ -375,6 +457,13 @@ impl CloudSyncer {
                     continue;
                 }
             };
+            if store
+                .is_page_tombstoned(&record.id)
+                .map_err(|e| CasError::Other(format!("Failed to check knowledge tombstone: {e}")))?
+            {
+                report.tombstoned_pages_refused += 1;
+                continue;
+            }
             let rel_path = record.rel_path.clone();
             match self.apply_knowledge_record(store, record) {
                 Ok(true) => report.applied += 1,
@@ -420,7 +509,11 @@ impl CloudSyncer {
     /// Deliberately advisory: it names both ids and stops. The client cannot
     /// tell a divergence from "genuinely nothing new for a while", so escalating
     /// to an error would eventually cry wolf at every quiet project.
-    fn check_pull_starvation(&self, envelope_was_empty: bool, pull_project_id: &str) -> Option<String> {
+    fn check_pull_starvation(
+        &self,
+        envelope_was_empty: bool,
+        pull_project_id: &str,
+    ) -> Option<String> {
         if !envelope_was_empty {
             let _ = self.queue().set_metadata(EMPTY_PULL_STREAK_KEY, "0");
             return None;
@@ -486,6 +579,23 @@ impl CloudSyncer {
             .commit_ingest(&batch)
             .map_err(|e| CasError::Other(format!("Failed to apply knowledge page: {e}")))?;
         Ok(report.pages_written > 0)
+    }
+
+    /// Send live pages and newly authored tombstones in one normal personal
+    /// push envelope. The cloud proposal intentionally reuses this envelope so
+    /// auth, gzip, project scope and server-side `skipped` reporting stay
+    /// identical for both kinds of change.
+    fn push_knowledge_batch(
+        &self,
+        pages: Vec<serde_json::Value>,
+        tombstones: Vec<serde_json::Value>,
+        token: &str,
+    ) -> Result<super::PushResponse, CasError> {
+        let payload = self.build_personal_push_payload_fields([
+            (KNOWLEDGE_ENTITY.to_string(), pages),
+            (KNOWLEDGE_TOMBSTONE_ENTITY.to_string(), tombstones),
+        ])?;
+        self.push_personal_payload(payload, token)
     }
 }
 
@@ -589,6 +699,15 @@ mod tests {
         .unwrap()
     }
 
+    fn remote_tombstone(id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "deleted_at": "2026-08-08T12:00:00Z",
+            "project_canonical_id": get_project_canonical_id()
+                .expect("knowledge pull tests run from a CAS project"),
+        })
+    }
+
     #[test]
     fn share_scope_follows_team_configuration() {
         assert_eq!(knowledge_share_scope(true), ShareScope::Team);
@@ -662,6 +781,119 @@ mod tests {
 
         assert_eq!(first, 1, "the seeded page must be pushed");
         assert_eq!(second, 0, "an unchanged page must not be re-pushed");
+    }
+
+    #[tokio::test]
+    async fn local_page_delete_emits_one_tombstone_and_marks_it_delivered() {
+        use std::io::Read;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/sync/push"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        let endpoint = server.uri();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let deleted_id = tokio::task::spawn_blocking(move || {
+            let store = seeded_store(&root);
+            let page = store.list_pages().unwrap().remove(0);
+            store.delete_page(&page.id).unwrap();
+            let syncer = syncer(Some(&endpoint), &root);
+            assert_eq!(syncer.push_knowledge_pages(&store).unwrap(), 0);
+            assert!(store.list_pending_page_tombstones().unwrap().is_empty());
+            assert!(store.is_page_tombstoned(&page.id).unwrap());
+            page.id
+        })
+        .await
+        .unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1, "the delete must be a real push request");
+        let mut raw = Vec::new();
+        flate2::read::GzDecoder::new(&requests[0].body[..])
+            .read_to_end(&mut raw)
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(payload[KNOWLEDGE_ENTITY], serde_json::json!([]));
+        let tombstones = payload[KNOWLEDGE_TOMBSTONE_ENTITY].as_array().unwrap();
+        assert_eq!(tombstones.len(), 1);
+        assert_eq!(tombstones[0]["id"], deleted_id);
+        assert!(
+            tombstones[0]["deleted_at"].as_str().is_some(),
+            "wire tombstone must carry its deletion time"
+        );
+    }
+
+    #[tokio::test]
+    async fn pulled_tombstone_wins_over_a_stale_page_in_the_same_envelope() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mut stale = remote_record("Build System", "# STALE RESURRECTION", false);
+        stale["id"] = serde_json::json!("cas-kn001");
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(super::super::pull::PULL_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "knowledge_tombstones": [remote_tombstone("cas-kn001")],
+                "knowledge_pages": [stale],
+            })))
+            .mount(&server)
+            .await;
+        let endpoint = server.uri();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let report = tokio::task::spawn_blocking(move || {
+            let store = seeded_store(&root);
+            let syncer = syncer(Some(&endpoint), &root);
+            let report = syncer.pull_knowledge_pages(&store).unwrap();
+            assert!(store.get_page("cas-kn001").is_err());
+            assert!(store.is_page_tombstoned("cas-kn001").unwrap());
+            report
+        })
+        .await
+        .unwrap();
+        assert_eq!(report.tombstones_applied, 1);
+        assert_eq!(report.tombstoned_pages_refused, 1);
+        assert_eq!(report.applied, 0);
+    }
+
+    #[tokio::test]
+    async fn pulled_tombstone_never_deletes_a_locked_page_without_local_action() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(super::super::pull::PULL_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "knowledge_tombstones": [remote_tombstone("cas-kn001")],
+                "knowledge_pages": [],
+            })))
+            .mount(&server)
+            .await;
+        let endpoint = server.uri();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let (report, body) = tokio::task::spawn_blocking(move || {
+            let store = seeded_store(&root);
+            store.set_locked("cas-kn001", true).unwrap();
+            let syncer = syncer(Some(&endpoint), &root);
+            let report = syncer.pull_knowledge_pages(&store).unwrap();
+            let page = store.get_page("cas-kn001").unwrap();
+            (report, store.read_body(&page.rel_path).unwrap())
+        })
+        .await
+        .unwrap();
+        assert_eq!(report.tombstones_locked_preserved, 1);
+        assert_eq!(body, "# Build System\n\nZig linker.");
     }
 
     /// The body a page carries must survive push → wire → pull unchanged,
@@ -789,7 +1021,11 @@ mod tests {
         foreign["project_canonical_id"] = serde_json::json!("github.com/someone-else/other-repo");
         // A legitimate page in the same envelope must still land: refusing the
         // foreign row must not become "drop the whole pull".
-        let mut legit = remote_record("Retrieval Pipeline", "# Retrieval\n\nlocal-project body", false);
+        let mut legit = remote_record(
+            "Retrieval Pipeline",
+            "# Retrieval\n\nlocal-project body",
+            false,
+        );
         legit["id"] = serde_json::json!("cas-kn902");
 
         let server = MockServer::start().await;
@@ -857,7 +1093,10 @@ mod tests {
         let mut unscoped = remote_record("Orphan Page", "# no scope", false);
         unscoped["id"] = serde_json::json!("cas-kn998");
         // Field absent entirely — an older server, or a bug. Fail closed.
-        unscoped.as_object_mut().unwrap().remove("project_canonical_id");
+        unscoped
+            .as_object_mut()
+            .unwrap()
+            .remove("project_canonical_id");
 
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -1020,9 +1259,15 @@ mod tests {
 
             let mut early = None;
             for _ in 1..EMPTY_PULL_STREAK_THRESHOLD {
-                early = syncer.pull_knowledge_pages(&store).unwrap().starvation_warning;
+                early = syncer
+                    .pull_knowledge_pages(&store)
+                    .unwrap()
+                    .starvation_warning;
             }
-            let at_threshold = syncer.pull_knowledge_pages(&store).unwrap().starvation_warning;
+            let at_threshold = syncer
+                .pull_knowledge_pages(&store)
+                .unwrap()
+                .starvation_warning;
             (early, at_threshold)
         })
         .await
@@ -1077,7 +1322,12 @@ mod tests {
             syncer.push_knowledge_pages(&store).unwrap();
             let mut warnings = Vec::new();
             for _ in 0..(EMPTY_PULL_STREAK_THRESHOLD + 2) {
-                warnings.push(syncer.pull_knowledge_pages(&store).unwrap().starvation_warning);
+                warnings.push(
+                    syncer
+                        .pull_knowledge_pages(&store)
+                        .unwrap()
+                        .starvation_warning,
+                );
             }
             warnings
         })

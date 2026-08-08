@@ -233,6 +233,152 @@ pub(crate) fn teams_root_dir() -> PathBuf {
     claude_config_dir_from(&home, env_config_dir.as_deref()).join("teams")
 }
 
+/// cas-7aa2 (GH #176): neutralise Claude Code's NATIVE `SendMessage` copies
+/// that were written into a config-dir teams tree the factory does not deliver
+/// into.
+///
+/// WHY THIS EXISTS. The `SendMessage` auto-route
+/// ([`crate::hooks::handlers::handlers_events::pre_tool`]) enqueues the message
+/// onto the CAS prompt queue and then returns `permissionDecision = "allow"`
+/// (cas-73c8, so the sender sees a success receipt instead of an `<error>`
+/// envelope). Allow means the harness's own `SendMessage` ALSO runs and appends
+/// its own row to `$CLAUDE_CONFIG_DIR/teams/{team}/inboxes/{target}.json` —
+/// in the SENDER's config dir.
+///
+/// When sender and daemon share a config dir that second row is harmless: it
+/// lands in the very file the daemon writes to, and the `(from, text)` dedupe
+/// guard in [`TeamsManager::write_to_inbox_impl`] collapses the pair (the
+/// delivered text is `queued.prompt` verbatim, so the two rows really are
+/// byte-identical).
+///
+/// A worker spawned with an explicit `config_dir` (two-account machines — see
+/// `spawn_queue.worker_spec.config_dir`) has NO such luck. Its native copy goes
+/// to a tree the daemon never writes to and no factory recipient ever reads,
+/// so:
+/// - the dedupe guard cannot see it (it only ever looks in the daemon's tree),
+/// - nothing consumes it — `read` stays `false` forever, and
+/// - retention (see [`INBOX_RETENTION`]) deliberately never prunes unread rows,
+///   so the file grows without bound.
+///
+/// That stranded backlog is live ammunition: the moment any session named like
+/// the recipient starts in that config dir under this team name, the harness
+/// injects the whole accumulated history as one startup burst.
+///
+/// THE DISCRIMINATOR. A factory-owned tree always has `config.json` (written by
+/// [`TeamsManager::init_team_config`]) alongside the per-role `*-settings.json`
+/// files. A tree conjured purely by a native `SendMessage` write has only
+/// `inboxes/`. So "no `config.json`" means "the daemon does not deliver here",
+/// and every row in it is a native stray.
+///
+/// WHAT IT DOES. In a non-factory tree, flips `read: true` on unread rows —
+/// inert (no harness injects a read row) and now eligible for retention
+/// pruning — rather than deleting them, so the evidence survives a support
+/// window. It never touches `own_inbox_names`: messages addressed to the
+/// calling agent are left exactly as found, because the safe direction for an
+/// inbox you might legitimately be the reader of is "do nothing".
+///
+/// Rows are rewritten through [`serde_json::Value`], NOT [`InboxMessage`]:
+/// native rows carry `msgV` / `msg_id` / `type` fields that the typed struct
+/// does not model and would silently drop on re-serialize.
+///
+/// Best-effort throughout — returns the number of rows made inert (0 on any
+/// I/O or parse failure). A hook must never fail a tool call over housekeeping.
+pub(crate) fn reap_stranded_native_inbox_copies(session: &str, own_inbox_names: &[String]) -> usize {
+    reap_stranded_native_inbox_copies_in(&teams_root_dir().join(session), own_inbox_names)
+}
+
+/// Testable core of [`reap_stranded_native_inbox_copies`], against an explicit
+/// `<teams root>/<session>` directory.
+pub(crate) fn reap_stranded_native_inbox_copies_in(
+    team_dir: &std::path::Path,
+    own_inbox_names: &[String],
+) -> usize {
+    // The factory's own tree. The daemon delivers here and the dedupe guard
+    // works — leave every row alone.
+    if team_dir.join("config.json").exists() {
+        return 0;
+    }
+
+    let inboxes_dir = team_dir.join("inboxes");
+    let Ok(entries) = std::fs::read_dir(&inboxes_dir) else {
+        return 0;
+    };
+
+    let mut reaped = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        // Never touch an inbox the caller may legitimately be the reader of.
+        if own_inbox_names.iter().any(|name| name == stem) {
+            continue;
+        }
+
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(mut rows) = serde_json::from_str::<Vec<serde_json::Value>>(&content) else {
+            continue;
+        };
+
+        let mut changed = 0usize;
+        for row in rows.iter_mut() {
+            let Some(obj) = row.as_object_mut() else {
+                continue;
+            };
+            if obj.get("read").and_then(|v| v.as_bool()) == Some(false) {
+                obj.insert("read".to_string(), serde_json::Value::Bool(true));
+                changed += 1;
+            }
+        }
+        if changed == 0 {
+            continue;
+        }
+
+        let Ok(json) = serde_json::to_string_pretty(&rows) else {
+            continue;
+        };
+        // Same exclusive-lock discipline as every other inbox mutation, so a
+        // concurrent harness write cannot interleave with this rewrite.
+        let write = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .and_then(|file| {
+                let _lock = InboxFileLock::acquire(&file, &path)
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                std::fs::write(&path, &json)
+            });
+        match write {
+            Ok(()) => {
+                reaped += changed;
+                tracing::debug!(
+                    target: "cas::coordination",
+                    stage = "stranded_native_copy_reaped",
+                    channel = "teams_inbox",
+                    inbox = stem,
+                    rows = changed,
+                    path = %path.display(),
+                    "cas-7aa2: marked native SendMessage copies inert in a non-factory teams tree"
+                );
+            }
+            Err(error) => {
+                tracing::debug!(
+                    path = %path.display(),
+                    %error,
+                    "cas-7aa2: could not rewrite a stranded inbox — leaving it as found"
+                );
+            }
+        }
+    }
+
+    reaped
+}
+
 impl TeamsManager {
     /// Create a new TeamsManager for the given factory session.
     ///
@@ -1566,6 +1712,173 @@ mod tests {
             teams_dir,
             inboxes_dir,
         }
+    }
+
+    // ---- cas-7aa2 (GH #176): the cross-config-dir dual-write shape ----
+    //
+    // Reproduces the live 2026-08-08 specimen: warm-stork-30 was spawned with
+    // `config_dir: "~/.claude"` (spawn_queue id=582) while the daemon and the
+    // supervisor ran under `~/.claude-alt`. Its native SendMessage rows piled
+    // up unread in `~/.claude/teams/cas-src-zealous-finch-10/inboxes/
+    // supervisor.json` — a tree holding nothing but `inboxes/`, no
+    // `config.json` — where no reader has ever existed.
+
+    /// Build a teams tree with no `config.json`: exactly what a native
+    /// `SendMessage` conjures in a sender's config dir when the factory lives
+    /// elsewhere. Rows carry the native-only `msgV`/`msg_id`/`type` fields the
+    /// typed `InboxMessage` does not model, so the test also pins that the
+    /// sweep does not silently drop them.
+    fn stranded_tree(tmp: &std::path::Path, session: &str) -> std::path::PathBuf {
+        let team_dir = tmp.join(".claude").join("teams").join(session);
+        std::fs::create_dir_all(team_dir.join("inboxes")).expect("inboxes dir");
+        team_dir
+    }
+
+    fn write_native_rows(team_dir: &std::path::Path, inbox: &str, rows: serde_json::Value) {
+        std::fs::write(
+            team_dir.join("inboxes").join(format!("{inbox}.json")),
+            serde_json::to_string_pretty(&rows).expect("serialize"),
+        )
+        .expect("write inbox");
+    }
+
+    fn read_rows(team_dir: &std::path::Path, inbox: &str) -> Vec<serde_json::Value> {
+        let content =
+            std::fs::read_to_string(team_dir.join("inboxes").join(format!("{inbox}.json")))
+                .expect("read inbox");
+        serde_json::from_str(&content).expect("parse inbox")
+    }
+
+    fn native_row(from: &str, text: &str, read: bool) -> serde_json::Value {
+        serde_json::json!({
+            "from": from,
+            "text": text,
+            "summary": "s",
+            "timestamp": "2026-08-08T01:05:35.531Z",
+            "color": "magenta",
+            "msgV": 1,
+            "msg_id": "f73987b4-7acb-41a9-91b2-47acd433f109",
+            "type": "message",
+            "read": read,
+        })
+    }
+
+    #[test]
+    fn stranded_native_copies_in_a_non_factory_tree_are_made_inert_cas_7aa2() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let team_dir = stranded_tree(tmp.path(), "cas-src-zealous-finch-10");
+        write_native_rows(
+            &team_dir,
+            "supervisor",
+            serde_json::json!([
+                native_row("warm-stork-30", "ACK cas-e679 — started.", false),
+                native_row("warm-stork-30", "cas-e679 DONE.", false),
+            ]),
+        );
+
+        let reaped = reap_stranded_native_inbox_copies_in(
+            &team_dir,
+            &["warm-stork-30".to_string()],
+        );
+
+        assert_eq!(reaped, 2, "both unread strays must be neutralised");
+        let rows = read_rows(&team_dir, "supervisor");
+        assert!(
+            rows.iter().all(|r| r["read"] == serde_json::json!(true)),
+            "a read row is never injected by the harness and becomes retention-eligible: {rows:?}"
+        );
+        assert_eq!(
+            rows[0]["msg_id"],
+            serde_json::json!("f73987b4-7acb-41a9-91b2-47acd433f109"),
+            "native-only fields must survive the rewrite — reserializing through \
+             InboxMessage would drop msgV/msg_id/type"
+        );
+        assert_eq!(
+            rows[0]["text"],
+            serde_json::json!("ACK cas-e679 — started."),
+            "the evidence text is preserved, not deleted"
+        );
+    }
+
+    /// THE REGRESSION GUARD. In the factory's own tree the daemon's delivery
+    /// copy lives in these same files; marking it read would silently destroy
+    /// real delivery. `config.json` is the discriminator.
+    #[test]
+    fn the_factory_owned_tree_is_never_swept_cas_7aa2() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let team_dir = stranded_tree(tmp.path(), "cas-src-zealous-finch-10");
+        std::fs::write(team_dir.join("config.json"), "{}").expect("config.json");
+        write_native_rows(
+            &team_dir,
+            "supervisor",
+            serde_json::json!([native_row("brave-fox-53", "undelivered work", false)]),
+        );
+
+        let reaped = reap_stranded_native_inbox_copies_in(&team_dir, &[]);
+
+        assert_eq!(reaped, 0, "presence of config.json means the daemon delivers here");
+        let rows = read_rows(&team_dir, "supervisor");
+        assert_eq!(
+            rows[0]["read"],
+            serde_json::json!(false),
+            "an undelivered message in the factory's own tree must stay unread"
+        );
+    }
+
+    #[test]
+    fn the_callers_own_inboxes_are_left_exactly_as_found_cas_7aa2() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let team_dir = stranded_tree(tmp.path(), "cas-src-zealous-finch-10");
+        write_native_rows(
+            &team_dir,
+            "warm-stork-30",
+            serde_json::json!([native_row("brave-fox-53", "for you", false)]),
+        );
+        write_native_rows(
+            &team_dir,
+            "supervisor",
+            serde_json::json!([native_row("warm-stork-30", "stray", false)]),
+        );
+
+        // The supervisor alias is passed alongside the pane name because that
+        // is the file a supervisor's own mail arrives under.
+        let reaped = reap_stranded_native_inbox_copies_in(
+            &team_dir,
+            &["warm-stork-30".to_string()],
+        );
+
+        assert_eq!(reaped, 1, "only the stray in another agent's inbox is swept");
+        assert_eq!(
+            read_rows(&team_dir, "warm-stork-30")[0]["read"],
+            serde_json::json!(false),
+            "an inbox the caller may legitimately read is never touched"
+        );
+        assert_eq!(
+            read_rows(&team_dir, "supervisor")[0]["read"],
+            serde_json::json!(true)
+        );
+    }
+
+    #[test]
+    fn already_read_rows_are_not_recounted_and_a_missing_tree_is_a_noop_cas_7aa2() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let team_dir = stranded_tree(tmp.path(), "cas-src-zealous-finch-10");
+        write_native_rows(
+            &team_dir,
+            "supervisor",
+            serde_json::json!([native_row("warm-stork-30", "already inert", true)]),
+        );
+
+        assert_eq!(
+            reap_stranded_native_inbox_copies_in(&team_dir, &[]),
+            0,
+            "the sweep is idempotent — a second pass reaps nothing"
+        );
+        assert_eq!(
+            reap_stranded_native_inbox_copies_in(&tmp.path().join("no-such-tree"), &[]),
+            0,
+            "no tree at all is a silent no-op, never an error"
+        );
     }
 
     // ---- cas-3585: team dir must follow the active CLAUDE_CONFIG_DIR ----

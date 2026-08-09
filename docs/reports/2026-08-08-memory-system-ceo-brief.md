@@ -1,144 +1,156 @@
-# CAS Memory: experience that compounds
+# CAS Memory: the learning loop for every agent
 
-**Feature showcase · 8 August 2026**
+**Product showcase · refreshed 9 August 2026 · implementation reference `85963767`**
 
-CAS turns work that would normally disappear at the end of an agent session into reusable experience. It captures the durable lesson, distills project understanding, retrieves the right evidence when needed, and carries it into the next piece of work—without turning the whole project into a giant prompt.
+CAS turns the useful signal left by work into a reusable, inspectable asset. The product is not a bigger transcript: it is a controlled loop that captures what matters, gives it durable shape, retrieves the right part later, and lets the next task start with more context than the last one.
 
-> **The signature loop:** **work → capture → distill → retrieve → reuse**
+> **Work becomes memory; memory changes the next piece of work.**
 
-The problem is familiar: a capable agent starts a new session and re-learns the repository, the constraints, the decisions, and the proven way to operate. CAS makes that learning cumulative. A preference can remain personal. A project fact can become durable memory. Documentation and code can become an inspectable project wiki. Past code changes can remain searchable as provenance. The next agent begins with an orientation, then pulls only the detail its task requires.
+This is an implementation-grounded product explainer. It describes what the current checkout supports, separates local capability from cloud-gated semantic capability, and links the public source that supports each claim. It does not claim adoption, quality, or an endorsement by Tencent or GitHub.
 
-This is a product showcase, not a performance claim. It describes implementation capabilities visible in the public CAS repository and their convergence with published Tencent Agent Memory design principles.
-
-## How the experience works
+## The memory loop
 
 ```text
-Work
-  ↓  capture the lesson that should survive
-Durable memory
-  ↓  distill source-backed project understanding
-Inspectable knowledge
-  ↓  retrieve only the useful context and provenance
-Focused context
-  ↓
-Reuse in the next task, session, or agent
+ WORK SIGNALS
+ conversations · tasks · code · docs · git history
+        │
+        ▼
+ CAPTURE ──► CLASSIFY & SCOPE ──► PERSIST
+ observations       type, importance,       SQLite records + Markdown knowledge
+ learnings          validity, lifecycle     source lineage + locks
+ preferences        project / host-global /
+ context            team-shared boundaries
+        │                                      │
+        └─────────────── FEEDBACK ◄────────────┘
+                            ▲
+                            │
+ REUSE ◄── RECALL & INJECT ◄── HYBRID FIND & RANK ◄── DISTILL / VECTORIZE
+ next task      compact orientation +          lexical / structural /             knowledge pages,
+ next session   focused detail on demand        temporal / entity / semantic        history, code symbols
 ```
 
-1. **Work creates signal.** An agent records a learning, preference, context item, or observation rather than leaving the insight only in a transcript.
-2. **Capture makes it durable.** Memory has explicit scope, importance, lifecycle tier, tags, and validity boundaries.
-3. **Distill creates orientation.** CAS can turn the repository’s own docs and code summaries into ordinary Markdown knowledge pages with source lineage.
-4. **Retrieve stays focused.** Search spans memory, knowledge, indexed code, and history/provenance so an agent can discover the relevant thread before opening detail.
-5. **Reuse begins the next loop ahead.** A compact knowledge index can orient a session; full pages and source evidence are brought in on demand.
+The loop is deliberately selective. CAS can provide a compact session orientation and pinned guidance, then let the agent search and open only the detail needed for the task. A useful outcome, correction, or preference can be captured again, improving the next pass rather than vanishing into a transcript.
 
-## Signature capabilities
+## The memory surfaces, mapped to the loop
 
-### Durable, atomic memory
-
-CAS stores learnings, preferences, context, and observations as individual memory records that survive sessions. They can carry importance, tags, scope, lifecycle tier, and a validity window—enough structure to preserve a useful fact without burying it in a chat log. [Public CAS memory surface](https://github.com/pippenz/cas/blob/main/cas-cli/src/mcp/tools/core/memory.rs) · [memory model](https://github.com/pippenz/cas/blob/main/crates/cas-types/src/entry.rs)
-
-### A wiki made from the project itself
-
-Knowledge distillation writes project understanding as ordinary Markdown pages on disk, indexed with source provenance. That makes the result both useful to an agent and inspectable by a person with normal repository tools. [Architecture: knowledge pages](https://github.com/pippenz/cas/blob/main/cas-cli/docs/ARCHITECTURE.md#knowledge-pages) · [knowledge MCP surface](https://github.com/pippenz/cas/blob/main/cas-cli/src/mcp/tools/core/knowledge.rs)
-
-### Progressive disclosure, not prompt sprawl
-
-CAS uses a compact knowledge index for orientation and exposes searchable, readable pages for the moments when depth is necessary. The principle is simple: discover first, load detail second. [CAS README: Knowledge](https://github.com/pippenz/cas#knowledge) · [knowledge retrieval implementation](https://github.com/pippenz/cas/blob/main/cas-cli/src/mcp/tools/core/knowledge.rs)
-
-### Retrieval with multiple useful paths
-
-CAS search can draw from persistent entries, knowledge, indexed code symbols, graph and temporal signals, and Git history/provenance. The source-code path is tree-sitter symbol indexing plus local BM25—not a claim that the entire codebase is vectorized end-to-end. Optional cloud capability can add semantic ranking where available. [Hybrid search implementation](https://github.com/pippenz/cas/blob/main/cas-cli/src/hybrid_search/hybrid.rs) · [README: search, honestly](https://github.com/pippenz/cas#context-system)
-
-### History that can answer “why?”
-
-Code history and provenance make prior changes part of retrievable working memory: an agent can connect a change, its path, its timing, and available task/session provenance instead of rediscovering intent from scratch. [History store](https://github.com/pippenz/cas/blob/main/crates/cas-store/src/history_store.rs) · [history search surface](https://github.com/pippenz/cas/blob/main/cas-cli/src/mcp/tools/core/search.rs)
-
-### Trust controls built into the artifact
-
-Knowledge is readable Markdown, source-linked, and lockable. A lock is intentionally respected by automated distillation and incoming synchronization, preserving human-authored truth. Memory sharing is optional and scoped; local-first operation remains useful without cloud services. [User-sovereignty lock](https://github.com/pippenz/cas/blob/main/cas-cli/docs/ARCHITECTURE.md#knowledge-pages) · [README: local-first and optional cloud](https://github.com/pippenz/cas#cloud-optional)
-
-## Where this becomes compelling
-
-| Moment | What CAS carries forward | Why it changes the experience |
+| Surface | Enters or supports the loop | What it contributes |
 | --- | --- | --- |
-| **A new coding session** | Architecture, conventions, constraints, and relevant past changes | The agent starts oriented instead of asking the team to repeat the project’s story. |
-| **A recurring incident or review** | Previous diagnosis, guardrails, and a reusable operating pattern | A hard-won workflow can become a durable playbook rather than tribal memory. |
-| **A handoff across agents** | Shared project knowledge plus bounded, optionally scoped memory assets | Work can continue with context while respecting ownership and sharing boundaries. |
-| **A decision with history** | Source pages and searchable commit provenance | The agent can trace what changed and inspect the evidence behind a constraint. |
-| **An unfamiliar repository** | A distilled map of docs and code, with drill-down links | Cold start becomes navigation and verification—not blind rediscovery. |
+| **Working/session context** | Recall & inject | A bounded orientation for the active session; detail stays available through tools rather than being loaded wholesale. |
+| **Durable entries** | Capture → persist | Atomic `learning`, `preference`, `context`, and `observation` records, with importance, tags, lifecycle, and validity controls. |
+| **Pinned/persona guidance** | Recall & inject | Always-active, high-priority guidance for the session start path. |
+| **Scope boundaries** | Classify & scope | Project memory stays with the project; host-global material can be reused locally; team sharing is optional and explicit. |
+| **Distilled knowledge pages** | Distill → persist | A source-linked, human-readable Markdown wiki; pages can be locked against automated overwrite. |
+| **Tasks, rules, and skills** | Recall & inject | Current work, normative constraints, and procedural playbooks that make memory actionable. |
+| **Git history and provenance** | Work signal → recall | Searchable commits and associated provenance help answer what changed and why. |
+| **Source-code symbols** | Work signal → hybrid recall | tree-sitter structural symbols and local BM25 always provide source lookup once indexed; semantic source vectors enrich that path when the cloud capability is live. |
 
-## Convergence with Tencent’s published memory architecture
+## How vectorization works
 
-Tencent’s public materials describe an agent-memory system as more than conversation retention: it should extract reusable assets, organize them in layers, retrieve selectively, preserve governance, and let teams carry experience into new work. CAS converges with these principles in a local-first coding-agent context. This is an **alignment of architecture**, not an endorsement by Tencent and not a claim that either system was built from the other.
+```text
+ A changed knowledge page, history item, or eligible code symbol
+                       │
+                       ▼
+               pending_embedding queue
+                       │  prepare text/chunk
+                       ▼
+          cas-cloud /api/embeddings request
+          model: cas-embed-v1 · default: 1024 dimensions
+                       │  ≤32 inputs/request; batch budget + rate limiter
+                       ▼
+    validate dimension ── reject all-zero vectors ── leave failed work retryable
+                       │
+                       ▼
+       LMDB vector caches with separated namespaces
+       knowledge + history: index/knowledge-vectors
+       source symbols:     index/code-vectors
+                       │  persist {provider, model, dims}
+                       ▼
+      model/dimension change? clear stale cache → re-mark corpus pending → rebuild safely
+                       │
+                       ▼
+ query vector + lexical / structural / temporal / entity candidates
+                       │
+                       ▼
+          hybrid ranking → focused recall → injection → reuse
+```
 
-| Tencent principle — sourced statement | CAS implementation — observed public evidence | Interpretation |
+### Current capability boundary
+
+- **Knowledge and history vectorization are implemented.** Their pending queues drain through the same cloud embedding client and local cache, while the durable pages, history ledger, and local lexical retrieval remain useful offline.
+- **Source-code vectorization is also implemented.** The tree-sitter indexer queues eligible symbols; their identity, path, documentation, signature, and bounded source context form the embedding text. Vectors live in an isolated `index/code-vectors` LMDB environment, separate from knowledge/history.
+- **Semantic retrieval is capability-gated.** It becomes live only with cloud authentication and a non-empty, model-compatible local cache. When those conditions are absent—or a query embedding fails—CAS retains the always-local tree-sitter/BM25 symbol path and does not create an empty vector cache just for lookup.
+- **Hybrid does not mean “vectors only.”** Semantic similarity can join lexical, structural, temporal, and entity signals. Exact symbol names and paths retain their precision advantage; a semantic code result is merged with the pattern channel rather than replacing it.
+
+### Live coverage snapshot: implemented ≠ enabled ≠ indexed ≠ complete
+
+The 9 August live status is deliberately shown as coverage, not as a blanket semantic-search claim:
+
+| State | Live observation | What it means—and does not mean |
 | --- | --- | --- |
-| **Memory is reusable work, not merely chat.** TencentDB Agent Memory describes Chat Memory, Skills, Wiki, and CodeGraph as reusable assets created from conversations, documents, and code. [TencentDB Agent Memory](https://github.com/TencentCloud/TencentDB-Agent-Memory#what-is-tencentdb-agent-memory) | CAS exposes durable memory alongside skills, a distilled knowledge wiki, and indexed code/search surfaces. [CAS README](https://github.com/pippenz/cas#context-system) | Both systems treat accumulated work as assets the next agent can use. |
-| **Layer and compress context.** Tencent describes an L0 conversation → L1 atom → L2 scenario → L3 core/persona refinement path. [TencentDB Agent Memory: technical implementation](https://github.com/TencentCloud/TencentDB-Agent-Memory#technical-implementation) | CAS keeps atomic memories while distilling repository sources into concise, source-linked knowledge pages. [CAS architecture](https://github.com/pippenz/cas/blob/main/cas-cli/docs/ARCHITECTURE.md#knowledge-pages) | CAS’s memory-plus-knowledge split converges on the value of compact, reusable context without claiming identical layers. |
-| **Retrieve on demand, within a context budget.** Tencent says its retrieval uses layered fallback and caps results to avoid overwhelming the context window. [TencentDB Agent Memory: technical implementation](https://github.com/TencentCloud/TencentDB-Agent-Memory#technical-implementation) | CAS provides a compact knowledge index and retrieves full pages when requested; its hybrid search combines local channels and optional semantic capability. [CAS README](https://github.com/pippenz/cas#knowledge) · [hybrid search](https://github.com/pippenz/cas/blob/main/cas-cli/src/hybrid_search/hybrid.rs) | Both favor selective recall over wholesale context injection. |
-| **Make knowledge include documents and code.** Tencent describes Wiki pages and CodeGraph as searchable assets with code symbols and relationships. [TencentDB Agent Memory: knowledge map](https://github.com/TencentCloud/TencentDB-Agent-Memory#-a-knowledge-map-that-reads-both-docs-and-code) | CAS distills documentation to Markdown knowledge and indexes code symbols; search includes code and history paths. [CAS architecture](https://github.com/pippenz/cas/blob/main/cas-cli/docs/ARCHITECTURE.md) · [code search](https://github.com/pippenz/cas/tree/main/crates/cas-search) | In both designs, useful memory reaches beyond the conversation transcript. |
-| **Govern who can reuse memory.** Tencent documents private, team, and restricted visibility plus ownership and access control. [TencentDB Agent Memory: team memory panel](https://github.com/TencentCloud/TencentDB-Agent-Memory#-a-team-memory-panel-controlled-by-humans) | CAS offers scoped memory and optional project/team sharing while protecting locked knowledge from automated overwrite. [CAS README: Cloud](https://github.com/pippenz/cas#cloud-optional) · [lock behavior](https://github.com/pippenz/cas/blob/main/cas-cli/docs/ARCHITECTURE.md#knowledge-pages) | CAS converges on governed reuse, with its own local-first and scope-specific design. |
-| **Preserve durable records and lifecycle.** Tencent’s overview documents memory types, metadata, append-only records, expiration, and memory decay. [Tencent Cloud: Agent Long-Term Memory Feature Overview](https://www.tencentcloud.com/document/product/409/80363) | CAS memory records include type, scope, importance, lifecycle tier, archive state, and optional validity boundaries. [CAS entry model](https://github.com/pippenz/cas/blob/main/crates/cas-types/src/entry.rs) | Both recognize that memory needs lifecycle controls, not just a storage bucket. |
+| **Implemented** | The checkout contains `code_embedding_text` and `embed_pending_code` in `cas-cli/src/cloud/code_embeddings.rs` (lines 22 and 54), plus the source-code hybrid merge path. | CAS has a source-symbol vector pipeline; it is not merely a planned design. |
+| **Authenticated** | `cas auth whoami --json` reported `logged_in: true`. | A cloud embedder can be configured; authentication alone does not prove an individual query will receive a semantic row. |
+| **Indexed** | `cas status --json` reported 362 indexed files, 6,694 stored symbols, no file lag, and the current `85963767` HEAD. | The always-local tree-sitter/BM25 source path is current. |
+| **Vector coverage** | The same status reported 548 vector-eligible symbols: 533 vectorized, 15 pending, 0 failed. | Source vectors exist and the queue is partly caught up; pending work means coverage is not yet 100%. |
+| **Enabled at query time** | The code channel opens only with cloud auth plus an existing non-empty cache whose metadata matches the embedder. | A stale/missing/mismatched cache or an embedding failure falls back to structural/BM25 lookup; status coverage is not substituted for this gate. |
 
-## Architecture in one view
+The MCP code-search query `embedding pending code symbol` supplied a live semantic/paraphrase retrieval receipt, while the exact symbol-and-path receipt came from local source inspection. Those are complementary pieces of evidence: a search result establishes searchable conceptual coverage; the exact source path establishes the current implementation boundary.
 
-```text
-                   ┌───────────────────────────┐
-                   │ Work: tasks, code, docs,  │
-                   │ conversations, outcomes   │
-                   └─────────────┬─────────────┘
-                                 │
-              ┌──────────────────┴──────────────────┐
-              │                                     │
-   ┌──────────▼──────────┐               ┌──────────▼──────────┐
-   │ Atomic memories     │               │ Project knowledge   │
-   │ facts / preferences │               │ Markdown + sources  │
-   │ context / lessons   │               │ human-lockable      │
-   └──────────┬──────────┘               └──────────┬──────────┘
-              └──────────────────┬──────────────────┘
-                                 │
-                    ┌────────────▼────────────┐
-                    │ Retrieve and inspect     │
-                    │ memory · knowledge ·     │
-                    │ code · history/provenance│
-                    └────────────┬────────────┘
-                                 │
-                    ┌────────────▼────────────┐
-                    │ Reuse in the next task   │
-                    └─────────────────────────┘
-```
+## The safety properties behind the visual
 
-The value is the loop, not a single store: facts stay atomic; project understanding becomes readable; retrieval reaches into code and history; and the human can inspect or protect the result.
+| Control | Why it matters in the product experience | Current evidence |
+| --- | --- | --- |
+| **Pending state is visible and retryable** | A failed cloud request does not masquerade as completed learning. | Pending queues retain pages, history items, and symbols until a valid vector is recorded. |
+| **Zero vectors are rejected** | An all-zero vector is not a meaningful similarity signal; storing it would pollute recall. | The cache refuses it and leaves the unit pending. |
+| **Metadata gates comparison** | Vectors from different models or dimensions are not silently mixed. | `{provider, model, dims}` is stored with the cache; a mismatch clears the stale cache and re-arms work. |
+| **Namespaces protect corpus boundaries** | A code query must not return a plausible-looking knowledge or history record. | Knowledge/history share a prefixed namespace; source vectors use a separate LMDB environment and a code prefix. |
+| **Rate and request limits are explicit** | A large backlog cannot turn into an unbounded burst. | The endpoint accepts at most 32 inputs per request; drains honor an invocation budget and shared limiter. |
+| **Local fallback remains real** | Offline or logged-out use remains a useful product, not a broken semantic promise. | BM25/FTS and tree-sitter symbol lookup run locally; absent semantic weight is not treated as a live retrieval channel. |
 
-## Trust and inspectability
+## What the next agent experiences
 
-- **Readable by default.** Distilled knowledge pages are Markdown files with source provenance, not an opaque prompt cache.
-- **Human authority is explicit.** A locked knowledge page is protected from automatic distillation and incoming overwrite. [Implementation evidence](https://github.com/pippenz/cas/blob/main/cas-cli/docs/ARCHITECTURE.md#knowledge-pages)
-- **Recall is bounded and truthful.** CAS describes local BM25/FTS capability separately from optional cloud semantic ranking. [Public capability statement](https://github.com/pippenz/cas#context-system)
-- **Sharing is not compulsory.** Local-first use works without an account; cloud sync and team sharing are optional, with project and preference scope rules documented publicly. [CAS Cloud](https://github.com/pippenz/cas#cloud-optional)
-- **Evidence remains inspectable.** Knowledge source lineage, code symbols, and git-history search leave a route back to the record behind a retrieved answer. [Architecture](https://github.com/pippenz/cas/blob/main/cas-cli/docs/ARCHITECTURE.md) · [history store](https://github.com/pippenz/cas/blob/main/crates/cas-store/src/history_store.rs)
+1. **Start oriented.** Pinned guidance and a compact context/knowledge index present the project’s operating shape without flooding the prompt.
+2. **Ask a focused question.** Search can reach memories, knowledge, tasks, rules, skills, code symbols, and history/provenance.
+3. **Inspect the evidence.** Knowledge stays readable Markdown with source lineage; history and code search link a result back to the record or symbol behind it.
+4. **Act, then improve the loop.** The outcome can become a scoped, durable memory or a distilled page. Retrieval on the next task can now use it.
 
-## Honest boundaries
+## Grounding: convergence, not endorsement
 
-CAS is not presented as a replacement for judgment, source review, or access control. Retrieval can surface relevant material; an agent still needs to inspect the source and apply the correct policy. Source-code retrieval is lexical/symbol-based locally rather than end-to-end vectorized code search; semantic ranking and cross-machine/team delivery are optional cloud capabilities. The local-first experience remains deliberately useful without them. The Tencent comparison is architectural convergence based on public materials—not a benchmark, partnership, endorsement, or claim of identical implementation.
+Tencent’s public Agent Memory materials describe reusable assets drawn from conversations, documents, and code; layered context; selective retrieval; and governed sharing. CAS follows the same broad product direction in a local-first coding-agent system: capture reusable work, keep it inspectable, retrieve it selectively, and scope who can reuse it. This is an architectural comparison only—not a partnership, benchmark, or endorsement by Tencent.
 
-## Sources and provenance
+| Public grounding | What it contributes to this showcase |
+| --- | --- |
+| [TencentDB Agent Memory: reusable assets, Wiki, and CodeGraph](https://github.com/TencentCloud/TencentDB-Agent-Memory#what-is-tencentdb-agent-memory) | A public example of memory extending beyond conversation retention into reusable work assets. |
+| [TencentDB Agent Memory: layered refinement and retrieval](https://github.com/TencentCloud/TencentDB-Agent-Memory#technical-implementation) | Support for the product principle of selective, layered context rather than prompt sprawl. |
+| [Tencent Cloud: Agent Long-Term Memory overview](https://www.tencentcloud.com/document/product/409/80363) | Public discussion of memory types, metadata, isolation, and lifecycle. |
+| [CAS public repository](https://github.com/pippenz/cas) | The public product and source evidence for CAS; links below point to the corresponding implementation areas. |
 
-**Research window:** 8 August 2026. **CAS repository reference:** [`286af839`](https://github.com/pippenz/cas/commit/286af839) (local inspection; public repository links in this report target the `main` branch). No adoption, ROI, quality, or performance figures are asserted.
+## Evidence map
 
-### External sources
+| Claim | Direct public evidence |
+| --- | --- |
+| Durable memory types and scope | [memory MCP surface](https://github.com/pippenz/cas/blob/main/cas-cli/src/mcp/tools/core/memory.rs) · [entry model](https://github.com/pippenz/cas/blob/main/crates/cas-types/src/entry.rs) |
+| Knowledge pages, source lineage, and locks | [knowledge MCP surface](https://github.com/pippenz/cas/blob/main/cas-cli/src/mcp/tools/core/knowledge.rs) · [architecture](https://github.com/pippenz/cas/blob/main/cas-cli/docs/ARCHITECTURE.md#knowledge-pages) |
+| Always-active pinned guidance | [session context builder](https://github.com/pippenz/cas/blob/main/crates/cas-core/src/hooks/context/build_start.rs) |
+| History/provenance | [history search MCP surface](https://github.com/pippenz/cas/blob/main/cas-cli/src/mcp/tools/core/search.rs) · [history store](https://github.com/pippenz/cas/blob/main/crates/cas-store/src/history_store.rs) |
+| Vector client, limits, metadata, and cache | [embeddings implementation](https://github.com/pippenz/cas/blob/main/cas-cli/src/cloud/embeddings.rs) |
+| Knowledge/history drain | [embedding drain](https://github.com/pippenz/cas/blob/main/cas-cli/src/cloud/embed_drain.rs) |
+| Source-code queue and vector drain | [source-code embeddings](https://github.com/pippenz/cas/blob/main/cas-cli/src/cloud/code_embeddings.rs) · [durable code-vector ledger](https://github.com/pippenz/cas/blob/main/crates/cas-store/src/code_vector_store.rs) |
+| Source-code structural + semantic merge | [code hybrid search](https://github.com/pippenz/cas/blob/main/cas-cli/src/hybrid_search/code.rs) · [tree-sitter code crate](https://github.com/pippenz/cas/tree/main/crates/cas-code) |
 
-- [Tencent Cloud — Agent Long-Term Memory Feature Overview](https://www.tencentcloud.com/document/product/409/80363): memory model, types, metadata, isolation, lifecycle examples, and applicable scenarios.
-- [TencentDB Agent Memory — GitHub repository](https://github.com/TencentCloud/TencentDB-Agent-Memory): reusable asset model, layered refinement, on-demand retrieval, Wiki/CodeGraph, and governed sharing statements.
-- [CAS — public GitHub repository](https://github.com/pippenz/cas): product description and implementation evidence linked inline throughout this report.
+## Provenance and review record
 
-### Research commands
+**Inspection date:** 9 August 2026. **Local checkout inspected:** `85963767`. **External research window:** 8–9 August 2026. Public links intentionally point to `main`, so readers can inspect the evolving public implementation.
+
+**Commands and live evidence used:**
 
 ```text
-exa-search --contents https://www.tencentcloud.com/document/product/409/80363
-exa-search --contents https://github.com/TencentCloud/TencentDB-Agent-Memory
-exa-search --contents https://github.com/pippenz/cas
-git rev-parse HEAD
-rg -n "knowledge|memory|history|hybrid" README.md cas-cli/docs/ARCHITECTURE.md cas-cli/src crates/cas-store crates/cas-types
+mcp__cs__search action=code_search query=embed_pending_code include_source=true
+rg -n -i 'pending_embedding|cas-embed-v1|embedding|vector|lmdb|zero vector|tree-sitter|BM25|semantic' crates cas-cli docs README.md
+rg -n 'embed_pending_code|drain_all_pending_with|DEFAULT_EMBEDDING_MODEL|DEFAULT_EMBEDDING_DIMS|MAX_EMBED_INPUTS_PER_REQUEST|VectorNamespace' cas-cli/src/cloud cas-cli/src/hybrid_search cas-cli/src/daemon crates/cas-store
+git show --stat --oneline --all -- cas-cli/src/cloud/code_embeddings.rs
+cas doctor
+cas status --json
+cas auth whoami --json
 ```
 
-**Interpretation discipline:** Tencent statements above are linked to Tencent’s public materials. CAS implementation statements are linked to public CAS documentation or source. The “Interpretation” column states the reasoned comparison and should not be read as a statement by either Tencent or CAS users.
+The doctor/status receipts showed a current source index, 533 vectorized source symbols, 15 pending symbols, no failed symbols, and authenticated cloud status. The code-search call returned indexed symbols from the live CAS environment, while local source inspection found the current source-vector implementation from `cas-733e` plus its race-safety follow-up `cas-c84d`. This report therefore supersedes earlier wording that described source vectors as planned. It still labels semantic retrieval accurately: cloud authentication, a compatible model, and populated cache are required before that channel contributes results.

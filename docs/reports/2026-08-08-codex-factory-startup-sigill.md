@@ -1,8 +1,11 @@
 # Codex factory startup crash: AVX-512 leaked into the CAS release binary
 
-Date: 2026-08-08  
-Status: source fix and release gates committed; `2.54.1` replacement prepared and awaiting final artifact publication proof  
-Severity: high local outage, with potentially broader x86_64 release-portability impact  
+Date: 2026-08-08
+
+Status: source fix and release gates committed; `2.54.1` replacement prepared and awaiting final artifact publication proof
+
+Severity: high local outage, with potentially broader x86_64 release-portability impact
+
 Audience: CAS maintainers, release engineering, and factory/harness owners
 
 ## Impact

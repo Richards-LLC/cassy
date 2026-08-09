@@ -239,7 +239,7 @@ pub struct MigrationStatus {
     pub applied: Vec<AppliedMigration>,
     /// Migrations that are pending
     pub pending: Vec<&'static Migration>,
-    /// Current schema version (highest applied migration ID)
+    /// Current schema version (highest contiguous applied migration ID)
     pub current_version: u32,
     /// Latest available version
     pub latest_version: u32,
@@ -299,6 +299,32 @@ fn get_applied_migrations(conn: &Connection) -> Result<Vec<AppliedMigration>> {
     Ok(migrations)
 }
 
+fn migration_is_detected(conn: &Connection, migration: &Migration) -> bool {
+    migration
+        .detect
+        .and_then(|query| conn.query_row(query, [], |row| row.get::<_, i64>(0)).ok())
+        .is_some_and(|detected| detected > 0)
+}
+
+fn record_detected_migration(conn: &Connection, migration: &Migration) -> Result<bool> {
+    conn.execute(
+        "INSERT OR IGNORE INTO cas_migrations (id, name, subsystem, applied_at)
+         VALUES (?, ?, ?, ?)",
+        params![
+            migration.id,
+            migration.name,
+            migration.subsystem.as_str(),
+            "DETECTED"
+        ],
+    )?;
+    let recorded = conn.query_row(
+        "SELECT COUNT(*) FROM cas_migrations WHERE id = ?1",
+        [migration.id],
+        |row| row.get::<_, i64>(0),
+    )? > 0;
+    Ok(recorded)
+}
+
 /// Check migration status for a CAS directory
 pub fn check_migrations(cas_dir: &Path) -> Result<MigrationStatus> {
     let db_path = cas_dir.join("cas.db");
@@ -319,39 +345,46 @@ pub fn check_migrations(cas_dir: &Path) -> Result<MigrationStatus> {
     // Ensure migrations table exists
     ensure_migrations_table(&conn)?;
 
-    // Get applied migrations
+    let initially_applied = get_applied_migrations(&conn)?;
+    let mut applied_ids: std::collections::HashSet<u32> =
+        initially_applied.iter().map(|migration| migration.id).collect();
+
+    // Schema detection may fill an unrecorded prefix left by databases that
+    // predate the ledger, but it must never jump over a real lower gap. A
+    // later migration can be independently detectable because a current store
+    // initializer created its table; recording it before the lower migration
+    // succeeds would make MAX(id) advertise a schema version the DB does not
+    // actually have.
+    let mut pending = Vec::new();
+    let mut detection_blocked = false;
+    for migration in MIGRATIONS {
+        if applied_ids.contains(&migration.id) {
+            continue;
+        }
+
+        if !detection_blocked && migration_is_detected(&conn, migration) {
+            if record_detected_migration(&conn, migration)? {
+                applied_ids.insert(migration.id);
+                continue;
+            }
+        }
+
+        detection_blocked = true;
+        pending.push(migration);
+    }
+
+    // Re-read after prefix detection so callers see the ledger writes made by
+    // this check. The reported cursor is the applied registry prefix, not the
+    // maximum arbitrary row: stranded higher rows must not hide a lower gap.
     let applied = get_applied_migrations(&conn)?;
-    let applied_ids: std::collections::HashSet<u32> = applied.iter().map(|m| m.id).collect();
-
-    // Find pending migrations
-    // Also check detect queries for migrations that may have been applied
-    // via schema changes before the migration system was in place
-    let pending: Vec<&'static Migration> = MIGRATIONS
+    let applied_ids: std::collections::HashSet<u32> =
+        applied.iter().map(|migration| migration.id).collect();
+    let current_version = MIGRATIONS
         .iter()
-        .filter(|m| {
-            if applied_ids.contains(&m.id) {
-                return false;
-            }
-            // Check if migration is already applied via schema detection
-            if let Some(detect_query) = m.detect {
-                let is_applied: i64 = conn
-                    .query_row(detect_query, [], |row| row.get(0))
-                    .unwrap_or(0);
-                if is_applied > 0 {
-                    // Migration already applied but not recorded - record it now
-                    let _ = conn.execute(
-                        "INSERT OR IGNORE INTO cas_migrations (id, name, subsystem, applied_at)
-                         VALUES (?, ?, ?, ?)",
-                        params![m.id, m.name, m.subsystem.as_str(), "DETECTED"],
-                    );
-                    return false;
-                }
-            }
-            true
-        })
-        .collect();
-
-    let current_version = applied.iter().map(|m| m.id).max().unwrap_or(0);
+        .take_while(|migration| applied_ids.contains(&migration.id))
+        .last()
+        .map(|migration| migration.id)
+        .unwrap_or(0);
     let latest_version = MIGRATIONS.last().map(|m| m.id).unwrap_or(0);
 
     Ok(MigrationStatus {
@@ -387,27 +420,26 @@ pub fn bootstrap_migrations(cas_dir: &Path) -> Result<usize> {
         return Ok(0);
     }
 
-    // Detect and record already-applied migrations
+    // Detect and record only the already-applied prefix. Once a migration is
+    // genuinely absent, later independently detectable schema must wait until
+    // that lower gap is repaired by the ordered runner.
     let mut bootstrapped = 0;
     for migration in MIGRATIONS.iter() {
-        if let Some(detect_query) = migration.detect {
-            let is_applied: i64 = conn
-                .query_row(detect_query, [], |row| row.get(0))
-                .unwrap_or(0);
-
-            if is_applied > 0 {
-                conn.execute(
-                    "INSERT OR IGNORE INTO cas_migrations (id, name, subsystem, applied_at)
-                     VALUES (?, ?, ?, ?)",
-                    params![
-                        migration.id,
-                        migration.name,
-                        migration.subsystem.as_str(),
-                        "BOOTSTRAP",
-                    ],
-                )?;
-                bootstrapped += 1;
-            }
+        if !migration_is_detected(&conn, migration) {
+            break;
+        }
+        let inserted = conn.execute(
+            "INSERT OR IGNORE INTO cas_migrations (id, name, subsystem, applied_at)
+             VALUES (?, ?, ?, ?)",
+            params![
+                migration.id,
+                migration.name,
+                migration.subsystem.as_str(),
+                "BOOTSTRAP",
+            ],
+        )?;
+        if inserted > 0 {
+            bootstrapped += 1;
         }
     }
 
@@ -546,6 +578,42 @@ pub fn run_migrations(cas_dir: &Path, dry_run: bool) -> Result<MigrationResult> 
         // Run each migration in a transaction
         conn.execute("BEGIN IMMEDIATE", [])?;
 
+        // `check_migrations` deliberately stops schema detection at the first
+        // real gap. Once every lower migration has committed, preserve the
+        // existing detection behavior for a later schema that was already
+        // installed out of band instead of replaying its DDL.
+        if migration_is_detected(&conn, migration) {
+            match record_detected_migration(&conn, migration) {
+                Ok(true) => {
+                    conn.execute("COMMIT", [])?;
+                    continue;
+                }
+                Ok(false) => {
+                    conn.execute("ROLLBACK", [])?;
+                    let reason = "schema was detected but its ledger row could not be recorded"
+                        .to_string();
+                    result
+                        .errors
+                        .push((migration.name.to_string(), reason.clone()));
+                    return Err(CasError::MigrationFailed {
+                        name: migration.name.to_string(),
+                        reason,
+                    });
+                }
+                Err(error) => {
+                    conn.execute("ROLLBACK", [])?;
+                    let reason = error.to_string();
+                    result
+                        .errors
+                        .push((migration.name.to_string(), reason.clone()));
+                    return Err(CasError::MigrationFailed {
+                        name: migration.name.to_string(),
+                        reason,
+                    });
+                }
+            }
+        }
+
         match apply_migration(&conn, migration) {
             Ok(()) => {
                 conn.execute("COMMIT", [])?;
@@ -579,7 +647,251 @@ pub fn has_pending_migrations(cas_dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use crate::migration::*;
+    use cas_store::KnowledgeStore;
+    use std::path::PathBuf;
     use tempfile::TempDir;
+
+    fn prepare_v225_knowledge_gap(home: &Path, stranded_later_ledger: bool) -> PathBuf {
+        let project = home.join(if stranded_later_ledger {
+            "stranded-v225"
+        } else {
+            "fresh-v225"
+        });
+        std::fs::create_dir_all(&project).unwrap();
+        crate::store::init_cas_dir(&project).unwrap();
+        let cas_dir = project.join(".cas");
+        let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
+
+        // Recreate the exact knowledge_pages shape shipped at schema v225.
+        // The current store initializer deliberately cannot add columns to an
+        // existing table, while the later m227-m229 tables remain present and
+        // therefore satisfy their detection predicates.
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_knowledge_pages_rel_path;
+             DROP INDEX IF EXISTS idx_knowledge_pages_type;
+             DROP INDEX IF EXISTS idx_knowledge_pages_pending_embedding;
+             DROP TABLE knowledge_pages;
+             CREATE TABLE knowledge_pages (
+                 row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 id TEXT NOT NULL UNIQUE,
+                 page_type TEXT NOT NULL,
+                 title TEXT NOT NULL,
+                 rel_path TEXT NOT NULL,
+                 snippet TEXT NOT NULL DEFAULT '',
+                 locked INTEGER NOT NULL DEFAULT 0,
+                 sources_json TEXT NOT NULL DEFAULT '[]',
+                 created_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL,
+                 pending_embedding INTEGER NOT NULL DEFAULT 1
+             );
+             CREATE UNIQUE INDEX idx_knowledge_pages_rel_path
+                 ON knowledge_pages(rel_path);
+             CREATE INDEX idx_knowledge_pages_type
+                 ON knowledge_pages(page_type);
+             CREATE INDEX idx_knowledge_pages_pending_embedding
+                 ON knowledge_pages(updated_at) WHERE pending_embedding = 1;
+             INSERT INTO knowledge_pages
+                 (id, page_type, title, rel_path, created_at, updated_at)
+             VALUES ('cas-kn-v225', 'architecture', 'Legacy page',
+                     'architecture/legacy.md', '2026-01-01T00:00:00Z',
+                     '2026-01-01T00:00:00Z');
+             DELETE FROM cas_migrations WHERE id >= 226;",
+        )
+        .unwrap();
+
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM cas_migrations", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            173,
+            "released v225 ledger fixture must retain the exact row count"
+        );
+        assert_eq!(
+            conn.query_row("SELECT MAX(id) FROM cas_migrations", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            225
+        );
+
+        if stranded_later_ledger {
+            for id in [227, 228, 229] {
+                let migration = MIGRATIONS
+                    .iter()
+                    .find(|migration| migration.id == id)
+                    .unwrap();
+                conn.execute(
+                    "INSERT INTO cas_migrations (id, name, subsystem, applied_at)
+                     VALUES (?1, ?2, ?3, 'DETECTED')",
+                    params![id, migration.name, migration.subsystem.as_str()],
+                )
+                .unwrap();
+            }
+        }
+        drop(conn);
+
+        // Production store opening installs only IF-NOT-EXISTS objects. It
+        // leaves the legacy primary table untouched, reproducing the failing
+        // `knowledge list` projection before the migration runner repairs it.
+        let store = cas_store::SqliteKnowledgeStore::open(&cas_dir).unwrap();
+        let error = store
+            .list_pages()
+            .expect_err("legacy v225 projection must lack attribution columns");
+        assert!(error.to_string().contains("no such column: origin"));
+        drop(store);
+
+        cas_dir
+    }
+
+    fn assert_repaired_v225_knowledge_gap(cas_dir: &Path) {
+        let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
+        for id in [226, 227, 228, 229] {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM cas_migrations WHERE id = ?1",
+                    [id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+                1,
+                "migration {id} must be recorded exactly once"
+            );
+        }
+        assert_ne!(
+            conn.query_row(
+                "SELECT applied_at FROM cas_migrations WHERE id = 226",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "DETECTED",
+            "the missing lower migration must actually apply"
+        );
+        drop(conn);
+
+        let store = cas_store::SqliteKnowledgeStore::open(cas_dir).unwrap();
+        let pages = store
+            .list_pages()
+            .expect("production knowledge listing must work after repair");
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].origin, cas_store::KnowledgePageOrigin::Local);
+        assert_eq!(pages[0].origin_project_id, None);
+
+        let status = check_migrations(cas_dir).unwrap();
+        assert_eq!(status.current_version, 229);
+        assert!(status.pending.is_empty());
+        let second = run_migrations(cas_dir, false).unwrap();
+        assert_eq!(second.applied_count, 0, "repeated open must be idempotent");
+    }
+
+    #[test]
+    fn detected_later_migrations_wait_for_missing_lower_migration() {
+        crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
+            let cas_dir = prepare_v225_knowledge_gap(home, false);
+
+            let status = check_migrations(&cas_dir).unwrap();
+            assert_eq!(
+                status.current_version, 225,
+                "a detected later schema must not advance the contiguous cursor"
+            );
+            assert_eq!(
+                status
+                    .pending
+                    .iter()
+                    .map(|migration| migration.id)
+                    .collect::<Vec<_>>(),
+                vec![226, 227, 228, 229],
+                "once m226 is missing, later unrecorded migrations must wait behind it"
+            );
+
+            let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM cas_migrations WHERE id > 225",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+                0,
+                "status detection must not strand later ledger rows past a gap"
+            );
+            drop(conn);
+
+            let first = run_migrations(&cas_dir, false).unwrap();
+            assert_eq!(first.applied_count, 1);
+            assert_eq!(first.applied_names, ["knowledge_pages_add_attribution"]);
+
+            let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
+            for id in [227, 228, 229] {
+                assert_eq!(
+                    conn.query_row(
+                        "SELECT applied_at FROM cas_migrations WHERE id = ?1",
+                        [id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .unwrap(),
+                    "DETECTED",
+                    "later migration {id} should retain schema detection after m226 succeeds"
+                );
+            }
+            drop(conn);
+
+            assert_repaired_v225_knowledge_gap(&cas_dir);
+        });
+    }
+
+    #[test]
+    fn bootstrap_detection_stops_at_first_unapplied_migration() {
+        crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
+            let cas_dir = prepare_v225_knowledge_gap(home, false);
+            let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
+            conn.execute("DELETE FROM cas_migrations", []).unwrap();
+            drop(conn);
+
+            assert_eq!(bootstrap_migrations(&cas_dir).unwrap(), 173);
+            let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
+            assert_eq!(
+                conn.query_row("SELECT MAX(id) FROM cas_migrations", [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                225
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM cas_migrations WHERE id > 225",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+                0
+            );
+        });
+    }
+
+    #[test]
+    fn stranded_later_ledger_repairs_missing_lower_migration() {
+        crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
+            let cas_dir = prepare_v225_knowledge_gap(home, true);
+
+            let status = check_migrations(&cas_dir).unwrap();
+            assert_eq!(
+                status.current_version, 225,
+                "max ledger id 229 must not hide the missing m226 prefix entry"
+            );
+            assert_eq!(
+                status
+                    .pending
+                    .iter()
+                    .map(|migration| migration.id)
+                    .collect::<Vec<_>>(),
+                vec![226]
+            );
+
+            let first = run_migrations(&cas_dir, false).unwrap();
+            assert_eq!(first.applied_count, 1);
+            assert_eq!(first.applied_names, ["knowledge_pages_add_attribution"]);
+            assert_repaired_v225_knowledge_gap(&cas_dir);
+        });
+    }
 
     #[test]
     fn test_migrations_table_creation() {
@@ -956,6 +1268,20 @@ mod tests {
             1,
             "m215 sealed-handoff table must survive repeated migration runs"
         );
+        assert!(
+            cas_store::shared_db::column_exists(&conn, "commit_links", "link_method"),
+            "m225 must wait for m143 to create commit_links, then add link_method"
+        );
+        assert!(!matches!(
+            conn.query_row(
+                "SELECT applied_at FROM cas_migrations WHERE id = 225",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+            .as_str(),
+            "BOOTSTRAP" | "DETECTED"
+        ));
     }
 
     /// cas-cbf1: the knowledge store lands on a DB that predates it — the

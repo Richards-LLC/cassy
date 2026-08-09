@@ -173,6 +173,10 @@ pub struct CloudSyncArgs {
     #[arg(long)]
     pub dry_run: bool,
 
+    /// Ignore pull watermarks and re-pull all data.
+    #[arg(long)]
+    pub full: bool,
+
     /// Allow re-homing existing cloud entities (passed through to push).
     ///
     /// See `cas cloud push --rehome` for details.
@@ -1872,6 +1876,8 @@ fn execute_pull(args: &CloudPullArgs, cli: &Cli, cas_root: &Path) -> anyhow::Res
         // team-pull watermark).
         if args.full {
             queue.delete_metadata("last_pull_at")?;
+            queue.delete_metadata("last_knowledge_pull_at")?;
+            queue.delete_metadata("knowledge_empty_pull_streak")?;
             if let Some(team_id) = config.active_team_id() {
                 if let Some(project_id) = crate::cloud::get_project_canonical_id() {
                     queue.delete_metadata(&format!("last_team_pull_at_{team_id}_{project_id}"))?;
@@ -2140,7 +2146,7 @@ pub fn execute_sync(args: &CloudSyncArgs, cli: &Cli, cas_root: &Path) -> anyhow:
             &CloudPullArgs {
                 entries_only: false,
                 tasks_only: false,
-                full: false,
+                full: args.full,
             },
             cli,
             cas_root,

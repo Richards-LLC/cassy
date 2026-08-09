@@ -4334,6 +4334,146 @@ enabled = false
     );
 }
 
+/// cas-0447 (GH #187) pinning regression for the cas-3894 behavior already on
+/// main: with halt armed while the caller still owns an InProgress task, an
+/// already-merged commit receipt closes successfully without a task-start
+/// round trip. This is deliberately an end-to-end receipt/ancestry fixture,
+/// not only a unit assertion on the ownership predicate.
+#[tokio::test]
+async fn test_0447_halted_inprogress_with_merged_receipt_closes_without_restart() {
+    use std::process::Command;
+
+    let (temp, service) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    let repo = temp.path();
+    let git = |args: &[&str]| -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("seed.txt"), "seed\n").unwrap();
+    git(&["add", "seed.txt"]);
+    git(&["commit", "-q", "-m", "seed"]);
+    git(&["checkout", "-q", "-b", "epic/cas-0447"]);
+    git(&["checkout", "-q", "-b", "factory/test-agent"]);
+
+    let agent_store = open_agent_store(&cas_dir).expect("agent store");
+    {
+        let mut agent = agent_store
+            .list(None)
+            .expect("list agents")
+            .into_iter()
+            .find(|agent| agent.name == "test-agent")
+            .expect("test agent exists");
+        agent.role = AgentRole::Worker;
+        agent_store.update(&agent).expect("mark worker");
+    }
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        "[verification]\nenabled = true\n",
+    )
+    .expect("enable verification");
+    let task_store = open_task_store(&cas_dir).expect("task store");
+
+    let epic_id = extract_task_id(&extract_text(
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                task_type: "epic".to_string(),
+                ..simple_task_req("cas-0447 epic")
+            }))
+            .await
+            .expect("create epic"),
+    ))
+    .expect("epic id")
+    .to_string();
+    {
+        let mut epic = task_store.get(&epic_id).expect("epic");
+        epic.branch = Some("epic/cas-0447".to_string());
+        task_store.update(&epic).expect("set epic branch");
+    }
+    let task_id = extract_task_id(&extract_text(
+        service
+            .cas_task_create(Parameters(TaskCreateRequest {
+                epic: Some(epic_id),
+                ..simple_task_req("cas-0447 finishing task")
+            }))
+            .await
+            .expect("create task"),
+    ))
+    .expect("task id")
+    .to_string();
+    service
+        .cas_task_start(Parameters(IdRequest {
+            id: task_id.clone(),
+        }))
+        .await
+        .expect("start task");
+
+    std::fs::write(repo.join("worker.txt"), "finished work\n").unwrap();
+    git(&["add", "worker.txt"]);
+    git(&["commit", "-q", "-m", &format!("{task_id}: worker change")]);
+    let receipt = git(&["rev-parse", "HEAD"]);
+    open_verification_store(&cas_dir)
+        .expect("verification store")
+        .add(&Verification::approved(
+            "ver-cas-0447".to_string(),
+            task_id.clone(),
+            "approved before merge".to_string(),
+        ))
+        .expect("approve task");
+
+    // Merge while the task projection remains InProgress; this is the GH #187
+    // finishing-worker shape, where only bookkeeping remains.
+    git(&["checkout", "-q", "epic/cas-0447"]);
+    git(&["merge", "--no-ff", "-q", "factory/test-agent"]);
+    git(&["checkout", "-q", "factory/test-agent"]);
+
+    {
+        let mut agent = agent_store
+            .list(None)
+            .unwrap()
+            .into_iter()
+            .find(|agent| agent.name == "test-agent")
+            .unwrap();
+        agent
+            .metadata
+            .insert("halt_task_work".to_string(), "1".to_string());
+        agent_store.update(&agent).expect("arm halt");
+    }
+
+    let merged = extract_text(
+        service
+            .cas_task_close(Parameters(TaskCloseRequest {
+                id: task_id.clone(),
+                reason: Some("finished and merged".to_string()),
+                bypass_code_review: None,
+                code_review_findings: None,
+                search_manifest: None,
+                commit_receipt: Some(receipt),
+            }))
+            .await
+            .expect("merged receipt close must bypass halt"),
+    );
+    assert!(merged.contains("Closed task:"), "close response: {merged}");
+    assert_eq!(task_store.get(&task_id).unwrap().status, TaskStatus::Closed);
+}
+
 /// cas-3894 AC2 (safety property): the halt-exemption is ownership-bound.
 /// A halted worker must still be refused when attempting to close a task it
 /// does NOT own — the exemption never lets a halted worker act on anyone

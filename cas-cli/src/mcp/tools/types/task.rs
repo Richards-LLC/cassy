@@ -16,6 +16,21 @@ use crate::mcp::tools::types::defaults::{
 pub const EXECUTION_NOTE_VALUES: &[&str] =
     &["test-first", "characterization-first", "additive-only"];
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TaskStartRequest {
+    /// Task ID
+    #[schemars(description = "Task ID to start")]
+    pub id: String,
+
+    /// Return a context-affordable response containing this task's notes but
+    /// no parent-epic or sibling-task payload.
+    #[schemars(
+        description = "Return a size-bounded start response with this task's notes only; omit parent-epic and sibling-task context"
+    )]
+    #[serde(default)]
+    pub brief: Option<bool>,
+}
+
 /// Validate and normalize an incoming `execution_note` parameter. Returns
 /// - `Ok(None)` if the input is absent or an empty string (clear/omitted)
 /// - `Ok(Some(v))` for an accepted enum value

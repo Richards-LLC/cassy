@@ -140,6 +140,15 @@ pub struct TaskRequest {
     #[serde(default)]
     pub id: Option<String>,
 
+    /// Context-affordable task-start response. When true for `action=start`,
+    /// return only bounded notes from the task itself and omit sibling/epic
+    /// context.
+    #[schemars(
+        description = "For start: return a size-bounded response with own-task notes only, omitting sibling and epic context"
+    )]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub brief: Option<bool>,
+
     /// Title (for create)
     #[schemars(description = "Task title for create")]
     #[serde(default)]

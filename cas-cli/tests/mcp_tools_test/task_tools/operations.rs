@@ -1,10 +1,92 @@
 use crate::support::*;
 use cas::mcp::CasCore;
 use cas::mcp::tools::*;
-use cas::store::{open_agent_store, open_event_store};
+use cas::store::{open_agent_store, open_event_store, open_task_store};
 use cas::types::EventType;
 use rmcp::handler::server::wrapper::Parameters;
 use rusqlite::Connection;
+
+/// cas-0447 (GH #187): a context-poor worker needs a bounded start response
+/// that preserves its own task notes without inheriting an epic's potentially
+/// enormous sibling-note payload.
+#[tokio::test]
+async fn test_0447_brief_task_start_returns_only_own_notes_and_is_size_bounded() {
+    let (temp, service) = setup_cas();
+
+    let epic = service
+        .cas_task_create(Parameters(TaskCreateRequest {
+            task_type: "epic".to_string(),
+            ..basic_create("Brief-start epic", None)
+        }))
+        .await
+        .expect("create epic");
+    let epic_id = extract_task_id(&extract_text(epic))
+        .expect("epic id")
+        .to_string();
+
+    let sibling_marker = "SIBLING-NOTES-MUST-NOT-LEAK";
+    service
+        .cas_task_create(Parameters(TaskCreateRequest {
+            notes: Some(format!("{sibling_marker}{}", "x".repeat(128_000))),
+            epic: Some(epic_id.clone()),
+            ..basic_create("Large-note sibling", None)
+        }))
+        .await
+        .expect("create sibling");
+
+    let own_marker = "OWN-TASK-NOTES-MUST-SURVIVE";
+    let target = service
+        .cas_task_create(Parameters(TaskCreateRequest {
+            notes: Some(own_marker.to_string()),
+            epic: Some(epic_id.clone()),
+            ..basic_create("Brief-start target", None)
+        }))
+        .await
+        .expect("create target");
+    let target_id = extract_task_id(&extract_text(target))
+        .expect("target id")
+        .to_string();
+
+    // Exercise the public unified MCP boundary, including JSON bool
+    // deserialization and TaskRequest -> TaskStartRequest forwarding.
+    let service = CasService::new(service, None);
+    let start: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "start",
+        "id": target_id,
+        "brief": true,
+    }))
+    .expect("deserialize brief start request");
+    let response = service
+        .task(Parameters(start))
+        .await
+        .expect("brief start");
+    let text = extract_text(response);
+
+    assert!(text.contains(own_marker), "own notes missing: {text}");
+    assert!(
+        !text.contains(sibling_marker),
+        "brief start leaked sibling notes: {} bytes",
+        text.len()
+    );
+    assert!(
+        !text.contains("SIBLING TASK NOTES") && !text.contains("EPIC OWNERSHIP"),
+        "brief start leaked epic context: {text}"
+    );
+    assert!(
+        text.len() < 8_192,
+        "brief start response must stay context-affordable; got {} bytes",
+        text.len()
+    );
+    assert_eq!(
+        open_task_store(&temp.path().join(".cas"))
+            .expect("task store")
+            .get(&epic_id)
+            .expect("epic")
+            .status,
+        cas::types::TaskStatus::InProgress,
+        "brief output must not change normal start lifecycle effects"
+    );
+}
 
 #[tokio::test]
 async fn test_task_show() {

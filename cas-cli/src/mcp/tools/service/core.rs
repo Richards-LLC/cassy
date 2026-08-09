@@ -305,13 +305,16 @@ impl CasService {
     }
 
     pub(super) async fn task_start(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
-        use crate::mcp::tools::IdRequest;
-        let inner_req = IdRequest {
+        use crate::mcp::tools::TaskStartRequest;
+        let inner_req = TaskStartRequest {
             id: req
                 .id
                 .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required for start — pass task ID as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=start id=cas-abc1"))?,
+            brief: req.brief,
         };
-        self.inner.cas_task_start(Parameters(inner_req)).await
+        self.inner
+            .cas_task_start_with_options(Parameters(inner_req))
+            .await
     }
 
     pub(super) async fn task_close(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {

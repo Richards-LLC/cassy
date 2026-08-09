@@ -14,12 +14,17 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::ui::factory::{DaemonMessage, SessionManager};
 
+mod auth;
 mod connector;
 mod events;
 mod identity;
 mod runtime;
 mod server;
 
+pub use auth::{
+    AuthContext, AuthStore, DeviceCredential, DeviceSession, PairingExchange, PairingInvitation,
+    PublicJwk, Scope, WsTicket, required_scope,
+};
 pub use connector::DaemonConnector;
 pub use events::{MachineEvent, MachineEventBus, MachineEventKind};
 pub(crate) use identity::ensure_private_dir;

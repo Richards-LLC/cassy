@@ -10,7 +10,8 @@ use tower::ServiceExt;
 
 use super::*;
 use crate::ui::factory::{
-    DaemonMessage, PROTOCOL_VERSION, PaneInfo, PaneKind, SessionState, daemon_capabilities,
+    ClientMessage, DaemonMessage, PROTOCOL_VERSION, PaneInfo, PaneKind, SessionState,
+    daemon_capabilities,
 };
 
 #[test]
@@ -376,8 +377,9 @@ fn h2_pair_02_pairing_is_bound_persistent_single_use_and_fragment_only() {
     use chrono::{Duration, Utc};
 
     let temp = tempfile::tempdir().unwrap();
+    let state_dir = temp.path().join("hub");
     let now = Utc::now();
-    let auth = AuthStore::open(temp.path(), "machine-test").unwrap();
+    let auth = AuthStore::open(&state_dir, "machine-test").unwrap();
     let invitation = auth
         .mint_pairing(
             "https://controller.example",
@@ -398,7 +400,7 @@ fn h2_pair_02_pairing_is_bound_persistent_single_use_and_fragment_only() {
     assert!(!credential.credential.is_empty());
     assert!(auth.exchange_pairing(exchange, now).is_err());
 
-    let reopened = AuthStore::open(temp.path(), "machine-test").unwrap();
+    let reopened = AuthStore::open(&state_dir, "machine-test").unwrap();
     assert_eq!(reopened.list_devices().unwrap().len(), 1);
 
     let expired = reopened
@@ -426,7 +428,7 @@ async fn h2_ws_04_ticket_is_five_minute_bound_single_use_under_race() {
     use chrono::{Duration, Utc};
 
     let temp = tempfile::tempdir().unwrap();
-    let auth = AuthStore::open(temp.path(), "machine-test").unwrap();
+    let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
     let context = AuthContext::test_fixture(
         "device-1",
         "https://controller.example",
@@ -462,7 +464,10 @@ async fn h2_ws_04_ticket_is_five_minute_bound_single_use_under_race() {
             )
         })
     );
-    assert_eq!(usize::from(one.unwrap().is_ok()) + usize::from(two.unwrap().is_ok()), 1);
+    assert_eq!(
+        usize::from(one.unwrap().is_ok()) + usize::from(two.unwrap().is_ok()),
+        1
+    );
 
     let expired = auth
         .issue_ws_ticket(&context, "factory-a", "/v1/sessions/factory-a/attach", now)

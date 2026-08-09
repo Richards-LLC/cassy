@@ -46,6 +46,7 @@ pub mod harness_policy;
 pub mod history;
 pub mod hooks;
 pub mod hybrid_search;
+pub mod hub;
 pub(crate) mod internal_llm;
 pub mod knowledge;
 pub mod logging;

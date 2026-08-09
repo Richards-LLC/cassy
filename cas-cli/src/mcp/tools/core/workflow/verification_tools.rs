@@ -366,6 +366,47 @@ impl CasCore {
             }
         }
 
+        // Supervisor-direct calls can be retried after a lost response or a
+        // process restart. The exact dispatch remains the authorization
+        // boundary: only an identical verdict from the same registered
+        // supervisor is idempotent. A conflicting retry fails closed.
+        if supervisor_direct {
+            verification.set_agent(caller_id.clone());
+            verification.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+            verification.dispatch_id = Some(requested_dispatch_id.clone());
+            verification.issuer_agent_id = Some(caller_id.clone());
+            if let Some(existing) = cas_store::get_verification_for_dispatch(
+                &self.cas_root,
+                &requested_dispatch_id,
+            )
+            .map_err(|e| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!(
+                    "Failed to inspect exact verification dispatch result: {e}"
+                )),
+                data: None,
+            })? {
+                if supervisor_verification_retry_matches(&existing, &verification) {
+                    return Ok(Self::success(format!(
+                        "{} Verification {} for task {} - {}: {} (idempotent retry)",
+                        verification_status_emoji(existing.status),
+                        existing.id,
+                        req.task_id,
+                        task.title,
+                        existing.summary
+                    )));
+                }
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(concat!(
+                        "Supervisor-direct verification rejected: the exact dispatch was ",
+                        "already resolved with a different verdict."
+                    )),
+                    data: None,
+                });
+            }
+        }
+
         // Atomically persist the verdict, resolve any active exact-task
         // dispatch, and clear that task's pending transition. If any step
         // fails, all authority and lifecycle writes roll back.
@@ -470,10 +511,8 @@ impl CasCore {
                         data: None,
                     })?
             } else {
-                verification.set_agent(caller_id.clone());
-                verification.provenance = cas_types::VerificationProvenance::SupervisorDirect;
-                verification.dispatch_id = Some(requested_dispatch_id.clone());
-                verification.issuer_agent_id = Some(caller_id.clone());
+                // Supervisor provenance is populated before the transaction
+                // so an identical retry can be compared to the durable row.
                 cas_store::get_verification_dispatch_with_conn(&tx, &requested_dispatch_id)
                     .map_err(|_| McpError {
                         code: ErrorCode::INVALID_PARAMS,
@@ -556,6 +595,28 @@ impl CasCore {
                     )),
                     data: None,
                 })?;
+            } else if dispatch.receipt_id.is_none()
+                && dispatch.delivery_transaction_id.is_none()
+                && task.status == TaskStatus::PendingSupervisorReview
+                && !approved_delivery
+            {
+                // A task-only supervisor-review rejection returns the work to
+                // Blocked for amendment. Approval remains in the review queue
+                // with its pending flag cleared so the supervisor can close
+                // or merge it using the durable verdict.
+                tx.execute(
+                    "UPDATE tasks
+                     SET status = 'blocked', pending_verification = 0, updated_at = ?2
+                     WHERE id = ?1 AND status = 'pending_supervisor_review'",
+                    rusqlite::params![req.task_id, chrono::Utc::now().to_rfc3339()],
+                )
+                .map_err(|e| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!(
+                        "Failed to project supervisor-review rejection: {e}"
+                    )),
+                    data: None,
+                })?;
             }
 
             if task.pending_verification {
@@ -611,12 +672,7 @@ impl CasCore {
             let _ = event_store.record(&event);
         }
 
-        let status_emoji = match verification.status {
-            VerificationStatus::Approved => "✅",
-            VerificationStatus::Rejected => "❌",
-            VerificationStatus::Error => "⚠️",
-            VerificationStatus::Skipped => "⏭️",
-        };
+        let status_emoji = verification_status_emoji(verification.status);
 
         Ok(Self::success(format!(
             "{} Verification {} for task {} - {}: {}",
@@ -820,4 +876,33 @@ impl CasCore {
     // ========================================================================
     // Worktree Operations
     // ========================================================================
+}
+
+fn verification_status_emoji(status: VerificationStatus) -> &'static str {
+    match status {
+        VerificationStatus::Approved => "✅",
+        VerificationStatus::Rejected => "❌",
+        VerificationStatus::Error => "⚠️",
+        VerificationStatus::Skipped => "⏭️",
+    }
+}
+
+fn supervisor_verification_retry_matches(
+    existing: &Verification,
+    candidate: &Verification,
+) -> bool {
+    existing.task_id == candidate.task_id
+        && existing.agent_id == candidate.agent_id
+        && existing.verification_type == candidate.verification_type
+        && existing.provenance == candidate.provenance
+        && existing.capability_id == candidate.capability_id
+        && existing.dispatch_id == candidate.dispatch_id
+        && existing.issuer_agent_id == candidate.issuer_agent_id
+        && existing.status == candidate.status
+        && existing.confidence == candidate.confidence
+        && existing.summary == candidate.summary
+        && existing.files_reviewed == candidate.files_reviewed
+        && existing.duration_ms == candidate.duration_ms
+        && serde_json::to_value(&existing.issues).ok()
+            == serde_json::to_value(&candidate.issues).ok()
 }

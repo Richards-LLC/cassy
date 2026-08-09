@@ -925,6 +925,92 @@ pub fn create_verification_dispatch_bound(
     )
 }
 
+/// Atomically bind a supervisor-review proof boundary and project the task
+/// into `PendingSupervisorReview`.
+///
+/// The dispatch is task-only (no fabricated delivery receipt or verifier
+/// capability). Identical retries reuse the one active dispatch. A task can
+/// never become review-pending without the exact identifier a registered
+/// supervisor must resolve.
+pub fn pend_task_for_supervisor_review_with_dispatch(
+    cas_dir: &Path,
+    task: &Task,
+    expected_status: TaskStatus,
+    requester_agent_id: &str,
+    owner_agent_id: &str,
+    deadline_at: DateTime<Utc>,
+) -> Result<VerificationDispatch> {
+    if task.status != TaskStatus::PendingSupervisorReview || !task.pending_verification {
+        return Err(StoreError::Parse(
+            "supervisor-review transition requires a pending task projection".to_string(),
+        ));
+    }
+    SqliteTaskStore::open(cas_dir)?.init()?;
+    SqliteEventStore::open(cas_dir)?;
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let conn = store.conn.lock().map_err(lock_err)?;
+    let tx = ImmediateTx::new(&conn)?;
+    let dispatch = create_verification_dispatch_bound_with_conn(
+        &tx,
+        &task.id,
+        requester_agent_id,
+        owner_agent_id,
+        &VerificationProofBoundary::task(),
+        deadline_at,
+        false,
+    )?;
+    let now = Utc::now();
+    let deliverables = serde_json::to_string(&task.deliverables)
+        .map_err(|error| StoreError::Parse(format!("invalid task deliverables: {error}")))?;
+    let changed = tx.execute(
+        "UPDATE tasks
+         SET status = ?1, pending_verification = 1, notes = ?2,
+             close_reason = ?3, deliverables = ?4, updated_at = ?5
+         WHERE id = ?6 AND status = ?7",
+        params![
+            TaskStatus::PendingSupervisorReview.to_string(),
+            task.notes,
+            task.close_reason,
+            deliverables,
+            now.to_rfc3339(),
+            task.id,
+            expected_status.to_string(),
+        ],
+    )?;
+    if changed != 1 {
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT status FROM tasks WHERE id = ?1",
+                params![task.id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if current.as_deref() != Some("pending_supervisor_review") {
+            return Err(current
+                .map(|status| {
+                    StoreError::Parse(format!(
+                        "supervisor-review transition expected {expected_status}, found {status}"
+                    ))
+                })
+                .unwrap_or_else(|| StoreError::TaskNotFound(task.id.clone())));
+        }
+    } else {
+        let event = Event::new(
+            EventType::TaskBlocked,
+            EventEntityType::Task,
+            &task.id,
+            format!("Task pending supervisor review: {}", task.title),
+        );
+        record_event_with_conn(&tx, &event)?;
+        // Recording tables are optional in lightweight/test stores; lifecycle
+        // recording is observational and must not invalidate the atomic task
+        // + dispatch transition.
+        let _ = capture_task_event(&tx, RecordingEventType::TaskBlocked, &task.id, None);
+    }
+    tx.commit()?;
+    Ok(dispatch)
+}
+
 /// Create an exact dispatch on a caller-owned SQLite transaction.
 ///
 /// This is used to make delivery receipt, transaction, and proof-boundary
@@ -3627,6 +3713,42 @@ mod tests {
                 .unwrap()
                 .state,
             VerificationDispatchState::Pending
+        );
+    }
+
+    #[test]
+    fn supervisor_review_transition_rolls_back_dispatch_on_status_mismatch() {
+        let (_store, dir) = create_test_store();
+        let task_store = SqliteTaskStore::open(dir.path()).expect("task store");
+        task_store.init().expect("task schema");
+        let task = Task::new(
+            "cas-supervisor-review-race".to_string(),
+            "atomic pending review".to_string(),
+        );
+        task_store.add(&task).expect("task");
+
+        let mut pending = task.clone();
+        pending.status = TaskStatus::PendingSupervisorReview;
+        pending.pending_verification = true;
+        assert!(
+            pend_task_for_supervisor_review_with_dispatch(
+                dir.path(),
+                &pending,
+                TaskStatus::InProgress,
+                "worker",
+                "supervisor",
+                Utc::now() + Duration::minutes(10),
+            )
+            .is_err(),
+            "a stale status expectation must reject the whole transition"
+        );
+
+        assert_eq!(task_store.get(&task.id).unwrap().status, TaskStatus::Open);
+        assert!(
+            get_latest_verification_dispatch(dir.path(), &task.id)
+                .expect("dispatch lookup")
+                .is_none(),
+            "failed transition must not leave an orphan dispatch"
         );
     }
 

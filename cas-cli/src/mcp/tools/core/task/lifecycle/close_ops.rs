@@ -3034,6 +3034,7 @@ impl CasCore {
                     let mut task_to_pend = task.clone();
                     let now = chrono::Utc::now();
                     task_to_pend.status = TaskStatus::PendingSupervisorReview;
+                    task_to_pend.pending_verification = true;
                     task_to_pend.updated_at = now;
                     task_to_pend.deliverables.pre_close_hook = declared_hook_evidence.clone();
                     // Persist the close reason so the supervisor can see it.
@@ -3049,16 +3050,29 @@ impl CasCore {
                             task_to_pend.notes = format!("{}\n\n{}", task_to_pend.notes, note);
                         }
                     }
-                    if let Err(e) = task_store.update(&task_to_pend) {
-                        tracing::warn!(
-                            task_id = %req.id,
-                            error = %e,
-                            "failed to transition task to pending_supervisor_review"
-                        );
-                        return Ok(Self::tool_error(format!(
-                            "Internal error: failed to update task status: {e}"
-                        )));
-                    }
+                    let requester_id = self.get_agent_id()?;
+                    let owner_id = self.verification_dispatch_owner(&requester_id)?;
+                    let dispatch = match cas_store::pend_task_for_supervisor_review_with_dispatch(
+                        &self.cas_root,
+                        &task_to_pend,
+                        task.status,
+                        &requester_id,
+                        &owner_id,
+                        chrono::Utc::now()
+                            + chrono::Duration::seconds(VERIFICATION_DISPATCH_TIMEOUT_SECS),
+                    ) {
+                        Ok(dispatch) => dispatch,
+                        Err(e) => {
+                            tracing::warn!(
+                                task_id = %req.id,
+                                error = %e,
+                                "failed to atomically bind supervisor-review dispatch"
+                            );
+                            return Ok(Self::tool_error(format!(
+                                "Internal error: failed to create the exact supervisor-review dispatch and pending task transition: {e}"
+                            )));
+                        }
+                    };
 
                     // Emit activity event so the supervisor TUI shows the
                     // new review item immediately.
@@ -3085,12 +3099,15 @@ impl CasCore {
                         "Task {} queued for supervisor review\n\n\
                         Lightweight structural lint passed (<1s). The full \
                         cas-code-review skill will be dispatched by the supervisor.\n\n\
-                        Status: pending_supervisor_review\n\n\
+                        Status: pending_supervisor_review\n\
+                        Dispatch: {}\n\n\
+                        After reviewing, the registered supervisor records the exact verdict with:\n\
+                        `mcp__cas__verification action=add task_id={} dispatch_id={} status=approved summary=\"...\"`\n\n\
                         You can now pick up the next task immediately. \
                         The supervisor will either:\n\
                         - Approve → closes + merges your branch\n\
                         - Reject → sends P0 findings back via coordination message",
-                        req.id
+                        req.id, dispatch.id, req.id, dispatch.id
                     )));
                 }
             }

@@ -472,14 +472,20 @@ async fn execute_sync_hits_each_pull_endpoint_exactly_once_when_team_configured(
     // runs. ENV_LOCK held inside the guard serializes parallel tests.
     let _env = CasRootGuard::set(&cas_root);
 
-    let args = CloudSyncArgs { dry_run: false, rehome: false };
+    let args = CloudSyncArgs {
+        dry_run: false,
+        rehome: false,
+        full: false,
+    };
     let cli = make_cli_json();
     let cas_root_owned = cas_root.clone();
-    let result =
-        tokio::task::spawn_blocking(move || execute_sync(&args, &cli, &cas_root_owned))
-            .await
-            .unwrap();
-    assert!(result.is_ok(), "execute_sync must return Ok; got {result:?}");
+    let result = tokio::task::spawn_blocking(move || execute_sync(&args, &cli, &cas_root_owned))
+        .await
+        .unwrap();
+    assert!(
+        result.is_ok(),
+        "execute_sync must return Ok; got {result:?}"
+    );
 
     // Rows-land assertion (per supervisor: don't infer landing from
     // wiremock count alone — read the store directly).
@@ -555,14 +561,79 @@ async fn execute_sync_does_not_hit_team_pull_when_no_team_configured() {
 
     let _env = CasRootGuard::set(&cas_root);
 
-    let args = CloudSyncArgs { dry_run: false, rehome: false };
+    let args = CloudSyncArgs {
+        dry_run: false,
+        rehome: false,
+        full: false,
+    };
     let cli = make_cli_json();
     let cas_root_owned = cas_root.clone();
-    let result =
-        tokio::task::spawn_blocking(move || execute_sync(&args, &cli, &cas_root_owned))
-            .await
-            .unwrap();
-    assert!(result.is_ok(), "execute_sync must return Ok; got {result:?}");
+    let result = tokio::task::spawn_blocking(move || execute_sync(&args, &cli, &cas_root_owned))
+        .await
+        .unwrap();
+    assert!(
+        result.is_ok(),
+        "execute_sync must return Ok; got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn execute_sync_full_ignores_personal_team_and_knowledge_watermarks() {
+    let server = MockServer::start().await;
+    mount_full_sync_mocks(&server, "alice-shared-via-full-sync").await;
+
+    let tmp = TempDir::new().unwrap();
+    let cas_root = tmp.path().to_path_buf();
+    init_all_stores_at(&cas_root);
+    let queue = SyncQueue::open(&cas_root).unwrap();
+    queue.init().unwrap();
+    make_cloud_config(server.uri())
+        .save_to_cas_dir(&cas_root)
+        .unwrap();
+
+    let _env = CasRootGuard::set(&cas_root);
+    let project_id = get_project_canonical_id().expect("full sync project id");
+    queue
+        .set_metadata("last_pull_at", "2026-08-09T17:00:00Z")
+        .unwrap();
+    queue
+        .set_metadata("last_knowledge_pull_at", "2026-08-09T17:00:00Z")
+        .unwrap();
+    queue
+        .set_metadata("knowledge_empty_pull_streak", "4")
+        .unwrap();
+    queue
+        .set_metadata(
+            &format!("last_team_pull_at_{TEST_TEAM}_{project_id}"),
+            "2026-08-09T17:00:00Z",
+        )
+        .unwrap();
+
+    let args = CloudSyncArgs {
+        dry_run: false,
+        rehome: false,
+        full: true,
+    };
+    let cli = make_cli_json();
+    let cas_root_owned = cas_root.clone();
+    tokio::task::spawn_blocking(move || execute_sync(&args, &cli, &cas_root_owned))
+        .await
+        .unwrap()
+        .expect("full sync must succeed");
+
+    let requests = server.received_requests().await.unwrap();
+    let pull_requests: Vec<_> = requests
+        .iter()
+        .filter(|request| request.method.as_str() == "GET")
+        .collect();
+    assert_eq!(pull_requests.len(), 3, "personal, team, and knowledge pull");
+    for request in pull_requests {
+        assert!(
+            request.url.query_pairs().all(|(key, _)| key != "since"),
+            "--full must remove the current-project watermark before request: {}",
+            request.url
+        );
+    }
 }
 
 /// Locks in: `execute_pull` (standalone `cas cloud pull` command) must also

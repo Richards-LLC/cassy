@@ -1,0 +1,156 @@
+//! Regression coverage for GH #192 / cas-ed01.
+//!
+//! A first pull can legitimately return an empty envelope when a new machine
+//! initially resolves the wrong canonical project id. That empty response must
+//! not create a watermark, otherwise correcting the id still sends `since=` and
+//! permanently skips the historical backfill.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use assert_cmd::Command;
+use cas::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, SyncQueue};
+use cas::store::{
+    open_commit_link_store, open_event_store, open_file_change_store, open_prompt_store,
+    open_rule_store_local, open_skill_store_local, open_spec_store, open_store_local,
+    open_task_store_local,
+};
+use cas::types::{Entry, EntryType, Scope};
+use wiremock::matchers::{method, path, query_param, query_param_is_missing};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+#[allow(deprecated)]
+fn cas_cmd() -> Command {
+    Command::cargo_bin("cas").unwrap()
+}
+
+#[test]
+fn cloud_sync_help_exposes_full_repull_escape_hatch() {
+    cas_cmd()
+        .args(["cloud", "sync", "--help"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "Ignore pull watermarks and re-pull all data",
+        ));
+}
+
+#[tokio::test]
+async fn empty_first_pull_then_corrected_bucket_backfills_without_metadata_surgery() {
+    let server = MockServer::start().await;
+    let project_id = cas::cloud::get_project_canonical_id()
+        .expect("test must run inside a project with a canonical id");
+
+    let entry = Entry {
+        id: "recovered-after-id-fix".to_string(),
+        scope: Scope::Project,
+        entry_type: EntryType::Context,
+        content: "historical row from the corrected project bucket".to_string(),
+        ..Default::default()
+    };
+    let mut entry_json = serde_json::to_value(entry).unwrap();
+    entry_json["project_id"] = serde_json::json!(project_id);
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let responder_calls = Arc::clone(&calls);
+    Mock::given(method("GET"))
+        .and(path("/api/sync/pull"))
+        .and(query_param("project_id", project_id.as_str()))
+        .and(query_param_is_missing("since"))
+        .respond_with(move |_: &wiremock::Request| {
+            let first_empty_bucket = responder_calls.fetch_add(1, Ordering::SeqCst) == 0;
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": if first_empty_bucket { Vec::new() } else { vec![entry_json.clone()] },
+                "tasks": [], "rules": [], "skills": [],
+                "specs": [], "events": [], "prompts": [],
+                "file_changes": [], "commit_links": [],
+                "pulled_at": if first_empty_bucket {
+                    "2026-08-09T18:00:00Z"
+                } else {
+                    "2026-08-09T18:05:00Z"
+                },
+            }))
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/sync/pull"))
+        .and(query_param("project_id", project_id.as_str()))
+        .and(query_param("since", "2026-08-09T18:05:00Z"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": [], "tasks": [], "rules": [], "skills": [],
+            "specs": [], "events": [], "prompts": [],
+            "file_changes": [], "commit_links": [],
+            "pulled_at": "2026-08-09T18:10:00Z",
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cas_root = tmp.path().join(".cas");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    let store = open_store_local(&cas_root).unwrap();
+    let task_store = open_task_store_local(&cas_root).unwrap();
+    let rule_store = open_rule_store_local(&cas_root).unwrap();
+    let skill_store = open_skill_store_local(&cas_root).unwrap();
+    let spec_store = open_spec_store(&cas_root).unwrap();
+    let event_store = open_event_store(&cas_root).unwrap();
+    let prompt_store = open_prompt_store(&cas_root).unwrap();
+    let file_change_store = open_file_change_store(&cas_root).unwrap();
+    let commit_link_store = open_commit_link_store(&cas_root).unwrap();
+    let queue = Arc::new(SyncQueue::open(&cas_root).unwrap());
+    queue.init().unwrap();
+
+    let syncer = CloudSyncer::new(
+        Arc::clone(&queue),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".to_string()),
+            ..Default::default()
+        },
+        CloudSyncerConfig::default(),
+    );
+    let pull = || {
+        syncer.pull(
+            store.as_ref(),
+            task_store.as_ref(),
+            rule_store.as_ref(),
+            skill_store.as_ref(),
+            spec_store.as_ref(),
+            event_store.as_ref(),
+            prompt_store.as_ref(),
+            file_change_store.as_ref(),
+            commit_link_store.as_ref(),
+        )
+    };
+
+    let empty = pull().expect("wrong project bucket returns a valid empty envelope");
+    assert_eq!(empty.total_pulled(), 0);
+    assert_eq!(
+        queue.get_metadata("last_pull_at").unwrap(),
+        None,
+        "an empty first pull must not poison the next request with since="
+    );
+
+    let recovered = pull().expect("corrected project bucket must be fully re-pulled");
+    assert_eq!(recovered.pulled_entries, 1);
+    assert_eq!(
+        queue.get_metadata("last_pull_at").unwrap().as_deref(),
+        Some("2026-08-09T18:05:00Z"),
+        "the first rows-applied pull establishes the incremental watermark"
+    );
+    assert_eq!(
+        store.get("recovered-after-id-fix").unwrap().content,
+        "historical row from the corrected project bucket"
+    );
+
+    let healthy_incremental = pull().expect("healthy incremental empty pull succeeds");
+    assert_eq!(healthy_incremental.total_pulled(), 0);
+    assert_eq!(
+        queue.get_metadata("last_pull_at").unwrap().as_deref(),
+        Some("2026-08-09T18:10:00Z"),
+        "once a project has a successful watermark, empty incremental pulls still advance it"
+    );
+}

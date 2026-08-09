@@ -3,9 +3,10 @@ use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use futures_util::SinkExt;
+use futures_util::{SinkExt, StreamExt};
 use tokio::sync::Notify;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tower::ServiceExt;
 
 use super::*;
@@ -430,12 +431,8 @@ async fn h2_ws_04_ticket_is_five_minute_bound_single_use_under_race() {
 
     let temp = tempfile::tempdir().unwrap();
     let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
-    let context = AuthContext::test_fixture(
-        "device-1",
-        "https://controller.example",
-        Scope::default_read_only(),
-    );
     let now = Utc::now();
+    let (_, context) = paired_context(&auth, now, Scope::default_read_only());
     let ticket = auth
         .issue_ws_ticket(&context, "factory-a", "/v1/sessions/factory-a/attach", now)
         .unwrap();
@@ -482,6 +479,249 @@ async fn h2_ws_04_ticket_is_five_minute_bound_single_use_under_race() {
             now + Duration::minutes(6),
         )
         .is_err()
+    );
+}
+
+#[test]
+fn h2_pair_02_independent_store_instances_reload_and_serialize_mutations() {
+    use chrono::Utc;
+    use std::sync::Barrier;
+
+    let temp = tempfile::tempdir().unwrap();
+    let state_dir = temp.path().join("hub");
+    let first = AuthStore::open(&state_dir, "machine-test").unwrap();
+    let second = AuthStore::open(&state_dir, "machine-test").unwrap();
+    let barrier = Arc::new(Barrier::new(2));
+    let now = Utc::now();
+
+    let first_barrier = barrier.clone();
+    let first_writer = std::thread::spawn(move || {
+        first_barrier.wait();
+        first
+            .mint_pairing(
+                "https://controller.example",
+                Scope::default_read_only(),
+                now,
+            )
+            .unwrap()
+    });
+    let second_writer = std::thread::spawn(move || {
+        barrier.wait();
+        second
+            .mint_pairing(
+                "https://controller.example",
+                Scope::default_read_only(),
+                now,
+            )
+            .unwrap()
+    });
+    let invitations = [first_writer.join().unwrap(), second_writer.join().unwrap()];
+
+    let running_hub = AuthStore::open(&state_dir, "machine-test").unwrap();
+    for invitation in invitations {
+        let exchange = PairingExchange::test_fixture(
+            invitation.token,
+            "machine-test",
+            "https://controller.example",
+            Scope::default_read_only(),
+        );
+        running_hub.exchange_pairing(exchange, now).unwrap();
+    }
+    assert_eq!(running_hub.list_devices().unwrap().len(), 2);
+}
+
+#[test]
+fn h2_scope_05_missing_device_context_is_fail_closed() {
+    use chrono::Utc;
+
+    let temp = tempfile::tempdir().unwrap();
+    let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
+    let context = AuthContext::test_fixture(
+        "missing-device",
+        "https://controller.example",
+        Scope::default_read_only(),
+    );
+    assert!(
+        auth.issue_ws_ticket(
+            &context,
+            "factory-a",
+            "/v1/sessions/factory-a/attach",
+            Utc::now(),
+        )
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn h2_ws_04_cli_revocation_disconnects_a_running_hub_socket() {
+    use chrono::Utc;
+
+    let temp = tempfile::tempdir().unwrap();
+    let state_dir = temp.path().join("hub");
+    let running_hub_auth = AuthStore::open(&state_dir, "machine-test").unwrap();
+    let cli_auth = AuthStore::open(&state_dir, "machine-test").unwrap();
+    let now = Utc::now();
+
+    let signing = p256::ecdsa::SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+    let invitation = cli_auth
+        .mint_pairing(
+            "https://controller.example",
+            Scope::default_read_only(),
+            now,
+        )
+        .unwrap();
+    let mut exchange = PairingExchange::test_fixture(
+        invitation.token,
+        "machine-test",
+        "https://controller.example",
+        Scope::default_read_only(),
+    );
+    exchange.public_key_jwk = public_jwk(&signing);
+    let credential = running_hub_auth.exchange_pairing(exchange, now).unwrap();
+    let proof = sign_dpop(
+        &signing,
+        &credential.credential,
+        "GET",
+        "/v1/bootstrap",
+        now,
+        "running-hub-context",
+    );
+    let context = running_hub_auth
+        .authenticate_dpop(
+            &format!("DPoP {}", credential.credential),
+            &proof,
+            "https://controller.example",
+            "GET",
+            "/v1/bootstrap",
+            now,
+        )
+        .unwrap();
+
+    let daemon_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let daemon_port = daemon_listener.local_addr().unwrap().port();
+    let daemon = tokio::spawn(async move {
+        let (stream, _) = daemon_listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let welcome = DaemonMessage::Welcome {
+            session_name: "factory-a".into(),
+            state: SessionState {
+                focused_pane: None,
+                panes: vec![],
+                epic_id: None,
+                epic_title: None,
+                cols: 120,
+                rows: 40,
+            },
+            scrollback: None,
+            protocol_version: PROTOCOL_VERSION,
+            capabilities: daemon_capabilities(),
+        };
+        socket
+            .send(WsMessage::Binary(serde_json::to_vec(&welcome).unwrap()))
+            .await
+            .unwrap();
+        futures_util::future::pending::<()>().await;
+    });
+
+    let mut session = fixture_session("factory-a");
+    session.ws_port = Some(daemon_port);
+    let events = MachineEventBus::new(16);
+    let state = HubState::new(
+        SessionCatalog::new(RecordingReadModel::with_sessions(vec![session])),
+        Arc::new(PreAuthAuthorizer),
+        MachineIdentity {
+            id: "machine-test".into(),
+        },
+        DaemonConnector::new(SessionMultiplexer::new(8), events.clone()),
+        events,
+    )
+    .with_auth(running_hub_auth.clone());
+    let hub_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hub_address = hub_listener.local_addr().unwrap();
+    let hub = tokio::spawn(async move {
+        axum::serve(hub_listener, router(state)).await.unwrap();
+    });
+
+    let endpoint = "/v1/sessions/factory-a/attach";
+    let ticket = running_hub_auth
+        .issue_ws_ticket(&context, "factory-a", endpoint, now)
+        .unwrap();
+    let mut request = format!("ws://{hub_address}{endpoint}?ticket={}", ticket.ticket)
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("origin", "https://controller.example".parse().unwrap());
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    assert!(matches!(
+        socket.next().await,
+        Some(Ok(WsMessage::Binary(_)))
+    ));
+
+    cli_auth
+        .revoke_device(&credential.device_id, Utc::now())
+        .unwrap();
+    let disconnected = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match socket.next().await {
+                Some(Ok(WsMessage::Close(_))) | None | Some(Err(_)) => break,
+                Some(Ok(_)) => continue,
+            }
+        }
+    })
+    .await;
+    assert!(
+        disconnected.is_ok(),
+        "a CLI revocation must close an already-upgraded socket in the running hub"
+    );
+    daemon.abort();
+    hub.abort();
+}
+
+#[test]
+fn h2_audit_06_independent_process_writers_append_complete_records() {
+    use chrono::Utc;
+    use std::sync::Barrier;
+
+    let temp = tempfile::tempdir().unwrap();
+    let state_dir = temp.path().join("hub");
+    let first = AuthStore::open(&state_dir, "machine-test").unwrap();
+    let second = AuthStore::open(&state_dir, "machine-test").unwrap();
+    let barrier = Arc::new(Barrier::new(2));
+    let write = |store: AuthStore, barrier: Arc<Barrier>, action: &'static str| {
+        std::thread::spawn(move || {
+            barrier.wait();
+            for _ in 0..64 {
+                store
+                    .audit(None, "allowed", action, None, None, Utc::now())
+                    .unwrap();
+            }
+        })
+    };
+    let one = write(first, barrier.clone(), "first-writer");
+    let two = write(second, barrier, "second-writer");
+    one.join().unwrap();
+    two.join().unwrap();
+
+    let audit = std::fs::read_to_string(state_dir.join("audit.jsonl")).unwrap();
+    let records = audit
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 128);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record["action"] == "first-writer")
+            .count(),
+        64
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record["action"] == "second-writer")
+            .count(),
+        64
     );
 }
 
@@ -655,6 +895,47 @@ fn public_jwk(signing: &p256::ecdsa::SigningKey) -> PublicJwk {
         x: URL_SAFE_NO_PAD.encode(point.x().unwrap()),
         y: URL_SAFE_NO_PAD.encode(point.y().unwrap()),
     }
+}
+
+fn paired_context(
+    auth: &AuthStore,
+    now: chrono::DateTime<chrono::Utc>,
+    scopes: std::collections::BTreeSet<Scope>,
+) -> (DeviceCredential, AuthContext) {
+    use p256::ecdsa::SigningKey;
+    use p256::elliptic_curve::rand_core::OsRng;
+
+    let signing = SigningKey::random(&mut OsRng);
+    let invitation = auth
+        .mint_pairing("https://controller.example", scopes.clone(), now)
+        .unwrap();
+    let mut exchange = PairingExchange::test_fixture(
+        invitation.token,
+        "machine-test",
+        "https://controller.example",
+        scopes,
+    );
+    exchange.public_key_jwk = public_jwk(&signing);
+    let credential = auth.exchange_pairing(exchange, now).unwrap();
+    let proof = sign_dpop(
+        &signing,
+        &credential.credential,
+        "GET",
+        "/v1/test-context",
+        now,
+        &uuid::Uuid::new_v4().to_string(),
+    );
+    let context = auth
+        .authenticate_dpop(
+            &format!("DPoP {}", credential.credential),
+            &proof,
+            "https://controller.example",
+            "GET",
+            "/v1/test-context",
+            now,
+        )
+        .unwrap();
+    (credential, context)
 }
 
 fn sign_dpop(

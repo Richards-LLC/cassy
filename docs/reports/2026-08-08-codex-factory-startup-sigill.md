@@ -2,7 +2,7 @@
 
 Date: 2026-08-08
 
-Status: source fix and release gates committed; `2.54.1` replacement prepared and awaiting final artifact publication proof
+Status: resolved; `2.54.1` replacement published, installed, and runtime-verified on the affected host
 
 Severity: high local outage, with potentially broader x86_64 release-portability impact
 
@@ -26,6 +26,12 @@ The observed diagnostic window ran from the first retained failed launch at
 2026-08-08 22:07:32 EDT: 17 minutes 35 seconds. That is not the full incident
 duration; the exact onset and external blast radius were not established.
 
+The immutable `v2.54.1` replacement was published at 2026-08-08 23:06:56
+EDT. Its downloaded x86_64 artifact was installed on the same AVX-512-absent
+host, where a fresh Codex factory reached **READY** and **SYSTEM READY** and
+remained registered and attachable. The `v2.54.0` tag and assets were not
+changed.
+
 ## Overview
 
 | Field | Detail |
@@ -40,7 +46,10 @@ duration; the exact onset and external blast radius were not established.
 | Crash instruction | `vcvttsd2usi %xmm0,%rcx`, AVX-512 encoded, at installed executable offset `0x2f24543` |
 | Local mitigation | Always pass Cargo's supported target triple to Zig, rebuild CAS, and replace the installed binary |
 | Local resolution | Rebuilt binary installed at 2026-08-08 22:08:03 EDT; fresh factory startup reached `READY` and `SYSTEM READY` and remained attachable |
-| Upstream status | Fix, regression tests, fail-closed target policy, ISA gate, `2.54.1` version bump, and release-note draft are committed on `factory/hv-sigill-release`; publication proof remains pending |
+| Replacement release | Annotated tag object `c004f2d2be9f7e916fdc578a649d085cac8c7de0` peels to release commit `22fe07c46fb9aec159142956d8d45689157552b6`; GitHub Actions run `31291108866` completed successfully |
+| Published assets | Linux x86_64 tarball SHA-256 `645177c6b379a7cf37c44f16dd537c0520954dec257b18b83d929ef1d2c01126`; macOS aarch64 tarball SHA-256 `58ca6eaa1075301dee6a36262c87d543a3fbc133564ee380864602c2eb68033d` |
+| Installed replacement | `cas 2.54.1 (22fe07c 2026-08-09)`; executable SHA-256 `1bc9691f36dce045c38e7c80f0cae3bfe355e5bbd9fb30caf1fe2708f03d5216` |
+| Upstream status | `v2.54.1` is published and verified; `v2.54.0` remains annotated tag object `6adfbfd39ccec06a1b96d170b0d93939ca996f8f` peeling to `c2150616fbcabcbff8ece84ed43d5de7dca24847`, with its original assets intact |
 
 ## Timeline
 
@@ -60,6 +69,11 @@ were emitted by CAS.
 | 22:07:32 | Release rebuild completed | `cargo build --release -p cas --bin cas` completed successfully; the binary size was 53,480,352 bytes. |
 | 22:08:03 | Local binary replaced | The rebuilt binary was installed to `/home/pippenz/.local/bin/cas`; source and installed SHA-256 were both `c7ebb290c4b38c83df23a37f032154d3ebcb1fded44f04e68e713ecc3955b3dc`. |
 | Final verification | End-to-end recovery proved | A fresh installed-binary launch reached `READY` and `SYSTEM READY`; `cas list --json` reported `is_running: true` and `can_attach: true`. The attached TUI was intentionally ended by a timeout and the test factory was cleaned up. |
+| 22:48:29 | Replacement tag created | Annotated `v2.54.1` tag object `c004f2d2` was created at exact `origin/main` commit `22fe07c4` and pushed without modifying `v2.54.0`. |
+| 23:02:16 | Official Linux artifact passed ISA audit | Release run `31291108866` reported `evex_avx512=absent` for bundled `libghostty_vt.a`, SHA-256 `4c0bb9443df240720dc10d163a9e01dc8ccb22ffc13ef7c2cd0c9d0a48ba7b26`. |
+| 23:06:56 | Replacement release published | Both expected release assets were attached after successful Linux x86_64 and macOS aarch64 jobs. Fresh downloads matched GitHub's published SHA-256 digests. |
+| About 23:08 | Published Linux binary installed | The downloaded archive contained only `cas` and `LICENSE`. The installed executable reported `cas 2.54.1 (22fe07c 2026-08-09)` and matched the extracted executable byte-for-byte. |
+| 23:09–23:10 | Published factory proof passed | On the same host with no `avx512*` CPU flag, a fresh factory and a bounded reattach both displayed `READY` and `SYSTEM READY`; the final registry state was `is_running=true`, `socket_exists=true`, and `can_attach=true`. |
 
 ## Root cause
 
@@ -116,6 +130,10 @@ distributable target can silently fall back to the build host.
 | Prior native-build logic | Returned no Zig target for a matching host/target | It exposed native release artifacts to build-host CPU feature selection. |
 | Portable rebuild opcode scan | No `vcvttsd2usi`; no `zmm[0-9]` | The explicit baseline removed the observed AVX-512 signatures from the Ghostty archive. |
 | Rebuilt installed CAS factory launch | `READY`, `SYSTEM READY`, running and attachable | The target-pinning change removed the user-visible failure on the same machine and Codex version. |
+| Official release archive audit | `evex_avx512=absent`; archive SHA-256 `4c0bb944…` | The release runner executed the deterministic guard against the bundled Ghostty archive before packaging. |
+| Freshly downloaded release assets | Both local SHA-256 values matched GitHub's published digests | The runtime proof used the public release bytes, not a local pre-release build. |
+| Installed published executable | `cas 2.54.1 (22fe07c)`; SHA-256 `1bc9691f…`; no `vcvttsd2usi` mnemonic | The installed executable is the extracted public artifact and lacks the incident instruction. |
+| Published CAS factory launch | `READY`, `SYSTEM READY`, running and attachable | The public replacement survives the original startup path on the affected AVX-512-absent host. |
 
 The correlation with Codex `0.147.0` is a trigger condition, not the root
 cause. CAS preflight reported version drift from the validated `0.146.0`
@@ -138,12 +156,12 @@ runtime baseline regardless of which valid terminal output Codex produces.
 
 ### Falsification criteria
 
-The diagnosis would need to be reopened if an explicitly targeted rebuild
-either still contained the same reachable AVX-512 instruction or reproduced a
-`SIGILL` at the same offset on this host. Neither occurred in the local proof.
-The broader release-portability claim still needs CI reproduction on official
-release infrastructure because the exact release runner CPU was inferred from
-the artifact behavior rather than inspected directly.
+The diagnosis would need to be reopened if an explicitly targeted build
+contained the same reachable AVX-512 instruction or the published replacement
+reproduced `SIGILL` on this host. Neither occurred. The official release runner
+also passed the bundled-archive ISA gate before packaging. The exact release
+runner CPU remains uninspected, and the number of other affected users remains
+unknown; neither uncertainty changes the artifact-level or same-host result.
 
 ## Why this was not caught
 
@@ -175,20 +193,23 @@ CPU baseline.
 | Done locally | Pass a mapped `-Dtarget` to Zig for every supported Cargo target, including native builds. | CAS maintainers | Inspect `build.rs` invocation; build emits the supported mapped target. |
 | Done locally | Extract target mapping into testable Rust code and add native/cross/unsupported mapping tests. | CAS maintainers | `cargo test -p ghostty_vt_sys`: 3 passed, 0 failed. |
 | Done locally | Rebuild and install a portable CAS binary on the affected host. | Incident operator | `cmp` passed; source and installed SHA-256 match; fresh factory became running and attachable. |
-| In progress | Publish the committed `2.54.1` replacement without changing `2.54.0`, then install the published artifact. | CAS maintainers / release engineering | Published checksum; installed `cas --version` identifies the fixed release. |
+| Done | Publish the committed `2.54.1` replacement without changing `2.54.0`, then install the published artifact. | CAS maintainers / release engineering | Tag `c004f2d2` peels to `22fe07c4`; both asset digests match; installed `cas --version` identifies `2.54.1`. |
 | Done | Add an x86_64 bundled-Ghostty ISA audit that rejects AVX-512. | Release engineering | Deterministic self-test accepts a baseline fixture, rejects seeded incident-matching `vcvttsd2usi`, fails closed on invalid input, and accepts the built `libghostty_vt.a`. |
-| Required before release | Run the released factory binary on baseline x86_64 hardware or a VM with AVX-512 masked. | Release engineering | Current stable Codex reaches `SYSTEM READY`, remains registered, and is attachable. |
-| Required before release | Refresh Codex harness conformance for the current supported Codex CLI instead of relying only on the prior validated pin. | Codex harness owner | `cas codex preflight --json` no longer reports the supported installed version as stale. |
+| Done | Run the released factory binary on baseline x86_64 hardware or a VM with AVX-512 masked. | Release engineering | Current Codex reached `READY` and `SYSTEM READY`; final registry state is running and attachable on a host with no `avx512*` CPU flag. |
+| Open follow-up | Refresh Codex harness conformance for the current supported Codex CLI instead of relying only on the prior validated pin. | Codex harness owner | `cas codex preflight --json` no longer reports the supported installed version as stale. The current preflight warning is non-blocking (`factory_blocked=false`) and the published runtime proof passed. |
 | Follow-up | Improve abrupt-daemon-death diagnostics to surface exit signal/core-dump guidance before reporting only “session not running.” | Factory runtime owner | A controlled signal-4 test reports the signal and a diagnostic command without requiring manual strace discovery. |
 | Done | Make unknown Cargo targets fail closed instead of falling back to native optimization. | Build/release owners | Policy is encoded in `build_support.rs`; regression test checks the target name and supported-target diagnostic. |
 
 ## Provenance
 
-This report was produced from direct inspection and local execution in
-`/home/pippenz/Petrastella/cas-src` at source commit
-`c2150616fbcabcbff8ece84ed43d5de7dca24847`. The portable build and release-gate
-changes are committed at `3d82f3f4`; `2.54.1` release preparation is committed at
-`38bc04d6`. It contains no external web-derived claims.
+This report was produced from direct inspection, GitHub release metadata, and
+local execution in `/home/pippenz/Petrastella/cas-src`. The affected release
+commit is `c2150616fbcabcbff8ece84ed43d5de7dca24847`; the portable build and
+release-gate changes are committed at `3d82f3f4`; `2.54.1` release preparation
+is committed at `38bc04d6`; and the published release commit is
+`22fe07c46fb9aec159142956d8d45689157552b6`. Release evidence was collected from
+GitHub Actions run `31291108866` and the `v2.54.1` release between 22:48 and
+23:10 EDT on 2026-08-08. It contains no external web-derived claims.
 
 Primary evidence and commands:
 
@@ -211,12 +232,23 @@ sha256sum target/release/cas /home/pippenz/.local/bin/cas
 cas codex --new -n codex-installed-proof-final
 cas list --json
 git diff --check
+git ls-remote --tags origin refs/tags/v2.54.0 refs/tags/v2.54.0^{} refs/tags/v2.54.1 refs/tags/v2.54.1^{}
+gh run view 31291108866 --repo pippenz/cas --json status,conclusion,headBranch,headSha,jobs
+gh release view v2.54.1 --repo pippenz/cas --json tagName,isDraft,isPrerelease,publishedAt,assets
+gh release download v2.54.1 --repo pippenz/cas --dir <temporary-directory>
+sha256sum <temporary-directory>/*.tar.gz
+tar -tzf <temporary-directory>/cas-x86_64-unknown-linux-gnu.tar.gz
+install -m 0755 <extracted-published-cas> /home/pippenz/.local/bin/cas
+objdump -d --insn-width=15 /home/pippenz/.local/bin/cas | rg '\bvcvttsd2usi\b'
+cas codex --new -n codex-v2541-published-proof --strict-cli --no-phone-home
+cas codex --attach -n codex-v2541-published-proof
+cas codex agents --session codex-v2541-published-proof --json
 ```
 
 Fresh verification receipts retained in the incident session:
 
 ```text
-ghostty_vt_sys tests: 2 passed; 0 failed
+ghostty_vt_sys tests: 3 passed; 0 failed
 portable archive scan: avx512=absent
 release build: exit 0
 binary comparison: identical
@@ -224,9 +256,36 @@ SHA-256 (both): c7ebb290c4b38c83df23a37f032154d3ebcb1fded44f04e68e713ecc3955b3dc
 factory proof: READY; SYSTEM READY
 registry proof: is_running=true; can_attach=true
 attached-launch timeout: exit 124 (expected test bound, not a crash)
+
+published tag: c004f2d2be9f7e916fdc578a649d085cac8c7de0 -> 22fe07c46fb9aec159142956d8d45689157552b6
+release workflow: 31291108866, completed/success
+official Ghostty archive: evex_avx512=absent; sha256=4c0bb9443df240720dc10d163a9e01dc8ccb22ffc13ef7c2cd0c9d0a48ba7b26
+published Linux tarball: sha256=645177c6b379a7cf37c44f16dd537c0520954dec257b18b83d929ef1d2c01126
+published macOS tarball: sha256=58ca6eaa1075301dee6a36262c87d543a3fbc133564ee380864602c2eb68033d
+installed published binary: cas 2.54.1 (22fe07c 2026-08-09)
+installed published binary: sha256=1bc9691f36dce045c38e7c80f0cae3bfe355e5bbd9fb30caf1fe2708f03d5216
+installed incident mnemonic scan: vcvttsd2usi=absent
+host baseline: avx=true; avx2=true; avx512*=false
+published factory proof: READY; SYSTEM READY
+published registry proof: is_running=true; socket_exists=true; can_attach=true
+published bounded reattach: READY; SYSTEM READY; exit 124 (expected timeout bound)
+tag absence/main pin check: exit 0; HEAD=origin/main=22fe07c46fb9aec159142956d8d45689157552b6
+annotated tag creation and push: exit 0; tag object=c004f2d2be9f7e916fdc578a649d085cac8c7de0
+release metadata and two-asset download: exit 0
+downloaded digest/archive-content verification: exit 0
+published binary install/version/checksum/cmp: exit 0
+installed incident-mnemonic absence guard: exit 0
+isolated-worktree launch attempt: exit 1 before spawn (expected missing-project-init precondition)
+canonical published factory launch: READY; SYSTEM READY; bounded detach exit 124
+post-detach registry/agent inspection: exit 0
 ```
 
-The core dump remains stored by systemd as recorded by `coredumpctl`; temporary
-test factories were cleaned up. An unrelated pre-existing factory was left
-running. The exact release-runner CPU and the number of other affected users
-remain unknown and are deliberately not inferred as settled facts.
+The first published-runtime command ran from the isolated release worktree and
+exited 1 before spawning because that directory was not an
+initialized CAS project. The proof was then run from the initialized canonical
+checkout at the same `22fe07c4` commit; no `cas init` or source mutation was
+performed. The final `codex-v2541-published-proof` session was left running and
+attachable for inspection. The core dump remains stored by systemd as recorded
+by `coredumpctl`; an unrelated pre-existing factory was left running. The exact
+release-runner CPU and the number of other affected users remain unknown and
+are deliberately not inferred as settled facts.

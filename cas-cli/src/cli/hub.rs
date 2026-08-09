@@ -308,11 +308,44 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
         };
         event_task.abort();
         paths.remove_process_record()?;
+        #[cfg(debug_assertions)]
+        hold_instance_lock_after_record_removal_for_test()?;
         if result.is_err() {
             let _ = tailscale_manager.disable_owned();
         }
         result
     })
+}
+
+#[cfg(debug_assertions)]
+fn hold_instance_lock_after_record_removal_for_test() -> Result<()> {
+    use std::fs;
+    use std::path::PathBuf;
+
+    let Some(root) = std::env::var_os("CAS_TEST_HUB_LOCK_RELEASE_BARRIER") else {
+        return Ok(());
+    };
+    let root = PathBuf::from(root);
+    fs::create_dir_all(&root)?;
+    let claim = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(root.join("claimed"));
+    match claim {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(error) => return Err(error.into()),
+    }
+    fs::write(root.join("record-removed-lock-held"), b"ready\n")?;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !root.join("release").exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    anyhow::ensure!(
+        root.join("release").exists(),
+        "test hub lock-release barrier timed out"
+    );
+    Ok(())
 }
 
 async fn serve_with_trusted_tls_proxy<R: crate::hub::SessionReadModel>(

@@ -1,7 +1,10 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::Path;
+use std::process::Stdio;
+use std::thread;
 use std::time::Duration;
+use std::time::Instant;
 
 use assert_cmd::Command;
 use serde_json::Value;
@@ -359,4 +362,123 @@ fn process_start_rejects_state_collisions_with_sanitized_diagnostics() {
             fs::set_permissions(&cas, fs::Permissions::from_mode(0o700)).unwrap();
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn restart_waits_for_record_absent_instance_lock_release_before_replacement() {
+    use cas::hub::HubRuntimePaths;
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = private_home();
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let tailscale = bin.join("tailscale");
+    fs::write(
+        &tailscale,
+        r#"#!/bin/sh
+case "$*" in
+  'status --json') printf '%s' '{"Self":{"DNSName":"restart-lock.tail.example."}}' ;;
+  'serve status --json')
+    if [ -f "$HOME/mock-serve" ]; then
+      printf '%s' '{"Web":{"restart-lock.tail.example:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:'"$(/bin/cat "$HOME/mock-port")"'"}}}}}'
+    else
+      printf '%s' '{}'
+    fi ;;
+  'serve --bg --yes --https=443 '*)
+    printf '%s' "${5##*:}" > "$HOME/mock-port"
+    : > "$HOME/mock-serve" ;;
+  'serve --https=443 off') /bin/rm -f "$HOME/mock-serve" ;;
+  *) exit 9 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&tailscale, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let barrier = home.path().join("restart-lock-barrier");
+    fs::create_dir(&barrier).unwrap();
+    let initial = cas_command(home.path(), bin.as_os_str())
+        .env("CAS_TEST_HUB_LOCK_RELEASE_BARRIER", &barrier)
+        .args(["--json", "hub", "start", "--port", "0", "--tailscale-serve"])
+        .output()
+        .expect("start hub for restart-lock race");
+    assert!(
+        initial.status.success(),
+        "initial hub failed: {}",
+        String::from_utf8_lossy(&initial.stderr)
+    );
+
+    let mut restart = std::process::Command::new(assert_cmd::cargo::cargo_bin!("cas"));
+    restart
+        .env_clear()
+        .env("HOME", home.path())
+        .env("PATH", bin.as_os_str())
+        .env("CAS_SKIP_FACTORY_TOOLING", "1")
+        .env("CAS_TEST_HUB_LOCK_RELEASE_BARRIER", &barrier)
+        .args([
+            "--json",
+            "hub",
+            "restart",
+            "--port",
+            "0",
+            "--tailscale-serve",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = restart.spawn().expect("spawn exact restart command");
+
+    let marker = barrier.join("record-removed-lock-held");
+    let marker_deadline = Instant::now() + Duration::from_secs(3);
+    while !marker.exists() && Instant::now() < marker_deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        marker.exists(),
+        "old hub never reached the widened lock window"
+    );
+    assert!(
+        !home.path().join(".cas/hub/process.json").exists(),
+        "the deterministic seam must expose record-absent state"
+    );
+    let paths = HubRuntimePaths::new(home.path().join(".cas/hub"));
+    assert!(
+        paths.acquire_instance_lock().is_err(),
+        "old hub must still authoritatively own the lock after record removal"
+    );
+
+    // Exceed the public implementation's five-second process-only stop wait.
+    // The old restart path discards that timeout, starts too early, and its
+    // one-shot child loses the still-held lock before this release arrives.
+    thread::sleep(Duration::from_millis(5_200));
+    fs::write(barrier.join("release"), b"release\n").unwrap();
+    let output = child
+        .wait_with_output()
+        .expect("wait exact restart command");
+    assert!(
+        output.status.success(),
+        "restart raced the old instance lock: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let status = cas_command(home.path(), bin.as_os_str())
+        .args(["--json", "hub", "status"])
+        .output()
+        .expect("status after restart-lock handoff");
+    assert!(status.status.success());
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["running"], true);
+    let replacement_pid = status["record"]["pid"].as_u64().unwrap();
+    let initial: Value = serde_json::from_slice(&initial.stdout).unwrap();
+    assert_ne!(replacement_pid, initial["pid"].as_u64().unwrap());
+
+    let stop = cas_command(home.path(), bin.as_os_str())
+        .args(["--json", "hub", "stop"])
+        .output()
+        .expect("stop replacement hub");
+    assert!(stop.status.success());
+    assert!(paths.acquire_instance_lock().is_ok());
+    assert!(!home.path().join(".cas/hub/process.json").exists());
+    assert!(!home.path().join("mock-serve").exists());
 }

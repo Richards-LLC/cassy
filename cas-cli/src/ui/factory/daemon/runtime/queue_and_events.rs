@@ -6219,6 +6219,121 @@ mod tests {
         );
     }
 
+    /// cas-f65d: a Commander semantic message and the equivalent MCP
+    /// coordination message must differ only in authenticated sender metadata.
+    /// Once the daemon's real delivery receipt helper runs, both rows must have
+    /// the same recipient-visible receipt and must be absent from inbox_poll.
+    #[test]
+    fn commander_and_mcp_messages_have_queue_and_recipient_receipt_parity() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let attribution = crate::ui::factory::protocol::MessageAttribution {
+            device_id: Some("device-123".to_string()),
+            credential_id: Some("credential-456".to_string()),
+            device_label: Some("Pippenz phone".to_string()),
+            operator_label: Some("Pippenz".to_string()),
+            controller_origin: Some("https://commander.example".to_string()),
+            request_id: Some("request-789".to_string()),
+        };
+
+        let commander_id = super::super::delivery::enqueue_commander_message(
+            &cas_dir,
+            "factory-1",
+            "worker-1",
+            "Please checkpoint now",
+            Some("checkpoint request"),
+            false,
+            &attribution,
+        )
+        .unwrap()
+        .id();
+        let mcp_id = queue
+            .enqueue_urgent_with_outcome(
+                "supervisor",
+                "worker-1",
+                "Please checkpoint now",
+                Some("factory-1"),
+                Some("checkpoint request"),
+                None,
+                false,
+            )
+            .unwrap()
+            .id();
+
+        let queued = queue.peek_all(10).unwrap();
+        let commander = queued.iter().find(|row| row.id == commander_id).unwrap();
+        let mcp = queued.iter().find(|row| row.id == mcp_id).unwrap();
+        assert_eq!(commander.target, mcp.target);
+        assert_eq!(commander.prompt, mcp.prompt);
+        assert_eq!(commander.factory_session, mcp.factory_session);
+        assert_eq!(commander.summary, mcp.summary);
+        assert_eq!(commander.priority, mcp.priority);
+        assert_eq!(commander.urgent, mcp.urgent);
+        assert_eq!(commander.source, attribution.queue_source());
+        assert_eq!(mcp.source, "supervisor");
+
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        let commander_metadata: String = conn
+            .query_row(
+                "SELECT attribution_json FROM prompt_queue WHERE id = ?",
+                [commander_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mcp_metadata: Option<String> = conn
+            .query_row(
+                "SELECT attribution_json FROM prompt_queue WHERE id = ?",
+                [mcp_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&commander_metadata).unwrap(),
+            serde_json::to_value(&attribution).unwrap()
+        );
+        assert_eq!(
+            mcp_metadata, None,
+            "MCP identity is not forged as Commander"
+        );
+        drop(conn);
+
+        assert_eq!(
+            queue
+                .count_unseen_for_recipient("worker-1", Some("factory-1"))
+                .unwrap(),
+            2,
+            "precondition: neither equivalent row has a receipt yet"
+        );
+        for id in [commander_id, mcp_id] {
+            FactoryDaemon::record_transport_receipt(&*queue, id, "worker-1");
+            queue.mark_transport_delivered(id).unwrap();
+        }
+
+        let commander_report = queue
+            .message_delivery_report(commander_id)
+            .unwrap()
+            .unwrap();
+        let mcp_report = queue.message_delivery_report(mcp_id).unwrap().unwrap();
+        assert_eq!(commander_report.stage, cas_store::DeliveryStage::Delivered);
+        assert_eq!(commander_report.stage, mcp_report.stage);
+        assert!(commander_report.recipient_transport_at.is_some());
+        assert!(mcp_report.recipient_transport_at.is_some());
+        assert_eq!(
+            queue
+                .count_unseen_for_recipient("worker-1", Some("factory-1"))
+                .unwrap(),
+            0
+        );
+        assert!(
+            queue
+                .poll_unseen_for_recipient("worker-1", Some("factory-1"), 20)
+                .unwrap()
+                .is_empty(),
+            "recipient-visible receipt parity means neither row is re-served"
+        );
+    }
+
     /// cas-1a54: the URGENT terminal arm was the one cas-b8ce missed.
     ///
     /// `resolve_urgent_wake_probes` → `UrgentProbeAction::ConsumeRow` stamped

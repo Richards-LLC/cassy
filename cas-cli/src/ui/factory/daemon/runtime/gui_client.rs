@@ -14,6 +14,13 @@ fn queue_frame(client: &mut GuiConnection, frame: &[u8]) {
     client.write_buf.extend(frame);
 }
 
+/// GUI transport adapter for the shared Commander control dispatcher.
+pub(super) fn commander_control_from_gui_message(
+    message: &ClientMessage,
+) -> Option<super::delivery::CommanderControl> {
+    super::delivery::commander_control_from_message(message)
+}
+
 impl FactoryDaemon {
     /// Accept new GUI client connections (non-blocking).
     pub(super) fn accept_gui_clients(&mut self) -> bool {
@@ -271,6 +278,19 @@ impl FactoryDaemon {
 
     /// Handle a single ClientMessage from a GUI client.
     async fn handle_gui_message(&mut self, client_id: usize, msg: ClientMessage) {
+        if let Some(control) = commander_control_from_gui_message(&msg) {
+            let error_prefix = control.error_prefix();
+            if let Err(error) = self.dispatch_commander_control(control).await {
+                if let Some(frame) = encode_frame(&DaemonMessage::Error {
+                    message: format!("{error_prefix}: {error}"),
+                }) && let Some(client) = self.gui_clients.get_mut(&client_id)
+                {
+                    queue_frame(client, &frame);
+                }
+            }
+            return;
+        }
+
         match msg {
             ClientMessage::Attach { .. } => {
                 let state = self.build_session_state();
@@ -435,37 +455,8 @@ impl FactoryDaemon {
                         .await;
                 }
             }
-            ClientMessage::InterruptPane { pane_id } => {
-                if let Err(error) = self.interrupt_pane_turn(&pane_id).await {
-                    if let Some(frame) = encode_frame(&DaemonMessage::Error {
-                        message: format!("targeted interrupt failed: {error}"),
-                    }) && let Some(client) = self.gui_clients.get_mut(&client_id)
-                    {
-                        queue_frame(client, &frame);
-                    }
-                }
-            }
-            ClientMessage::SendMessage {
-                target,
-                text,
-                summary,
-                urgent,
-                attribution,
-            } => {
-                if let Err(error) = self.enqueue_attributed_message(
-                    &target,
-                    &text,
-                    summary.as_deref(),
-                    urgent,
-                    &attribution,
-                ) {
-                    if let Some(frame) = encode_frame(&DaemonMessage::Error {
-                        message: format!("semantic message enqueue failed: {error}"),
-                    }) && let Some(client) = self.gui_clients.get_mut(&client_id)
-                    {
-                        queue_frame(client, &frame);
-                    }
-                }
+            ClientMessage::InterruptPane { .. } | ClientMessage::SendMessage { .. } => {
+                unreachable!("Commander controls return through the shared dispatcher")
             }
             ClientMessage::GetState => {
                 let state = self.build_session_state();

@@ -688,6 +688,89 @@ mod tests {
         assert!(daemon_capabilities().contains(&ProtocolCapability::AttributedSendMessage));
     }
 
+    /// New-daemon / old-client direction: serde's default unknown-field
+    /// tolerance lets a legacy TUI decode the v2 Welcome without knowing the
+    /// additive negotiation fields.
+    #[test]
+    fn legacy_client_decodes_current_welcome_by_ignoring_additive_fields() {
+        #[derive(Debug, Deserialize)]
+        enum LegacyDaemonMessage {
+            Welcome {
+                session_name: String,
+                state: SessionState,
+                scrollback: Option<HashMap<String, Vec<Vec<u8>>>>,
+            },
+        }
+
+        let current = DaemonMessage::Welcome {
+            session_name: "factory-1".to_string(),
+            state: SessionState {
+                focused_pane: None,
+                panes: Vec::new(),
+                epic_id: None,
+                epic_title: None,
+                cols: 120,
+                rows: 40,
+            },
+            scrollback: None,
+            protocol_version: PROTOCOL_VERSION,
+            capabilities: daemon_capabilities(),
+        };
+        let json = serde_json::to_string(&current).unwrap();
+        let legacy: LegacyDaemonMessage = serde_json::from_str(&json).unwrap();
+        match legacy {
+            LegacyDaemonMessage::Welcome {
+                session_name,
+                state,
+                scrollback,
+            } => {
+                assert_eq!(session_name, "factory-1");
+                assert_eq!(state.cols, 120);
+                assert!(scrollback.is_none());
+            }
+        }
+    }
+
+    /// New-client / old-daemon direction: an old decoder rejects only the
+    /// unknown additive control frame. The next legacy frame still decodes,
+    /// matching both daemon transport loops' per-message error handling.
+    #[test]
+    fn legacy_daemon_rejects_new_control_without_poisoning_following_messages() {
+        #[derive(Debug, Deserialize)]
+        enum LegacyClientMessage {
+            Focus { pane_id: String },
+            Interrupt,
+        }
+
+        for new_control in [
+            serde_json::to_string(&ClientMessage::InterruptPane {
+                pane_id: "worker-1".to_string(),
+            })
+            .unwrap(),
+            serde_json::to_string(&ClientMessage::SendMessage {
+                target: "worker-1".to_string(),
+                text: "hello".to_string(),
+                summary: None,
+                urgent: false,
+                attribution: attributed_remote_operator(),
+            })
+            .unwrap(),
+        ] {
+            assert!(serde_json::from_str::<LegacyClientMessage>(&new_control).is_err());
+            let next: LegacyClientMessage =
+                serde_json::from_str(r#"{"Focus":{"pane_id":"worker-1"}}"#).unwrap();
+            assert!(matches!(
+                next,
+                LegacyClientMessage::Focus { pane_id } if pane_id == "worker-1"
+            ));
+        }
+
+        assert!(matches!(
+            serde_json::from_str::<LegacyClientMessage>(r#""Interrupt""#).unwrap(),
+            LegacyClientMessage::Interrupt
+        ));
+    }
+
     #[test]
     fn unknown_client_message_remains_a_non_destructive_decode_error() {
         let unknown = r#"{"FutureControl":{"value":1}}"#;

@@ -2,6 +2,7 @@ use crate::mcp::tools::core::imports::*;
 
 pub(crate) mod close_ops;
 pub(crate) mod proof_scope;
+pub(crate) mod repository_proof;
 pub(crate) mod stale_close_guard;
 pub(crate) mod supervisor_push;
 

@@ -333,6 +333,44 @@ impl CasCore {
             });
         }
 
+        // Legacy task-only verification is authorized against the exact Git
+        // worktree snapshot captured when close created this dispatch. A
+        // mutation while the verifier is reviewing invalidates only this task's
+        // proof cycle; unrelated MCP and other-task work remains available.
+        let proof_dispatch = cas_store::get_verification_dispatch(
+            &self.cas_root,
+            &requested_dispatch_id,
+        )
+        .map_err(|_| McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from("Verification rejected: exact dispatch is unavailable."),
+            data: None,
+        })?;
+        if let Some(repository) = proof_dispatch.repository.as_ref()
+            && let Err(error) = crate::mcp::tools::core::task::lifecycle::repository_proof::verify_repository_proof(
+                repository,
+            )
+        {
+            cas_store::invalidate_verification_dispatch_for_repository_drift(
+                &self.cas_root,
+                &requested_dispatch_id,
+            )
+            .map_err(|store_error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!(
+                    "Repository proof changed, but exact task-scoped invalidation failed: {store_error}"
+                )),
+                data: None,
+            })?;
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "Verification rejected: {error}. Retry task close to create a fresh dispatch."
+                )),
+                data: None,
+            });
+        }
+
         let id = verification_store.generate_id().map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to generate ID: {e}")),

@@ -205,6 +205,7 @@ mod m226_knowledge_pages_add_attribution;
 mod m227_knowledge_page_tombstones;
 mod m228_history_epochs_create_table;
 mod m229_code_vector_state;
+mod m230_verification_repository_proof;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -443,6 +444,7 @@ pub const MIGRATIONS: &[Migration] = &[
     // never reused.
     m228_history_epochs_create_table::MIGRATION,
     m229_code_vector_state::MIGRATION,
+    m230_verification_repository_proof::MIGRATION,
 ];
 
 #[cfg(test)]

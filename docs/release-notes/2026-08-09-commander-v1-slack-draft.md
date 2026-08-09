@@ -1,14 +1,14 @@
-# Commander v1 runtime release — v2.55.4 candidate, unposted Slack drafts
+# Commander v1 runtime release — future corrective version, unposted Slack drafts
 
-> **DO NOT POST.** The immutable public `v2.55.3` artifact is authentic and identically installed on
-> two real machines, but its assembled H7 verdict is **NOT RELEASABLE**: the documented Tailscale
-> Serve hub restart failed to produce a ready replacement while paired phone-class clients were
-> attached. Source candidate `v2.55.4` contains the reviewed authoritative restart-lock handoff fix;
-> it is not tagged, published, installed, or accepted yet. All prior tags, releases, and assets remain
-> unchanged. **H7 remains NOT YET RELEASABLE. Do not post these drafts.** Re-review only after an
-> immutable `v2.55.4` release is independently verified and passes the complete two-machine H7 matrix
-> from its exact public bytes. Slack remains unposted until the user elects to post it after a green
-> gate.
+> **DO NOT POST.** The immutable public `v2.55.4` artifact is authentic and identically installed on
+> two real machines, but its assembled H7 verdict is **NOT RELEASABLE**. In two fresh Chrome 151
+> phone-class attempts, local controller pairing succeeded and the authorized machine-B preflight
+> returned the exact controller origin, but the subsequent cross-origin pairing exchange failed in
+> Chrome with `MissingAllowOriginHeader`. Direct multi-machine pairing never completed, so the gate
+> stopped before later acceptance rows. All published tags, releases, and assets remain unchanged.
+> **H7 remains NOT YET RELEASABLE. Do not post these drafts.** Re-review only after a new immutable
+> corrective release is independently verified and passes the complete two-machine H7 matrix from its
+> exact public bytes. Slack remains unposted until the user elects to post after a green gate.
 
 Destination after the gate passes: `#cas-internal` (`C0B44GUKDK2`). These are the two distinct
 top-level runtime-release posts required by `docs/RELEASE_SLACK_RUBRIC.md`; they are not threaded
@@ -16,7 +16,7 @@ replies. Status: **unposted**.
 
 ## User-perspective top-level post
 
-**Live on production · User · v2.55.4**
+**Live on production · User · [PUBLISHED VERSION]**
 
 Was: checking work across machines meant opening each terminal separately. → Now: Commander gives you
 one phone-friendly view of your paired CAS machines, with live panes and deliberate, secure control.
@@ -34,7 +34,7 @@ one phone-friendly view of your paired CAS machines, with live panes and deliber
 
 ## Dev-perspective top-level post
 
-**Live on production · Dev · v2.55.4**
+**Live on production · Dev · [PUBLISHED VERSION]**
 
 Was: CAS exposed machine-local daemon state without a browser-safe fleet boundary. → Now: each machine
 runs a loopback Commander hub with tailnet TLS, exact-origin proof-of-possession auth, one upstream per
@@ -44,6 +44,8 @@ daemon session, and bounded downstream fan-out.
   pairing capabilities and WebSocket tickets are short-lived and single-use.
 - Exact Origin/CORS handling, DPoP method/URI/credential binding, replay caches, per-operation scopes,
   revocation, and attributed audit fail closed.
+- Cross-origin pairing exchanges carry the exact authorized controller-origin CORS grant on both
+  successful and generic denied responses, so controller-origin Chrome can pair each target directly.
 - The verified Tailscale Serve TLS path uses a separate server-owned loopback backend and emits exactly
   `Strict-Transport-Security: max-age=31536000` across success, auth-error, catch-all, and preflight
   responses; the documented plaintext listener ignores spoofed proxy and identity headers.
@@ -73,12 +75,14 @@ daemon session, and bounded downstream fan-out.
 
 ## Pre-post fill and verification
 
-- [ ] Confirm the immutable published corrective tag is exactly `v2.55.4`; do not reuse or move
-      `v2.55.3` or any earlier tag.
+- [ ] Replace `[PUBLISHED VERSION]` only after one new immutable corrective tag exists; do not reuse or
+      move `v2.55.4` or any earlier tag.
 - [ ] Link the private posting checklist to the exact tag peel, GitHub release, workflow, asset names,
       SHA-256 digests, and green final acceptance report.
 - [ ] Confirm the public release contains the Commander source boundary and both machines identify the
       same downloaded version.
+- [ ] Confirm controller-origin Chrome completes direct pairing to machine B and that successful and
+      generic denied exchange responses expose only the exact authorized origin.
 - [ ] Confirm the documented paired-client Tailscale Serve restart reaches ready, preserves the stable
       machine identity and URL, reconnects clients, and does not restore a lease automatically.
 - [ ] Confirm the final acceptance verdict is green, not merely the source-only guards.

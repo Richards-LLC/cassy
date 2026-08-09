@@ -1268,6 +1268,20 @@ mod tests {
             1,
             "m215 sealed-handoff table must survive repeated migration runs"
         );
+        assert!(
+            cas_store::shared_db::column_exists(&conn, "commit_links", "link_method"),
+            "m225 must wait for m143 to create commit_links, then add link_method"
+        );
+        assert!(!matches!(
+            conn.query_row(
+                "SELECT applied_at FROM cas_migrations WHERE id = 225",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+            .as_str(),
+            "BOOTSTRAP" | "DETECTED"
+        ));
     }
 
     /// cas-cbf1: the knowledge store lands on a DB that predates it — the

@@ -359,6 +359,9 @@ impl CloudSyncer {
                         let skipped_count = skipped_count.unwrap_or_default();
                         if skipped_count > 0 {
                             let batch_size = batch_items.len();
+                            let diagnostic = format!(
+                                "cloud skipped {skipped_count} of {batch_size} {entity_type} row(s); retained pending because the server did not identify the rejected row(s)"
+                            );
                             warn!(
                                 entity_type = entity_type,
                                 skipped = skipped_count,
@@ -372,6 +375,9 @@ impl CloudSyncer {
                             // un-touched keeps them retryable in the local
                             // queue. Continuing the loop lets later
                             // sub-batches and entity types proceed normally.
+                            for item in &batch_items {
+                                let _ = self.queue.record_diagnostic(item.id, &diagnostic);
+                            }
                         } else {
                             for item in &batch_items {
                                 let _ = self.queue.mark_synced(item.id);

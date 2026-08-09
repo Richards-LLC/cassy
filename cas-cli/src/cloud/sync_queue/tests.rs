@@ -103,10 +103,44 @@ fn test_mark_failed_and_retry_limit() {
 }
 
 #[test]
+fn diagnostic_keeps_a_server_skipped_row_retryable() {
+    let (_temp, queue) = create_test_queue();
+    queue
+        .enqueue(
+            EntityType::Task,
+            "task-skipped",
+            SyncOperation::Upsert,
+            None,
+        )
+        .unwrap();
+
+    let queued = queue.pending(10, 5).unwrap();
+    queue
+        .record_diagnostic(
+            queued[0].id,
+            "cloud skipped task due to project-scoped identity collision",
+        )
+        .unwrap();
+
+    let after = queue.pending(10, 5).unwrap();
+    assert_eq!(after.len(), 1, "diagnostics must not dequeue genuine work");
+    assert_eq!(after[0].retry_count, 0, "a skip is not a transport retry");
+    assert_eq!(
+        after[0].last_error.as_deref(),
+        Some("cloud skipped task due to project-scoped identity collision")
+    );
+}
+
+#[test]
 fn health_reports_pending_age_and_last_push_error() {
     let (_temp, queue) = create_test_queue();
     queue
-        .enqueue(EntityType::Entry, "entry-health", SyncOperation::Upsert, None)
+        .enqueue(
+            EntityType::Entry,
+            "entry-health",
+            SyncOperation::Upsert,
+            None,
+        )
         .unwrap();
     let id = queue.pending(10, 5).unwrap()[0].id;
     queue.mark_failed(id, "Network error: offline").unwrap();
@@ -387,12 +421,7 @@ fn test_poison_head_doesnt_block_queue() {
 
     // Enqueue the poison head first (null payload → invalid upsert).
     queue
-        .enqueue(
-            EntityType::Task,
-            "task-poison",
-            SyncOperation::Upsert,
-            None,
-        )
+        .enqueue(EntityType::Task, "task-poison", SyncOperation::Upsert, None)
         .unwrap();
 
     // Two healthy items enqueued after the poison.
@@ -525,11 +554,7 @@ fn test_null_team_id_normalized_to_empty_on_migration() {
 
     // Confirm the coalesced row holds the latest payload.
     assert!(
-        pending[0]
-            .payload
-            .as_ref()
-            .unwrap()
-            .contains("\"v\":2"),
+        pending[0].payload.as_ref().unwrap().contains("\"v\":2"),
         "coalesced row must hold the updated payload from the most-recent enqueue"
     );
 }

@@ -26,6 +26,23 @@ impl SyncQueue {
         Ok(())
     }
 
+    /// Preserve a server-side refusal on a still-retryable queue row.
+    ///
+    /// Unlike [`Self::mark_failed`], this deliberately does not increment the
+    /// retry counter. A structured cloud `skipped` response is evidence that
+    /// the server accepted the request but declined one or more rows; callers
+    /// must retain those rows until the server can explain or resolve the
+    /// conflict. Recording the diagnostic makes `cas cloud queue --verbose`
+    /// useful without incorrectly parking the row as a transport failure.
+    pub fn record_diagnostic(&self, id: i64, diagnostic: &str) -> Result<(), CasError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sync_queue SET last_error = ?2 WHERE id = ?1",
+            params![id, diagnostic],
+        )?;
+        Ok(())
+    }
+
     /// Get the number of items in the queue.
     pub fn queue_depth(&self) -> Result<usize, CasError> {
         let conn = self.conn.lock().unwrap();

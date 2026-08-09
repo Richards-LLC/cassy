@@ -63,6 +63,7 @@ Open the focused reference you need — these are not pre-loaded.
 - **[planning.md](cas-supervisor/references/planning.md)** — Planning gates, spec requirements, EPIC sizing, dependencies.
 - **[workflow.md](cas-supervisor/references/workflow.md)** — Worker modes, count strategy, phases, merge/sync, blockers.
 - **[model-selection.md](cas-supervisor/references/model-selection.md)** — Tier rubric, spawn mix, escalation.
+- **[reminders.md](cas-supervisor/references/reminders.md)** — Push-first, bounded reminder checkpoints and cleanup.
 - **[worker-recovery.md](cas-supervisor/references/worker-recovery.md)** — Wedged/dead/silent workers, bad output, verification jail.
 - **[reference.md](cas-supervisor/references/reference.md)** — Actions/fields, dispatch, `update` vs `transfer`, messages, urgent interrupts.
 - **[code-review-queue.md](cas-supervisor/references/code-review-queue.md)** — Supervisor-owned review cadence and gates.

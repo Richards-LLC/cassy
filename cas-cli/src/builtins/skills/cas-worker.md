@@ -106,6 +106,7 @@ Open only what the situation needs:
 - [close-gate.md](cas-worker/references/close-gate.md) before a deep-task close (six checks, review/P0 handling, simplification).
 - [recovery.md](cas-worker/references/recovery.md) for errors, verification jail, reassignment, worktree/MCP trouble, exhaustion, or a silent supervisor.
 - [discipline.md](cas-worker/references/discipline.md) before >2-minute work and for backgrounding, test-loop, and checkpoint recipes.
+- [reminders.md](../cas-supervisor/references/reminders.md) for the shared push-first reminder decision table and cleanup contract.
 - [details.md](cas-worker/references/details.md) for exact fields/actions, sync, production pulls, and store-access details.
 
 ## Context budgeting

@@ -1,13 +1,13 @@
-# Commander v1 runtime release — v2.55.1 unposted Slack drafts
+# Commander v1 runtime release — v2.55.2 candidate, unposted Slack drafts
 
 > **DO NOT POST.** The immutable public `v2.55.0` Linux artifact fails the final-executable portable
 > x86_64 audit and is superseded before installation; its tag, release, and assets remain unchanged.
-> `v2.55.1` is published and identically installed on two real machines, but the H7 verdict is
-> **NOT RELEASABLE**. The assembled run found two binding blockers: the public hub cannot bootstrap
-> on a clean installed host without an undocumented manual `~/.cas` creation step, and an exact
-> daemon `SIGILL` is reported to real Chrome as `unknown`. Do not post these drafts for `v2.55.1`.
-> Re-review only after a new immutable release contains both fixes and the complete H7 matrix reruns
-> green from that published artifact.
+> `v2.55.1` is published and identically installed on two real machines, but its H7 verdict is
+> **NOT RELEASABLE**. Source candidate `v2.55.2` contains reviewed fixes for the clean-host bootstrap
+> and live daemon `SIGILL` evidence failures; it is not tagged, published, installed, or accepted yet.
+> **H7 remains NOT YET RELEASABLE. Do not post these drafts.** Re-review only after an immutable
+> `v2.55.2` release is independently verified and the complete H7 matrix reruns green from that exact
+> public artifact.
 
 Destination after the gate passes: `#cas-internal` (`C0B44GUKDK2`). These are the two distinct
 top-level runtime-release posts required by `docs/RELEASE_SLACK_RUBRIC.md`; they are not threaded
@@ -15,20 +15,22 @@ replies. Status: **unposted**.
 
 ## User-perspective top-level post
 
-**Live on production · User · v2.55.1**
+**Live on production · User · v2.55.2**
 
 Was: checking work across machines meant opening each terminal separately. → Now: Commander gives you
 one phone-friendly view of your paired CAS machines, with live panes and deliberate, secure control.
 
 - Pair a machine once, then see its sessions and terminal output directly over your private network.
+- Start on a newly installed machine without manually creating Commander state directories first.
 - Watch the same session from more than one screen while one clearly identified controller holds input.
-- Reconnect after hub or daemon restarts without hiding what stopped or inventing a recovery state.
+- Reconnect after hub or daemon restarts with an evidence-backed explanation when the operating system
+  reports how a daemon stopped, while missing or stale evidence stays honestly unknown.
 - Revoke a device when needed; expired, replayed, cross-site, or over-scoped access is refused.
 - Commander observes existing work without creating additional sessions or model requests.
 
 ## Dev-perspective top-level post
 
-**Live on production · Dev · v2.55.1**
+**Live on production · Dev · v2.55.2**
 
 Was: CAS exposed machine-local daemon state without a browser-safe fleet boundary. → Now: each machine
 runs a loopback Commander hub with tailnet TLS, exact-origin proof-of-possession auth, one upstream per
@@ -40,6 +42,12 @@ daemon session, and bounded downstream fan-out.
   revocation, and attributed audit fail closed.
 - One upstream daemon WebSocket serves multiple pane viewers; controller leases make concurrent input
   explicit, and slow viewers do not create another upstream or stall healthy viewers.
+- Clean-home startup creates the missing hub hierarchy owner-only for ordinary and Tailscale Serve
+  flows, preserves safe existing state, and fails closed on symlink, ownership, mode, or ancestor
+  collisions without leaking filesystem paths.
+- Daemon-exit receipts are bound to session, PID, and process-start fingerprint. The connector consumes
+  only exact evidence after disconnect, rejects stale epochs, and surfaces real `SIGILL` remediation
+  without turning absent or malformed evidence into a diagnosis.
 - The embedded phone-responsive client uses pinned Ghostty WASM with retained MIT notices, strict CSP,
   offline assets, push-driven status, additive protocol negotiation, targeted interrupt, and attributed
   semantic messaging.
@@ -55,7 +63,7 @@ daemon session, and bounded downstream fan-out.
 
 ## Pre-post fill and verification
 
-- [ ] Replace `v2.55.1` with the future immutable corrective version; do not reuse or move any tag.
+- [ ] Confirm the immutable published corrective tag is exactly `v2.55.2`; do not reuse or move any tag.
 - [ ] Link the private posting checklist to the exact tag peel, GitHub release, workflow, asset names,
       SHA-256 digests, and green final acceptance report.
 - [ ] Confirm the public release contains the Commander source boundary and both machines identify the

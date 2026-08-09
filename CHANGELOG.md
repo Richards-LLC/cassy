@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.55.2] - 2026-08-09
+
+### Fixed
+- **Commander now starts securely on a clean installed machine without a manual initialization step.** The hub creates a missing `~/.cas/hub` hierarchy with owner-only permissions for both ordinary and Tailscale Serve startup, preserves existing safe state, and rejects symlinks, non-directories, unsafe final modes, wrong ownership, and unwritable ancestors without exposing filesystem paths.
+- **A real daemon `SIGILL` now reaches Commander as evidence-backed `SIGILL`, not `unknown`.** Spawned daemons record an owner-only exit receipt bound to the exact session, PID, and process-start fingerprint; the live hub consumes only an exact match after disconnect, rejects stale PID epochs, distinguishes a still-live transport loss, and leaves absent or malformed evidence honestly unknown. The replacement guidance therefore identifies portable-release remediation only when the operating system actually reported `SIGILL`.
+
 ## [2.55.1] - 2026-08-09
 
 ### Fixed

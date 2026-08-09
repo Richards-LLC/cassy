@@ -103,6 +103,23 @@ fn test_mark_failed_and_retry_limit() {
 }
 
 #[test]
+fn health_reports_pending_age_and_last_push_error() {
+    let (_temp, queue) = create_test_queue();
+    queue
+        .enqueue(EntityType::Entry, "entry-health", SyncOperation::Upsert, None)
+        .unwrap();
+    let id = queue.pending(10, 5).unwrap()[0].id;
+    queue.mark_failed(id, "Network error: offline").unwrap();
+
+    let health = queue
+        .health(5, chrono::Utc::now() + chrono::Duration::hours(7))
+        .unwrap();
+    assert_eq!(health.pending, 1);
+    assert!(health.oldest_age_secs.unwrap() >= 7 * 60 * 60 - 1);
+    assert_eq!(health.last_error.as_deref(), Some("Network error: offline"));
+}
+
+#[test]
 fn test_metadata() {
     let (_temp, queue) = create_test_queue();
 

@@ -572,6 +572,14 @@ pub struct CloudSyncConfig {
     /// Maximum retry attempts for failed syncs
     #[serde(default = "default_max_retries")]
     pub max_retries: i32,
+
+    /// Warn when the number of retryable local changes reaches this count.
+    #[serde(default = "default_cloud_queue_pending_warning")]
+    pub queue_pending_warning: usize,
+
+    /// Warn when the oldest retryable local change is this old (seconds).
+    #[serde(default = "default_cloud_queue_oldest_warning_secs")]
+    pub queue_oldest_warning_secs: u64,
 }
 
 fn default_cloud_sync_interval() -> u64 {
@@ -582,6 +590,14 @@ fn default_max_retries() -> i32 {
     5
 }
 
+fn default_cloud_queue_pending_warning() -> usize {
+    200
+}
+
+fn default_cloud_queue_oldest_warning_secs() -> u64 {
+    6 * 60 * 60
+}
+
 impl Default for CloudSyncConfig {
     fn default() -> Self {
         Self {
@@ -589,6 +605,8 @@ impl Default for CloudSyncConfig {
             interval_secs: default_cloud_sync_interval(),
             pull_on_start: true,
             max_retries: default_max_retries(),
+            queue_pending_warning: default_cloud_queue_pending_warning(),
+            queue_oldest_warning_secs: default_cloud_queue_oldest_warning_secs(),
         }
     }
 }

@@ -15,6 +15,8 @@ use cas_pty::{
 use serde::{Deserialize, Serialize};
 
 use crate::bounded_process::{BoundedCommandError, Deadline, run_command};
+use crate::cloud::{QueueHealth, SyncQueue};
+use crate::config::Config;
 
 const SCHEMA_VERSION: u32 = 2;
 const RUNTIME_BOUND: Duration = Duration::from_millis(6_500);
@@ -268,7 +270,15 @@ struct PreflightFacts {
     receipts: Vec<HarnessConformanceReceipt>,
     default_versions: HashMap<Harness, VersionProbe>,
     required_harnesses: HashSet<Harness>,
+    cloud_queue: CloudQueueFacts,
     runtime_elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+struct CloudQueueFacts {
+    health: Option<QueueHealth>,
+    pending_warning: usize,
+    oldest_warning_secs: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -312,6 +322,7 @@ pub fn collect_factory_preflight(
         receipts: harness_conformance_receipts().unwrap_or_default(),
         default_versions,
         required_harnesses: required_harnesses(project_root),
+        cloud_queue: collect_cloud_queue_facts(cas_root),
         runtime_elapsed_ms: started.elapsed().as_millis() as u64,
     };
     build_report(facts)
@@ -340,6 +351,7 @@ fn build_report(facts: PreflightFacts) -> FactoryPreflightReport {
     let repository = classify_repository(facts.repository, &mut findings);
     let cas_mcp = classify_mcp(facts.mcp, &mut findings);
     let optional_upstreams = classify_proxy(facts.proxy, &mut findings);
+    classify_cloud_queue(facts.cloud_queue, &mut findings);
     let harnesses = classify_harnesses(
         facts.receipts,
         facts.default_versions,
@@ -372,6 +384,67 @@ fn build_report(facts: PreflightFacts) -> FactoryPreflightReport {
         optional_upstreams,
         harnesses,
         findings,
+    }
+}
+
+/// Read persisted queue evidence without creating a database or reaching the
+/// cloud. Preflight remains a bounded, read-only local diagnostic.
+fn collect_cloud_queue_facts(cas_root: &Path) -> CloudQueueFacts {
+    let cloud = Config::load(cas_root)
+        .unwrap_or_default()
+        .cloud
+        .unwrap_or_default();
+    let health = if cas_root.join("cas.db").is_file() {
+        SyncQueue::open_read_only(cas_root)
+            .and_then(|queue| queue.health(cloud.max_retries.max(1), chrono::Utc::now()))
+            .ok()
+    } else {
+        None
+    };
+    CloudQueueFacts {
+        health,
+        pending_warning: cloud.queue_pending_warning.max(1),
+        oldest_warning_secs: cloud.queue_oldest_warning_secs.max(1),
+    }
+}
+
+fn classify_cloud_queue(facts: CloudQueueFacts, findings: &mut Vec<PreflightFinding>) {
+    let Some(health) = facts.health else {
+        return;
+    };
+    let pending_wedged = health.pending >= facts.pending_warning;
+    let age_wedged = health
+        .oldest_age_secs
+        .is_some_and(|age| age >= facts.oldest_warning_secs as i64);
+    if !pending_wedged && !age_wedged {
+        return;
+    }
+
+    let oldest = health
+        .oldest_age_secs
+        .map(format_queue_age)
+        .unwrap_or_else(|| "none".to_string());
+    let last_error = health.last_error.as_deref().unwrap_or("none recorded");
+    let message = format!(
+        "Cloud sync queue warning: {} pending; oldest pending age {}; last push error: {}.",
+        health.pending, oldest, last_error
+    );
+    findings.push(warning(
+        "cloud.queue_unhealthy",
+        "cloud_queue",
+        &message,
+        "Check `cas cloud queue` and the daemon logs; pending sync is a warning and does not block factory launch.",
+        health.oldest_item.map(|at| at.to_rfc3339()),
+    ));
+}
+
+fn format_queue_age(age_secs: i64) -> String {
+    if age_secs >= 3600 {
+        format!("{}h {}m", age_secs / 3600, (age_secs % 3600) / 60)
+    } else if age_secs >= 60 {
+        format!("{}m", age_secs / 60)
+    } else {
+        format!("{}s", age_secs)
     }
 }
 
@@ -1288,6 +1361,11 @@ mod tests {
             required_harnesses: [Harness::ClaudeCode, Harness::CodexCli, Harness::GrokBuild]
                 .into_iter()
                 .collect(),
+            cloud_queue: CloudQueueFacts {
+                health: None,
+                pending_warning: 200,
+                oldest_warning_secs: 6 * 60 * 60,
+            },
             runtime_elapsed_ms: 12,
         }
     }
@@ -1299,6 +1377,48 @@ mod tests {
         assert_eq!(report.overall, PreflightOverall::Ready);
         assert!(!report.factory_blocked);
         assert!(report.findings.is_empty());
+    }
+
+    #[test]
+    fn unhealthy_cloud_queue_warns_but_never_blocks_factory() {
+        let mut facts = healthy_facts();
+        facts.cloud_queue.health = Some(QueueHealth {
+            pending: 201,
+            oldest_item: Some(chrono::Utc::now() - chrono::Duration::hours(7)),
+            oldest_age_secs: Some(7 * 60 * 60),
+            last_error: Some("Network error: offline".to_string()),
+        });
+
+        let report = build_report(facts);
+        let finding = report
+            .findings
+            .iter()
+            .find(|finding| finding.code == "cloud.queue_unhealthy")
+            .expect("cloud queue health warning");
+        assert_eq!(finding.severity, PreflightSeverity::Warning);
+        assert!(finding.message.contains("201 pending"));
+        assert!(finding.message.contains("7h 0m"));
+        assert!(finding.message.contains("Network error: offline"));
+        assert!(!report.factory_blocked);
+    }
+
+    #[test]
+    fn healthy_cloud_queue_stays_silent() {
+        let mut facts = healthy_facts();
+        facts.cloud_queue.health = Some(QueueHealth {
+            pending: 2,
+            oldest_item: Some(chrono::Utc::now()),
+            oldest_age_secs: Some(5),
+            last_error: None,
+        });
+
+        let report = build_report(facts);
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|finding| finding.code != "cloud.queue_unhealthy")
+        );
     }
 
     #[test]

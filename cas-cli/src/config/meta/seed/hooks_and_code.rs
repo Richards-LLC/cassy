@@ -94,6 +94,34 @@ pub(super) fn register_hooks_and_code(registry: &mut ConfigRegistry) {
         });
 
     registry.register(ConfigMeta {
+            key: "cloud.queue_pending_warning",
+            section: "cloud",
+            name: "Queue Pending Warning",
+            description: "Warn in factory preflight when this many local cloud changes are still waiting to push.",
+            value_type: ConfigType::Int,
+            default: "200",
+            constraint: Constraint::Range(1, 1000000),
+            advanced: false,
+            requires_feature: None,
+            keywords: &["cloud", "sync", "queue", "warning", "health"],
+            use_cases: &["Lower to detect sync wedges sooner", "Raise for intentionally large offline batches"],
+        });
+
+    registry.register(ConfigMeta {
+            key: "cloud.queue_oldest_warning_secs",
+            section: "cloud",
+            name: "Queue Age Warning",
+            description: "Warn in factory preflight when the oldest local cloud change has waited this long to push.",
+            value_type: ConfigType::Int,
+            default: "21600",
+            constraint: Constraint::Range(60, 604800),
+            advanced: false,
+            requires_feature: None,
+            keywords: &["cloud", "sync", "queue", "age", "warning", "health"],
+            use_cases: &["Detect a stalled sync daemon", "Tune for a planned offline period"],
+        });
+
+    registry.register(ConfigMeta {
             key: "cloud.pull_on_start",
             section: "cloud",
             name: "Pull on Start",

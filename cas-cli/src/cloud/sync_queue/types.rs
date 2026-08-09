@@ -159,6 +159,23 @@ pub struct QueueStats {
     pub oldest_item: Option<String>,
 }
 
+/// Read-only health evidence for the cloud sync queue.
+///
+/// This intentionally describes the queue as it is persisted, rather than a
+/// daemon-local status value. It is therefore safe to surface from commands
+/// such as factory preflight even when no `cas serve` process is running.
+#[derive(Debug, Clone, Serialize)]
+pub struct QueueHealth {
+    /// Rows still eligible for another push attempt.
+    pub pending: usize,
+    /// Timestamp of the oldest eligible row, when one exists.
+    pub oldest_item: Option<DateTime<Utc>>,
+    /// Age of the oldest eligible row at the time this snapshot was taken.
+    pub oldest_age_secs: Option<i64>,
+    /// Most recently recorded push error, if a push has failed.
+    pub last_error: Option<String>,
+}
+
 /// Pending items grouped by entity type
 #[derive(Debug, Default)]
 pub struct PendingByType {

@@ -31,6 +31,14 @@ impl Config {
                 "cloud.max_retries".to_string(),
                 cloud.max_retries.to_string(),
             ),
+            (
+                "cloud.queue_pending_warning".to_string(),
+                cloud.queue_pending_warning.to_string(),
+            ),
+            (
+                "cloud.queue_oldest_warning_secs".to_string(),
+                cloud.queue_oldest_warning_secs.to_string(),
+            ),
             // Hooks section
             (
                 "hooks.capture_enabled".to_string(),

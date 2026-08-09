@@ -118,6 +118,7 @@ async fn test_store_operations_work() {
         team_id: None,
         bypass_overlap: None,
         mode: None,
+        expected_updated_at: None,
         personal: None,
     };
 
@@ -147,6 +148,7 @@ async fn test_all_store_types_accessible() {
         team_id: None,
         bypass_overlap: None,
         mode: None,
+        expected_updated_at: None,
         personal: None,
     };
 

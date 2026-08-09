@@ -1,7 +1,7 @@
 use crate::cloud::CloudConfig;
 use crate::mcp::tools::core::imports::*;
 use crate::mcp::tools::types::{
-    BlockReason, DimensionBreakdown, MemoryRememberResponse, RecommendedAction,
+    BlockReason, DimensionBreakdown, MemoryMergeReceipt, MemoryRememberResponse, RecommendedAction,
 };
 
 use cas_core::memory::{
@@ -324,28 +324,15 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<RememberRequest>,
     ) -> Result<CallToolResult, McpError> {
-        // `mode` contract (cas-e382): Phase 1 accepts `None` and
-        // `"interactive"` (treated identically). `"autofix"` is reserved
-        // for Phase 2 and returns an explicit error rather than silently
-        // degrading — callers should fail loudly if they ask for a feature
-        // that does not exist yet.
+        // Interactive is deliberately the default. Autofix changes existing
+        // durable state, so it must be explicitly requested.
         match req.mode.as_deref() {
-            None | Some("interactive") => {}
-            Some("autofix") => {
-                return Err(McpError {
-                    code: ErrorCode::INVALID_REQUEST,
-                    message: Cow::from(
-                        "mode=autofix is reserved for Phase 2 and is not supported in Phase 1. \
-                         Use mode=interactive (default) and act on a Blocked response yourself.",
-                    ),
-                    data: None,
-                });
-            }
+            None | Some("interactive") | Some("autofix") => {}
             Some(other) => {
                 return Err(McpError {
                     code: ErrorCode::INVALID_REQUEST,
                     message: Cow::from(format!(
-                        "unknown mode '{other}'. Valid modes: 'interactive' (default). 'autofix' is reserved for Phase 2."
+                        "unknown mode '{other}'. Valid modes: 'interactive' (default) or 'autofix'."
                     )),
                     data: None,
                 });
@@ -353,6 +340,20 @@ impl CasCore {
         }
 
         let store = self.open_store()?;
+
+        let expected_updated_at = req
+            .expected_updated_at
+            .as_deref()
+            .map(|value| {
+                chrono::DateTime::parse_from_rfc3339(value)
+                    .map(|timestamp| timestamp.with_timezone(&chrono::Utc))
+                    .map_err(|_| McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from("expected_updated_at must be an RFC3339 timestamp"),
+                        data: None,
+                    })
+                })
+            .transpose()?;
 
         let entry_type: EntryType = req.entry_type.parse().unwrap_or(EntryType::Learning);
         let id = store.generate_id().map_err(|e| McpError {
@@ -408,7 +409,105 @@ impl CasCore {
                 &tags,
                 &id,
             ) {
-                Ok(Some(OverlapOutcome::Block { best, all_high_scoring, recommendation })) => {
+                Ok(Some(OverlapOutcome::Block {
+                    best,
+                    all_high_scoring,
+                    recommendation,
+                })) => {
+                    if req.mode.as_deref() == Some("autofix") {
+                        let mut existing = store.get(&best.slug).map_err(|e| McpError {
+                            code: ErrorCode::INTERNAL_ERROR,
+                            message: Cow::from(format!("Failed to load overlap target: {e}")),
+                            data: None,
+                        })?;
+                        let actual_updated_at =
+                            store.recent_timestamp(&existing).map_err(|e| McpError {
+                                code: ErrorCode::INTERNAL_ERROR,
+                                message: Cow::from(format!(
+                                    "Failed to read overlap target revision: {e}"
+                                )),
+                                data: None,
+                            })?;
+                        let expected = expected_updated_at.unwrap_or(actual_updated_at);
+                        if expected != actual_updated_at {
+                            let response = MemoryRememberResponse::Conflict {
+                                slug: existing.id,
+                                expected_updated_at: expected.to_rfc3339(),
+                                actual_updated_at: actual_updated_at.to_rfc3339(),
+                            };
+                            return Ok(build_remember_result(
+                                &response,
+                                "Autofix merge conflict: the overlapping memory changed; reload it and retry.".to_string(),
+                                true,
+                            ));
+                        }
+
+                        // Preserve the existing identity and provenance while replacing the
+                        // incoming memory fields in the one conditional store write.
+                        existing.entry_type = entry_type.clone();
+                        existing.tags = tags.clone();
+                        existing.content = req.content.clone();
+                        existing.title = req.title.clone();
+                        existing.importance = req.importance;
+                        existing.valid_from = valid_from.clone();
+                        existing.valid_until = valid_until.clone();
+                        existing.pending_embedding = true;
+
+                        if !store
+                            .update_if_unmodified(&existing, expected)
+                            .map_err(|e| McpError {
+                                code: ErrorCode::INTERNAL_ERROR,
+                                message: Cow::from(format!(
+                                    "Failed to merge overlapping memory: {e}"
+                                )),
+                                data: None,
+                            })?
+                        {
+                            let actual =
+                                store.recent_timestamp(&existing).map_err(|e| McpError {
+                                    code: ErrorCode::INTERNAL_ERROR,
+                                    message: Cow::from(format!(
+                                        "Failed to read merge-conflict revision: {e}"
+                                    )),
+                                    data: None,
+                                })?;
+                            let response = MemoryRememberResponse::Conflict {
+                                slug: existing.id,
+                                expected_updated_at: expected.to_rfc3339(),
+                                actual_updated_at: actual.to_rfc3339(),
+                            };
+                            return Ok(build_remember_result(
+                                &response,
+                                "Autofix merge conflict: the overlapping memory changed; reload it and retry.".to_string(),
+                                true,
+                            ));
+                        }
+
+                        let updated_at =
+                            store.recent_timestamp(&existing).map_err(|e| McpError {
+                                code: ErrorCode::INTERNAL_ERROR,
+                                message: Cow::from(format!(
+                                    "Failed to read merged memory revision: {e}"
+                                )),
+                                data: None,
+                            })?;
+                        if let Ok(search) = self.open_search_index() {
+                            let _ = search.index_entry(&existing);
+                        }
+                        let response = MemoryRememberResponse::Merged {
+                            slug: existing.id.clone(),
+                            receipt: MemoryMergeReceipt {
+                                merged_into: existing.id.clone(),
+                                expected_updated_at: expected.to_rfc3339(),
+                                updated_at: updated_at.to_rfc3339(),
+                            },
+                        };
+                        return Ok(build_remember_result(
+                            &response,
+                            format!("Merged into existing entry: {}", existing.id),
+                            false,
+                        ));
+                    }
                     // Build the structured Blocked response (cas-e382).
                     // The tool call returns Ok(CallToolResult) with
                     // is_error=true so agents can parse `structured_content`

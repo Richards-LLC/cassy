@@ -7,7 +7,7 @@
 //! - Created (moderate overlap, cross-refs populated)
 //! - Blocked (high overlap, dimension breakdown + recommendation)
 //! - `mode=interactive` is equivalent to default
-//! - `mode=autofix` returns a clean "not supported in Phase 1" error
+//! - `mode=autofix` remains valid for a low-overlap create
 //! - `mode` with an unknown value errors
 //! - Serde round-trip / snapshot for each runtime variant
 
@@ -34,6 +34,7 @@ fn base_request(content: String, title: &str, tags: &str) -> RememberRequest {
         team_id: None,
         bypass_overlap: None,
         mode: None,
+        expected_updated_at: None,
         personal: None,
     }
 }
@@ -180,7 +181,7 @@ async fn mode_interactive_is_equivalent_to_default() {
 }
 
 #[tokio::test]
-async fn mode_autofix_returns_not_supported_error() {
+async fn mode_autofix_allows_low_overlap_create() {
     let (_temp, service) = setup_cas();
 
     let mut req = base_request(
@@ -189,15 +190,12 @@ async fn mode_autofix_returns_not_supported_error() {
         "autofix-tag",
     );
     req.mode = Some("autofix".to_string());
-    let err = service
+    let result = service
         .cas_remember(Parameters(req))
         .await
-        .expect_err("autofix is reserved for Phase 2");
-    let msg = err.message.to_string();
-    assert!(
-        msg.contains("autofix") && msg.contains("Phase 2"),
-        "autofix error should mention Phase 2 deferral, got: {msg}"
-    );
+        .expect("autofix is valid and low overlap creates normally");
+    assert_eq!(result.is_error, Some(false));
+    assert_eq!(result.structured_content.unwrap()["status"], "created");
 }
 
 #[tokio::test]

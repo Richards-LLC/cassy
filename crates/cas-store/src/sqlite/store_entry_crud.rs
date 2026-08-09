@@ -234,6 +234,41 @@ impl SqliteStore {
             Ok(())
         }) // with_write_retry
     }
+
+    /// Atomically apply the fields used by a memory merge only while the
+    /// lifecycle timestamp observed by the caller still matches. Returning
+    /// `Ok(false)` is a normal optimistic-concurrency conflict.
+    pub(crate) fn store_update_if_unmodified(
+        &self,
+        entry: &Entry,
+        expected_updated_at: chrono::DateTime<Utc>,
+    ) -> Result<bool> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = self.conn.lock().unwrap();
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            let rows = tx.execute(
+                "UPDATE entries SET type = ?1, tags = ?2, content = ?3, title = ?4,
+                 importance = ?5, valid_from = ?6, valid_until = ?7,
+                 pending_embedding = 1, updated_at = ?8
+                 WHERE id = ?9
+                   AND MAX(created, COALESCE(updated_at, created)) = ?10",
+                params![
+                    entry.entry_type.to_string(),
+                    Self::tags_to_string(&entry.tags),
+                    entry.content,
+                    entry.title,
+                    entry.importance,
+                    entry.valid_from.map(|t| t.to_rfc3339()),
+                    entry.valid_until.map(|t| t.to_rfc3339()),
+                    Utc::now().to_rfc3339(),
+                    entry.id,
+                    expected_updated_at.to_rfc3339(),
+                ],
+            )?;
+            tx.commit()?;
+            Ok(rows == 1)
+        })
+    }
     pub(crate) fn store_delete(&self, id: &str) -> Result<()> {
         let timer = TraceTimer::new();
         let conn = self.conn.lock().unwrap();

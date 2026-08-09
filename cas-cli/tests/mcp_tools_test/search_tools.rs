@@ -110,6 +110,7 @@ async fn test_search_with_content() {
         team_id: None,
         bypass_overlap: None,
         mode: None,
+        expected_updated_at: None,
         personal: None,
     };
 
@@ -154,6 +155,7 @@ async fn test_search_filter_by_type() {
         team_id: None,
         bypass_overlap: None,
         mode: None,
+        expected_updated_at: None,
         personal: None,
     };
 

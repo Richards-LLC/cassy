@@ -344,6 +344,12 @@ async fn proxy_socket(
     let mut revocations = auth
         .as_ref()
         .map(|(store, _)| store.subscribe_revocations());
+    let revalidation_period = std::time::Duration::from_millis(250);
+    let mut revalidation = tokio::time::interval_at(
+        tokio::time::Instant::now() + revalidation_period,
+        revalidation_period,
+    );
+    revalidation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             frame = viewer.recv() => match frame {
@@ -380,6 +386,26 @@ async fn proxy_socket(
                 }
             } => {
                 if revoked.as_deref() == auth.as_ref().map(|(_, context)| context.device_id.as_str()) {
+                    let _ = sink.send(Message::Close(None)).await;
+                    break;
+                }
+            }
+            revoked_on_disk = async {
+                let Some((store, context)) = auth.as_ref() else {
+                    return futures_util::future::pending::<bool>().await;
+                };
+                revalidation.tick().await;
+                let store = store.clone();
+                let context = context.clone();
+                tokio::task::spawn_blocking(move || {
+                    store
+                        .ensure_active_context(&context, chrono::Utc::now())
+                        .is_err()
+                })
+                .await
+                .unwrap_or(true)
+            } => {
+                if revoked_on_disk {
                     let _ = sink.send(Message::Close(None)).await;
                     break;
                 }

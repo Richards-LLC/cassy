@@ -3,8 +3,9 @@
 //! Implements H2-PERM-01 through H2-AUDIT-06 from the binding Commander ADR.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -12,6 +13,7 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Duration, Utc};
+use fs2::FileExt;
 use p256::ecdsa::signature::Verifier;
 use p256::ecdsa::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -348,8 +350,37 @@ struct AuditRecord<'a> {
 struct AuthInner {
     root: PathBuf,
     machine_id: String,
-    state: Mutex<PersistedState>,
+    gate: Mutex<()>,
+    lock_file: File,
     revocations: broadcast::Sender<String>,
+}
+
+struct AuthFileLock<'a>(&'a File);
+
+impl Drop for AuthFileLock<'_> {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(self.0);
+    }
+}
+
+struct LockedState<'a> {
+    state: PersistedState,
+    _file_lock: AuthFileLock<'a>,
+    _gate: MutexGuard<'a, ()>,
+}
+
+impl Deref for LockedState<'_> {
+    type Target = PersistedState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+impl DerefMut for LockedState<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.state
+    }
 }
 
 #[derive(Clone)]
@@ -359,24 +390,33 @@ impl AuthStore {
     pub fn open(root: impl AsRef<Path>, machine_id: impl Into<String>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         secure_directory(&root)?;
-        let state_path = root.join("auth.json");
-        let state = if state_path.exists() {
-            secure_regular_file(&state_path)?;
-            serde_json::from_slice(&fs::read(&state_path)?).context("invalid hub auth state")?
-        } else {
-            PersistedState::default()
-        };
+        let lock_path = root.join("auth.lock");
+        if lock_path.exists() {
+            secure_regular_file(&lock_path)?;
+        }
+        let mut lock_options = OpenOptions::new();
+        lock_options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            lock_options.mode(0o600);
+        }
+        let lock_file = lock_options.open(&lock_path)?;
+        secure_regular_file(&lock_path)?;
         let (revocations, _) = broadcast::channel(64);
         let store = Self(Arc::new(AuthInner {
             root,
             machine_id: machine_id.into(),
-            state: Mutex::new(state),
+            gate: Mutex::new(()),
+            lock_file,
             revocations,
         }));
+        let state_path = store.0.root.join("auth.json");
+        let state = store.lock()?;
         if !state_path.exists() {
-            let state = store.lock()?;
             store.persist(&state)?;
         }
+        drop(state);
         Ok(store)
     }
 
@@ -577,7 +617,7 @@ impl AuthStore {
     ) -> Result<WsTicket> {
         anyhow::ensure!(context.has(Scope::PaneRead), "authorization refused");
         let mut state = self.lock()?;
-        self.ensure_active_context(&state, context, now)?;
+        Self::ensure_active_context_in_state(&state, context, now)?;
         let ticket = random_secret();
         let expires_at = now + Duration::minutes(WS_TICKET_TTL_MINUTES);
         state.tickets.push(TicketRecord {
@@ -618,7 +658,7 @@ impl AuthStore {
             "websocket ticket refused"
         );
         let context = record.context.clone();
-        self.ensure_active_context(&state, &context, now)?;
+        Self::ensure_active_context_in_state(&state, &context, now)?;
         state.tickets[index].consumed_at = Some(now);
         self.persist(&state)?;
         Ok(context)
@@ -686,7 +726,7 @@ impl AuthStore {
         now: DateTime<Utc>,
     ) -> Result<DateTime<Utc>> {
         let mut state = self.lock()?;
-        self.ensure_active_context(&state, context, now)?;
+        Self::ensure_active_context_in_state(&state, context, now)?;
         if let Some(existing) = state.leases.get(session) {
             anyhow::ensure!(
                 existing.expires_at < now || existing.device_id == context.device_id,
@@ -712,7 +752,7 @@ impl AuthStore {
         now: DateTime<Utc>,
     ) -> Result<bool> {
         let state = self.lock()?;
-        self.ensure_active_context(&state, context, now)?;
+        Self::ensure_active_context_in_state(&state, context, now)?;
         Ok(state
             .leases
             .get(session)
@@ -742,43 +782,66 @@ impl AuthStore {
             controller_origin: context.map(|value| value.controller_origin.as_str()),
             target_session,
         };
+        let _state_lock = self.lock()?;
         append_private_json_line(&self.0.root.join("audit.jsonl"), &record)
     }
 
-    fn ensure_active_context(
-        &self,
+    pub fn ensure_active_context(&self, context: &AuthContext, now: DateTime<Utc>) -> Result<()> {
+        let state = self.lock()?;
+        Self::ensure_active_context_in_state(&state, context, now)
+    }
+
+    fn ensure_active_context_in_state(
         state: &PersistedState,
         context: &AuthContext,
         now: DateTime<Utc>,
     ) -> Result<()> {
-        if let Some(device) = state
+        let device = state
             .devices
             .iter()
             .find(|device| device.device_id == context.device_id)
-        {
-            anyhow::ensure!(
-                device.revoked_at.is_none()
-                    && device.expires_at >= now
-                    && device.last_used_at + Duration::days(CREDENTIAL_IDLE_DAYS) >= now,
-                "authorization refused"
-            );
-        }
+            .context("authorization refused")?;
+        anyhow::ensure!(
+            device.credential_id == context.credential_id
+                && device.controller_origin == context.controller_origin
+                && context.scopes.is_subset(&device.scopes)
+                && device.revoked_at.is_none()
+                && device.expires_at >= now
+                && device.last_used_at + Duration::days(CREDENTIAL_IDLE_DAYS) >= now,
+            "authorization refused"
+        );
         Ok(())
     }
 
-    fn lock(&self) -> Result<MutexGuard<'_, PersistedState>> {
-        self.0
-            .state
+    fn lock(&self) -> Result<LockedState<'_>> {
+        let gate = self
+            .0
+            .gate
             .lock()
-            .map_err(|_| anyhow::anyhow!("hub auth state poisoned"))
+            .map_err(|_| anyhow::anyhow!("hub auth state poisoned"))?;
+        self.0.lock_file.lock_exclusive()?;
+        let file_lock = AuthFileLock(&self.0.lock_file);
+        let target = self.0.root.join("auth.json");
+        let state = if target.exists() {
+            secure_regular_file(&target)?;
+            serde_json::from_slice(&fs::read(&target)?).context("invalid hub auth state")?
+        } else {
+            PersistedState::default()
+        };
+        Ok(LockedState {
+            state,
+            _file_lock: file_lock,
+            _gate: gate,
+        })
     }
 
     fn persist(&self, state: &PersistedState) -> Result<()> {
         let target = self.0.root.join("auth.json");
-        let temporary = self
-            .0
-            .root
-            .join(format!(".auth.{}.tmp", std::process::id()));
+        let temporary = self.0.root.join(format!(
+            ".auth.{}.{}.tmp",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         write_private_file(&temporary, &serde_json::to_vec_pretty(state)?, true)?;
         fs::rename(&temporary, &target)?;
         secure_regular_file(&target)

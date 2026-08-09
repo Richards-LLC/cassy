@@ -368,6 +368,17 @@ pub fn decode_length(header: &[u8; FRAME_HEADER_SIZE]) -> usize {
 mod tests {
     use crate::ui::factory::protocol::*;
 
+    fn attributed_remote_operator() -> MessageAttribution {
+        MessageAttribution {
+            device_id: Some("device-123".to_string()),
+            credential_id: Some("credential-456".to_string()),
+            device_label: Some("Pippenz phone".to_string()),
+            operator_label: Some("Pippenz".to_string()),
+            controller_origin: Some("https://commander.example".to_string()),
+            request_id: Some("request-789".to_string()),
+        }
+    }
+
     #[test]
     fn test_encode_decode_client_message() {
         let msg = ClientMessage::Input {
@@ -463,6 +474,141 @@ mod tests {
             }
             _ => panic!("Wrong message type decoded"),
         }
+    }
+
+    #[test]
+    fn legacy_unit_interrupt_wire_shape_is_unchanged() {
+        let json = serde_json::to_string(&ClientMessage::Interrupt).unwrap();
+        assert_eq!(json, r#""Interrupt""#);
+        assert!(matches!(
+            serde_json::from_str::<ClientMessage>(&json).unwrap(),
+            ClientMessage::Interrupt
+        ));
+    }
+
+    #[test]
+    fn targeted_interrupt_is_a_separately_named_additive_variant() {
+        let json = serde_json::to_string(&ClientMessage::InterruptPane {
+            pane_id: "worker-1".to_string(),
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"InterruptPane":{"pane_id":"worker-1"}}"#);
+        assert!(matches!(
+            serde_json::from_str::<ClientMessage>(&json).unwrap(),
+            ClientMessage::InterruptPane { pane_id } if pane_id == "worker-1"
+        ));
+    }
+
+    #[test]
+    fn semantic_message_wire_contract_requires_explicit_attribution() {
+        let msg = ClientMessage::SendMessage {
+            target: "worker-1".to_string(),
+            text: "Please checkpoint now".to_string(),
+            summary: Some("checkpoint request".to_string()),
+            urgent: false,
+            attribution: attributed_remote_operator(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
+        match decoded {
+            ClientMessage::SendMessage {
+                target,
+                text,
+                summary,
+                urgent,
+                attribution,
+            } => {
+                assert_eq!(target, "worker-1");
+                assert_eq!(text, "Please checkpoint now");
+                assert_eq!(summary.as_deref(), Some("checkpoint request"));
+                assert!(!urgent);
+                assert_eq!(attribution.device_id.as_deref(), Some("device-123"));
+                assert_eq!(attribution.operator_label.as_deref(), Some("Pippenz"));
+            }
+            _ => panic!("Wrong message type decoded"),
+        }
+
+        let missing_attribution = r#"{"SendMessage":{"target":"worker-1","text":"hello","summary":null,"urgent":false}}"#;
+        assert!(
+            serde_json::from_str::<ClientMessage>(missing_attribution).is_err(),
+            "attribution is a required part of the wire contract"
+        );
+    }
+
+    #[test]
+    fn unavailable_attribution_is_explicit_and_never_supervisor() {
+        let attribution = MessageAttribution {
+            device_id: None,
+            credential_id: None,
+            device_label: None,
+            operator_label: None,
+            controller_origin: None,
+            request_id: None,
+        };
+        let json = serde_json::to_value(&attribution).unwrap();
+        for field in [
+            "device_id",
+            "credential_id",
+            "device_label",
+            "operator_label",
+            "controller_origin",
+            "request_id",
+        ] {
+            assert_eq!(json.get(field), Some(&serde_json::Value::Null));
+        }
+        assert_ne!(attribution.queue_source(), "supervisor");
+        assert_ne!(attribution.queue_source(), "mcp");
+    }
+
+    #[test]
+    fn welcome_negotiates_version_and_capabilities_additively() {
+        let legacy_json = r#"{"Welcome":{"session_name":"factory-1","state":{"focused_pane":null,"panes":[],"epic_id":null,"epic_title":null,"cols":120,"rows":40},"scrollback":null}}"#;
+        let decoded: DaemonMessage = serde_json::from_str(legacy_json).unwrap();
+        match decoded {
+            DaemonMessage::Welcome {
+                protocol_version,
+                capabilities,
+                ..
+            } => {
+                assert_eq!(protocol_version, LEGACY_PROTOCOL_VERSION);
+                assert!(capabilities.is_empty());
+            }
+            _ => panic!("Wrong message type decoded"),
+        }
+
+        let current = DaemonMessage::Welcome {
+            session_name: "factory-1".to_string(),
+            state: SessionState {
+                focused_pane: None,
+                panes: Vec::new(),
+                epic_id: None,
+                epic_title: None,
+                cols: 120,
+                rows: 40,
+            },
+            scrollback: None,
+            protocol_version: PROTOCOL_VERSION,
+            capabilities: daemon_capabilities(),
+        };
+        let json = serde_json::to_value(&current).unwrap();
+        assert_eq!(
+            json.pointer("/Welcome/protocol_version"),
+            Some(&serde_json::json!(PROTOCOL_VERSION))
+        );
+        assert!(daemon_capabilities().contains(&ProtocolCapability::TargetedInterrupt));
+        assert!(daemon_capabilities().contains(&ProtocolCapability::AttributedSendMessage));
+    }
+
+    #[test]
+    fn unknown_client_message_remains_a_non_destructive_decode_error() {
+        let unknown = r#"{"FutureControl":{"value":1}}"#;
+        assert!(serde_json::from_str::<ClientMessage>(unknown).is_err());
+
+        let known_after_unknown = r#"{"Focus":{"pane_id":"worker-1"}}"#;
+        assert!(matches!(
+            serde_json::from_str::<ClientMessage>(known_after_unknown).unwrap(),
+            ClientMessage::Focus { pane_id } if pane_id == "worker-1"
+        ));
     }
 
     #[test]

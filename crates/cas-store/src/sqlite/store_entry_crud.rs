@@ -24,8 +24,38 @@ impl SqliteStore {
         let conn = self.conn.lock().unwrap();
         // Use a per-day sequence key so IDs reset daily (e.g., "entry:2026-03-30")
         let seq_name = format!("entry:{today}");
-        let next_num = crate::shared_db::next_sequence_val(&conn, &seq_name)?;
-        Ok(format!("{today}-{next_num}"))
+        let id_pattern = format!("{today}-[0-9]*");
+        let suffix_start = (today.len() + 2) as i64; // SQLite SUBSTR positions are 1-indexed.
+
+        loop {
+            let next_num = crate::shared_db::next_sequence_val(&conn, &seq_name)?;
+            let max_existing: Option<i64> = conn.query_row(
+                "SELECT MAX(CASE
+                    WHEN id GLOB ?1 THEN CAST(SUBSTR(id, ?2) AS INTEGER)
+                 END)
+                 FROM entries",
+                params![&id_pattern, suffix_start],
+                |row| row.get(0),
+            )?;
+
+            // Synced or restored rows do not advance the local sequence. Keep
+            // the counter above every same-day entry before handing an ID to a
+            // caller, otherwise a deterministic retry can return the same
+            // colliding slug again.
+            if max_existing.is_none_or(|max| next_num > max) {
+                return Ok(format!("{today}-{next_num}"));
+            }
+
+            conn.execute(
+                "INSERT INTO id_sequences (name, next_val) VALUES (?1, ?2)
+                 ON CONFLICT(name) DO UPDATE SET next_val =
+                    CASE
+                        WHEN next_val < excluded.next_val THEN excluded.next_val
+                        ELSE next_val
+                    END",
+                params![&seq_name, max_existing.unwrap()],
+            )?;
+        }
     }
     pub(crate) fn store_add(&self, entry: &Entry) -> Result<()> {
         let timer = TraceTimer::new();
@@ -96,7 +126,18 @@ impl SqliteStore {
                 }
             }
 
-            result?;
+            match result {
+                Ok(_) => {}
+                Err(rusqlite::Error::SqliteFailure(sqlite_error, message))
+                    if sqlite_error.code == rusqlite::ffi::ErrorCode::ConstraintViolation
+                        && message.as_deref().is_some_and(|message| {
+                            message.contains("UNIQUE constraint failed: entries.id")
+                        }) =>
+                {
+                    return Err(StoreError::EntryExists(entry.id.clone()));
+                }
+                Err(error) => return Err(StoreError::Database(error)),
+            }
 
             // Record event for sidecar activity feed (within same transaction)
             let summary = entry.title.as_deref().unwrap_or_else(|| {

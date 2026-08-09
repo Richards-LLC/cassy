@@ -6,6 +6,7 @@ This is the per-machine operating procedure for the Commander hub. Repeat it on 
 
 - Install the same published `cas` version on every machine and put the binary at a stable absolute path.
 - Install Tailscale, join every machine and browser device to the same tailnet, enable MagicDNS and HTTPS certificates for the tailnet, and confirm `tailscale status` reports `Running`.
+- On Linux, authorize the account that runs the hub to operate Tailscale without sudo: `sudo tailscale set --operator="$USER"`. Verify it with `sudo tailscale debug prefs`; `OperatorUser` must equal that account. Without this one-time host setting, CAS reports `permission-denied` and keeps the hub loopback-only.
 - Choose one machine URL as the browser profile's controller origin. Pair every other machine to that exact origin; changing it requires re-pairing.
 - Do not expose port 4173 on a LAN interface. The CAS hub remains on `127.0.0.1`; Tailscale Serve is the TLS terminator.
 
@@ -121,10 +122,13 @@ For an upgrade, stop as above, replace the binary atomically, compare `cas --ver
 Executed in the H5 development environment:
 
 - `tailscale version` reported 1.102.2 and `tailscale status --json` reported a running node with MagicDNS.
-- `tailscale serve status --json` returned `{}` before the proof, establishing no pre-existing mapping.
+- The first 8443 attempt, before the Linux operator prerequisite was configured, reported `permission-denied`; the hub remained healthy at `http://127.0.0.1:4173`, `cas hub stop` removed it, and Serve status remained `{}`.
+- After `sudo -n tailscale set --operator=pippenz`, the exact 8443 sequence above was run with the port override. `tailscale serve status --json` returned `{}` before startup. `cas hub --tailscale-serve --tailscale-serve-port 8443` printed `https://soundwave-linux.tailf5a734.ts.net:8443/`; hub status reported version 2.54.1 at the same URL.
+- Live Serve status contained only the HTTPS 8443 root handler proxying `http://127.0.0.1:4173`. `curl --noproxy '*' --fail --silent --show-error https://soundwave-linux.tailf5a734.ts.net:8443/v1/health` returned `{"schema_version":1,"ready":true}` with HTTP 200 and TLS verification result 0.
+- The active ownership receipt was mode 0600 with `created_by_cas: true`, empty `status_before`, and the exact 8443 handler in `status_after`. `cas --json hub stop` returned `tailscale_serve_removed: true`; final Serve status was `{}`, port 4173 had no listener, the active ownership receipt was absent, and the mode-0600 teardown receipt recorded the handler as `status_before` and `{}` as `status_after`.
 - Mocked-binary tests executed exact status-before, port-scoped on, status-after, idempotent reuse, conflict refusal, and owned off flows.
 - The local hub/auth test suite exercised pairing exchange, five-minute single-use WS tickets, and attach over the same route that Tailscale proxies as WSS.
 
-Deferred operator acceptance (requires machine B plus a second browser/phone and therefore is not claimed by this single-machine development run): follow the pairing section verbatim, capture the remote HTTPS health response and WSS 101 upgrade, verify output from machine B, then reboot B and repeat the stable URL/version/capability checks. Paste those receipts into the H7 two-machine acceptance record.
+Deferred H7 operator acceptance (requires machine B plus a second browser/phone and therefore is not claimed by this single-machine development run): follow the pairing section verbatim, capture the remote HTTPS health response and WSS 101 upgrade, verify output from machine B, then reboot B and repeat the stable URL/version/capability checks. Paste those receipts into the H7 two-machine acceptance record. The single-machine HTTPS receipt above is not a substitute for that two-device proof.
 
 The binding security model and complete assembled acceptance invariants are in `docs/specs/2026-08-08-commander-security-architecture.md` (H1-TLS-02, H2-PAIR-02, H2-WS-04, H7-FLEET-02).

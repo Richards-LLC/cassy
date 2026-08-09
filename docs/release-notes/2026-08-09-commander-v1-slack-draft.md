@@ -1,13 +1,14 @@
-# Commander v1 runtime release — future corrective artifact, unposted Slack drafts
+# Commander v1 runtime release — v2.55.4 candidate, unposted Slack drafts
 
 > **DO NOT POST.** The immutable public `v2.55.3` artifact is authentic and identically installed on
 > two real machines, but its assembled H7 verdict is **NOT RELEASABLE**: the documented Tailscale
 > Serve hub restart failed to produce a ready replacement while paired phone-class clients were
-> attached. Clean-home and listener-bound HSTS corrections passed, but later acceptance rows were
-> deliberately stopped. All prior tags, releases, and assets remain unchanged. **H7 remains NOT YET
-> RELEASABLE. Do not post these drafts.** Re-review only after a new immutable corrective artifact
-> passes the complete two-machine H7 matrix from its exact public bytes. Slack remains unposted until
-> the user elects to post it after a green gate.
+> attached. Source candidate `v2.55.4` contains the reviewed authoritative restart-lock handoff fix;
+> it is not tagged, published, installed, or accepted yet. All prior tags, releases, and assets remain
+> unchanged. **H7 remains NOT YET RELEASABLE. Do not post these drafts.** Re-review only after an
+> immutable `v2.55.4` release is independently verified and passes the complete two-machine H7 matrix
+> from its exact public bytes. Slack remains unposted until the user elects to post it after a green
+> gate.
 
 Destination after the gate passes: `#cas-internal` (`C0B44GUKDK2`). These are the two distinct
 top-level runtime-release posts required by `docs/RELEASE_SLACK_RUBRIC.md`; they are not threaded
@@ -15,7 +16,7 @@ replies. Status: **unposted**.
 
 ## User-perspective top-level post
 
-**Live on production · User · [PUBLISHED VERSION]**
+**Live on production · User · v2.55.4**
 
 Was: checking work across machines meant opening each terminal separately. → Now: Commander gives you
 one phone-friendly view of your paired CAS machines, with live panes and deliberate, secure control.
@@ -25,6 +26,7 @@ one phone-friendly view of your paired CAS machines, with live panes and deliber
   visits instead of accepting a plaintext downgrade.
 - Start on a newly installed machine without manually creating Commander state directories first.
 - Watch the same session from more than one screen while one clearly identified controller holds input.
+- Restart a Commander hub without racing its still-exiting predecessor or launching a competing owner.
 - Reconnect after hub or daemon restarts with an evidence-backed explanation when the operating system
   reports how a daemon stopped, while missing or stale evidence stays honestly unknown.
 - Revoke a device when needed; expired, replayed, cross-site, or over-scoped access is refused.
@@ -32,7 +34,7 @@ one phone-friendly view of your paired CAS machines, with live panes and deliber
 
 ## Dev-perspective top-level post
 
-**Live on production · Dev · [PUBLISHED VERSION]**
+**Live on production · Dev · v2.55.4**
 
 Was: CAS exposed machine-local daemon state without a browser-safe fleet boundary. → Now: each machine
 runs a loopback Commander hub with tailnet TLS, exact-origin proof-of-possession auth, one upstream per
@@ -47,6 +49,9 @@ daemon session, and bounded downstream fan-out.
   responses; the documented plaintext listener ignores spoofed proxy and identity headers.
 - One upstream daemon WebSocket serves multiple pane viewers; controller leases make concurrent input
   explicit, and slow viewers do not create another upstream or stall healthy viewers.
+- Hub restart propagates stop failures, waits for both the old PID and authoritative machine-lock
+  release, and acquires the lock before stale cleanup or replacement launch. A bounded timeout fails
+  without starting a competing hub, and concurrent start/restart attempts retain exactly one owner.
 - Clean-home startup creates the missing hub hierarchy owner-only for ordinary and Tailscale Serve
   flows, preserves safe existing state, and fails closed on symlink, ownership, mode, or ancestor
   collisions without leaking filesystem paths.
@@ -68,8 +73,8 @@ daemon session, and bounded downstream fan-out.
 
 ## Pre-post fill and verification
 
-- [ ] Replace `[PUBLISHED VERSION]` only after a new immutable corrective tag exists; do not reuse or
-      move `v2.55.3` or any earlier tag.
+- [ ] Confirm the immutable published corrective tag is exactly `v2.55.4`; do not reuse or move
+      `v2.55.3` or any earlier tag.
 - [ ] Link the private posting checklist to the exact tag peel, GitHub release, workflow, asset names,
       SHA-256 digests, and green final acceptance report.
 - [ ] Confirm the public release contains the Commander source boundary and both machines identify the

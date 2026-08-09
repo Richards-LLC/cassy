@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.55.4] - 2026-08-09
+
+### Fixed
+- **Commander hub restart now waits for an authoritative machine-lock handoff before starting the replacement.** Restart propagates stop failures, waits for both the old process and its lock ownership to disappear, and acquires the machine lock before stale-state cleanup or replacement launch. If the bounded handoff deadline expires, the command fails truthfully without starting a competing hub; concurrent start and restart attempts preserve exactly one owner.
+
 ## [2.55.3] - 2026-08-09
 
 ### Fixed

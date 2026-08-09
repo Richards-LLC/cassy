@@ -5,6 +5,41 @@ use crate::cloud::sync_queue::{EntityType, QueuedSync, SyncOperation, SyncQueue}
 use crate::error::CasError;
 
 impl SyncQueue {
+    /// Drop a queued task/entry tombstone when its target still exists locally.
+    ///
+    /// Pull/apply paths intentionally write through non-syncing stores, so a
+    /// remote restore can recreate a row without replacing an older queued
+    /// delete. Checking the co-located source-of-truth table before any HTTP
+    /// request prevents that stale tombstone from deleting the live cloud row.
+    /// The check and queue removal share one SQLite transaction so the exact
+    /// queue item is neutralized atomically.
+    pub(crate) fn neutralize_delete_if_local_entity_exists(
+        &self,
+        item: &QueuedSync,
+    ) -> Result<bool, CasError> {
+        let table = match item.entity_type {
+            EntityType::Entry => "entries",
+            EntityType::Task => "tasks",
+            _ => return Ok(false),
+        };
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let exists: bool = tx.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE id = ?1)"),
+            params![item.entity_id],
+            |row| row.get(0),
+        )?;
+        if exists {
+            tx.execute(
+                "DELETE FROM sync_queue WHERE id = ?1 AND operation = 'delete'",
+                params![item.id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(exists)
+    }
+
     /// Queue a sync operation.
     ///
     /// Uses upsert semantics - if an item with the same entity_type,

@@ -10,6 +10,8 @@ use cas::cli::cloud::{CloudPushArgs, execute_push};
 use cas::cloud::{
     CloudConfig, CloudSyncer, CloudSyncerConfig, EntityType, PushScope, SyncOperation, SyncQueue,
 };
+use cas::store::{open_store_local, open_task_store_local};
+use cas::types::{Entry, Task};
 use flate2::read::GzDecoder;
 use tempfile::TempDir;
 use wiremock::matchers::{method, path};
@@ -64,6 +66,145 @@ fn decode_gzip_json(body: &[u8]) -> serde_json::Value {
     let mut decoded = Vec::new();
     decoder.read_to_end(&mut decoded).unwrap();
     serde_json::from_slice(&decoded).unwrap()
+}
+
+fn init_local_entity_tables(root: &TempDir) {
+    open_store_local(root.path()).unwrap();
+    open_task_store_local(root.path()).unwrap();
+}
+
+fn delete_syncer(root: &TempDir, endpoint: String) -> CloudSyncer {
+    let mut config = CloudConfig::default();
+    config.endpoint = endpoint;
+    config.token = Some("test-token".to_string());
+    CloudSyncer::new_for_project(
+        Arc::new(SyncQueue::open(root.path()).unwrap()),
+        config,
+        CloudSyncerConfig::default(),
+        "delete-project".to_string(),
+        root.path(),
+    )
+}
+
+#[tokio::test]
+async fn personal_deletes_use_singular_task_and_entry_paths() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/sync/task/absent-task"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/sync/entry/absent-entry"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let root = TempDir::new().unwrap();
+    init_local_entity_tables(&root);
+    let queue = SyncQueue::open(root.path()).unwrap();
+    queue.init().unwrap();
+    queue
+        .enqueue(EntityType::Task, "absent-task", SyncOperation::Delete, None)
+        .unwrap();
+    queue
+        .enqueue(
+            EntityType::Entry,
+            "absent-entry",
+            SyncOperation::Delete,
+            None,
+        )
+        .unwrap();
+
+    let syncer = delete_syncer(&root, server.uri());
+    tokio::task::spawn_blocking(move || syncer.push())
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(queue.pending(10, 5).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn failed_personal_delete_records_status_and_body_for_retry() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/sync/task/retry-task"))
+        .respond_with(ResponseTemplate::new(400).set_body_string("bad tombstone"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let root = TempDir::new().unwrap();
+    init_local_entity_tables(&root);
+    let queue = SyncQueue::open(root.path()).unwrap();
+    queue.init().unwrap();
+    queue
+        .enqueue(EntityType::Task, "retry-task", SyncOperation::Delete, None)
+        .unwrap();
+
+    let syncer = delete_syncer(&root, server.uri());
+    tokio::task::spawn_blocking(move || syncer.push())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let pending = queue.pending(10, 5).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].retry_count, 1);
+    let error = pending[0].last_error.as_deref().unwrap();
+    assert!(error.contains("400"), "missing status in {error:?}");
+    assert!(
+        error.contains("bad tombstone"),
+        "missing response body in {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn personal_deletes_for_live_task_and_entry_are_neutralized_without_http() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let root = TempDir::new().unwrap();
+    let entry_store = open_store_local(root.path()).unwrap();
+    let task_store = open_task_store_local(root.path()).unwrap();
+    entry_store
+        .add(&Entry::new(
+            "live-entry".to_string(),
+            "still here".to_string(),
+        ))
+        .unwrap();
+    task_store
+        .add(&Task::new(
+            "live-task".to_string(),
+            "still here".to_string(),
+        ))
+        .unwrap();
+    let queue = SyncQueue::open(root.path()).unwrap();
+    queue.init().unwrap();
+    queue
+        .enqueue(EntityType::Entry, "live-entry", SyncOperation::Delete, None)
+        .unwrap();
+    queue
+        .enqueue(EntityType::Task, "live-task", SyncOperation::Delete, None)
+        .unwrap();
+
+    let syncer = delete_syncer(&root, server.uri());
+    let result = tokio::task::spawn_blocking(move || syncer.push())
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(result.pushed_entries, 0);
+    assert_eq!(result.pushed_tasks, 0);
+    assert!(queue.pending(10, 5).unwrap().is_empty());
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]

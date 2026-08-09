@@ -48,6 +48,33 @@ fn test_task_crud() {
 }
 
 #[test]
+fn create_atomic_records_creator_session_on_task_created_event() {
+    let (_temp, store) = create_test_store();
+    {
+        let conn = store.conn.lock().unwrap();
+        conn.execute_batch(crate::EVENT_SCHEMA).unwrap();
+    }
+    let task = Task::new(
+        store.generate_id().unwrap(),
+        "Session-authored task".to_string(),
+    );
+
+    store
+        .create_atomic(&task, &[], None, Some("outer-session"))
+        .unwrap();
+
+    let conn = store.conn.lock().unwrap();
+    let session_id: Option<String> = conn
+        .query_row(
+            "select session_id from events where entity_id = ?1 and event_type = 'task_created'",
+            [&task.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(session_id.as_deref(), Some("outer-session"));
+}
+
+#[test]
 fn test_task_depth_roundtrip() {
     use cas_types::TaskDepth;
     let (_temp, store) = create_test_store();

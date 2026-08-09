@@ -215,6 +215,7 @@ pub(crate) struct RecallRequest {
     pub(crate) focus_epic_id: Option<String>,
     pub(crate) focus_epic_title: Option<String>,
     pub(crate) focus_epic_labels: Vec<String>,
+    pub(crate) authored_evidence: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -225,6 +226,7 @@ pub(crate) struct RecallQuery {
     pub(crate) files: Vec<String>,
     pub(crate) symbols: Vec<String>,
     pub(crate) focus_terms: Vec<String>,
+    pub(crate) authored_evidence: Vec<String>,
 }
 
 impl RecallQuery {
@@ -238,6 +240,7 @@ impl RecallQuery {
         let decisions = stable_values(&request.recent_decisions, 4);
         let seen = stable_values(&request.seen_evidence, 32);
         let focus_labels = stable_values(&request.focus_epic_labels, 12);
+        let authored_evidence = stable_values(&request.authored_evidence, LEDGER_ENTRY_CAP);
         // Keep ownership deterministic even when callers reuse their buffers.
         files.shrink_to_fit();
         symbols.shrink_to_fit();
@@ -291,6 +294,7 @@ impl RecallQuery {
             files,
             symbols,
             focus_terms,
+            authored_evidence,
         })
     }
 }
@@ -1253,6 +1257,11 @@ pub(crate) fn build_ambient_recall_context(
     let candidates = retrieve_candidates(&identity, &request, &retrievers)?;
     let ledger_file = ledger_path(cas_root, &identity.session_id);
     let mut ledger = RecallLedger::load(&ledger_file);
+    // A session may have written evidence since the last hook. Persist that
+    // provenance before rendering so the ledger remains protective if a later
+    // lookup cannot read the originating table (for example, during a schema
+    // transition). The retriever has already removed this turn's direct hits.
+    ledger.record_authored(&candidates.authored_evidence);
     let rendered = render_packet(&identity, &query, &candidates, &mut ledger);
     match rendered {
         Some((packet, injected)) => {
@@ -1371,13 +1380,62 @@ fn hook_request(
         }
         request.symbols = stable_values(&symbols, 16);
     }
+    request.authored_evidence = session_authored_evidence(&conn, &input.session_id);
     request
+}
+
+/// Evidence created by this hook's agent session must not consume its next
+/// recall packet. Entries carry direct session provenance; task creation is
+/// captured in the sidecar event stream. Query both the hook session and the
+/// factory session environment because hook hosts have historically supplied
+/// different identifiers for the same agent process.
+fn session_authored_evidence(conn: &Connection, hook_session_id: &str) -> Vec<String> {
+    let mut session_ids = vec![hook_session_id.trim().to_string()];
+    if let Ok(factory_session_id) = std::env::var("CAS_SESSION_ID") {
+        session_ids.push(factory_session_id.trim().to_string());
+    }
+    let session_ids = stable_values(&session_ids, 2);
+    let mut ids = Vec::new();
+
+    for session_id in session_ids {
+        if session_id.is_empty() {
+            continue;
+        }
+        if let Ok(mut statement) = conn.prepare(
+            "select id from entries where session_id = ?1 order by created_at desc limit ?2",
+        ) {
+            if let Ok(rows) = statement
+                .query_map(params![session_id, LEDGER_ENTRY_CAP as i64], |row| {
+                    row.get::<_, String>(0)
+                })
+            {
+                ids.extend(rows.filter_map(Result::ok));
+            }
+        }
+        if let Ok(mut statement) = conn.prepare(
+            "select distinct entity_id from events \
+             where session_id = ?1 and event_type in ('memory_stored', 'task_created') \
+             and entity_type in ('entry', 'task') \
+             order by created_at desc limit ?2",
+        ) {
+            if let Ok(rows) = statement
+                .query_map(params![session_id, LEDGER_ENTRY_CAP as i64], |row| {
+                    row.get::<_, String>(0)
+                })
+            {
+                ids.extend(rows.filter_map(Result::ok));
+            }
+        }
+    }
+    stable_values(&ids, LEDGER_ENTRY_CAP)
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RecallCandidates {
     pub(crate) candidates: Vec<EvidenceCandidate>,
     pub(crate) rejected_scope: usize,
+    pub(crate) authored_evidence: Vec<String>,
+    pub(crate) rejected_authored: usize,
 }
 
 /// Disposable per-session state. It suppresses repeated prompt inflation; it
@@ -1388,6 +1446,8 @@ pub(crate) struct RecallLedger {
     last_query_hash: String,
     #[serde(default)]
     seen: Vec<SeenEvidence>,
+    #[serde(default)]
+    authored: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1428,6 +1488,21 @@ impl RecallLedger {
         if self.seen.len() > LEDGER_ENTRY_CAP {
             self.seen.drain(..self.seen.len() - LEDGER_ENTRY_CAP);
         }
+    }
+
+    fn record_authored(&mut self, ids: &[String]) {
+        for id in ids {
+            self.authored.retain(|existing| existing != id);
+            self.authored.push(id.clone());
+        }
+        if self.authored.len() > LEDGER_ENTRY_CAP {
+            self.authored
+                .drain(..self.authored.len() - LEDGER_ENTRY_CAP);
+        }
+    }
+
+    fn has_authored(&self, candidate: &EvidenceCandidate) -> bool {
+        self.authored.iter().any(|id| id == &candidate.evidence_id)
     }
 
     fn save(&self, path: &Path) {
@@ -1477,10 +1552,18 @@ pub(crate) fn render_packet(
         .min(policy.emergency_tokens)
         .saturating_mul(4);
     let query_hash = stable_hash(&query.canonical);
+    let mut authored_omitted = candidates.rejected_authored;
     let delta: Vec<EvidenceCandidate> = candidates
         .candidates
         .iter()
         .filter(|candidate| !ledger.has_seen(candidate))
+        .filter(|candidate| {
+            let authored = ledger.has_authored(candidate);
+            if authored {
+                authored_omitted += 1;
+            }
+            !authored
+        })
         .cloned()
         .collect();
     if delta.is_empty() {
@@ -1515,13 +1598,18 @@ pub(crate) fn render_packet(
         if lexical_only && (semantic_evidence_exists || lexical_injected == LEXICAL_INJECTION_CAP) {
             continue;
         }
-        let card = render_card(candidate);
+        let Some(why_relevant) = injection_reason(candidate) else {
+            continue;
+        };
+        let mut candidate = candidate.clone();
+        candidate.why_relevant = why_relevant;
+        let card = render_card(&candidate);
         if full.len() + 1 + card.len() + footer_reserve > byte_budget {
             break;
         }
         full.push('\n');
         full.push_str(&card);
-        injected.push(candidate.clone());
+        injected.push(candidate);
         if lexical_only {
             lexical_injected += 1;
         }
@@ -1530,7 +1618,7 @@ pub(crate) fn render_packet(
         return None;
     }
 
-    let omitted = delta.len().saturating_sub(injected.len());
+    let omitted = delta.len().saturating_sub(injected.len()) + authored_omitted;
     full.push_str(&format!(
         "\n[recall disclosure: injected={} omitted={} scope_rejected={} bodies=tool-pull-only]",
         injected.len(),
@@ -1557,6 +1645,23 @@ pub(crate) fn render_packet(
         },
         injected,
     ))
+}
+
+/// Every displayed card needs a truthful, non-empty selection reason. A
+/// lexical label without matched terms is neither: preserve stronger selector
+/// evidence when available, otherwise leave the row out of the injection.
+fn injection_reason(candidate: &EvidenceCandidate) -> Option<String> {
+    let existing = candidate.why_relevant.trim();
+    if !existing.is_empty() && existing != "lexical match:" && existing != "lexical(weak) match:" {
+        return Some(existing.to_string());
+    }
+    if candidate.binding {
+        return Some("exact task/file/symbol binding".to_string());
+    }
+    candidate
+        .semantic_score
+        .filter(|score| *score > 0.0)
+        .map(|score| format!("semantic match {score:.3}"))
 }
 
 fn render_card(candidate: &EvidenceCandidate) -> String {
@@ -1648,6 +1753,12 @@ pub(crate) fn retrieve_candidates(
                 .semantic_score
                 .is_some_and(|score| score >= FOCUSED_EPIC_SEMANTIC_FLOOR)
     });
+    let authored_evidence = query.authored_evidence.clone();
+    let rejected_authored = candidates
+        .iter()
+        .filter(|candidate| authored_evidence.contains(&candidate.evidence_id))
+        .count();
+    candidates.retain(|candidate| !authored_evidence.contains(&candidate.evidence_id));
     candidates.sort_by(|a, b| {
         b.binding
             .cmp(&a.binding)
@@ -1659,6 +1770,8 @@ pub(crate) fn retrieve_candidates(
     Some(RecallCandidates {
         candidates,
         rejected_scope,
+        authored_evidence,
+        rejected_authored,
     })
 }
 
@@ -2003,6 +2116,8 @@ mod tests {
         let candidates = RecallCandidates {
             candidates: rows,
             rejected_scope: 7,
+            authored_evidence: Vec::new(),
+            rejected_authored: 0,
         };
         let mut ledger = RecallLedger::default();
         let (packet, injected) =
@@ -2033,6 +2148,8 @@ mod tests {
         let candidates = RecallCandidates {
             candidates: vec![first.clone()],
             rejected_scope: 0,
+            authored_evidence: Vec::new(),
+            rejected_authored: 0,
         };
         let (packet, injected) =
             render_packet(&identity, &query, &candidates, &mut ledger).unwrap();
@@ -2045,10 +2162,86 @@ mod tests {
         let changed = RecallCandidates {
             candidates: vec![revised],
             rejected_scope: 0,
+            authored_evidence: Vec::new(),
+            rejected_authored: 0,
         };
         let (packet, _) = render_packet(&identity, &query, &changed, &mut ledger).unwrap();
         assert!(packet.full.contains("@r2"));
         assert!(packet.full.contains("STALE"));
+    }
+
+    #[test]
+    fn injection_never_renders_an_empty_why_label() {
+        let identity = identity(RecallRole::Worker);
+        let query = RecallQuery::build(
+            &identity,
+            &RecallRequest {
+                prompt: "repair parser cache".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut empty_lexical = candidate("empty-lexical", EvidenceScope::Global);
+        empty_lexical.why_relevant = "lexical match:".into();
+        let mut empty_binding = candidate("empty-binding", EvidenceScope::Global);
+        empty_binding.why_relevant.clear();
+        empty_binding.binding = true;
+        let candidates = RecallCandidates {
+            candidates: vec![empty_lexical, empty_binding],
+            rejected_scope: 0,
+            authored_evidence: Vec::new(),
+            rejected_authored: 0,
+        };
+
+        let (packet, injected) =
+            render_packet(&identity, &query, &candidates, &mut RecallLedger::default()).unwrap();
+        assert_eq!(packet.injected, 1);
+        assert_eq!(packet.omitted, 1);
+        assert!(
+            injected
+                .iter()
+                .all(|candidate| !candidate.why_relevant.trim().is_empty())
+        );
+        assert_eq!(injected[0].why_relevant, "exact task/file/symbol binding");
+        assert!(!packet.full.contains("why=lexical match: |"));
+    }
+
+    #[test]
+    fn same_session_authored_rows_are_not_injected_and_count_as_omitted() {
+        let identity = identity(RecallRole::Worker);
+        let authored = candidate("self-authored", EvidenceScope::Project("project-a".into()));
+        let other = candidate("independent", EvidenceScope::Project("project-a".into()));
+        let retriever = FixedRetriever {
+            calls: Cell::new(0),
+            rows: vec![authored, other],
+        };
+        let request = RecallRequest {
+            prompt: "repair parser cache".into(),
+            authored_evidence: vec!["self-authored".into()],
+            ..Default::default()
+        };
+        let query = RecallQuery::build(&identity, &request).unwrap();
+        let candidates = retrieve_candidates(&identity, &request, &[&retriever]).unwrap();
+        assert_eq!(candidates.rejected_authored, 1);
+        assert_eq!(candidates.authored_evidence, vec!["self-authored"]);
+        assert_eq!(
+            candidates
+                .candidates
+                .iter()
+                .map(|candidate| candidate.evidence_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["independent"]
+        );
+
+        let mut ledger = RecallLedger::default();
+        ledger.record_authored(&candidates.authored_evidence);
+        let (packet, injected) =
+            render_packet(&identity, &query, &candidates, &mut ledger).unwrap();
+        assert_eq!(packet.injected, 1);
+        assert_eq!(packet.omitted, 1);
+        assert_eq!(injected[0].evidence_id, "independent");
+        assert!(!packet.full.contains("self-authored"));
+        assert!(packet.full.contains("injected=1 omitted=1"));
     }
 
     #[test]
@@ -2236,6 +2429,8 @@ mod tests {
                 })
                 .collect(),
             rejected_scope: 0,
+            authored_evidence: Vec::new(),
+            rejected_authored: 0,
         };
         let mut ledger = RecallLedger::default();
         let (packet, injected) =
@@ -2873,6 +3068,51 @@ mod tests {
     }
 
     #[test]
+    fn hook_runtime_excludes_memory_authored_by_its_session() {
+        let project = tempfile::tempdir().unwrap();
+        let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_AGENT_NAME", Some("worker-one")),
+            ("CAS_FACTORY_SESSION", Some("factory-one")),
+            (crate::internal_llm::INTERNAL_LLM_ENV, None),
+        ]);
+        let entries = crate::store::open_store_local(&cas_root).unwrap();
+        let self_authored = Entry {
+            id: "self-parser-memory".into(),
+            title: Some("Parser cache failure".into()),
+            content: "Use deterministic cache keys when repairing the parser cache".into(),
+            session_id: Some("outer-session".into()),
+            ..Entry::default()
+        };
+        let independent = Entry {
+            id: "independent-parser-memory".into(),
+            title: Some("Parser cache guide".into()),
+            content: "Use deterministic cache keys when repairing the parser cache".into(),
+            ..Entry::default()
+        };
+        entries.add(&self_authored).unwrap();
+        entries.add(&independent).unwrap();
+        let input = cas_core::hooks::types::HookInput {
+            session_id: "outer-session".into(),
+            cwd: project.path().to_string_lossy().into_owned(),
+            agent_role: Some("worker".into()),
+            ..Default::default()
+        };
+
+        let packet = build_ambient_recall_context(
+            &input,
+            &cas_root,
+            Some("Please repair the parser cache failure"),
+            false,
+        )
+        .unwrap();
+        assert!(packet.full.contains("independent-parser-memory"));
+        assert!(!packet.full.contains("self-parser-memory"));
+        assert!(packet.full.contains("omitted=1"));
+    }
+
+    #[test]
     fn irrelevant_prompt_transition_does_not_open_a_ledger() {
         let project = tempfile::tempdir().unwrap();
         let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
@@ -3010,6 +3250,8 @@ mod tests {
                     })
                     .collect(),
                 rejected_scope: 0,
+                authored_evidence: Vec::new(),
+                rejected_authored: 0,
             };
             let mut ledger = RecallLedger::default();
             sizes.push(

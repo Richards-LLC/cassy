@@ -195,8 +195,17 @@ impl CasCore {
             depth,
         };
 
+        // Associate the creation event and dependency metadata with the
+        // current session. This is used by ambient recall to avoid feeding a
+        // task back to the agent that just authored it.
+        let created_by = self.get_agent_id().ok();
         task_store
-            .create_atomic(&task, &blocked_by_ids, epic_id.as_deref(), Some("mcp"))
+            .create_atomic(
+                &task,
+                &blocked_by_ids,
+                epic_id.as_deref(),
+                created_by.as_deref().or(Some("mcp")),
+            )
             .map_err(|e| {
                 let is_invalid_epic = match &e {
                     cas_store::StoreError::TaskNotFound(missing_id) => {

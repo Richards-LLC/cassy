@@ -60,6 +60,12 @@ async fn autofix_merges_high_overlap_into_surviving_entry_with_receipt() {
     assert_eq!(response["slug"], seed_slug);
     assert_eq!(response["receipt"]["merged_into"], response["slug"]);
     assert!(response["receipt"]["updated_at"].as_str().is_some());
+
+    let stored = service
+        .cas_get(Parameters(IdRequest { id: seed_slug }))
+        .await
+        .unwrap();
+    assert!(extract_text(stored).contains("replacement analysis with new evidence"));
 }
 
 #[tokio::test]
@@ -94,6 +100,14 @@ async fn autofix_rejects_a_stale_expected_updated_at_without_mutating() {
     assert_eq!(response["status"], "conflict");
     assert_eq!(response["slug"], seed_slug);
     assert_eq!(response["expected_updated_at"], "1970-01-01T00:00:00+00:00");
+
+    let stored = service
+        .cas_get(Parameters(IdRequest { id: seed_slug }))
+        .await
+        .unwrap();
+    let text = extract_text(stored);
+    assert!(text.contains("original analysis"));
+    assert!(!text.contains("must not overwrite original analysis"));
 }
 
 #[tokio::test]

@@ -68,14 +68,23 @@ pub struct RememberRequest {
     #[serde(default)]
     pub bypass_overlap: Option<bool>,
 
-    /// Overlap-handling mode. Phase 1 supports `"interactive"` (default) —
-    /// on high-overlap the call returns a structured `Blocked` response and
-    /// the caller decides what to do. `"autofix"` is reserved for Phase 2
-    /// (auto-update of the existing memory) and currently returns an
-    /// explicit "not supported" error.
-    #[schemars(description = "Overlap handling mode: 'interactive' (default) | 'autofix' (reserved, Phase 2)")]
+    /// Overlap-handling mode. `"interactive"` (default) returns a structured
+    /// `Blocked` response on high overlap. `"autofix"` explicitly opts in to
+    /// an atomic update of the overlapping memory.
+    #[schemars(
+        description = "Overlap handling mode: 'interactive' (default) | 'autofix' (atomic high-overlap merge)"
+    )]
     #[serde(default)]
     pub mode: Option<String>,
+
+    /// Optimistic-concurrency timestamp for an `autofix` merge. If supplied,
+    /// it must match the overlapping entry's current RFC3339 update timestamp
+    /// or no data is changed and the response reports a conflict.
+    #[schemars(
+        description = "For mode=autofix: expected existing-entry update timestamp (RFC3339); stale values return a conflict"
+    )]
+    #[serde(default)]
+    pub expected_updated_at: Option<String>,
 
     /// Force a personal (non-team) note even in a team-linked project.
     ///
@@ -122,12 +131,9 @@ pub struct DimensionBreakdown {
 
 /// Tagged-union response shape for `action=remember`.
 ///
-/// Phase 1 emits two variants: `Created` (covers low + moderate overlap,
-/// with `refresh_recommended` as a flag for the cross-ref-cap case) and
-/// `Blocked` (high overlap, score 4–5). Phase 2 may add new variants for
-/// `mode=autofix` outcomes — the serde tagged enum shape makes that
-/// backwards-compatible as long as new variants use new `status` tag
-/// names, so we do not reserve placeholder variants here.
+/// `Created` covers low + moderate overlap, `Blocked` reports safe default
+/// high-overlap behavior, and explicit `autofix` calls produce either
+/// `Merged` or a non-mutating `Conflict`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum MemoryRememberResponse {
@@ -154,6 +160,29 @@ pub enum MemoryRememberResponse {
         recommended_action: RecommendedAction,
         other_high_scoring: Vec<String>,
     },
+
+    /// An explicit `mode=autofix` request atomically merged into the existing
+    /// high-overlap memory. `slug` remains the surviving stable identifier.
+    Merged {
+        slug: String,
+        receipt: MemoryMergeReceipt,
+    },
+
+    /// The target memory changed after the caller's observed timestamp, so
+    /// an autofix merge was rejected without silently overwriting it.
+    Conflict {
+        slug: String,
+        expected_updated_at: String,
+        actual_updated_at: String,
+    },
+}
+
+/// Durable receipt returned after an atomic high-overlap autofix merge.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryMergeReceipt {
+    pub merged_into: String,
+    pub expected_updated_at: String,
+    pub updated_at: String,
 }
 
 /// Reason a memory insert was blocked. Currently only `HighOverlap` is

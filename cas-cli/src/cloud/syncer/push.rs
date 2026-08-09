@@ -288,10 +288,9 @@ impl CloudSyncer {
             .filter(|i| i.operation == SyncOperation::Upsert)
             .collect();
 
-        let deletes: Vec<&str> = items
+        let deletes: Vec<&QueuedSync> = items
             .iter()
             .filter(|i| i.operation == SyncOperation::Delete)
-            .map(|i| i.entity_id.as_str())
             .collect();
 
         // Parse payloads to (item, json_value) tuples.
@@ -384,10 +383,46 @@ impl CloudSyncer {
         }
 
         // Send individual delete requests
-        for cas_id in deletes {
+        for item in deletes {
+            let cas_id = item.entity_id.as_str();
+
+            // Pull/apply writes deliberately bypass the syncing wrappers. A
+            // remote restore can therefore recreate a task/entry while an old
+            // local tombstone remains queued. Neutralize that exact tombstone
+            // before making deletes functional; uncertainty fails closed.
+            match self.queue.neutralize_delete_if_local_entity_exists(item) {
+                Ok(true) => {
+                    warn!(
+                        entity_type = %item.entity_type,
+                        entity_id = cas_id,
+                        queue_id = item.id,
+                        "Neutralized stale cloud delete because the entity still exists locally"
+                    );
+                    continue;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    let error = format!(
+                        "Delete safety check failed for {} {cas_id}: {e}",
+                        item.entity_type
+                    );
+                    let _ = self.queue.mark_failed(item.id, &error);
+                    warn!(
+                        entity_type = %item.entity_type,
+                        entity_id = cas_id,
+                        queue_id = item.id,
+                        error = %e,
+                        "Skipped cloud delete because local existence could not be verified"
+                    );
+                    continue;
+                }
+            }
+
             let delete_url = format!(
                 "{}/api/sync/{}/{}",
-                self.cloud_config.endpoint, entity_type, cas_id
+                self.cloud_config.endpoint,
+                item.entity_type.as_str(),
+                cas_id
             );
 
             let response = ureq::delete(&delete_url)
@@ -396,22 +431,31 @@ impl CloudSyncer {
                 .call();
 
             match response {
-                Ok(resp) if resp.status() == 200 || resp.status() == 404 => {
-                    // Mark delete as synced (404 means already deleted, that's fine)
-                    if let Some(item) = items
-                        .iter()
-                        .find(|i| i.entity_id == cas_id && i.operation == SyncOperation::Delete)
-                    {
-                        let _ = self.queue.mark_synced(item.id);
-                        synced_count += 1;
-                    }
+                Ok(resp) if (200..300).contains(&resp.status()) => {
+                    let _ = self.queue.mark_synced(item.id);
+                    synced_count += 1;
                 }
                 Ok(resp) => {
                     let status = resp.status();
                     let body = resp.into_string().unwrap_or_default();
+                    let error = format!("Delete failed with status {status}: {body}");
+                    let _ = self.queue.mark_failed(item.id, &error);
                     eprintln!("Delete {cas_id} failed with status {status}: {body}");
                 }
-                Err(e) => {
+                Err(ureq::Error::Status(404, _)) => {
+                    // Already absent remotely is the desired final state.
+                    let _ = self.queue.mark_synced(item.id);
+                    synced_count += 1;
+                }
+                Err(ureq::Error::Status(status, resp)) => {
+                    let body = resp.into_string().unwrap_or_default();
+                    let error = format!("Delete failed with status {status}: {body}");
+                    let _ = self.queue.mark_failed(item.id, &error);
+                    eprintln!("Delete {cas_id} failed with status {status}: {body}");
+                }
+                Err(ureq::Error::Transport(e)) => {
+                    let error = format!("Delete failed: {e}");
+                    let _ = self.queue.mark_failed(item.id, &error);
                     eprintln!("Delete {cas_id} failed: {e}");
                 }
             }

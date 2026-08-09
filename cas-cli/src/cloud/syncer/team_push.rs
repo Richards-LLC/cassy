@@ -33,6 +33,45 @@ impl CloudSyncer {
             .as_ref()
             .ok_or_else(|| CasError::Other("Not logged in".to_string()))?;
 
+        // The same stale-tombstone hazard applies to the team copy of a
+        // dual-enqueued task/entry delete. Filter those rows before grouping,
+        // otherwise `cas cloud sync` would protect the personal row and then
+        // immediately replay the destructive team delete.
+        let mut sendable = Vec::with_capacity(queued.len());
+        for item in queued {
+            if item.operation == SyncOperation::Delete {
+                match self.queue.neutralize_delete_if_local_entity_exists(&item) {
+                    Ok(true) => {
+                        tracing::warn!(
+                            entity_type = %item.entity_type,
+                            entity_id = %item.entity_id,
+                            queue_id = item.id,
+                            team_id,
+                            "Neutralized stale team cloud delete because the entity still exists locally"
+                        );
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        let error = format!(
+                            "Team delete safety check failed for {} {}: {e}",
+                            item.entity_type, item.entity_id
+                        );
+                        let _ = self.queue.mark_failed(item.id, &error);
+                        result.errors.push(error);
+                        continue;
+                    }
+                }
+            }
+            sendable.push(item);
+        }
+        let queued = sendable;
+
+        if queued.is_empty() {
+            result.duration_ms = start.elapsed().as_millis() as u64;
+            return Ok(result);
+        }
+
         // Group deletes for the existing one-per-entity delete path. Upserts
         // stay associated with their queue rows below so sub-batches can be
         // marked synced/failed independently.

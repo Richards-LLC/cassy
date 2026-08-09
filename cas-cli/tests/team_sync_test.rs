@@ -27,6 +27,8 @@ use common::{TEST_TEAM, make_cli_json, make_cloud_config};
 
 use cas::cli::cloud::execute_team_push;
 use cas::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, EntityType, SyncOperation, SyncQueue};
+use cas::store::open_task_store_local;
+use cas::types::Task;
 use flate2::read::GzDecoder;
 use std::io::Read;
 use std::sync::Arc;
@@ -183,6 +185,50 @@ async fn team_push_silent_when_queue_empty() {
             .await
             .unwrap();
     assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn team_delete_for_live_task_is_neutralized_without_http() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    open_task_store_local(tmp.path())
+        .unwrap()
+        .add(&Task::new(
+            "live-team-task".to_string(),
+            "still here".to_string(),
+        ))
+        .unwrap();
+    let queue = Arc::new(SyncQueue::open(tmp.path()).unwrap());
+    queue.init().unwrap();
+    queue
+        .enqueue_for_team(
+            EntityType::Task,
+            "live-team-task",
+            SyncOperation::Delete,
+            None,
+            TEST_TEAM,
+        )
+        .unwrap();
+
+    let syncer = CloudSyncer::new(
+        queue.clone(),
+        make_cloud_config(server.uri()),
+        CloudSyncerConfig::default(),
+    );
+    let result = tokio::task::spawn_blocking(move || syncer.push_team(TEST_TEAM))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(result.errors.is_empty());
+    assert!(queue.pending_for_team(TEST_TEAM, 10, 5).unwrap().is_empty());
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 /// Isolation contract: team push HTTP failure must not block the caller's

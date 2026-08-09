@@ -634,6 +634,14 @@ async fn execute_sync_full_ignores_personal_team_and_knowledge_watermarks() {
             request.url
         );
     }
+    assert_eq!(
+        queue
+            .get_metadata("knowledge_empty_pull_streak")
+            .unwrap()
+            .as_deref(),
+        Some("1"),
+        "full sync must reset the old streak before the current empty pull increments it"
+    );
 }
 
 /// Locks in: `execute_pull` (standalone `cas cloud pull` command) must also

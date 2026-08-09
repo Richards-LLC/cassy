@@ -2,11 +2,12 @@
 
 > **DO NOT POST.** The immutable public `v2.55.0` Linux artifact fails the final-executable portable
 > x86_64 audit and is superseded before installation; its tag, release, and assets remain unchanged.
-> `v2.55.1` is only the corrective candidate. The H7 verdict remains **NOT YET RELEASABLE**.
-> Release ownership must first merge the reviewed commit to `main`, publish a new immutable `v2.55.1`
-> tag whose peeled commit contains `bfa1e0af`, record both asset digests, install the same public Linux
-> asset on two real machines, and receive a green assembled acceptance report. Re-review this file
-> only after all of those gates pass.
+> `v2.55.1` is published and identically installed on two real machines, but the H7 verdict is
+> **NOT RELEASABLE**. The assembled run found two binding blockers: the public hub cannot bootstrap
+> on a clean installed host without an undocumented manual `~/.cas` creation step, and an exact
+> daemon `SIGILL` is reported to real Chrome as `unknown`. Do not post these drafts for `v2.55.1`.
+> Re-review only after a new immutable release contains both fixes and the complete H7 matrix reruns
+> green from that published artifact.
 
 Destination after the gate passes: `#cas-internal` (`C0B44GUKDK2`). These are the two distinct
 top-level runtime-release posts required by `docs/RELEASE_SLACK_RUBRIC.md`; they are not threaded
@@ -54,8 +55,7 @@ daemon session, and bounded downstream fan-out.
 
 ## Pre-post fill and verification
 
-- [ ] Confirm the immutable corrective tag is exactly `v2.55.1`; do not reuse or move `v2.55.0` or an
-      earlier tag.
+- [ ] Replace `v2.55.1` with the future immutable corrective version; do not reuse or move any tag.
 - [ ] Link the private posting checklist to the exact tag peel, GitHub release, workflow, asset names,
       SHA-256 digests, and green final acceptance report.
 - [ ] Confirm the public release contains the Commander source boundary and both machines identify the

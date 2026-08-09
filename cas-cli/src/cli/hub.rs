@@ -1,5 +1,6 @@
 use std::fs::OpenOptions;
-use std::net::{IpAddr, SocketAddr};
+use std::future::IntoFuture;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -137,6 +138,9 @@ fn start(args: &HubServeArgs, cli: &Cli, tailscale_serve: bool, tailscale_port: 
                 record.version
             );
         }
+        // A killed hub cannot tear down its owned proxy. Remove only the exact
+        // unchanged mapping described by its private receipt before replacing it.
+        let _ = TailscaleServeManager::new(paths.root()).disable_owned();
         paths.remove_process_record()?;
     }
     let log = OpenOptions::new()
@@ -220,17 +224,21 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
     runtime.block_on(async move {
         let listener = tokio::net::TcpListener::bind(addr).await?;
         let actual = listener.local_addr()?;
-        let (tailscale, transport_warning) = if tailscale_serve {
-            match TailscaleServeManager::new(paths.root()).ensure(actual.port(), tailscale_port) {
-                Ok(receipt) => (Some(receipt), None),
+        let tailscale_manager = TailscaleServeManager::new(paths.root());
+        let (tailscale_listener, tailscale, transport_warning) = if tailscale_serve {
+            let proxy_listener =
+                tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+            let proxy_port = proxy_listener.local_addr()?.port();
+            match tailscale_manager.ensure(proxy_port, tailscale_port) {
+                Ok(receipt) => (Some(proxy_listener), Some(receipt), None),
                 Err(error) => {
                     let warning = error.to_string();
                     tracing::warn!(%warning, "Tailscale Serve refused; keeping Commander loopback-only");
-                    (None, Some(warning))
+                    (None, None, Some(warning))
                 }
             }
         } else {
-            (None, None)
+            (None, None, None)
         };
         let record = HubProcessRecord {
             pid: std::process::id(),
@@ -242,7 +250,10 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
             tailscale_serve_port: tailscale.as_ref().map(|receipt| receipt.https_port),
             transport_warning,
         };
-        paths.write_process_record(&record)?;
+        if let Err(error) = paths.write_process_record(&record) {
+            let _ = tailscale_manager.disable_owned();
+            return Err(error);
+        }
 
         let catalog = SessionCatalog::new(LocalSessionReadModel);
         let events = MachineEventBus::new(1024);
@@ -287,14 +298,78 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
             }
         });
 
-        let result = axum::serve(listener, router(state))
-            .with_graceful_shutdown(shutdown_signal())
-            .await
-            .context("Commander hub server failed");
+        let result = if let Some(proxy_listener) = tailscale_listener {
+            serve_with_trusted_tls_proxy(listener, state, proxy_listener).await
+        } else {
+            axum::serve(listener, router(state))
+                .with_graceful_shutdown(shutdown_signal())
+                .await
+                .context("Commander hub server failed")
+        };
         event_task.abort();
         paths.remove_process_record()?;
+        if result.is_err() {
+            let _ = tailscale_manager.disable_owned();
+        }
         result
     })
+}
+
+async fn serve_with_trusted_tls_proxy<R: crate::hub::SessionReadModel>(
+    plaintext_listener: tokio::net::TcpListener,
+    state: HubState<R>,
+    trusted_proxy_listener: tokio::net::TcpListener,
+) -> Result<()> {
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let plaintext = axum::serve(plaintext_listener, router(state.clone()))
+        .with_graceful_shutdown(shutdown_requested(shutdown_rx.clone()))
+        .into_future();
+    let trusted_proxy = axum::serve(
+        trusted_proxy_listener,
+        router(state.with_response_transport(TransportSecurity::TrustedLoopbackTlsProxy)),
+    )
+    .with_graceful_shutdown(shutdown_requested(shutdown_rx))
+    .into_future();
+    tokio::pin!(plaintext);
+    tokio::pin!(trusted_proxy);
+
+    enum FirstExit {
+        Shutdown,
+        Plaintext(std::io::Result<()>),
+        TrustedProxy(std::io::Result<()>),
+    }
+    let first = tokio::select! {
+        _ = shutdown_signal() => FirstExit::Shutdown,
+        result = &mut plaintext => FirstExit::Plaintext(result),
+        result = &mut trusted_proxy => FirstExit::TrustedProxy(result),
+    };
+    let _ = shutdown_tx.send(true);
+
+    match first {
+        FirstExit::Shutdown => {
+            let (plaintext, trusted_proxy) = tokio::join!(plaintext, trusted_proxy);
+            plaintext.context("Commander loopback listener failed")?;
+            trusted_proxy.context("Commander trusted proxy listener failed")?;
+            Ok(())
+        }
+        FirstExit::Plaintext(result) => {
+            let _ = trusted_proxy.await;
+            result.context("Commander loopback listener failed")?;
+            anyhow::bail!("Commander loopback listener exited unexpectedly")
+        }
+        FirstExit::TrustedProxy(result) => {
+            let _ = plaintext.await;
+            result.context("Commander trusted proxy listener failed")?;
+            anyhow::bail!("Commander trusted proxy listener exited unexpectedly")
+        }
+    }
+}
+
+async fn shutdown_requested(mut receiver: tokio::sync::watch::Receiver<bool>) {
+    if *receiver.borrow_and_update() {
+        return;
+    }
+    let _ = receiver.changed().await;
 }
 
 fn auth_store() -> Result<AuthStore> {

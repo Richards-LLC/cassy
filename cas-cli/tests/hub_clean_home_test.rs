@@ -52,12 +52,21 @@ fn start_hub(home: &Path, path: &OsStr, tailscale: bool) -> Value {
 
 fn assert_health_status_and_stop(home: &Path, path: &OsStr, record: &Value) -> Value {
     let port = record["port"].as_u64().expect("hub port");
-    let health: Value = ureq::get(&format!("http://127.0.0.1:{port}/v1/health"))
+    let health_response = ureq::get(&format!("http://127.0.0.1:{port}/v1/health"))
+        .set("Host", "spoof.tail.example")
+        .set("Forwarded", "proto=https;host=spoof.tail.example")
+        .set("X-Forwarded-Proto", "https")
+        .set("X-Forwarded-Host", "spoof.tail.example")
+        .set("Tailscale-User-Login", "spoof@example.com")
         .timeout(Duration::from_secs(2))
         .call()
-        .expect("clean-home health request")
-        .into_json()
-        .expect("health JSON");
+        .expect("clean-home health request");
+    assert_eq!(
+        health_response.header("strict-transport-security"),
+        None,
+        "the documented plaintext listener ignores client-spoofed TLS headers"
+    );
+    let health: Value = health_response.into_json().expect("health JSON");
     assert_eq!(health, serde_json::json!({"schema_version":1,"ready":true}));
 
     let status = cas_command(home, path)
@@ -86,6 +95,22 @@ fn assert_health_status_and_stop(home: &Path, path: &OsStr, record: &Value) -> V
     assert_eq!(stop["stopped"], true);
     assert!(!home.join(".cas/hub/process.json").exists());
     stop
+}
+
+fn response_even_for_error(request: ureq::Request) -> ureq::Response {
+    match request.timeout(Duration::from_secs(2)).call() {
+        Ok(response) => response,
+        Err(ureq::Error::Status(_, response)) => response,
+        Err(error) => panic!("Commander request failed before HTTP response: {error}"),
+    }
+}
+
+fn assert_hsts(response: &ureq::Response) {
+    assert_eq!(
+        response.header("strict-transport-security"),
+        Some("max-age=31536000")
+    );
+    assert_eq!(response.all("strict-transport-security").len(), 1);
 }
 
 #[cfg(unix)]
@@ -161,7 +186,110 @@ esac
         0o600
     );
 
-    let stop = assert_health_status_and_stop(home.path(), bin.as_os_str(), &record);
+    let plaintext_port = record["port"].as_u64().unwrap() as u16;
+    let trusted_backend_port = fs::read_to_string(home.path().join("mock-port"))
+        .unwrap()
+        .parse::<u16>()
+        .unwrap();
+    assert_ne!(trusted_backend_port, plaintext_port);
+    for (path, status) in [
+        ("/", 200),
+        ("/v1/health", 200),
+        ("/v1/sessions", 401),
+        ("/missing", 405),
+    ] {
+        let response = response_even_for_error(ureq::get(&format!(
+            "http://127.0.0.1:{trusted_backend_port}{path}"
+        )));
+        assert_eq!(response.status(), status, "unexpected status for {path}");
+        assert_hsts(&response);
+        assert_eq!(response.header("referrer-policy"), Some("no-referrer"));
+        assert_eq!(response.header("x-content-type-options"), Some("nosniff"));
+        assert_eq!(response.header("x-frame-options"), Some("DENY"));
+        assert!(response.header("content-security-policy").is_some());
+    }
+    let preflight = response_even_for_error(
+        ureq::request(
+            "OPTIONS",
+            &format!("http://127.0.0.1:{trusted_backend_port}/v1/auth/pairing/exchange"),
+        )
+        .set("Origin", "http://127.0.0.1:4173")
+        .set("Access-Control-Request-Method", "POST")
+        .set("Access-Control-Request-Headers", "content-type"),
+    );
+    assert_eq!(preflight.status(), 204);
+    assert_eq!(
+        preflight.header("access-control-allow-origin"),
+        Some("http://127.0.0.1:4173")
+    );
+    assert_hsts(&preflight);
+
+    let restart = cas_command(home.path(), bin.as_os_str())
+        .args([
+            "--json",
+            "hub",
+            "restart",
+            "--port",
+            "0",
+            "--tailscale-serve",
+        ])
+        .output()
+        .expect("restart trusted proxy hub");
+    assert!(
+        restart.status.success(),
+        "trusted proxy restart failed: {}",
+        String::from_utf8_lossy(&restart.stderr)
+    );
+    let status = cas_command(home.path(), bin.as_os_str())
+        .args(["--json", "hub", "status"])
+        .output()
+        .expect("status after restart");
+    assert!(status.status.success());
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    let restarted = &status["record"];
+    assert_eq!(restarted["public_url"], "https://clean-host.tail.example/");
+    let restarted_plaintext = restarted["port"].as_u64().unwrap() as u16;
+    let restarted_backend = fs::read_to_string(home.path().join("mock-port"))
+        .unwrap()
+        .parse::<u16>()
+        .unwrap();
+    assert_ne!(restarted_backend, restarted_plaintext);
+    assert_hsts(&response_even_for_error(ureq::get(&format!(
+        "http://127.0.0.1:{restarted_backend}/v1/health"
+    ))));
+
+    let killed_pid = restarted["pid"].as_i64().unwrap() as i32;
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(killed_pid),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .unwrap();
+    let recovered_output = cas_command(home.path(), bin.as_os_str())
+        .args(["--json", "hub", "start", "--port", "0", "--tailscale-serve"])
+        .output()
+        .expect("recover killed trusted proxy hub");
+    assert!(
+        recovered_output.status.success(),
+        "stale owned mapping recovery failed: {}",
+        String::from_utf8_lossy(&recovered_output.stderr)
+    );
+    let recovered: Value = serde_json::from_slice(&recovered_output.stdout).unwrap();
+    assert_eq!(recovered["public_url"], "https://clean-host.tail.example/");
+    let recovered_plaintext = recovered["port"].as_u64().unwrap() as u16;
+    let recovered_backend = fs::read_to_string(home.path().join("mock-port"))
+        .unwrap()
+        .parse::<u16>()
+        .unwrap();
+    assert_ne!(recovered_backend, recovered_plaintext);
+    assert_hsts(&response_even_for_error(ureq::get(&format!(
+        "http://127.0.0.1:{recovered_backend}/v1/health"
+    ))));
+    assert!(
+        std::net::TcpStream::connect(("127.0.0.1", restarted_backend)).is_err(),
+        "killed trusted backend listener survived recovery"
+    );
+
+    let stop = assert_health_status_and_stop(home.path(), bin.as_os_str(), &recovered);
     assert_eq!(stop["tailscale_serve_removed"], true);
     assert!(!home.path().join(".cas/hub/tailscale-serve.json").exists());
     assert_eq!(
@@ -169,6 +297,14 @@ esac
         0o600
     );
     assert!(!home.path().join("mock-serve").exists());
+    assert!(
+        std::net::TcpStream::connect(("127.0.0.1", recovered_plaintext)).is_err(),
+        "plaintext listener survived owned teardown"
+    );
+    assert!(
+        std::net::TcpStream::connect(("127.0.0.1", recovered_backend)).is_err(),
+        "trusted proxy backend survived owned teardown"
+    );
 }
 
 #[cfg(unix)]

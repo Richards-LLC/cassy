@@ -8,7 +8,6 @@
 //! (`mcp/daemon.rs`, gate deliberately retained), so this command is the manual catch-up lever
 //! when the lag reported by `cas doctor` matters right now.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -16,7 +15,7 @@ use clap::{Args, Subcommand};
 
 use crate::cli::Cli;
 use crate::config::Config;
-use crate::daemon::indexing::index_code_files_with;
+use crate::daemon::indexing::{collect_source_files, index_code_files_with, reconcile_code_tree};
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum IndexCommands {
@@ -59,13 +58,17 @@ fn execute_code(args: &IndexCodeArgs, cli: &Cli, cas_root: &Path) -> anyhow::Res
         args.paths.clone()
     };
 
-    let mut files = collect_source_files(&roots, &code_config.extensions, &code_config.exclude_patterns);
+    let mut files = collect_source_files(
+        &roots,
+        &code_config.extensions,
+        &code_config.exclude_patterns,
+    );
     files.sort();
     if args.max_files > 0 && files.len() > args.max_files {
         files.truncate(args.max_files);
     }
 
-    if files.is_empty() {
+    if files.is_empty() && !args.paths.is_empty() {
         if cli.json {
             println!(
                 "{}",
@@ -83,7 +86,11 @@ fn execute_code(args: &IndexCodeArgs, cli: &Cli, cas_root: &Path) -> anyhow::Res
     }
 
     let started = Instant::now();
-    let result = index_code_files_with(&files, cas_root, args.force)?;
+    let result = if args.paths.is_empty() {
+        reconcile_code_tree(&files, &roots, cas_root, args.force)?
+    } else {
+        index_code_files_with(&files, cas_root, args.force)?
+    };
     let elapsed = started.elapsed();
 
     // Post-run totals come from the store, not the run, so a no-op incremental pass still
@@ -133,64 +140,6 @@ fn execute_code(args: &IndexCodeArgs, cli: &Cli, cas_root: &Path) -> anyhow::Res
 /// `.gitignore` is honoured (via the `ignore` walker) so `target/`, `node_modules/` and friends
 /// cost nothing, and the configured exclude globs are applied on top for trees that ignore
 /// nothing.
-fn collect_source_files(
-    roots: &[PathBuf],
-    extensions: &[String],
-    exclude_patterns: &[String],
-) -> Vec<PathBuf> {
-    let wanted: HashSet<String> = extensions.iter().map(|e| e.to_lowercase()).collect();
-    let excludes: Vec<glob::Pattern> = exclude_patterns
-        .iter()
-        .filter_map(|pattern| glob::Pattern::new(pattern).ok())
-        .collect();
-
-    let mut out: Vec<PathBuf> = Vec::new();
-    let mut seen: HashSet<PathBuf> = HashSet::new();
-
-    for root in roots {
-        if root.is_file() {
-            if is_wanted(root, &wanted) {
-                push_unique(&mut out, &mut seen, root.clone());
-            }
-            continue;
-        }
-
-        for entry in ignore::WalkBuilder::new(root)
-            .hidden(true)
-            .git_ignore(true)
-            .build()
-            .flatten()
-        {
-            let path = entry.path();
-            if !path.is_file() || !is_wanted(path, &wanted) {
-                continue;
-            }
-
-            let relative = path.strip_prefix(root).unwrap_or(path);
-            if excludes.iter().any(|pattern| pattern.matches_path(relative)) {
-                continue;
-            }
-
-            push_unique(&mut out, &mut seen, path.to_path_buf());
-        }
-    }
-
-    out
-}
-
-fn push_unique(out: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, path: PathBuf) {
-    if seen.insert(path.clone()) {
-        out.push(path);
-    }
-}
-
-fn is_wanted(path: &Path, wanted: &HashSet<String>) -> bool {
-    path.extension()
-        .and_then(|value| value.to_str())
-        .map(|value| wanted.contains(&value.to_lowercase()))
-        .unwrap_or(false)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,5 +172,22 @@ mod tests {
 
         let files = collect_source_files(&[file.clone()], &["rs".to_string()], &[]);
         assert_eq!(files, vec![file]);
+    }
+
+    #[test]
+    fn collect_source_files_excludes_configured_but_unsupported_extensions() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let supported = temp.path().join("lib.rs");
+        let unsupported = temp.path().join("App.swift");
+        std::fs::write(&supported, "pub fn supported() {}").unwrap();
+        std::fs::write(&unsupported, "func unsupported() {}").unwrap();
+
+        let files = collect_source_files(
+            &[temp.path().to_path_buf()],
+            &["rs".to_string(), "swift".to_string()],
+            &[],
+        );
+
+        assert_eq!(files, vec![supported]);
     }
 }

@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ambient recall benchmark — 2026-08-08</title>
+  <style>
+    :root{--bg:#f7f8fa;--panel:#fff;--text:#17202a;--muted:#52606d;--line:#aeb8c2;--accent:#2457a7;--good:#176b3a;--warn:#8a4b08}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}a{color:var(--accent)}a:focus{outline:3px solid var(--warn);outline-offset:2px}.skip{position:absolute;left:-999px}.skip:focus{left:1rem;top:1rem;background:var(--panel);padding:.5rem;z-index:2}header,main,footer{max-width:1120px;margin:auto;padding:1.25rem}header{padding-top:2.4rem}.hero{border-left:7px solid var(--good);background:var(--panel);padding:1.25rem;box-shadow:0 1px 4px #0002}.hero p{font-size:1.2rem;margin:.4rem 0}.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:.8rem;margin:1rem 0}.kpi{background:var(--panel);border:1px solid var(--line);padding:1rem}.kpi strong{display:block;font-size:1.65rem}.kpi span{color:var(--muted)}section{margin:2rem 0}h1{font-size:2rem;margin:0 0 .5rem}h2{border-bottom:2px solid var(--line);padding-bottom:.35rem}h3{color:var(--accent)}.table-wrap{overflow-x:auto}table{border-collapse:collapse;width:100%;background:var(--panel)}caption{text-align:left;font-weight:700;padding:.5rem 0}th,td{border:1px solid var(--line);padding:.6rem;text-align:left;vertical-align:top}td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}.best{font-weight:800;color:var(--good)}code,pre{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}pre{white-space:pre-wrap;background:#eef1f4;border:1px solid var(--line);padding:1rem;overflow:auto}.chart{background:var(--panel);border:1px solid var(--line);padding:1rem}.chart svg{width:100%;height:auto;max-height:260px}.note{border-left:5px solid var(--warn);padding:.75rem 1rem;background:var(--panel)}li{margin:.35rem 0}footer{border-top:1px solid var(--line);color:var(--muted);font-size:.9rem}@media(prefers-color-scheme:dark){:root{--bg:#11161c;--panel:#1b232d;--text:#edf2f7;--muted:#b8c2cc;--line:#657382;--accent:#88b5ff;--good:#74d99a;--warn:#ffc172}pre{background:#10151b}}@media(max-width:520px){header,main,footer{padding:1rem}h1{font-size:1.65rem}th,td{padding:.45rem}}@media print{:root{--bg:#fff;--panel:#fff;--text:#000;--muted:#333;--line:#777;--accent:#000;--good:#000;--warn:#000}body{background:#fff;font-size:11pt}header,main,footer{max-width:none;padding:.4in}.hero,.kpi,.chart,table tr{box-shadow:none;break-inside:avoid}thead{display:table-header-group}a[href^="http"]::after{content:" (" attr(href) ")"}svg{max-width:100%}details{display:block}details>*{display:block}}
+  </style>
+</head>
+<body>
+<a class="skip" href="#content">Skip to report</a>
+<header>
+  <h1>Ambient recall benchmark</h1>
+  <p>Practitioner comparison · 8 August 2026</p>
+  <div class="hero"><strong>Winner: bounded fusion, now proven on the authenticated runtime path.</strong><p>Recall@3 rose from 0.333 to 1.000 (+0.667). The live isolated run used one query request per event, fanned out across three namespaces, ranked Code first for a worker and History first for a supervisor, and returned zero private-canary hits.</p></div>
+  <div class="kpis">
+    <div class="kpi"><strong>+0.667</strong><span>Recall@3 vs BM25-only</span></div>
+    <div class="kpi"><strong>2 / 2</strong><span>Query requests / semantic events</span></div>
+    <div class="kpi"><strong>247 / 270 ms</strong><span>Cold / warm-local-cache live latency</span></div>
+    <div class="kpi"><strong>0</strong><span>Private-canary hits</span></div>
+  </div>
+</header>
+<main id="content">
+  <p class="note"><strong>Scope note:</strong> Quality metrics are deterministic six-label fixtures. Live latency and freshness are single authenticated isolated observations, not percentile estimates. Both live role events include a remote query embedding.</p>
+  <section><h2>Overview</h2><div class="table-wrap"><table><caption>Measured outcomes against their named baseline or target</caption><thead><tr><th scope="col">Measurement</th><th class="num" scope="col">Baseline / target</th><th class="num" scope="col">Result</th><th class="num" scope="col">Variance / verdict</th><th class="num" scope="col">Sample</th></tr></thead><tbody>
+    <tr><th scope="row">Recall@3</th><td class="num">BM25 0.333</td><td class="num best">Fusion 1.000, best</td><td class="num best">+0.667</td><td class="num">6 labels</td></tr>
+    <tr><th scope="row">MRR</th><td class="num">BM25 0.500</td><td class="num best">Fusion 1.000, best</td><td class="num best">+0.500</td><td class="num">6 labels</td></tr>
+    <tr><th scope="row">Harmful / stale / leakage</th><td class="num">0 required</td><td class="num best">0 / 0 / 0</td><td class="num">pass</td><td class="num">6 labels</td></tr>
+    <tr><th scope="row">Prompt p99</th><td class="num">7,200 B</td><td class="num best">5,087 B</td><td class="num">−2,113 B</td><td class="num">6 sizes</td></tr>
+    <tr><th scope="row">Cold semantic event</th><td class="num">≤1,500 ms</td><td class="num best">247 ms</td><td class="num">−1,253 ms</td><td class="num">1 event</td></tr>
+    <tr><th scope="row">Warm-local-cache supervisor event</th><td class="num">≤300 ms</td><td class="num best">270 ms</td><td class="num">−30 ms</td><td class="num">1 event</td></tr>
+    <tr><th scope="row">Query requests</th><td class="num">1 / event</td><td class="num best">2 / 2</td><td class="num">exact</td><td class="num">2 events</td></tr>
+    <tr><th scope="row">Daemon freshness</th><td class="num">≤10 min active</td><td class="num best">834 ms to pending 0</td><td class="num">under target</td><td class="num">4 units</td></tr>
+  </tbody></table></div>
+  <figure class="chart"><svg viewBox="0 0 800 210" role="img" aria-labelledby="chart-title chart-desc" preserveAspectRatio="xMidYMid meet"><title id="chart-title">Fusion gains 0.667 recall and 0.500 MRR versus BM25-only</title><desc id="chart-desc">Signed horizontal variance bars share a zero-to-one scale. Recall gain is 0.667 and MRR gain is 0.500.</desc><line x1="170" y1="25" x2="170" y2="180" stroke="currentColor" stroke-width="2"/><line x1="170" y1="180" x2="750" y2="180" stroke="currentColor"/><text x="15" y="78" fill="currentColor">Recall@3 delta</text><rect x="170" y="52" width="387" height="38" fill="var(--accent)"/><text x="568" y="78" fill="currentColor">+0.667</text><text x="15" y="143" fill="currentColor">MRR delta</text><rect x="170" y="117" width="290" height="38" fill="var(--good)"/><text x="471" y="143" fill="currentColor">+0.500</text><text x="165" y="202" fill="currentColor">0</text><text x="735" y="202" fill="currentColor">+1.0</text></svg><figcaption>Absolute variance on one shared 0–1 scale. Source: fixed six-label tests in <code>cas-cli/src/ambient_recall.rs</code>, extracted 2026-08-08.</figcaption></figure>
+  <details open><summary>Chart data</summary><table><caption>Underlying variance values</caption><thead><tr><th scope="col">Metric</th><th class="num" scope="col">Baseline</th><th class="num" scope="col">Fusion</th><th class="num" scope="col">Absolute delta</th></tr></thead><tbody><tr><th scope="row">Recall@3</th><td class="num">0.333</td><td class="num">1.000</td><td class="num">+0.667</td></tr><tr><th scope="row">MRR</th><td class="num">0.500</td><td class="num">1.000</td><td class="num">+0.500</td></tr></tbody></table></details></section>
+
+  <section><h2>Harness</h2><ul>
+    <li>Code basis: authenticated harness commit <code>09b71cf3</code>; runtime replay checkpoint <code>b982bbd9</code>; Rust 1.95.0, test profile, one test thread.</li>
+    <li>Fixed evaluation: six labels—two lexical, two semantic paraphrases, two structural bindings—with three lexical distractors per label.</li>
+    <li>Prompt sizes: 1, 8, 32, 72, 1,000, and 10,000 candidates; snippets exceed the 320-character card cap.</li>
+    <li>Live run: freshly migrated temporary git project with one Knowledge page, one History commit, and public/private Code symbols. The configured <code>cas-cloud</code>/<code>cas-embed-v1</code> capability was read in place; no credential was copied or printed and the live project store was not mutated.</li>
+    <li>Held constant: query construction, scope gate, role policies, evidence schema, deterministic ordering, caps, omission disclosure, and ledger behavior.</li>
+    <li>Current SessionStart was not replayed numerically. The fixed corpus compares BM25-only with fusion; the live corpus validates production transport, scope, and ranking.</li>
+  </ul></section>
+
+  <section><h2>Results</h2>
+    <h3>Recall quality and bounded context</h3><p>BM25 found the two lexical labels in its top three and placed the other four targets fourth. Fusion ranked all six targets first; the margin came from paraphrase and structural binding, with no lexical regression.</p><p>Supervisor overhead measured 5,085 B p50 and 5,087 B p95/p99, 2,113 B below budget. The 10,000-candidate and ~750k-token-style cases remained bounded. Unchanged evidence revisions were suppressed; changed revisions reappeared as deltas.</p>
+    <h3>Authenticated semantic runtime</h3><p>The isolated daemon drain embedded four units in three provider requests and reached <code>pending_after=0</code> in 834 ms. It left an error-free History embedding attempt at <code>2026-08-08T21:54:50.224939958Z</code> and error-free Code scan state at <code>2026-08-08T21:54:49.650311285Z</code>. Cache counts were Knowledge 1, History 1, isolated Code 2.</p><p>Two role events issued exactly two provider requests. The worker event took 247 ms and ranked <code>Code:sym-live</code> first; the warm-local-cache supervisor event took 270 ms and ranked the History commit first. Both contained all three surfaces. <code>sym-private-live</code> was absent, proving scope filtering before comparison.</p>
+    <h3>Cost, isolation, and fallback</h3><p>The provider exposes neither billed tokens nor price. The honest receipt is 3 drain requests for 4 units plus 2 query requests for 2 events. Dollars remain formula-only:</p><pre><code>one query-event dollars = (T_query / 1,000,000) * P + Q
+run dollars = (T_drain / 1,000,000) * P + 3Q + 2 * one query-event dollars</code></pre><p><code>P</code> is dollars per million billed input tokens and <code>Q</code> any per-request charge; neither is published. Adversarial fixtures reject foreign/project/team/private rows. Logged-out fallback uses existing SQLite read-only, creates no vector cache, and makes zero provider calls. Cards never become memories; nested internal-model and irrelevant transitions create no ambient activity.</p>
+  </section>
+
+  <section><h2>Where the loser wins</h2><p>BM25-only is cheaper for exact lexical lookup or provider-absent operation because it needs no network request or vector cache. Fusion wins on paraphrase and structural binding. This run proves one request per semantic event, not free semantic lookup; no query-vector cache is claimed.</p></section>
+
+  <section><h2>Threats to validity</h2><ul><li>Six labels establish deterministic behavior, not population quality; current SessionStart was not numerically replayed.</li><li>Live latency/freshness are single observations, not percentile distributions.</li><li>The four-unit live corpus isolates namespace, role, scope, and call counts; large-corpus prompt bounding is separate.</li><li>Prompt percentiles are byte overhead with a conservative four-bytes-per-token boundary.</li><li>Provider billing fields are absent. Requests, units, latency, and queue state are measured; dollars are formula-only.</li></ul></section>
+
+  <section><h2>Provenance</h2><p>Markdown source: <a href="2026-08-08-ambient-recall-benchmark.md">2026-08-08-ambient-recall-benchmark.md</a>. Live harness: <code>authenticated_isolated_live_provider_receipt</code> at <code>09b71cf3</code>; window 2026-08-08T21:54:49Z–21:54:50Z.</p><p>Run commands from the repository root.</p><pre><code>env ZIG=./.context/zig/zig cargo test -p cas --lib ambient_recall::tests -- --nocapture --test-threads=1
+env ZIG=./.context/zig/zig cargo test -p cas --lib ambient_recall::tests -- --nocapture --test-threads=1
+
+env ZIG=./.context/zig/zig CAS_AMBIENT_LIVE_CONFIG_DIR=./.cas cargo test -p cas --lib -- ambient_recall::tests::authenticated_isolated_live_provider_receipt --ignored --nocapture --test-threads=1</code></pre><p>Live: exit 0; 1 passed, 0 failed, 4,220 filtered; test body 1.38 s. Fixed checkpoint: 15 passed, 0 failed, 4,205 filtered.</p></section>
+</main>
+<footer>Self-contained offline report · no external assets or runtime requests.</footer>
+</body>
+</html>

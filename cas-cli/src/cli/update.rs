@@ -892,6 +892,7 @@ fn run_schema_migrations(
 
     // Success - commit transaction
     tx.commit()?;
+    let final_status = check_migrations(&cas_root)?;
 
     if cli.json {
         let applied_json: Vec<String> = result
@@ -902,7 +903,7 @@ fn run_schema_migrations(
 
         println!(
             r#"{{"schema_status":"updated","current_version":{},"migrations_applied":{},"applied":[{}],"files_updated":{}}}"#,
-            status.current_version + result.applied_count as u32,
+            final_status.current_version,
             result.applied_count,
             applied_json.join(","),
             tx.file_change_count()
@@ -918,7 +919,10 @@ fn run_schema_migrations(
         }
 
         fmt.newline()?;
-        fmt.success(&format!("Schema updated to v{}", status.latest_version))?;
+        fmt.success(&format!(
+            "Schema updated to v{}",
+            final_status.current_version
+        ))?;
 
         if args.keep_backup {
             if let Some(backup_dir) = tx.backup_dir() {

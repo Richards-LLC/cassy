@@ -23,6 +23,7 @@ mod coordinator;
 pub mod device;
 // T5: capability-gated cloud embeddings for distilled knowledge pages.
 pub mod embeddings;
+pub mod code_embeddings;
 // M7 (cas-db6e): the daemon-tick drain that keeps every corpus embedded without
 // anyone running `cas cloud sync`.
 pub mod embed_drain;

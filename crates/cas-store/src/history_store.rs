@@ -286,6 +286,69 @@ pub const HISTORY_FTS_STATEMENTS: &[&str] = &[
       WHERE NOT EXISTS (SELECT 1 FROM history_commits_fts)",
 ];
 
+/// Canonical DDL for `history_epochs` (spec §9 — EPIC cas-6212 / cas-8d2a, M8).
+///
+/// One row per observed *binary epoch*: a window during which a particular
+/// executable was actually running. This is the table that makes "is symptom X
+/// fixed" answerable against the running binary rather than a tag date, which
+/// is the mistake cas-9d92 had to retract on 2026-08-07 (a fix installed at
+/// 21:02:26Z while pre-install daemons kept heartbeating until 21:36:37Z).
+///
+/// `ended_at` is the *last observed liveness* of that process, not a clean
+/// shutdown stamp — a killed daemon never gets to write one, so the heartbeat
+/// advances it on every tick. A NULL `ended_at` therefore means "started and
+/// never observed alive again", which is a weaker claim than "still running"
+/// and is treated as such by the classifier.
+pub const HISTORY_EPOCHS_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS history_epochs (
+    id INTEGER PRIMARY KEY,
+    epoch_kind TEXT NOT NULL,
+    binary_path TEXT,
+    binary_mtime TEXT,
+    version TEXT,
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    pid INTEGER,
+    exe_deleted INTEGER NOT NULL DEFAULT 0,
+    recorded_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_history_epochs_started_at
+    ON history_epochs(started_at);
+CREATE INDEX IF NOT EXISTS idx_history_epochs_kind
+    ON history_epochs(epoch_kind);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_history_epochs_identity
+    ON history_epochs(epoch_kind, COALESCE(pid, -1), started_at);
+"#;
+
+/// Statement-level form of [`HISTORY_EPOCHS_SCHEMA`] for the migration runner.
+/// Keep in lockstep; `m228`'s shape-drift test fails on any divergence.
+pub const HISTORY_EPOCHS_SCHEMA_STATEMENTS: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS history_epochs (
+        id INTEGER PRIMARY KEY,
+        epoch_kind TEXT NOT NULL,
+        binary_path TEXT,
+        binary_mtime TEXT,
+        version TEXT,
+        started_at TEXT NOT NULL,
+        ended_at TEXT,
+        pid INTEGER,
+        exe_deleted INTEGER NOT NULL DEFAULT 0,
+        recorded_at TEXT NOT NULL
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_history_epochs_started_at
+        ON history_epochs(started_at)",
+    "CREATE INDEX IF NOT EXISTS idx_history_epochs_kind
+        ON history_epochs(epoch_kind)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_history_epochs_identity
+        ON history_epochs(epoch_kind, COALESCE(pid, -1), started_at)",
+];
+
+/// `history_epochs.epoch_kind` values (spec §9).
+pub const EPOCH_KIND_BINARY_INSTALL: &str = "binary_install";
+pub const EPOCH_KIND_DAEMON_START: &str = "daemon_start";
+pub const EPOCH_KIND_DAEMON_LAST_HEARTBEAT: &str = "daemon_last_heartbeat";
+
 /// The `history_index_state.source` value for the git walker.
 pub const SOURCE_GIT: &str = "git";
 
@@ -304,6 +367,11 @@ pub const SOURCE_CHANGELOG: &str = "changelog";
 /// not going down", which is the tracing::warn-only failure mode M7 exists to
 /// end.
 pub const SOURCE_EMBEDDINGS: &str = "embeddings";
+
+/// Maximum number of incompletely mapped commits admitted to one
+/// symbol-filtered result set. They are useful as explicit uncertainty, but an
+/// unbounded uncertain tail can both swamp callers and hide exact mapped hits.
+pub const HISTORY_SYMBOL_UNCERTAIN_LIMIT: usize = 10;
 
 /// `history_docs.doc_kind` values. These are the id prefixes too
 /// (`gh:issue:116`, `gh:pr:57`, `gh:comment:<id>`, `changelog:v2.49.0`).
@@ -331,6 +399,10 @@ pub struct HistoryCommit {
     pub body: Option<String>,
     pub branch_hint: Option<String>,
     pub repository: String,
+    /// How completely M3 could map this commit's changed files to symbols.
+    /// `absent`, `pending`, and `partial` mean a symbol-filtered query cannot
+    /// prove that the commit did not touch its requested symbol.
+    pub symbol_mapping: String,
 }
 
 /// One `(commit, file)` structural-diff row.
@@ -496,6 +568,11 @@ pub struct HistoryQuery {
     /// Substring match against `history_commit_files.file_path`. A commit
     /// matches when *any* of its touched paths contains this.
     pub path: Option<String>,
+    /// Exact qualified symbol name recorded by M3 in
+    /// `history_commit_symbols`. Rows whose mapping is incomplete are also
+    /// returned so the caller can report uncertainty rather than manufacture a
+    /// false negative.
+    pub symbol: Option<String>,
     /// Inclusive lower bound on `committed_at` (RFC3339).
     pub since: Option<String>,
     /// Inclusive upper bound on `committed_at` (RFC3339).
@@ -603,6 +680,75 @@ struct WorkerCommitEvent {
     session_id: Option<String>,
     agent_id: Option<String>,
     created_at: Option<String>,
+}
+
+/// One observed binary epoch (spec §9).
+///
+/// `id` is ignored on write; the identity of a row is
+/// `(epoch_kind, pid, started_at)`, which is what makes recording idempotent
+/// across a daemon that re-registers and across repeated backfills.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HistoryEpoch {
+    pub id: i64,
+    /// One of [`EPOCH_KIND_BINARY_INSTALL`], [`EPOCH_KIND_DAEMON_START`],
+    /// [`EPOCH_KIND_DAEMON_LAST_HEARTBEAT`].
+    pub epoch_kind: String,
+    pub binary_path: Option<String>,
+    /// Executable mtime, RFC3339. This — not `version` — is what distinguishes
+    /// two builds carrying the same `CARGO_PKG_VERSION`, which is the usual
+    /// shape during a release day. Always `None` when [`Self::exe_deleted`] is
+    /// true: metadata at that path belongs to the replacement file, not the
+    /// executable backing this process.
+    pub binary_mtime: Option<String>,
+    pub version: Option<String>,
+    pub started_at: String,
+    /// Last moment this process was *observed alive*. See
+    /// [`HISTORY_EPOCHS_SCHEMA`] for why this is not a shutdown stamp.
+    pub ended_at: Option<String>,
+    pub pid: Option<i64>,
+    /// `/proc/<pid>/exe` no longer resolves to the file on disk — the binary
+    /// was replaced or removed under the running process.
+    pub exe_deleted: bool,
+    pub recorded_at: String,
+}
+
+impl HistoryEpoch {
+    /// Binary mtime that is safe to use as evidence about this process.
+    ///
+    /// Keep this guard at the model boundary as defense in depth for callers
+    /// holding rows written before storage normalized stale executable
+    /// identities to a NULL mtime.
+    pub fn trusted_binary_mtime(&self) -> Option<&str> {
+        if self.exe_deleted {
+            None
+        } else {
+            self.binary_mtime.as_deref()
+        }
+    }
+}
+
+/// What an epoch backfill pass actually found (spec §9 "historical rows are
+/// backfilled from `daemon_instances`").
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EpochBackfill {
+    /// False when `daemon_instances` does not exist in this database — a
+    /// distinct fact from "no rows", and not reported as one.
+    pub source_available: bool,
+    pub scanned: i64,
+    pub inserted: i64,
+    /// Rows whose `(kind, pid, started_at)` identity was already present.
+    pub already_present: i64,
+}
+
+/// Observation counts inside one time window, used by the Q6 verdict logic.
+///
+/// `sample` is the denominator the `INSUFFICIENT-POST-FIX-DATA` threshold is
+/// tested against; `matches` is the symptom. Both are always carried so a
+/// caller is never handed a bare "fixed" (spec §9).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ObservationCounts {
+    pub matches: i64,
+    pub sample: i64,
 }
 
 /// Storage for the structural git-history index.
@@ -833,6 +979,48 @@ pub trait HistoryStore: Send + Sync {
 
     /// Overlap rows recorded for one commit.
     fn symbols_for_commit(&self, sha: &str) -> Result<Vec<HistoryCommitSymbol>>;
+
+    /// Record (or refresh) one binary epoch, keyed on
+    /// `(epoch_kind, pid, started_at)`. Returns the row id.
+    ///
+    /// Idempotent by construction: a daemon that re-registers, or a backfill
+    /// that runs twice, updates the existing row rather than growing a second
+    /// window for the same process — duplicated epochs would widen the MIXED
+    /// band and silently suppress CLEAN-POST evidence.
+    fn record_epoch(&self, epoch: &HistoryEpoch) -> Result<i64>;
+
+    /// Advance the `ended_at` of the newest `daemon_start` epoch for `pid`.
+    ///
+    /// Called from the daemon heartbeat rather than from shutdown: a killed or
+    /// crashed daemon never reaches shutdown, and it is exactly those processes
+    /// — the ones still serving an old binary — whose tail defines the MIXED
+    /// window. Returns whether a row was updated.
+    fn touch_epoch_end(&self, pid: i64, ended_at: &str) -> Result<bool>;
+
+    /// Epochs ordered by `started_at` ascending, optionally from a lower bound.
+    fn list_epochs(&self, since: Option<&str>, limit: usize) -> Result<Vec<HistoryEpoch>>;
+
+    /// Backfill `daemon_start` epochs from `daemon_instances`.
+    ///
+    /// Those rows carry `started_at` and `last_heartbeat` but no binary
+    /// identity, so the backfilled epochs have NULL `version`/`binary_mtime`.
+    /// That is deliberate: an unknown binary cannot be claimed to be running a
+    /// fix, and the classifier treats it as such (it can extend the MIXED
+    /// window, never open a CLEAN-POST one).
+    fn backfill_epochs_from_daemons(&self) -> Result<EpochBackfill>;
+
+    /// Symptom and sample counts over `events` inside `[from, until)`.
+    ///
+    /// `symptom` is matched case-insensitively as a substring against
+    /// `event_type` and `summary`. Comparison goes through SQLite's
+    /// `datetime()` on both sides so a stored `…Z` and a stored `…+00:00`
+    /// cannot order differently as strings.
+    fn observation_counts(
+        &self,
+        from: &str,
+        until: Option<&str>,
+        symptom: Option<&str>,
+    ) -> Result<ObservationCounts>;
 }
 
 /// SQLite-backed [`HistoryStore`] sharing the process-wide `cas.db` connection.
@@ -875,7 +1063,7 @@ impl SqliteHistoryStore {
     /// join cannot shift positions under the reader.
     const COMMIT_COLUMNS: &'static str = "c.sha, c.short_sha, c.parent_shas, c.is_merge, \
          c.author_name, c.author_email, c.authored_at, c.committed_at, c.subject, c.body, \
-         c.branch_hint, c.repository";
+         c.branch_hint, c.repository, c.symbol_mapping";
 
     fn commit_from_row(row: &rusqlite::Row) -> rusqlite::Result<HistoryCommit> {
         let parents: String = row.get("parent_shas")?;
@@ -892,6 +1080,7 @@ impl SqliteHistoryStore {
             body: row.get("body")?,
             branch_hint: row.get("branch_hint")?,
             repository: row.get("repository")?,
+            symbol_mapping: row.get("symbol_mapping")?,
         })
     }
 
@@ -949,6 +1138,20 @@ impl SqliteHistoryStore {
                    OR f.old_path LIKE '%' || ?{idx} || '%'))"
             ));
             params.push(path.clone());
+            idx += 1;
+        }
+        if let Some(symbol) = &query.symbol {
+            // A symbol row is positive evidence, but an incomplete M3 verdict
+            // is not negative evidence. Excluding `pending`, `absent`, or
+            // `partial` commits here would turn index lag into a confident
+            // claim that the named symbol was never touched. Return those rows
+            // with their verdict; `history::search` serializes it per hit.
+            sql.push_str(&format!(
+                " AND (c.symbol_mapping IN ('pending', 'absent', 'partial') \
+                   OR EXISTS (SELECT 1 FROM history_commit_symbols s \
+                              WHERE s.sha = c.sha AND s.qualified_name = ?{idx}))"
+            ));
+            params.push(symbol.clone());
             idx += 1;
         }
         if let Some(shas) = &query.shas {
@@ -1148,6 +1351,7 @@ impl HistoryStore for SqliteHistoryStore {
                      ADD COLUMN symbol_mapping TEXT NOT NULL DEFAULT 'pending'",
             )?;
         }
+        conn.execute_batch(HISTORY_EPOCHS_SCHEMA)?;
         Ok(())
     }
 
@@ -1372,6 +1576,15 @@ impl HistoryStore for SqliteHistoryStore {
             return Ok(Vec::new());
         }
 
+        // Every mapped candidate admitted by `filter_sql` has an exact symbol
+        // row. Put that certain tier ahead of pending/absent/partial rows
+        // before LIMIT; recency and FTS relevance only order within a tier.
+        let certainty_order = query
+            .symbol
+            .as_ref()
+            .map(|_| "CASE WHEN c.symbol_mapping = 'mapped' THEN 0 ELSE 1 END, ")
+            .unwrap_or_default();
+
         let (sql, values) = match &text_expr {
             Some(expr) => {
                 let (filter, filter_params) = Self::filter_sql(query, 3);
@@ -1389,7 +1602,7 @@ impl HistoryStore for SqliteHistoryStore {
                            JOIN history_commits c ON c.sha = history_commits_fts.sha
                           WHERE history_commits_fts MATCH ?1
                             AND c.repository = ?2{filter}
-                          ORDER BY score
+                          ORDER BY {certainty_order}score
                           LIMIT ?{limit_idx}",
                         cols = Self::COMMIT_COLUMNS,
                     ),
@@ -1407,7 +1620,7 @@ impl HistoryStore for SqliteHistoryStore {
                         "SELECT {cols}, 0.0 AS score
                            FROM history_commits c
                           WHERE c.repository = ?1{filter}
-                          ORDER BY c.committed_at DESC, c.sha
+                          ORDER BY {certainty_order}c.committed_at DESC, c.sha
                           LIMIT ?{limit_idx}",
                         cols = Self::COMMIT_COLUMNS,
                     ),
@@ -1464,6 +1677,33 @@ impl HistoryStore for SqliteHistoryStore {
                 score,
                 recency,
                 files,
+            });
+        }
+        if query.symbol.is_some() {
+            // The hybrid layer sorts this score again. Preserve the SQL
+            // certainty tier across that second ranking step, then retain a
+            // small, explicit tail of unknowns rather than either hiding them
+            // or returning an unbounded maybe-list.
+            let uncertain_max = hits
+                .iter()
+                .filter(|hit| hit.commit.symbol_mapping != "mapped")
+                .map(|hit| hit.score)
+                .fold(0.0_f64, f64::max);
+            for hit in &mut hits {
+                if hit.commit.symbol_mapping == "mapped" {
+                    hit.score += uncertain_max + 1.0;
+                }
+            }
+            let mut uncertain = 0;
+            hits.retain(|hit| {
+                if hit.commit.symbol_mapping == "mapped" {
+                    true
+                } else if uncertain < HISTORY_SYMBOL_UNCERTAIN_LIMIT {
+                    uncertain += 1;
+                    true
+                } else {
+                    false
+                }
             });
         }
         Ok(hits)
@@ -2452,6 +2692,232 @@ impl HistoryStore for SqliteHistoryStore {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
+
+    fn record_epoch(&self, epoch: &HistoryEpoch) -> Result<i64> {
+        let now = chrono::Utc::now().to_rfc3339();
+        // If the running executable was deleted/replaced, `binary_path` now
+        // names the replacement file and its mtime says nothing about the
+        // process being recorded. Never persist that mtime as proof.
+        let trusted_binary_mtime = epoch.trusted_binary_mtime();
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+
+        // Identity lookup rather than `ON CONFLICT`, because the uniqueness
+        // constraint is an *expression* index (`COALESCE(pid, -1)`) and naming
+        // an expression as a conflict target is a syntax that varies with the
+        // SQLite build. A select-then-write inside the transaction is portable
+        // and reads the same.
+        let existing: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM history_epochs
+                  WHERE epoch_kind = ?1 AND COALESCE(pid, -1) = COALESCE(?2, -1)
+                    AND started_at = ?3",
+                params![epoch.epoch_kind, epoch.pid, epoch.started_at],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let id = match existing {
+            Some(id) => {
+                // `ended_at` only ever moves forward: a refresh that carries no
+                // liveness stamp must not erase one we already observed.
+                tx.execute(
+                    "UPDATE history_epochs
+                        SET binary_path = COALESCE(?2, binary_path),
+                            binary_mtime = CASE
+                                WHEN exe_deleted != 0 OR ?6 != 0 THEN NULL
+                                ELSE COALESCE(?3, binary_mtime)
+                            END,
+                            version = COALESCE(?4, version),
+                            ended_at = MAX(COALESCE(?5, ''), COALESCE(ended_at, '')),
+                            exe_deleted = MAX(exe_deleted, ?6)
+                      WHERE id = ?1",
+                    params![
+                        id,
+                        epoch.binary_path,
+                        trusted_binary_mtime,
+                        epoch.version,
+                        epoch.ended_at,
+                        i64::from(epoch.exe_deleted),
+                    ],
+                )?;
+                // MAX() of two empty strings writes '' where NULL is meant.
+                tx.execute(
+                    "UPDATE history_epochs SET ended_at = NULL WHERE id = ?1 AND ended_at = ''",
+                    params![id],
+                )?;
+                id
+            }
+            None => {
+                tx.execute(
+                    "INSERT INTO history_epochs (
+                         epoch_kind, binary_path, binary_mtime, version,
+                         started_at, ended_at, pid, exe_deleted, recorded_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        epoch.epoch_kind,
+                        epoch.binary_path,
+                        trusted_binary_mtime,
+                        epoch.version,
+                        epoch.started_at,
+                        epoch.ended_at,
+                        epoch.pid,
+                        i64::from(epoch.exe_deleted),
+                        now,
+                    ],
+                )?;
+                tx.last_insert_rowid()
+            }
+        };
+
+        tx.commit()?;
+        Ok(id)
+    }
+
+    fn touch_epoch_end(&self, pid: i64, ended_at: &str) -> Result<bool> {
+        let conn = self.lock();
+        let updated = conn.execute(
+            "UPDATE history_epochs
+                SET ended_at = ?2
+              WHERE id = (SELECT id FROM history_epochs
+                           WHERE epoch_kind = ?3 AND pid = ?1
+                           ORDER BY started_at DESC LIMIT 1)",
+            params![pid, ended_at, EPOCH_KIND_DAEMON_START],
+        )?;
+        Ok(updated > 0)
+    }
+
+    fn list_epochs(&self, since: Option<&str>, limit: usize) -> Result<Vec<HistoryEpoch>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, epoch_kind, binary_path,
+                    CASE WHEN exe_deleted != 0 THEN NULL ELSE binary_mtime END,
+                    version, started_at,
+                    ended_at, pid, exe_deleted, recorded_at
+               FROM history_epochs
+              WHERE (?1 IS NULL OR datetime(started_at) >= datetime(?1))
+              ORDER BY datetime(started_at) ASC, id ASC
+              LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![since, limit.max(1) as i64], |row| {
+                Ok(HistoryEpoch {
+                    id: row.get(0)?,
+                    epoch_kind: row.get(1)?,
+                    binary_path: row.get(2)?,
+                    binary_mtime: row.get(3)?,
+                    version: row.get(4)?,
+                    started_at: row.get(5)?,
+                    ended_at: row.get(6)?,
+                    pid: row.get(7)?,
+                    exe_deleted: row.get::<_, i64>(8)? != 0,
+                    recorded_at: row.get(9)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    fn backfill_epochs_from_daemons(&self) -> Result<EpochBackfill> {
+        let mut conn = self.lock();
+        let has_source: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                            WHERE type = 'table' AND name = 'daemon_instances')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_source {
+            return Ok(EpochBackfill::default());
+        }
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let tx = conn.transaction()?;
+        let rows: Vec<(i64, String, String)> = {
+            let mut stmt =
+                tx.prepare("SELECT pid, started_at, last_heartbeat FROM daemon_instances")?;
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let mut out = EpochBackfill {
+            source_available: true,
+            scanned: rows.len() as i64,
+            ..EpochBackfill::default()
+        };
+        {
+            let mut insert = tx.prepare(
+                "INSERT INTO history_epochs (
+                     epoch_kind, binary_path, binary_mtime, version,
+                     started_at, ended_at, pid, exe_deleted, recorded_at
+                 ) VALUES (?1, NULL, NULL, NULL, ?2, ?3, ?4, 0, ?5)",
+            )?;
+            let mut exists = tx.prepare(
+                "SELECT EXISTS(SELECT 1 FROM history_epochs
+                                WHERE epoch_kind = ?1 AND COALESCE(pid, -1) = ?2
+                                  AND started_at = ?3)",
+            )?;
+            for (pid, started_at, last_heartbeat) in rows {
+                let present: bool = exists.query_row(
+                    params![EPOCH_KIND_DAEMON_START, pid, started_at],
+                    |row| row.get(0),
+                )?;
+                if present {
+                    out.already_present += 1;
+                    continue;
+                }
+                // `last_heartbeat` equals `started_at` for a daemon that never
+                // ticked; that is still an observation of liveness at that
+                // instant, so it is kept rather than nulled.
+                insert.execute(params![
+                    EPOCH_KIND_DAEMON_START,
+                    started_at,
+                    last_heartbeat,
+                    pid,
+                    now
+                ])?;
+                out.inserted += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(out)
+    }
+
+    fn observation_counts(
+        &self,
+        from: &str,
+        until: Option<&str>,
+        symptom: Option<&str>,
+    ) -> Result<ObservationCounts> {
+        let conn = self.lock();
+        let has_events: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                            WHERE type = 'table' AND name = 'events')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_events {
+            return Ok(ObservationCounts::default());
+        }
+
+        let row = conn.query_row(
+            "SELECT COUNT(*),
+                    SUM(CASE WHEN ?3 IS NULL
+                              OR event_type LIKE '%' || ?3 || '%'
+                              OR summary LIKE '%' || ?3 || '%'
+                             THEN 1 ELSE 0 END)
+               FROM events
+              WHERE datetime(created_at) >= datetime(?1)
+                AND (?2 IS NULL OR datetime(created_at) < datetime(?2))",
+            params![from, until, symptom],
+            |row| {
+                Ok(ObservationCounts {
+                    sample: row.get(0)?,
+                    matches: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                })
+            },
+        )?;
+        Ok(row)
+    }
 }
 
 #[cfg(test)]
@@ -2480,6 +2946,9 @@ mod tests {
             body: Some("body".into()),
             branch_hint: Some("main".into()),
             repository: "/repo".into(),
+            // Test commits have not passed through M3's mapper. Keep this
+            // fixture intentionally retryable, as a freshly indexed commit is.
+            symbol_mapping: "pending".into(),
         }
     }
 
@@ -3381,6 +3850,268 @@ mod tests {
         assert_eq!(
             cov.by_method,
             vec![(LINK_METHOD_FACTORY_ANCHOR.to_string(), 1)]
+        );
+    }
+
+    // ---- Binary epochs (spec §9, EPIC cas-6212 / cas-8d2a, M8) ----
+
+    fn epoch(started: &str, pid: i64) -> HistoryEpoch {
+        HistoryEpoch {
+            id: 0,
+            epoch_kind: EPOCH_KIND_DAEMON_START.into(),
+            binary_path: Some("/usr/local/bin/cas".into()),
+            binary_mtime: Some("2026-08-07T20:55:00Z".into()),
+            version: Some("2.49.0".into()),
+            started_at: started.into(),
+            ended_at: Some(started.into()),
+            pid: Some(pid),
+            exe_deleted: false,
+            recorded_at: started.into(),
+        }
+    }
+
+    /// AC(1): a daemon start writes an epoch, and writing the same start twice
+    /// refreshes one row rather than inventing a second window for the same
+    /// process — a duplicate would widen MIXED and suppress CLEAN-POST.
+    #[test]
+    fn record_epoch_is_idempotent_per_process_start() {
+        let (_t, store) = store();
+        let first = store.record_epoch(&epoch("2026-08-07T21:02:26Z", 42)).unwrap();
+        let second = store.record_epoch(&epoch("2026-08-07T21:02:26Z", 42)).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(store.list_epochs(None, 100).unwrap().len(), 1);
+
+        store.record_epoch(&epoch("2026-08-07T21:40:00Z", 43)).unwrap();
+        let all = store.list_epochs(None, 100).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].started_at, "2026-08-07T21:02:26Z", "ordered by start");
+        assert_eq!(all[0].version.as_deref(), Some("2.49.0"));
+        assert_eq!(all[0].binary_mtime.as_deref(), Some("2026-08-07T20:55:00Z"));
+    }
+
+    #[test]
+    fn touch_epoch_end_advances_the_liveness_stamp() {
+        let (_t, store) = store();
+        store.record_epoch(&epoch("2026-08-07T21:02:26Z", 42)).unwrap();
+        assert!(store.touch_epoch_end(42, "2026-08-07T21:36:35Z").unwrap());
+        assert_eq!(
+            store.list_epochs(None, 10).unwrap()[0].ended_at.as_deref(),
+            Some("2026-08-07T21:36:35Z")
+        );
+        assert!(
+            !store.touch_epoch_end(999, "2026-08-07T21:36:35Z").unwrap(),
+            "an unknown pid must report that nothing was updated"
+        );
+    }
+
+    /// A refresh that carries no liveness stamp must not erase one already
+    /// observed — the tail of an old daemon is the whole MIXED window.
+    #[test]
+    fn re_recording_never_rewinds_ended_at() {
+        let (_t, store) = store();
+        store.record_epoch(&epoch("2026-08-07T21:02:26Z", 42)).unwrap();
+        store.touch_epoch_end(42, "2026-08-07T21:36:35Z").unwrap();
+
+        let mut stale = epoch("2026-08-07T21:02:26Z", 42);
+        stale.ended_at = None;
+        store.record_epoch(&stale).unwrap();
+
+        assert_eq!(
+            store.list_epochs(None, 10).unwrap()[0].ended_at.as_deref(),
+            Some("2026-08-07T21:36:35Z")
+        );
+    }
+
+    #[test]
+    fn stale_executable_identity_clears_replacement_mtime_and_is_sticky() {
+        let (_t, store) = store();
+        let started = "2026-08-07T21:02:26Z";
+        let mut stale = epoch(started, 42);
+        stale.binary_mtime = Some("2026-08-08T00:00:00Z".into());
+        stale.exe_deleted = true;
+        store.record_epoch(&stale).unwrap();
+
+        let recorded = store.list_epochs(None, 10).unwrap().remove(0);
+        assert!(recorded.exe_deleted);
+        assert!(
+            recorded.binary_mtime.is_none(),
+            "the replacement file's fresh mtime must not survive storage"
+        );
+        let json = serde_json::to_value(&recorded).unwrap();
+        assert_eq!(json["binary_mtime"], serde_json::Value::Null);
+        assert_eq!(json["exe_deleted"], true);
+
+        // Once an executable is unlinked, a later refresh cannot make that
+        // same process identity current again or restore replacement metadata.
+        let mut refresh = epoch(started, 42);
+        refresh.binary_mtime = Some("2026-08-09T00:00:00Z".into());
+        store.record_epoch(&refresh).unwrap();
+        let refreshed = store.list_epochs(None, 10).unwrap().remove(0);
+        assert!(refreshed.exe_deleted);
+        assert!(refreshed.binary_mtime.is_none());
+
+        let conn = store.lock();
+        let raw: (Option<String>, i64) = conn
+            .query_row(
+                "SELECT binary_mtime, exe_deleted FROM history_epochs WHERE pid = 42",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(raw, (None, 1));
+    }
+
+    #[test]
+    fn stale_mtime_from_an_older_database_is_hidden_on_read() {
+        let (_t, store) = store();
+        let conn = store.lock();
+        conn.execute(
+            "INSERT INTO history_epochs (
+                 epoch_kind, binary_path, binary_mtime, version,
+                 started_at, ended_at, pid, exe_deleted, recorded_at
+             ) VALUES (?1, '/usr/local/bin/cas', ?2, '2.49.0', ?3, ?3, 42, 1, ?3)",
+            params![
+                EPOCH_KIND_DAEMON_START,
+                "2026-08-08T00:00:00Z",
+                "2026-08-07T21:02:26Z"
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let epoch = store.list_epochs(None, 10).unwrap().remove(0);
+        assert!(epoch.exe_deleted);
+        assert!(
+            epoch.binary_mtime.is_none(),
+            "legacy replacement metadata must not escape the storage boundary"
+        );
+    }
+
+    /// AC(2): historical epochs come out of `daemon_instances`, twice safely.
+    #[test]
+    fn backfill_reads_daemon_instances_and_repeats_safely() {
+        let (_t, store) = store();
+        {
+            let conn = store.lock();
+            conn.execute_batch(
+                "CREATE TABLE daemon_instances (
+                     id TEXT PRIMARY KEY, pid INTEGER NOT NULL, daemon_type TEXT NOT NULL,
+                     started_at TEXT NOT NULL, last_heartbeat TEXT NOT NULL, status TEXT NOT NULL);
+                 INSERT INTO daemon_instances VALUES
+                     ('d1', 111, 'mcp_embedded', '2026-08-07T19:00:00Z', '2026-08-07T21:36:35Z', 'running'),
+                     ('d2', 222, 'mcp_embedded', '2026-08-07T21:02:26Z', '2026-08-07T23:00:00Z', 'running');",
+            )
+            .unwrap();
+        }
+
+        let first = store.backfill_epochs_from_daemons().unwrap();
+        assert!(first.source_available);
+        assert_eq!((first.scanned, first.inserted, first.already_present), (2, 2, 0));
+
+        let second = store.backfill_epochs_from_daemons().unwrap();
+        assert_eq!((second.scanned, second.inserted, second.already_present), (2, 0, 2));
+
+        let epochs = store.list_epochs(None, 100).unwrap();
+        assert_eq!(epochs.len(), 2);
+        assert_eq!(epochs[0].ended_at.as_deref(), Some("2026-08-07T21:36:35Z"));
+        assert!(
+            epochs[0].binary_mtime.is_none() && epochs[0].version.is_none(),
+            "daemon_instances records no binary identity, and the backfill must not invent one"
+        );
+        assert!(
+            epochs.iter().all(|epoch| !epoch.exe_deleted),
+            "backfill must report identity as unknown, not invent a stale-executable observation"
+        );
+    }
+
+    /// No `daemon_instances` table is "unmeasurable", not "zero daemons".
+    #[test]
+    fn backfill_reports_a_missing_source_rather_than_an_empty_one() {
+        let (_t, store) = store();
+        let out = store.backfill_epochs_from_daemons().unwrap();
+        assert!(!out.source_available);
+        assert_eq!(out.scanned, 0);
+    }
+
+    #[test]
+    fn observation_counts_window_and_symptom() {
+        let (_t, store) = store();
+        {
+            let conn = store.lock();
+            conn.execute_batch(
+                "CREATE TABLE events (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT NOT NULL,
+                     entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, summary TEXT NOT NULL,
+                     metadata TEXT, created_at TEXT NOT NULL, session_id TEXT);
+                 INSERT INTO events (event_type, entity_type, entity_id, summary, created_at) VALUES
+                     ('wake_missed', 'agent', 'a', 'worker did not wake', '2026-08-07T20:00:00Z'),
+                     ('task_created', 'task', 't', 'created', '2026-08-07T21:10:00+00:00'),
+                     ('wake_missed', 'agent', 'a', 'worker did not wake', '2026-08-07T21:20:00Z'),
+                     ('task_created', 'task', 't', 'created', '2026-08-07T22:00:00Z'),
+                     ('task_created', 'task', 't', 'created', '2026-08-07T22:30:00Z');",
+            )
+            .unwrap();
+        }
+
+        // The MIXED window: 21:02:26 → 21:36:35. One symptom, two observations.
+        let mixed = store
+            .observation_counts(
+                "2026-08-07T21:02:26Z",
+                Some("2026-08-07T21:36:35Z"),
+                Some("wake_missed"),
+            )
+            .unwrap();
+        assert_eq!(mixed, ObservationCounts { matches: 1, sample: 2 });
+
+        // CLEAN-POST: quiet of the symptom, two observations of sample.
+        let post = store
+            .observation_counts("2026-08-07T21:36:35Z", None, Some("wake_missed"))
+            .unwrap();
+        assert_eq!(post, ObservationCounts { matches: 0, sample: 2 });
+
+        // No symptom filter: every row in the window is a match.
+        let all = store
+            .observation_counts("2026-08-07T21:36:35Z", None, None)
+            .unwrap();
+        assert_eq!(all, ObservationCounts { matches: 2, sample: 2 });
+    }
+
+    /// A `…Z` stamp and a `…+00:00` stamp for the same instant must land in the
+    /// same window; string comparison alone would not guarantee that.
+    #[test]
+    fn observation_counts_normalizes_timestamp_formats() {
+        let (_t, store) = store();
+        {
+            let conn = store.lock();
+            conn.execute_batch(
+                "CREATE TABLE events (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT NOT NULL,
+                     entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, summary TEXT NOT NULL,
+                     metadata TEXT, created_at TEXT NOT NULL, session_id TEXT);
+                 INSERT INTO events (event_type, entity_type, entity_id, summary, created_at) VALUES
+                     ('e', 'x', 'y', 's', '2026-08-07T21:59:59.123456789+00:00'),
+                     ('e', 'x', 'y', 's', '2026-08-07T22:00:01Z'),
+                     ('e', 'x', 'y', 's', '2026-08-08T00:00:00+02:00');",
+            )
+            .unwrap();
+        }
+        // 22:00:00Z onwards: the second row, plus the +02:00 row (= 22:00:00Z).
+        let counts = store
+            .observation_counts("2026-08-07T22:00:00Z", None, None)
+            .unwrap();
+        assert_eq!(counts.sample, 2);
+    }
+
+    /// No `events` table at all is zero observations, which the verdict layer
+    /// then reads as INSUFFICIENT — never as a quiet, verified window.
+    #[test]
+    fn observation_counts_tolerate_a_missing_events_table() {
+        let (_t, store) = store();
+        assert_eq!(
+            store
+                .observation_counts("2026-08-07T21:36:35Z", None, Some("x"))
+                .unwrap(),
+            ObservationCounts::default()
         );
     }
 

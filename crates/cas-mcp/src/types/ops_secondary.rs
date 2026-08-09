@@ -207,7 +207,7 @@ pub struct SearchContextRequest {
 
     /// Symbol filter for history search
     #[schemars(
-        description = "Only commits touching this symbol (for history). Not supported until the symbol mapping lands; the response declares it rather than ignoring it."
+        description = "Only commits touching this exact qualified symbol (for history). Incompletely mapped commits are returned with their explicit mapping verdict rather than silently treated as non-matches."
     )]
     #[serde(default)]
     pub symbol: Option<String>,

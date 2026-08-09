@@ -82,6 +82,19 @@ pub fn handle_user_prompt_submit(
             }
             factory_context.push_str(&mail);
         }
+        if let Some(root) = cas_root {
+            if let Some(packet) = crate::ambient_recall::build_ambient_recall_context(
+                input,
+                root,
+                input.submitted_prompt(),
+                false,
+            ) {
+                if !factory_context.is_empty() {
+                    factory_context.push_str("\n\n");
+                }
+                factory_context.push_str(&packet.full);
+            }
+        }
     }
     if is_supervisor {
         // Supervisors still skip attribution capture — they don't write code.

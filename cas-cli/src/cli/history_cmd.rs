@@ -33,6 +33,10 @@ pub enum HistoryCommands {
     /// provenance edges (spec §5.3). Never overwrites a link the PostToolUse
     /// hook observed directly.
     RepairLinks(RepairLinksArgs),
+    /// List the running-binary timeline, or backfill it from daemon records
+    Epochs(EpochsArgs),
+    /// Answer "is symptom X fixed" against the running-binary timeline
+    Verdict(VerdictArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -41,6 +45,25 @@ pub struct EmbedArgs {
     /// the daemon's per-tick budget.
     #[arg(long)]
     pub limit: Option<usize>,
+
+    /// Emit JSON instead of prose
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct EpochsArgs {
+    /// Backfill historical epochs from `daemon_instances` before listing
+    #[arg(long)]
+    pub backfill: bool,
+
+    /// Only epochs starting at or after this bound (14d, 2026-08-01, RFC3339)
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// Maximum epochs to list
+    #[arg(long, default_value_t = 20)]
+    pub limit: usize,
 
     /// Emit JSON instead of prose
     #[arg(long)]
@@ -59,6 +82,29 @@ pub struct RepairLinksArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+pub struct VerdictArgs {
+    /// Symptom to look for: a substring of an event type or summary
+    pub symptom: Vec<String>,
+
+    /// Commit carrying the fix (full SHA or prefix); resolved to its commit
+    /// time, which is a *build* time, never the start of post-fix data
+    #[arg(long)]
+    pub fix_commit: Option<String>,
+
+    /// The fix's build time, if there is no indexed commit for it
+    #[arg(long)]
+    pub fix_at: Option<String>,
+
+    /// Post-boundary observations required before absence counts as verified
+    #[arg(long, default_value_t = crate::history::epochs::DEFAULT_SAMPLE_THRESHOLD)]
+    pub threshold: i64,
+
+    /// Emit JSON instead of prose
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
 pub struct SearchArgs {
     /// Free text matched against commit subject and body. Optional: a query
     /// with only `--path`/`--since` is a legitimate structural question.
@@ -68,7 +114,8 @@ pub struct SearchArgs {
     #[arg(long)]
     pub path: Option<String>,
 
-    /// Only commits touching this symbol (not supported until M3; declared)
+    /// Only commits touching this exact qualified symbol. Commits whose symbol
+    /// mapping is incomplete are returned with their explicit mapping verdict.
     #[arg(long)]
     pub symbol: Option<String>,
 
@@ -167,6 +214,8 @@ pub fn execute(
         HistoryCommands::Embed(args) => execute_embed(args, cas_root),
         HistoryCommands::Symbols(args) => execute_symbols(args, cas_root),
         HistoryCommands::RepairLinks(args) => execute_repair_links(args, cas_root),
+        HistoryCommands::Epochs(args) => execute_epochs(args, cas_root),
+        HistoryCommands::Verdict(args) => execute_verdict(args, cas_root),
     }
 }
 
@@ -257,6 +306,118 @@ fn execute_repair_links(args: &RepairLinksArgs, cas_root: &Path) -> anyhow::Resu
     println!(
         "  no session-bearing edge  {}\n             ambiguous prefix (skipped, never guessed)  {}\n             already linked (raced a direct observation)  {}",
         total.no_session_edge, total.skipped_ambiguous, total.already_present
+    );
+    Ok(())
+}
+
+/// `cas history epochs` — the running-binary timeline (spec §9).
+fn execute_epochs(args: &EpochsArgs, cas_root: &Path) -> anyhow::Result<()> {
+    use cas_store::{HistoryStore, SqliteHistoryStore};
+
+    let store = SqliteHistoryStore::open(cas_root)?;
+    let backfill = if args.backfill {
+        Some(store.backfill_epochs_from_daemons()?)
+    } else {
+        None
+    };
+
+    let since = args
+        .since
+        .as_deref()
+        .map(history::search::parse_time_bound)
+        .transpose()?;
+    let epochs = store.list_epochs(since.as_deref(), args.limit)?;
+
+    if args.json {
+        let payload = serde_json::json!({
+            "backfill": backfill.as_ref().map(|b| serde_json::json!({
+                "source_available": b.source_available,
+                "scanned": b.scanned,
+                "inserted": b.inserted,
+                "already_present": b.already_present,
+            })),
+            "epochs": epochs,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    if let Some(b) = &backfill {
+        if b.source_available {
+            println!(
+                "backfill: {} daemon record(s) scanned, {} epoch(s) added, {} already present",
+                b.scanned, b.inserted, b.already_present
+            );
+        } else {
+            // "No daemon records" and "no daemon table" are different facts.
+            println!("backfill: no daemon_instances table in this database — nothing to backfill");
+        }
+    }
+
+    if epochs.is_empty() {
+        println!("no binary epochs recorded — start `cas serve`, or run with --backfill");
+        return Ok(());
+    }
+    for e in &epochs {
+        let binary_identity = if e.exe_deleted {
+            "mtime unknown [running exe replaced/deleted]"
+        } else {
+            e.binary_mtime.as_deref().unwrap_or("mtime unknown")
+        };
+        println!(
+            "{}  {}  pid {}  {}  binary {}",
+            e.started_at,
+            e.ended_at.as_deref().unwrap_or("(never seen alive again)"),
+            e.pid.map(|p| p.to_string()).unwrap_or_else(|| "?".into()),
+            e.version.as_deref().unwrap_or("version unknown"),
+            binary_identity,
+        );
+    }
+    Ok(())
+}
+
+/// `cas history verdict` — the three-valued is-it-fixed answer (spec §9, §12 Q6).
+fn execute_verdict(args: &VerdictArgs, cas_root: &Path) -> anyhow::Result<()> {
+    let request = crate::history::epochs::VerdictRequest {
+        symptom: args.symptom.join(" "),
+        fix_commit: args.fix_commit.clone(),
+        fix_at: args.fix_at.clone(),
+        threshold: args.threshold,
+    };
+    let response = crate::history::epochs::run(cas_root, &request)?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+        return Ok(());
+    }
+
+    let a = &response.assessment;
+    println!("verdict: {}", response.verdict);
+    println!("  {}", a.rationale);
+    match (&a.boundary.fix_started_running, &a.boundary.clean_post_from) {
+        (Some(fix), Some(clean)) => {
+            println!("  fix first observed running: {fix}");
+            println!(
+                "  clean-post from:            {clean} ({} non-fixed/unknown daemon(s) overlapped)",
+                a.boundary.overlapping_nonfixed_epochs
+            );
+        }
+        _ => println!("  no epoch has been observed running the fixed binary"),
+    }
+    println!(
+        "  clean-post: {} match(es) in {} observation(s) (threshold {})",
+        a.clean_post_matches, a.clean_post_sample, a.threshold
+    );
+    println!(
+        "  mixed:      {} match(es) in {} observation(s) — excluded from the verdict",
+        a.mixed_matches, a.mixed_sample
+    );
+    println!(
+        "  epochs: {} recorded, {} considered, {} with unknown binary ({} stale/deleted executable)",
+        response.epochs_recorded,
+        a.boundary.epochs_considered,
+        a.boundary.epochs_without_binary_identity,
+        a.boundary.epochs_with_stale_executable_identity
     );
     Ok(())
 }
@@ -649,6 +810,7 @@ fn execute_status(args: &StatusArgs, cas_root: &Path) -> anyhow::Result<()> {
         .lag_commits
         .map(|l| l.to_string())
         .unwrap_or_else(|| "unknown".to_string());
+    let lag_seconds = s.lag_age_seconds_at(chrono::Utc::now());
 
     if args.json {
         let payload = serde_json::json!({
@@ -661,6 +823,7 @@ fn execute_status(args: &StatusArgs, cas_root: &Path) -> anyhow::Result<()> {
             "indexed_commit_file_pairs": s.indexed_pairs,
             "repo_commits": s.repo_commits,
             "lag_commits": s.lag_commits,
+            "lag_seconds": lag_seconds,
             "current": s.is_current(),
             "last_indexed_at": s.state.as_ref().and_then(|st| st.last_indexed_at.clone()),
             "last_attempt_at": s.state.as_ref().and_then(|st| st.last_attempt_at.clone()),
@@ -693,7 +856,12 @@ fn execute_status(args: &StatusArgs, cas_root: &Path) -> anyhow::Result<()> {
         s.indexed_commits, s.repo_commits
     );
     println!("  file changes    {}", s.indexed_pairs);
-    println!("  lag             {lag} commit(s) behind HEAD");
+    println!(
+        "  lag             {lag} commit(s) behind HEAD ({})",
+        lag_seconds
+            .map(|seconds| format!("{seconds}s old"))
+            .unwrap_or_else(|| "age unknown".to_string())
+    );
     println!(
         "  backfill        {}",
         if backfill_complete {

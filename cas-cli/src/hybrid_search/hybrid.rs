@@ -59,6 +59,9 @@ pub struct HistoryFilter {
     pub repository: String,
     /// Substring match against a commit's touched paths.
     pub path: Option<String>,
+    /// Exact qualified symbol name recorded by M3. Incompletely mapped commits
+    /// remain candidates so the history response can state that uncertainty.
+    pub symbol: Option<String>,
     /// Inclusive RFC3339 bounds on `committed_at`.
     pub since: Option<String>,
     pub until: Option<String>,
@@ -371,8 +374,8 @@ impl HybridSearch {
 
         Ok(Self {
             bm25_index,
-            graph_retriever: None, // Needs entity store to be set separately
-            code_search: None,     // Needs code store to be set separately
+            graph_retriever: None,  // Needs entity store to be set separately
+            code_search: None,      // Needs code store to be set separately
             knowledge_store: None,  // Needs knowledge store to be set separately
             history_store: None,    // Needs history store to be set separately
             semantic_channel: None, // Needs cloud auth; see set_semantic_channel
@@ -598,6 +601,7 @@ impl HybridSearch {
                 let code_opts = CodeSearchOptions {
                     query: search_query.clone(),
                     limit: opts.base.limit * 3,
+                    semantic: true,
                     ..Default::default()
                 };
                 code_search
@@ -976,6 +980,7 @@ impl HybridSearch {
             repository: filter.repository.clone(),
             text,
             path: filter.path.clone(),
+            symbol: filter.symbol.clone(),
             since: filter.since.clone(),
             until: filter.until.clone(),
             include_merges: filter.include_merges,
@@ -1321,6 +1326,7 @@ mod tests {
                 committed_at: (*at).to_string(),
                 subject: (*subject).to_string(),
                 repository: "/repo".to_string(),
+                symbol_mapping: "pending".to_string(),
                 ..Default::default()
             })
             .collect();

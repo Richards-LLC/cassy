@@ -5,6 +5,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -72,6 +73,9 @@ pub struct CodeWatcher {
     _event_tx: Option<Sender<WatchEvent>>,
     /// The debouncer (kept alive to maintain the watcher)
     _debouncer: Option<Debouncer<RecommendedWatcher>>,
+    /// The first drain is a full reconciliation, not merely a batch of
+    /// watcher events. Atomic because the scheduler reads it through `&self`.
+    initial_reconcile: AtomicBool,
 }
 
 impl CodeWatcher {
@@ -83,6 +87,7 @@ impl CodeWatcher {
             event_rx: None,
             _event_tx: None,
             _debouncer: None,
+            initial_reconcile: AtomicBool::new(false),
         }
     }
 
@@ -157,6 +162,26 @@ impl CodeWatcher {
         Ok(())
     }
 
+    /// Register the watcher before taking the initial tree snapshot.
+    ///
+    /// Files created or deleted while `scan` runs are then present either in
+    /// the returned snapshot or in the watcher event stream. Keeping the
+    /// ordering inside this API prevents startup callers from accidentally
+    /// reopening the pre-registration race.
+    pub fn start_with_initial_scan(
+        &mut self,
+        scan: impl FnOnce() -> Vec<PathBuf>,
+    ) -> Result<(), CasError> {
+        self.start()?;
+        self.seed_initial(scan());
+        Ok(())
+    }
+
+    /// Roots whose complete source set the first reconciliation represents.
+    pub fn watch_paths(&self) -> &[PathBuf] {
+        &self.config.watch_paths
+    }
+
     /// Check if a path should be watched based on extension and ignore patterns
     fn should_watch_path(path: &Path, extensions: &[String], ignore_patterns: &[String]) -> bool {
         // Check extension
@@ -199,6 +224,18 @@ impl CodeWatcher {
         } else {
             vec![]
         }
+    }
+
+    /// Seed the first daemon pass with every currently eligible file.
+    pub fn seed_initial(&self, files: impl IntoIterator<Item = PathBuf>) {
+        if let Ok(mut pending) = self.pending_files.lock() {
+            pending.extend(files);
+            self.initial_reconcile.store(true, Ordering::Release);
+        }
+    }
+
+    pub fn take_initial_reconcile(&self) -> bool {
+        self.initial_reconcile.swap(false, Ordering::AcqRel)
     }
 
     /// Check if there are pending files
@@ -311,5 +348,60 @@ mod tests {
         assert!(!watcher.has_pending());
         assert_eq!(watcher.pending_count(), 0);
         assert!(watcher.take_pending().is_empty());
+    }
+
+    #[test]
+    fn initial_seed_is_drained_once_as_a_reconciliation() {
+        let watcher = CodeWatcher::new(WatcherConfig::default());
+        watcher.seed_initial([PathBuf::from("src/a.rs"), PathBuf::from("src/b.rs")]);
+        assert_eq!(watcher.pending_count(), 2);
+        assert!(watcher.take_initial_reconcile());
+        assert!(!watcher.take_initial_reconcile());
+        assert_eq!(watcher.take_pending().len(), 2);
+    }
+
+    #[test]
+    fn watcher_first_initial_scan_captures_create_and_delete_changes() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().to_path_buf();
+        let deleted = root.join("deleted.rs");
+        let created = root.join("created.rs");
+        std::fs::write(&deleted, "pub fn deleted() {}\n").unwrap();
+
+        let mut watcher = CodeWatcher::new(WatcherConfig {
+            watch_paths: vec![root],
+            extensions: vec!["rs".to_string()],
+            debounce_ms: 20,
+            ignore_patterns: Vec::new(),
+        });
+        watcher
+            .start_with_initial_scan(|| {
+                let snapshot = vec![deleted.clone()];
+                std::fs::write(&created, "pub fn created() {}\n").unwrap();
+                std::fs::remove_file(&deleted).unwrap();
+                snapshot
+            })
+            .unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut saw_created = false;
+        let mut saw_deleted = false;
+        while std::time::Instant::now() < deadline && !(saw_created && saw_deleted) {
+            while let Some(event) = watcher.try_recv() {
+                match event {
+                    WatchEvent::Modified(path) if path == created => saw_created = true,
+                    WatchEvent::Deleted(path) if path == deleted => saw_deleted = true,
+                    _ => {}
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(saw_created, "create during the initial scan was missed");
+        assert!(saw_deleted, "delete during the initial scan was missed");
+        assert!(watcher.take_initial_reconcile());
+        let pending = watcher.take_pending();
+        assert!(pending.contains(&created));
+        assert!(pending.contains(&deleted));
     }
 }

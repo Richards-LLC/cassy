@@ -267,6 +267,7 @@ mod tests {
             branch_hint: Some("factory/worker".to_string()),
             author_name: Some("T".to_string()),
             repository,
+            symbol_mapping: "pending".to_string(),
             ..Default::default()
         };
         let repository = super::super::repository_id(&fx.repo_root);

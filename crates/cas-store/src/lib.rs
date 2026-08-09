@@ -37,6 +37,7 @@ pub mod shared_db;
 
 mod agent_store;
 mod code_store;
+mod code_vector_store;
 mod commit_link_store;
 mod delivery_store;
 mod entity_store;
@@ -88,6 +89,10 @@ pub use event_store::{EVENT_SCHEMA, EventStore, SqliteEventStore, record_event_w
 
 // Code store for indexed source code
 pub use code_store::CodeStore;
+pub use code_vector_store::{
+    CODE_VECTOR_SCHEMA, CODE_VECTOR_SCHEMA_STATEMENTS, CodeIndexState, CodeVectorStats,
+    CodeVectorWork, SqliteCodeVectorStore,
+};
 pub use delivery_store::{
     DELIVERY_SCHEMA, build_worker_completion_receipt, create_worker_delivery,
     create_worker_delivery_with_dispatch, create_worker_delivery_with_dispatch_for_lease,
@@ -104,12 +109,13 @@ pub use entity_store::{ENTITY_SCHEMA, SqliteEntityStore};
 // touched files, and the walker watermark.
 pub use history_store::{
     CoChangedFile, DOC_KIND_CHANGELOG, DOC_KIND_COMMENT, DOC_KIND_ISSUE, DOC_KIND_PR,
-    HISTORY_DOCS_SCHEMA, HISTORY_DOCS_SCHEMA_STATEMENTS, HISTORY_FTS_STATEMENTS, HISTORY_SCHEMA,
-    HISTORY_SCHEMA_STATEMENTS, HistoryCommit, HistoryCommitFile, HistoryCommitHit,
-    HistoryCommitSymbol, HistoryDoc, HistoryIndexState, HistoryQuery, HistoryStore,
-    ProvenanceCoverage, SOURCE_CHANGELOG, SOURCE_EMBEDDINGS, SOURCE_GIT, SOURCE_GITHUB,
-    SqliteHistoryStore,
-    SymbolMapping, SymbolRange,
+    EPOCH_KIND_BINARY_INSTALL, EPOCH_KIND_DAEMON_LAST_HEARTBEAT, EPOCH_KIND_DAEMON_START,
+    EpochBackfill, HISTORY_DOCS_SCHEMA, HISTORY_DOCS_SCHEMA_STATEMENTS, HISTORY_EPOCHS_SCHEMA,
+    HISTORY_EPOCHS_SCHEMA_STATEMENTS, HISTORY_FTS_STATEMENTS, HISTORY_SCHEMA,
+    HISTORY_SCHEMA_STATEMENTS, HISTORY_SYMBOL_UNCERTAIN_LIMIT, HistoryCommit, HistoryCommitFile,
+    HistoryCommitHit, HistoryCommitSymbol, HistoryDoc, HistoryEpoch, HistoryIndexState,
+    HistoryQuery, HistoryStore, ObservationCounts, ProvenanceCoverage, SOURCE_CHANGELOG,
+    SOURCE_EMBEDDINGS, SOURCE_GIT, SOURCE_GITHUB, SqliteHistoryStore, SymbolMapping, SymbolRange,
 };
 
 // Commit → task / session provenance resolution (EPIC cas-6212 / cas-519f,

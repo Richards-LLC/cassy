@@ -32,6 +32,7 @@ use std::process::Command;
 
 use cas::mcp::{CasCore, CasService};
 use cas::store::init_cas_dir;
+use cas_store::CodeStore;
 use cas_mcp::types::SearchContextRequest;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::RawContent;
@@ -137,6 +138,58 @@ impl Fixture {
 
     fn db(&self) -> rusqlite::Connection {
         rusqlite::Connection::open(self.cas_root.join("cas.db")).unwrap()
+    }
+
+    /// Seed M2 through its real store API, then let the real M3 pass produce
+    /// `history_commit_symbols`. The code store normalizes absolute paths on
+    /// write, so direct SQL would miss the production join and make this
+    /// production-path test a convenient fiction.
+    fn index_symbol_file(
+        &self,
+        relative: &str,
+        symbols: &[(&str, &str, usize, usize)],
+    ) {
+        let code = cas_store::SqliteCodeStore::open(&self.cas_root).unwrap();
+        let repository = self
+            .repo
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let absolute = self.repo.join(relative).to_string_lossy().to_string();
+        let file_id = code.generate_file_id_for(&repository, &absolute);
+
+        code.add_file(&cas_code::CodeFile {
+            id: file_id.clone(),
+            path: absolute.clone(),
+            repository: repository.clone(),
+            language: cas_code::Language::Rust,
+            content_hash: "history-search-fixture".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+        for (id, qualified_name, line_start, line_end) in symbols {
+            code.add_symbol(&cas_code::CodeSymbol {
+                id: (*id).to_string(),
+                name: (*qualified_name).to_string(),
+                qualified_name: (*qualified_name).to_string(),
+                language: cas_code::Language::Rust,
+                file_path: absolute.clone(),
+                file_id: file_id.clone(),
+                line_start: *line_start,
+                line_end: *line_end,
+                repository: repository.clone(),
+                content_hash: "history-search-fixture".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+    }
+
+    fn map_symbols(&self) {
+        cas::history::symbols::map_symbols(&self.cas_root, &self.repo, 1_000)
+            .expect("symbol mapping pass");
     }
 
     /// Seed the exact commit→task edge (`tasks.deliverables.factory_branch_anchor`).
@@ -437,6 +490,52 @@ async fn every_response_carries_the_index_status_contract() {
     assert!(status["last_error"].is_null());
 }
 
+/// A tiny commit timestamp gap must still age into a stale-index signal when
+/// the daemon has not successfully observed the repository for days.
+#[tokio::test]
+async fn nonzero_history_lag_ages_from_the_last_successful_observation() {
+    let fx = Fixture::new();
+    let stale = (chrono::Utc::now() - chrono::Duration::days(2)).to_rfc3339();
+    fx.db()
+        .execute(
+            "UPDATE history_index_state
+                SET last_indexed_at = ?1, last_attempt_at = ?1
+              WHERE source = 'git'",
+            [&stale],
+        )
+        .unwrap();
+    commit(
+        &fx.repo,
+        "src/new_since_last_tick.rs",
+        "fn still_unindexed() {}\n",
+        "new work after the stalled history tick",
+    );
+
+    let response = fx
+        .history(serde_json::json!({"action": "history", "query": "backoff"}))
+        .await;
+    let status = &response["index_status"];
+    assert_eq!(status["lag_commits"], 1);
+    assert!(
+        status["lag_seconds"].as_i64().unwrap() >= 2 * 24 * 60 * 60 - 5,
+        "lag did not age from the stale successful observation: {status}"
+    );
+
+    // A malformed/missing observation is not evidence of freshness.
+    fx.db()
+        .execute(
+            "UPDATE history_index_state
+                SET last_indexed_at = 'not-a-time', last_attempt_at = 'not-a-time'
+              WHERE source = 'git'",
+            [],
+        )
+        .unwrap();
+    let unknown = fx
+        .history(serde_json::json!({"action": "history", "query": "backoff"}))
+        .await;
+    assert!(unknown["index_status"]["lag_seconds"].is_null());
+}
+
 /// A `kind` this surface cannot serve must not be answered with commits.
 #[tokio::test]
 async fn an_unsupported_kind_returns_no_results_and_says_why() {
@@ -458,26 +557,110 @@ async fn an_unsupported_kind_returns_no_results_and_says_why() {
     );
 }
 
-/// A symbol filter has nothing to filter on until M3, so it is declared rather
-/// than silently dropped — a dropped filter returns a wider result set that
-/// looks like a confident answer.
+/// M3 symbol rows reach the real MCP construction path. A commit with an
+/// `absent` mapping verdict stays in the answer as explicitly uncertain rather
+/// than becoming a false negative for the requested symbol.
 #[tokio::test]
-async fn a_symbol_filter_is_declared_not_ignored() {
+async fn a_symbol_filter_returns_matches_and_surfaces_absent_mapping() {
     let fx = Fixture::new();
+    // `retry.rs` is indexed through the M2 store API. `pane.rs` deliberately
+    // is not, so the real M3 pass stamps its commit `absent`.
+    fx.index_symbol_file(
+        "src/delivery/retry.rs",
+        &[("retry-symbol", "delivery::retry", 1, 1)],
+    );
+    fx.map_symbols();
+
     let response = fx
         .history(serde_json::json!({
             "action": "history",
-            "query": "backoff",
-            "symbol": "retry",
+            "symbol": "delivery::retry",
         }))
         .await;
 
+    assert_eq!(response["filters"]["symbol"], "delivery::retry");
     assert!(
         response["unsupported"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|u| u["feature"] == "symbol filter" && u["lands_in"] == "M3")
+            .all(|u| u["feature"] != "symbol filter"),
+        "M3 is live; a stale declaration would tell callers not to use it: {}",
+        response["unsupported"]
+    );
+
+    let mut matched: Vec<_> = response["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|hit| hit["symbol_mapping"] == "mapped")
+        .map(|hit| hit["subject"].as_str().unwrap())
+        .collect();
+    matched.sort_unstable();
+    assert_eq!(
+        matched,
+        vec![
+            "add exponential backoff to the drain",
+            "stop re-emitting on every poll tick",
+        ],
+        "the requested qualified symbol must return both commits that touched it"
+    );
+
+    let absent = response["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|hit| hit["subject"] == "widen the transcript pane")
+        .expect("an unindexed file must remain an explicit unknown, not a false negative");
+    assert_eq!(absent["symbol_mapping"], "absent");
+}
+
+/// Exact mapped hits are the certain tier. Newer pending rows remain a visible
+/// but bounded tail; neither SQL LIMIT nor the hybrid recency sort may displace
+/// the older exact hits.
+#[tokio::test]
+async fn exact_symbol_hits_precede_a_bounded_uncertain_tail_in_production() {
+    let fx = Fixture::new();
+    fx.index_symbol_file(
+        "src/delivery/retry.rs",
+        &[("retry-symbol-priority", "delivery::retry", 1, 1)],
+    );
+    fx.map_symbols();
+    for n in 0..15 {
+        commit(
+            &fx.repo,
+            &format!("src/newer/uncertain_{n}.rs"),
+            &format!("fn uncertain_{n}() {{}}\n"),
+            &format!("newer uncertain history row {n}"),
+        );
+    }
+    cas::history::run_index_pass(&fx.cas_root, &fx.repo).expect("index newer pending rows");
+
+    let response = fx
+        .history(serde_json::json!({
+            "action": "history",
+            "symbol": "delivery::retry",
+            "limit": 100,
+        }))
+        .await;
+    let hits = response["results"].as_array().unwrap();
+    assert_eq!(
+        response["filters"]["symbol_uncertain_limit"],
+        serde_json::json!(cas_store::HISTORY_SYMBOL_UNCERTAIN_LIMIT)
+    );
+    let exact = hits
+        .iter()
+        .take_while(|hit| hit["symbol_mapping"] == "mapped")
+        .count();
+    assert_eq!(exact, 2, "both older exact hits must lead the result: {hits:?}");
+    assert!(
+        hits.iter().skip(exact).all(|hit| hit["symbol_mapping"] != "mapped"),
+        "certainty tiers interleaved: {hits:?}"
+    );
+    assert_eq!(
+        hits.len() - exact,
+        cas_store::HISTORY_SYMBOL_UNCERTAIN_LIMIT,
+        "uncertainty must remain visible but capped"
     );
 }
 

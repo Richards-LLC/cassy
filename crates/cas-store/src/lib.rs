@@ -151,6 +151,7 @@ pub use verification_store::{
     claim_verification_dispatch_bound, consume_server_verifier_handoff_with_conn,
     consume_verifier_capability_with_conn, create_verification_dispatch,
     create_verification_dispatch_bound, create_verification_dispatch_bound_with_conn,
+    pend_task_for_supervisor_review_with_dispatch,
     get_latest_verification_dispatch, get_latest_verification_dispatch_with_conn,
     get_verification_dispatch, get_verification_dispatch_with_conn, get_verification_for_dispatch,
     inspect_bound_server_verifier_handoff, inspect_verifier_capability,

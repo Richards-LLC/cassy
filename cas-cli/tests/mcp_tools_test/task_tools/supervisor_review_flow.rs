@@ -9,6 +9,7 @@
 use crate::support::*;
 use cas::config::{CodeReviewConfig, Config};
 use cas::mcp::CasService;
+use cas::mcp::tools::VerificationAddRequest;
 use cas::store::{open_agent_store, open_task_store, open_verification_store};
 use cas::types::{TaskStatus, Verification, VerificationStatus};
 use rmcp::handler::server::wrapper::Parameters;
@@ -318,35 +319,199 @@ async fn test_supervisor_verify_on_pending_review_task_works() {
     let _env_lock = env_test_lock();
 
     let cas_dir = temp.path().join(".cas");
-    let task_store = open_task_store(&cas_dir).unwrap();
+    write_supervisor_review_config(&cas_dir);
+    init_git_repo_with_staged_changes(temp.path());
 
-    // Put a task directly into PendingSupervisorReview state.
-    let mut task =
-        cas::types::Task::new("cas-b51a-verify".to_string(), "Verify PSR task".to_string());
-    task.status = TaskStatus::PendingSupervisorReview;
-    task_store.add(&task).expect("task.add should succeed");
+    // Bind a real worker and supervisor to one factory session so the close
+    // path can create an exact supervisor-owned dispatch.
+    let session = "cas-ad76-cross-process";
+    let agent_store = open_agent_store(&cas_dir).unwrap();
+    let worker_id = "cas-ad76-worker";
+    let mut worker = cas::types::Agent::new(worker_id.to_string(), "test-agent".to_string());
+    worker.role = cas::types::AgentRole::Worker;
+    worker.agent_type = cas::types::AgentType::Worker;
+    worker.factory_session = Some(session.to_string());
+    worker.heartbeat();
+    agent_store.register(&worker).unwrap();
+    let supervisor_id = "cas-ad76-supervisor";
+    let mut supervisor =
+        cas::types::Agent::new(supervisor_id.to_string(), "review-supervisor".to_string());
+    supervisor.role = cas::types::AgentRole::Supervisor;
+    supervisor.factory_session = Some(session.to_string());
+    supervisor.heartbeat();
+    agent_store.register(&supervisor).unwrap();
 
-    // Supervisor records an approved verification row directly on the store
-    // (mirrors what mcp__cas__verification action=add would do).
-    let verification_store = open_verification_store(&cas_dir).unwrap();
-    let ver_id = verification_store.generate_id().expect("should generate ID");
-    let mut row = Verification::new(ver_id, "cas-b51a-verify".to_string());
-    row.status = VerificationStatus::Approved;
-    row.summary = "Code review complete — no P0 findings.".to_string();
-    verification_store
-        .add(&row)
-        .expect("verification.add should succeed for PendingSupervisorReview task");
+    let worker_core = cas::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+    worker_core.set_agent_id_for_testing(worker_id.to_string());
+    let worker_service = CasService::new(worker_core, None);
+    let worker_guard = FactoryWorkerGuard::enter();
+    let created = worker_service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "create",
+            "title": "cas-e86c supervisor review reproduction",
+            "priority": 1,
+            "task_type": "bug",
+        }))))
+        .await
+        .expect("worker creates task");
+    let task_id = extract_task_id(&extract_text(created)).unwrap().to_string();
+    worker_service
+        .task(Parameters(task_req(
+            serde_json::json!({"action": "start", "id": task_id}),
+        )))
+        .await
+        .expect("worker starts task");
 
-    // Verify the row is retrievable.
-    let latest = verification_store
-        .get_latest_for_task("cas-b51a-verify")
-        .expect("store should not error")
-        .expect("should find the verification row");
-    assert_eq!(
-        latest.status,
-        VerificationStatus::Approved,
-        "Supervisor verification row must be Approved"
+    let first_close = extract_text(
+        worker_service
+            .task(Parameters(task_req(serde_json::json!({
+                "action": "close",
+                "id": task_id,
+                "reason": "exact delivery reviewed by supervisor",
+            }))))
+            .await
+            .expect("worker queues review"),
     );
+    let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+        .expect("dispatch lookup")
+        .unwrap_or_else(|| panic!("pending close must create a dispatch: {first_close}"));
+    assert!(
+        first_close.contains(&dispatch.id),
+        "close guidance must return its exact dispatch: {first_close}"
+    );
+
+    // A repeated close must reuse the one active boundary, never create a
+    // second dispatch or verification row.
+    let retry = extract_text(
+        worker_service
+            .task(Parameters(task_req(serde_json::json!({
+                "action": "close",
+                "id": task_id,
+                "reason": "exact delivery reviewed by supervisor",
+            }))))
+            .await
+            .expect("idempotent close retry"),
+    );
+    assert!(retry.contains(&dispatch.id), "retry guidance: {retry}");
+    assert!(
+        agent_store.get_lease(&task_id).unwrap().is_none(),
+        "pending-review close must release the worker lease"
+    );
+
+    let rejected_created = worker_service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "create",
+            "title": "Supervisor review rejection projection",
+            "priority": 1,
+            "task_type": "bug",
+        }))))
+        .await
+        .expect("worker creates rejection task");
+    let rejected_task_id = extract_task_id(&extract_text(rejected_created))
+        .unwrap()
+        .to_string();
+    worker_service
+        .task(Parameters(task_req(
+            serde_json::json!({"action": "start", "id": rejected_task_id}),
+        )))
+        .await
+        .expect("worker starts rejection task");
+    worker_service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "close",
+            "id": rejected_task_id,
+            "reason": "ready for a rejecting review",
+        }))))
+        .await
+        .expect("worker queues rejection task");
+    let rejected_dispatch =
+        cas_store::get_latest_verification_dispatch(&cas_dir, &rejected_task_id)
+            .unwrap()
+            .expect("rejection task dispatch");
+    drop(worker_guard);
+    drop(worker_service);
+
+    // Simulate process restart and cross-process supervisor review with a
+    // fresh core bound to the registered supervisor identity.
+    let supervisor_core = cas::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+    supervisor_core.set_agent_id_for_testing(supervisor_id.to_string());
+    let add = || VerificationAddRequest {
+        task_id: task_id.clone(),
+        status: "approved".to_string(),
+        summary: "Code review complete — no P0 findings.".to_string(),
+        confidence: Some(0.98),
+        issues: None,
+        files_reviewed: Some("feature.rs".to_string()),
+        duration_ms: Some(10),
+        verification_type: None,
+        verifier_capability: None,
+        dispatch_id: Some(dispatch.id.clone()),
+    };
+    let mut mismatched = add();
+    mismatched.dispatch_id = Some("vdisp-does-not-exist".to_string());
+    assert!(
+        supervisor_core
+            .cas_verification_add(Parameters(mismatched))
+            .await
+            .is_err(),
+        "a supervisor must not verify against a mismatched dispatch ID"
+    );
+    supervisor_core
+        .cas_verification_add(Parameters(add()))
+        .await
+        .expect("supervisor resolves exact pending review dispatch");
+    supervisor_core
+        .cas_verification_add(Parameters(add()))
+        .await
+        .expect("identical supervisor review retry is idempotent");
+    let mut conflicting = add();
+    conflicting.summary = "A different verdict for the same boundary".to_string();
+    assert!(
+        supervisor_core
+            .cas_verification_add(Parameters(conflicting))
+            .await
+            .is_err(),
+        "a conflicting retry must fail closed"
+    );
+    supervisor_core
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: rejected_task_id.clone(),
+            status: "rejected".to_string(),
+            summary: "P0 finding requires amendment".to_string(),
+            confidence: Some(0.99),
+            issues: None,
+            files_reviewed: Some("feature.rs".to_string()),
+            duration_ms: Some(12),
+            verification_type: None,
+            verifier_capability: None,
+            dispatch_id: Some(rejected_dispatch.id),
+        }))
+        .await
+        .expect("supervisor rejects exact pending review dispatch");
+    let rejected_task = open_task_store(&cas_dir).unwrap().get(&rejected_task_id).unwrap();
+    assert_eq!(rejected_task.status, TaskStatus::Blocked);
+    assert!(!rejected_task.pending_verification);
+
+    let latest = open_verification_store(&cas_dir)
+        .unwrap()
+        .get_latest_for_task(&task_id)
+        .unwrap()
+        .expect("exact verdict");
+    assert_eq!(latest.status, VerificationStatus::Approved);
+    assert_eq!(latest.dispatch_id.as_deref(), Some(dispatch.id.as_str()));
+    let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+    let (dispatches, verdicts, capabilities, handoffs): (i64, i64, i64, i64) = conn
+        .query_row(
+            "SELECT
+               (SELECT COUNT(*) FROM verification_dispatches WHERE task_id = ?1),
+               (SELECT COUNT(*) FROM verifications WHERE task_id = ?1),
+               (SELECT COUNT(*) FROM verification_capabilities WHERE task_id = ?1),
+               (SELECT COUNT(*) FROM verification_handoffs)",
+            rusqlite::params![task_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!((dispatches, verdicts, capabilities, handoffs), (1, 1, 0, 0));
 }
 
 /// AC5 test 5: the `CodeReviewConfig` default owner is "supervisor" (cas-865b).
@@ -843,16 +1008,43 @@ async fn test_worker_reclose_after_approved_verification_completes_close() {
         "precondition: first close queues the task for supervisor review"
     );
 
-    // Supervisor reviews and records an approved verdict (what
-    // `mcp__cas__verification action=add status=approved` persists).
-    let verification_store = open_verification_store(&cas_dir).unwrap();
-    let ver_id = verification_store.generate_id().expect("should generate ID");
-    let mut row = Verification::new(ver_id.clone(), id.clone());
-    row.status = VerificationStatus::Approved;
-    row.summary = "Reviewed off the queue — no findings.".to_string();
-    verification_store
-        .add(&row)
-        .expect("supervisor verdict should persist");
+    // Supervisor resolves the exact durable dispatch through the public MCP
+    // path. A task-wide legacy row must not bypass an active proof boundary.
+    let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &id)
+        .unwrap()
+        .expect("pending supervisor dispatch");
+    let supervisor_id = "cas-1932-supervisor";
+    let mut supervisor =
+        cas::types::Agent::new(supervisor_id.to_string(), "review-supervisor".to_string());
+    supervisor.role = cas::types::AgentRole::Supervisor;
+    supervisor.heartbeat();
+    open_agent_store(&cas_dir)
+        .unwrap()
+        .register(&supervisor)
+        .unwrap();
+    let supervisor_core = cas::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+    supervisor_core.set_agent_id_for_testing(supervisor_id.to_string());
+    supervisor_core
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: id.clone(),
+            status: "approved".to_string(),
+            summary: "Reviewed off the queue — no findings.".to_string(),
+            confidence: None,
+            issues: None,
+            files_reviewed: None,
+            duration_ms: None,
+            verification_type: None,
+            verifier_capability: None,
+            dispatch_id: Some(dispatch.id),
+        }))
+        .await
+        .expect("supervisor verdict should resolve the exact dispatch");
+    let ver_id = open_verification_store(&cas_dir)
+        .unwrap()
+        .get_latest_for_task(&id)
+        .unwrap()
+        .expect("supervisor verdict")
+        .id;
 
     // Second close by the worker: must complete, not re-queue.
     let second = extract_text(

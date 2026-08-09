@@ -10,8 +10,46 @@ env:
   RUSTC_WRAPPER: sccache
 
 jobs:
+  verify:
+    name: Verify Release Inputs
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux linker
+        run: |
+          sudo apt-get update
+          # Keep this aligned with .cargo/config.toml's gcc + mold toolchain.
+          sudo apt-get install -y gcc mold
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.5
+
+      # Keep Cargo's registry and dependency artifacts warm across releases.
+      # The explicit lockfile key prevents a dependency update from restoring
+      # incompatible artifacts, while source changes still rebuild workspace crates.
+      - name: Cache release dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-verify-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          cache-on-failure: true
+
+      - name: Install Zig
+        run: ./scripts/bootstrap-zig.sh
+
+      - name: Fail fast on release inputs
+        run: ./scripts/check-release-preflight.sh "${GITHUB_REF_NAME}"
+
   build:
     name: Build Linux x86_64
+    needs: verify
     runs-on: ubuntu-latest
 
     steps:
@@ -35,9 +73,10 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.5
 
-      - name: Cache cargo
+      - name: Cache release dependencies
         uses: Swatinem/rust-cache@v2
         with:
+          key: release-linux-x86_64-${{ hashFiles('Cargo.lock') }}
           cache-on-failure: true
 
       - name: Install Zig
@@ -77,6 +116,7 @@ jobs:
 
   build-macos:
     name: Build macOS ARM64
+    needs: verify
     # Zig 0.15.2 needs the Xcode 26.3 / macOS 26.2 SDK; macos-latest uses an
     # incompatible newer SDK. Keep this aligned with ci.yml's macos-check.
     runs-on: macos-26
@@ -99,15 +139,16 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.5
 
-      - name: Cache cargo
+      - name: Cache release dependencies
         uses: Swatinem/rust-cache@v2
         with:
+          key: release-macos-aarch64-${{ hashFiles('Cargo.lock') }}
           cache-on-failure: true
 
       - name: Build
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
-        run: cargo build -p cas --release --target aarch64-apple-darwin
+        run: cargo build -p cas --release --target aarch64-apple-darwin --locked
 
       - name: Package
         run: |
@@ -126,7 +167,7 @@ jobs:
 
   release:
     name: Create Release
-    needs: [build, build-macos]
+    needs: [verify, build, build-macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write

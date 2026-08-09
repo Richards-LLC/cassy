@@ -966,9 +966,31 @@ impl SqliteKnowledgeStore {
 
 impl KnowledgeStore for SqliteKnowledgeStore {
     fn init(&self) -> Result<()> {
-        let conn = self.lock();
-        conn.execute_batch(KNOWLEDGE_SCHEMA)?;
-        Ok(())
+        // `KNOWLEDGE_SCHEMA` is a modern baseline. On a database whose
+        // `knowledge_pages` table predates m226, its CREATE TABLE IF NOT
+        // EXISTS is a no-op and therefore cannot add the attribution columns
+        // that every page read selects. Keep store open safe for every caller
+        // (CLI, MCP, and direct users) rather than requiring each one to run
+        // the CLI migration runner before its first page query.
+        //
+        // The numbered m226 migration still owns durable ledger recording:
+        // after this self-heal its detection query sees the current shape and
+        // records the migration normally. `ensure_column` makes this repair
+        // idempotent and race-safe when several processes open the store.
+        shared_db::with_write_retry(|| {
+            let conn = self.lock();
+            conn.execute_batch(KNOWLEDGE_SCHEMA)?;
+            for (column, alter_sql) in [
+                ("origin", KNOWLEDGE_PAGE_ATTRIBUTION_STATEMENTS[0]),
+                (
+                    "origin_project_id",
+                    KNOWLEDGE_PAGE_ATTRIBUTION_STATEMENTS[1],
+                ),
+            ] {
+                shared_db::ensure_column(&conn, "knowledge_pages", column, alter_sql)?;
+            }
+            Ok(())
+        })
     }
 
     /// Sequence-backed, not hash-backed. A distillation pass mints several IDs
@@ -1787,6 +1809,72 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let store = SqliteKnowledgeStore::open(temp.path()).unwrap();
         (temp, store)
+    }
+
+    /// Create the exact m219-era page table: it has the page index and FTS
+    /// rows, but lacks the attribution columns introduced by m226.
+    fn create_pre_m226_store(cas_dir: &Path) {
+        let conn = Connection::open(cas_dir.join("cas.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE knowledge_pages (
+                 row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 id TEXT NOT NULL UNIQUE,
+                 page_type TEXT NOT NULL,
+                 title TEXT NOT NULL,
+                 rel_path TEXT NOT NULL,
+                 snippet TEXT NOT NULL DEFAULT '',
+                 locked INTEGER NOT NULL DEFAULT 0,
+                 sources_json TEXT NOT NULL DEFAULT '[]',
+                 created_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL,
+                 pending_embedding INTEGER NOT NULL DEFAULT 1
+             );
+             CREATE VIRTUAL TABLE knowledge_pages_fts USING fts5(
+                 title, snippet, body, content='', contentless_delete=1
+             );
+             INSERT INTO knowledge_pages
+                 (id, page_type, title, rel_path, snippet, sources_json, created_at, updated_at)
+             VALUES (
+                 'cas-kn001', 'architecture', 'Legacy Store', 'architecture/legacy-store.md',
+                 'A legacy indexed page.', '[\"README.md\"]',
+                 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+             );
+             INSERT INTO knowledge_pages_fts (rowid, title, snippet, body)
+             VALUES (1, 'Legacy Store', 'A legacy indexed page.', 'The legacy page is searchable.');",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn open_self_heals_pre_m226_attribution_before_page_queries() {
+        let temp = TempDir::new().unwrap();
+        create_pre_m226_store(temp.path());
+
+        let store = SqliteKnowledgeStore::open(temp.path())
+            .expect("open must repair the legacy page table before returning");
+
+        // These are the query shapes used by CLI status/list/read/search and
+        // MCP knowledge handlers. They must all work on the first open.
+        let page = store.get_page("cas-kn001").expect("read legacy page");
+        assert_eq!(page.origin, KnowledgePageOrigin::Local);
+        assert_eq!(page.origin_project_id, None);
+        assert_eq!(store.list_pages().unwrap().len(), 1);
+        assert_eq!(store.search("searchable", 10).unwrap().len(), 1);
+
+        // A second open is the idempotency check: m226's self-heal must not
+        // attempt to add either column again.
+        drop(store);
+        let reopened = SqliteKnowledgeStore::open(temp.path())
+            .expect("reopening an already upgraded store must be a no-op");
+        assert_eq!(reopened.list_pages().unwrap().len(), 1);
+
+        let conn = reopened.lock();
+        assert!(shared_db::column_exists(&conn, "knowledge_pages", "origin"));
+        assert!(shared_db::column_exists(
+            &conn,
+            "knowledge_pages",
+            "origin_project_id"
+        ));
     }
 
     fn page(

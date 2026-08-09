@@ -968,6 +968,115 @@ fn seed_knowledge_page(cas_dir: &std::path::Path) {
         .expect("ingest should commit");
 }
 
+/// Replace a current initialized knowledge schema with the m219 shape that
+/// existed before m226 added page-attribution columns. The CLI process must
+/// repair this fixture through `SqliteKnowledgeStore::open` before any page
+/// command issues a query.
+fn seed_pre_m226_knowledge_store(cas_dir: &std::path::Path) {
+    let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).expect("open legacy fixture");
+    conn.execute_batch(
+        "DROP TABLE knowledge_pages_fts;
+         DROP TABLE knowledge_sources;
+         DROP TABLE knowledge_page_tombstones;
+         DROP TABLE knowledge_pages;
+         DELETE FROM cas_migrations WHERE id IN (219, 226, 227);
+
+         CREATE TABLE knowledge_pages (
+             row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+             id TEXT NOT NULL UNIQUE,
+             page_type TEXT NOT NULL,
+             title TEXT NOT NULL,
+             rel_path TEXT NOT NULL,
+             snippet TEXT NOT NULL DEFAULT '',
+             locked INTEGER NOT NULL DEFAULT 0,
+             sources_json TEXT NOT NULL DEFAULT '[]',
+             created_at TEXT NOT NULL,
+             updated_at TEXT NOT NULL,
+             pending_embedding INTEGER NOT NULL DEFAULT 1
+         );
+         CREATE VIRTUAL TABLE knowledge_pages_fts USING fts5(
+             title, snippet, body, content='', contentless_delete=1
+         );
+         INSERT INTO knowledge_pages
+             (id, page_type, title, rel_path, snippet, sources_json, created_at, updated_at)
+         VALUES (
+             'cas-kn001', 'architecture', 'Legacy Store', 'architecture/legacy-store.md',
+             'A pre-m226 page.', '[\"README.md\"]',
+             '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+         );
+         INSERT INTO knowledge_pages_fts (rowid, title, snippet, body)
+         VALUES (1, 'Legacy Store', 'A pre-m226 page.', 'The legacy page is searchable.');",
+    )
+    .expect("create pre-m226 knowledge fixture");
+    std::fs::create_dir_all(cas_dir.join("knowledge/architecture")).expect("create body dir");
+    std::fs::write(
+        cas_dir.join("knowledge/architecture/legacy-store.md"),
+        "# Legacy Store\n\nThe legacy page is searchable.\n",
+    )
+    .expect("write legacy body");
+}
+
+#[test]
+fn test_knowledge_commands_open_and_upgrade_pre_m226_store() {
+    let temp = TempDir::new().unwrap();
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["init", "--yes"])
+        .assert()
+        .success();
+
+    let cas_dir = temp.path().join(".cas");
+    seed_pre_m226_knowledge_store(&cas_dir);
+
+    // Every public CLI entry point opens the shared store. `status` runs
+    // first, proving the self-heal happens before its first SELECT; the rest
+    // guard against future paths opening a query-capable legacy store.
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["knowledge", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("pages:   1"));
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["knowledge", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("architecture/legacy-store.md"));
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["knowledge", "search", "searchable"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Legacy Store"));
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["knowledge", "read", "cas-kn001"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("The legacy page is searchable."));
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["knowledge", "build", "--dry-run", "--max-sources", "1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Knowledge distillation (dry run"));
+
+    let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).expect("open upgraded store");
+    for column in ["origin", "origin_project_id"] {
+        let exists: i64 = conn
+            .query_row(
+                "SELECT EXISTS (
+                     SELECT 1 FROM pragma_table_info('knowledge_pages') WHERE name = ?1
+                 )",
+                [column],
+                |row| row.get(0),
+            )
+            .expect("query column shape");
+        assert_eq!(exists, 1, "m226 column {column} must be restored");
+    }
+}
+
 #[test]
 fn test_knowledge_search_and_read_round_trip() {
     let temp = TempDir::new().unwrap();

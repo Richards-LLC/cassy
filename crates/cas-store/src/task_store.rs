@@ -303,7 +303,7 @@ impl SqliteTaskStore {
         }
     }
 
-    fn add_with_conn(conn: &Connection, task: &Task) -> Result<()> {
+    fn add_with_conn(conn: &Connection, task: &Task, event_session_id: Option<&str>) -> Result<()> {
         conn.execute(
             "INSERT INTO tasks (id, title, description, design, acceptance_criteria, notes,
              status, priority, task_type, assignee, labels, created_at, updated_at,
@@ -349,6 +349,10 @@ impl SqliteTaskStore {
             &task.id,
             format!("Task created: {}", task.title),
         );
+        let event = match event_session_id.filter(|session_id| !session_id.trim().is_empty()) {
+            Some(session_id) => event.with_session(session_id),
+            None => event,
+        };
         let _ = record_event_with_conn(conn, &event);
 
         // Capture event for recording playback
@@ -485,7 +489,7 @@ impl TaskStore for SqliteTaskStore {
     fn add(&self, task: &Task) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
             let conn = self.conn.lock().unwrap();
-            Self::add_with_conn(&conn, task)
+            Self::add_with_conn(&conn, task, None)
         })
     }
 
@@ -523,7 +527,7 @@ impl TaskStore for SqliteTaskStore {
                 }
             }
 
-            Self::add_with_conn(&tx, task)?;
+            Self::add_with_conn(&tx, task, created_by)?;
 
             for blocker_id in blocked_by
                 .iter()

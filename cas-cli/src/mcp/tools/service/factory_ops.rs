@@ -1193,7 +1193,7 @@ impl CasService {
         held: bool,
     ) -> Result<CallToolResult, McpError> {
         use crate::harness_policy::is_supervisor_from_env;
-        use crate::store::open_agent_store;
+        use crate::store::{open_agent_store, open_reminder_store};
         use crate::ui::factory::{metadata_path, persist_session_metadata_worker_hold_at};
         use cas_types::{AgentRole, AgentStatus};
 
@@ -1228,7 +1228,7 @@ impl CasService {
             )
         })?;
         let owned = supervisor_owned_workers();
-        let worker_is_in_session = agent_store
+        let worker = agent_store
             .list(None)
             .map_err(|error| {
                 Self::error(
@@ -1237,7 +1237,7 @@ impl CasService {
                 )
             })?
             .into_iter()
-            .any(|agent| {
+            .find(|agent| {
                 agent.role == AgentRole::Worker
                     && matches!(agent.status, AgentStatus::Active | AgentStatus::Idle)
                     && agent.name == worker_name
@@ -1246,14 +1246,37 @@ impl CasService {
                         .as_ref()
                         .is_none_or(|workers| workers.contains(worker_name))
             });
-        if !worker_is_in_session {
+        let Some(worker) = worker else {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
                 format!(
                     "Worker {worker_name:?} is not a live member of factory session {factory_session}"
                 ),
             ));
-        }
+        };
+
+        // Hold semantics deliberately cancel rather than suspend: reminders
+        // are one-shot watchdogs whose original timing and event context are
+        // stale once a supervisor has explicitly parked the worker. Release
+        // restores normal future signaling but never resurrects old waits.
+        let cancelled_reminders = if held {
+            let reminders = open_reminder_store(&self.inner.cas_root).map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Failed to open reminder store: {error}"),
+                )
+            })?;
+            reminders
+                .cancel_pending_for_target(&worker.id)
+                .map_err(|error| {
+                    Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!("Failed to cancel pending worker reminders: {error}"),
+                    )
+                })?
+        } else {
+            0
+        };
 
         let path = metadata_path(&factory_session);
         persist_session_metadata_worker_hold_at(&path, worker_name, held).map_err(|error| {
@@ -1275,8 +1298,13 @@ impl CasService {
         );
 
         let verb = if held { "Held" } else { "Released" };
+        let reminder_summary = if held {
+            format!(" Cancelled {cancelled_reminders} pending reminder(s) targeted to this worker; release does not revive cancelled one-shot reminders.")
+        } else {
+            String::new()
+        };
         Ok(Self::success(format!(
-            "{verb} worker {worker_name} for factory session {factory_session}. Hold state survives a daemon restart of this session and is cleared on worker removal or session shutdown."
+            "{verb} worker {worker_name} for factory session {factory_session}. Hold state survives a daemon restart of this session and is cleared on worker removal or session shutdown.{reminder_summary}"
         )))
     }
 

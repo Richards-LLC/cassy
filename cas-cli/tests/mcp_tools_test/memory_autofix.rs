@@ -6,7 +6,7 @@ use rmcp::handler::server::wrapper::Parameters;
 
 fn structured_memory(title: &str, module: &str, body: &str) -> String {
     format!(
-        "---\nname: {title}\ndescription: {title}\ntrack: bug\nmodule: {module}\nproblem_type: runtime_error\nseverity: high\nroot_cause: race_condition\n---\n\n## Problem\n{body}\n"
+        "---\nname: {title}\ndescription: {title}\ntrack: bug\nmodule: {module}\nproblem_type: runtime_error\nseverity: high\nroot_cause: race_condition\ndate: 2026-04-09\n---\n\n## Problem\n{body}\n"
     )
 }
 
@@ -35,7 +35,11 @@ async fn autofix_merges_high_overlap_into_surviving_entry_with_receipt() {
     let tags = "sqlite-wal,ntfs3-fs,mcp-timeout";
 
     let mut seed = request(
-        structured_memory(title, "cas-mcp", "original analysis"),
+        structured_memory(
+            title,
+            "cas-mcp",
+            "sqlite wal hangs on ntfs3 in cas-mcp/src/server.rs because posix_lock is not supported",
+        ),
         title,
         tags,
     );
@@ -47,7 +51,11 @@ async fn autofix_merges_high_overlap_into_surviving_entry_with_receipt() {
         .to_string();
 
     let mut merge = request(
-        structured_memory(title, "cas-mcp", "replacement analysis with new evidence"),
+        structured_memory(
+            title,
+            "cas-mcp",
+            "sqlite wal hangs on ntfs3 in cas-mcp/src/server.rs because posix_lock is not supported; replacement analysis with new evidence",
+        ),
         title,
         tags,
     );
@@ -75,7 +83,11 @@ async fn autofix_rejects_a_stale_expected_updated_at_without_mutating() {
     let tags = "sqlite-wal,ntfs3-fs,mcp-timeout";
 
     let mut seed = request(
-        structured_memory(title, "cas-mcp", "original analysis"),
+        structured_memory(
+            title,
+            "cas-mcp",
+            "sqlite wal hangs on ntfs3 in cas-mcp/src/server.rs because posix_lock is not supported",
+        ),
         title,
         tags,
     );
@@ -87,7 +99,11 @@ async fn autofix_rejects_a_stale_expected_updated_at_without_mutating() {
         .to_string();
 
     let mut merge = request(
-        structured_memory(title, "cas-mcp", "must not overwrite original analysis"),
+        structured_memory(
+            title,
+            "cas-mcp",
+            "sqlite wal hangs on ntfs3 in cas-mcp/src/server.rs because posix_lock is not supported; must not overwrite original analysis",
+        ),
         title,
         tags,
     );
@@ -106,7 +122,7 @@ async fn autofix_rejects_a_stale_expected_updated_at_without_mutating() {
         .await
         .unwrap();
     let text = extract_text(stored);
-    assert!(text.contains("original analysis"));
+    assert!(text.contains("posix_lock is not supported"));
     assert!(!text.contains("must not overwrite original analysis"));
 }
 
@@ -115,7 +131,11 @@ async fn interactive_high_overlap_remains_blocked() {
     let (_temp, service) = setup_cas();
     let title = "sqlite wal ntfs3";
     let tags = "sqlite-wal,ntfs3-fs,mcp-timeout";
-    let content = structured_memory(title, "cas-mcp", "original analysis");
+    let content = structured_memory(
+        title,
+        "cas-mcp",
+        "sqlite wal hangs on ntfs3 in cas-mcp/src/server.rs because posix_lock is not supported",
+    );
 
     let mut seed = request(content.clone(), title, tags);
     seed.bypass_overlap = Some(true);

@@ -60,6 +60,63 @@ fn apply_factory_worker_metadata_records_worker_model_effort_and_clone_path() {
     );
 }
 
+/// cas-be49 / GH #161: a repeated SessionStart for a still-live factory
+/// worker used to insert the fresh hook session id as a second agent row.
+/// This is the narrow durable reproduction of the urgent-interrupt symptom:
+/// the first row represents the eager MCP/bootstrap registration, then the
+/// socket reports a different session id for the same Claude Code PID.
+#[test]
+fn repeated_factory_worker_session_start_reuses_live_pid_identity() {
+    let temp = TempDir::new().expect("temp project");
+    let cas_root = init_cas_dir(temp.path()).expect("init cas dir");
+    let agent_store = crate::store::open_agent_store(&cas_root).expect("open agent store");
+    let cc_pid = std::process::id();
+
+    let mut original = Agent::new(
+        "worker-established-session".to_string(),
+        "strong-bear-44".to_string(),
+    );
+    original.role = AgentRole::Worker;
+    original.agent_type = cas_types::AgentType::Worker;
+    // Eager MCP bootstrap runs in a child process: it records its own PID
+    // and the Claude Code process as `ppid`. The follow-up socket event
+    // carries that Claude Code PID directly.
+    original.pid = Some(cc_pid.checked_add(1).expect("non-max test pid"));
+    original.ppid = Some(cc_pid);
+    agent_store
+        .register(&original)
+        .expect("register original worker");
+
+    let (resolved, reused) = register_session_start_agent(
+        agent_store.as_ref(),
+        "fresh-session-after-urgent-interrupt",
+        Some("strong-bear-44"),
+        Some("worker"),
+        cc_pid,
+        Some("/tmp/strong-bear-44"),
+    )
+    .expect("reconcile repeated SessionStart");
+
+    assert!(
+        reused,
+        "same live worker PID must reuse its durable identity"
+    );
+    assert_eq!(resolved.id, original.id);
+    assert!(
+        agent_store
+            .get("fresh-session-after-urgent-interrupt")
+            .is_err(),
+        "the fresh SessionStart id must not mint a ghost row"
+    );
+    let same_worker_rows = agent_store
+        .list(None)
+        .expect("list agents")
+        .into_iter()
+        .filter(|agent| agent.name == "strong-bear-44")
+        .count();
+    assert_eq!(same_worker_rows, 1, "worker identity must remain singular");
+}
+
 /// cas-921f (P1 fix-round): the real env→register→resolve chain for a
 /// worker's harness, end to end — from a REAL `CAS_FACTORY_WORKER_CLI` env
 /// var (not injected `Agent.metadata` directly, which is what the earlier

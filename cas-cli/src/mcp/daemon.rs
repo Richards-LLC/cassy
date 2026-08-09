@@ -35,7 +35,7 @@ use crate::store::{
     open_prompt_store, open_rule_store_local, open_skill_store_local, open_spec_store,
     open_store_local, open_task_store_local,
 };
-use crate::types::{Agent, AgentRole};
+use crate::types::{Agent, AgentRole, AgentStatus, AgentType};
 
 /// Longest the symbol index may go un-refreshed before the daemon stops waiting for an idle
 /// window and indexes anyway (cas-499c).
@@ -88,6 +88,83 @@ pub(crate) fn apply_factory_worker_metadata(agent: &mut Agent, clone_path: Optio
     if let Ok(cli) = std::env::var("CAS_FACTORY_WORKER_CLI") {
         agent.metadata.insert("worker_cli".to_string(), cli);
     }
+}
+
+/// Register the durable identity announced by a SessionStart hook.
+///
+/// Factory workers can receive a second SessionStart while the Claude Code
+/// process itself is still running (notably around an urgent interrupt). The
+/// eager MCP bootstrap may already have registered that same process under
+/// `ppid`, while an earlier socket registration records it under `pid`.
+/// Treating the newly supplied session id as authoritative in either case
+/// mints a ghost agent row. Reuse only a same-name Worker attached to the
+/// same live Claude Code PID; ordinary sessions and a genuinely new process
+/// retain their supplied session id.
+///
+/// The returned boolean is true when an existing durable worker identity was
+/// refreshed instead of creating a row for the incoming session id.
+pub(crate) fn register_session_start_agent(
+    store: &dyn crate::store::AgentStore,
+    session_id: &str,
+    agent_name: Option<&str>,
+    agent_role: Option<&str>,
+    cc_pid: u32,
+    clone_path: Option<&str>,
+) -> crate::store::Result<(Agent, bool)> {
+    let requested_worker = agent_role.is_some_and(|role| role.eq_ignore_ascii_case("worker"));
+    let reusable = if requested_worker {
+        agent_name.and_then(|name| {
+            [
+                store.get_by_pid(cc_pid).ok().flatten(),
+                store.get_by_cc_pid(cc_pid).ok().flatten(),
+            ]
+            .into_iter()
+            .flatten()
+            .find(|existing| {
+                if existing.id == session_id
+                    || existing.name != name
+                    || existing.role != AgentRole::Worker
+                {
+                    return false;
+                }
+
+                // Socket registration records the Claude Code PID directly.
+                // Eager MCP registration records the MCP process and the
+                // Claude Code PID as its parent. Both describe the same
+                // durable worker identity, but the direct form can use its
+                // stronger start-time fingerprint check.
+                existing.pid == Some(cc_pid)
+                    && matches!(
+                        evaluate_liveness(existing, pid_alive, pid_matches_fingerprint),
+                        LivenessOutcome::Alive { .. }
+                    )
+                    || existing.ppid == Some(cc_pid) && pid_alive(cc_pid)
+            })
+        })
+    } else {
+        None
+    };
+
+    let reused = reusable.is_some();
+    let name = agent_name
+        .map(str::to_owned)
+        .unwrap_or_else(friendly_names::generate);
+    let mut agent = reusable.unwrap_or_else(|| Agent::new(session_id.to_string(), name.clone()));
+    agent.name = name;
+    agent.status = AgentStatus::Active;
+    agent.pid = Some(cc_pid);
+    agent.ppid = None;
+    stamp_pid_fingerprint(&mut agent, cc_pid);
+    agent.machine_id = Some(Agent::get_or_generate_machine_id());
+
+    if requested_worker {
+        agent.role = AgentRole::Worker;
+        agent.agent_type = AgentType::Worker;
+    }
+    apply_factory_worker_metadata(&mut agent, clone_path);
+
+    store.register(&agent)?;
+    Ok((agent, reused))
 }
 
 /// Extension trait for EmbeddedDaemonConfig to convert to DaemonConfig
@@ -1263,54 +1340,52 @@ impl EmbeddedDaemon {
         }
 
         // Register in database (always — even for other agents, so their
-        // record exists for their own daemon to adopt via PID matching)
+        // record exists for their own daemon to adopt via PID matching).
+        // `register_session_start_agent` first reconciles a factory worker
+        // with a live same-PID row created by either prior socket handling or
+        // eager MCP bootstrap, rather than minting a fresh session-id row.
+        let mut registered_id = None;
         if let Ok(store) = open_agent_store(&self.config.cas_root) {
-            // Use name from hook's environment, fall back to generated name
-            let name = agent_name.unwrap_or_else(friendly_names::generate);
-            let mut agent = Agent::new(session_id.clone(), name);
-            // Use the Claude Code process's PID, not the daemon's PID
-            agent.pid = Some(cc_pid);
-            // PID-reuse fingerprint (cas-ea46): pair `agent.pid` with the
-            // /proc/<pid>/stat starttime so the heartbeat liveness gate can
-            // detect kernel PID recycling. Missing fingerprint (non-Linux,
-            // /proc hidden) falls back to pid-only liveness.
-            stamp_pid_fingerprint(&mut agent, cc_pid);
-            // PPID is less reliable from the hook, so we skip it for socket-registered agents
-            agent.machine_id = Some(Agent::get_or_generate_machine_id());
-
-            // The socket event forwards hook environment and therefore may
-            // bootstrap Worker only. Supervisor/Director authority must come
-            // from a server-created durable row, which the conflict-safe
-            // registration path preserves.
-            if agent_role
-                .as_deref()
-                .is_some_and(|role| role.eq_ignore_ascii_case("worker"))
-            {
-                agent.role = AgentRole::Worker;
-            }
-
-            apply_factory_worker_metadata(&mut agent, clone_path.as_deref());
-
-            if store.register(&agent).is_ok() {
+            if let Ok((agent, reused)) = register_session_start_agent(
+                store.as_ref(),
+                &session_id,
+                agent_name.as_deref(),
+                agent_role.as_deref(),
+                cc_pid,
+                clone_path.as_deref(),
+            ) {
+                registered_id = Some(agent.id.clone());
                 eprintln!(
-                    "[CAS] Daemon registered agent: {} (role: {}, ours: {})",
-                    &session_id[..8.min(session_id.len())],
+                    "[CAS] Daemon {} agent: {} (role: {}, ours: {})",
+                    if reused { "refreshed" } else { "registered" },
+                    &agent.id[..8.min(agent.id.len())],
                     agent.role,
                     is_our_agent,
                 );
 
+                // The socket's in-memory PID mapping must agree with the
+                // canonical durable identity; otherwise GetSession would
+                // immediately feed the discarded fresh id back into MCP.
+                if reused {
+                    self.pid_sessions
+                        .write()
+                        .await
+                        .insert(cc_pid, agent.id.clone());
+                }
+
                 // Force an immediate heartbeat so the agent doesn't start the
                 // stale countdown waiting for the next 30s daemon tick.
-                if let Err(e) = store.heartbeat(&session_id) {
+                if let Err(e) = store.heartbeat(&agent.id) {
                     tracing::warn!(
-                        agent_id = %&session_id[..8.min(session_id.len())],
+                        agent_id = %&agent.id[..8.min(agent.id.len())],
                         error = %e,
                         "Immediate post-registration heartbeat failed"
                     );
                 }
 
-                // Register with cloud coordinator (best-effort)
-                {
+                // A replayed SessionStart only refreshes local liveness; it
+                // does not represent a second cloud agent either.
+                if !reused {
                     let mut coord_guard = self.cloud_coordinator.write().await;
                     if let Some(ref mut coord) = *coord_guard {
                         match coord.register(&agent) {
@@ -1336,7 +1411,7 @@ impl EmbeddedDaemon {
         // in the heartbeat loop.
         if is_our_agent {
             let mut guard = self.agent_id.write().await;
-            *guard = Some(session_id);
+            *guard = Some(registered_id.unwrap_or(session_id));
         }
     }
 

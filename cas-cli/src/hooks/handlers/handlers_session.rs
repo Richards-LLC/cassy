@@ -41,57 +41,21 @@ pub fn handle_session_start(
         // Helper to register agent directly in database
         let register_directly = |stores: &mut HookStores| {
             if let Some(agent_store) = stores.agents() {
-                use crate::orchestration::names as friendly_names;
-                use crate::types::{Agent, AgentRole};
-
-                let name = agent_name.clone().unwrap_or_else(friendly_names::generate);
-                let mut agent = Agent::new(input.session_id.clone(), name);
-                agent.pid = Some(cc_pid);
-                // PID-reuse fingerprint (cas-ea46 / cas-389c): pair agent.pid
-                // with the /proc/<pid>/stat starttime so the heartbeat liveness
-                // gate can detect kernel PID recycling. Previously missing on
-                // this fallback path — caught by the source-scanning test in
-                // mcp::daemon_tests.
-                crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, cc_pid);
-                agent.machine_id = Some(Agent::get_or_generate_machine_id());
-
-                // Hook environment is a worker bootstrap hint, not a source
-                // of Supervisor/Director authority. Privileged agents must
-                // already have a server-created durable row; ON CONFLICT
-                // preserves that role without trusting this value.
-                if agent_role
-                    .as_deref()
-                    .is_some_and(|role| role.eq_ignore_ascii_case("worker"))
-                {
-                    agent.role = AgentRole::Worker;
-                }
-
-                // Store clone path in metadata for factory workers
-                if let Some(ref path) = clone_path {
-                    agent
-                        .metadata
-                        .insert("clone_path".to_string(), path.clone());
-                }
-                if let Ok(model) = std::env::var("CAS_FACTORY_WORKER_MODEL") {
-                    agent.metadata.insert("worker_model".to_string(), model);
-                }
-                if let Ok(effort) = std::env::var("CAS_FACTORY_WORKER_EFFORT") {
-                    agent.metadata.insert("worker_effort".to_string(), effort);
-                }
-                // cas-058f: mirror apply_factory_worker_metadata's worker_cli
-                // write for this direct-registration fallback path (both
-                // registration paths must agree, or is-wedged/kill would see
-                // the harness only sometimes).
-                if let Ok(cli) = std::env::var("CAS_FACTORY_WORKER_CLI") {
-                    agent.metadata.insert("worker_cli".to_string(), cli);
-                }
-
-                if let Err(reg_err) = agent_store.register(&agent) {
-                    eprintln!("cas: Failed to register agent: {reg_err}");
-                } else {
-                    eprintln!(
-                        "cas: Registered agent directly (pid: {cc_pid}, role: {agent_role:?})"
-                    );
+                match crate::mcp::daemon::register_session_start_agent(
+                    agent_store.as_ref(),
+                    &input.session_id,
+                    agent_name.as_deref(),
+                    agent_role.as_deref(),
+                    cc_pid,
+                    clone_path.as_deref(),
+                ) {
+                    Ok((_agent, reused)) => {
+                        let verb = if reused { "Refreshed" } else { "Registered" };
+                        eprintln!(
+                            "cas: {verb} agent directly (pid: {cc_pid}, role: {agent_role:?})"
+                        );
+                    }
+                    Err(reg_err) => eprintln!("cas: Failed to register agent: {reg_err}"),
                 }
             }
         };
